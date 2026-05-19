@@ -64,13 +64,18 @@ fn spawn_p2p_listeners(
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>
 {
     let mut handles = Vec::with_capacity(config.p2p_listen.len());
+    let magic = bitcoin::p2p::Magic::from_bytes(config.network.magic());
     for addr in &config.p2p_listen {
         let listener_addr = *addr;
         let listener_shutdown = std::sync::Arc::clone(shutdown);
         let handle = std::thread::Builder::new()
             .name(format!("bitcoin-rs-p2p-{listener_addr}"))
             .spawn(move || {
-                bitcoin_rs_p2p::listener::serve_with_shutdown(listener_addr, listener_shutdown)
+                bitcoin_rs_p2p::listener::serve_with_shutdown(
+                    listener_addr,
+                    listener_shutdown,
+                    magic,
+                )
             })?;
         tracing::info!(addr = %listener_addr, "p2p listener bound");
         handles.push(handle);

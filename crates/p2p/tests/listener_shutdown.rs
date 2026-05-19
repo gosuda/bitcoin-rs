@@ -1,4 +1,5 @@
 //! P2P listener shutdown integration coverage.
+use bitcoin::p2p::Magic;
 use bitcoin_rs_p2p::listener::serve_with_shutdown;
 use std::error::Error;
 use std::io;
@@ -22,7 +23,7 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel();
 
     let handle = thread::spawn(move || {
-        let result = serve_with_shutdown(addr, listener_shutdown);
+        let result = serve_with_shutdown(addr, listener_shutdown, Magic::BITCOIN);
         let _ = tx.send(result);
     });
 
