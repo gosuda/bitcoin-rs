@@ -119,6 +119,35 @@ impl Context {
             mining_sender,
         }
     }
+    /// Builds a context that shares pre-existing handles owned elsewhere
+    /// (typically by `bitcoin-rs-node::state::NodeState`).
+    ///
+    /// This is the wiring path for the integration layer: subsystem owners
+    /// pass in their authoritative Arc handles, and RPC handlers observe
+    /// the same state.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_handles(
+        chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        mempool: Arc<RwLock<Mempool>>,
+        blocks: Arc<RwLock<Vec<BlockRecord>>>,
+        transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
+        network: Arc<RwLock<NetworkState>>,
+        mining_template_id: Arc<ArcSwap<CompactString>>,
+    ) -> Self {
+        let (mining_sender, mining_notifications) = unbounded();
+        Self {
+            chain_tip,
+            mempool,
+            blocks,
+            transactions,
+            network,
+            mining_template_id,
+            mining_notifications,
+            mining_sender,
+        }
+    }
+
 
     /// Publishes a new best-chain tip and wakes getblocktemplate long polls.
     pub fn set_chain_tip(&self, tip: TipSnapshot) {
@@ -181,5 +210,29 @@ impl Context {
             .iter()
             .find(|record| record.hash == hash)
             .cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_handles_shares_chain_tip_with_caller() {
+        use alloc::sync::Arc;
+
+        let chain_tip = Arc::new(ArcSwapOption::empty());
+        let ctx = Context::from_handles(
+            Arc::clone(&chain_tip),
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(NetworkState::default())),
+            Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
+            "chain_tip must be shared with caller"
+        );
     }
 }
