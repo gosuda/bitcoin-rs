@@ -58,6 +58,7 @@ pub fn serve_with_shutdown(
     peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
     peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
     inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
 ) -> Result<(), ListenerError> {
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
@@ -74,6 +75,7 @@ pub fn serve_with_shutdown(
                     Arc::clone(&peer_registry),
                     Arc::clone(&peer_outbound),
                     inbound_headers_tx.clone(),
+                    inbound_blocks_tx.clone(),
                 );
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -92,6 +94,7 @@ fn spawn_handshake_thread(
     registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
     peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
     inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
 ) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
     let spawn_result = std::thread::Builder::new()
@@ -104,6 +107,7 @@ fn spawn_handshake_thread(
                 &registry,
                 &peer_outbound,
                 &inbound_headers_tx,
+                &inbound_blocks_tx,
             ) {
                 tracing::warn!(
                     peer_addr = %peer_addr,
@@ -131,6 +135,7 @@ fn run_handshake(
     registry: &RwLock<Vec<crate::PeerInfo>>,
     peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
     inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: &Sender<bitcoin::Block>,
 ) -> Result<(), crate::wire::PeerError> {
     stream
         .set_nonblocking(false)
@@ -169,7 +174,13 @@ fn run_handshake(
         peer.stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .map_err(crate::wire::PeerError::Io)?;
-        run_message_loop(&mut peer, peer_addr, &outbound_rx, inbound_headers_tx)
+        run_message_loop(
+            &mut peer,
+            peer_addr,
+            &outbound_rx,
+            inbound_headers_tx,
+            inbound_blocks_tx,
+        )
     })();
 
     peer_outbound.write().remove(&peer_addr);
@@ -187,6 +198,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer_addr: SocketAddr,
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
     inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: &Sender<bitcoin::Block>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
     use std::time::Instant;
@@ -224,6 +236,15 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             peer_addr = %peer_addr,
                             %error,
                             "p2p inbound headers channel disconnected",
+                        );
+                    }
+                }
+                if let bitcoin::p2p::message::NetworkMessage::Block(block) = &message {
+                    if let Err(error) = inbound_blocks_tx.send(block.clone()) {
+                        tracing::warn!(
+                            peer_addr = %peer_addr,
+                            %error,
+                            "p2p inbound blocks channel disconnected",
                         );
                     }
                 }

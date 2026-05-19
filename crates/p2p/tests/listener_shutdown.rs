@@ -26,6 +26,7 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let outbound = Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
     let (inbound_headers_tx, _inbound_headers_rx) =
         crossbeam_channel::unbounded::<Vec<bitcoin::block::Header>>();
+    let (inbound_blocks_tx, _inbound_blocks_rx) = crossbeam_channel::unbounded::<bitcoin::Block>();
 
     let listener_outbound = Arc::clone(&outbound);
     let handle = thread::spawn(move || {
@@ -36,6 +37,7 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
             listener_registry,
             listener_outbound,
             inbound_headers_tx,
+            inbound_blocks_tx,
         );
         let _ = tx.send(result);
     });

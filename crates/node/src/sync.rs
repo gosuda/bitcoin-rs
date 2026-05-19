@@ -1,23 +1,21 @@
 //! Block download orchestrator.
 //!
-//! Reads the shared chain-tip / peer registry / outbound-channel handles
+//! Reads the shared apply handles / peer registry / outbound-channel handles
 //! and, when a peer reports a longer chain, sends `getheaders` toward
 //! that peer. Inbound `headers` batches are drained into the shared
-//! [`BlockTree`]; full block import via `crate::import::import_block` lands
-//! in a follow-up.
+//! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
+//! [`crate::apply::apply_block`].
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use std::net::SocketAddr;
 
-use arc_swap::ArcSwapOption;
 use bitcoin::BlockHash;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_p2p::{Message, PeerInfo};
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::{Receiver, Sender};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
@@ -29,35 +27,29 @@ const PROTOCOL_VERSION: u32 = 70_016;
 
 /// Block download orchestrator.
 pub struct BlockSync {
-    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    handles: crate::apply::ApplyHandles,
     peers: Arc<RwLock<Vec<PeerInfo>>>,
     peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
-    block_tree: Arc<RwLock<BlockTree>>,
-    network: Network,
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
+    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
 }
 
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
     pub const fn new(
-        chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
-        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        handles: crate::apply::ApplyHandles,
         peers: Arc<RwLock<Vec<PeerInfo>>>,
         peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
-        block_tree: Arc<RwLock<BlockTree>>,
-        network: Network,
         inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
+        inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
     ) -> Self {
         Self {
-            applied_tip,
-            chain_tip,
+            handles,
             peers,
             peer_outbound,
-            block_tree,
-            network,
             inbound_headers_rx,
+            inbound_blocks_rx,
         }
     }
 
@@ -65,7 +57,12 @@ impl BlockSync {
     /// pushes `getheaders` into the peer's outbound channel.
     pub fn tick(&self) {
         self.drain_inbound_headers();
-        let our_height = self.applied_tip.load_full().map_or(0, |tip| tip.height);
+        self.drain_inbound_blocks();
+        let our_height = self
+            .handles
+            .applied_tip
+            .load_full()
+            .map_or(0, |tip| tip.height);
         let Some(target) = self.pick_sync_peer(our_height) else {
             tracing::trace!(our_height, "block sync: no peer above current height");
             return;
@@ -112,8 +109,8 @@ impl BlockSync {
         while let Ok(batch) = receiver.try_recv() {
             let batch_len = batch.len();
             total_headers = total_headers.saturating_add(batch_len);
-            let mut tree = self.block_tree.write();
-            match bitcoin_rs_chain::accept_headers(&mut tree, &batch, self.network) {
+            let mut tree = self.handles.block_tree.write();
+            match bitcoin_rs_chain::accept_headers(&mut tree, &batch, self.handles.network) {
                 Ok(node_ids) => {
                     tracing::debug!(
                         accepted = node_ids.len(),
@@ -135,6 +132,34 @@ impl BlockSync {
         }
     }
 
+    fn drain_inbound_blocks(&self) {
+        let receiver = self.inbound_blocks_rx.lock();
+        let mut applied = 0_usize;
+        let mut failed = 0_usize;
+        while let Ok(block) = receiver.try_recv() {
+            match crate::apply::apply_block(&self.handles, &block) {
+                Ok(tip) => {
+                    applied += 1;
+                    tracing::debug!(
+                        height = tip.height,
+                        %tip.hash,
+                        "block sync: applied inbound block"
+                    );
+                }
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(
+                        %error,
+                        "block sync: failed to apply inbound block"
+                    );
+                }
+            }
+        }
+        if applied > 0 || failed > 0 {
+            tracing::debug!(applied, failed, "block sync: drained inbound blocks");
+        }
+    }
+
     fn pick_sync_peer(&self, our_height: u32) -> Option<PeerInfo> {
         let peers = self.peers.read();
         peers
@@ -149,12 +174,13 @@ impl BlockSync {
     }
 
     fn build_locator(&self) -> Vec<Hash256> {
-        if let Some(tip) = self.chain_tip.load_full() {
+        if let Some(tip) = self.handles.chain_tip.load_full() {
             return self
+                .handles
                 .block_tree
                 .read()
                 .block_locator(tip.tip_id, LOCATOR_MAX_ENTRIES);
         }
-        alloc::vec![self.network.genesis_block_hash()]
+        alloc::vec![self.handles.network.genesis_block_hash()]
     }
 }

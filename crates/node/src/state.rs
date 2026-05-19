@@ -186,8 +186,9 @@ pub struct NodeState {
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     >,
     inbound_headers_tx: Sender<Vec<Header>>,
-    #[allow(dead_code)]
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<Header>>>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
+    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
     sync: Arc<crate::BlockSync>,
     mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
@@ -215,14 +216,24 @@ impl NodeState {
         let (inbound_headers_tx, inbound_headers_rx_raw) =
             crossbeam_channel::unbounded::<Vec<Header>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            crossbeam_channel::unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let sync = Arc::new(crate::BlockSync::new(
-            Arc::clone(&chain_tip),
-            Arc::clone(&applied_tip),
+            crate::apply::ApplyHandles {
+                network: config.network,
+                chain_tip: Arc::clone(&chain_tip),
+                applied_tip: Arc::clone(&applied_tip),
+                block_tree: Arc::clone(&block_tree),
+                utxo: Arc::clone(&utxo),
+                mempool: Arc::clone(&mempool),
+                blocks: Arc::clone(&blocks),
+                transactions: Arc::clone(&transactions),
+            },
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
-            Arc::clone(&block_tree),
-            config.network,
             Arc::clone(&inbound_headers_rx),
+            Arc::clone(&inbound_blocks_rx),
         ));
         tracing::info!(
             backend = storage.kind(),
@@ -246,6 +257,8 @@ impl NodeState {
             peer_outbound,
             inbound_headers_tx,
             inbound_headers_rx,
+            inbound_blocks_tx,
+            inbound_blocks_rx,
             mining_template_id,
             sync,
             replayed: Mutex::new(Vec::new()),
@@ -350,6 +363,32 @@ impl NodeState {
     #[must_use]
     pub fn inbound_headers_sender(&self) -> Sender<Vec<Header>> {
         self.inbound_headers_tx.clone()
+    }
+
+    /// Returns the shared receiver handle consumed by `BlockSync::tick`.
+    ///
+    /// Exposed so tests and `BlockSync::new` can wire the channel; production
+    /// code calls `state.sync()` and lets the orchestrator own the drain.
+    #[must_use]
+    pub fn inbound_headers_rx_handle(&self) -> Arc<Mutex<Receiver<Vec<Header>>>> {
+        Arc::clone(&self.inbound_headers_rx)
+    }
+
+    /// Returns a cloned `Sender` that the P2P listener pushes inbound
+    /// `Block` messages into. The matching `Receiver` is consumed by
+    /// `BlockSync::tick` to apply downloaded blocks.
+    #[must_use]
+    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin::Block> {
+        self.inbound_blocks_tx.clone()
+    }
+
+    /// Returns the shared receiver handle consumed by `BlockSync::tick`.
+    ///
+    /// Exposed so tests and `BlockSync::new` can wire the channel; production
+    /// code calls `state.sync()` and lets the orchestrator own the drain.
+    #[must_use]
+    pub fn inbound_blocks_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin::Block>>> {
+        Arc::clone(&self.inbound_blocks_rx)
     }
 
     /// Returns the shared block-download orchestrator.
@@ -543,6 +582,18 @@ mod tests {
             .map_err(|err| anyhow::anyhow!("send via tx1 failed: {err}"))?;
         tx2.send(Vec::new())
             .map_err(|err| anyhow::anyhow!("send via tx2 failed: {err}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_blocks_sender_is_clonable_into_listener_threads() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let _tx1 = state.inbound_blocks_sender();
+        let _tx2 = state.inbound_blocks_sender();
         Ok(())
     }
 
