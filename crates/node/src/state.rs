@@ -282,10 +282,10 @@ impl NodeState {
     /// This is the v1 contract: the block hash is taken from the decoded
     /// header, the new height is `current_tip.height + 1` (or zero when no
     /// tip is published yet), chainwork is approximated by accumulating the
-    /// block header's own work onto the prior tip's chainwork, and the block
-    /// is stored in `blocks` for RPC consumers. Contextual consensus checks,
-    /// BIP30 / BIP34 / soft-fork checks, BIP9 deployment state, and reorg
-    /// planning land in follow-up turns.
+    /// block header's own work onto the prior tip's chainwork, and contextual
+    /// BIP30 / BIP34 checks run against the resolved height. The block is
+    /// stored in `blocks` for RPC consumers. Broader soft-fork checks, BIP9
+    /// deployment state, and reorg planning land in follow-up turns.
     ///
     /// Returns the new `TipSnapshot` so callers can publish it elsewhere.
     pub fn apply_block(
@@ -333,6 +333,8 @@ impl NodeState {
             },
         };
         bitcoin_rs_consensus::verify_block::verify_block_rules_borrowed(block, &prev_tip_state)?;
+        // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
+        self.check_bip30_and_bip34(block, height)?;
 
         let mut changes = BlockChanges::default();
         for tx in &block.txdata {
@@ -391,6 +393,57 @@ impl NodeState {
             "apply_block: synthetic chain advance committed"
         );
         Ok(tip)
+    }
+
+    fn check_bip30_and_bip34(
+        &self,
+        block: &bitcoin::Block,
+        height: u32,
+    ) -> core::result::Result<(), ApplyError> {
+        use bitcoin::hashes::Hash as _;
+
+        // BIP30: best-effort — reject if any tx in the block re-uses an
+        // outpoint that the UTXO set still considers live. The first vout
+        // (index 0) lookup catches the common-case duplicate-coinbase
+        // scenario that BIP30 was written to address. A proper any-vout
+        // sweep needs an accessor on `UtxoSet` that walks all live outputs
+        // for a given txid; see follow-up.
+        let mut has_duplicate = false;
+        for tx in &block.txdata {
+            let txid = tx.compute_txid();
+            let outpoint = bitcoin_rs_primitives::OutPoint::new(
+                bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
+                0,
+            );
+            if self.utxo.get(&outpoint).is_some() {
+                has_duplicate = true;
+                break;
+            }
+        }
+        bitcoin_rs_consensus::bip30::check_bip30(height, has_duplicate)?;
+
+        // BIP34: when active for this network at `height`, the coinbase
+        // scriptSig must start with the minimally-encoded height.
+        if self.config.network.is_bip34_active(height) {
+            let coinbase = block
+                .txdata
+                .first()
+                .ok_or(bitcoin_rs_consensus::ConsensusError::EmptyBlock)?;
+            // `verify_block_rules_borrowed` already pinned the first tx to
+            // be the coinbase; relying on that here. `coinbase.input[0]`
+            // is the synthetic prevout pointing at the impossible
+            // outpoint; its `script_sig` carries the BIP34 height encoding.
+            let coinbase_input = coinbase
+                .input
+                .first()
+                .ok_or(bitcoin_rs_consensus::ConsensusError::MissingCoinbase)?;
+            bitcoin_rs_consensus::bip34::check_bip34(
+                height,
+                coinbase_input.script_sig.as_script(),
+            )?;
+        }
+
+        Ok(())
     }
 }
 

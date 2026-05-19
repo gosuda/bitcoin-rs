@@ -99,6 +99,7 @@ mod tests {
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
         let mut follow_up = Block::consensus_decode(&mut cursor)?;
         follow_up.header.prev_blockhash = follow_up.block_hash();
+        follow_up.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
         follow_up.header.merkle_root = follow_up
             .compute_merkle_root()
             .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
@@ -161,6 +162,59 @@ mod tests {
         assert!(
             state.chain_tip().load().is_none(),
             "rejected block must not advance chain tip"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn import_rejects_post_bip34_block_with_no_height_in_coinbase() -> Result<()> {
+        let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
+        let mut block = Block::consensus_decode(&mut cursor)?;
+        let synthetic_tip_hash = Hash256::from_le_bytes(&[2_u8; 32]);
+
+        block.header.prev_blockhash =
+            bitcoin::BlockHash::from_byte_array(synthetic_tip_hash.to_le_bytes());
+        block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::new();
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
+
+        let mut block_bytes = Vec::new();
+        block.consensus_encode(&mut block_bytes)?;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        state
+            .chain_tip()
+            .store(Some(std::sync::Arc::new(bitcoin_rs_chain::TipSnapshot {
+                tip_id: bitcoin_rs_chain::node::NodeId::new(499),
+                height: 499,
+                chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
+                hash: synthetic_tip_hash,
+            })));
+
+        let Err(error) = import_block(&state, &block_bytes) else {
+            anyhow::bail!("post-BIP34 block without height should be rejected");
+        };
+
+        assert!(
+            error.chain().any(|cause| matches!(
+                cause.downcast_ref::<bitcoin_rs_consensus::ConsensusError>(),
+                Some(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP34", .. })
+            )),
+            "error chain should contain BIP34 rejection: {error:?}"
+        );
+        assert_eq!(
+            state
+                .chain_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("synthetic tip should remain published"))?
+                .height,
+            499
         );
         Ok(())
     }
