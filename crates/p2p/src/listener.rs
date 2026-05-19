@@ -34,13 +34,20 @@ pub enum ListenerError {
 /// Binds `addr` and runs an accept loop until `shutdown` is set.
 ///
 /// On each accepted connection, spawns a thread that runs the inbound
-/// handshake. The thread has a [`HANDSHAKE_READ_TIMEOUT`] (60s) read and
-/// write timeout; it terminates on success, on failure, or when the
-/// timeout expires. Per-connection threads are NOT joined by the outer
-/// shutdown — they outlive the listener by up to the timeout.
+/// handshake followed by a message-dispatch loop. The thread has a
+/// `HANDSHAKE_READ_TIMEOUT` (60s) read and write timeout that doubles as
+/// the idle disconnect threshold. The thread terminates on:
+///   - successful handshake then idle (60s of no inbound messages)
+///   - wire / FSM error
+///   - explicit FSM disconnect transition
+///
+/// Per-connection threads are NOT joined by the outer shutdown — they
+/// outlive the listener by up to the timeout. On exit (clean or error),
+/// the peer is removed from `peer_registry` via address-match retain.
 ///
 /// Successful inbound handshakes append their public metadata to
-/// `peer_registry`.
+/// `peer_registry`. The peer is removed from `peer_registry` when the
+/// per-connection thread exits.
 #[allow(clippy::needless_pass_by_value)]
 pub fn serve_with_shutdown(
     addr: SocketAddr,
@@ -125,8 +132,56 @@ fn run_handshake(
         registry.write().push(info);
     }
 
-    tracing::info!(peer_addr = %peer_addr, "p2p inbound handshake complete");
-    Ok(())
+    tracing::info!(
+        peer_addr = %peer_addr,
+        "p2p inbound handshake complete; entering message loop",
+    );
+
+    let loop_result = run_message_loop(&mut peer, peer_addr);
+
+    registry.write().retain(|p| p.addr != peer_addr);
+    if let Err(error) = &loop_result {
+        tracing::warn!(peer_addr = %peer_addr, %error, "p2p peer disconnected with error");
+    } else {
+        tracing::debug!(peer_addr = %peer_addr, "p2p peer disconnected cleanly");
+    }
+    loop_result
+}
+
+fn run_message_loop<S: std::io::Read + std::io::Write>(
+    peer: &mut Peer<S>,
+    peer_addr: SocketAddr,
+) -> Result<(), crate::wire::PeerError> {
+    use crate::peer::PeerState;
+
+    loop {
+        if peer.state == PeerState::Disconnecting {
+            return Ok(());
+        }
+        match crate::wire::read_message(&mut peer.stream, peer.magic) {
+            Ok(message) => {
+                tracing::trace!(
+                    peer_addr = %peer_addr,
+                    command = %message.command(),
+                    "p2p message received",
+                );
+                let responses = crate::dispatch::dispatch_inbound(peer, &message)?;
+                for response in responses {
+                    peer.send(&response)?;
+                }
+            }
+            Err(crate::wire::PeerError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                tracing::debug!(peer_addr = %peer_addr, "p2p peer idle; closing");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn generate_nonce(peer_addr: SocketAddr) -> u64 {

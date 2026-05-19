@@ -22,9 +22,11 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let listener_shutdown = Arc::clone(&shutdown);
     let (tx, rx) = mpsc::channel();
     let registry = Arc::new(parking_lot::RwLock::new(Vec::new()));
+    let listener_registry = Arc::clone(&registry);
 
     let handle = thread::spawn(move || {
-        let result = serve_with_shutdown(addr, listener_shutdown, Magic::BITCOIN, registry);
+        let result =
+            serve_with_shutdown(addr, listener_shutdown, Magic::BITCOIN, listener_registry);
         let _ = tx.send(result);
     });
 
@@ -38,5 +40,6 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     }
 
     result?;
+    assert!(registry.read().is_empty());
     Ok(())
 }
