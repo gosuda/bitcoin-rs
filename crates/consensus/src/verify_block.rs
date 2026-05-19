@@ -5,8 +5,17 @@ use crate::ConsensusError;
 use crate::rust_path::TipState;
 
 /// Verifies non-contextual block rules that do not require a UTXO set.
-pub fn verify_block_rules(block: &Block, _prev_tip: &TipState) -> Result<(), ConsensusError> {
-    let txdata = &block.0.txdata;
+pub fn verify_block_rules(block: &Block, prev_tip: &TipState) -> Result<(), ConsensusError> {
+    verify_block_rules_borrowed(&block.0, prev_tip)
+}
+
+/// Verifies non-contextual block rules for callers that already hold a
+/// `&bitcoin::Block`, avoiding a clone into [`bitcoin_rs_primitives::Block`].
+pub fn verify_block_rules_borrowed(
+    block: &bitcoin::Block,
+    _prev_tip: &TipState,
+) -> Result<(), ConsensusError> {
+    let txdata = &block.txdata;
     if txdata.is_empty() {
         return Err(ConsensusError::EmptyBlock);
     }
@@ -18,13 +27,13 @@ pub fn verify_block_rules(block: &Block, _prev_tip: &TipState) -> Result<(), Con
             return Err(ConsensusError::ExtraCoinbase { tx_index });
         }
     }
-    if !block.0.check_merkle_root() {
+    if !block.check_merkle_root() {
         return Err(ConsensusError::MerkleRoot);
     }
-    if !block.0.check_witness_commitment() {
+    if !block.check_witness_commitment() {
         return Err(ConsensusError::WitnessCommitment);
     }
-    let weight = block.0.weight().to_wu();
+    let weight = block.weight().to_wu();
     let max = Weight::MAX_BLOCK.to_wu();
     if weight > max {
         return Err(ConsensusError::BlockWeight { weight, max });
