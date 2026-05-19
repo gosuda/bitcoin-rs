@@ -90,6 +90,44 @@ impl BlockTree {
         Arc::clone(&self.tip)
     }
 
+    /// Builds a block locator starting from `tip_id`. Returns the chain of
+    /// header hashes at offsets 0, 1, 2, ..., 9, 11, 15, 23, 39, ... walking
+    /// back through parents with exponential backoff after the 10th entry.
+    /// Stops at the genesis (no parent) or after `max_entries` hashes.
+    #[must_use]
+    pub fn block_locator(&self, tip_id: NodeId, max_entries: usize) -> Vec<Hash256> {
+        let mut locator = Vec::with_capacity(max_entries.min(32));
+        let mut current = tip_id;
+        let mut step: u64 = 1;
+        while locator.len() < max_entries {
+            let Ok(node) = self.node(current) else {
+                break;
+            };
+            locator.push(node.hash);
+
+            let mut walker = current;
+            let mut walked = false;
+            for _ in 0..step {
+                let Ok(walker_node) = self.node(walker) else {
+                    break;
+                };
+                let Some(parent) = walker_node.parent else {
+                    break;
+                };
+                walker = parent;
+                walked = true;
+            }
+            if !walked {
+                break;
+            }
+            current = walker;
+            if locator.len() >= 10 {
+                step = step.saturating_mul(2);
+            }
+        }
+        locator
+    }
+
     /// Inserts a header whose parent is inferred from `prev_blockhash`.
     pub fn insert_header(
         &mut self,
@@ -234,4 +272,56 @@ fn node_hash_key(nodes: &Slab<BlockTreeNode>, id: NodeId) -> u64 {
 
 fn work_from_header(header: &BlockHeader) -> ChainWork {
     ChainWork::from_be_bytes(header.work().to_be_bytes())
+}
+#[cfg(test)]
+mod tests {
+    use bitcoin::{
+        BlockHash, TxMerkleNode,
+        block::{Header as BlockHeader, Version},
+        hashes::Hash as _,
+        pow::CompactTarget,
+    };
+
+    use super::{BlockTree, hash_from_header};
+    use crate::node::NodeStatus;
+
+    #[test]
+    fn block_locator_walks_back_to_genesis_on_short_chain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut hashes = vec![hash_from_header(&genesis)];
+
+        for height in 1..5 {
+            let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            hashes.push(hash_from_header(&header));
+        }
+
+        let locator = tree.block_locator(tip_id, 32);
+
+        assert_eq!(locator.len(), 5);
+        assert_eq!(locator[0], hashes[4]);
+        assert_eq!(locator[1], hashes[3]);
+        assert_eq!(locator[2], hashes[2]);
+        assert_eq!(locator[3], hashes[1]);
+        assert_eq!(locator[4], hashes[0]);
+        assert_eq!(locator.last(), hashes.first());
+        Ok(())
+    }
+
+    fn test_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {
+        let mut merkle = [0_u8; 32];
+        merkle[..4].copy_from_slice(&height.to_le_bytes());
+        BlockHeader {
+            version: Version::ONE,
+            prev_blockhash,
+            merkle_root: TxMerkleNode::from_byte_array(merkle),
+            time: height,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: height,
+        }
+    }
 }
