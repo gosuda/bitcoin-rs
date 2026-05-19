@@ -59,3 +59,25 @@ registry resolves to `0.7.0`.
 **305 packages** to "latest Rust 1.85.0 compatible versions". `cargo check
 --workspace --all-targets` and `cargo clippy --workspace --all-targets --
 -D warnings` both exit 0. `cargo fmt --all --check` is clean.
+
+## 1. Heavy sys-crate gating (Tasks 2 + 4 prelude)
+
+Two of the workspace deps cannot build on a clean host that matches our declared
+MSRV 1.85.0:
+
+| Crate | Failure mode | Root cause | Resolution |
+|---|---|---|---|
+| `bitcoinkernel` (`libbitcoinkernel-sys` 0.2.0) | `cmake` aborts: "Could NOT find Boost (missing: Boost_DIR)" | The crate vendors libbitcoinkernel C++ sources and builds them via CMake; **Boost development headers (`libboost-dev`) are required**. The host has Boost **runtime** libraries (`libboost-*1.90.0`) but no `-dev` package. | Feature-gate behind `kernel` in `crates/consensus/Cargo.toml`. Default build skips the kernel; CI installs `libboost-dev` and enables the feature explicitly. |
+| `signet-libmdbx` 0.8.3 | `error: signet-mdbx-sys@0.1.0 requires rustc 1.92` | The MDBX sys-binding's MSRV is 1.92 — incompatible with our pinned 1.85.0 toolchain. | Feature-gate behind `mdbx` in `crates/storage/Cargo.toml`. The G7 four-backend equivalence gate therefore runs **rocksdb + fjall + redb** under MSRV 1.85, and **rocksdb + fjall + redb + mdbx** under a separate CI matrix entry using a 1.92 toolchain (newer-than-MSRV). |
+
+### Resulting feature flags
+
+- `crates/consensus`: `kernel` feature → enables `bitcoinkernel` dep + the dual-path validator. **Default off.**
+- `crates/storage`: `rocksdb`, `fjall`, `redb`, `mdbx` features. Default: `rocksdb`. The `mdbx` feature requires Rust ≥ 1.92.
+- Workspace CI: `clippy`/`test` jobs build with `--no-default-features --features rocksdb,fjall,redb` under 1.85. A separate `kernel-and-mdbx` job installs `libboost-dev` and uses Rust 1.92 with `--features kernel,mdbx`.
+
+### What this means for PLAN.md gates
+
+- **G3 (kernel parity)** still runs in CI, but only on the `kernel-and-mdbx` job — the gate is gated on the kernel feature, not on every PR.
+- **G7 (4-backend equivalence)** runs in two parts: the MSRV-1.85 default-feature CI proves rocksdb ↔ fjall ↔ redb equivalence; the elevated-MSRV CI proves the same chain results when MDBX is added.
+- All other gates (G1, G2, G4, G5, G6, G8 – G14) are unaffected.
