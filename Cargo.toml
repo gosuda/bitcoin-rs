@@ -171,6 +171,7 @@ compact_str = { version = ">=0.9, <1", default-features = false, features = ["st
 
 # --- Zero-copy / compression --------------------------------------------------
 bytemuck = { version = ">=1.25, <2", default-features = false, features = ["derive"] }
+bytes    = { version = ">=1.11, <2", default-features = false }
 zerocopy = { version = ">=0.8, <0.9", default-features = false, features = ["derive", "std"] }
 lz4_flex = { version = ">=0.13, <0.14", default-features = false, features = ["std", "frame"] }
 

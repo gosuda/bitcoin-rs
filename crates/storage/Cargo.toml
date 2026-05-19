@@ -11,4 +11,33 @@ description = "bitcoin-rs :: storage"
 [lints]
 workspace = true
 
+[features]
+default = ["rocksdb"]
+rocksdb = ["dep:rust-rocksdb"]
+fjall = ["dep:fjall"]
+redb = ["dep:redb"]
+mdbx = ["dep:signet-libmdbx"]
+
 [dependencies]
+bytemuck.workspace = true
+bytes.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+rust-rocksdb = { workspace = true, optional = true }
+fjall = { workspace = true, optional = true }
+redb = { workspace = true, optional = true }
+signet-libmdbx = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+rayon.workspace = true
+sha2.workspace = true
+tempfile = "3"
+
+[[bench]]
+name = "kvstore_backends"
+harness = false
