@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use signet_libmdbx::{Database, DatabaseFlags, Environment, Geometry, WriteFlags};
+use signet_libmdbx::{
+    Database, DatabaseFlags, Environment, Geometry, WriteFlags,
+    tx::aliases::{RoTxSync, RwTxSync},
+};
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch};
 
@@ -159,7 +162,7 @@ enum BatchOp {
 }
 
 struct MdbxSnapshot {
-    txn: signet_libmdbx::tx::RoTxSync,
+    txn: RoTxSync,
     databases: Vec<Database>,
 }
 
@@ -190,16 +193,16 @@ impl KvSnapshot for MdbxSnapshot {
 }
 
 fn collect_prefix(
-    txn: &signet_libmdbx::tx::RoTxSync,
+    txn: &RoTxSync,
     database: Database,
     prefix: &[u8],
 ) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
     let mut cursor = txn.cursor(database).map_err(StorageError::backend)?;
     let mut rows = Vec::new();
-    let mut iter = cursor
+    let iter = cursor
         .iter_from::<Vec<u8>, Vec<u8>>(prefix)
         .map_err(StorageError::backend)?;
-    while let Some(item) = iter.next() {
+    for item in iter {
         let (key, value) = item.map_err(StorageError::backend)?;
         if !key.starts_with(prefix) {
             break;
@@ -210,17 +213,17 @@ fn collect_prefix(
 }
 
 fn collect_range_keys(
-    txn: &signet_libmdbx::tx::RwTxSync,
+    txn: &RwTxSync,
     database: Database,
     start: &[u8],
     end: &[u8],
 ) -> Result<Vec<Vec<u8>>, StorageError> {
     let mut cursor = txn.cursor(database).map_err(StorageError::backend)?;
     let mut keys = Vec::new();
-    let mut iter = cursor
+    let iter = cursor
         .iter_from::<Vec<u8>, Vec<u8>>(start)
         .map_err(StorageError::backend)?;
-    while let Some(item) = iter.next() {
+    for item in iter {
         let (key, _) = item.map_err(StorageError::backend)?;
         if key.as_slice() >= end {
             break;

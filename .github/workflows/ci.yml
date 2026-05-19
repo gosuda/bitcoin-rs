@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Default storage features compatible with MSRV 1.85 + a clean (no-libboost-dev) host.
-  PORTABLE_FEATURES: "rocksdb,fjall,redb"
+  # Default storage features compatible with MSRV 1.92 + a standard Linux host.
+  PORTABLE_FEATURES: "rocksdb,fjall,redb,mdbx"
 
 jobs:
   wallet-no-seckey:
@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
       - run: |
           cargo test --workspace --no-fail-fast \
@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
       - run: |
           cargo bench --workspace --no-run \
@@ -69,13 +69,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: --workspace --no-default-features --features "rocksdb,fjall,redb"
+          arguments: --workspace --no-default-features --features "rocksdb,fjall,redb,mdbx"
 
-  # Heavy sys-crate matrix:
+  # Heavy sys-crate gate:
   # - libboost-dev for libbitcoinkernel-sys
-  # - elevated toolchain (≥1.92) for signet-mdbx-sys
-  # Runs the G3 kernel-parity gate and the G7 MDBX backend.
-  kernel-mdbx:
+  # Runs the G3 kernel-parity gate on top of the default 4-backend storage matrix.
+  kernel-only:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,4 +83,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: |
           cargo test --workspace --no-fail-fast \
-            --features "kernel,mdbx,${PORTABLE_FEATURES}"
+            --no-default-features --features "kernel,${PORTABLE_FEATURES}"

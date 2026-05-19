@@ -195,17 +195,25 @@ fn portable_backends_have_identical_aggregate_hashes() -> TestResult<()> {
     let rocks_temp = tempfile::TempDir::new()?;
     let fjall_temp = tempfile::TempDir::new()?;
     let redb_temp = tempfile::TempDir::new()?;
+    #[cfg(feature = "mdbx")]
+    let mdbx_temp = tempfile::TempDir::new()?;
 
     let rocksdb =
         run_equivalence_suite(bitcoin_rs_storage::RocksDbStore::open(rocks_temp.path())?)?;
     let fjall = run_equivalence_suite(bitcoin_rs_storage::FjallStore::open(fjall_temp.path())?)?;
     let redb = run_equivalence_suite(bitcoin_rs_storage::RedbStore::open(redb_temp.path())?)?;
+    #[cfg(feature = "mdbx")]
+    let mdbx = run_equivalence_suite(bitcoin_rs_storage::MdbxStore::open(mdbx_temp.path())?)?;
 
     eprintln!("rocksdb aggregate hash: {}", hash_hex(&rocksdb));
     eprintln!("fjall aggregate hash: {}", hash_hex(&fjall));
     eprintln!("redb aggregate hash: {}", hash_hex(&redb));
+    #[cfg(feature = "mdbx")]
+    eprintln!("mdbx aggregate hash: {}", hash_hex(&mdbx));
 
     assert_eq!(rocksdb, fjall);
     assert_eq!(rocksdb, redb);
+    #[cfg(feature = "mdbx")]
+    assert_eq!(rocksdb, mdbx);
     Ok(())
 }
