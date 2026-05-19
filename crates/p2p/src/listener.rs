@@ -34,9 +34,10 @@ pub enum ListenerError {
 /// Binds `addr` and runs an accept loop until `shutdown` is set.
 ///
 /// On each accepted connection, spawns a thread that runs the inbound
-/// handshake followed by a message-dispatch loop. The thread has a
-/// `HANDSHAKE_READ_TIMEOUT` (60s) read and write timeout that doubles as
-/// the idle disconnect threshold. The thread terminates on:
+/// handshake followed by a message-dispatch loop. The handshake uses
+/// `HANDSHAKE_READ_TIMEOUT` (60s); after handshake, the message loop polls
+/// inbound reads every second while enforcing a 60s inbound idle timeout.
+/// The thread terminates on:
 ///   - successful handshake then idle (60s of no inbound messages)
 ///   - wire / FSM error
 ///   - explicit FSM disconnect transition
@@ -54,6 +55,9 @@ pub fn serve_with_shutdown(
     shutdown: Arc<AtomicBool>,
     magic: Magic,
     peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<
+        RwLock<hashbrown::HashMap<SocketAddr, crossbeam_channel::Sender<crate::Message>>>,
+    >,
 ) -> Result<(), ListenerError> {
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
@@ -63,7 +67,13 @@ pub fn serve_with_shutdown(
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer_addr)) => {
-                spawn_handshake_thread(stream, peer_addr, magic, Arc::clone(&peer_registry));
+                spawn_handshake_thread(
+                    stream,
+                    peer_addr,
+                    magic,
+                    Arc::clone(&peer_registry),
+                    Arc::clone(&peer_outbound),
+                );
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(POLL_INTERVAL);
@@ -79,12 +89,15 @@ fn spawn_handshake_thread(
     peer_addr: SocketAddr,
     magic: Magic,
     registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<
+        RwLock<hashbrown::HashMap<SocketAddr, crossbeam_channel::Sender<crate::Message>>>,
+    >,
 ) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
     let spawn_result = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            if let Err(error) = run_handshake(stream, peer_addr, magic, &registry) {
+            if let Err(error) = run_handshake(stream, peer_addr, magic, &registry, &peer_outbound) {
                 tracing::warn!(
                     peer_addr = %peer_addr,
                     %error,
@@ -109,6 +122,9 @@ fn run_handshake(
     peer_addr: SocketAddr,
     magic: Magic,
     registry: &RwLock<Vec<crate::PeerInfo>>,
+    peer_outbound: &RwLock<
+        hashbrown::HashMap<SocketAddr, crossbeam_channel::Sender<crate::Message>>,
+    >,
 ) -> Result<(), crate::wire::PeerError> {
     stream
         .set_nonblocking(false)
@@ -124,21 +140,33 @@ fn run_handshake(
     let mut peer = Peer::new(stream, magic);
     run_inbound_handshake(&mut peer, nonce, 0)?;
 
-    if let Some(remote_version) = peer.remote_version.as_ref() {
-        let conn_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
-        let info = crate::PeerInfo::inbound_from_version(peer_addr, remote_version, conn_time);
-        registry.write().push(info);
-    }
+    let Some(remote_version) = peer.remote_version.as_ref() else {
+        return Err(crate::wire::PeerError::Protocol(
+            "missing remote version after successful handshake",
+        ));
+    };
+    let conn_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let info = crate::PeerInfo::inbound_from_version(peer_addr, remote_version, conn_time);
+    registry.write().push(info);
+
+    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
+    peer_outbound.write().insert(peer_addr, outbound_tx);
 
     tracing::info!(
         peer_addr = %peer_addr,
         "p2p inbound handshake complete; entering message loop",
     );
 
-    let loop_result = run_message_loop(&mut peer, peer_addr);
+    let loop_result = (|| {
+        peer.stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(crate::wire::PeerError::Io)?;
+        run_message_loop(&mut peer, peer_addr, &outbound_rx)
+    })();
 
+    peer_outbound.write().remove(&peer_addr);
     registry.write().retain(|p| p.addr != peer_addr);
     if let Err(error) = &loop_result {
         tracing::warn!(peer_addr = %peer_addr, %error, "p2p peer disconnected with error");
@@ -151,18 +179,35 @@ fn run_handshake(
 fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
+    outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
+    use std::time::Instant;
+
+    const IDLE_DISCONNECT: Duration = Duration::from_secs(60);
+
+    let mut last_inbound = Instant::now();
 
     loop {
         if peer.state == PeerState::Disconnecting {
             return Ok(());
         }
+
+        while let Ok(message) = outbound_rx.try_recv() {
+            peer.send(&message)?;
+        }
+
+        if last_inbound.elapsed() >= IDLE_DISCONNECT {
+            tracing::debug!(peer_addr = %peer_addr, "p2p peer idle 60s; closing");
+            return Ok(());
+        }
+
         match crate::wire::read_message(&mut peer.stream, peer.magic) {
             Ok(message) => {
+                last_inbound = Instant::now();
                 tracing::trace!(
                     peer_addr = %peer_addr,
-                    command = %message.command(),
+                    command = ?std::mem::discriminant(&message),
                     "p2p message received",
                 );
                 let responses = crate::dispatch::dispatch_inbound(peer, &message)?;
@@ -176,8 +221,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                tracing::debug!(peer_addr = %peer_addr, "p2p peer idle; closing");
-                return Ok(());
+                continue;
             }
             Err(error) => return Err(error),
         }

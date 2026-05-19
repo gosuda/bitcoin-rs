@@ -184,6 +184,12 @@ pub struct NodeState {
     transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     network: Arc<RwLock<NetworkState>>,
     peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
+    /// Per-peer outbound message senders, keyed by remote socket address.
+    /// External code pushes messages here; the per-connection thread drains
+    /// and writes them to the peer's TCP stream.
+    peer_outbound: Arc<
+        RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
+    >,
     mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
 }
@@ -204,6 +210,7 @@ impl NodeState {
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
         tracing::info!(
             backend = storage.kind(),
@@ -223,6 +230,7 @@ impl NodeState {
             transactions,
             network,
             peers,
+            peer_outbound,
             mining_template_id,
             replayed: Mutex::new(Vec::new()),
         })
@@ -292,6 +300,21 @@ impl NodeState {
     #[must_use]
     pub fn peers(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>> {
         Arc::clone(&self.peers)
+    }
+
+    /// Returns the shared per-peer outbound message-sender map.
+    ///
+    /// External callers can look up a peer's `Sender<Message>` by socket
+    /// address and send a message into that peer's outbound queue. The
+    /// per-connection thread drains the receiver each iteration of
+    /// `run_message_loop` and writes the message via `peer.send`.
+    #[must_use]
+    pub fn peer_outbound(
+        &self,
+    ) -> Arc<
+        RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
+    > {
+        Arc::clone(&self.peer_outbound)
     }
 
     /// Returns the shared getblocktemplate long-poll id.
@@ -730,6 +753,20 @@ mod tests {
             state.peers().read().is_empty(),
             "freshly opened registry is empty"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_empty_peer_outbound_map() -> anyhow::Result<()> {
+        use tempfile::tempdir;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        assert!(state.peer_outbound().read().is_empty());
         Ok(())
     }
 

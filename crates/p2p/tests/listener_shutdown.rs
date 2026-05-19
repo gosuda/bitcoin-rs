@@ -23,10 +23,17 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel();
     let registry = Arc::new(parking_lot::RwLock::new(Vec::new()));
     let listener_registry = Arc::clone(&registry);
+    let outbound = Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
 
+    let listener_outbound = Arc::clone(&outbound);
     let handle = thread::spawn(move || {
-        let result =
-            serve_with_shutdown(addr, listener_shutdown, Magic::BITCOIN, listener_registry);
+        let result = serve_with_shutdown(
+            addr,
+            listener_shutdown,
+            Magic::BITCOIN,
+            listener_registry,
+            listener_outbound,
+        );
         let _ = tx.send(result);
     });
 
