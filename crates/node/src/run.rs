@@ -95,9 +95,15 @@ pub fn run(mut config: Config) -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let loop_handle = EventLoop::new(shutdown_rx);
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
-    let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(
-        bitcoin_rs_rpc::Context::new(),
-    )));
+    let rpc_context = bitcoin_rs_rpc::Context::from_handles(
+        state.chain_tip(),
+        state.mempool(),
+        state.blocks(),
+        state.transactions(),
+        state.network(),
+        state.mining_template_id(),
+    );
+    let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
         state.config().rpc_bind,
         rpc_auth,
