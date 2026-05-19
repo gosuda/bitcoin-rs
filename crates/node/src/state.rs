@@ -48,6 +48,9 @@ pub enum ApplyError {
     /// Consensus validation rejected the block.
     #[error("consensus: {0}")]
     Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
+    /// Block-tree insertion rejected the header.
+    #[error("chain: {0}")]
+    Chain(#[from] bitcoin_rs_chain::ChainError),
     /// UTXO commit failed during block apply.
     #[error("utxo commit: {0}")]
     UtxoCommit(#[from] bitcoin_rs_utxo::UtxoError),
@@ -157,6 +160,7 @@ pub struct NodeState {
     utxo: Arc<UtxoSet>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    block_tree: Arc<RwLock<bitcoin_rs_chain::BlockTree>>,
     blocks: Arc<RwLock<Vec<BlockRecord>>>,
     transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     network: Arc<RwLock<NetworkState>>,
@@ -175,6 +179,7 @@ impl NodeState {
         let utxo = Arc::new(UtxoSet::new());
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
         let chain_tip = Arc::new(ArcSwapOption::empty());
+        let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
         let blocks = Arc::new(RwLock::new(Vec::new()));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let network = Arc::new(RwLock::new(NetworkState::default()));
@@ -192,6 +197,7 @@ impl NodeState {
             utxo,
             mempool,
             chain_tip,
+            block_tree,
             blocks,
             transactions,
             network,
@@ -234,6 +240,12 @@ impl NodeState {
     #[must_use]
     pub fn chain_tip(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
         Arc::clone(&self.chain_tip)
+    }
+
+    /// Returns the shared block-tree handle.
+    #[must_use]
+    pub fn block_tree(&self) -> Arc<RwLock<bitcoin_rs_chain::BlockTree>> {
+        Arc::clone(&self.block_tree)
     }
 
     /// Returns the shared block-records handle exposed to RPC handlers.
@@ -352,6 +364,11 @@ impl NodeState {
         // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
         self.check_bip30_and_bip34(block, height)?;
 
+        // Persist the header into the in-memory block tree; it is the source of
+        // truth for header height, chainwork, and parent linkage. We dual-write
+        // `chain_tip` below until readers migrate to `block_tree()`.
+        self.insert_active_header(block)?;
+
         let mut changes = BlockChanges::default();
         for tx in &block.txdata {
             let txid = tx.compute_txid();
@@ -409,6 +426,13 @@ impl NodeState {
             "apply_block: synthetic chain advance committed"
         );
         Ok(tip)
+    }
+
+    fn insert_active_header(&self, block: &bitcoin::Block) -> core::result::Result<(), ApplyError> {
+        self.block_tree
+            .write()
+            .insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?;
+        Ok(())
     }
 
     fn check_bip30_and_bip34(
@@ -488,6 +512,24 @@ mod tests {
         assert!(Arc::strong_count(&mempool) >= 2);
         assert_eq!(mempool.read().len(), 0, "fresh mempool must be empty");
 
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_empty_block_tree() -> anyhow::Result<()> {
+        use tempfile::tempdir;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let tree = state.block_tree();
+
+        assert!(
+            tree.read().is_empty(),
+            "freshly opened tree has zero headers"
+        );
         Ok(())
     }
 

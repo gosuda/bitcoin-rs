@@ -163,6 +163,34 @@ mod tests {
     }
 
     #[test]
+    fn two_block_import_grows_block_tree_to_two_headers() -> Result<()> {
+        let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
+        let mut follow_up = Block::consensus_decode(&mut cursor)?;
+        follow_up.header.prev_blockhash = follow_up.block_hash();
+        follow_up.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
+        follow_up.header.merkle_root = follow_up
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
+        mine_block_to_declared_target(&mut follow_up)?;
+
+        let mut follow_up_bytes = Vec::new();
+        follow_up.consensus_encode(&mut follow_up_bytes)?;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        let _genesis = import_block(&state, &genesis_bytes)?;
+        let _follow_up = import_block(&state, &follow_up_bytes)?;
+
+        assert_eq!(state.block_tree().read().len(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn import_rejects_block_with_no_coinbase() -> Result<()> {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
