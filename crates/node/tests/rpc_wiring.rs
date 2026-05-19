@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use bitcoin_rs_node::{state::NodeState, Config};
+use bitcoin_rs_node::{Config, state::NodeState};
 use bitcoin_rs_rpc::Context;
 use tempfile::tempdir;
 
