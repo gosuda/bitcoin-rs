@@ -465,8 +465,6 @@ mod tests {
 
     use super::*;
 
-    use bitcoin::hashes::Hash as _;
-
     #[test]
     fn stats_reports_empty_and_inserted_entry_counters() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
