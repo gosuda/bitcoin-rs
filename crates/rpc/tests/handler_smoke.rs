@@ -14,6 +14,7 @@ use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_p2p::PeerInfo;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_rpc::{BlockRecord, Context, Handler, NetworkState, RpcError};
+use bitcoin_rs_utxo::UtxoSet;
 use compact_str::CompactString;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
@@ -140,6 +141,16 @@ fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), Box<dyn st
         chainwork,
         "000000000000000000000000000000000000000000000000000000000000abcd"
     );
+    Ok(())
+}
+
+#[test]
+fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::Error>> {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let result = handler.dispatch("gettxoutsetinfo", &json!([]))?;
+
+    assert_eq!(result.get("txouts").as_u64(), Some(0));
+    assert_eq!(result.get("transactions").as_u64(), Some(0));
     Ok(())
 }
 
@@ -274,6 +285,7 @@ impl Fixture {
     }
 }
 
+#[allow(clippy::arc_with_non_send_sync)]
 fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
     Arc::new(Context::from_handles(
         Arc::new(ArcSwapOption::empty()),
@@ -281,6 +293,7 @@ fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Arc::new(RwLock::new(Vec::new())),
         Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(UtxoSet::new()),
         Arc::new(RwLock::new(NetworkState::default())),
         Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
         peers,

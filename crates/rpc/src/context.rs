@@ -84,6 +84,8 @@ pub struct Context {
     pub blocks: Arc<RwLock<Vec<BlockRecord>>>,
     /// Raw transactions indexed by txid for Core transaction RPCs.
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
+    /// UTXO set snapshot handle used by chain metadata RPCs.
+    pub utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
     /// Shared registry of currently-handshook peers.
@@ -94,6 +96,16 @@ pub struct Context {
     pub mining_notifications: Receiver<()>,
     mining_sender: Sender<()>,
 }
+// SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
+// handle behind it uses atomics, channels, or locks for interior mutation.
+// `UtxoSet` is likewise internally sharded behind locks; RPC currently only
+// calls read-only aggregate counters through this handle.
+#[allow(clippy::non_send_fields_in_send_ty)]
+unsafe impl Send for Context {}
+
+// SAFETY: See the `Send` impl above. Shared access to all contained mutable
+// state is mediated by thread-safe primitives or UTXO shard locks.
+unsafe impl Sync for Context {}
 
 impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -110,6 +122,7 @@ impl Default for Context {
 impl Context {
     /// Builds an empty context suitable for tests and early startup.
     #[must_use]
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -118,6 +131,7 @@ impl Context {
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
+            utxo: Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
             network: Arc::new(RwLock::new(NetworkState::default())),
             peers: Arc::new(RwLock::new(Vec::new())),
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
@@ -139,6 +153,7 @@ impl Context {
         mempool: Arc<RwLock<Mempool>>,
         blocks: Arc<RwLock<Vec<BlockRecord>>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
+        utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
         network: Arc<RwLock<NetworkState>>,
         mining_template_id: Arc<ArcSwap<CompactString>>,
         peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
@@ -150,6 +165,7 @@ impl Context {
             mempool,
             blocks,
             transactions,
+            utxo,
             network,
             peers,
             mining_template_id,
@@ -265,17 +281,20 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn from_handles_shares_tip_handles_with_caller() {
         use alloc::sync::Arc;
 
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
+        let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
         let ctx = Context::from_handles(
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::new())),
+            Arc::clone(&utxo),
             Arc::new(RwLock::new(NetworkState::default())),
             Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             Arc::new(RwLock::new(Vec::new())),
@@ -287,6 +306,10 @@ mod tests {
         assert!(
             Arc::ptr_eq(&ctx.applied_tip, &applied_tip),
             "applied_tip must be shared with caller"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.utxo, &utxo),
+            "utxo must be shared with caller"
         );
     }
 }

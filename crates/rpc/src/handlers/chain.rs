@@ -158,16 +158,16 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     }))
 }
 
-pub(crate) fn gettxoutsetinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     Ok(json!({
-        "height": 0,
-        "bestblock": Hash256::default().to_string_be(),
-        "txouts": 0,
+        "height": ctx.applied_height(),
+        "bestblock": ctx.applied_hash().to_string_be(),
+        "txouts": ctx.utxo.len(),
         "bogosize": 0,
         "hash_serialized_2": Hash256::default().to_string_be(),
         "total_amount": 0.0,
-        "transactions": 0,
+        "transactions": ctx.utxo.record_count(),
         "disk_size": 0
     }))
 }

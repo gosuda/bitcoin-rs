@@ -11,9 +11,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use bitcoin_rs_node::{Config, state::NodeState};
 use bitcoin_rs_rpc::Context;
+use bitcoin_rs_utxo::UtxoSet;
 use tempfile::tempdir;
 
 #[test]
+#[allow(clippy::arc_with_non_send_sync)]
 fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let dir = tempdir()?;
     let mut config = Config::default();
@@ -25,6 +27,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let mempool = state.mempool();
     let blocks = state.blocks();
     let transactions = state.transactions();
+    let utxo = Arc::new(UtxoSet::new());
     let network = state.network();
     let mining_template_id = state.mining_template_id();
     let peers = state.peers();
@@ -35,6 +38,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::clone(&mempool),
         Arc::clone(&blocks),
         Arc::clone(&transactions),
+        Arc::clone(&utxo),
         Arc::clone(&network),
         Arc::clone(&mining_template_id),
         Arc::clone(&peers),
@@ -60,6 +64,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::ptr_eq(&ctx.transactions, &transactions),
         "transactions must share identity"
     );
+    assert!(Arc::ptr_eq(&ctx.utxo, &utxo), "utxo must share identity");
     assert!(
         Arc::ptr_eq(&ctx.network, &network),
         "network must share identity"
