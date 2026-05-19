@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bitcoin::p2p::Magic;
+use crossbeam_channel::Sender;
 use parking_lot::RwLock;
 
 use thiserror::Error;
@@ -55,9 +56,8 @@ pub fn serve_with_shutdown(
     shutdown: Arc<AtomicBool>,
     magic: Magic,
     peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<
-        RwLock<hashbrown::HashMap<SocketAddr, crossbeam_channel::Sender<crate::Message>>>,
-    >,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
+    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
 ) -> Result<(), ListenerError> {
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
@@ -73,6 +73,7 @@ pub fn serve_with_shutdown(
                     magic,
                     Arc::clone(&peer_registry),
                     Arc::clone(&peer_outbound),
+                    inbound_headers_tx.clone(),
                 );
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -89,15 +90,21 @@ fn spawn_handshake_thread(
     peer_addr: SocketAddr,
     magic: Magic,
     registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<
-        RwLock<hashbrown::HashMap<SocketAddr, crossbeam_channel::Sender<crate::Message>>>,
-    >,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
+    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
 ) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
     let spawn_result = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            if let Err(error) = run_handshake(stream, peer_addr, magic, &registry, &peer_outbound) {
+            if let Err(error) = run_handshake(
+                stream,
+                peer_addr,
+                magic,
+                &registry,
+                &peer_outbound,
+                &inbound_headers_tx,
+            ) {
                 tracing::warn!(
                     peer_addr = %peer_addr,
                     %error,
@@ -122,9 +129,8 @@ fn run_handshake(
     peer_addr: SocketAddr,
     magic: Magic,
     registry: &RwLock<Vec<crate::PeerInfo>>,
-    peer_outbound: &RwLock<
-        hashbrown::HashMap<SocketAddr, crossbeam_channel::Sender<crate::Message>>,
-    >,
+    peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
+    inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
 ) -> Result<(), crate::wire::PeerError> {
     stream
         .set_nonblocking(false)
@@ -163,7 +169,7 @@ fn run_handshake(
         peer.stream
             .set_read_timeout(Some(Duration::from_secs(1)))
             .map_err(crate::wire::PeerError::Io)?;
-        run_message_loop(&mut peer, peer_addr, &outbound_rx)
+        run_message_loop(&mut peer, peer_addr, &outbound_rx, inbound_headers_tx)
     })();
 
     peer_outbound.write().remove(&peer_addr);
@@ -180,6 +186,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
+    inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
     use std::time::Instant;
@@ -210,6 +217,16 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     command = ?std::mem::discriminant(&message),
                     "p2p message received",
                 );
+                if let bitcoin::p2p::message::NetworkMessage::Headers(headers) = &message {
+                    let batch = headers.clone();
+                    if let Err(error) = inbound_headers_tx.send(batch) {
+                        tracing::warn!(
+                            peer_addr = %peer_addr,
+                            %error,
+                            "p2p inbound headers channel disconnected",
+                        );
+                    }
+                }
                 let responses = crate::dispatch::dispatch_inbound(peer, &message)?;
                 for response in responses {
                     peer.send(&response)?;

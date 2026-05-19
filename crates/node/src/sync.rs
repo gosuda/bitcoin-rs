@@ -2,9 +2,9 @@
 //!
 //! Reads the shared chain-tip / peer registry / outbound-channel handles
 //! and, when a peer reports a longer chain, sends `getheaders` toward
-//! that peer. The response-side (handling `headers` and `block` messages
-//! to import blocks via `crate::import::import_block`) lands in a
-//! follow-up.
+//! that peer. Inbound `headers` batches are drained into the shared
+//! [`BlockTree`]; full block import via `crate::import::import_block` lands
+//! in a follow-up.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -18,9 +18,9 @@ use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::{Hash256, Network};
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 use hashbrown::HashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
@@ -34,6 +34,7 @@ pub struct BlockSync {
     peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
     block_tree: Arc<RwLock<BlockTree>>,
     network: Network,
+    inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
 }
 
 impl BlockSync {
@@ -45,6 +46,7 @@ impl BlockSync {
         peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
         block_tree: Arc<RwLock<BlockTree>>,
         network: Network,
+        inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
     ) -> Self {
         Self {
             chain_tip,
@@ -52,12 +54,14 @@ impl BlockSync {
             peer_outbound,
             block_tree,
             network,
+            inbound_headers_rx,
         }
     }
 
     /// Runs one orchestrator tick: picks a sync peer, builds a locator,
     /// pushes `getheaders` into the peer's outbound channel.
     pub fn tick(&self) {
+        self.drain_inbound_headers();
         let our_height = self.chain_tip.load_full().map_or(0, |tip| tip.height);
         let Some(target) = self.pick_sync_peer(our_height) else {
             tracing::trace!(our_height, "block sync: no peer above current height");
@@ -97,6 +101,35 @@ impl BlockSync {
             protocol_version = PROTOCOL_VERSION,
             "block sync: sent getheaders"
         );
+    }
+
+    fn drain_inbound_headers(&self) {
+        let receiver = self.inbound_headers_rx.lock();
+        let mut total_headers = 0_usize;
+        while let Ok(batch) = receiver.try_recv() {
+            let batch_len = batch.len();
+            total_headers = total_headers.saturating_add(batch_len);
+            let mut tree = self.block_tree.write();
+            match bitcoin_rs_chain::accept_headers(&mut tree, &batch, self.network) {
+                Ok(node_ids) => {
+                    tracing::debug!(
+                        accepted = node_ids.len(),
+                        received = batch_len,
+                        "block sync: accepted inbound headers batch",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        received = batch_len,
+                        %error,
+                        "block sync: rejected inbound headers batch",
+                    );
+                }
+            }
+        }
+        if total_headers > 0 {
+            tracing::debug!(total_headers, "block sync: drained inbound headers");
+        }
     }
 
     fn pick_sync_peer(&self, our_height: u32) -> Option<PeerInfo> {

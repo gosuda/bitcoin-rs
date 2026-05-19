@@ -58,6 +58,7 @@ fn spawn_electrum_listener(
     ))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn spawn_p2p_listeners(
     config: &bitcoin_rs_node::Config,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -70,6 +71,7 @@ fn spawn_p2p_listeners(
             >,
         >,
     >,
+    inbound_headers_tx: crossbeam_channel::Sender<Vec<bitcoin::block::Header>>,
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>
 {
     let mut handles = Vec::with_capacity(config.p2p_listen.len());
@@ -79,6 +81,7 @@ fn spawn_p2p_listeners(
         let listener_shutdown = std::sync::Arc::clone(shutdown);
         let listener_peers = Arc::clone(peers);
         let listener_peer_outbound = Arc::clone(peer_outbound);
+        let listener_inbound_headers_tx = inbound_headers_tx.clone();
         let handle = std::thread::Builder::new()
             .name(format!("bitcoin-rs-p2p-{listener_addr}"))
             .spawn(move || {
@@ -88,6 +91,7 @@ fn spawn_p2p_listeners(
                     magic,
                     listener_peers,
                     listener_peer_outbound,
+                    listener_inbound_headers_tx,
                 )
             })?;
         tracing::info!(addr = %listener_addr, "p2p listener bound");
@@ -160,7 +164,13 @@ pub fn run(mut config: Config) -> Result<()> {
     let electrum_thread = spawn_electrum_listener(state.config(), &shutdown)?;
     let peers = state.peers();
     let peer_outbound = state.peer_outbound();
-    let p2p_threads = spawn_p2p_listeners(state.config(), &shutdown, &peers, &peer_outbound)?;
+    let p2p_threads = spawn_p2p_listeners(
+        state.config(),
+        &shutdown,
+        &peers,
+        &peer_outbound,
+        state.inbound_headers_sender(),
+    )?;
     loop_handle.spin(&shutdown)?;
     if let Some(handle) = electrum_thread {
         match handle.join() {

@@ -6,13 +6,12 @@
 //! / index / p2p / rpc / electrum) parks here as the integration point matures.
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use bitcoin::{Transaction, Txid};
+use bitcoin::{Transaction, Txid, block::Header};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_rpc::{BlockRecord, NetworkState};
 use compact_str::CompactString;
 use core::fmt;
-#[allow(unused_imports)]
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use hashbrown::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -190,6 +189,9 @@ pub struct NodeState {
     peer_outbound: Arc<
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     >,
+    inbound_headers_tx: Sender<Vec<Header>>,
+    #[allow(dead_code)]
+    inbound_headers_rx: Arc<Mutex<Receiver<Vec<Header>>>>,
     sync: Arc<crate::BlockSync>,
     mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
@@ -213,12 +215,16 @@ impl NodeState {
         let peers = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
+        let (inbound_headers_tx, inbound_headers_rx_raw) =
+            crossbeam_channel::unbounded::<Vec<Header>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
         let sync = Arc::new(crate::BlockSync::new(
             Arc::clone(&chain_tip),
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
             Arc::clone(&block_tree),
             config.network,
+            Arc::clone(&inbound_headers_rx),
         ));
         tracing::info!(
             backend = storage.kind(),
@@ -239,6 +245,8 @@ impl NodeState {
             network,
             peers,
             peer_outbound,
+            inbound_headers_tx,
+            inbound_headers_rx,
             mining_template_id,
             sync,
             replayed: Mutex::new(Vec::new()),
@@ -324,6 +332,14 @@ impl NodeState {
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     > {
         Arc::clone(&self.peer_outbound)
+    }
+
+    /// Returns a cloned `Sender` that the P2P listener pushes inbound
+    /// `Headers` batches into. The matching `Receiver` is consumed by
+    /// `BlockSync::tick` to extend the `BlockTree`.
+    #[must_use]
+    pub fn inbound_headers_sender(&self) -> Sender<Vec<Header>> {
+        self.inbound_headers_tx.clone()
     }
 
     /// Returns the shared block-download orchestrator.
@@ -798,6 +814,22 @@ mod tests {
         let state = NodeState::open(config)?;
 
         assert!(state.peer_outbound().read().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_headers_sender_is_unbounded_clone_target() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let tx1 = state.inbound_headers_sender();
+        let tx2 = state.inbound_headers_sender();
+        tx1.send(Vec::new())
+            .map_err(|err| anyhow::anyhow!("send via tx1 failed: {err}"))?;
+        tx2.send(Vec::new())
+            .map_err(|err| anyhow::anyhow!("send via tx2 failed: {err}"))?;
         Ok(())
     }
 

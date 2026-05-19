@@ -24,6 +24,8 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let registry = Arc::new(parking_lot::RwLock::new(Vec::new()));
     let listener_registry = Arc::clone(&registry);
     let outbound = Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
+    let (inbound_headers_tx, _inbound_headers_rx) =
+        crossbeam_channel::unbounded::<Vec<bitcoin::block::Header>>();
 
     let listener_outbound = Arc::clone(&outbound);
     let handle = thread::spawn(move || {
@@ -33,6 +35,7 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
             Magic::BITCOIN,
             listener_registry,
             listener_outbound,
+            inbound_headers_tx,
         );
         let _ = tx.send(result);
     });
