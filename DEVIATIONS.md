@@ -181,3 +181,59 @@ placeholder. Live infrastructure runs are operator responsibilities.
 
 - Files: `bin/bitcoin-rs/{Cargo.toml,tests/gates/g{01..14}_*.rs}`
 - Commit: 144e2c1 + 61ae824
+
+## §7 — Integration layer: NodeState wiring + listeners + synthetic apply_block
+
+Follow-up to §4..§6. The session that opened with the T18..T20 scaffold
+closed by wiring the source-of-truth subsystem handles into the node
+lifecycle. The wiring is real but **synthetic in the consensus sense**:
+blocks are accepted without consensus validation.
+
+### What is now wired
+
+- `NodeState::open` constructs the canonical Arc handle set: `Arc<UtxoSet>`,
+  `Arc<RwLock<Mempool>>`, `Arc<ArcSwapOption<TipSnapshot>>`,
+  `Arc<RwLock<Vec<BlockRecord>>>`, `Arc<RwLock<HashMap<Txid, Transaction>>>`,
+  `Arc<RwLock<NetworkState>>`, `Arc<ArcSwap<CompactString>>` (mining
+  template id).
+- `bitcoin_rs_rpc::Context::from_handles` reuses the same Arcs. The
+  `rpc_wiring.rs` integration test pins pointer identity across all six.
+- `run.rs` orchestrates: open → tracing → crash recovery → shutdown source
+  → spawn RPC listener thread (always) → spawn Electrum listener thread
+  (when `config.electrum_bind.is_some()`) → spawn one P2P listener thread
+  per `config.p2p_listen` address → spin the event loop → graceful drain
+  → join each listener.
+- RPC, Electrum, and P2P listeners share a `serve_with_shutdown(Arc<AtomicBool>)`
+  pattern using non-blocking `accept()` + 100 ms poll.
+- `NodeState::apply_block(&Block)` advances the synthetic chain tip on
+  header continuity, commits block outputs to `UtxoSet` via
+  `commit_block`, evicts confirmed txs from `Mempool` via
+  `remove_by_txid`, and indexes the block's transactions for
+  `getrawtransaction`. `bitcoin_rs_node::import::import_block` flips
+  `ImportOutcome::applied` to `true` on successful apply.
+- `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via
+  `Mempool::stats()`.
+- Electrum TLS cert config is honored as plaintext-with-warning until a
+  matching `electrum_tls_key` field lands; the warning surfaces on every
+  boot that configures `electrum_tls_cert` without TLS wiring.
+
+### What is NOT yet wired (consensus correctness gates)
+
+- **No consensus validation in `apply_block`.** Only `prev_blockhash ==
+  current_tip.hash` is checked. No PoW verification, no merkle root
+  check, no script verification, no BIP30/34/65/66/68/112/141/143 rules,
+  no BIP9 deployment state. The chain advance is observable but invalid
+  by Bitcoin consensus.
+- **No real block-tree maintenance.** `BlockTree::accept_header` is not
+  called by `apply_block`. The chain is a flat list of `TipSnapshot`s
+  without reorg-planning state.
+- **No P2P handshake.** The listener accepts and drops the connection
+  before any Version/Verack exchange. Peers cannot talk to the node yet.
+- **No block download orchestrator.** No code path connects accepted
+  peers to `import_block`; `import_block` only fires from tests.
+- **No index / filter / coinstats updates triggered by tip advance.**
+  Electrum index, BIP158 filter generation, and coinstats remain stale
+  until a follow-up wires the listener side.
+- **G14 empirical validation still deferred.** The `faster than Bitcoin
+  Core` claim requires multi-day live mainnet IBD against `bitcoind`
+  and `gocoin`. Operator responsibility.
