@@ -19,10 +19,13 @@ pub mod inv;
 pub mod listener;
 /// Peer state and peer manager types.
 pub mod peer;
+/// Peer metadata published after a successful handshake.
+pub mod peer_info;
 /// Bitcoin P2P wire codec.
 pub mod wire;
 /// BIP339 wtxid-relay state.
 pub mod wtxid;
 
 pub use peer::{DnsResolver, Peer, PeerManager, PeerState};
+pub use peer_info::PeerInfo;
 pub use wire::{Message, PeerError};

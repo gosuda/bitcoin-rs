@@ -164,6 +164,7 @@ pub struct NodeState {
     blocks: Arc<RwLock<Vec<BlockRecord>>>,
     transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     network: Arc<RwLock<NetworkState>>,
+    peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
     mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
 }
@@ -183,6 +184,7 @@ impl NodeState {
         let blocks = Arc::new(RwLock::new(Vec::new()));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let network = Arc::new(RwLock::new(NetworkState::default()));
+        let peers = Arc::new(RwLock::new(Vec::new()));
         let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
         tracing::info!(
             backend = storage.kind(),
@@ -201,6 +203,7 @@ impl NodeState {
             blocks,
             transactions,
             network,
+            peers,
             mining_template_id,
             replayed: Mutex::new(Vec::new()),
         })
@@ -264,6 +267,12 @@ impl NodeState {
     #[must_use]
     pub fn network(&self) -> Arc<RwLock<NetworkState>> {
         Arc::clone(&self.network)
+    }
+
+    /// Returns the shared registry of currently-handshook peers.
+    #[must_use]
+    pub fn peers(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>> {
+        Arc::clone(&self.peers)
     }
 
     /// Returns the shared getblocktemplate long-poll id.
@@ -558,6 +567,23 @@ mod tests {
         assert!(
             tree.read().is_empty(),
             "freshly opened tree has zero headers"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_empty_peer_registry() -> anyhow::Result<()> {
+        use tempfile::tempdir;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        assert!(
+            state.peers().read().is_empty(),
+            "freshly opened registry is empty"
         );
         Ok(())
     }

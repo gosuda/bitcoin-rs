@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bitcoin::p2p::Magic;
+use parking_lot::RwLock;
 
 use thiserror::Error;
 
@@ -38,13 +39,14 @@ pub enum ListenerError {
 /// timeout expires. Per-connection threads are NOT joined by the outer
 /// shutdown — they outlive the listener by up to the timeout.
 ///
-/// Peer-management integration (tracking accepted peers, dispatching
-/// inv/getdata/headers, etc.) lands in a follow-up.
+/// Successful inbound handshakes append their public metadata to
+/// `peer_registry`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn serve_with_shutdown(
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
     magic: Magic,
+    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
 ) -> Result<(), ListenerError> {
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
@@ -54,7 +56,7 @@ pub fn serve_with_shutdown(
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer_addr)) => {
-                spawn_handshake_thread(stream, peer_addr, magic);
+                spawn_handshake_thread(stream, peer_addr, magic, Arc::clone(&peer_registry));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(POLL_INTERVAL);
@@ -65,12 +67,17 @@ pub fn serve_with_shutdown(
     Ok(())
 }
 
-fn spawn_handshake_thread(stream: TcpStream, peer_addr: SocketAddr, magic: Magic) {
+fn spawn_handshake_thread(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    magic: Magic,
+    registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
     let spawn_result = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            if let Err(error) = run_handshake(stream, peer_addr, magic) {
+            if let Err(error) = run_handshake(stream, peer_addr, magic, &registry) {
                 tracing::warn!(
                     peer_addr = %peer_addr,
                     %error,
@@ -87,14 +94,14 @@ fn spawn_handshake_thread(stream: TcpStream, peer_addr: SocketAddr, magic: Magic
         );
     }
     // The handle is intentionally dropped: per-connection threads outlive
-    // this listener thread by up to HANDSHAKE_READ_TIMEOUT. Tracking them
-    // lands when peer-management is wired.
+    // this listener thread by up to HANDSHAKE_READ_TIMEOUT.
 }
 
 fn run_handshake(
     stream: TcpStream,
     peer_addr: SocketAddr,
     magic: Magic,
+    registry: &RwLock<Vec<crate::PeerInfo>>,
 ) -> Result<(), crate::wire::PeerError> {
     stream
         .set_nonblocking(false)
@@ -109,7 +116,16 @@ fn run_handshake(
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::new(stream, magic);
     run_inbound_handshake(&mut peer, nonce, 0)?;
-    tracing::debug!(peer_addr = %peer_addr, "p2p inbound handshake complete");
+
+    if let Some(remote_version) = peer.remote_version.as_ref() {
+        let conn_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let info = crate::PeerInfo::inbound_from_version(peer_addr, remote_version, conn_time);
+        registry.write().push(info);
+    }
+
+    tracing::info!(peer_addr = %peer_addr, "p2p inbound handshake complete");
     Ok(())
 }
 
