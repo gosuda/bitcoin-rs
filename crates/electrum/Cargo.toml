@@ -11,4 +11,32 @@ description = "bitcoin-rs :: electrum"
 [lints]
 workspace = true
 
+[features]
+default = []
+rocksdb = ["bitcoin-rs-storage/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall"]
+redb = ["bitcoin-rs-storage/redb"]
+mdbx = ["bitcoin-rs-storage/mdbx"]
+
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-index.workspace = true
+bitcoin-rs-storage.workspace = true
+bitcoin-rs-mempool.workspace = true
+bitcoin.workspace = true
+sonic-rs.workspace = true
+serde.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+crossbeam-channel.workspace = true
+compact_str.workspace = true
+hashbrown.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+tempfile = "3"
