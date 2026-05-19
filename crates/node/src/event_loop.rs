@@ -6,6 +6,8 @@ use crossbeam_channel::{Receiver, select, tick};
 
 use crate::shutdown;
 
+const STATS_INTERVAL: u64 = 1024;
+
 const MEMPOOL_TICK: Duration = Duration::from_secs(1);
 const DEFRAG_TICK: Duration = Duration::from_secs(1);
 const METRICS_TICK: Duration = Duration::from_secs(10);
@@ -37,7 +39,21 @@ impl EventLoop {
     /// Runs the event loop until a shutdown notification arrives.
     pub fn spin(self, shutdown: &AtomicBool) -> Result<()> {
         shutdown::mark_draining();
+        let mut iterations: u64 = 0;
+        let mut mempool_ticks: u64 = 0;
+        let mut defrag_ticks: u64 = 0;
+        let mut metrics_scrapes: u64 = 0;
         while !shutdown.load(Ordering::Acquire) {
+            iterations += 1;
+            if iterations.is_multiple_of(STATS_INTERVAL) {
+                tracing::debug!(
+                    iterations,
+                    mempool_ticks,
+                    defrag_ticks,
+                    metrics_scrapes,
+                    "event loop heartbeat"
+                );
+            }
             select! {
                 recv(self.shutdown_signal) -> _ => {
                     shutdown.store(true, Ordering::Release);
@@ -46,16 +62,19 @@ impl EventLoop {
                 }
                 recv(self.mempool_tick) -> ticked => {
                     if ticked.is_ok() {
+                        mempool_ticks += 1;
                         Self::on_mempool_tick();
                     }
                 }
                 recv(self.defrag_tick) -> ticked => {
                     if ticked.is_ok() {
+                        defrag_ticks += 1;
                         Self::on_defrag_tick();
                     }
                 }
                 recv(self.metrics_scrape) -> ticked => {
                     if ticked.is_ok() {
+                        metrics_scrapes += 1;
                         Self::on_metrics_scrape();
                     }
                 }
