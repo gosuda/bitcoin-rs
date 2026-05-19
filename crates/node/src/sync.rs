@@ -29,6 +29,7 @@ const PROTOCOL_VERSION: u32 = 70_016;
 
 /// Block download orchestrator.
 pub struct BlockSync {
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     peers: Arc<RwLock<Vec<PeerInfo>>>,
     peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
@@ -42,6 +43,7 @@ impl BlockSync {
     #[must_use]
     pub const fn new(
         chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         peers: Arc<RwLock<Vec<PeerInfo>>>,
         peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
         block_tree: Arc<RwLock<BlockTree>>,
@@ -49,6 +51,7 @@ impl BlockSync {
         inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
     ) -> Self {
         Self {
+            applied_tip,
             chain_tip,
             peers,
             peer_outbound,
@@ -62,7 +65,7 @@ impl BlockSync {
     /// pushes `getheaders` into the peer's outbound channel.
     pub fn tick(&self) {
         self.drain_inbound_headers();
-        let our_height = self.chain_tip.load_full().map_or(0, |tip| tip.height);
+        let our_height = self.applied_tip.load_full().map_or(0, |tip| tip.height);
         let Some(target) = self.pick_sync_peer(our_height) else {
             tracing::trace!(our_height, "block sync: no peer above current height");
             return;

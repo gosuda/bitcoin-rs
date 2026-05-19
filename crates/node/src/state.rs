@@ -178,6 +178,7 @@ pub struct NodeState {
     utxo: Arc<UtxoSet>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<bitcoin_rs_chain::BlockTree>>,
     blocks: Arc<RwLock<Vec<BlockRecord>>>,
     transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
@@ -209,6 +210,7 @@ impl NodeState {
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
         let chain_tip = block_tree.read().tip_handle();
+        let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
         let blocks = Arc::new(RwLock::new(Vec::new()));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let network = Arc::new(RwLock::new(NetworkState::default()));
@@ -220,6 +222,7 @@ impl NodeState {
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
         let sync = Arc::new(crate::BlockSync::new(
             Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
             Arc::clone(&block_tree),
@@ -239,6 +242,7 @@ impl NodeState {
             utxo,
             mempool,
             chain_tip,
+            applied_tip,
             block_tree,
             blocks,
             transactions,
@@ -287,6 +291,17 @@ impl NodeState {
     #[must_use]
     pub fn chain_tip(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
         Arc::clone(&self.chain_tip)
+    }
+
+    /// Returns the shared best-applied-block tip handle.
+    ///
+    /// This handle lags `chain_tip()` when headers are accepted ahead of blocks
+    /// being downloaded and applied. RPC consumers showing user-visible state
+    /// (best block hash, block count) read this; sync-progress consumers read
+    /// `chain_tip()`.
+    #[must_use]
+    pub fn applied_tip(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
+        Arc::clone(&self.applied_tip)
     }
 
     /// Returns the shared block-tree handle.
@@ -485,6 +500,7 @@ impl NodeState {
             utxo_removes = changes.remove_count(),
             "apply_block: chain advance committed"
         );
+        self.applied_tip.store(Some(Arc::new(tip.clone())));
         Ok(tip)
     }
 
@@ -782,6 +798,21 @@ mod tests {
         assert!(
             Arc::ptr_eq(&sync_a, &sync_b),
             "sync handle is stable across calls"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_empty_applied_tip() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        assert!(
+            state.applied_tip().load_full().is_none(),
+            "freshly opened applied_tip is empty"
         );
         Ok(())
     }

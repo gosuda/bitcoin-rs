@@ -76,6 +76,10 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing chain tip after import"))?;
         assert_eq!(tip.height, 0);
         assert_eq!(tip.hash, genesis_hash);
+        assert!(
+            state.applied_tip().load_full().is_some(),
+            "applied_tip published after import_block"
+        );
         assert_eq!(
             state.utxo().len(),
             1,
