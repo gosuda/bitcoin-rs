@@ -71,6 +71,7 @@ impl Default for Auth {
 /// Fully resolved node configuration.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Bitcoin network selected for consensus and default ports.
     #[serde(deserialize_with = "deserialize_network")]
@@ -171,7 +172,7 @@ impl Config {
     {
         let cli = ConfigLayer::try_parse_from(args)?;
         let env = std::env::vars();
-        Self::from_layers(cli.config.clone(), cli.bitcoin_conf.clone(), env, cli)
+        Self::from_layers(cli.config.as_ref(), cli.bitcoin_conf.as_ref(), env, &cli)
     }
 
     /// Testable layered loader with an explicit environment source.
@@ -195,7 +196,7 @@ impl Config {
         if cli.bitcoin_conf.is_none() {
             cli.bitcoin_conf = bitcoin_conf_path.map(Path::to_path_buf);
         }
-        Self::from_layers(cli.config.clone(), cli.bitcoin_conf.clone(), env, cli)
+        Self::from_layers(cli.config.as_ref(), cli.bitcoin_conf.as_ref(), env, &cli)
     }
 
     /// Returns a copy that receives an extra in-process shutdown notification channel.
@@ -218,22 +219,22 @@ impl Config {
     }
 
     fn from_layers<E, K, V>(
-        toml_path: Option<PathBuf>,
-        bitcoin_conf_path: Option<PathBuf>,
+        toml_path: Option<&PathBuf>,
+        bitcoin_conf_path: Option<&PathBuf>,
         env: E,
-        cli: ConfigLayer,
+        cli: &ConfigLayer,
     ) -> Result<Self>
     where
         E: IntoIterator<Item = (K, V)>,
         K: AsRef<str>,
         V: AsRef<str>,
     {
-        let toml_layer = match &toml_path {
+        let toml_layer = match toml_path {
             Some(path) => Some(load_toml_layer(path)?),
             None => None,
         };
         let env_layer = ConfigLayer::from_env(env)?;
-        let network = effective_network(toml_layer.as_ref(), &env_layer, &cli);
+        let network = effective_network(toml_layer.as_ref(), &env_layer, cli);
         let mut config = Self::default_for_network(network);
 
         if let Some(path) = &bitcoin_conf_path {
@@ -243,7 +244,7 @@ impl Config {
             config.apply_layer(layer);
         }
         config.apply_layer(&env_layer);
-        config.apply_layer(&cli);
+        config.apply_layer(cli);
         config.validate()?;
         Ok(config)
     }
@@ -253,10 +254,10 @@ impl Config {
             self.network = network;
         }
         if let Some(data_dir) = &layer.data_dir {
-            self.data_dir = data_dir.clone();
+            self.data_dir.clone_from(data_dir);
         }
         if let Some(storage_backend) = &layer.storage_backend {
-            self.storage_backend = storage_backend.clone();
+            self.storage_backend.clone_from(storage_backend);
         }
         if let Some(rpc_bind) = layer.rpc_bind {
             self.rpc_bind = rpc_bind;
@@ -283,7 +284,7 @@ impl Config {
             self.electrum_tls_cert = Some(electrum_tls_cert.clone());
         }
         if let Some(p2p_listen) = &layer.p2p_listen {
-            self.p2p_listen = p2p_listen.clone();
+            self.p2p_listen.clone_from(p2p_listen);
         }
         if let Some(dns_seeds_enabled) = layer.dns_seeds_enabled {
             self.dns_seeds_enabled = dns_seeds_enabled;
@@ -304,7 +305,7 @@ impl Config {
             self.dbcache_mb = dbcache_mb;
         }
         if let Some(log_level) = &layer.log_level {
-            self.log_level = log_level.clone();
+            self.log_level.clone_from(log_level);
         }
         if let Some(metrics_bind) = layer.metrics_bind {
             self.metrics_bind = Some(metrics_bind);
@@ -393,11 +394,11 @@ impl ConfigLayer {
                 "BITCOIN_RS_RPC_COOKIE" => layer.rpc_cookie = Some(PathBuf::from(value)),
                 "BITCOIN_RS_ELECTRUM_BIND" => layer.electrum_bind = Some(value.parse()?),
                 "BITCOIN_RS_ELECTRUM_TLS_CERT" => {
-                    layer.electrum_tls_cert = Some(PathBuf::from(value))
+                    layer.electrum_tls_cert = Some(PathBuf::from(value));
                 }
                 "BITCOIN_RS_P2P_LISTEN" => layer.p2p_listen = Some(parse_socket_list(value)?),
                 "BITCOIN_RS_DNS_SEEDS_ENABLED" => {
-                    layer.dns_seeds_enabled = Some(parse_bool(value)?)
+                    layer.dns_seeds_enabled = Some(parse_bool(value)?);
                 }
                 "BITCOIN_RS_PRUNE_TARGET_MB" => layer.prune_target_mb = Some(value.parse()?),
                 "BITCOIN_RS_UTREEXO_MODE" => layer.utreexo_mode = Some(parse_bool(value)?),

@@ -39,7 +39,7 @@ impl EventLoop {
         shutdown::mark_draining();
         while !shutdown.load(Ordering::Acquire) {
             select! {
-                recv(self.shutdown_signal) -> _message => {
+                recv(self.shutdown_signal) -> _ => {
                     shutdown.store(true, Ordering::Release);
                     metrics::gauge!("node.shutdown.requested").set(1.0);
                     break;

@@ -54,7 +54,6 @@ fn apply_key(layer: &mut ConfigLayer, key: &str, value: &str) {
         "rpcuser" => layer.rpc_user = Some(value.to_owned()),
         "rpcpassword" => layer.rpc_password = Some(value.to_owned()),
         "rpccookiefile" => layer.rpc_cookie = Some(value.into()),
-        "server" => {}
         "listen" => {
             if parse_core_bool(value).is_some_and(|listen| !listen) {
                 layer.p2p_listen = Some(Vec::new());
