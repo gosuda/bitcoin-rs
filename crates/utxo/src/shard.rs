@@ -9,7 +9,7 @@ use self_cell::self_cell;
 use crate::{
     UtxoError, UtxoKey,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord, validate_bitmap_vout},
-    set::{BuildPayload, SpendPayload},
+    set::{BuildPayload, SpendPayload, UtxoChangeListener},
 };
 
 const OPS_AT_ONCE: usize = 32;
@@ -78,18 +78,19 @@ impl Shard {
     pub(crate) fn commit_batch(
         &self,
         adds: &[(UtxoKey, BuildPayload<'_>)],
-        removes: &[SpendPayload],
+        removes: &[SpendPayload<'_>],
+        listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
     ) -> Result<(), UtxoError> {
         let mut cell = self.inner.write();
         cell.with_dependent_mut(|arena, table| {
             for chunk in removes.chunks(OPS_AT_ONCE) {
                 for remove in chunk {
-                    apply_remove(arena, table, remove.key, remove.vout)?;
+                    apply_remove(arena, table, remove, listener)?;
                 }
             }
             for chunk in adds.chunks(OPS_AT_ONCE) {
                 for (key, payload) in chunk {
-                    apply_add(arena, table, *key, payload)?;
+                    apply_add(arena, table, *key, payload, listener)?;
                 }
             }
             Ok::<(), UtxoError>(())
@@ -201,6 +202,7 @@ fn apply_add<'arena>(
     table: &mut ShardTable<'arena>,
     key: UtxoKey,
     payload: &BuildPayload<'_>,
+    listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
 ) -> Result<(), UtxoError> {
     validate_bitmap_vout(payload.vout)?;
     let mut record = take_record(table, key).unwrap_or_else(|| UtxoRecord::new(key));
@@ -222,22 +224,43 @@ fn apply_add<'arena>(
         height: payload.height,
     })?;
     insert_record(arena, table, record);
+    if let Some(listener) = listener {
+        listener.on_insert(
+            payload.outpoint,
+            payload.txout,
+            payload.height,
+            payload.coinbase,
+        );
+    }
     Ok(())
 }
 
 fn apply_remove<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
-    key: UtxoKey,
-    vout: u32,
+    remove: &SpendPayload<'_>,
+    listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
 ) -> Result<(), UtxoError> {
-    validate_bitmap_vout(vout)?;
-    let Some(mut record) = take_record(table, key) else {
+    validate_bitmap_vout(remove.vout)?;
+    let Some(mut record) = take_record(table, remove.key) else {
         return Ok(());
     };
-    let removed = record.remove_output(vout)?;
+    let removed_output = record.find_output(remove.vout).and_then(|output| {
+        let script = script_slice(table, output)?;
+        Some((
+            txout_from_parts(output.value, script),
+            output.height,
+            output.coinbase,
+        ))
+    });
+    let removed = record.remove_output(remove.vout)?;
     if removed && !record.is_empty() {
         insert_record(arena, table, record);
+    }
+    if let (true, Some((txout, height, coinbase)), Some(listener)) =
+        (removed, removed_output, listener)
+    {
+        listener.on_remove_coin(remove.op, &txout, height, coinbase);
     }
     Ok(())
 }

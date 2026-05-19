@@ -79,6 +79,26 @@ pub enum UtxoError {
     },
 }
 
+/// Receives UTXO mutations committed to durable shard state.
+pub trait UtxoChangeListener {
+    /// Called after an output has been inserted into its shard.
+    fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool);
+
+    /// Called after an output has been removed from its shard.
+    fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32);
+
+    /// Called after an output has been removed, with the coinbase flag retained.
+    fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        let _ = coinbase;
+        self.on_remove(op, txout, height);
+    }
+
+    /// Returns the current `MuHash3072` snapshot trailer, when this listener tracks one.
+    fn muhash3072(&self) -> Option<[u8; 384]> {
+        None
+    }
+}
+
 /// One UTXO output to add to the set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtxoAdd {
@@ -106,6 +126,7 @@ impl UtxoAdd {
 
     pub(crate) const fn payload(&self) -> BuildPayload<'_> {
         BuildPayload {
+            outpoint: &self.outpoint,
             vout: self.outpoint.vout,
             txout: &self.txout,
             coinbase: self.coinbase,
@@ -178,6 +199,7 @@ impl UndoBatch {
 
 #[derive(Copy, Clone)]
 pub(crate) struct BuildPayload<'a> {
+    pub(crate) outpoint: &'a OutPoint,
     pub(crate) vout: u32,
     pub(crate) txout: &'a TxOut,
     pub(crate) coinbase: bool,
@@ -185,7 +207,8 @@ pub(crate) struct BuildPayload<'a> {
 }
 
 #[derive(Copy, Clone)]
-pub(crate) struct SpendPayload {
+pub(crate) struct SpendPayload<'a> {
+    pub(crate) op: &'a OutPoint,
     pub(crate) key: UtxoKey,
     pub(crate) vout: u32,
 }
@@ -194,6 +217,7 @@ pub(crate) struct SpendPayload {
 pub struct UtxoSet {
     pub(crate) shards: [Shard; UtxoKey::SHARD_COUNT],
     pub(crate) last_defragged_shard: Mutex<u8>,
+    listener: Option<Box<dyn UtxoChangeListener + Send + Sync>>,
 }
 
 impl UtxoSet {
@@ -203,7 +227,13 @@ impl UtxoSet {
         Self {
             shards: [(); UtxoKey::SHARD_COUNT].map(|()| Shard::new()),
             last_defragged_shard: Mutex::new(0),
+            listener: None,
         }
+    }
+
+    /// Installs a listener for subsequently committed UTXO changes.
+    pub fn set_listener(&mut self, listener: Box<dyn UtxoChangeListener + Send + Sync>) {
+        self.listener = Some(listener);
     }
 
     /// Applies all UTXO changes for a connected block.
@@ -264,6 +294,12 @@ impl UtxoSet {
         self.shards[usize::from(key.shard())].insert_owned_record(key, outputs)
     }
 
+    pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
+        self.listener
+            .as_deref()
+            .and_then(UtxoChangeListener::muhash3072)
+    }
+
     fn commit_adds_and_removes(
         &self,
         adds: &[UtxoAdd],
@@ -281,12 +317,14 @@ impl UtxoSet {
             validate_bitmap_vout(remove.vout)?;
             let key = UtxoKey::from_txid(&remove.txid);
             removes_by_shard[usize::from(key.shard())].push(SpendPayload {
+                op: remove,
                 key,
                 vout: remove.vout,
             });
         }
 
         let errors = Mutex::new(Vec::new());
+        let listener = self.listener.as_deref();
         rayon::scope(|scope| {
             for shard_idx in 0..UtxoKey::SHARD_COUNT {
                 let shard_adds = &adds_by_shard[shard_idx];
@@ -297,7 +335,7 @@ impl UtxoSet {
                 let shard = &self.shards[shard_idx];
                 let errors = &errors;
                 scope.spawn(move |_| {
-                    if let Err(error) = shard.commit_batch(shard_adds, shard_removes) {
+                    if let Err(error) = shard.commit_batch(shard_adds, shard_removes, listener) {
                         errors.lock().push(error);
                     }
                 });
@@ -331,6 +369,6 @@ fn empty_add_buckets<'a>() -> Vec<Vec<(UtxoKey, BuildPayload<'a>)>> {
     (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
 }
 
-fn empty_remove_buckets() -> Vec<Vec<SpendPayload>> {
+fn empty_remove_buckets<'a>() -> Vec<Vec<SpendPayload<'a>>> {
     (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
 }

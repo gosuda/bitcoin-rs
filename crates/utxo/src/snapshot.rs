@@ -101,7 +101,9 @@ pub fn write_snapshot(
         })?;
     }
 
-    let trailer = [0_u8; MUHASH_TRAILER_LEN];
+    let trailer = set
+        .listener_muhash3072()
+        .unwrap_or([0_u8; MUHASH_TRAILER_LEN]);
     writer.write_all(&trailer)?;
     Ok(trailer)
 }

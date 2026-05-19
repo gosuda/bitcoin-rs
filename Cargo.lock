@@ -204,6 +204,22 @@ dependencies = [
 [[package]]
 name = "bitcoin-rs-coinstats"
 version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
+ "bitcoin-rs-utxo",
+ "bytemuck",
+ "parking_lot",
+ "proptest",
+ "ruint",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "zerocopy",
+]
 
 [[package]]
 name = "bitcoin-rs-consensus"
