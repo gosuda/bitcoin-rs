@@ -39,6 +39,12 @@ pub enum ApplyError {
     /// Height arithmetic overflowed `u32::MAX`.
     #[error("height overflow at tip {0}")]
     HeightOverflow(u32),
+    /// The block header hash does not satisfy its declared proof-of-work target.
+    #[error("proof-of-work: header hash {hash} exceeds declared target")]
+    ProofOfWork {
+        /// Block header hash, big-endian display.
+        hash: bitcoin_rs_primitives::Hash256,
+    },
     /// Consensus validation rejected the block.
     #[error("consensus: {0}")]
     Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
@@ -319,6 +325,16 @@ impl NodeState {
             }
             None => (0_u32, header_work),
         };
+
+        // Self-consistency PoW: the block header's hash must satisfy its
+        // declared target. This is the cheapest consensus gate; do it before
+        // any structural checks. Contextual difficulty-adjustment validation
+        // (verifying the declared target matches the network's expected
+        // difficulty at this height) requires `BlockTree` state — deferred.
+        let declared_target = block.header.target();
+        if block.header.validate_pow(declared_target).is_err() {
+            return Err(ApplyError::ProofOfWork { hash: block_hash });
+        }
 
         let prev_tip_state = match prior.as_deref() {
             Some(tip) => bitcoin_rs_consensus::rust_path::TipState {

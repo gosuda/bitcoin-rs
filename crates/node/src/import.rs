@@ -94,6 +94,43 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_block_whose_hash_exceeds_declared_target() -> Result<()> {
+        let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
+        let mut block = Block::consensus_decode(&mut cursor)?;
+        block.header.bits = bitcoin::CompactTarget::from_consensus(0x0010_0001);
+
+        let mut block_bytes = Vec::new();
+        block.consensus_encode(&mut block_bytes)?;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        let Err(error) = import_block(&state, &block_bytes) else {
+            anyhow::bail!("block whose hash exceeds declared target should be rejected");
+        };
+
+        assert!(
+            error.chain().any(|cause| {
+                matches!(
+                    cause.downcast_ref::<crate::state::ApplyError>(),
+                    Some(crate::state::ApplyError::ProofOfWork { .. })
+                )
+            }),
+            "error chain should contain ProofOfWork rejection: {error:?}"
+        );
+
+        assert!(
+            state.chain_tip().load().is_none(),
+            "rejected block must not advance chain tip"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn import_two_blocks_in_sequence_advances_height_to_one() -> Result<()> {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
@@ -103,7 +140,7 @@ mod tests {
         follow_up.header.merkle_root = follow_up
             .compute_merkle_root()
             .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
-        follow_up.header.nonce = follow_up.header.nonce.wrapping_add(1);
+        mine_block_to_declared_target(&mut follow_up)?;
 
         let mut follow_up_bytes = Vec::new();
         follow_up.consensus_encode(&mut follow_up_bytes)?;
@@ -138,6 +175,7 @@ mod tests {
             .compute_merkle_root()
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
         block.header.merkle_root = merkle_root;
+        mine_block_to_declared_target(&mut block)?;
 
         let mut block_bytes = Vec::new();
         block.consensus_encode(&mut block_bytes)?;
@@ -179,6 +217,7 @@ mod tests {
         block.header.merkle_root = block
             .compute_merkle_root()
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
+        mine_block_to_declared_target(&mut block)?;
 
         let mut block_bytes = Vec::new();
         block.consensus_encode(&mut block_bytes)?;
@@ -216,6 +255,17 @@ mod tests {
                 .height,
             499
         );
+        Ok(())
+    }
+
+    fn mine_block_to_declared_target(block: &mut Block) -> Result<()> {
+        while block.header.validate_pow(block.header.target()).is_err() {
+            block.header.nonce = block
+                .header
+                .nonce
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("exhausted nonce while mining test block"))?;
+        }
         Ok(())
     }
 
