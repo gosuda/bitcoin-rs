@@ -25,6 +25,10 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
 
+/// Number of blocks after a coinbase that its outputs become spendable.
+/// Consensus rule since Bitcoin v0.3.1; universal across networks.
+const COINBASE_MATURITY: u32 = 100;
+
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -380,34 +384,9 @@ impl NodeState {
 
         self.verify_block_transactions(block, height)?;
 
-        let mut changes = BlockChanges::default();
-        for tx in &block.txdata {
-            let txid = tx.compute_txid();
-            for (vout_idx, txout) in tx.output.iter().enumerate() {
-                let outpoint = OutPoint::new(
-                    bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
-                    u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
-                );
-                changes.add(UtxoAdd::new(
-                    outpoint,
-                    txout.clone(),
-                    tx.is_coinbase(),
-                    height,
-                ));
-            }
+        self.check_coinbase_maturity(block, height)?;
 
-            if !tx.is_coinbase() {
-                for tx_input in &tx.input {
-                    let previous_output = tx_input.previous_output;
-                    changes.remove(OutPoint::new(
-                        bitcoin_rs_primitives::Hash256::from_le_bytes(
-                            previous_output.txid.as_byte_array(),
-                        ),
-                        previous_output.vout,
-                    ));
-                }
-            }
-        }
+        let changes = build_utxo_changes(block, height)?;
         self.utxo
             .commit_block(&changes, &block_hash)
             .map_err(ApplyError::UtxoCommit)?;
@@ -469,6 +448,45 @@ impl NodeState {
         Ok(())
     }
 
+    pub(crate) fn check_coinbase_maturity(
+        &self,
+        block: &bitcoin::Block,
+        height: u32,
+    ) -> core::result::Result<(), ApplyError> {
+        use bitcoin::hashes::Hash as _;
+
+        // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
+        for tx in &block.txdata {
+            if tx.is_coinbase() {
+                continue;
+            }
+            for tx_input in &tx.input {
+                let prev_outpoint = OutPoint::new(
+                    bitcoin_rs_primitives::Hash256::from_le_bytes(
+                        tx_input.previous_output.txid.as_byte_array(),
+                    ),
+                    tx_input.previous_output.vout,
+                );
+                let Some(entry) = self.utxo.get_entry(&prev_outpoint) else {
+                    continue;
+                };
+                let depth = height.saturating_sub(entry.height);
+                if entry.coinbase && depth < COINBASE_MATURITY {
+                    return Err(ApplyError::Consensus(
+                        bitcoin_rs_consensus::ConsensusError::Bip {
+                            bip: "COINBASE_MATURITY",
+                            reason: format!(
+                                "spent coinbase output created at height {} cannot be spent at height {} (depth {} < {})",
+                                entry.height, height, depth, COINBASE_MATURITY,
+                            ),
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_bip30_and_bip34(
         &self,
         block: &bitcoin::Block,
@@ -519,6 +537,43 @@ impl NodeState {
 
         Ok(())
     }
+}
+
+fn build_utxo_changes(
+    block: &bitcoin::Block,
+    height: u32,
+) -> core::result::Result<BlockChanges, ApplyError> {
+    use bitcoin::hashes::Hash as _;
+
+    let mut changes = BlockChanges::default();
+    for tx in &block.txdata {
+        let txid = tx.compute_txid();
+        for (vout_idx, txout) in tx.output.iter().enumerate() {
+            let outpoint = OutPoint::new(
+                bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
+                u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
+            );
+            changes.add(UtxoAdd::new(
+                outpoint,
+                txout.clone(),
+                tx.is_coinbase(),
+                height,
+            ));
+        }
+
+        if !tx.is_coinbase() {
+            for tx_input in &tx.input {
+                let previous_output = tx_input.previous_output;
+                changes.remove(OutPoint::new(
+                    bitcoin_rs_primitives::Hash256::from_le_bytes(
+                        previous_output.txid.as_byte_array(),
+                    ),
+                    previous_output.vout,
+                ));
+            }
+        }
+    }
+    Ok(changes)
 }
 
 #[must_use]

@@ -252,6 +252,67 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_premature_coinbase_spend() -> Result<()> {
+        let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
+        let genesis_block = Block::consensus_decode(&mut cursor)?;
+        let genesis_coinbase_txid = genesis_block.txdata[0].compute_txid();
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let _genesis = import_block(&state, &genesis_bytes)?;
+
+        let mut block = genesis_block;
+        block.header.prev_blockhash = block.block_hash();
+        block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
+        block.txdata.push(bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: genesis_coinbase_txid,
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        });
+
+        let Err(error) = state.check_coinbase_maturity(&block, 1) else {
+            anyhow::bail!("premature coinbase spend should be rejected");
+        };
+
+        assert!(
+            matches!(
+                error,
+                crate::state::ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip {
+                    bip: "COINBASE_MATURITY",
+                    ..
+                })
+            ),
+            "error should be COINBASE_MATURITY rejection: {error:?}"
+        );
+        assert_eq!(
+            state
+                .chain_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("genesis tip should remain published"))?
+                .height,
+            0
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn import_rejects_block_with_no_coinbase() -> Result<()> {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
