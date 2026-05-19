@@ -12,13 +12,13 @@ use crate::handlers::{optional_bool, params_array, required_str, serde_to_sonic}
 
 pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
-    let pool = ctx.mempool.read();
+    let stats = ctx.mempool.read().stats();
     Ok(json!({
         "loaded": true,
-        "size": pool.len(),
-        "bytes": pool.total_vsize(),
-        "usage": 0,
-        "total_fee": 0.0,
+        "size": stats.txs,
+        "bytes": stats.bytes,
+        "usage": stats.bytes,
+        "total_fee": sats_to_btc(stats.total_fee),
         "maxmempool": 300_000_000_u64,
         "mempoolminfee": 0.0,
         "minrelaytxfee": 0.0,
