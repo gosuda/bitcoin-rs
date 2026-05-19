@@ -39,6 +39,9 @@ pub enum ApplyError {
     /// Height arithmetic overflowed `u32::MAX`.
     #[error("height overflow at tip {0}")]
     HeightOverflow(u32),
+    /// Consensus validation rejected the block.
+    #[error("consensus: {0}")]
+    Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
     /// UTXO commit failed during block apply.
     #[error("utxo commit: {0}")]
     UtxoCommit(#[from] bitcoin_rs_utxo::UtxoError),
@@ -274,13 +277,13 @@ impl NodeState {
         crate::crash_recovery::write_meta(self, &meta)
     }
 
-    /// Synthetically applies `block` as the next tip without consensus validation.
+    /// Applies `block` as the next tip after non-contextual consensus checks.
     ///
     /// This is the v1 contract: the block hash is taken from the decoded
     /// header, the new height is `current_tip.height + 1` (or zero when no
     /// tip is published yet), chainwork is approximated by accumulating the
     /// block header's own work onto the prior tip's chainwork, and the block
-    /// is stored in `blocks` for RPC consumers. Real consensus validation,
+    /// is stored in `blocks` for RPC consumers. Contextual consensus checks,
     /// BIP30 / BIP34 / soft-fork checks, BIP9 deployment state, and reorg
     /// planning land in follow-up turns.
     ///
@@ -300,7 +303,7 @@ impl NodeState {
             bitcoin_rs_chain::node::ChainWork::from_be_bytes(block.header.work().to_be_bytes());
 
         let prior = self.chain_tip.load_full();
-        let (height, chainwork) = match prior {
+        let (height, chainwork) = match prior.as_deref() {
             Some(tip) => {
                 if tip.hash != prev_hash {
                     return Err(ApplyError::PrevHashMismatch {
@@ -316,6 +319,20 @@ impl NodeState {
             }
             None => (0_u32, header_work),
         };
+
+        let prev_tip_state = match prior.as_deref() {
+            Some(tip) => bitcoin_rs_consensus::rust_path::TipState {
+                height: Some(tip.height),
+                block_hash: None,
+                median_time_past: 0,
+            },
+            None => bitcoin_rs_consensus::rust_path::TipState {
+                height: None,
+                block_hash: None,
+                median_time_past: 0,
+            },
+        };
+        bitcoin_rs_consensus::verify_block::verify_block_rules_borrowed(block, &prev_tip_state)?;
 
         let mut changes = BlockChanges::default();
         for tx in &block.txdata {

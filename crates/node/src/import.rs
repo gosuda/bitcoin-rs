@@ -49,7 +49,6 @@ pub fn import_block(state: &NodeState, block_bytes: &[u8]) -> Result<ImportOutco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::TxMerkleNode;
     use bitcoin::consensus::Encodable as _;
     use tempfile::tempdir;
 
@@ -100,7 +99,9 @@ mod tests {
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
         let mut follow_up = Block::consensus_decode(&mut cursor)?;
         follow_up.header.prev_blockhash = follow_up.block_hash();
-        follow_up.header.merkle_root = TxMerkleNode::from_byte_array([1_u8; 32]);
+        follow_up.header.merkle_root = follow_up
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
         follow_up.header.nonce = follow_up.header.nonce.wrapping_add(1);
 
         let mut follow_up_bytes = Vec::new();
@@ -120,6 +121,47 @@ mod tests {
             .load_full()
             .ok_or_else(|| anyhow::anyhow!("missing chain tip after second import"))?;
         assert_eq!(tip.height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn import_rejects_block_with_no_coinbase() -> Result<()> {
+        let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
+        let mut block = Block::consensus_decode(&mut cursor)?;
+        block.txdata[0].input[0].previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([1_u8; 32]),
+            vout: 0,
+        };
+        let merkle_root = block
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
+        block.header.merkle_root = merkle_root;
+
+        let mut block_bytes = Vec::new();
+        block.consensus_encode(&mut block_bytes)?;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        let Err(error) = import_block(&state, &block_bytes) else {
+            anyhow::bail!("block without coinbase should be rejected");
+        };
+
+        assert!(
+            error.chain().any(
+                |cause| cause.downcast_ref::<bitcoin_rs_consensus::ConsensusError>()
+                    == Some(&bitcoin_rs_consensus::ConsensusError::MissingCoinbase)
+            ),
+            "error chain should contain MissingCoinbase: {error:?}"
+        );
+        assert!(
+            state.chain_tip().load().is_none(),
+            "rejected block must not advance chain tip"
+        );
         Ok(())
     }
 
