@@ -416,6 +416,32 @@ dependencies = [
 [[package]]
 name = "bitcoin-rs-rpc"
 version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "bitcoin",
+ "bitcoin-rs-chain",
+ "bitcoin-rs-coinstats",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-filters",
+ "bitcoin-rs-index",
+ "bitcoin-rs-mempool",
+ "bitcoin-rs-mining",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
+ "bitcoin-rs-utxo",
+ "bitcoin-rs-wallet",
+ "compact_str",
+ "crossbeam-channel",
+ "hashbrown 0.17.1",
+ "parking_lot",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sonic-rs",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
 
 [[package]]
 name = "bitcoin-rs-script"

@@ -11,4 +11,37 @@ description = "bitcoin-rs :: rpc"
 [lints]
 workspace = true
 
+[features]
+default = []
+rocksdb = ["bitcoin-rs-storage/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall"]
+redb = ["bitcoin-rs-storage/redb"]
+mdbx = ["bitcoin-rs-storage/mdbx"]
+
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-consensus.workspace = true
+bitcoin-rs-chain.workspace = true
+bitcoin-rs-index.workspace = true
+bitcoin-rs-mempool.workspace = true
+bitcoin-rs-utxo.workspace = true
+bitcoin-rs-filters.workspace = true
+bitcoin-rs-coinstats.workspace = true
+bitcoin-rs-mining.workspace = true
+bitcoin-rs-wallet.workspace = true
+bitcoin-rs-storage.workspace = true
+bitcoin.workspace = true
+sonic-rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+crossbeam-channel.workspace = true
+compact_str.workspace = true
+hashbrown.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile = "3"
