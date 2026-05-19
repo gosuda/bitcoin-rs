@@ -11,4 +11,26 @@ description = "bitcoin-rs :: index"
 [lints]
 workspace = true
 
+[features]
+default = []
+rocksdb = ["bitcoin-rs-storage/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall"]
+redb = ["bitcoin-rs-storage/redb"]
+
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-storage = { workspace = true, default-features = false }
+bitcoin.workspace = true
+bitcoin_slices.workspace = true
+hashbrown.workspace = true
+zerocopy.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+tempfile = "3"
