@@ -24,6 +24,22 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
 
+/// Errors produced when applying a block to the node state.
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyError {
+    /// The block's previous header hash does not match the current tip's hash.
+    #[error("prev hash mismatch: tip {tip}, block prev {prev}")]
+    PrevHashMismatch {
+        /// Current tip header hash, big-endian hex.
+        tip: bitcoin_rs_primitives::Hash256,
+        /// Block's previous header hash, big-endian hex.
+        prev: bitcoin_rs_primitives::Hash256,
+    },
+    /// Height arithmetic overflowed `u32::MAX`.
+    #[error("height overflow at tip {0}")]
+    HeightOverflow(u32),
+}
+
 enum NodeStorage {
     #[cfg(feature = "rocksdb")]
     RocksDb(bitcoin_rs_storage::RocksDbStore),
@@ -252,6 +268,62 @@ impl NodeState {
             last_committed_height: height,
         };
         crate::crash_recovery::write_meta(self, &meta)
+    }
+
+    /// Synthetically applies `block` as the next tip without consensus validation.
+    ///
+    /// This is the v1 contract: the block hash is taken from the decoded
+    /// header, the new height is `current_tip.height + 1` (or zero when no
+    /// tip is published yet), chainwork is approximated by accumulating the
+    /// block header's own work onto the prior tip's chainwork, and the block
+    /// is stored in `blocks` for RPC consumers. Real consensus validation,
+    /// UTXO commit, BIP30 / BIP34 / soft-fork checks, BIP9 deployment state,
+    /// and reorg planning land in follow-up turns.
+    ///
+    /// Returns the new `TipSnapshot` so callers can publish it elsewhere.
+    pub fn apply_block(
+        &self,
+        block: &bitcoin::Block,
+    ) -> core::result::Result<bitcoin_rs_chain::TipSnapshot, ApplyError> {
+        use bitcoin::hashes::Hash as _;
+
+        let block_hash =
+            bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let prev_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(
+            block.header.prev_blockhash.as_byte_array(),
+        );
+        let header_work =
+            bitcoin_rs_chain::node::ChainWork::from_be_bytes(block.header.work().to_be_bytes());
+
+        let prior = self.chain_tip.load_full();
+        let (height, chainwork) = match prior {
+            Some(tip) => {
+                if tip.hash != prev_hash {
+                    return Err(ApplyError::PrevHashMismatch {
+                        tip: tip.hash,
+                        prev: prev_hash,
+                    });
+                }
+                let new_height = tip
+                    .height
+                    .checked_add(1)
+                    .ok_or(ApplyError::HeightOverflow(tip.height))?;
+                (new_height, tip.chainwork.saturating_add(header_work))
+            }
+            None => (0_u32, header_work),
+        };
+
+        let tip = bitcoin_rs_chain::TipSnapshot {
+            tip_id: bitcoin_rs_chain::node::NodeId::new(height),
+            height,
+            chainwork,
+            hash: block_hash,
+        };
+        self.chain_tip.store(Some(Arc::new(tip.clone())));
+        self.blocks
+            .write()
+            .push(bitcoin_rs_rpc::BlockRecord::from_block(height, block));
+        Ok(tip)
     }
 }
 

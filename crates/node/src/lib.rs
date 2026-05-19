@@ -34,3 +34,4 @@ pub mod state;
 pub use bitcoin_rs_primitives::Network;
 pub use config::{Auth, Config};
 pub use run::run;
+pub use state::ApplyError;
