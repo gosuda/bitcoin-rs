@@ -7,7 +7,16 @@
 #[test]
 fn crash_recovery() {
     let status = std::process::Command::new(env!("CARGO"))
-        .args(["test", "-p", "bitcoin-rs-node", "--test", "crash_recovery"])
+        .args([
+            "test",
+            "-p",
+            "bitcoin-rs-node",
+            "--no-default-features",
+            "--features",
+            "rocksdb,fjall,redb",
+            "--test",
+            "crash_recovery",
+        ])
         .status()
         .expect("spawn cargo");
     assert!(

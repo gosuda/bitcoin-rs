@@ -7,7 +7,16 @@
 #[test]
 fn graceful_shutdown() {
     let status = std::process::Command::new(env!("CARGO"))
-        .args(["test", "-p", "bitcoin-rs-node", "--test", "shutdown"])
+        .args([
+            "test",
+            "-p",
+            "bitcoin-rs-node",
+            "--no-default-features",
+            "--features",
+            "rocksdb,fjall,redb",
+            "--test",
+            "shutdown",
+        ])
         .status()
         .expect("spawn cargo");
     assert!(status.success(), "node shutdown integration test must pass");
