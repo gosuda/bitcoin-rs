@@ -16,6 +16,8 @@ pub mod config;
 pub mod crash_recovery;
 /// Central synchronous event loop.
 pub mod event_loop;
+/// Block import pipeline.
+pub mod import;
 /// Tracing initialization.
 pub mod logging;
 /// Metrics instrumentation and optional exposition.
