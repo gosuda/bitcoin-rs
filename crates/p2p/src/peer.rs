@@ -89,7 +89,7 @@ impl<S> Peer<S> {
     }
 
     /// Mark the peer ready once both version and verack have arrived.
-    pub fn refresh_ready_state(&mut self) {
+    pub const fn refresh_ready_state(&mut self) {
         if self.remote_version.is_some() && self.received_verack {
             self.state = PeerState::Ready;
         }

@@ -39,7 +39,7 @@ where
     }
 
     /// Returns mutable subscription state for tests and embedders.
-    pub fn subscriptions_mut(&mut self) -> &mut SessionSubscriptions {
+    pub const fn subscriptions_mut(&mut self) -> &mut SessionSubscriptions {
         &mut self.subscriptions
     }
 

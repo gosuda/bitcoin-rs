@@ -136,7 +136,7 @@ impl PendingRows {
         self.header_rows.dedup();
     }
 
-    fn counts(&self) -> IndexRowCounts {
+    const fn counts(&self) -> IndexRowCounts {
         IndexRowCounts {
             txids: self.txid_rows.len(),
             funding: self.funding_rows.len(),

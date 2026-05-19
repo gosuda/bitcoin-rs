@@ -147,7 +147,7 @@ fn chacha20_block(key: &[u8; 32], counter: u32, out: &mut [u8]) {
     }
 }
 
-fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+const fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     state[a] = state[a].wrapping_add(state[b]);
     state[d] = (state[d] ^ state[a]).rotate_left(16);
     state[c] = state[c].wrapping_add(state[d]);

@@ -181,10 +181,10 @@ impl BlockTree {
             return Ok(());
         }
 
-        if let Some(old_tip) = self.tip.load_full() {
-            if old_tip.tip_id != node_id {
-                self.node_mut(old_tip.tip_id)?.status = NodeStatus::Stale;
-            }
+        if let Some(old_tip) = self.tip.load_full()
+            && old_tip.tip_id != node_id
+        {
+            self.node_mut(old_tip.tip_id)?.status = NodeStatus::Stale;
         }
         self.node_mut(node_id)?.status = NodeStatus::Active;
         let node = self.node(node_id)?;

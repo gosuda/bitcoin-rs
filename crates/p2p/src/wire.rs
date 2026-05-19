@@ -199,7 +199,7 @@ fn empty_payload(payload: &[u8], message: Message) -> Result<Message, PeerError>
 
 fn write_command<W: Write>(writer: &mut W, command: &CommandString) -> Result<(), PeerError> {
     let command = command.as_ref().as_bytes();
-    if command.len() > COMMAND_LEN || command.iter().any(|byte| *byte == 0) {
+    if command.len() > COMMAND_LEN || command.contains(&0) {
         return Err(PeerError::InvalidCommand(
             String::from_utf8_lossy(command).into_owned(),
         ));

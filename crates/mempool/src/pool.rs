@@ -210,15 +210,12 @@ impl Mempool {
             self.by_txid.remove(&entry.tx.compute_txid());
             self.pareto.remove(*id);
             for (vout, output) in entry.tx.output.iter().enumerate() {
-                let Ok(vout_id) = EntryId::try_from(vout) else {
+                let Ok(_) = EntryId::try_from(vout) else {
                     continue;
                 };
                 let _ = self
                     .funding
                     .remove(&(ScriptHash::from_script(&output.script_pubkey), *id));
-                if vout_id == EntryId::MAX {
-                    continue;
-                }
             }
             for input in &entry.tx.input {
                 let _ = self.spending.remove(&(input.previous_output, *id));

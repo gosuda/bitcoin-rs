@@ -147,7 +147,8 @@ fn collect_iter(iterator: KvIter<'_>) -> Result<Vec<KvPair>, StorageError> {
 fn hash_hex(hash: &[u8; 32]) -> String {
     let mut hex = String::with_capacity(64);
     for byte in hash {
-        hex.push_str(&format!("{byte:02x}"));
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
     }
     hex
 }

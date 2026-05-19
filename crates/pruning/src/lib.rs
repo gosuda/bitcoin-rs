@@ -31,7 +31,7 @@ pub struct PruneOutcome {
 
 impl PruneOutcome {
     /// Adds one deleted row to the outcome.
-    pub(crate) fn record_removed(&mut self, bytes: u64) {
+    pub(crate) const fn record_removed(&mut self, bytes: u64) {
         self.bytes_freed = self.bytes_freed.saturating_add(bytes);
         self.blocks_removed = self.blocks_removed.saturating_add(1);
     }

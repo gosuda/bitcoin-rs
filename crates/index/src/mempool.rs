@@ -121,7 +121,7 @@ impl MempoolRows {
         rows
     }
 
-    fn counts(&self) -> MempoolRowCounts {
+    const fn counts(&self) -> MempoolRowCounts {
         MempoolRowCounts {
             txids: self.txid_rows.len(),
             funding: self.funding_rows.len(),

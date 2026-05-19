@@ -98,7 +98,7 @@ fn parse_hash(hex: &str) -> TestResult<Hash256> {
 }
 
 fn hex_to_bytes(hex: &str) -> TestResult<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("hex string has odd length".into());
     }
     let mut out = Vec::with_capacity(hex.len() / 2);

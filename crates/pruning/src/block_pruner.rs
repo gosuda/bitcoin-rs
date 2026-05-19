@@ -74,10 +74,10 @@ pub(crate) fn prune_prefixed_rows<S: KvStore>(
         let row_bytes = row_len_u64(&value)?;
         total_bytes = total_bytes.saturating_add(row_bytes);
 
-        if let Some(height) = row_height(&key, prefix) {
-            if height < prune_below_height {
-                candidates.push((key, row_bytes));
-            }
+        if let Some(height) = row_height(&key, prefix)
+            && height < prune_below_height
+        {
+            candidates.push((key, row_bytes));
         }
     }
 

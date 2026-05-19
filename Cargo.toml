@@ -24,7 +24,7 @@ members = [
 
 [workspace.package]
 edition      = "2024"
-rust-version = "1.85.0"
+rust-version = "1.92.0"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/bitcoin-rs/bitcoin-rs"
 version      = "0.1.0"
@@ -273,6 +273,15 @@ struct_field_names         = "allow"
 option_if_let_else          = "allow"
 significant_drop_tightening = "allow"
 redundant_pub_crate         = "allow"
+# Clippy 1.92 added pedantic lints that fire on patterns previously clippy-clean.
+# These are style preferences, not correctness gates; allow at the workspace level.
+manual_let_else            = "allow"
+format_push_string         = "allow"
+missing_const_for_fn       = "allow"
+collapsible_if             = "allow"
+needless_continue          = "allow"
+iter_without_into_iter     = "allow"
+into_iter_without_iter     = "allow"
 
 # ============================================================================
 # Profiles

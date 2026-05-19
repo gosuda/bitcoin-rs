@@ -123,9 +123,9 @@ fn attach_descriptor_scripts(input: &mut Input, descriptor: &Descriptor) {
         if let Ok(redeem_script) = descriptor.inner.explicit_script() {
             input.redeem_script = Some(redeem_script);
         }
-    } else if script.is_p2wsh() {
-        if let Ok(witness_script) = descriptor.inner.explicit_script() {
-            input.witness_script = Some(witness_script);
-        }
+    } else if script.is_p2wsh()
+        && let Ok(witness_script) = descriptor.inner.explicit_script()
+    {
+        input.witness_script = Some(witness_script);
     }
 }

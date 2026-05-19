@@ -53,7 +53,7 @@ fn receive_version<S>(
     }
 }
 
-fn receive_verack<S>(peer: &mut Peer<S>) -> Result<(), PeerError> {
+const fn receive_verack<S>(peer: &mut Peer<S>) -> Result<(), PeerError> {
     if peer.remote_version.is_none() {
         return Err(PeerError::Protocol("verack received before version"));
     }

@@ -165,7 +165,7 @@ struct BitWriter<'a> {
 }
 
 impl<'a> BitWriter<'a> {
-    fn new(out: &'a mut Vec<u8>) -> Self {
+    const fn new(out: &'a mut Vec<u8>) -> Self {
         Self {
             out,
             buffer: 0,
@@ -302,14 +302,14 @@ impl SipState {
         }
     }
 
-    fn compress(&mut self, word: u64) {
+    const fn compress(&mut self, word: u64) {
         self.v3 ^= word;
         self.round();
         self.round();
         self.v0 ^= word;
     }
 
-    fn finalize(mut self, word: u64) -> u64 {
+    const fn finalize(mut self, word: u64) -> u64 {
         self.compress(word);
         self.v2 ^= 0xff;
         self.round();
@@ -319,7 +319,7 @@ impl SipState {
         self.v0 ^ self.v1 ^ self.v2 ^ self.v3
     }
 
-    fn round(&mut self) {
+    const fn round(&mut self) {
         self.v0 = self.v0.wrapping_add(self.v1);
         self.v1 = self.v1.rotate_left(13);
         self.v1 ^= self.v0;

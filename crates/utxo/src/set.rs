@@ -155,19 +155,19 @@ impl BlockChanges {
 
     /// Returns true when there are no additions or removals.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.adds.is_empty() && self.removes.is_empty()
     }
 
     /// Returns the number of add operations.
     #[must_use]
-    pub fn add_count(&self) -> usize {
+    pub const fn add_count(&self) -> usize {
         self.adds.len()
     }
 
     /// Returns the number of remove operations.
     #[must_use]
-    pub fn remove_count(&self) -> usize {
+    pub const fn remove_count(&self) -> usize {
         self.removes.len()
     }
 }
@@ -192,7 +192,7 @@ impl UndoBatch {
 
     /// Returns true when the undo batch is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.restores.is_empty() && self.removes.is_empty()
     }
 }

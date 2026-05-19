@@ -7,12 +7,12 @@ pub struct WtxidRelayState {
 
 impl WtxidRelayState {
     /// Mark that the local peer sent `wtxidrelay`.
-    pub fn mark_local_advertised(&mut self) {
+    pub const fn mark_local_advertised(&mut self) {
         self.local_advertised = true;
     }
 
     /// Mark that the remote peer sent `wtxidrelay`.
-    pub fn mark_peer_supported(&mut self) {
+    pub const fn mark_peer_supported(&mut self) {
         self.peer_advertised = true;
     }
 

@@ -64,7 +64,7 @@ impl CoinStats {
     }
 
     /// Applies per-block height and transaction-count deltas.
-    pub fn finish_block(&mut self, height: u32, tx_delta: u64) {
+    pub const fn finish_block(&mut self, height: u32, tx_delta: u64) {
         self.height = height;
         self.tx_count = self.tx_count.saturating_add(tx_delta);
     }
