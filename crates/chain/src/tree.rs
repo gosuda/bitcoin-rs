@@ -127,6 +127,40 @@ impl BlockTree {
         }
         locator
     }
+    /// Returns the median time of the most recent `window` blocks, inclusive
+    /// of `start_id`, walking backward via parent pointers.
+    ///
+    /// BIP113 uses `window = 11`. When the chain has fewer than `window`
+    /// blocks, the median is computed over however many exist. Returns `None`
+    /// only when `start_id` is not in the tree.
+    #[must_use]
+    pub fn median_time_past_at(&self, start_id: NodeId, window: usize) -> Option<u32> {
+        if window == 0 {
+            return Some(0);
+        }
+
+        let mut times = Vec::with_capacity(window);
+        let mut cursor = start_id;
+        while times.len() < window {
+            let Ok(node) = self.node(cursor) else {
+                if times.is_empty() {
+                    return None;
+                }
+                break;
+            };
+            times.push(node.header.time);
+            let Some(parent) = node.parent else {
+                break;
+            };
+            cursor = parent;
+        }
+
+        if times.is_empty() {
+            return None;
+        }
+        times.sort_unstable();
+        Some(times[times.len() / 2])
+    }
 
     /// Inserts a header whose parent is inferred from `prev_blockhash`.
     pub fn insert_header(
@@ -309,6 +343,36 @@ mod tests {
         assert_eq!(locator[3], hashes[1]);
         assert_eq!(locator[4], hashes[0]);
         assert_eq!(locator.last(), hashes.first());
+        Ok(())
+    }
+
+    #[test]
+    fn median_time_past_at_returns_median_of_recent_timestamps()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let mut prev_hash = BlockHash::all_zeros();
+        let mut tip = None;
+
+        for i in 0..11_u32 {
+            let header = BlockHeader {
+                version: Version::ONE,
+                prev_blockhash: prev_hash,
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_000_000 + i * 600,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            };
+            prev_hash = header.block_hash();
+            tip = Some(tree.insert_header(header, NodeStatus::HeaderValid)?);
+        }
+
+        let Some(tip) = tip else {
+            panic!("chain has 11 blocks should yield a tip");
+        };
+        let Some(mtp) = tree.median_time_past_at(tip, 11) else {
+            panic!("chain has 11 blocks should yield Some");
+        };
+        assert_eq!(mtp, 1_003_000);
         Ok(())
     }
 

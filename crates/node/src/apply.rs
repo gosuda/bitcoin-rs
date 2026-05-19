@@ -76,11 +76,18 @@ pub fn apply_block(
     }
 
     let prev_tip_state = match prior.as_deref() {
-        Some(tip) => bitcoin_rs_consensus::rust_path::TipState {
-            height: Some(tip.height),
-            block_hash: None,
-            median_time_past: 0,
-        },
+        Some(tip) => {
+            let mtp = handles
+                .block_tree
+                .read()
+                .median_time_past_at(tip.tip_id, 11)
+                .unwrap_or(0);
+            bitcoin_rs_consensus::rust_path::TipState {
+                height: Some(tip.height),
+                block_hash: None,
+                median_time_past: mtp,
+            }
+        }
         None => bitcoin_rs_consensus::rust_path::TipState {
             height: None,
             block_hash: None,
