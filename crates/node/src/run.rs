@@ -58,6 +58,26 @@ fn spawn_electrum_listener(
     ))
 }
 
+fn spawn_p2p_listeners(
+    config: &bitcoin_rs_node::Config,
+    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>
+{
+    let mut handles = Vec::with_capacity(config.p2p_listen.len());
+    for addr in &config.p2p_listen {
+        let listener_addr = *addr;
+        let listener_shutdown = std::sync::Arc::clone(shutdown);
+        let handle = std::thread::Builder::new()
+            .name(format!("bitcoin-rs-p2p-{listener_addr}"))
+            .spawn(move || {
+                bitcoin_rs_p2p::listener::serve_with_shutdown(listener_addr, listener_shutdown)
+            })?;
+        tracing::info!(addr = %listener_addr, "p2p listener bound");
+        handles.push(handle);
+    }
+    Ok(handles)
+}
+
 /// Boots the node from a resolved [`Config`] and runs until shutdown.
 ///
 /// Flow:
@@ -119,6 +139,7 @@ pub fn run(mut config: Config) -> Result<()> {
         .name("bitcoin-rs-rpc".into())
         .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
     let electrum_thread = spawn_electrum_listener(state.config(), &shutdown)?;
+    let p2p_threads = spawn_p2p_listeners(state.config(), &shutdown)?;
     loop_handle.spin(&shutdown)?;
     if let Some(handle) = electrum_thread {
         match handle.join() {
@@ -131,6 +152,20 @@ pub fn run(mut config: Config) -> Result<()> {
         Ok(Ok(())) => tracing::info!("rpc listener exited cleanly"),
         Ok(Err(error)) => tracing::warn!(%error, "rpc listener exited with i/o error"),
         Err(_) => tracing::error!("rpc listener panicked"),
+    }
+    for handle in p2p_threads {
+        let thread_name = handle
+            .thread()
+            .name()
+            .unwrap_or("bitcoin-rs-p2p")
+            .to_owned();
+        match handle.join() {
+            Ok(Ok(())) => tracing::info!(thread = %thread_name, "p2p listener exited cleanly"),
+            Ok(Err(error)) => {
+                tracing::warn!(thread = %thread_name, %error, "p2p listener exited with error");
+            }
+            Err(_) => tracing::error!(thread = %thread_name, "p2p listener panicked"),
+        }
     }
 
     shutdown::drain_and_shutdown(DRAIN_DEADLINE)?;
