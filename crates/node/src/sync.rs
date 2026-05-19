@@ -9,6 +9,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use bitcoin::BlockHash;
 use bitcoin::hashes::Hash as _;
@@ -26,6 +27,10 @@ const LOCATOR_MAX_ENTRIES: usize = 32;
 const PROTOCOL_VERSION: u32 = 70_016;
 /// Maximum number of block inventory entries we request per tick.
 const GETDATA_BATCH_SIZE: usize = 16;
+/// Time after which a pending getdata is considered stuck and re-requestable.
+const PENDING_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
+const PENDING_BUDGET: usize = 128;
 
 /// Block download orchestrator.
 pub struct BlockSync {
@@ -34,12 +39,13 @@ pub struct BlockSync {
     peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
+    pending_blocks: Arc<Mutex<HashMap<Hash256, Instant>>>,
 }
 
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         handles: crate::apply::ApplyHandles,
         peers: Arc<RwLock<Vec<PeerInfo>>>,
         peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
@@ -52,6 +58,7 @@ impl BlockSync {
             peer_outbound,
             inbound_headers_rx,
             inbound_blocks_rx,
+            pending_blocks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -117,6 +124,7 @@ impl BlockSync {
                         %tip.hash,
                         "block sync: applied inbound block"
                     );
+                    self.pending_blocks.lock().remove(&tip.hash);
                 }
                 Err(error) => {
                     failed += 1;
@@ -158,17 +166,33 @@ impl BlockSync {
             return;
         }
 
-        let mut hashes: Vec<Hash256> = Vec::with_capacity(GETDATA_BATCH_SIZE);
+        let mut pending = self.pending_blocks.lock();
+        let now = Instant::now();
+        pending.retain(|_hash, ts| now.duration_since(*ts) < PENDING_TIMEOUT);
+
+        let remaining_budget = PENDING_BUDGET.saturating_sub(pending.len());
+        if remaining_budget == 0 {
+            tracing::trace!(
+                pending = pending.len(),
+                "block sync: pending budget exhausted; skipping getdata"
+            );
+            return;
+        }
+        let batch_cap = remaining_budget.min(GETDATA_BATCH_SIZE);
+
+        let mut hashes: Vec<Hash256> = Vec::with_capacity(batch_cap);
         let tree = self.handles.block_tree.read();
         let mut cursor = chain_tip.tip_id;
-        while hashes.len() < GETDATA_BATCH_SIZE {
+        while hashes.len() < batch_cap {
             let Ok(node) = tree.node(cursor) else {
                 break;
             };
             if node.height <= applied_height {
                 break;
             }
-            hashes.push(node.hash);
+            if !pending.contains_key(&node.hash) {
+                hashes.push(node.hash);
+            }
             let Some(parent) = node.parent else {
                 break;
             };
@@ -182,6 +206,10 @@ impl BlockSync {
 
         hashes.reverse();
         let count = hashes.len();
+        for hash in &hashes {
+            pending.insert(*hash, now);
+        }
+        drop(pending);
         let inventory: Vec<Inventory> = hashes
             .into_iter()
             .map(|hash| Inventory::WitnessBlock(BlockHash::from_byte_array(hash.to_le_bytes())))
@@ -358,6 +386,83 @@ mod tests {
             return Err(std::io::Error::other("expected getheaders").into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn second_tick_does_not_re_request_already_pending_blocks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+        let mut tip_id = genesis_id;
+
+        for height in 1_u32..=3 {
+            let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::from_pointee(TipSnapshot {
+            tip_id: genesis_id,
+            height: 0,
+            chainwork: ChainWork::ZERO,
+            hash: genesis_hash,
+        }));
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        let first = rx.try_recv()?;
+        if !matches!(first, NetworkMessage::GetData(_)) {
+            return Err(std::io::Error::other("expected first tick getdata").into());
+        }
+        let second = rx.try_recv()?;
+        if !matches!(second, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first tick getheaders").into());
+        }
+
+        sync.tick();
+
+        let third = rx.try_recv()?;
+        if !matches!(third, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected second tick getheaders only").into());
+        }
+        match rx.try_recv() {
+            Ok(NetworkMessage::GetData(_)) => {
+                Err(std::io::Error::other("second tick re-requested pending blocks").into())
+            }
+            Ok(_) => {
+                Err(std::io::Error::other("unexpected extra message after second tick").into())
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(()),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(std::io::Error::other("outbound channel disconnected").into())
+            }
+        }
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
