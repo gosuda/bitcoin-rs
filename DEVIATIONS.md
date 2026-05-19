@@ -138,3 +138,46 @@ and names `SipHash-1-3` for GCS element hashing. Bitcoin Core's
 The filters crate follows Bitcoin Core's vector-compatible behavior because the
 Task 9 acceptance test explicitly requires byte-identical filter and header
 matches against `bitcoin/src/test/data/blockfilters.json`.
+
+## §4 — T18 node lifecycle scaffold
+
+The `bitcoin-rs-node` crate landed with the lifecycle skeleton (config
+layering, tracing, metrics in-process, signal-bridge, graceful drain,
+crash-recovery sidecar) but does NOT yet construct chain / utxo /
+mempool / index / p2p / rpc / electrum subsystems. `EventLoop::spin`
+handles shutdown + tick channels only; tick handlers are stubs.
+Subsystem wiring lands in a follow-up.
+
+- Files: `crates/node/src/{config.rs,state.rs,run.rs,event_loop.rs,crash_recovery.rs,signal.rs,shutdown.rs,logging.rs,metrics.rs,bitcoin_conf_compat.rs}`
+- Commit: 33333f9 + 304259f
+
+## §5 — T19 bin wiring + clap exit handling
+
+`bin/bitcoin-rs/src/main.rs` boots `Config::load_from_args` →
+`node::run`. `Config::load_from_args` distinguishes `clap::Error` kinds
+`DisplayHelp` / `DisplayVersion` and calls `err.exit()` so `bitcoin-rs
+--help` and `--version` return exit code 0 — the standard clap idiom.
+A `utreexo` feature was added to `crates/node/Cargo.toml` as a
+passthrough to `dep:bitcoin-rs-utreexo` to make the bin's feature table
+resolvable.
+
+- Files: `bin/bitcoin-rs/{Cargo.toml,src/main.rs,tests/cli_help.rs}`, `crates/node/{Cargo.toml,src/config.rs}`
+- Commit: 47af93b
+
+## §6 — T20 gates scaffold + integration-layer deferral
+
+G1..G14 acceptance tests are scaffolded under
+`bin/bitcoin-rs/tests/gates/`. Live-infrastructure gates (G1, G2, G3,
+G5, G6, G8, G9, G14) are `#[ignore]`d with run instructions in
+doc-comments. Wrapper gates (G4, G7, G10, G11, G12) shell out to
+in-tree crate tests. G13 (lints clean) is `#[ignore]`d because CI
+already runs clippy in a dedicated job; the gate body documents the
+exact invocation.
+
+The `"faster than Bitcoin Core"` performance budget claim (G14) cannot
+be validated in-session — it requires multi-day mainnet IBD benchmarks
+against a reference bitcoind. The gate is scaffolded as a structural
+placeholder. Live infrastructure runs are operator responsibilities.
+
+- Files: `bin/bitcoin-rs/{Cargo.toml,tests/gates/g{01..14}_*.rs}`
+- Commit: 144e2c1 + 61ae824
