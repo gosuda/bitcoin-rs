@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use core::time::Duration;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 
@@ -13,6 +13,7 @@ use crate::session::Session;
 
 const DEFAULT_MAX_SESSIONS: usize = 256;
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Electrum TCP server configuration.
 #[derive(Clone)]
@@ -109,6 +110,50 @@ impl ElectrumServer {
         }
         Ok(())
     }
+
+    /// Runs the accept loop until `shutdown` is set to `true`.
+    ///
+    /// Polls non-blocking accept on a 100 ms cadence so the loop can
+    /// observe shutdown without parking on an open socket. Each accepted
+    /// session is restored to blocking mode and inherits the same
+    /// `READ_TIMEOUT` as the legacy `run` entry.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn run_with_shutdown(
+        self,
+        shutdown: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> Result<(), ElectrumError> {
+        self.listener.set_nonblocking(true)?;
+        while !shutdown.load(core::sync::atomic::Ordering::Acquire) {
+            match self.listener.accept() {
+                Ok((stream, _peer)) => {
+                    stream.set_nonblocking(false)?;
+                    stream.set_read_timeout(Some(READ_TIMEOUT))?;
+                    if self.permits.try_recv().is_err() {
+                        warn!(peer = ?stream.peer_addr().ok(), "rejecting electrum session: capacity reached");
+                        continue;
+                    }
+                    let index = self.index.clone();
+                    let mempool = self.mempool.clone();
+                    let tls = self.tls.clone();
+                    let permit_returns = self.permit_returns.clone();
+                    thread::spawn(move || {
+                        let result = serve_stream(stream, tls, index, mempool);
+                        if permit_returns.send(()).is_err() {
+                            warn!("electrum session permit return channel closed");
+                        }
+                        if let Err(error) = result {
+                            debug!(error = %error, "electrum session ended with error");
+                        }
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(POLL_INTERVAL);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
 }
 
 fn serve_stream(
@@ -158,5 +203,33 @@ impl Write for MaybeTlsStream {
             Self::Tcp(stream) => stream.flush(),
             Self::Tls(stream) => stream.flush(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{ElectrumError, ElectrumServer, IndexHandle, MempoolHandle, ServerConfig};
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn run_with_shutdown_exits_on_signal() -> Result<(), ElectrumError> {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let server = ElectrumServer::bind(
+            "127.0.0.1:0".parse().expect("parse addr"),
+            index,
+            mempool,
+            ServerConfig::default(),
+        )?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let clone = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.run_with_shutdown(clone));
+        std::thread::sleep(core::time::Duration::from_millis(150));
+        shutdown.store(true, Ordering::Release);
+        handle.join().expect("join thread")?;
+        Ok(())
     }
 }
