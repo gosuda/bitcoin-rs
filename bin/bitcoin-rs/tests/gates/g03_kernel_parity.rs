@@ -11,5 +11,4 @@
 #[ignore = "requires kernel feature + 100k mainnet blocks"]
 fn kernel_parity_gate() {
     // Validate each block through bitcoin-rs consensus and bitcoinkernel, then compare verdicts.
-    let _ = ();
 }

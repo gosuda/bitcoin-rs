@@ -11,5 +11,4 @@
 #[ignore = "requires live bitcoind mainnet RPC for cross-check"]
 fn headers_only_sync_parity() {
     // Compare bitcoin-rs headers-only mainnet block hashes to bitcoind getblockhash for 0..tip.
-    let _ = ();
 }

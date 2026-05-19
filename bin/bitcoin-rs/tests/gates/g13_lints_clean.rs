@@ -11,5 +11,4 @@
 #[ignore = "runs cargo clippy across the workspace; invoke manually in CI"]
 fn lints_clean() {
     // Run the documented lint, fmt, and cargo-deny invocations in the dedicated CI job.
-    let _ = ();
 }

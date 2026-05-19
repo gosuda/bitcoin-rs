@@ -11,5 +11,4 @@
 #[ignore = "requires full IBD + bitcoind gettxoutsetinfo cross-check"]
 fn full_ibd_utxo_root_parity_muhash() {
     // Compare sampled bitcoin-rs coinstats muhash values to bitcoind gettxoutsetinfo during IBD.
-    let _ = ();
 }

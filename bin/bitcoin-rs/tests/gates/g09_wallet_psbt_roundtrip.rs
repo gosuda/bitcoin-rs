@@ -13,5 +13,4 @@
 #[ignore = "requires every descriptor type + external signer fixture"]
 fn wallet_psbt_round_trip() {
     // Build, externally sign, finalize, and submit PSBTs for every documented descriptor family.
-    let _ = ();
 }

@@ -1,3 +1,5 @@
+//! Integration tests for the bitcoin-rs node.
+
 use anyhow::{Context as _, Result, anyhow};
 use bitcoin_rs_node::{Auth, Config, Network, run};
 use crossbeam_channel::bounded;

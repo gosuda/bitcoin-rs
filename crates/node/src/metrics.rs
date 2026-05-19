@@ -1,7 +1,8 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use std::{collections::HashMap, net::SocketAddr};
+use hashbrown::HashMap;
+use std::net::SocketAddr;
 
 use anyhow::Result;
 use metrics::{

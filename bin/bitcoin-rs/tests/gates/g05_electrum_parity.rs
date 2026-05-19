@@ -11,5 +11,4 @@
 #[ignore = "requires reference electrs build + shared chain"]
 fn electrum_protocol_parity() {
     // Diff bitcoin-rs electrum responses against reference electrs for the documented method set.
-    let _ = ();
 }

@@ -8,8 +8,16 @@
 #[test]
 fn reorg_deep_test() {
     let status = std::process::Command::new(env!("CARGO"))
-        .args(["test", "-p", "bitcoin-rs-chain", "plans_deep_reorg_to_common_fork"])
+        .args([
+            "test",
+            "-p",
+            "bitcoin-rs-chain",
+            "plans_deep_reorg_to_common_fork",
+        ])
         .status()
         .expect("spawn cargo");
-    assert!(status.success(), "chain crate depth-100 reorg test must pass");
+    assert!(
+        status.success(),
+        "chain crate depth-100 reorg test must pass"
+    );
 }

@@ -39,14 +39,13 @@ pub fn run(mut config: Config) -> Result<()> {
         "bitcoin-rs node booting"
     );
 
-    let shutdown_rx: Receiver<()> = match injected_shutdown {
-        Some(rx) => rx,
-        None => {
-            let (tx, rx) = bounded(1);
-            // Forwards process signals into our channel; the JoinHandle outlives `run`.
-            let _signal_thread = crate::signal::install_shutdown_handler(tx)?;
-            rx
-        }
+    let shutdown_rx: Receiver<()> = if let Some(rx) = injected_shutdown {
+        rx
+    } else {
+        let (tx, rx) = bounded(1);
+        // Forwards process signals into our channel; the JoinHandle outlives `run`.
+        let _signal_thread = crate::signal::install_shutdown_handler(tx)?;
+        rx
     };
 
     let shutdown = Arc::new(AtomicBool::new(false));

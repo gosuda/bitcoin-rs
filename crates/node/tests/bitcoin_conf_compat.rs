@@ -1,3 +1,5 @@
+//! Integration tests for the bitcoin-rs node.
+
 use anyhow::Result;
 use bitcoin_rs_node::{Auth, Config, bitcoin_conf_compat};
 use std::fs;
@@ -8,7 +10,7 @@ fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
     let conf_path = temp.path().join("bitcoin.conf");
     fs::write(
         &conf_path,
-        r#"
+        r"
 # Global Core options may carry a leading dash.
 -prune=550
 -rpcuser=foo
@@ -18,7 +20,7 @@ fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
 -txindex=1
 -blockfilterindex=1
 -dbcache=768
-"#,
+",
     )?;
 
     let mut config = Config::default();
@@ -39,13 +41,13 @@ fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Resu
     let conf_path = temp.path().join("bitcoin.conf");
     fs::write(
         &conf_path,
-        r#"
+        r"
 -prune=550
 [regtest]
 -prune=900
 -rpcuser=regtest-user
 -rpcpassword=regtest-pass
-"#,
+",
     )?;
 
     let mut config = Config::default_for_network(bitcoin_rs_node::Network::Regtest);

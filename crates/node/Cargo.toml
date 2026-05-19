@@ -82,6 +82,7 @@ utreexo = ["dep:bitcoin-rs-utreexo"]
 prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
+hashbrown.workspace = true
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-consensus.workspace = true

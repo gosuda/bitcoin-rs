@@ -11,5 +11,8 @@ fn consensus_test_vectors() {
         .args(["test", "-p", "bitcoin-rs-consensus", "--no-fail-fast"])
         .status()
         .expect("spawn cargo");
-    assert!(status.success(), "consensus crate tests must pass — these include tx_valid.json, tx_invalid.json, script_tests.json, sighash.json");
+    assert!(
+        status.success(),
+        "consensus crate tests must pass — these include tx_valid.json, tx_invalid.json, script_tests.json, sighash.json"
+    );
 }

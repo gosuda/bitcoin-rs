@@ -1,3 +1,5 @@
+//! Integration tests for the bitcoin-rs node.
+
 use anyhow::Result;
 use bitcoin_rs_node::{Auth, Config, Network};
 use std::fs;
@@ -25,12 +27,12 @@ rpc_password = "toml-pass"
     )?;
     fs::write(
         &bitcoin_conf_path,
-        r#"
+        r"
 -prune=550
 -rpcuser=conf-user
 -rpcpassword=conf-pass
 -txindex=1
-"#,
+",
     )?;
 
     let env: [EnvPair; 4] = [

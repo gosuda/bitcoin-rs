@@ -1,3 +1,5 @@
+//! Integration tests for the bitcoin-rs node.
+
 use anyhow::{Context as _, Result};
 use bitcoin_rs_node::{Config, Network, crash_recovery, state::NodeState};
 

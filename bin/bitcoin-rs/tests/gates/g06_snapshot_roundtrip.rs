@@ -12,5 +12,4 @@
 #[ignore = "requires populated UTXO set; covered by `crates/utxo` unit tests for the in-memory path"]
 fn snapshot_round_trip() {
     // Dump and reload a populated UTXO snapshot, then compare UTXO and coinstats roots.
-    let _ = ();
 }

@@ -15,5 +15,4 @@
 #[ignore = "requires criterion runs against mainnet IBD; numbers in PLAN.md G14"]
 fn performance_budgets() {
     // Measure mainnet IBD throughput, UTXO commit p95, electrum history p95, and RSS budgets.
-    let _ = ();
 }

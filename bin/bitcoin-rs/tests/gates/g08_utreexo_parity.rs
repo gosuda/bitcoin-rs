@@ -11,5 +11,4 @@
 #[ignore = "requires --utreexo IBD against full-UTXO baseline"]
 fn utreexo_parity() {
     // Compare utreexo IBD tip and coinstats hash against the full-UTXO rocksdb baseline.
-    let _ = ();
 }
