@@ -1,6 +1,7 @@
-use bitcoin::consensus::Encodable;
+use bitcoin::{consensus::Encodable, io::Write};
+use sha2::{Digest, Sha256};
 
-use crate::{Hash256, encode::double_sha256};
+use crate::{Hash256, encode::Sha256Writer, varint};
 
 /// A transaction input using the canonical `bitcoin` crate representation.
 pub type TxIn = bitcoin::TxIn;
@@ -16,53 +17,66 @@ impl Tx {
     /// Computes the transaction id from the non-witness serialization.
     #[must_use]
     pub fn txid(&self) -> Hash256 {
-        let bytes = txid_bytes(&self.0);
-        assert!(
-            !has_witness(&self.0) || !has_segwit_marker(&bytes),
-            "non-witness txid serialization unexpectedly contains a segwit marker"
-        );
-        double_sha256(&bytes)
+        let mut engine = Sha256::new();
+        let mut writer = Sha256Writer(&mut engine);
+        encode_without_witness(&self.0, &mut writer);
+        finalize_double_sha256(engine)
     }
 
     /// Computes the witness transaction id from the witness serialization.
     #[must_use]
     pub fn wtxid(&self) -> Hash256 {
-        let bytes = wtxid_bytes(&self.0);
-        assert!(
-            !has_witness(&self.0) || has_segwit_marker(&bytes),
-            "witness transaction serialization omitted the segwit marker"
-        );
-        double_sha256(&bytes)
+        let mut engine = Sha256::new();
+        let mut writer = Sha256Writer(&mut engine);
+        encode_consensus(&mut writer, &self.0);
+        finalize_double_sha256(engine)
     }
 }
 
-fn txid_bytes(tx: &bitcoin::Transaction) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    encode_part(&mut bytes, &tx.version);
-    encode_part(&mut bytes, &tx.input);
-    encode_part(&mut bytes, &tx.output);
-    encode_part(&mut bytes, &tx.lock_time);
-    bytes
+fn encode_without_witness(tx: &bitcoin::Transaction, writer: &mut impl Write) {
+    write_all(writer, &tx.version.0.to_le_bytes());
+    encode_len(writer, tx.input.len());
+    for input in &tx.input {
+        encode_consensus(writer, &input.previous_output);
+        write_script(writer, input.script_sig.as_bytes());
+        write_all(writer, &input.sequence.0.to_le_bytes());
+    }
+    encode_len(writer, tx.output.len());
+    for output in &tx.output {
+        write_all(writer, &output.value.to_sat().to_le_bytes());
+        write_script(writer, output.script_pubkey.as_bytes());
+    }
+    encode_consensus(writer, &tx.lock_time);
 }
 
-fn wtxid_bytes(tx: &bitcoin::Transaction) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    encode_part(&mut bytes, tx);
-    bytes
+fn write_script(writer: &mut impl Write, script: &[u8]) {
+    encode_len(writer, script.len());
+    write_all(writer, script);
 }
 
-fn encode_part<T: Encodable + ?Sized>(bytes: &mut Vec<u8>, value: &T) {
-    if let Err(error) = value.consensus_encode(bytes) {
-        panic!("consensus encoding into Vec failed: {error}");
+fn encode_len(writer: &mut impl Write, len: usize) {
+    let len = u64::try_from(len).unwrap_or_else(|_| unreachable!("usize fits into u64"));
+    let encoded = varint::encode(len);
+    write_all(writer, encoded.as_slice());
+}
+
+fn encode_consensus<T: Encodable + ?Sized>(writer: &mut impl Write, value: &T) {
+    if let Err(error) = value.consensus_encode(writer) {
+        unreachable!("sha256 writer is infallible: {error}");
     }
 }
 
-fn has_witness(tx: &bitcoin::Transaction) -> bool {
-    tx.input.iter().any(|input| !input.witness.is_empty())
+fn write_all(writer: &mut impl Write, bytes: &[u8]) {
+    if let Err(error) = writer.write_all(bytes) {
+        unreachable!("sha256 writer is infallible: {error}");
+    }
 }
 
-fn has_segwit_marker(bytes: &[u8]) -> bool {
-    bytes.get(4) == Some(&0) && bytes.get(5).is_some_and(|flag| *flag != 0)
+fn finalize_double_sha256(engine: Sha256) -> Hash256 {
+    let first = engine.finalize();
+    let second = Sha256::digest(first);
+    let bytes = second.into();
+    Hash256::from_le_bytes(&bytes)
 }
 
 #[cfg(test)]

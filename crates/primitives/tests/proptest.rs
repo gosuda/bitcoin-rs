@@ -47,7 +47,13 @@ fn compact_size_varint_boundaries_roundtrip() -> Result<(), varint::VarintError>
     Ok(())
 }
 
-#[test]
-fn any_array_strategy_is_used_for_hash_inputs() {
-    let _strategy = any::<[u8; 32]>().prop_map(|bytes| Hash256::from_le_bytes(&bytes));
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 1000, ..ProptestConfig::default() })]
+
+    #[test]
+    fn hash256_strategy_values_roundtrip_le_bytes(
+        hash in any::<[u8; 32]>().prop_map(|bytes| Hash256::from_le_bytes(&bytes))
+    ) {
+        prop_assert_eq!(Hash256::from_le_bytes(&hash.to_le_bytes()), hash);
+    }
 }

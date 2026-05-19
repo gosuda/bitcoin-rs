@@ -104,7 +104,10 @@ impl Hash256 {
 
 impl fmt::Display for Hash256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_string_be())
+        for byte in self.0.iter().rev() {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
 }
 

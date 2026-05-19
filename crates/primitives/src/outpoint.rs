@@ -1,4 +1,7 @@
-use core::{fmt, mem::size_of};
+use core::{
+    fmt,
+    mem::{align_of, size_of},
+};
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -17,6 +20,8 @@ pub struct OutPoint {
 }
 
 const _: () = assert!(size_of::<OutPoint>() == 36);
+const _: () = assert!(size_of::<Hash256>() == 32);
+const _: () = assert!(align_of::<OutPoint>() == 1);
 
 impl OutPoint {
     /// Constructs a new outpoint.
