@@ -12,3 +12,23 @@ description = "bitcoin-rs :: mining"
 workspace = true
 
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-consensus.workspace = true
+bitcoin-rs-mempool.workspace = true
+bitcoin-rs-chain.workspace = true
+bitcoin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+rocksdb = []
+fjall = []
+redb = []
+mdbx = []
+
+[dev-dependencies]
+proptest.workspace = true
