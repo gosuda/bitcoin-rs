@@ -455,6 +455,7 @@ impl NodeState {
         // stood BEFORE this block's outputs were committed — inputs in this
         // block can only spend outputs from earlier blocks. Coinbase txs
         // early-return inside `verify_transaction`.
+        let flags = compute_verify_flags(self.config.network, height);
         let view = crate::utxo_view::UtxoSetView::new(Arc::clone(&self.utxo));
         for tx in &block.txdata {
             if tx.is_coinbase() {
@@ -463,12 +464,7 @@ impl NodeState {
             // TODO(perf): drop the per-tx clone once `verify_transaction_borrowed(&bitcoin::Transaction, ...)`
             // lands on `bitcoin_rs_consensus`. See DEVIATIONS §7.
             let wrapped = bitcoin_rs_primitives::Tx(tx.clone());
-            bitcoin_rs_consensus::verify_transaction(
-                &wrapped,
-                &view,
-                height,
-                bitcoin_rs_script::VerifyFlags::MANDATORY,
-            )?;
+            bitcoin_rs_consensus::verify_transaction(&wrapped, &view, height, flags)?;
         }
         Ok(())
     }
@@ -523,6 +519,35 @@ impl NodeState {
 
         Ok(())
     }
+}
+
+#[must_use]
+const fn compute_verify_flags(
+    network: bitcoin_rs_primitives::Network,
+    height: u32,
+) -> bitcoin_rs_script::VerifyFlags {
+    use bitcoin_rs_script::VerifyFlags;
+
+    // P2SH (BIP16) is effectively always-on for supported validation paths.
+    let mut flags = VerifyFlags::P2SH;
+    if network.is_bip66_active(height) {
+        flags = flags.union(VerifyFlags::DERSIG);
+    }
+    if network.is_bip65_active(height) {
+        flags = flags.union(VerifyFlags::CHECKLOCKTIMEVERIFY);
+    }
+    if network.is_csv_active(height) {
+        flags = flags.union(VerifyFlags::CHECKSEQUENCEVERIFY);
+    }
+    if network.is_segwit_active(height) {
+        flags = flags
+            .union(VerifyFlags::WITNESS)
+            .union(VerifyFlags::NULLDUMMY);
+    }
+    if network.is_taproot_active(height) {
+        flags = flags.union(VerifyFlags::TAPROOT);
+    }
+    flags
 }
 
 #[cfg(test)]
