@@ -11,4 +11,26 @@ description = "bitcoin-rs :: chain"
 [lints]
 workspace = true
 
+[features]
+default = []
+rocksdb = ["bitcoin-rs-storage/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall"]
+redb = ["bitcoin-rs-storage/redb"]
+
 [dependencies]
+bitcoin.workspace = true
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-storage = { workspace = true, default-features = false }
+slab.workspace = true
+hashbrown.workspace = true
+arc-swap.workspace = true
+parking_lot.workspace = true
+ruint.workspace = true
+bytemuck.workspace = true
+zerocopy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile = "3"
