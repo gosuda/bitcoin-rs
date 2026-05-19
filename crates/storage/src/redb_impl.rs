@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use redb::{Database, ReadTransaction, ReadableTable, TableDefinition};
+use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch};
 
