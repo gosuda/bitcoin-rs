@@ -15,6 +15,8 @@ pub mod fsm;
 pub mod handshake;
 /// Inventory relay helpers.
 pub mod inv;
+/// TCP listener skeleton with graceful shutdown.
+pub mod listener;
 /// Peer state and peer manager types.
 pub mod peer;
 /// Bitcoin P2P wire codec.
