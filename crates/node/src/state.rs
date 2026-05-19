@@ -369,6 +369,8 @@ impl NodeState {
         // `chain_tip` below until readers migrate to `block_tree()`.
         self.insert_active_header(block)?;
 
+        self.verify_block_transactions(block, height)?;
+
         let mut changes = BlockChanges::default();
         for tx in &block.txdata {
             let txid = tx.compute_txid();
@@ -432,6 +434,33 @@ impl NodeState {
         self.block_tree
             .write()
             .insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?;
+        Ok(())
+    }
+
+    fn verify_block_transactions(
+        &self,
+        block: &bitcoin::Block,
+        height: u32,
+    ) -> core::result::Result<(), ApplyError> {
+        // Per-tx script verification. The view borrows the UTXO set as it
+        // stood BEFORE this block's outputs were committed — inputs in this
+        // block can only spend outputs from earlier blocks. Coinbase txs
+        // early-return inside `verify_transaction`.
+        let view = crate::utxo_view::UtxoSetView::new(Arc::clone(&self.utxo));
+        for tx in &block.txdata {
+            if tx.is_coinbase() {
+                continue;
+            }
+            // TODO(perf): drop the per-tx clone once `verify_transaction_borrowed(&bitcoin::Transaction, ...)`
+            // lands on `bitcoin_rs_consensus`. See DEVIATIONS §7.
+            let wrapped = bitcoin_rs_primitives::Tx(tx.clone());
+            bitcoin_rs_consensus::verify_transaction(
+                &wrapped,
+                &view,
+                height,
+                bitcoin_rs_script::VerifyFlags::MANDATORY,
+            )?;
+        }
         Ok(())
     }
 

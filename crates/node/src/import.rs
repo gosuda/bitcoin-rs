@@ -191,6 +191,67 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_block_with_unspendable_input_tx() -> Result<()> {
+        let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
+        let mut block = Block::consensus_decode(&mut cursor)?;
+        block.header.prev_blockhash = block.block_hash();
+        block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
+        block.txdata.push(bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0_u8; 32]),
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        });
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
+        mine_block_to_declared_target(&mut block)?;
+
+        let mut block_bytes = Vec::new();
+        block.consensus_encode(&mut block_bytes)?;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        let _genesis = import_block(&state, &genesis_bytes)?;
+        let Err(error) = import_block(&state, &block_bytes) else {
+            anyhow::bail!("block with missing prevout should be rejected");
+        };
+
+        assert!(
+            error.chain().any(|cause| matches!(
+                cause.downcast_ref::<bitcoin_rs_consensus::ConsensusError>(),
+                Some(bitcoin_rs_consensus::ConsensusError::MissingPrevout { input_index: 0 })
+            )),
+            "error chain should contain MissingPrevout: {error:?}"
+        );
+        assert_eq!(
+            state
+                .chain_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("genesis tip should remain published"))?
+                .height,
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
     fn import_rejects_block_with_no_coinbase() -> Result<()> {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());

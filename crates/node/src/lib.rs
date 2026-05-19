@@ -30,8 +30,11 @@ pub mod shutdown;
 pub mod signal;
 /// Shared node state.
 pub mod state;
+/// UTXO view adapter for consensus transaction checks.
+pub mod utxo_view;
 
 pub use bitcoin_rs_primitives::Network;
 pub use config::{Auth, Config};
 pub use run::run;
 pub use state::ApplyError;
+pub use utxo_view::UtxoSetView;
