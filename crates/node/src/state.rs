@@ -18,15 +18,10 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_primitives::OutPoint;
-use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
+use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
-
-/// Number of blocks after a coinbase that its outputs become spendable.
-/// Consensus rule since Bitcoin v0.3.1; universal across networks.
-const COINBASE_MATURITY: u32 = 100;
 
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
@@ -392,352 +387,39 @@ impl NodeState {
         crate::crash_recovery::write_meta(self, &meta)
     }
 
-    /// Applies `block` as the next tip after non-contextual consensus checks.
+    /// Snapshot of the handle set needed by `crate::apply::apply_block`.
+    #[must_use]
+    pub fn apply_handles(&self) -> crate::apply::ApplyHandles {
+        crate::apply::ApplyHandles {
+            network: self.config.network,
+            chain_tip: Arc::clone(&self.chain_tip),
+            applied_tip: Arc::clone(&self.applied_tip),
+            block_tree: Arc::clone(&self.block_tree),
+            utxo: Arc::clone(&self.utxo),
+            mempool: Arc::clone(&self.mempool),
+            blocks: Arc::clone(&self.blocks),
+            transactions: Arc::clone(&self.transactions),
+        }
+    }
+
+    /// Synthetically applies `block` as the next tip after consensus checks.
     ///
-    /// This is the v1 contract: the block hash is taken from the decoded
-    /// header, the new height is `current_tip.height + 1` (or zero when no
-    /// tip is published yet), and contextual BIP30 / BIP34 checks run against
-    /// the resolved height. The block is stored in `blocks` for RPC consumers.
-    /// Broader soft-fork checks, BIP9 deployment state, and reorg planning
-    /// land in follow-up turns.
-    ///
-    /// Returns the `TipSnapshot` published by the `BlockTree`.
+    /// Delegates to `crate::apply::apply_block` over the shared handles.
     pub fn apply_block(
         &self,
         block: &bitcoin::Block,
-    ) -> core::result::Result<bitcoin_rs_chain::TipSnapshot, ApplyError> {
-        use bitcoin::hashes::Hash as _;
-
-        let block_hash =
-            bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
-        let prev_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(
-            block.header.prev_blockhash.as_byte_array(),
-        );
-        let prior = self.chain_tip.load_full();
-        let height = match prior.as_deref() {
-            Some(tip) => {
-                if tip.hash != prev_hash {
-                    return Err(ApplyError::PrevHashMismatch {
-                        tip: tip.hash,
-                        prev: prev_hash,
-                    });
-                }
-                tip.height
-                    .checked_add(1)
-                    .ok_or(ApplyError::HeightOverflow(tip.height))?
-            }
-            None => 0_u32,
-        };
-
-        // Self-consistency PoW: the block header's hash must satisfy its
-        // declared target. This is the cheapest consensus gate; do it before
-        // any structural checks. Contextual difficulty-adjustment validation
-        // (verifying the declared target matches the network's expected
-        // difficulty at this height) requires `BlockTree` state — deferred.
-        let declared_target = block.header.target();
-        if block.header.validate_pow(declared_target).is_err() {
-            return Err(ApplyError::ProofOfWork { hash: block_hash });
-        }
-
-        let prev_tip_state = match prior.as_deref() {
-            Some(tip) => bitcoin_rs_consensus::rust_path::TipState {
-                height: Some(tip.height),
-                block_hash: None,
-                median_time_past: 0,
-            },
-            None => bitcoin_rs_consensus::rust_path::TipState {
-                height: None,
-                block_hash: None,
-                median_time_past: 0,
-            },
-        };
-        bitcoin_rs_consensus::verify_block::verify_block_rules_borrowed(block, &prev_tip_state)?;
-        // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
-        self.check_bip30_and_bip34(block, height)?;
-        // PoW limit + DAA non-retarget continuity.
-        self.check_pow_limit_and_continuity(block, height)?;
-
-        self.verify_block_transactions(block, height)?;
-
-        self.check_coinbase_maturity(block, height)?;
-
-        let changes = build_utxo_changes(block, height)?;
-        self.utxo
-            .commit_block(&changes, &block_hash)
-            .map_err(ApplyError::UtxoCommit)?;
-
-        // Persist the header into the in-memory block tree after validation and
-        // UTXO commit have succeeded. `BlockTree` publishes the canonical
-        // best-tip snapshot as part of `insert_header`.
-        self.insert_active_header(block)?;
-
-        let tip = self
-            .chain_tip
-            .load_full()
-            .map(|arc| (*arc).clone())
-            .ok_or_else(|| {
-                ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip {
-                    bip: "INTERNAL",
-                    reason: format!(
-                        "chain tip not published by BlockTree after insert_header for block {block_hash}"
-                    ),
-                })
-            })?;
-        self.blocks
-            .write()
-            .push(bitcoin_rs_rpc::BlockRecord::from_block(height, block));
-        for tx in &block.txdata {
-            let txid = tx.compute_txid();
-            let evicted_count = self.mempool.write().remove_by_txid(&txid).len();
-            tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
-            self.transactions.write().insert(txid, tx.clone());
-        }
-        tracing::info!(
-            height,
-            %block_hash,
-            tx_count = block.txdata.len(),
-            utxo_adds = changes.add_count(),
-            utxo_removes = changes.remove_count(),
-            "apply_block: chain advance committed"
-        );
-        self.applied_tip.store(Some(Arc::new(tip.clone())));
-        Ok(tip)
+    ) -> core::result::Result<TipSnapshot, ApplyError> {
+        crate::apply::apply_block(&self.apply_handles(), block)
     }
 
-    fn insert_active_header(&self, block: &bitcoin::Block) -> core::result::Result<(), ApplyError> {
-        self.block_tree
-            .write()
-            .insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?;
-        Ok(())
-    }
-
-    fn verify_block_transactions(
-        &self,
-        block: &bitcoin::Block,
-        height: u32,
-    ) -> core::result::Result<(), ApplyError> {
-        // Per-tx script verification. The view borrows the UTXO set as it
-        // stood BEFORE this block's outputs were committed — inputs in this
-        // block can only spend outputs from earlier blocks. Coinbase txs
-        // early-return inside `verify_transaction`.
-        let flags = compute_verify_flags(self.config.network, height);
-        let view = crate::utxo_view::UtxoSetView::new(Arc::clone(&self.utxo));
-        for tx in &block.txdata {
-            if tx.is_coinbase() {
-                continue;
-            }
-            // TODO(perf): drop the per-tx clone once `verify_transaction_borrowed(&bitcoin::Transaction, ...)`
-            // lands on `bitcoin_rs_consensus`. See DEVIATIONS §7.
-            let wrapped = bitcoin_rs_primitives::Tx(tx.clone());
-            bitcoin_rs_consensus::verify_transaction(&wrapped, &view, height, flags)?;
-        }
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub(crate) fn check_coinbase_maturity(
         &self,
         block: &bitcoin::Block,
         height: u32,
     ) -> core::result::Result<(), ApplyError> {
-        use bitcoin::hashes::Hash as _;
-
-        // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
-        for tx in &block.txdata {
-            if tx.is_coinbase() {
-                continue;
-            }
-            for tx_input in &tx.input {
-                let prev_outpoint = OutPoint::new(
-                    bitcoin_rs_primitives::Hash256::from_le_bytes(
-                        tx_input.previous_output.txid.as_byte_array(),
-                    ),
-                    tx_input.previous_output.vout,
-                );
-                let Some(entry) = self.utxo.get_entry(&prev_outpoint) else {
-                    continue;
-                };
-                let depth = height.saturating_sub(entry.height);
-                if entry.coinbase && depth < COINBASE_MATURITY {
-                    return Err(ApplyError::Consensus(
-                        bitcoin_rs_consensus::ConsensusError::Bip {
-                            bip: "COINBASE_MATURITY",
-                            reason: format!(
-                                "spent coinbase output created at height {} cannot be spent at height {} (depth {} < {})",
-                                entry.height, height, depth, COINBASE_MATURITY,
-                            ),
-                        },
-                    ));
-                }
-            }
-        }
-        Ok(())
+        crate::apply::check_coinbase_maturity(&self.apply_handles(), block, height)
     }
-
-    fn check_bip30_and_bip34(
-        &self,
-        block: &bitcoin::Block,
-        height: u32,
-    ) -> core::result::Result<(), ApplyError> {
-        use bitcoin::hashes::Hash as _;
-
-        // BIP30: best-effort — reject if any tx in the block re-uses an
-        // outpoint that the UTXO set still considers live. The first vout
-        // (index 0) lookup catches the common-case duplicate-coinbase
-        // scenario that BIP30 was written to address. A proper any-vout
-        // sweep needs an accessor on `UtxoSet` that walks all live outputs
-        // for a given txid; see follow-up.
-        let mut has_duplicate = false;
-        for tx in &block.txdata {
-            let txid = tx.compute_txid();
-            let outpoint = bitcoin_rs_primitives::OutPoint::new(
-                bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
-                0,
-            );
-            if self.utxo.get(&outpoint).is_some() {
-                has_duplicate = true;
-                break;
-            }
-        }
-        bitcoin_rs_consensus::bip30::check_bip30(height, has_duplicate)?;
-
-        // BIP34: when active for this network at `height`, the coinbase
-        // scriptSig must start with the minimally-encoded height.
-        if self.config.network.is_bip34_active(height) {
-            let coinbase = block
-                .txdata
-                .first()
-                .ok_or(bitcoin_rs_consensus::ConsensusError::EmptyBlock)?;
-            // `verify_block_rules_borrowed` already pinned the first tx to
-            // be the coinbase; relying on that here. `coinbase.input[0]`
-            // is the synthetic prevout pointing at the impossible
-            // outpoint; its `script_sig` carries the BIP34 height encoding.
-            let coinbase_input = coinbase
-                .input
-                .first()
-                .ok_or(bitcoin_rs_consensus::ConsensusError::MissingCoinbase)?;
-            bitcoin_rs_consensus::bip34::check_bip34(
-                height,
-                coinbase_input.script_sig.as_script(),
-            )?;
-        }
-
-        Ok(())
-    }
-
-    fn check_pow_limit_and_continuity(
-        &self,
-        block: &bitcoin::Block,
-        height: u32,
-    ) -> core::result::Result<(), ApplyError> {
-        // PoW limit: declared target must not exceed network max_target.
-        let target_be = block.header.target().to_be_bytes();
-        let declared = bitcoin_rs_chain::node::ChainWork::from_be_bytes(target_be);
-        let max_target = self.config.network.max_target();
-        if declared > max_target {
-            return Err(ApplyError::TargetAboveLimit);
-        }
-
-        // nBits continuity: at non-retarget heights, must match the parent.
-        // Genesis (height 0) has no parent; skip.
-        if height == 0 {
-            return Ok(());
-        }
-        let retarget_interval = self.config.network.retarget_interval();
-        let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
-        if is_retarget {
-            // Retarget heights compute a new target from the last 2016 blocks'
-            // timespan; full computation is deferred to a follow-up. For now
-            // we already verified `declared <= max_target` above, so we let
-            // any retarget-height nBits through.
-            return Ok(());
-        }
-
-        // Non-retarget: look up the parent header via the BlockTree.
-        // The parent is the current chain_tip (which apply_block has already
-        // verified equals block.header.prev_blockhash via the prev-hash check
-        // upstream).
-        let tree = self.block_tree.read();
-        let Some(parent_id) = self.chain_tip.load_full().map(|tip| tip.tip_id) else {
-            // No tip published yet — should not happen at height > 0 since
-            // apply_block's prev-hash check would have rejected. Defensive.
-            return Ok(());
-        };
-        let parent = tree.node(parent_id).map_err(ApplyError::Chain)?;
-        if block.header.bits != parent.header.bits {
-            return Err(ApplyError::NbitsNonRetargetMismatch {
-                actual: block.header.bits.to_consensus(),
-                expected: parent.header.bits.to_consensus(),
-                height,
-            });
-        }
-        Ok(())
-    }
-}
-
-fn build_utxo_changes(
-    block: &bitcoin::Block,
-    height: u32,
-) -> core::result::Result<BlockChanges, ApplyError> {
-    use bitcoin::hashes::Hash as _;
-
-    let mut changes = BlockChanges::default();
-    for tx in &block.txdata {
-        let txid = tx.compute_txid();
-        for (vout_idx, txout) in tx.output.iter().enumerate() {
-            let outpoint = OutPoint::new(
-                bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
-                u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
-            );
-            changes.add(UtxoAdd::new(
-                outpoint,
-                txout.clone(),
-                tx.is_coinbase(),
-                height,
-            ));
-        }
-
-        if !tx.is_coinbase() {
-            for tx_input in &tx.input {
-                let previous_output = tx_input.previous_output;
-                changes.remove(OutPoint::new(
-                    bitcoin_rs_primitives::Hash256::from_le_bytes(
-                        previous_output.txid.as_byte_array(),
-                    ),
-                    previous_output.vout,
-                ));
-            }
-        }
-    }
-    Ok(changes)
-}
-
-#[must_use]
-const fn compute_verify_flags(
-    network: bitcoin_rs_primitives::Network,
-    height: u32,
-) -> bitcoin_rs_script::VerifyFlags {
-    use bitcoin_rs_script::VerifyFlags;
-
-    // P2SH (BIP16) is effectively always-on for supported validation paths.
-    let mut flags = VerifyFlags::P2SH;
-    if network.is_bip66_active(height) {
-        flags = flags.union(VerifyFlags::DERSIG);
-    }
-    if network.is_bip65_active(height) {
-        flags = flags.union(VerifyFlags::CHECKLOCKTIMEVERIFY);
-    }
-    if network.is_csv_active(height) {
-        flags = flags.union(VerifyFlags::CHECKSEQUENCEVERIFY);
-    }
-    if network.is_segwit_active(height) {
-        flags = flags
-            .union(VerifyFlags::WITNESS)
-            .union(VerifyFlags::NULLDUMMY);
-    }
-    if network.is_taproot_active(height) {
-        flags = flags.union(VerifyFlags::TAPROOT);
-    }
-    flags
 }
 
 #[cfg(test)]

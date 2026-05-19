@@ -8,6 +8,8 @@
 
 extern crate alloc;
 
+/// Block-apply pipeline executed by `NodeState::apply_block` and `BlockSync::tick`.
+pub mod apply;
 /// Bitcoin Core configuration compatibility.
 pub mod bitcoin_conf_compat;
 /// Layered node configuration.
