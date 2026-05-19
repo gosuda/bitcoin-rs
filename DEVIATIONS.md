@@ -122,3 +122,15 @@ contain `OP_CODESEPARATOR` (Core's pre-segwit handling is removed in the Rust
 port). The `sighash.json` vector runner skips rows whose script-code contains
 `OP_CODESEPARATOR` and reports the count in the test output. The skipped rows
 are a known v1 gap covered by the same `hand-rolled` follow-up.
+
+## 3. Task 9 — BIP157/158 vector-compatible byte order and SipHash rounds
+
+Task 9 says filter headers are `sha256d(prev_header || sha256d(filter_bytes))`
+and names `SipHash-1-3` for GCS element hashing. Bitcoin Core's
+`blockfilters.json` vectors and implementation use
+`sha256d(sha256d(filter_bytes) || prev_header)` for BIP157 filter headers and
+`CSipHasher`, Core's SipHash-2-4 implementation, for BIP158 range hashing.
+
+The filters crate follows Bitcoin Core's vector-compatible behavior because the
+Task 9 acceptance test explicitly requires byte-identical filter and header
+matches against `bitcoin/src/test/data/blockfilters.json`.

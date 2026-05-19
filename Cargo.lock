@@ -156,6 +156,17 @@ version = "0.1.0"
 [[package]]
 name = "bitcoin-rs-filters"
 version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
+ "bytemuck",
+ "proptest",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "zerocopy",
+]
 
 [[package]]
 name = "bitcoin-rs-index"
