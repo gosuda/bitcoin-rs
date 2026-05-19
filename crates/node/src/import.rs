@@ -131,6 +131,36 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_block_with_target_above_network_limit() -> Result<()> {
+        let bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Mainnet);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+
+        let Err(error) = import_block(&state, &bytes) else {
+            anyhow::bail!("regtest genesis target exceeds mainnet PoW limit");
+        };
+
+        assert!(
+            error.chain().any(|cause| {
+                matches!(
+                    cause.downcast_ref::<crate::state::ApplyError>(),
+                    Some(crate::state::ApplyError::TargetAboveLimit)
+                )
+            }),
+            "error chain should contain TargetAboveLimit rejection: {error:?}"
+        );
+        assert!(
+            state.chain_tip().load().is_none(),
+            "rejected block must not advance chain tip"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn import_two_blocks_in_sequence_advances_height_to_one() -> Result<()> {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());

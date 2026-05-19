@@ -49,6 +49,21 @@ pub enum ApplyError {
         /// Block header hash, big-endian display.
         hash: bitcoin_rs_primitives::Hash256,
     },
+    /// Declared target exceeds the network's proof-of-work limit.
+    #[error("declared target exceeds network max_target")]
+    TargetAboveLimit,
+    /// Declared `nBits` does not match the parent block's `nBits` at a non-retarget height.
+    #[error(
+        "nBits {actual:08x} does not match parent {expected:08x} at non-retarget height {height}"
+    )]
+    NbitsNonRetargetMismatch {
+        /// This block's `nBits`.
+        actual: u32,
+        /// Parent block's `nBits`.
+        expected: u32,
+        /// Block height.
+        height: u32,
+    },
     /// Consensus validation rejected the block.
     #[error("consensus: {0}")]
     Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
@@ -376,6 +391,8 @@ impl NodeState {
         bitcoin_rs_consensus::verify_block::verify_block_rules_borrowed(block, &prev_tip_state)?;
         // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
         self.check_bip30_and_bip34(block, height)?;
+        // PoW limit + DAA non-retarget continuity.
+        self.check_pow_limit_and_continuity(block, height)?;
 
         // Persist the header into the in-memory block tree; it is the source of
         // truth for header height, chainwork, and parent linkage. We dual-write
@@ -535,6 +552,55 @@ impl NodeState {
             )?;
         }
 
+        Ok(())
+    }
+
+    fn check_pow_limit_and_continuity(
+        &self,
+        block: &bitcoin::Block,
+        height: u32,
+    ) -> core::result::Result<(), ApplyError> {
+        // PoW limit: declared target must not exceed network max_target.
+        let target_be = block.header.target().to_be_bytes();
+        let declared = bitcoin_rs_chain::node::ChainWork::from_be_bytes(target_be);
+        let max_target = self.config.network.max_target();
+        if declared > max_target {
+            return Err(ApplyError::TargetAboveLimit);
+        }
+
+        // nBits continuity: at non-retarget heights, must match the parent.
+        // Genesis (height 0) has no parent; skip.
+        if height == 0 {
+            return Ok(());
+        }
+        let retarget_interval = self.config.network.retarget_interval();
+        let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
+        if is_retarget {
+            // Retarget heights compute a new target from the last 2016 blocks'
+            // timespan; full computation is deferred to a follow-up. For now
+            // we already verified `declared <= max_target` above, so we let
+            // any retarget-height nBits through.
+            return Ok(());
+        }
+
+        // Non-retarget: look up the parent header via the BlockTree.
+        // The parent is the current chain_tip (which apply_block has already
+        // verified equals block.header.prev_blockhash via the prev-hash check
+        // upstream).
+        let tree = self.block_tree.read();
+        let Some(parent_id) = self.chain_tip.load_full().map(|tip| tip.tip_id) else {
+            // No tip published yet — should not happen at height > 0 since
+            // apply_block's prev-hash check would have rejected. Defensive.
+            return Ok(());
+        };
+        let parent = tree.node(parent_id).map_err(ApplyError::Chain)?;
+        if block.header.bits != parent.header.bits {
+            return Err(ApplyError::NbitsNonRetargetMismatch {
+                actual: block.header.bits.to_consensus(),
+                expected: parent.header.bits.to_consensus(),
+                height,
+            });
+        }
         Ok(())
     }
 }
