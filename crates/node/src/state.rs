@@ -7,9 +7,12 @@
 
 use core::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
-use parking_lot::Mutex;
+use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+use bitcoin_rs_utxo::UtxoSet;
+use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
 
@@ -114,16 +117,21 @@ pub struct NodeState {
     config: Config,
     data_dir: PathBuf,
     storage: NodeStorage,
+    utxo: Arc<UtxoSet>,
+    mempool: Arc<RwLock<Mempool>>,
     replayed: Mutex<Vec<u32>>,
 }
 
 impl NodeState {
     /// Opens (or creates) the node's data directory and configured storage
     /// backend.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn open(config: Config) -> Result<Self> {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let storage = NodeStorage::open(&config)?;
+        let utxo = Arc::new(UtxoSet::new());
+        let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
         tracing::info!(
             backend = storage.kind(),
             chainstate_dir = %config.data_dir.join("chainstate").display(),
@@ -134,6 +142,8 @@ impl NodeState {
             config,
             data_dir,
             storage,
+            utxo,
+            mempool,
             replayed: Mutex::new(Vec::new()),
         })
     }
@@ -154,6 +164,18 @@ impl NodeState {
     #[must_use]
     pub const fn storage_kind(&self) -> &'static str {
         self.storage.kind()
+    }
+
+    /// Returns the shared UTXO set handle.
+    #[must_use]
+    pub fn utxo(&self) -> Arc<UtxoSet> {
+        Arc::clone(&self.utxo)
+    }
+
+    /// Returns the shared mempool handle.
+    #[must_use]
+    pub fn mempool(&self) -> Arc<RwLock<Mempool>> {
+        Arc::clone(&self.mempool)
     }
 
     /// Heights walked by the most recent crash-recovery replay.
@@ -177,5 +199,34 @@ impl NodeState {
             last_committed_height: height,
         };
         crate::crash_recovery::write_meta(self, &meta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_constructs_empty_handles() -> anyhow::Result<()> {
+        use tempfile::tempdir;
+
+        let dir = tempdir()?;
+        let config = crate::Config {
+            data_dir: dir.path().join("node"),
+            ..crate::Config::default()
+        };
+
+        let state = NodeState::open(config)?;
+        let utxo = state.utxo();
+        let mempool = state.mempool();
+
+        assert!(
+            Arc::strong_count(&utxo) >= 2,
+            "caller and NodeState should both hold a strong ref"
+        );
+        assert!(Arc::strong_count(&mempool) >= 2);
+        assert_eq!(mempool.read().len(), 0, "fresh mempool must be empty");
+
+        Ok(())
     }
 }
