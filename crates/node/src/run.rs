@@ -1,12 +1,12 @@
 //! Top-level orchestration: wire subsystems, spin the event loop, drain.
 
 use crate as bitcoin_rs_node;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::{Receiver, bounded};
 
 use crate::config::Config;
 use crate::event_loop::EventLoop;

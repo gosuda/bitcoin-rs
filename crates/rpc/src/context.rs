@@ -148,7 +148,6 @@ impl Context {
         }
     }
 
-
     /// Publishes a new best-chain tip and wakes getblocktemplate long polls.
     pub fn set_chain_tip(&self, tip: TipSnapshot) {
         self.mining_template_id
