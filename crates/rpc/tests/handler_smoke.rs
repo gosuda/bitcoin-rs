@@ -129,7 +129,9 @@ fn network_peer_methods_read_shared_peer_registry() -> Result<(), Box<dyn std::e
     let peer_info = peer_info
         .as_array()
         .ok_or("getpeerinfo must return array")?;
-    let peer = peer_info.get(0).ok_or("getpeerinfo must return one peer")?;
+    let peer = peer_info
+        .first()
+        .ok_or("getpeerinfo must return one peer")?;
     assert_eq!(peer_info.len(), 1);
     assert_eq!(peer.get("version").as_u64(), Some(70_016));
     Ok(())
