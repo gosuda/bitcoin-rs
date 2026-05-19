@@ -12,3 +12,24 @@ description = "bitcoin-rs :: pruning"
 workspace = true
 
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-storage = { workspace = true, default-features = false }
+bitcoin-rs-utxo.workspace = true
+bitcoin-rs-chain.workspace = true
+bitcoin-rs-utreexo.workspace = true
+bitcoin.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+rocksdb = ["bitcoin-rs-storage/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall"]
+redb = ["bitcoin-rs-storage/redb"]
+mdbx = ["bitcoin-rs-storage/mdbx"]
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+tempfile = "3"
