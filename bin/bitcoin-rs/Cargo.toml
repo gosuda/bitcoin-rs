@@ -28,3 +28,59 @@ redb = ["bitcoin-rs-node/redb"]
 mdbx = ["bitcoin-rs-node/mdbx"]
 kernel = ["bitcoin-rs-node/kernel"]
 utreexo = ["bitcoin-rs-node/utreexo"]
+
+[[test]]
+name = "g01_headers_only_sync"
+path = "tests/gates/g01_headers_only_sync.rs"
+
+[[test]]
+name = "g02_ibd_muhash_parity"
+path = "tests/gates/g02_ibd_muhash_parity.rs"
+
+[[test]]
+name = "g03_kernel_parity"
+path = "tests/gates/g03_kernel_parity.rs"
+
+[[test]]
+name = "g04_consensus_vectors"
+path = "tests/gates/g04_consensus_vectors.rs"
+
+[[test]]
+name = "g05_electrum_parity"
+path = "tests/gates/g05_electrum_parity.rs"
+
+[[test]]
+name = "g06_snapshot_roundtrip"
+path = "tests/gates/g06_snapshot_roundtrip.rs"
+
+[[test]]
+name = "g07_storage_equivalence"
+path = "tests/gates/g07_storage_equivalence.rs"
+
+[[test]]
+name = "g08_utreexo_parity"
+path = "tests/gates/g08_utreexo_parity.rs"
+
+[[test]]
+name = "g09_wallet_psbt_roundtrip"
+path = "tests/gates/g09_wallet_psbt_roundtrip.rs"
+
+[[test]]
+name = "g10_reorg_deep"
+path = "tests/gates/g10_reorg_deep.rs"
+
+[[test]]
+name = "g11_crash_recovery"
+path = "tests/gates/g11_crash_recovery.rs"
+
+[[test]]
+name = "g12_graceful_shutdown"
+path = "tests/gates/g12_graceful_shutdown.rs"
+
+[[test]]
+name = "g13_lints_clean"
+path = "tests/gates/g13_lints_clean.rs"
+
+[[test]]
+name = "g14_perf_budgets"
+path = "tests/gates/g14_perf_budgets.rs"
