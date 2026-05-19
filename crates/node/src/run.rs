@@ -13,6 +13,17 @@ use crate::state::NodeState;
 use crate::{crash_recovery, logging, shutdown};
 
 const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+const RPC_MAX_CONNECTIONS: usize = 128;
+const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
+    match node_auth {
+        crate::Auth::Basic { user, password } => {
+            Ok(bitcoin_rs_rpc::Auth::basic(user.clone(), password))
+        }
+        crate::Auth::Cookie { path } => Ok(bitcoin_rs_rpc::Auth::cookie(path)?),
+    }
+}
 
 /// Boots the node from a resolved [`Config`] and runs until shutdown.
 ///
@@ -50,7 +61,30 @@ pub fn run(mut config: Config) -> Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let loop_handle = EventLoop::new(shutdown_rx);
+    let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
+    let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(
+        bitcoin_rs_rpc::Context::new(),
+    )));
+    let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
+        state.config().rpc_bind,
+        rpc_auth,
+        rpc_handler,
+        RPC_MAX_CONNECTIONS,
+        RPC_IDLE_TIMEOUT,
+    )?;
+    let rpc_local_addr = rpc_server.local_addr()?;
+    tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
+    // TODO(rpc_smoke): cover the RPC listener once the test ergonomics improve.
+    let rpc_shutdown = Arc::clone(&shutdown);
+    let rpc_thread = std::thread::Builder::new()
+        .name("bitcoin-rs-rpc".into())
+        .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
     loop_handle.spin(&shutdown)?;
+    match rpc_thread.join() {
+        Ok(Ok(())) => tracing::info!("rpc listener exited cleanly"),
+        Ok(Err(error)) => tracing::warn!(%error, "rpc listener exited with i/o error"),
+        Err(_) => tracing::error!("rpc listener panicked"),
+    }
 
     shutdown::drain_and_shutdown(DRAIN_DEADLINE)?;
     tracing::info!("bitcoin-rs node exited cleanly");
