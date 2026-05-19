@@ -198,8 +198,8 @@ impl NodeState {
         let storage = NodeStorage::open(&config)?;
         let utxo = Arc::new(UtxoSet::new());
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let chain_tip = Arc::new(ArcSwapOption::empty());
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
+        let chain_tip = block_tree.read().tip_handle();
         let blocks = Arc::new(RwLock::new(Vec::new()));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let network = Arc::new(RwLock::new(NetworkState::default()));
@@ -327,13 +327,12 @@ impl NodeState {
     ///
     /// This is the v1 contract: the block hash is taken from the decoded
     /// header, the new height is `current_tip.height + 1` (or zero when no
-    /// tip is published yet), chainwork is approximated by accumulating the
-    /// block header's own work onto the prior tip's chainwork, and contextual
-    /// BIP30 / BIP34 checks run against the resolved height. The block is
-    /// stored in `blocks` for RPC consumers. Broader soft-fork checks, BIP9
-    /// deployment state, and reorg planning land in follow-up turns.
+    /// tip is published yet), and contextual BIP30 / BIP34 checks run against
+    /// the resolved height. The block is stored in `blocks` for RPC consumers.
+    /// Broader soft-fork checks, BIP9 deployment state, and reorg planning
+    /// land in follow-up turns.
     ///
-    /// Returns the new `TipSnapshot` so callers can publish it elsewhere.
+    /// Returns the `TipSnapshot` published by the `BlockTree`.
     pub fn apply_block(
         &self,
         block: &bitcoin::Block,
@@ -345,11 +344,8 @@ impl NodeState {
         let prev_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(
             block.header.prev_blockhash.as_byte_array(),
         );
-        let header_work =
-            bitcoin_rs_chain::node::ChainWork::from_be_bytes(block.header.work().to_be_bytes());
-
         let prior = self.chain_tip.load_full();
-        let (height, chainwork) = match prior.as_deref() {
+        let height = match prior.as_deref() {
             Some(tip) => {
                 if tip.hash != prev_hash {
                     return Err(ApplyError::PrevHashMismatch {
@@ -357,13 +353,11 @@ impl NodeState {
                         prev: prev_hash,
                     });
                 }
-                let new_height = tip
-                    .height
+                tip.height
                     .checked_add(1)
-                    .ok_or(ApplyError::HeightOverflow(tip.height))?;
-                (new_height, tip.chainwork.saturating_add(header_work))
+                    .ok_or(ApplyError::HeightOverflow(tip.height))?
             }
-            None => (0_u32, header_work),
+            None => 0_u32,
         };
 
         // Self-consistency PoW: the block header's hash must satisfy its
@@ -394,11 +388,6 @@ impl NodeState {
         // PoW limit + DAA non-retarget continuity.
         self.check_pow_limit_and_continuity(block, height)?;
 
-        // Persist the header into the in-memory block tree; it is the source of
-        // truth for header height, chainwork, and parent linkage. We dual-write
-        // `chain_tip` below until readers migrate to `block_tree()`.
-        self.insert_active_header(block)?;
-
         self.verify_block_transactions(block, height)?;
 
         self.check_coinbase_maturity(block, height)?;
@@ -408,13 +397,23 @@ impl NodeState {
             .commit_block(&changes, &block_hash)
             .map_err(ApplyError::UtxoCommit)?;
 
-        let tip = bitcoin_rs_chain::TipSnapshot {
-            tip_id: bitcoin_rs_chain::node::NodeId::new(height),
-            height,
-            chainwork,
-            hash: block_hash,
-        };
-        self.chain_tip.store(Some(Arc::new(tip.clone())));
+        // Persist the header into the in-memory block tree after validation and
+        // UTXO commit have succeeded. `BlockTree` publishes the canonical
+        // best-tip snapshot as part of `insert_header`.
+        self.insert_active_header(block)?;
+
+        let tip = self
+            .chain_tip
+            .load_full()
+            .map(|arc| (*arc).clone())
+            .ok_or_else(|| {
+                ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip {
+                    bip: "INTERNAL",
+                    reason: format!(
+                        "chain tip not published by BlockTree after insert_header for block {block_hash}"
+                    ),
+                })
+            })?;
         self.blocks
             .write()
             .push(bitcoin_rs_rpc::BlockRecord::from_block(height, block));
@@ -430,7 +429,7 @@ impl NodeState {
             tx_count = block.txdata.len(),
             utxo_adds = changes.add_count(),
             utxo_removes = changes.remove_count(),
-            "apply_block: synthetic chain advance committed"
+            "apply_block: chain advance committed"
         );
         Ok(tip)
     }

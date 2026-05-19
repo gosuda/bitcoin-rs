@@ -18,7 +18,7 @@ use crate::{
 pub struct BlockTree {
     nodes: Slab<BlockTreeNode>,
     by_hash: HashTable<NodeId>,
-    tip: ArcSwapOption<TipSnapshot>,
+    tip: Arc<ArcSwapOption<TipSnapshot>>,
 }
 
 impl BlockTree {
@@ -28,7 +28,7 @@ impl BlockTree {
         Self {
             nodes: Slab::new(),
             by_hash: HashTable::new(),
-            tip: ArcSwapOption::empty(),
+            tip: Arc::new(ArcSwapOption::empty()),
         }
     }
 
@@ -78,6 +78,16 @@ impl BlockTree {
     #[must_use]
     pub fn tip(&self) -> Option<Arc<TipSnapshot>> {
         self.tip.load_full()
+    }
+
+    /// Returns a cheap-clonable handle to the canonical best-tip pointer.
+    ///
+    /// Sharing this handle lets lock-free readers observe tip advances
+    /// without acquiring the `BlockTree`'s outer `RwLock`. Writes happen
+    /// through `publish_tip_if_best` (called by `insert_header`).
+    #[must_use]
+    pub fn tip_handle(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
+        Arc::clone(&self.tip)
     }
 
     /// Inserts a header whose parent is inferred from `prev_blockhash`.
