@@ -77,6 +77,20 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing chain tip after import"))?;
         assert_eq!(tip.height, 0);
         assert_eq!(tip.hash, genesis_hash);
+        assert_eq!(
+            state.utxo().len(),
+            1,
+            "genesis has one live coinbase output"
+        );
+        assert_eq!(
+            state.transactions().read().len(),
+            1,
+            "genesis coinbase must be indexed"
+        );
+        assert!(
+            state.mempool().read().is_empty(),
+            "genesis import must leave mempool empty"
+        );
         Ok(())
     }
 

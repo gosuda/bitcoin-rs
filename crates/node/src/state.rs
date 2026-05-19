@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_primitives::OutPoint;
+use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
 use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
@@ -38,6 +39,9 @@ pub enum ApplyError {
     /// Height arithmetic overflowed `u32::MAX`.
     #[error("height overflow at tip {0}")]
     HeightOverflow(u32),
+    /// UTXO commit failed during block apply.
+    #[error("utxo commit: {0}")]
+    UtxoCommit(#[from] bitcoin_rs_utxo::UtxoError),
 }
 
 enum NodeStorage {
@@ -277,8 +281,8 @@ impl NodeState {
     /// tip is published yet), chainwork is approximated by accumulating the
     /// block header's own work onto the prior tip's chainwork, and the block
     /// is stored in `blocks` for RPC consumers. Real consensus validation,
-    /// UTXO commit, BIP30 / BIP34 / soft-fork checks, BIP9 deployment state,
-    /// and reorg planning land in follow-up turns.
+    /// BIP30 / BIP34 / soft-fork checks, BIP9 deployment state, and reorg
+    /// planning land in follow-up turns.
     ///
     /// Returns the new `TipSnapshot` so callers can publish it elsewhere.
     pub fn apply_block(
@@ -313,6 +317,38 @@ impl NodeState {
             None => (0_u32, header_work),
         };
 
+        let mut changes = BlockChanges::default();
+        for tx in &block.txdata {
+            let txid = tx.compute_txid();
+            for (vout_idx, txout) in tx.output.iter().enumerate() {
+                let outpoint = OutPoint::new(
+                    bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
+                    u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
+                );
+                changes.add(UtxoAdd::new(
+                    outpoint,
+                    txout.clone(),
+                    tx.is_coinbase(),
+                    height,
+                ));
+            }
+
+            if !tx.is_coinbase() {
+                for tx_input in &tx.input {
+                    let previous_output = tx_input.previous_output;
+                    changes.remove(OutPoint::new(
+                        bitcoin_rs_primitives::Hash256::from_le_bytes(
+                            previous_output.txid.as_byte_array(),
+                        ),
+                        previous_output.vout,
+                    ));
+                }
+            }
+        }
+        self.utxo
+            .commit_block(&changes, &block_hash)
+            .map_err(ApplyError::UtxoCommit)?;
+
         let tip = bitcoin_rs_chain::TipSnapshot {
             tip_id: bitcoin_rs_chain::node::NodeId::new(height),
             height,
@@ -323,6 +359,20 @@ impl NodeState {
         self.blocks
             .write()
             .push(bitcoin_rs_rpc::BlockRecord::from_block(height, block));
+        for tx in &block.txdata {
+            let txid = tx.compute_txid();
+            let evicted_count = self.mempool.write().remove_by_txid(&txid).len();
+            tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
+            self.transactions.write().insert(txid, tx.clone());
+        }
+        tracing::info!(
+            height,
+            %block_hash,
+            tx_count = block.txdata.len(),
+            utxo_adds = changes.add_count(),
+            utxo_removes = changes.remove_count(),
+            "apply_block: synthetic chain advance committed"
+        );
         Ok(tip)
     }
 }
