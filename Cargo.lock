@@ -1886,9 +1886,9 @@ checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 
 [[package]]
 name = "rust-librocksdb-sys"
-version = "0.40.0+10.7.5"
+version = "0.45.1+11.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c00d2a200a5d3a21d9c2d39785d8542b2226cf3d132976c04f32eae31d3c0394"
+checksum = "53dde00fa87096889040d32fada4f8885bff041b27e48017f8a5abf1a812348f"
 dependencies = [
  "bindgen",
  "bzip2-sys",
@@ -1897,14 +1897,15 @@ dependencies = [
  "libc",
  "libz-sys",
  "lz4-sys",
+ "pkg-config",
  "zstd-sys",
 ]
 
 [[package]]
 name = "rust-rocksdb"
-version = "0.44.2"
+version = "0.49.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1139f88cb2ef35c4310f818025cd7e09e1895b42a44d1aed3ac6733d3e398b21"
+checksum = "0d825b7ca5eeb6474e2cdf468b72d192726fa28a4ca701b36fe280781cb92709"
 dependencies = [
  "libc",
  "parking_lot",

@@ -176,10 +176,10 @@ zerocopy = { version = ">=0.8, <0.9", default-features = false, features = ["der
 lz4_flex = { version = ">=0.13, <0.14", default-features = false, features = ["std", "frame"] }
 
 # --- Storage backends ---------------------------------------------------------
-# rust-rocksdb 0.44 line (plan claim of 0.49 does not exist on crates.io).
+# rust-rocksdb 0.49 line.
 # `default = [snappy, lz4, zstd, zlib, bzip2, bindgen-runtime]` — disable to
 # pick only what we use (rocksdb default).
-rust-rocksdb = { version = ">=0.44, <0.45", default-features = false, features = [
+rust-rocksdb = { version = ">=0.49.1, <0.50", default-features = false, features = [
     "mt_static", "snappy", "lz4", "zstd",
 ] }
 
