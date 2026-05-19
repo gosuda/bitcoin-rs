@@ -18,3 +18,13 @@ workspace = true
 [dependencies]
 mimalloc.workspace = true
 anyhow.workspace = true
+bitcoin-rs-node = { path = "../../crates/node", default-features = false }
+
+[features]
+default = ["rocksdb", "fjall", "redb", "mdbx"]
+rocksdb = ["bitcoin-rs-node/rocksdb"]
+fjall = ["bitcoin-rs-node/fjall"]
+redb = ["bitcoin-rs-node/redb"]
+mdbx = ["bitcoin-rs-node/mdbx"]
+kernel = ["bitcoin-rs-node/kernel"]
+utreexo = ["bitcoin-rs-node/utreexo"]

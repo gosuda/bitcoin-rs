@@ -253,6 +253,7 @@ name = "bitcoin-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitcoin-rs-node",
  "mimalloc",
 ]
 
@@ -437,6 +438,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "crossbeam-utils",
+ "hashbrown 0.17.1",
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",

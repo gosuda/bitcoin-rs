@@ -170,7 +170,12 @@ impl Config {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let cli = ConfigLayer::try_parse_from(args)?;
+        let cli = match ConfigLayer::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => {
+                err.exit();
+            }
+        };
         let env = std::env::vars();
         Self::from_layers(cli.config.as_ref(), cli.bitcoin_conf.as_ref(), env, &cli)
     }

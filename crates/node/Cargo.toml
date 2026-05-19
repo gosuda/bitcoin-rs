@@ -78,6 +78,7 @@ mdbx = [
     "bitcoin-rs-wallet/mdbx",
 ]
 kernel = ["bitcoin-rs-consensus/kernel"]
+utreexo = ["dep:bitcoin-rs-utreexo"]
 prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
@@ -86,7 +87,7 @@ bitcoin-rs-script.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-utxo.workspace = true
-bitcoin-rs-utreexo.workspace = true
+bitcoin-rs-utreexo = { workspace = true, optional = true }
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-index.workspace = true
 bitcoin-rs-filters.workspace = true
