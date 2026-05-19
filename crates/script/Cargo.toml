@@ -11,4 +11,25 @@ description = "bitcoin-rs :: script"
 [lints]
 workspace = true
 
+[features]
+default = []
+rocksdb = []
+fjall = []
+redb = []
+
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin.workspace = true
+secp256k1.workspace = true
+sha2.workspace = true
+rayon.workspace = true
+tinyvec.workspace = true
+smallvec.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+proptest.workspace = true

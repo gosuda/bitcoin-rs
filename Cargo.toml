@@ -65,7 +65,7 @@ mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
 # --- Bitcoin ecosystem --------------------------------------------------------
 # bitcoin 0.32 line; 0.33 is still beta. `default = [std, secp-recovery]`.
 bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
-    "std", "secp-recovery", "serde", "rand-std",
+    "std", "secp-recovery", "serde", "rand-std", "bitcoinconsensus-std",
 ] }
 
 # bitcoinkernel: latest stable is 0.2.0 (corrected from plan claim of 0.1).

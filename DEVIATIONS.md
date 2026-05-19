@@ -81,3 +81,17 @@ MSRV 1.85.0:
 - **G3 (kernel parity)** still runs in CI, but only on the `kernel-and-mdbx` job — the gate is gated on the kernel feature, not on every PR.
 - **G7 (4-backend equivalence)** runs in two parts: the MSRV-1.85 default-feature CI proves rocksdb ↔ fjall ↔ redb equivalence; the elevated-MSRV CI proves the same chain results when MDBX is added.
 - All other gates (G1, G2, G4, G5, G6, G8 – G14) are unaffected.
+
+## 2. Task 3 — script interpreter v1 wraps bitcoin crate
+
+Task 3 Step 2 calls for a hand-rolled per-opcode dispatcher. The v1 script
+crate instead exposes the planned `Interpreter` surface while delegating legacy
+and segwit script execution to `bitcoin::Script::verify_with_flags`, backed by
+the `bitcoinconsensus` feature. This keeps consensus script behavior tied to
+Core's audited implementation while the rest of the public surface lands:
+bounded stack infrastructure, opcode re-exports, sigop counters, sighash cache,
+taproot helpers, and the Rayon-backed Schnorr batch shape.
+
+The hand-rolled dispatcher remains a follow-up behind a `hand-rolled` cargo
+feature. It must ship with a parity-vs-bitcoin-crate test before replacing the
+delegated v1 path, so downstream callers do not observe an API change.
