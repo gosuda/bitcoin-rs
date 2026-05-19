@@ -186,8 +186,10 @@ placeholder. Live infrastructure runs are operator responsibilities.
 
 Follow-up to §4..§6. The session that opened with the T18..T20 scaffold
 closed by wiring the source-of-truth subsystem handles into the node
-lifecycle. The wiring is real but **synthetic in the consensus sense**:
-blocks are accepted without consensus validation.
+lifecycle. The wiring covers the full consensus pipeline non-contextually
+(PoW + non-contextual rules + BIP30/34 + BlockTree + script verify) and
+the listener-side P2P handshake; **contextual consensus (DAA, BIP9, MTP,
+BIP68) and block-download orchestration remain deferred**.
 
 ### What is now wired
 
@@ -205,12 +207,18 @@ blocks are accepted without consensus validation.
   → join each listener.
 - RPC, Electrum, and P2P listeners share a `serve_with_shutdown(Arc<AtomicBool>)`
   pattern using non-blocking `accept()` + 100 ms poll.
-- `NodeState::apply_block(&Block)` advances the synthetic chain tip on
-  header continuity, commits block outputs to `UtxoSet` via
-  `commit_block`, evicts confirmed txs from `Mempool` via
-  `remove_by_txid`, and indexes the block's transactions for
-  `getrawtransaction`. `bitcoin_rs_node::import::import_block` flips
-  `ImportOutcome::applied` to `true` on successful apply.
+- `NodeState::apply_block(&Block)` runs the consensus pipeline: (1) PoW
+  self-consistency (`header.validate_pow(header.target())`), (2) non-contextual
+  block rules via `bitcoin_rs_consensus::verify_block_rules_borrowed`
+  (empty, missing-coinbase, extra-coinbase, merkle root, witness commitment,
+  block weight), (3) BIP30 (best-effort duplicate-txid via UTXO lookup) +
+  BIP34 (per-network activation via `Network::is_bip34_active`),
+  (4) `BlockTree::insert_header(header, NodeStatus::Active)`,
+  (5) per-tx script verification with `VerifyFlags::MANDATORY` (P2SH +
+  DERSIG + NULLDUMMY + CLTV + CSV + WITNESS + TAPROOT) over a `UtxoSetView`
+  wrapper, (6) UTXO commit, (7) mempool eviction via `remove_by_txid`,
+  (8) tx-index update, (9) chain-tip ArcSwap advance.
+  `import_block` flips `ImportOutcome::applied` to `true` on success.
 - `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via
   `Mempool::stats()`.
 - Electrum TLS cert config is honored as plaintext-with-warning until a
@@ -219,16 +227,29 @@ blocks are accepted without consensus validation.
 
 ### What is NOT yet wired (consensus correctness gates)
 
-- **No consensus validation in `apply_block`.** Only `prev_blockhash ==
-  current_tip.hash` is checked. No PoW verification, no merkle root
-  check, no script verification, no BIP30/34/65/66/68/112/141/143 rules,
-  no BIP9 deployment state. The chain advance is observable but invalid
-  by Bitcoin consensus.
-- **No real block-tree maintenance.** `BlockTree::accept_header` is not
-  called by `apply_block`. The chain is a flat list of `TipSnapshot`s
-  without reorg-planning state.
-- **No P2P handshake.** The listener accepts and drops the connection
-  before any Version/Verack exchange. Peers cannot talk to the node yet.
+- **No contextual consensus.** `apply_block` runs non-contextual rules
+  + BIP30/BIP34 + per-tx script verification with `VerifyFlags::MANDATORY`,
+  but it does NOT verify (a) the declared target matches the network's
+  expected difficulty at this height (DAA), (b) BIP113 median-time-past
+  for nLocktime, (c) BIP68 relative-locktime sequences, (d) BIP9
+  deployment-state-aware script flags, (e) BIP-COINBASE-100 (coinbase
+  maturity). Every block must currently be Taproot-active (MANDATORY
+  flags) — pre-Taproot blocks would over-strict-fail. These gates need
+  BlockTree-derived state (window queries for MTP, height-aware activation
+  for soft-fork flags).
+- **NodeState dual-writes the chain tip.** `chain_tip: Arc<ArcSwapOption<TipSnapshot>>`
+  is published by both `apply_block` (synthetic) and `BlockTree::publish_tip_if_best`
+  (real). The clean refactor collapses onto `BlockTree::tip_handle()` — deferred.
+- **No `verify_transaction_borrowed`.** The per-tx script verify clones each
+  `bitcoin::Transaction` into a `bitcoin_rs_primitives::Tx` wrapper because
+  the consensus API takes `&Tx`. A borrowed adapter on the consensus crate
+  drops the clone (perf lever; see TODO breadcrumb in `state.rs`).
+- **P2P handshake completes but the peer is dropped.** `listener.rs` spawns
+  a per-connection thread that runs `run_inbound_handshake` (Version/Verack
+  + BIP155/BIP339 feature messages) with a 60-second read/write timeout.
+  On success the connection is closed — there is no peer registry yet, so
+  the handshake produces no durable state. The peer-tracking PeerManager
+  + post-handshake message dispatch loop is the next strand.
 - **No block download orchestrator.** No code path connects accepted
   peers to `import_block`; `import_block` only fires from tests.
 - **No index / filter / coinstats updates triggered by tip advance.**
