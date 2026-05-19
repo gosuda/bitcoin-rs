@@ -11,4 +11,28 @@ description = "bitcoin-rs :: p2p"
 [lints]
 workspace = true
 
+[features]
+default = ["rocksdb"]
+rocksdb = ["bitcoin-rs-storage/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall"]
+redb = ["bitcoin-rs-storage/redb"]
+
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-storage = { workspace = true, default-features = false }
+bitcoin.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+bytemuck.workspace = true
+zerocopy.workspace = true
+tinyvec.workspace = true
+smallvec.workspace = true
+hashbrown.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile = "3"
