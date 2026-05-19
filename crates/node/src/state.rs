@@ -1,36 +1,139 @@
 //! Shared node state aggregating subsystem handles.
 //!
-//! V1 keeps this deliberately minimal: it owns the resolved [`Config`] and a
-//! data-directory path, plus the replay log used by [`crate::crash_recovery`].
-//! Subsystem wiring (chain / utxo / mempool / index / p2p / rpc / electrum)
-//! is constructed by the binary at boot and parks here as the integration
-//! point matures.
+//! V1 keeps this deliberately minimal: it owns the resolved [`Config`], the
+//! data-directory path, the open chainstate storage backend, and the replay log
+//! used by [`crate::crash_recovery`]. Subsystem wiring (chain / utxo / mempool
+//! / index / p2p / rpc / electrum) parks here as the integration point matures.
 
+use core::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use parking_lot::Mutex;
 
 use crate::Config;
+
+enum NodeStorage {
+    #[cfg(feature = "rocksdb")]
+    RocksDb(bitcoin_rs_storage::RocksDbStore),
+    #[cfg(feature = "fjall")]
+    Fjall(bitcoin_rs_storage::FjallStore),
+    #[cfg(feature = "redb")]
+    Redb(bitcoin_rs_storage::RedbStore),
+    #[cfg(feature = "mdbx")]
+    Mdbx(bitcoin_rs_storage::MdbxStore),
+}
+
+impl NodeStorage {
+    fn open(config: &Config) -> Result<Self> {
+        let chainstate_dir = config.data_dir.join("chainstate");
+        std::fs::create_dir_all(&chainstate_dir)
+            .with_context(|| format!("create chainstate_dir {}", chainstate_dir.display()))?;
+
+        match config.storage_backend.as_str() {
+            #[cfg(feature = "rocksdb")]
+            "rocksdb" => Ok(Self::RocksDb(
+                bitcoin_rs_storage::RocksDbStore::open(&chainstate_dir)
+                    .map_err(anyhow::Error::new)?,
+            )),
+            #[cfg(feature = "fjall")]
+            "fjall" => Ok(Self::Fjall(
+                bitcoin_rs_storage::FjallStore::open(&chainstate_dir)
+                    .map_err(anyhow::Error::new)?,
+            )),
+            #[cfg(feature = "redb")]
+            "redb" => Ok(Self::Redb(
+                bitcoin_rs_storage::RedbStore::open(&chainstate_dir).map_err(anyhow::Error::new)?,
+            )),
+            #[cfg(feature = "mdbx")]
+            "mdbx" => Ok(Self::Mdbx(
+                bitcoin_rs_storage::MdbxStore::open(&chainstate_dir).map_err(anyhow::Error::new)?,
+            )),
+            other => bail!(
+                "unsupported storage backend: {other} (compiled features = {CompiledStorageFeatures})"
+            ),
+        }
+    }
+
+    const fn kind(&self) -> &'static str {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(store) => {
+                let _ = store;
+                "rocksdb"
+            }
+            #[cfg(feature = "fjall")]
+            Self::Fjall(store) => {
+                let _ = store;
+                "fjall"
+            }
+            #[cfg(feature = "redb")]
+            Self::Redb(store) => {
+                let _ = store;
+                "redb"
+            }
+            #[cfg(feature = "mdbx")]
+            Self::Mdbx(store) => {
+                let _ = store;
+                "mdbx"
+            }
+        }
+    }
+}
+
+const COMPILED_STORAGE_FEATURES: &[&str] = &[
+    #[cfg(feature = "rocksdb")]
+    "rocksdb",
+    #[cfg(feature = "fjall")]
+    "fjall",
+    #[cfg(feature = "redb")]
+    "redb",
+    #[cfg(feature = "mdbx")]
+    "mdbx",
+];
+
+struct CompiledStorageFeatures;
+
+impl fmt::Display for CompiledStorageFeatures {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Some((first, rest)) = COMPILED_STORAGE_FEATURES.split_first() else {
+            return f.write_str("none");
+        };
+
+        f.write_str(first)?;
+        for feature in rest {
+            f.write_str(",")?;
+            f.write_str(feature)?;
+        }
+        Ok(())
+    }
+}
 
 /// Aggregate handle to a running node.
 pub struct NodeState {
     config: Config,
     data_dir: PathBuf,
+    storage: NodeStorage,
     replayed: Mutex<Vec<u32>>,
 }
 
 impl NodeState {
-    /// Opens (or creates) the node's data directory and constructs the
-    /// in-memory state. The configured storage backend is not yet bound at
-    /// this layer; see [`crate::run::run`].
+    /// Opens (or creates) the node's data directory and configured storage
+    /// backend.
     pub fn open(config: Config) -> Result<Self> {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
+        let storage = NodeStorage::open(&config)?;
+        tracing::info!(
+            backend = storage.kind(),
+            chainstate_dir = %config.data_dir.join("chainstate").display(),
+            "opened storage backend"
+        );
         let data_dir = config.data_dir.clone();
         Ok(Self {
             config,
             data_dir,
+            storage,
             replayed: Mutex::new(Vec::new()),
         })
     }
@@ -45,6 +148,12 @@ impl NodeState {
     #[must_use]
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Returns the configured storage backend that was opened.
+    #[must_use]
+    pub const fn storage_kind(&self) -> &'static str {
+        self.storage.kind()
     }
 
     /// Heights walked by the most recent crash-recovery replay.
