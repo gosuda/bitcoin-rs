@@ -207,54 +207,39 @@ BIP68) and block-download orchestration remain deferred**.
   → join each listener.
 - RPC, Electrum, and P2P listeners share a `serve_with_shutdown(Arc<AtomicBool>)`
   pattern using non-blocking `accept()` + 100 ms poll.
-- `NodeState::apply_block(&Block)` runs the consensus pipeline: (1) PoW
-  self-consistency (`header.validate_pow(header.target())`), (2) non-contextual
-  block rules via `bitcoin_rs_consensus::verify_block_rules_borrowed`
-  (empty, missing-coinbase, extra-coinbase, merkle root, witness commitment,
-  block weight), (3) BIP30 (best-effort duplicate-txid via UTXO lookup) +
-  BIP34 (per-network activation via `Network::is_bip34_active`),
-  (4) `BlockTree::insert_header(header, NodeStatus::Active)`,
-  (5) per-tx script verification with `VerifyFlags::MANDATORY` (P2SH +
-  DERSIG + NULLDUMMY + CLTV + CSV + WITNESS + TAPROOT) over a `UtxoSetView`
-  wrapper, (6) UTXO commit, (7) mempool eviction via `remove_by_txid`,
-  (8) tx-index update, (9) chain-tip ArcSwap advance.
+- `NodeState::apply_block(&Block)` runs the consensus pipeline:
+  (1) PoW self-consistency (`header.validate_pow(header.target())`),
+  (2) PoW limit (declared target ≤ `Network::max_target()`),
+  (3) nBits continuity at non-retarget heights (`block.header.bits == parent.header.bits` unless `height % retarget_interval == 0`),
+  (4) non-contextual block rules via `bitcoin_rs_consensus::verify_block_rules_borrowed`
+  (empty, missing-coinbase, extra-coinbase, merkle root, witness commitment, block weight),
+  (5) BIP30 (best-effort duplicate-txid via UTXO lookup) + BIP34 (per-network activation),
+  (6) per-tx script verification with **activation-aware** `VerifyFlags` (P2SH always-on; DERSIG / CLTV / CSV / WITNESS+NULLDUMMY / TAPROOT each gated by `Network::is_*_active(height)`) over a `UtxoSetView` wrapper,
+  (7) COINBASE_MATURITY (100-block depth) via `UtxoSet::get_entry` surfacing `(coinbase, height)`,
+  (8) UTXO commit (`commit_block`),
+  (9) `BlockTree::insert_header(NodeStatus::Active)` — also publishes the new tip via `publish_tip_if_best` on the BlockTree's owned `Arc<ArcSwapOption<TipSnapshot>>`,
+  (10) mempool eviction via `Mempool::remove_by_txid`,
+  (11) tx-index update for `getrawtransaction`.
+  Failed validation at steps 1–8 leaves no orphan header in the BlockTree.
   `import_block` flips `ImportOutcome::applied` to `true` on success.
-- `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via
-  `Mempool::stats()`.
+- **NodeState's `chain_tip` is single-sourced.** `NodeState` caches `Arc::clone(&block_tree.read().tip_handle())` at construction; RPC `Context::from_handles` receives this same Arc. There is no synthetic `self.chain_tip.store(...)` in `apply_block` — the BlockTree publishes the tip via `insert_header`.
+- **P2P listener runs full Bitcoin v1 handshake + message-dispatch loop.** `bitcoin_rs_p2p::handshake::run_inbound_handshake` exchanges Version / WtxidRelay / SendAddrV2 / SendHeaders / Verack with the remote. After handshake the per-connection thread enters `run_message_loop` which routes inbound messages via `dispatch::dispatch_inbound`, sends responses (Pong on Ping, etc.), and exits cleanly on idle (60s read timeout), wire error, or explicit `Disconnecting`. On exit, the peer is removed from the shared registry via address-match retain.
+- **Peer registry surfaced via RPC.** `bitcoin_rs_p2p::PeerInfo` (addr, version, services, user_agent, start_height, conn_time, inbound) is collected on handshake success and pushed to `NodeState`'s shared `Arc<RwLock<Vec<PeerInfo>>>`. `rpc::Context::from_handles` takes this handle; `getpeerinfo` enumerates it into Core-compatible JSON; `getconnectioncount` returns the real `len()`.
+- `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via `Mempool::stats()`.
+- `getblockchaininfo` surfaces real `chainwork` as a 64-character lowercase big-endian hex string via `rpc::Context::chainwork_hex()`.
+- `Network::is_{bip34,bip65,bip66,csv,segwit,taproot}_active(height) -> bool` const fns carry the per-network activation tables from Core's `chainparams.cpp`.
 - Electrum TLS cert config is honored as plaintext-with-warning until a
   matching `electrum_tls_key` field lands; the warning surfaces on every
   boot that configures `electrum_tls_cert` without TLS wiring.
 
 ### What is NOT yet wired (consensus correctness gates)
 
-- **No contextual consensus.** `apply_block` runs non-contextual rules
-  + BIP30/BIP34 + per-tx script verification with `VerifyFlags::MANDATORY`,
-  but it does NOT verify (a) the declared target matches the network's
-  expected difficulty at this height (DAA), (b) BIP113 median-time-past
-  for nLocktime, (c) BIP68 relative-locktime sequences, (d) BIP9
-  deployment-state-aware script flags, (e) BIP-COINBASE-100 (coinbase
-  maturity). Every block must currently be Taproot-active (MANDATORY
-  flags) — pre-Taproot blocks would over-strict-fail. These gates need
-  BlockTree-derived state (window queries for MTP, height-aware activation
-  for soft-fork flags).
-- **NodeState dual-writes the chain tip.** `chain_tip: Arc<ArcSwapOption<TipSnapshot>>`
-  is published by both `apply_block` (synthetic) and `BlockTree::publish_tip_if_best`
-  (real). The clean refactor collapses onto `BlockTree::tip_handle()` — deferred.
-- **No `verify_transaction_borrowed`.** The per-tx script verify clones each
-  `bitcoin::Transaction` into a `bitcoin_rs_primitives::Tx` wrapper because
-  the consensus API takes `&Tx`. A borrowed adapter on the consensus crate
-  drops the clone (perf lever; see TODO breadcrumb in `state.rs`).
-- **P2P handshake completes but the peer is dropped.** `listener.rs` spawns
-  a per-connection thread that runs `run_inbound_handshake` (Version/Verack
-  + BIP155/BIP339 feature messages) with a 60-second read/write timeout.
-  On success the connection is closed — there is no peer registry yet, so
-  the handshake produces no durable state. The peer-tracking PeerManager
-  + post-handshake message dispatch loop is the next strand.
-- **No block download orchestrator.** No code path connects accepted
-  peers to `import_block`; `import_block` only fires from tests.
-- **No index / filter / coinstats updates triggered by tip advance.**
-  Electrum index, BIP158 filter generation, and coinstats remain stale
-  until a follow-up wires the listener side.
+- **No full DAA retarget computation.** `apply_block` checks PoW limit and nBits continuity at non-retarget heights, but at every 2016th block (mainnet retarget interval) the declared target is permitted to differ from the parent without verifying it matches the new target computed from the last 2016 blocks' timespan.
+- **No BIP113 MTP nLocktime check, no BIP68 sequence locks, no BIP9 deployment-state tracking.** `verify_transaction` takes only `(tx, prevouts, height, flags)` — adding median-time-past + relative-locktime context requires a consensus crate API extension.
+- **No `verify_transaction_borrowed`.** Per-tx script verify clones each `bitcoin::Transaction` into a `bitcoin_rs_primitives::Tx` wrapper because the consensus API takes `&Tx`. A borrowed adapter on the consensus crate (mirroring `verify_block_rules_borrowed`) drops the clone (perf lever; see TODO breadcrumb in `state.rs`). Also requires `Interpreter::execute` to accept `&bitcoin::Transaction`.
+- **No outbound message channel per peer.** The post-handshake dispatch loop reads inbound and writes responses derived from `dispatch_inbound`, but external callers (e.g. a block download orchestrator) have no path to inject messages addressed to a specific peer — the peer's `TcpStream` is owned by the per-connection thread.
+- **No block download orchestrator.** No code path connects accepted peers to `import_block` via `getheaders` / `getdata` / `block` exchange. `import_block` only fires from tests.
+- **No index / filter / coinstats updates triggered by tip advance.** Electrum index, BIP158 filter generation, and coinstats remain stale until a follow-up wires the listener side.
 - **G14 empirical validation still deferred.** The `faster than Bitcoin
   Core` claim requires multi-day live mainnet IBD against `bitcoind`
   and `gocoin`. Operator responsibility.
