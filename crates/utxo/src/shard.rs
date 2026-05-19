@@ -44,6 +44,17 @@ impl<'arena> ShardTable<'arena> {
     }
 }
 
+/// One live UTXO output with the metadata consensus consumers need.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveOutput {
+    /// The transaction output script + value.
+    pub txout: TxOut,
+    /// Whether the originating transaction was a coinbase.
+    pub coinbase: bool,
+    /// Block height at which this output was created.
+    pub height: u32,
+}
+
 self_cell! {
     /// Pinned shard arena plus the table that borrows from it.
     pub struct ShardCell {
@@ -108,6 +119,25 @@ impl Shard {
             let output = record.find_output(vout)?;
             let script = script_slice(table, output)?;
             Some(txout_from_parts(output.value, script))
+        })
+    }
+
+    /// Returns the full live-output entry (txout + coinbase + height)
+    /// if `key:vout` is live in this shard.
+    #[must_use]
+    pub fn get_entry(&self, key: &UtxoKey, vout: u32) -> Option<LiveOutput> {
+        let cell = self.inner.read();
+        cell.with_dependent(|_arena, table| {
+            let record = table
+                .table
+                .find(key.hash(), |record| record.key() == *key)?;
+            let output = record.find_output(vout)?;
+            let script = script_slice(table, output)?;
+            Some(LiveOutput {
+                txout: txout_from_parts(output.value, script),
+                coinbase: output.coinbase,
+                height: output.height,
+            })
         })
     }
 

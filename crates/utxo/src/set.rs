@@ -253,6 +253,14 @@ impl UtxoSet {
         self.shards[usize::from(key.shard())].get(&key, op.vout)
     }
 
+    /// Returns the full live-output entry (txout + coinbase + height)
+    /// if `op` is live in the set.
+    #[must_use]
+    pub fn get_entry(&self, op: &OutPoint) -> Option<crate::shard::LiveOutput> {
+        let key = UtxoKey::from_txid(&op.txid);
+        self.shards[usize::from(key.shard())].get_entry(&key, op.vout)
+    }
+
     /// Reverses one connected block using its undo data.
     pub fn undo_block(&self, undo: &UndoBatch) -> Result<(), UtxoError> {
         self.commit_adds_and_removes(&undo.restores, &undo.removes)

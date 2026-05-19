@@ -43,3 +43,23 @@ fn commit_roundtrips_ten_thousand_outputs() -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
+
+#[test]
+fn get_entry_surfaces_coinbase_and_height() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let mut changes = BlockChanges::default();
+    let outpoint = OutPoint::new(txid(42), 0);
+    let txout = txout(42);
+
+    changes.add(UtxoAdd::new(outpoint, txout.clone(), true, 123));
+    set.commit_block(&changes, &txid(43))?;
+
+    let entry = set
+        .get_entry(&outpoint)
+        .ok_or("expected committed outpoint to be live")?;
+    assert_eq!(entry.txout, txout);
+    assert!(entry.coinbase);
+    assert_eq!(entry.height, 123);
+
+    Ok(())
+}
