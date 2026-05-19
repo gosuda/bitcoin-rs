@@ -185,6 +185,17 @@ impl Mempool {
         ids
     }
 
+    /// Removes the entry for `txid` along with all descendants that spend
+    /// its outputs. Returns the set of removed entry ids in stable order.
+    ///
+    /// Returns an empty vector when the txid is not present in the pool.
+    pub fn remove_by_txid(&mut self, txid: &bitcoin::Txid) -> Vec<EntryId> {
+        let Some(id) = self.by_txid.get(txid).copied() else {
+            return Vec::new();
+        };
+        self.remove_entry_and_descendants(id)
+    }
+
     pub(crate) fn conflicts_for(&self, tx: &Transaction) -> Vec<EntryId> {
         let mut conflicts = Vec::new();
         for input in &tx.input {
@@ -454,6 +465,8 @@ mod tests {
 
     use super::*;
 
+    use bitcoin::hashes::Hash as _;
+
     #[test]
     fn stats_reports_empty_and_inserted_entry_counters() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
@@ -475,6 +488,37 @@ mod tests {
         assert_eq!(stats.txs, 1);
         assert_eq!(stats.bytes, expected_vsize);
         assert_eq!(stats.total_fee, expected_fee);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_by_txid_returns_empty_for_unknown_txid() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+
+        let removed = pool.remove_by_txid(&bitcoin::Txid::all_zeros());
+
+        assert!(removed.is_empty());
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn remove_by_txid_removes_entry_and_descendants_when_present() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let txid = tx.compute_txid();
+        let entry = MempoolEntry::new(Arc::new(tx), 123, 4_567, 0, 0);
+        let id = pool.insert_entry(entry)?;
+
+        let removed = pool.remove_by_txid(&txid);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed.first().copied(), Some(id));
+        assert_eq!(pool.len(), 0);
         Ok(())
     }
 }
