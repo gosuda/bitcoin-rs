@@ -131,7 +131,7 @@ pub fn run(mut config: Config) -> Result<()> {
     };
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let loop_handle = EventLoop::new(shutdown_rx);
+    let loop_handle = EventLoop::new(shutdown_rx, state.sync());
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
     let rpc_context = bitcoin_rs_rpc::Context::from_handles(
         state.chain_tip(),

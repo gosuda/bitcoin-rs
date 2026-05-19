@@ -1,4 +1,5 @@
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,6 +12,7 @@ const STATS_INTERVAL: u64 = 1024;
 const MEMPOOL_TICK: Duration = Duration::from_secs(1);
 const DEFRAG_TICK: Duration = Duration::from_secs(1);
 const METRICS_TICK: Duration = Duration::from_secs(10);
+const SYNC_TICK: Duration = Duration::from_secs(5);
 
 /// Central v1 event loop for process-level tick coordination.
 ///
@@ -22,17 +24,21 @@ pub struct EventLoop {
     mempool_tick: Receiver<Instant>,
     defrag_tick: Receiver<Instant>,
     metrics_scrape: Receiver<Instant>,
+    sync_tick: Receiver<Instant>,
+    sync: Arc<crate::BlockSync>,
 }
 
 impl EventLoop {
     /// Builds an event loop from an already-bridged shutdown signal receiver.
     #[must_use]
-    pub fn new(shutdown_signal: Receiver<()>) -> Self {
+    pub fn new(shutdown_signal: Receiver<()>, sync: Arc<crate::BlockSync>) -> Self {
         Self {
             shutdown_signal,
             mempool_tick: tick(MEMPOOL_TICK),
             defrag_tick: tick(DEFRAG_TICK),
             metrics_scrape: tick(METRICS_TICK),
+            sync_tick: tick(SYNC_TICK),
+            sync,
         }
     }
 
@@ -43,6 +49,7 @@ impl EventLoop {
         let mut mempool_ticks: u64 = 0;
         let mut defrag_ticks: u64 = 0;
         let mut metrics_scrapes: u64 = 0;
+        let mut sync_ticks: u64 = 0;
         while !shutdown.load(Ordering::Acquire) {
             iterations += 1;
             if iterations.is_multiple_of(STATS_INTERVAL) {
@@ -51,6 +58,7 @@ impl EventLoop {
                     mempool_ticks,
                     defrag_ticks,
                     metrics_scrapes,
+                    sync_ticks,
                     "event loop heartbeat"
                 );
             }
@@ -78,6 +86,12 @@ impl EventLoop {
                         Self::on_metrics_scrape();
                     }
                 }
+                recv(self.sync_tick) -> ticked => {
+                    if ticked.is_ok() {
+                        sync_ticks += 1;
+                        self.on_sync_tick();
+                    }
+                }
             }
         }
         shutdown::notify_drained();
@@ -103,5 +117,12 @@ impl EventLoop {
         metrics::counter!("node.event_loop.metrics_scrapes").increment(1);
         metrics::histogram!("node.event_loop.tick_seconds").record(started.elapsed().as_secs_f64());
         tracing::trace!("metrics scrape tick");
+    }
+
+    fn on_sync_tick(&self) {
+        let started = quanta::Instant::now();
+        metrics::counter!("node.event_loop.sync_ticks").increment(1);
+        self.sync.tick();
+        metrics::histogram!("node.event_loop.tick_seconds").record(started.elapsed().as_secs_f64());
     }
 }

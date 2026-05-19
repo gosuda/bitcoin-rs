@@ -190,6 +190,7 @@ pub struct NodeState {
     peer_outbound: Arc<
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     >,
+    sync: Arc<crate::BlockSync>,
     mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
 }
@@ -212,6 +213,13 @@ impl NodeState {
         let peers = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
+        let sync = Arc::new(crate::BlockSync::new(
+            Arc::clone(&chain_tip),
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            Arc::clone(&block_tree),
+            config.network,
+        ));
         tracing::info!(
             backend = storage.kind(),
             chainstate_dir = %config.data_dir.join("chainstate").display(),
@@ -232,6 +240,7 @@ impl NodeState {
             peers,
             peer_outbound,
             mining_template_id,
+            sync,
             replayed: Mutex::new(Vec::new()),
         })
     }
@@ -315,6 +324,12 @@ impl NodeState {
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     > {
         Arc::clone(&self.peer_outbound)
+    }
+
+    /// Returns the shared block-download orchestrator.
+    #[must_use]
+    pub fn sync(&self) -> Arc<crate::BlockSync> {
+        Arc::clone(&self.sync)
     }
 
     /// Returns the shared getblocktemplate long-poll id.
@@ -735,6 +750,22 @@ mod tests {
         assert!(
             tree.read().is_empty(),
             "freshly opened tree has zero headers"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_block_sync_orchestrator() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let sync_a = state.sync();
+        let sync_b = state.sync();
+        assert!(
+            Arc::ptr_eq(&sync_a, &sync_b),
+            "sync handle is stable across calls"
         );
         Ok(())
     }
