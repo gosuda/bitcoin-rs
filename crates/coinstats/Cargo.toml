@@ -1,0 +1,14 @@
+[package]
+name = "bitcoin-rs-coinstats"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: coinstats"
+
+[lints]
+workspace = true
+
+[dependencies]

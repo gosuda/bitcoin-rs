@@ -1,0 +1,14 @@
+[package]
+name = "bitcoin-rs-primitives"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: primitives — hashes, outpoints, varints, tx/block layout"
+
+[lints]
+workspace = true
+
+[dependencies]

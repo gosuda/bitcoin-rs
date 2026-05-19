@@ -1,0 +1,14 @@
+[package]
+name = "bitcoin-rs-chain"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: chain"
+
+[lints]
+workspace = true
+
+[dependencies]

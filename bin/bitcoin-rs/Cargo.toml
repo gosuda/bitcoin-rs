@@ -1,0 +1,20 @@
+[package]
+name = "bitcoin-rs"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs node binary"
+
+[[bin]]
+name = "bitcoin-rs"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+mimalloc.workspace = true
+anyhow.workspace = true

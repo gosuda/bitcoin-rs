@@ -1,0 +1,19 @@
+/target
+**/target
+Cargo.lock.bak
+*.swp
+*.tmp
+.idea/
+.vscode/
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph.svg
+heap-profile-*
+core.*
+/tmp/
+
+# Re-include project plan tracked in-repo (global ~/.gitignore drops PLAN.md).
+!PLAN.md
+!DEVIATIONS.md

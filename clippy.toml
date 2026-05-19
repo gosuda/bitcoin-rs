@@ -1,0 +1,9 @@
+msrv = "1.85.0"
+cognitive-complexity-threshold = 15
+type-complexity-threshold = 250
+too-many-arguments-threshold = 8
+disallowed-types = [
+    { path = "std::sync::Mutex",         reason = "use parking_lot::Mutex" },
+    { path = "std::sync::RwLock",        reason = "use parking_lot::RwLock" },
+    { path = "std::collections::HashMap", reason = "use hashbrown::HashMap or hashbrown::HashTable" },
+]

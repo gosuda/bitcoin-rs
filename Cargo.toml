@@ -1,0 +1,299 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/primitives",
+    "crates/consensus",
+    "crates/script",
+    "crates/storage",
+    "crates/utxo",
+    "crates/utreexo",
+    "crates/chain",
+    "crates/index",
+    "crates/filters",
+    "crates/coinstats",
+    "crates/pruning",
+    "crates/mempool",
+    "crates/p2p",
+    "crates/wallet",
+    "crates/mining",
+    "crates/rpc",
+    "crates/electrum",
+    "crates/node",
+    "bin/bitcoin-rs",
+]
+
+[workspace.package]
+edition      = "2024"
+rust-version = "1.85.0"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/bitcoin-rs/bitcoin-rs"
+version      = "0.1.0"
+authors      = ["bitcoin-rs contributors"]
+
+# ============================================================================
+# Workspace dependencies.
+#
+# Every floor and feature set below was verified against crates.io via
+# `cargo info` on 2026-05-19. The PLAN.md "Tech-Stack Dependency Table"
+# carries the rationale; this section is the authoritative reflection.
+# ============================================================================
+[workspace.dependencies]
+
+# Internal crates
+bitcoin-rs-primitives = { path = "crates/primitives", version = "0.1.0" }
+bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.1.0" }
+bitcoin-rs-script     = { path = "crates/script",     version = "0.1.0" }
+bitcoin-rs-storage    = { path = "crates/storage",    version = "0.1.0" }
+bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.1.0" }
+bitcoin-rs-utreexo    = { path = "crates/utreexo",    version = "0.1.0" }
+bitcoin-rs-chain      = { path = "crates/chain",      version = "0.1.0" }
+bitcoin-rs-index      = { path = "crates/index",      version = "0.1.0" }
+bitcoin-rs-filters    = { path = "crates/filters",    version = "0.1.0" }
+bitcoin-rs-coinstats  = { path = "crates/coinstats",  version = "0.1.0" }
+bitcoin-rs-pruning    = { path = "crates/pruning",    version = "0.1.0" }
+bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.1.0" }
+bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.1.0" }
+bitcoin-rs-wallet     = { path = "crates/wallet",     version = "0.1.0" }
+bitcoin-rs-mining     = { path = "crates/mining",     version = "0.1.0" }
+bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.1.0" }
+bitcoin-rs-electrum   = { path = "crates/electrum",   version = "0.1.0" }
+bitcoin-rs-node       = { path = "crates/node",       version = "0.1.0" }
+
+# Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
+mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
+
+# --- Bitcoin ecosystem --------------------------------------------------------
+# bitcoin 0.32 line; 0.33 is still beta. `default = [std, secp-recovery]`.
+bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
+    "std", "secp-recovery", "serde", "rand-std",
+] }
+
+# bitcoinkernel: latest stable is 0.2.0 (corrected from plan claim of 0.1).
+# No features exposed.
+bitcoinkernel = { version = ">=0.2, <0.3", default-features = false }
+
+# secp256k1 0.31 line; 0.32 still beta. NOTE: feature is `rand`, not `rand-std`.
+secp256k1 = { version = ">=0.31.1, <0.32", default-features = false, features = [
+    "std", "alloc", "recovery", "rand", "serde", "global-context",
+] }
+
+# sha2 0.10: `asm` feature is real on 0.10 but removed on 0.11. Stay <0.11.
+sha2 = { version = ">=0.10.9, <0.11", default-features = false, features = [
+    "std", "asm",
+] }
+
+# bitcoin_hashes 0.14 (aligned with bitcoin 0.32). NOTE: 0.14 has no `asm`
+# feature — the asm path is supplied transitively via sha2.
+bitcoin_hashes = { version = ">=0.14.1, <0.15", default-features = false, features = [
+    "std",
+] }
+
+# Miniscript: descriptors + BIP380/381/382.
+miniscript = { version = ">=13, <14", default-features = false, features = [
+    "std", "serde",
+] }
+
+# rustreexo 0.5 line. `with-serde` is the alias that enables `serde`.
+rustreexo = { version = ">=0.5, <0.6", default-features = false, features = [
+    "std", "with-serde",
+] }
+
+# bitcoin_slices: zero-alloc block visitor. Default features list is empty;
+# enable bitcoin + sha2 explicitly.
+bitcoin_slices = { version = ">=0.11, <0.12", default-features = false, features = [
+    "bitcoin", "sha2",
+] }
+
+# Coin selection — BnB + knapsack + waste-metric. `default = [std]`.
+bdk_coin_select = { version = ">=0.4.1, <0.5" }
+
+# Note: `payjoin` is intentionally NOT declared at the workspace level. Task 14
+# adds it with feature names verified against the version current at that time;
+# the 0.23 line uses `["v2"]` and the 1.0-rc line uses different feature names,
+# so we defer to avoid pinning the wrong API surface.
+
+# --- Core data structures -----------------------------------------------------
+# hashbrown 0.17: HashTable raw API. Default also adds `equivalent` + `raw-entry`
+# which we do not use; disable defaults for minimal surface.
+hashbrown = { version = ">=0.17.1, <0.18", default-features = false, features = [
+    "inline-more", "default-hasher", "allocator-api2",
+] }
+
+# bumpalo: `+default = [allocator-api2]`. Add `collections` for arena Vec/String.
+bumpalo = { version = ">=3.20, <4", default-features = false, features = [
+    "collections", "allocator-api2",
+] }
+
+# self_cell: proc-macro-free. No features needed.
+self_cell = { version = ">=1.2.2, <2", default-features = false }
+
+# ruint: 256-bit chainwork. `default = [std]`.
+ruint = { version = ">=1.17, <2", default-features = false, features = [
+    "alloc",
+] }
+
+# slab: block-tree node arena. `default = [std]`.
+slab = { version = ">=0.4.12, <0.5", default-features = false, features = [
+    "std", "serde",
+] }
+
+# arc-swap (registry name uses hyphen, NOT underscore).
+arc-swap = { version = ">=1.9.1, <2", default-features = false }
+
+# parking_lot 0.12 line (0.13 does not exist).
+parking_lot = { version = ">=0.12.5, <0.13", default-features = false, features = [
+    "arc_lock", "send_guard",
+] }
+
+# Crossbeam (event-loop + utilities + mempool fallback path).
+crossbeam-channel  = { version = ">=0.5.15, <0.6", default-features = false, features = ["std"] }
+crossbeam-utils    = { version = ">=0.8.21, <0.9", default-features = false, features = ["std"] }
+crossbeam-skiplist = { version = ">=0.1.3, <0.2",  default-features = false, features = ["std", "alloc"] }
+
+# Rayon — no default features at all on 1.12; nothing to disable/add.
+rayon = { version = ">=1.12, <2" }
+
+# --- Hashing ------------------------------------------------------------------
+foldhash      = { version = ">=0.2, <0.3", default-features = false, features = ["std"] }
+gxhash        = { version = ">=3.5, <4",   default-features = false, features = ["std", "hybrid"] }
+nohash-hasher = { version = ">=0.2, <0.3", default-features = false, features = ["std"] }
+# Dev-only bench dep. `default = [std]`.
+rapidhash     = { version = ">=4.4, <5",   default-features = false, features = ["std"] }
+
+# --- Small vectors / strings --------------------------------------------------
+# tinyvec: no default features; explicitly enable alloc.
+tinyvec     = { version = ">=1.11, <2", default-features = false, features = ["alloc"] }
+# smallvec 1.x stable (2.0 is alpha). No default features; enable union + const_*.
+smallvec    = { version = ">=1.15, <2", default-features = false, features = [
+    "union", "const_generics", "const_new",
+] }
+compact_str = { version = ">=0.9, <1", default-features = false, features = ["std"] }
+
+# --- Zero-copy / compression --------------------------------------------------
+bytemuck = { version = ">=1.25, <2", default-features = false, features = ["derive"] }
+zerocopy = { version = ">=0.8, <0.9", default-features = false, features = ["derive", "std"] }
+lz4_flex = { version = ">=0.13, <0.14", default-features = false, features = ["std", "frame"] }
+
+# --- Storage backends ---------------------------------------------------------
+# rust-rocksdb 0.44 line (plan claim of 0.49 does not exist on crates.io).
+# `default = [snappy, lz4, zstd, zlib, bzip2, bindgen-runtime]` — disable to
+# pick only what we use (rocksdb default).
+rust-rocksdb = { version = ">=0.44, <0.45", default-features = false, features = [
+    "mt_static", "snappy", "lz4", "zstd",
+] }
+
+# MDBX via init4tech fork — no features exposed.
+signet-libmdbx = { version = ">=0.8.3, <0.9", default-features = false }
+
+# fjall 2.x line (plan claim of 3.1 does not exist on crates.io).
+fjall = { version = ">=2.11, <3", default-features = false, features = ["lz4"] }
+
+# redb 2.x line (plan claim of 4.1 does not exist on crates.io). No defaults.
+redb = { version = ">=2.6, <3", default-features = false }
+
+# --- Serialization / config ---------------------------------------------------
+serde      = { version = ">=1, <2",     default-features = false, features = ["derive", "std", "alloc"] }
+serde_json = { version = ">=1, <2",     default-features = false, features = ["std", "raw_value"] }
+sonic-rs   = { version = ">=0.5, <0.6", default-features = false }
+# toml: `+default = [parse, display]`. Latest 1.1.2 — bump floor past 0.8.
+toml       = { version = ">=0.8.23, <2", default-features = false, features = ["parse", "display"] }
+clap       = { version = ">=4.6, <5",   default-features = false, features = [
+    "std", "color", "error-context", "help", "suggestions", "usage",
+    "derive", "env", "wrap_help",
+] }
+
+# --- Observability ------------------------------------------------------------
+tracing            = { version = ">=0.1.44, <0.2", default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = { version = ">=0.3.23, <0.4", default-features = false, features = [
+    "std", "fmt", "registry", "ansi", "env-filter", "json", "smallvec",
+    "tracing-log", "sharded-slab", "thread_local",
+] }
+# metrics 0.24 has NO features at all.
+metrics                     = { version = ">=0.24.6, <0.25" }
+# metrics-exporter-prometheus default pulls tokio+hyper+rustls; disable defaults
+# and let crates/node opt in to `http-listener` if/when wired (Task 18).
+metrics-exporter-prometheus = { version = ">=0.18, <0.19", default-features = false }
+# quanta: monotonic TSC clock for hot-path timing. No special features needed.
+quanta                      = { version = ">=0.12.6, <0.13", default-features = false }
+
+# --- Signals + TLS ------------------------------------------------------------
+signal-hook = { version = ">=0.4.4, <0.5", default-features = false }
+# rustls 0.23: default = [aws_lc_rs, logging, prefer-post-quantum, std, tls12].
+# Switch to the `ring` provider so we keep one TLS stack consistent with the
+# project's "no aws-lc-sys C build" preference; keep `logging` and `tls12`.
+rustls           = { version = ">=0.23.40, <0.24", default-features = false, features = [
+    "std", "ring", "tls12", "logging",
+] }
+rustls-pki-types = { version = ">=1.14, <2", default-features = false, features = ["std"] }
+
+# --- Errors -------------------------------------------------------------------
+thiserror = { version = ">=2, <3",        default-features = false, features = ["std"] }
+anyhow    = { version = ">=1.0.100, <2",  default-features = false, features = ["std"] }
+
+# --- Atomics ------------------------------------------------------------------
+portable-atomic = { version = ">=1.13, <2", default-features = false, features = ["std", "fallback"] }
+
+# --- Test / bench -------------------------------------------------------------
+proptest        = { version = ">=1.11, <2",    default-features = false, features = ["std"] }
+proptest-derive = { version = ">=0.8, <0.9",   default-features = false }
+# criterion 0.7 (plan claim of 0.8 does not exist).
+criterion       = { version = ">=0.7, <0.8",   default-features = false, features = [
+    "cargo_bench_support", "html_reports", "plotters", "rayon",
+] }
+
+# ============================================================================
+# Lints
+# ============================================================================
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs           = "warn"
+unreachable_pub        = "warn"
+
+[workspace.lints.clippy]
+pedantic                   = { level = "warn", priority = -1 }
+nursery                    = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+as_conversions             = "deny"
+cast_lossless              = "deny"
+unwrap_used                = "deny"
+expect_used                = "warn"
+dbg_macro                  = "deny"
+todo                       = "deny"
+unimplemented              = "deny"
+mod_module_files           = "deny"
+# Pedantic noise overrides — drop these patterns from the warn band.
+module_name_repetitions    = "allow"
+similar_names              = "allow"
+must_use_candidate         = "allow"
+missing_errors_doc         = "allow"
+missing_panics_doc         = "allow"
+struct_field_names         = "allow"
+# Nursery items that fire on perfectly fine code.
+option_if_let_else          = "allow"
+significant_drop_tightening = "allow"
+redundant_pub_crate         = "allow"
+
+# ============================================================================
+# Profiles
+# ============================================================================
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+debug         = "line-tables-only"
+strip         = "symbols"
+
+[profile.bench]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+debug         = "line-tables-only"
+
+[profile.dev]
+opt-level = 1
+debug     = "limited"
+
+[profile.test]
+opt-level = 1
+debug     = "limited"

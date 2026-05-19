@@ -1,0 +1,45 @@
+# cargo-deny config for bitcoin-rs
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+no-default-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = [
+    # Forbid disallowed crates discovered during the 2026-05-19 dependency audit:
+    { name = "openssl", reason = "use rustls" },
+    { name = "openssl-sys", reason = "use rustls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
