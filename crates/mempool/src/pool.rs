@@ -72,6 +72,17 @@ pub struct Mempool {
     /// Active mempool policy limits.
     pub limits: MempoolLimits,
 }
+/// Aggregate mempool counters surfaced through the JSON-RPC `getmempoolinfo`
+/// and Electrum `mempool.get_fee_histogram` surfaces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MempoolStats {
+    /// Number of transactions in the mempool.
+    pub txs: u64,
+    /// Sum of virtual sizes in vbytes.
+    pub bytes: u64,
+    /// Sum of base fees in satoshis.
+    pub total_fee: u64,
+}
 
 impl Mempool {
     /// Creates an empty mempool with the supplied limits.
@@ -138,6 +149,22 @@ impl Mempool {
         self.entries.iter().fold(0, |total, (_, entry)| {
             total.saturating_add(u64::from(entry.vsize))
         })
+    }
+
+    /// Returns aggregate counters for the current pool.
+    #[must_use]
+    pub fn stats(&self) -> MempoolStats {
+        let txs = u64::try_from(self.entries.len()).unwrap_or(u64::MAX);
+        let bytes = self.total_vsize();
+        let total_fee = self
+            .entries
+            .iter()
+            .fold(0_u64, |acc, (_id, entry)| acc.saturating_add(entry.fee));
+        MempoolStats {
+            txs,
+            bytes,
+            total_fee,
+        }
     }
 
     /// Returns an entry by public id.
@@ -417,4 +444,37 @@ pub(crate) fn tx_fee_rate(fee: u64, vsize: u32) -> u64 {
 
 const fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(OutPoint, EntryId)> {
     (outpoint, EntryId::MIN)..=(outpoint, EntryId::MAX)
+}
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    use bitcoin::Transaction;
+
+    use super::*;
+
+    #[test]
+    fn stats_reports_empty_and_inserted_entry_counters() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.stats(), MempoolStats::default());
+
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let entry = MempoolEntry::new(Arc::new(tx), 123, 4_567, 0, 0);
+        let expected_vsize = u64::from(entry.vsize);
+        let expected_fee = entry.fee;
+
+        pool.insert_entry(entry)?;
+
+        let stats = pool.stats();
+        assert_eq!(stats.txs, 1);
+        assert_eq!(stats.bytes, expected_vsize);
+        assert_eq!(stats.total_fee, expected_fee);
+        Ok(())
+    }
 }

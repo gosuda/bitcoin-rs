@@ -20,5 +20,5 @@ pub use entry::{EntryId, MempoolEntry};
 pub use eviction::evict_lowest_fee_packages;
 pub use pareto::ParetoFront;
 pub use policy::{MempoolLimits, PolicyError};
-pub use pool::{Mempool, MempoolError, ScriptHash};
+pub use pool::{Mempool, MempoolError, MempoolStats, ScriptHash};
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
