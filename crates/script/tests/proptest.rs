@@ -25,7 +25,7 @@ proptest! {
             &[],
             VerifyFlags::MANDATORY,
             &fixture.prevout,
-            &fixture.tx,
+            &fixture.tx.0,
             0,
         );
         prop_assert_eq!(ok, Ok(true));
@@ -44,7 +44,7 @@ proptest! {
             &witness,
             VerifyFlags::MANDATORY,
             &fixture.prevout,
-            &fixture.tx,
+            &fixture.tx.0,
             0,
         );
         prop_assert_eq!(ok, Ok(true));
@@ -63,7 +63,7 @@ proptest! {
             &witness,
             VerifyFlags::MANDATORY,
             &fixture.prevout,
-            &fixture.tx,
+            &fixture.tx.0,
             0,
         );
         prop_assert_eq!(ok, Ok(true));
@@ -82,7 +82,7 @@ proptest! {
             &[],
             VerifyFlags::MANDATORY,
             &fixture.prevout,
-            &fixture.tx,
+            &fixture.tx.0,
             0,
         );
         prop_assert!(matches!(ok, Err(bitcoin_rs_script::ScriptError::Verification(_))));

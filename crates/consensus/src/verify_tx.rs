@@ -10,26 +10,35 @@ use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, MAX_MONEY};
 pub fn verify_transaction(
     tx: &Tx,
     prevouts: &impl UtxoView,
+    height: u32,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    verify_transaction_borrowed(&tx.0, prevouts, height, flags)
+}
+
+/// Verifies non-contextual and input-script transaction rules for a borrowed transaction.
+pub fn verify_transaction_borrowed(
+    tx: &bitcoin::Transaction,
+    prevouts: &impl UtxoView,
     _height: u32,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    let bitcoin_tx = &tx.0;
-    if bitcoin_tx.input.is_empty() {
+    if tx.input.is_empty() {
         return Err(ConsensusError::EmptyInputs);
     }
-    if bitcoin_tx.output.is_empty() {
+    if tx.output.is_empty() {
         return Err(ConsensusError::EmptyOutputs);
     }
 
-    let output_value = total_output_value(tx)?;
-    if bitcoin_tx.is_coinbase() {
+    let output_value = total_output_value_borrowed(tx)?;
+    if tx.is_coinbase() {
         return Ok(());
     }
 
     let mut seen = BTreeSet::new();
     let mut input_value = 0u64;
     let interpreter = Interpreter;
-    for (input_index, input) in bitcoin_tx.input.iter().enumerate() {
+    for (input_index, input) in tx.input.iter().enumerate() {
         if input.previous_output.is_null() {
             return Err(ConsensusError::NullPrevout { input_index });
         }
@@ -66,9 +75,8 @@ pub fn verify_transaction(
         });
     }
 
-    let sigop_cost =
-        u32::try_from(bitcoin_tx.total_sigop_cost(|outpoint| prevouts.lookup(outpoint)))
-            .unwrap_or(u32::MAX);
+    let sigop_cost = u32::try_from(tx.total_sigop_cost(|outpoint| prevouts.lookup(outpoint)))
+        .unwrap_or(u32::MAX);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -79,8 +87,8 @@ pub fn verify_transaction(
     Ok(())
 }
 
-fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
-    tx.0.output.iter().try_fold(0u64, |sum, output| {
+fn total_output_value_borrowed(tx: &bitcoin::Transaction) -> Result<u64, ConsensusError> {
+    tx.output.iter().try_fold(0u64, |sum, output| {
         let next = sum
             .checked_add(output.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;

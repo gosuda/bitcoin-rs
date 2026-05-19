@@ -1,7 +1,7 @@
 use bitcoin::hashes::Hash as _;
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{Script, ScriptBuf, Witness, consensus::encode};
-use bitcoin_rs_primitives::{Tx, TxOut};
+use bitcoin_rs_primitives::TxOut;
 use thiserror::Error;
 
 /// Verification flags passed to the delegated consensus script engine.
@@ -219,10 +219,10 @@ impl Interpreter {
         witness: &[Vec<u8>],
         flags: VerifyFlags,
         prevout: &TxOut,
-        tx: &Tx,
+        tx: &bitcoin::Transaction,
         input_idx: usize,
     ) -> Result<bool, ScriptError> {
-        let mut spending = tx.0.clone();
+        let mut spending = tx.clone();
         let inputs = spending.input.len();
         let input = spending
             .input

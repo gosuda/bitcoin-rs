@@ -160,18 +160,15 @@ fn verify_block_transactions(
 ) -> core::result::Result<(), ApplyError> {
     // Per-tx script verification. The view borrows the UTXO set as it
     // stood BEFORE this block's outputs were committed — inputs in this
-    // block can only spend outputs from earlier blocks. Coinbase txs
-    // early-return inside `verify_transaction`.
+    // block can only spend outputs from earlier blocks. Coinbase txs have
+    // no prevouts to verify here.
     let flags = compute_verify_flags(handles.network, height);
     let view = crate::utxo_view::UtxoSetView::new(Arc::clone(&handles.utxo));
     for tx in &block.txdata {
         if tx.is_coinbase() {
             continue;
         }
-        // TODO(perf): drop the per-tx clone once `verify_transaction_borrowed(&bitcoin::Transaction, ...)`
-        // lands on `bitcoin_rs_consensus`. See DEVIATIONS §7.
-        let wrapped = bitcoin_rs_primitives::Tx(tx.clone());
-        bitcoin_rs_consensus::verify_transaction(&wrapped, &view, height, flags)?;
+        bitcoin_rs_consensus::verify_transaction_borrowed(tx, &view, height, flags)?;
     }
     Ok(())
 }
