@@ -95,3 +95,30 @@ taproot helpers, and the Rayon-backed Schnorr batch shape.
 The hand-rolled dispatcher remains a follow-up behind a `hand-rolled` cargo
 feature. It must ship with a parity-vs-bitcoin-crate test before replacing the
 delegated v1 path, so downstream callers do not observe an API change.
+
+### v1 taproot coverage gap
+
+The `bitcoinconsensus` C library that backs `bitcoin::Script::verify_with_flags`
+does not validate taproot rules under `VERIFY_ALL`. The v1 `Interpreter`
+therefore:
+
+- Verifies legacy + segwit-v0 scripts via `verify_with_flags` (full).
+- Verifies **single-input** taproot key-path spends via a local BIP341 sighash +
+  `secp256k1::verify_schnorr` path.
+- **Returns `ScriptError::TaprootPrevoutsUnavailable`** for multi-input taproot
+  spends, and does **not** execute tapscript (BIP342) opcodes at all.
+- Sigop counting omits taproot's per-input weight contribution.
+
+**Consequence:** the default-features build can validate everything up through
+Taproot activation (block 709632) for single-input taproot transactions only.
+Multi-input taproot and tapscript spends require the `kernel` feature
+(libbitcoinkernel). Future work, behind a `hand-rolled` feature in
+`crates/script`, ships the missing BIP341/BIP342 interpreter coverage.
+
+### v1 legacy sighash + `OP_CODESEPARATOR`
+
+`bitcoin::sighash::SighashCache::legacy_signature_hash` rejects scripts that
+contain `OP_CODESEPARATOR` (Core's pre-segwit handling is removed in the Rust
+port). The `sighash.json` vector runner skips rows whose script-code contains
+`OP_CODESEPARATOR` and reports the count in the test output. The skipped rows
+are a known v1 gap covered by the same `hand-rolled` follow-up.
