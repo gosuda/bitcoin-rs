@@ -144,6 +144,57 @@ fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn empty_context_is_not_initial_block_download() -> Result<(), Box<dyn std::error::Error>> {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("getblockchaininfo", &json!([]))?;
+
+    assert_eq!(result.get("blocks").as_u64(), Some(0));
+    assert_eq!(result.get("headers").as_u64(), Some(0));
+    assert_eq!(result.get("initialblockdownload").as_bool(), Some(false));
+    Ok(())
+}
+
+#[test]
+fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn std::error::Error>>
+{
+    let ctx = Arc::new(Context::new());
+    let applied_hash = Hash256::from_le_bytes(&[1_u8; 32]);
+    let header_hash = Hash256::from_le_bytes(&[2_u8; 32]);
+    ctx.set_applied_tip(TipSnapshot {
+        tip_id: NodeId::new(1),
+        height: 3,
+        chainwork: ChainWork::ZERO,
+        hash: applied_hash,
+    });
+    ctx.set_chain_tip(TipSnapshot {
+        tip_id: NodeId::new(2),
+        height: 7,
+        chainwork: ChainWork::ZERO,
+        hash: header_hash,
+    });
+    let handler = Handler::new(ctx);
+
+    let info = handler.dispatch("getblockchaininfo", &json!([]))?;
+    assert_eq!(info.get("blocks").as_u64(), Some(3));
+    assert_eq!(info.get("headers").as_u64(), Some(7));
+    assert_eq!(
+        info.get("bestblockhash").as_str(),
+        Some(applied_hash.to_string_be().as_str())
+    );
+    assert_eq!(info.get("initialblockdownload").as_bool(), Some(true));
+    assert_eq!(
+        handler.dispatch("getblockcount", &json!([]))?.as_u64(),
+        Some(3)
+    );
+    assert_eq!(
+        handler.dispatch("getbestblockhash", &json!([]))?.as_str(),
+        Some(applied_hash.to_string_be().as_str())
+    );
+    Ok(())
+}
+
+#[test]
 fn network_peer_methods_read_shared_peer_registry() -> Result<(), Box<dyn std::error::Error>> {
     let peers = Arc::new(RwLock::new(vec![PeerInfo {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
@@ -203,6 +254,12 @@ impl Fixture {
             chainwork: ChainWork::ZERO,
             hash: block_hash,
         });
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 7,
+            chainwork: ChainWork::ZERO,
+            hash: block_hash,
+        });
         ctx.add_block(BlockRecord::synthetic(7, block_hash));
         let tx = tx(1, ScriptBuf::from_bytes(vec![0x51]));
         let txid = ctx.add_transaction(tx.clone());
@@ -219,6 +276,7 @@ impl Fixture {
 
 fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
     Arc::new(Context::from_handles(
+        Arc::new(ArcSwapOption::empty()),
         Arc::new(ArcSwapOption::empty()),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Arc::new(RwLock::new(Vec::new())),

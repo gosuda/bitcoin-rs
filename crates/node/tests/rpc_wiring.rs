@@ -21,6 +21,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let state = NodeState::open(config)?;
 
     let chain_tip = state.chain_tip();
+    let applied_tip = state.applied_tip();
     let mempool = state.mempool();
     let blocks = state.blocks();
     let transactions = state.transactions();
@@ -30,6 +31,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
 
     let ctx = Context::from_handles(
         Arc::clone(&chain_tip),
+        Arc::clone(&applied_tip),
         Arc::clone(&mempool),
         Arc::clone(&blocks),
         Arc::clone(&transactions),
@@ -41,6 +43,10 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     assert!(
         Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
         "chain_tip must share identity"
+    );
+    assert!(
+        Arc::ptr_eq(&ctx.applied_tip, &applied_tip),
+        "applied_tip must share identity"
     );
     assert!(
         Arc::ptr_eq(&ctx.mempool, &mempool),

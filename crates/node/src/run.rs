@@ -139,6 +139,7 @@ pub fn run(mut config: Config) -> Result<()> {
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
     let rpc_context = bitcoin_rs_rpc::Context::from_handles(
         state.chain_tip(),
+        state.applied_tip(),
         state.mempool(),
         state.blocks(),
         state.transactions(),

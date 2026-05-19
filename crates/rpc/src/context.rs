@@ -76,6 +76,8 @@ pub struct NetworkState {
 pub struct Context {
     /// Best-chain tip snapshot published by chain validation.
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Best-applied-block tip snapshot published after block application.
+    pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// In-memory mempool handle.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Block records already available without blocking storage readers.
@@ -112,6 +114,7 @@ impl Context {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
+            applied_tip: Arc::new(ArcSwapOption::empty()),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -132,6 +135,7 @@ impl Context {
     #[allow(clippy::too_many_arguments)]
     pub fn from_handles(
         chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         mempool: Arc<RwLock<Mempool>>,
         blocks: Arc<RwLock<Vec<BlockRecord>>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
@@ -142,6 +146,7 @@ impl Context {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
             chain_tip,
+            applied_tip,
             mempool,
             blocks,
             transactions,
@@ -161,6 +166,11 @@ impl Context {
         let _ignored = self.mining_sender.send(());
     }
 
+    /// Publishes a new best-applied-block tip.
+    pub fn set_applied_tip(&self, tip: TipSnapshot) {
+        self.applied_tip.store(Some(Arc::new(tip)));
+    }
+
     /// Stores a block record for block and header RPCs.
     pub fn add_block(&self, record: BlockRecord) {
         self.blocks.write().push(record);
@@ -177,6 +187,21 @@ impl Context {
     #[must_use]
     pub fn height(&self) -> u32 {
         self.chain_tip.load_full().map_or(0, |tip| tip.height)
+    }
+
+    /// Returns the current best-applied-block height (lags `height()` when
+    /// headers are ahead of downloaded blocks).
+    #[must_use]
+    pub fn applied_height(&self) -> u32 {
+        self.applied_tip.load_full().map_or(0, |tip| tip.height)
+    }
+
+    /// Returns the current best-applied-block hash.
+    #[must_use]
+    pub fn applied_hash(&self) -> Hash256 {
+        self.applied_tip
+            .load_full()
+            .map_or_else(Hash256::default, |tip| tip.hash)
     }
 
     /// Returns the current best block hash, or all-zero before initial sync.
@@ -240,12 +265,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_handles_shares_chain_tip_with_caller() {
+    fn from_handles_shares_tip_handles_with_caller() {
         use alloc::sync::Arc;
 
         let chain_tip = Arc::new(ArcSwapOption::empty());
+        let applied_tip = Arc::new(ArcSwapOption::empty());
         let ctx = Context::from_handles(
             Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::new())),
@@ -256,6 +283,10 @@ mod tests {
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
             "chain_tip must be shared with caller"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.applied_tip, &applied_tip),
+            "applied_tip must be shared with caller"
         );
     }
 }

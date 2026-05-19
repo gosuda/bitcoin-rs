@@ -10,18 +10,18 @@ use crate::handlers::{ensure_no_params, optional_bool, params_array, required_st
 
 pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let blocks = ctx.height();
-    let best = ctx.best_hash().to_string_be();
+    let applied = ctx.applied_height();
+    let headers = ctx.height();
     Ok(json!({
         "chain": "main",
-        "blocks": blocks,
-        "headers": blocks,
-        "bestblockhash": best,
+        "blocks": applied,
+        "headers": headers,
+        "bestblockhash": ctx.applied_hash().to_string_be(),
         "difficulty": 0,
         "time": 0,
         "mediantime": 0,
         "verificationprogress": 0.0,
-        "initialblockdownload": blocks == 0,
+        "initialblockdownload": applied < headers,
         "chainwork": ctx.chainwork_hex(),
         "size_on_disk": 0,
         "pruned": false,
@@ -31,7 +31,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
 
 pub(crate) fn getblockcount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    Ok(json!(ctx.height()))
+    Ok(json!(ctx.applied_height()))
 }
 
 pub(crate) fn getblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -45,7 +45,7 @@ pub(crate) fn getblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 
 pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    Ok(json!(ctx.best_hash().to_string_be()))
+    Ok(json!(ctx.applied_hash().to_string_be()))
 }
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
