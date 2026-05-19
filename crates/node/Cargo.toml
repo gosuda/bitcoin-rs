@@ -110,6 +110,7 @@ crossbeam-channel.workspace = true
 crossbeam-utils.workspace = true
 parking_lot.workspace = true
 arc-swap.workspace = true
+compact_str.workspace = true
 signal-hook = { workspace = true, features = ["iterator"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

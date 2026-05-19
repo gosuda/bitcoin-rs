@@ -436,6 +436,7 @@ dependencies = [
  "bitcoin-rs-utxo",
  "bitcoin-rs-wallet",
  "clap",
+ "compact_str",
  "crossbeam-channel",
  "crossbeam-utils",
  "hashbrown 0.17.1",

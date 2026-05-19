@@ -5,7 +5,15 @@
 //! used by [`crate::crash_recovery`]. Subsystem wiring (chain / utxo / mempool
 //! / index / p2p / rpc / electrum) parks here as the integration point matures.
 
+use arc_swap::{ArcSwap, ArcSwapOption};
+use bitcoin::{Transaction, Txid};
+use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_rpc::{BlockRecord, NetworkState};
+use compact_str::CompactString;
 use core::fmt;
+#[allow(unused_imports)]
+use crossbeam_channel::Receiver;
+use hashbrown::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -119,6 +127,11 @@ pub struct NodeState {
     storage: NodeStorage,
     utxo: Arc<UtxoSet>,
     mempool: Arc<RwLock<Mempool>>,
+    chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
+    network: Arc<RwLock<NetworkState>>,
+    mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
 }
 
@@ -132,6 +145,11 @@ impl NodeState {
         let storage = NodeStorage::open(&config)?;
         let utxo = Arc::new(UtxoSet::new());
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let chain_tip = Arc::new(ArcSwapOption::empty());
+        let blocks = Arc::new(RwLock::new(Vec::new()));
+        let transactions = Arc::new(RwLock::new(HashMap::new()));
+        let network = Arc::new(RwLock::new(NetworkState::default()));
+        let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
         tracing::info!(
             backend = storage.kind(),
             chainstate_dir = %config.data_dir.join("chainstate").display(),
@@ -144,6 +162,11 @@ impl NodeState {
             storage,
             utxo,
             mempool,
+            chain_tip,
+            blocks,
+            transactions,
+            network,
+            mining_template_id,
             replayed: Mutex::new(Vec::new()),
         })
     }
@@ -176,6 +199,36 @@ impl NodeState {
     #[must_use]
     pub fn mempool(&self) -> Arc<RwLock<Mempool>> {
         Arc::clone(&self.mempool)
+    }
+
+    /// Returns the shared best-chain tip handle.
+    #[must_use]
+    pub fn chain_tip(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
+        Arc::clone(&self.chain_tip)
+    }
+
+    /// Returns the shared block-records handle exposed to RPC handlers.
+    #[must_use]
+    pub fn blocks(&self) -> Arc<RwLock<Vec<BlockRecord>>> {
+        Arc::clone(&self.blocks)
+    }
+
+    /// Returns the shared txid → transaction map exposed to RPC handlers.
+    #[must_use]
+    pub fn transactions(&self) -> Arc<RwLock<HashMap<Txid, Transaction>>> {
+        Arc::clone(&self.transactions)
+    }
+
+    /// Returns the shared network-counters handle exposed to RPC handlers.
+    #[must_use]
+    pub fn network(&self) -> Arc<RwLock<NetworkState>> {
+        Arc::clone(&self.network)
+    }
+
+    /// Returns the shared getblocktemplate long-poll id.
+    #[must_use]
+    pub fn mining_template_id(&self) -> Arc<ArcSwap<CompactString>> {
+        Arc::clone(&self.mining_template_id)
     }
 
     /// Heights walked by the most recent crash-recovery replay.
@@ -226,6 +279,35 @@ mod tests {
         );
         assert!(Arc::strong_count(&mempool) >= 2);
         assert_eq!(mempool.read().len(), 0, "fresh mempool must be empty");
+
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_full_rpc_handle_set() -> anyhow::Result<()> {
+        use tempfile::tempdir;
+
+        let dir = tempdir()?;
+        let config = crate::Config {
+            data_dir: dir.path().join("node"),
+            ..crate::Config::default()
+        };
+
+        let state = NodeState::open(config)?;
+        let chain_tip = state.chain_tip();
+        let blocks = state.blocks();
+        let transactions = state.transactions();
+        let network = state.network();
+        let mining_template_id = state.mining_template_id();
+
+        assert!(chain_tip.load().is_none(), "fresh chain tip must be empty");
+        assert!(blocks.read().is_empty(), "fresh blocks must be empty");
+        assert!(
+            transactions.read().is_empty(),
+            "fresh transactions must be empty"
+        );
+        assert_eq!(network.read().connection_count, 0);
+        assert_eq!(mining_template_id.load().as_str(), "0");
 
         Ok(())
     }
