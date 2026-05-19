@@ -12,3 +12,32 @@ description = "bitcoin-rs :: wallet"
 workspace = true
 
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-script.workspace = true
+bitcoin-rs-index.workspace = true
+bitcoin-rs-storage.workspace = true
+bitcoin.workspace = true
+miniscript.workspace = true
+bdk_coin_select.workspace = true
+secp256k1 = { workspace = true, default-features = false, features = ["std", "alloc"] }
+parking_lot.workspace = true
+arc-swap.workspace = true
+hashbrown.workspace = true
+tinyvec.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+bitcoin-rs-consensus.workspace = true
+proptest.workspace = true
+tempfile = "3"
+
+[features]
+default = []
+rocksdb = ["bitcoin-rs-storage/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall"]
+redb = ["bitcoin-rs-storage/redb"]
+mdbx = ["bitcoin-rs-storage/mdbx"]

@@ -14,6 +14,13 @@ env:
   PORTABLE_FEATURES: "rocksdb,fjall,redb"
 
 jobs:
+  wallet-no-seckey:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          ! grep -r 'SecretKey\|secp256k1::Secret\|seckey' crates/wallet/src
+
   fmt:
     runs-on: ubuntu-latest
     steps:
