@@ -11,4 +11,20 @@ description = "bitcoin-rs :: utreexo"
 [lints]
 workspace = true
 
+[features]
+default = []
+rocksdb = []
+fjall = []
+redb = []
+
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin.workspace = true
+rustreexo.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
