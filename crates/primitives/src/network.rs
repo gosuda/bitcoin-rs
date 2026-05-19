@@ -60,6 +60,70 @@ impl Network {
         height >= activation
     }
 
+    /// Returns `true` when BIP65 (`OP_CHECKLOCKTIMEVERIFY`) is enforced at `height`.
+    ///
+    /// Per Bitcoin Core's `chainparams.cpp`:
+    /// - Mainnet activates at height 388,381
+    /// - Testnet3 activates at height 581,885
+    /// - Testnet4 / Signet activate at height 1
+    /// - Regtest activates at height 1,351
+    #[must_use]
+    pub const fn is_bip65_active(self, height: u32) -> bool {
+        let activation = match self {
+            Self::Mainnet => 388_381,
+            Self::Testnet3 => 581_885,
+            Self::Testnet4 | Self::Signet => 1,
+            Self::Regtest => 1_351,
+        };
+        height >= activation
+    }
+
+    /// Returns `true` when BIP66 (strict DER signatures) is enforced at `height`.
+    #[must_use]
+    pub const fn is_bip66_active(self, height: u32) -> bool {
+        let activation = match self {
+            Self::Mainnet => 363_725,
+            Self::Testnet3 => 330_776,
+            Self::Testnet4 | Self::Signet => 1,
+            Self::Regtest => 1_251,
+        };
+        height >= activation
+    }
+
+    /// Returns `true` when CSV (BIP68/112/113 relative locktime + MTP) is enforced at `height`.
+    #[must_use]
+    pub const fn is_csv_active(self, height: u32) -> bool {
+        let activation = match self {
+            Self::Mainnet => 419_328,
+            Self::Testnet3 => 770_112,
+            Self::Testnet4 | Self::Signet => 1,
+            Self::Regtest => 432,
+        };
+        height >= activation
+    }
+
+    /// Returns `true` when Segwit (BIP141/143/147) is enforced at `height`.
+    #[must_use]
+    pub const fn is_segwit_active(self, height: u32) -> bool {
+        let activation = match self {
+            Self::Mainnet => 481_824,
+            Self::Testnet3 => 834_624,
+            Self::Testnet4 | Self::Signet | Self::Regtest => 0,
+        };
+        height >= activation
+    }
+
+    /// Returns `true` when Taproot (BIP341/342) is enforced at `height`.
+    #[must_use]
+    pub const fn is_taproot_active(self, height: u32) -> bool {
+        let activation = match self {
+            Self::Mainnet => 709_632,
+            Self::Testnet3 => 2_017_256,
+            Self::Testnet4 | Self::Signet | Self::Regtest => 0,
+        };
+        height >= activation
+    }
+
     /// Returns the default JSON-RPC port used by Bitcoin Core.
     #[must_use]
     pub const fn default_rpc_port(self) -> u16 {
@@ -194,5 +258,56 @@ mod tests {
         assert!(Network::Regtest.is_bip34_active(500));
         assert!(!Network::Testnet3.is_bip34_active(21_110));
         assert!(Network::Testnet3.is_bip34_active(21_111));
+    }
+
+    #[test]
+    fn softfork_activations_match_core_chainparams() {
+        fn assert_activation(
+            is_active: impl Fn(Network, u32) -> bool,
+            network: Network,
+            activation: u32,
+        ) {
+            if activation == 0 {
+                assert!(is_active(network, 0));
+            } else {
+                assert!(!is_active(network, activation - 1));
+                assert!(is_active(network, activation));
+            }
+        }
+
+        // BIP65
+        assert_activation(Network::is_bip65_active, Network::Mainnet, 388_381);
+        assert_activation(Network::is_bip65_active, Network::Testnet3, 581_885);
+        assert_activation(Network::is_bip65_active, Network::Testnet4, 1);
+        assert_activation(Network::is_bip65_active, Network::Signet, 1);
+        assert_activation(Network::is_bip65_active, Network::Regtest, 1_351);
+
+        // BIP66
+        assert_activation(Network::is_bip66_active, Network::Mainnet, 363_725);
+        assert_activation(Network::is_bip66_active, Network::Testnet3, 330_776);
+        assert_activation(Network::is_bip66_active, Network::Testnet4, 1);
+        assert_activation(Network::is_bip66_active, Network::Signet, 1);
+        assert_activation(Network::is_bip66_active, Network::Regtest, 1_251);
+
+        // CSV
+        assert_activation(Network::is_csv_active, Network::Mainnet, 419_328);
+        assert_activation(Network::is_csv_active, Network::Testnet3, 770_112);
+        assert_activation(Network::is_csv_active, Network::Testnet4, 1);
+        assert_activation(Network::is_csv_active, Network::Signet, 1);
+        assert_activation(Network::is_csv_active, Network::Regtest, 432);
+
+        // Segwit
+        assert_activation(Network::is_segwit_active, Network::Mainnet, 481_824);
+        assert_activation(Network::is_segwit_active, Network::Testnet3, 834_624);
+        assert_activation(Network::is_segwit_active, Network::Testnet4, 0);
+        assert_activation(Network::is_segwit_active, Network::Signet, 0);
+        assert_activation(Network::is_segwit_active, Network::Regtest, 0);
+
+        // Taproot
+        assert_activation(Network::is_taproot_active, Network::Mainnet, 709_632);
+        assert_activation(Network::is_taproot_active, Network::Testnet3, 2_017_256);
+        assert_activation(Network::is_taproot_active, Network::Testnet4, 0);
+        assert_activation(Network::is_taproot_active, Network::Signet, 0);
+        assert_activation(Network::is_taproot_active, Network::Regtest, 0);
     }
 }
