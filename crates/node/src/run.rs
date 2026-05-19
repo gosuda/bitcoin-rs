@@ -1,11 +1,12 @@
 //! Top-level orchestration: wire subsystems, spin the event loop, drain.
 
-use std::sync::Arc;
+use crate as bitcoin_rs_node;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossbeam_channel::{Receiver, bounded};
+use crossbeam_channel::{bounded, Receiver};
 
 use crate::config::Config;
 use crate::event_loop::EventLoop;
@@ -23,6 +24,38 @@ fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
         }
         crate::Auth::Cookie { path } => Ok(bitcoin_rs_rpc::Auth::cookie(path)?),
     }
+}
+
+fn spawn_electrum_listener(
+    config: &bitcoin_rs_node::Config,
+    shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<Option<std::thread::JoinHandle<Result<(), bitcoin_rs_electrum::ElectrumError>>>>
+{
+    let Some(addr) = config.electrum_bind else {
+        return Ok(None);
+    };
+
+    if let Some(cert) = &config.electrum_tls_cert {
+        tracing::warn!(
+            cert = %cert.display(),
+            "electrum TLS cert configured but TLS wiring deferred; serving plaintext"
+        );
+    }
+
+    let index = bitcoin_rs_electrum::IndexHandle::new();
+    let mempool = bitcoin_rs_electrum::MempoolHandle::default();
+    let cfg = bitcoin_rs_electrum::ServerConfig::default();
+    let server = bitcoin_rs_electrum::ElectrumServer::bind(addr, index, mempool, cfg)
+        .map_err(anyhow::Error::from)?;
+    let local_addr = server.local_addr()?;
+    tracing::info!(addr = %local_addr, "electrum listener bound");
+
+    let electrum_shutdown = Arc::clone(shutdown);
+    Ok(Some(
+        std::thread::Builder::new()
+            .name("bitcoin-rs-electrum".into())
+            .spawn(move || server.run_with_shutdown(electrum_shutdown))?,
+    ))
 }
 
 /// Boots the node from a resolved [`Config`] and runs until shutdown.
@@ -79,7 +112,15 @@ pub fn run(mut config: Config) -> Result<()> {
     let rpc_thread = std::thread::Builder::new()
         .name("bitcoin-rs-rpc".into())
         .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
+    let electrum_thread = spawn_electrum_listener(state.config(), &shutdown)?;
     loop_handle.spin(&shutdown)?;
+    if let Some(handle) = electrum_thread {
+        match handle.join() {
+            Ok(Ok(())) => tracing::info!("electrum listener exited cleanly"),
+            Ok(Err(error)) => tracing::warn!(%error, "electrum listener exited with error"),
+            Err(_) => tracing::error!("electrum listener panicked"),
+        }
+    }
     match rpc_thread.join() {
         Ok(Ok(())) => tracing::info!("rpc listener exited cleanly"),
         Ok(Err(error)) => tracing::warn!(%error, "rpc listener exited with i/o error"),
