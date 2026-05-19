@@ -186,8 +186,8 @@ rust-rocksdb = { version = ">=0.49.1, <0.50", default-features = false, features
 # MDBX via init4tech fork — no features exposed.
 signet-libmdbx = { version = ">=0.8.3, <0.9", default-features = false }
 
-# fjall 2.x line (plan claim of 3.1 does not exist on crates.io).
-fjall = { version = ">=2.11, <3", default-features = false, features = ["lz4"] }
+# fjall 3.x line.
+fjall = { version = ">=3.1.4, <4", default-features = false, features = ["lz4"] }
 
 # redb 2.x line (plan claim of 4.1 does not exist on crates.io). No defaults.
 redb = { version = ">=2.6, <3", default-features = false }

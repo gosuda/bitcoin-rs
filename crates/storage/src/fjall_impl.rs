@@ -1,35 +1,33 @@
 use std::path::Path;
 
-use fjall::{Config, PartitionCreateOptions, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch};
 
 /// Fjall-backed key-value store.
 pub struct FjallStore {
-    keyspace: fjall::Keyspace,
-    partitions: Vec<fjall::Partition>,
+    db: Database,
+    keyspaces: Vec<Keyspace>,
 }
 
 impl FjallStore {
-    /// Opens or creates a Fjall store at `path` with one partition per column family.
+    /// Opens or creates a Fjall store at `path` with one keyspace per column family.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let keyspace = Config::new(path).open().map_err(StorageError::backend)?;
-        let mut partitions = Vec::with_capacity(ColumnFamily::ALL.len());
+        let db = Database::builder(path.as_ref())
+            .open()
+            .map_err(StorageError::backend)?;
+        let mut keyspaces = Vec::with_capacity(ColumnFamily::ALL.len());
         for cf in ColumnFamily::ALL.iter().copied() {
-            partitions.push(
-                keyspace
-                    .open_partition(cf.name(), PartitionCreateOptions::default())
+            keyspaces.push(
+                db.keyspace(cf.name(), KeyspaceCreateOptions::default)
                     .map_err(StorageError::backend)?,
             );
         }
-        Ok(Self {
-            keyspace,
-            partitions,
-        })
+        Ok(Self { db, keyspaces })
     }
 
-    fn partition(&self, cf: ColumnFamily) -> Result<&fjall::Partition, StorageError> {
-        self.partitions
+    fn keyspace(&self, cf: ColumnFamily) -> Result<&Keyspace, StorageError> {
+        self.keyspaces
             .get(cf.index())
             .ok_or(StorageError::UnknownColumnFamily(cf))
     }
@@ -39,7 +37,7 @@ impl KvStore for FjallStore {
     type WriteBatch = FjallWriteBatch;
 
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        self.partition(cf)?
+        self.keyspace(cf)?
             .get(key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
             .map_err(StorageError::backend)
@@ -50,8 +48,10 @@ impl KvStore for FjallStore {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
-        let iterator = self.partition(cf)?.prefix(prefix.to_vec()).map(|item| {
-            item.map(|(key, value)| (key.to_vec(), value.to_vec()))
+        let iterator = self.keyspace(cf)?.prefix(prefix).map(|guard| {
+            guard
+                .into_inner()
+                .map(|(key, value)| (key.to_vec(), value.to_vec()))
                 .map_err(StorageError::backend)
         });
         Ok(Box::new(iterator))
@@ -62,26 +62,28 @@ impl KvStore for FjallStore {
     }
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
-        let mut fjall_batch = self.keyspace.batch();
+        let mut fjall_batch = self.db.batch();
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    fjall_batch.insert(self.partition(cf)?, key, value);
+                    fjall_batch.insert(self.keyspace(cf)?, key, value);
                 }
                 BatchOp::Delete { cf, key } => {
-                    fjall_batch.remove(self.partition(cf)?, key);
+                    fjall_batch.remove(self.keyspace(cf)?, key);
                 }
                 BatchOp::DeleteRange { cf, start, end } => {
-                    let partition = self.partition(cf)?;
-                    let keys = partition
+                    let keyspace = self.keyspace(cf)?;
+                    let keys = keyspace
                         .range(start..end)
-                        .map(|item| {
-                            item.map(|(key, _)| key.to_vec())
+                        .map(|guard| {
+                            guard
+                                .key()
+                                .map(|key| key.to_vec())
                                 .map_err(StorageError::backend)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     for key in keys {
-                        fjall_batch.remove(partition, key);
+                        fjall_batch.remove(keyspace, key);
                     }
                 }
             }
@@ -91,18 +93,16 @@ impl KvStore for FjallStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         // Fjall journals are crash-consistent before fsync; SyncAll requests full durability.
-        self.keyspace
+        self.db
             .persist(PersistMode::SyncAll)
             .map_err(StorageError::backend)
     }
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        let snapshots = self
-            .partitions
-            .iter()
-            .map(fjall::Partition::snapshot)
-            .collect();
-        Ok(Box::new(FjallSnapshot { snapshots }))
+        Ok(Box::new(FjallSnapshot {
+            store: self,
+            snapshot: self.db.snapshot(),
+        }))
     }
 }
 
@@ -154,22 +154,15 @@ enum BatchOp {
     },
 }
 
-struct FjallSnapshot {
-    snapshots: Vec<fjall::Snapshot>,
+struct FjallSnapshot<'a> {
+    store: &'a FjallStore,
+    snapshot: fjall::Snapshot,
 }
 
-impl FjallSnapshot {
-    fn snapshot(&self, cf: ColumnFamily) -> Result<&fjall::Snapshot, StorageError> {
-        self.snapshots
-            .get(cf.index())
-            .ok_or(StorageError::UnknownColumnFamily(cf))
-    }
-}
-
-impl KvSnapshot for FjallSnapshot {
+impl KvSnapshot for FjallSnapshot<'_> {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        self.snapshot(cf)?
-            .get(key)
+        self.snapshot
+            .get(self.store.keyspace(cf)?, key)
             .map(|value| value.map(|bytes| bytes.to_vec()))
             .map_err(StorageError::backend)
     }
@@ -179,10 +172,15 @@ impl KvSnapshot for FjallSnapshot {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
-        let iterator = self.snapshot(cf)?.prefix(prefix.to_vec()).map(|item| {
-            item.map(|(key, value)| (key.to_vec(), value.to_vec()))
-                .map_err(StorageError::backend)
-        });
+        let iterator = self
+            .snapshot
+            .prefix(self.store.keyspace(cf)?, prefix)
+            .map(|guard| {
+                guard
+                    .into_inner()
+                    .map(|(key, value)| (key.to_vec(), value.to_vec()))
+                    .map_err(StorageError::backend)
+            });
         Ok(Box::new(iterator))
     }
 }
