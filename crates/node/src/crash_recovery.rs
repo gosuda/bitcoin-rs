@@ -47,11 +47,36 @@ pub fn read_meta(state: &NodeState) -> Result<Option<Meta>> {
 
 /// Overwrites the recovery sidecar with `meta`.
 pub fn write_meta(state: &NodeState, meta: &Meta) -> Result<()> {
+    use std::io::Write as _;
+
     let path = meta_path(state);
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec_pretty(meta)
         .with_context(|| format!("encode recovery meta {}", path.display()))?;
-    std::fs::write(&path, json)
-        .with_context(|| format!("write recovery meta {}", path.display()))?;
+
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)
+            .with_context(|| format!("open tmp recovery meta {}", tmp.display()))?;
+        file.write_all(&json)
+            .with_context(|| format!("write tmp recovery meta {}", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("fsync tmp recovery meta {}", tmp.display()))?;
+    }
+
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("atomic rename recovery meta {}", path.display()))?;
+    // Best-effort directory fsync. POSIX allows the rename to be re-ordered until
+    // the parent directory's inode is synced. Failing the fsync (e.g. on filesystems
+    // that don't support it) is non-fatal — the rename already happened.
+    if let Ok(dir_handle) = std::fs::File::open(dir) {
+        let _ = dir_handle.sync_all();
+    }
+
     Ok(())
 }
 
