@@ -11,4 +11,113 @@ description = "bitcoin-rs :: node"
 [lints]
 workspace = true
 
+[features]
+default = []
+rocksdb = [
+    "bitcoin-rs-chain/rocksdb",
+    "bitcoin-rs-coinstats/rocksdb",
+    "bitcoin-rs-consensus/rocksdb",
+    "bitcoin-rs-electrum/rocksdb",
+    "bitcoin-rs-filters/rocksdb",
+    "bitcoin-rs-index/rocksdb",
+    "bitcoin-rs-mempool/rocksdb",
+    "bitcoin-rs-mining/rocksdb",
+    "bitcoin-rs-p2p/rocksdb",
+    "bitcoin-rs-pruning/rocksdb",
+    "bitcoin-rs-rpc/rocksdb",
+    "bitcoin-rs-script/rocksdb",
+    "bitcoin-rs-storage/rocksdb",
+    "bitcoin-rs-utreexo/rocksdb",
+    "bitcoin-rs-utxo/rocksdb",
+    "bitcoin-rs-wallet/rocksdb",
+]
+fjall = [
+    "bitcoin-rs-chain/fjall",
+    "bitcoin-rs-coinstats/fjall",
+    "bitcoin-rs-consensus/fjall",
+    "bitcoin-rs-electrum/fjall",
+    "bitcoin-rs-filters/fjall",
+    "bitcoin-rs-index/fjall",
+    "bitcoin-rs-mempool/fjall",
+    "bitcoin-rs-mining/fjall",
+    "bitcoin-rs-p2p/fjall",
+    "bitcoin-rs-pruning/fjall",
+    "bitcoin-rs-rpc/fjall",
+    "bitcoin-rs-script/fjall",
+    "bitcoin-rs-storage/fjall",
+    "bitcoin-rs-utreexo/fjall",
+    "bitcoin-rs-utxo/fjall",
+    "bitcoin-rs-wallet/fjall",
+]
+redb = [
+    "bitcoin-rs-chain/redb",
+    "bitcoin-rs-coinstats/redb",
+    "bitcoin-rs-consensus/redb",
+    "bitcoin-rs-electrum/redb",
+    "bitcoin-rs-filters/redb",
+    "bitcoin-rs-index/redb",
+    "bitcoin-rs-mempool/redb",
+    "bitcoin-rs-mining/redb",
+    "bitcoin-rs-p2p/redb",
+    "bitcoin-rs-pruning/redb",
+    "bitcoin-rs-rpc/redb",
+    "bitcoin-rs-script/redb",
+    "bitcoin-rs-storage/redb",
+    "bitcoin-rs-utreexo/redb",
+    "bitcoin-rs-utxo/redb",
+    "bitcoin-rs-wallet/redb",
+]
+mdbx = [
+    "bitcoin-rs-coinstats/mdbx",
+    "bitcoin-rs-electrum/mdbx",
+    "bitcoin-rs-mining/mdbx",
+    "bitcoin-rs-pruning/mdbx",
+    "bitcoin-rs-rpc/mdbx",
+    "bitcoin-rs-storage/mdbx",
+    "bitcoin-rs-utxo/mdbx",
+    "bitcoin-rs-wallet/mdbx",
+]
+kernel = ["bitcoin-rs-consensus/kernel"]
+prometheus-http = ["metrics-exporter-prometheus/http-listener"]
+
 [dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-script.workspace = true
+bitcoin-rs-consensus.workspace = true
+bitcoin-rs-storage.workspace = true
+bitcoin-rs-utxo.workspace = true
+bitcoin-rs-utreexo.workspace = true
+bitcoin-rs-chain.workspace = true
+bitcoin-rs-index.workspace = true
+bitcoin-rs-filters.workspace = true
+bitcoin-rs-coinstats.workspace = true
+bitcoin-rs-pruning.workspace = true
+bitcoin-rs-mempool.workspace = true
+bitcoin-rs-p2p.workspace = true
+bitcoin-rs-wallet.workspace = true
+bitcoin-rs-mining.workspace = true
+bitcoin-rs-rpc.workspace = true
+bitcoin-rs-electrum.workspace = true
+
+bitcoin.workspace = true
+clap.workspace = true
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+crossbeam-channel.workspace = true
+crossbeam-utils.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+signal-hook = { workspace = true, features = ["iterator"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+quanta.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+proptest.workspace = true
+anyhow.workspace = true
