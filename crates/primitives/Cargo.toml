@@ -12,3 +12,14 @@ description = "bitcoin-rs :: primitives — hashes, outpoints, varints, tx/block
 workspace = true
 
 [dependencies]
+bitcoin.workspace = true
+bitcoin_hashes.workspace = true
+bytemuck.workspace = true
+ruint.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tinyvec.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
