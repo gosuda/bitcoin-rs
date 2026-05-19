@@ -2,14 +2,21 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+use arc_swap::{ArcSwap, ArcSwapOption};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_mempool::MempoolEntry;
+use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+use bitcoin_rs_p2p::PeerInfo;
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_rpc::{BlockRecord, Context, Handler, RpcError};
+use bitcoin_rs_rpc::{BlockRecord, Context, Handler, NetworkState, RpcError};
+use compact_str::CompactString;
+use hashbrown::HashMap;
+use parking_lot::RwLock;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 #[test]
@@ -103,6 +110,32 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn network_peer_methods_read_shared_peer_registry() -> Result<(), Box<dyn std::error::Error>> {
+    let peers = Arc::new(RwLock::new(vec![PeerInfo {
+        addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
+        version: 70_016,
+        services: 0,
+        user_agent: "/test/".into(),
+        start_height: 0,
+        conn_time: 0,
+        inbound: true,
+    }]));
+    let handler = Handler::new(context_with_peers(peers));
+
+    let count = handler.dispatch("getconnectioncount", &json!([]))?;
+    assert_eq!(count.as_u64(), Some(1));
+
+    let peer_info = handler.dispatch("getpeerinfo", &json!([]))?;
+    let peer_info = peer_info
+        .as_array()
+        .ok_or("getpeerinfo must return array")?;
+    let peer = peer_info.get(0).ok_or("getpeerinfo must return one peer")?;
+    assert_eq!(peer_info.len(), 1);
+    assert_eq!(peer.get("version").as_u64(), Some(70_016));
+    Ok(())
+}
+
+#[test]
 fn signing_methods_are_disabled() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(Arc::new(Context::new()));
     let error = handler
@@ -146,6 +179,18 @@ impl Fixture {
             block_hash,
         })
     }
+}
+
+fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
+    Arc::new(Context::from_handles(
+        Arc::new(ArcSwapOption::empty()),
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        Arc::new(RwLock::new(Vec::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(NetworkState::default())),
+        Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
+        peers,
+    ))
 }
 
 fn tx(label: u8, script_pubkey: ScriptBuf) -> Transaction {

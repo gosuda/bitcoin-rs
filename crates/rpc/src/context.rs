@@ -84,6 +84,8 @@ pub struct Context {
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
+    /// Shared registry of currently-handshook peers.
+    pub peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
     /// Current getblocktemplate long-poll id.
     pub mining_template_id: Arc<ArcSwap<CompactString>>,
     /// Receiver notified when mining template inputs change.
@@ -114,6 +116,7 @@ impl Context {
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
             network: Arc::new(RwLock::new(NetworkState::default())),
+            peers: Arc::new(RwLock::new(Vec::new())),
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             mining_notifications,
             mining_sender,
@@ -134,6 +137,7 @@ impl Context {
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
         network: Arc<RwLock<NetworkState>>,
         mining_template_id: Arc<ArcSwap<CompactString>>,
+        peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
     ) -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -142,6 +146,7 @@ impl Context {
             blocks,
             transactions,
             network,
+            peers,
             mining_template_id,
             mining_notifications,
             mining_sender,
@@ -228,6 +233,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(NetworkState::default())),
             Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
+            Arc::new(RwLock::new(Vec::new())),
         );
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),

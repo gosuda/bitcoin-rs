@@ -130,6 +130,7 @@ pub fn run(mut config: Config) -> Result<()> {
         state.transactions(),
         state.network(),
         state.mining_template_id(),
+        state.peers(),
     );
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(

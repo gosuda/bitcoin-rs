@@ -523,6 +523,7 @@ dependencies = [
  "bitcoin-rs-index",
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",
+ "bitcoin-rs-p2p",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bitcoin-rs-utxo",

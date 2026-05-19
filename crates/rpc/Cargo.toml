@@ -13,9 +13,9 @@ workspace = true
 
 [features]
 default = []
-rocksdb = ["bitcoin-rs-storage/rocksdb"]
-fjall = ["bitcoin-rs-storage/fjall"]
-redb = ["bitcoin-rs-storage/redb"]
+rocksdb = ["bitcoin-rs-storage/rocksdb", "bitcoin-rs-p2p/rocksdb"]
+fjall = ["bitcoin-rs-storage/fjall", "bitcoin-rs-p2p/fjall"]
+redb = ["bitcoin-rs-storage/redb", "bitcoin-rs-p2p/redb"]
 mdbx = ["bitcoin-rs-storage/mdbx"]
 
 [dependencies]
@@ -24,6 +24,7 @@ bitcoin-rs-consensus.workspace = true
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-index.workspace = true
 bitcoin-rs-mempool.workspace = true
+bitcoin-rs-p2p.workspace = true
 bitcoin-rs-utxo.workspace = true
 bitcoin-rs-filters.workspace = true
 bitcoin-rs-coinstats.workspace = true
