@@ -42,6 +42,24 @@ impl Network {
         }
     }
 
+    /// Returns `true` when BIP34 coinbase-height encoding is enforced at `height`.
+    ///
+    /// Per Bitcoin Core's `chainparams.cpp`:
+    /// - Mainnet activates at height 227,835
+    /// - Testnet3 activates at height 21,111
+    /// - Testnet4 / Signet activate at height 1
+    /// - Regtest activates at height 500
+    #[must_use]
+    pub const fn is_bip34_active(self, height: u32) -> bool {
+        let activation = match self {
+            Self::Mainnet => 227_835,
+            Self::Testnet3 => 21_111,
+            Self::Testnet4 | Self::Signet => 1,
+            Self::Regtest => 500,
+        };
+        height >= activation
+    }
+
     /// Returns the default JSON-RPC port used by Bitcoin Core.
     #[must_use]
     pub const fn default_rpc_port(self) -> u16 {
@@ -166,5 +184,15 @@ mod tests {
         assert_eq!(Network::Signet.magic(), [0x0a, 0x03, 0xcf, 0x40]);
         assert_eq!(Network::Regtest.magic(), [0xfa, 0xbf, 0xb5, 0xda]);
         assert_eq!(Network::Regtest.retarget_interval(), 144);
+    }
+
+    #[test]
+    fn bip34_activation_heights_match_core_chainparams() {
+        assert!(!Network::Mainnet.is_bip34_active(227_834));
+        assert!(Network::Mainnet.is_bip34_active(227_835));
+        assert!(!Network::Regtest.is_bip34_active(499));
+        assert!(Network::Regtest.is_bip34_active(500));
+        assert!(!Network::Testnet3.is_bip34_active(21_110));
+        assert!(Network::Testnet3.is_bip34_active(21_111));
     }
 }
