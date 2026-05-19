@@ -43,7 +43,7 @@ authors      = ["bitcoin-rs contributors"]
 bitcoin-rs-primitives = { path = "crates/primitives", version = "0.1.0" }
 bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.1.0" }
 bitcoin-rs-script     = { path = "crates/script",     version = "0.1.0" }
-bitcoin-rs-storage    = { path = "crates/storage",    version = "0.1.0" }
+bitcoin-rs-storage    = { path = "crates/storage",    version = "0.1.0", default-features = false }
 bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.1.0" }
 bitcoin-rs-utreexo    = { path = "crates/utreexo",    version = "0.1.0" }
 bitcoin-rs-chain      = { path = "crates/chain",      version = "0.1.0" }
