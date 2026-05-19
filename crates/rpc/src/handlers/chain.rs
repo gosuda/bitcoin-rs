@@ -22,7 +22,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         "mediantime": 0,
         "verificationprogress": 0.0,
         "initialblockdownload": blocks == 0,
-        "chainwork": "00",
+        "chainwork": ctx.chainwork_hex(),
         "size_on_disk": 0,
         "pruned": false,
         "warnings": ""

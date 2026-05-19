@@ -187,6 +187,24 @@ impl Context {
             .map_or_else(Hash256::default, |tip| tip.hash)
     }
 
+    /// Returns the current best-chain chainwork as a 64-character lowercase
+    /// big-endian hex string. Returns "00" when no tip is published yet (a
+    /// 2-char placeholder matching `bitcoind`'s pre-genesis behavior).
+    #[must_use]
+    pub fn chainwork_hex(&self) -> String {
+        let Some(tip) = self.chain_tip.load_full() else {
+            return "00".to_owned();
+        };
+        let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            use core::fmt::Write as _;
+
+            let _: fmt::Result = write!(&mut out, "{byte:02x}");
+        }
+        out
+    }
+
     /// Returns the block hash for `height` when known without blocking I/O.
     #[must_use]
     pub fn block_hash_at_height(&self, height: u32) -> Option<Hash256> {

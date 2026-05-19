@@ -110,6 +110,40 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let mut chainwork = [0_u8; 32];
+    chainwork[30] = 0xab;
+    chainwork[31] = 0xcd;
+    ctx.set_chain_tip(TipSnapshot {
+        tip_id: NodeId::new(1),
+        height: 1,
+        chainwork: ChainWork::from_be_bytes(chainwork),
+        hash: Hash256::from_le_bytes(&[1_u8; 32]),
+    });
+    let handler = Handler::new(ctx);
+
+    let result = handler.dispatch("getblockchaininfo", &json!([]))?;
+    let chainwork_value = result.get("chainwork");
+    let chainwork = chainwork_value
+        .as_str()
+        .ok_or("chainwork must be a string")?;
+
+    assert_eq!(chainwork.len(), 64);
+    assert!(
+        chainwork
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "chainwork must be lowercase hex"
+    );
+    assert_eq!(
+        chainwork,
+        "000000000000000000000000000000000000000000000000000000000000abcd"
+    );
+    Ok(())
+}
+
+#[test]
 fn network_peer_methods_read_shared_peer_registry() -> Result<(), Box<dyn std::error::Error>> {
     let peers = Arc::new(RwLock::new(vec![PeerInfo {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
