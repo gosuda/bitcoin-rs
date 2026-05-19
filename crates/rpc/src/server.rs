@@ -14,6 +14,7 @@ use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
 const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
+const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
@@ -56,33 +57,67 @@ impl RpcServer {
     pub fn serve(self) -> io::Result<()> {
         let active = Arc::new(Mutex::new(0_usize));
         for stream in self.listener.incoming() {
-            let mut stream = stream?;
-            let should_accept = {
-                let mut count = active.lock();
-                if *count >= self.max_connections {
-                    false
-                } else {
-                    *count += 1;
-                    true
-                }
-            };
-            if !should_accept {
-                write_status(&mut stream, 503, "Service Unavailable", b"busy", false)?;
-                continue;
-            }
-
-            let auth = Arc::clone(&self.auth);
-            let handler = Arc::clone(&self.handler);
-            let active = Arc::clone(&active);
-            let idle_timeout = self.idle_timeout;
-            thread::spawn(move || {
-                if let Err(error) = serve_connection(stream, &auth, &handler, idle_timeout) {
-                    debug!(%error, "rpc connection closed with error");
-                }
-                let mut count = active.lock();
-                *count = count.saturating_sub(1);
-            });
+            self.handle_accept(&active, stream?)?;
         }
+        Ok(())
+    }
+
+    /// Runs the accept loop until `shutdown` is set to `true`.
+    ///
+    /// Polls non-blocking accept on a fixed cadence so the loop can observe
+    /// shutdown without parking on an open socket. Each accepted connection
+    /// is restored to blocking mode and handed to a bounded worker thread,
+    /// preserving the configured `idle_timeout` per connection.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn serve_with_shutdown(
+        self,
+        shutdown: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> io::Result<()> {
+        use core::sync::atomic::Ordering;
+
+        self.listener.set_nonblocking(true)?;
+        let active = Arc::new(Mutex::new(0_usize));
+        while !shutdown.load(Ordering::Acquire) {
+            match self.listener.accept() {
+                Ok((stream, _addr)) => {
+                    stream.set_nonblocking(false)?;
+                    self.handle_accept(&active, stream)?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(POLL_INTERVAL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
+        let should_accept = {
+            let mut count = active.lock();
+            if *count >= self.max_connections {
+                false
+            } else {
+                *count += 1;
+                true
+            }
+        };
+        if !should_accept {
+            write_status(&mut stream, 503, "Service Unavailable", b"busy", false)?;
+            return Ok(());
+        }
+
+        let auth = Arc::clone(&self.auth);
+        let handler = Arc::clone(&self.handler);
+        let active = Arc::clone(active);
+        let idle_timeout = self.idle_timeout;
+        thread::spawn(move || {
+            if let Err(error) = serve_connection(stream, &auth, &handler, idle_timeout) {
+                debug!(%error, "rpc connection closed with error");
+            }
+            let mut count = active.lock();
+            *count = count.saturating_sub(1);
+        });
         Ok(())
     }
 }
@@ -254,4 +289,32 @@ fn write_status(
     )?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::context::Context;
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let server = RpcServer::bind(
+            "127.0.0.1:0",
+            auth,
+            handler,
+            4,
+            core::time::Duration::from_millis(500),
+        )?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+        std::thread::sleep(core::time::Duration::from_millis(150));
+        shutdown.store(true, Ordering::Release);
+        handle.join().expect("join serve thread")
+    }
 }
