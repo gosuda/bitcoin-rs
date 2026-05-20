@@ -147,6 +147,10 @@ pub struct Context {
     /// Optional outbound channel for `addnode` to request new P2P connections.
     /// `None` for embedded/test callers without a live P2P listener.
     pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
+    /// Best-effort ban list (host:port). Subnet bans are not yet supported.
+    pub banned: Arc<parking_lot::RwLock<hashbrown::HashSet<std::net::SocketAddr>>>,
+    /// Persisted `addnode add` entries.
+    pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
     mining_sender: Sender<()>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
@@ -197,6 +201,8 @@ impl Context {
             mining_notifications,
             inbound_blocks_sender: None,
             p2p_outbound_sender: None,
+            banned: Arc::new(parking_lot::RwLock::new(hashbrown::HashSet::new())),
+            added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
             mining_sender,
         }
     }
@@ -224,6 +230,8 @@ impl Context {
         chain_network: Network,
         inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
         p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
+        banned: Arc<parking_lot::RwLock<hashbrown::HashSet<std::net::SocketAddr>>>,
+        added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
     ) -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -243,6 +251,8 @@ impl Context {
             mining_notifications,
             inbound_blocks_sender,
             p2p_outbound_sender,
+            banned,
+            added_nodes,
             mining_sender,
         }
     }
@@ -443,6 +453,8 @@ mod tests {
         ));
         let filter_index = noop_filter_index();
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
+        let banned = Arc::new(RwLock::new(hashbrown::HashSet::new()));
+        let added_nodes = Arc::new(RwLock::new(Vec::new()));
         let ctx = Context::from_handles(
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
@@ -459,6 +471,8 @@ mod tests {
             Network::Mainnet,
             None,
             None,
+            Arc::clone(&banned),
+            Arc::clone(&added_nodes),
         );
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
@@ -483,6 +497,14 @@ mod tests {
         assert!(
             Arc::ptr_eq(&ctx.block_tree, &block_tree),
             "block_tree must be shared with caller"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.banned, &banned),
+            "banned must be shared with caller"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.added_nodes, &added_nodes),
+            "added_nodes must be shared with caller"
         );
     }
 

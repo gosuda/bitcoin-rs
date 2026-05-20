@@ -79,28 +79,61 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
     Ok(json!(array))
 }
 
-pub(crate) fn getaddednodeinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    // Optional node-address filter. Accept and ignore.
+pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let _ = params_array(params)?;
-    Ok(json!(Vec::<sonic_rs::Value>::new()))
+    let added = ctx.added_nodes.read();
+    let entries: Vec<sonic_rs::Value> = added
+        .iter()
+        .map(|addr| {
+            json!({
+                "addednode": addr.to_string(),
+                "connected": false,
+                "addresses": Vec::<sonic_rs::Value>::new(),
+            })
+        })
+        .collect();
+    Ok(json!(entries))
 }
 
-pub(crate) fn listbanned(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    Ok(json!(Vec::<sonic_rs::Value>::new()))
+    let banned = ctx.banned.read();
+    let entries: Vec<sonic_rs::Value> = banned
+        .iter()
+        .map(|addr| {
+            json!({
+                "address": addr.to_string(),
+                "banned_until": 0_u64,
+                "ban_created": 0_u64,
+                "ban_reason": "manual",
+            })
+        })
+        .collect();
+    Ok(json!(entries))
 }
 
-pub(crate) fn setban(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "subnet is required")?;
+pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    use core::str::FromStr as _;
+
+    let subnet_str = required_str(params, 0, "subnet is required")?;
     let command = required_str(params, 1, "command is required")?;
+    let addr = std::net::SocketAddr::from_str(subnet_str)
+        .map_err(|_| RpcError::InvalidParams("subnet must be a valid host:port"))?;
     match command {
-        "add" | "remove" => Ok(Value::new_null()),
-        _ => Err(RpcError::InvalidParams("command must be 'add' or 'remove'")),
+        "add" => {
+            ctx.banned.write().insert(addr);
+        }
+        "remove" => {
+            ctx.banned.write().remove(&addr);
+        }
+        _ => return Err(RpcError::InvalidParams("command must be 'add' or 'remove'")),
     }
+    Ok(Value::new_null())
 }
 
-pub(crate) fn clearbanned(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn clearbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
+    ctx.banned.write().clear();
     Ok(Value::new_null())
 }
 
@@ -130,6 +163,12 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
         .map_err(|_| RpcError::InvalidParams("node must be a valid host:port address"))?;
     match command {
         "add" | "onetry" => {
+            if command == "add" {
+                let mut list = ctx.added_nodes.write();
+                if !list.contains(&addr) {
+                    list.push(addr);
+                }
+            }
             if let Some(sender) = &ctx.p2p_outbound_sender
                 && sender.send(addr).is_err()
             {
@@ -137,8 +176,8 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
             }
         }
         "remove" => {
-            // Removing an added node is no-op; real ban-list integration is
-            // deferred to a future strand.
+            let mut list = ctx.added_nodes.write();
+            list.retain(|a| *a != addr);
         }
         _ => {
             return Err(RpcError::InvalidParams(
@@ -328,14 +367,14 @@ mod admin_rpc_tests {
     #[test]
     fn setban_accepts_add_and_remove() {
         let ctx = Arc::new(Context::new());
-        assert!(setban(&ctx, &json!(["10.0.0.0/8", "add"])).is_ok());
-        assert!(setban(&ctx, &json!(["10.0.0.0/8", "remove"])).is_ok());
+        assert!(setban(&ctx, &json!(["10.0.0.1:8333", "add"])).is_ok());
+        assert!(setban(&ctx, &json!(["10.0.0.1:8333", "remove"])).is_ok());
     }
 
     #[test]
     fn setban_rejects_unknown_command() {
         let ctx = Arc::new(Context::new());
-        let result = setban(&ctx, &json!(["10.0.0.0/8", "frobnicate"]));
+        let result = setban(&ctx, &json!(["10.0.0.1:8333", "frobnicate"]));
         assert!(result.is_err());
     }
 
@@ -345,5 +384,69 @@ mod admin_rpc_tests {
         let result = setnetworkactive(&ctx, &json!([true]))
             .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
         assert_eq!(result.as_bool(), Some(true));
+    }
+}
+#[cfg(test)]
+mod ban_state_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use sonic_rs::JsonContainerTrait;
+
+    #[test]
+    fn setban_add_persists_in_context() {
+        let ctx = Arc::new(Context::new());
+        let _ = setban(&ctx, &json!(["127.0.0.1:8333", "add"]))
+            .unwrap_or_else(|err| panic!("setban failed: {err}"));
+        let banned = ctx.banned.read();
+        assert_eq!(banned.len(), 1);
+    }
+
+    #[test]
+    fn listbanned_returns_added_entries() {
+        let ctx = Arc::new(Context::new());
+        ctx.banned.write().insert(std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            8333,
+        ));
+        let result =
+            listbanned(&ctx, &json!(null)).unwrap_or_else(|err| panic!("listbanned failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        assert_eq!(arr.len(), 1);
+    }
+
+    #[test]
+    fn clearbanned_empties_set() {
+        let ctx = Arc::new(Context::new());
+        ctx.banned.write().insert(std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            8333,
+        ));
+        let _ = clearbanned(&ctx, &json!(null))
+            .unwrap_or_else(|err| panic!("clearbanned failed: {err}"));
+        assert!(ctx.banned.read().is_empty());
+    }
+
+    #[test]
+    fn addnode_add_persists_in_added_nodes_list() {
+        let ctx = Arc::new(Context::new());
+        let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
+            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
+        let added = ctx.added_nodes.read();
+        assert_eq!(added.len(), 1);
+    }
+
+    #[test]
+    fn getaddednodeinfo_returns_persisted_entries() {
+        let ctx = Arc::new(Context::new());
+        let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
+            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
+        let result = getaddednodeinfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getaddednodeinfo failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        assert_eq!(arr.len(), 1);
     }
 }
