@@ -42,6 +42,7 @@ pub mod verify_block;
 /// Transaction rule checks.
 pub mod verify_tx;
 
+pub use bip9::{DeploymentContext, DeploymentParams, DeploymentState, compute_state};
 pub use connect_block::connect_block_dual_path;
 pub use rust_path::{BlockState, RustValidator, TipState, UtxoView};
 pub use verify_block::{verify_block_rules, verify_block_rules_borrowed};
