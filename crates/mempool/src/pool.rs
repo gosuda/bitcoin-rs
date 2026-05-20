@@ -175,6 +175,47 @@ impl Mempool {
             .and_then(|index| self.entries.get(index))
     }
 
+    /// Adjusts the effective fee of `txid` in the pool by `fee_delta` satoshis.
+    ///
+    /// The delta can be negative (saturating at 0). Bumps the entry's `fee` and
+    /// recomputes `fee_rate` against the existing `vsize`. Returns `true` when
+    /// the txid was present and the adjustment was applied; `false` when the
+    /// txid was not in the mempool.
+    ///
+    /// Note: ancestor/descendant fee accounting is not propagated by this
+    /// adjustment; that's deferred to a follow-up strand that walks the spend
+    /// graph after each prioritise.
+    #[must_use]
+    pub fn prioritise(&mut self, txid: Txid, fee_delta: i64) -> bool {
+        let Some(&id) = self.by_txid.get(&txid) else {
+            return false;
+        };
+
+        {
+            let Some(entry) = self.entry_mut(id) else {
+                return false;
+            };
+            let new_fee = if fee_delta >= 0 {
+                entry
+                    .fee
+                    .saturating_add(u64::try_from(fee_delta).unwrap_or(0))
+            } else {
+                let neg = fee_delta.saturating_neg();
+                let abs = u64::try_from(neg).unwrap_or(0);
+                entry.fee.saturating_sub(abs)
+            };
+            entry.fee = new_fee;
+            let denom = u64::from(entry.vsize).max(1);
+            entry.fee_rate = new_fee.saturating_mul(1_000) / denom;
+        }
+
+        let Some(entry) = self.entry(id).cloned() else {
+            return false;
+        };
+        self.pareto.insert(id, &entry);
+        true
+    }
+
     /// Removes an entry and all descendants that spend its outputs.
     pub fn remove_entry_and_descendants(&mut self, id: EntryId) -> Vec<EntryId> {
         let mut ids = Vec::new();
@@ -548,6 +589,76 @@ mod tests {
         let descendants = pool.descendant_ids_for_entry(parent_id);
 
         assert_eq!(descendants, vec![child_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_bumps_fee_and_rate() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(1, Vec::new());
+        let txid = tx.compute_txid();
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
+        let _id = pool.insert_entry(entry)?;
+
+        assert!(pool.prioritise(txid, 500));
+
+        let Some(&id) = pool.by_txid.get(&txid) else {
+            panic!("tx missing after prioritise");
+        };
+        let Some(entry) = pool.entry(id) else {
+            panic!("entry missing");
+        };
+        assert_eq!(entry.fee, 1_500);
+        assert_eq!(entry.fee_rate, 15_000);
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_saturates_negative_delta_at_zero() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(2, Vec::new());
+        let txid = tx.compute_txid();
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
+        let _id = pool.insert_entry(entry)?;
+
+        assert!(pool.prioritise(txid, -2_000));
+
+        let Some(&id) = pool.by_txid.get(&txid) else {
+            panic!("tx missing after prioritise");
+        };
+        let Some(entry) = pool.entry(id) else {
+            panic!("entry missing");
+        };
+        assert_eq!(entry.fee, 0);
+        assert_eq!(entry.fee_rate, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_returns_false_for_unknown_txid() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+
+        assert!(!pool.prioritise(Txid::all_zeros(), 100));
+    }
+
+    #[test]
+    fn prioritise_reorders_priority_index() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let lower_fee_tx = tx(3, Vec::new());
+        let lower_fee_txid = lower_fee_tx.compute_txid();
+        let lower_fee_id =
+            pool.insert_entry(MempoolEntry::new(Arc::new(lower_fee_tx), 100, 1_000, 1, 7))?;
+        let higher_fee_tx = tx(4, Vec::new());
+        let higher_fee_id =
+            pool.insert_entry(MempoolEntry::new(Arc::new(higher_fee_tx), 100, 2_000, 2, 7))?;
+
+        assert_eq!(
+            pool.pareto.top_n(1).collect::<Vec<_>>(),
+            vec![higher_fee_id]
+        );
+        assert!(pool.prioritise(lower_fee_txid, 2_000));
+
+        assert_eq!(pool.pareto.top_n(1).collect::<Vec<_>>(), vec![lower_fee_id]);
         Ok(())
     }
 

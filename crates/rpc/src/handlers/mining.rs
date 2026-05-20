@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 use core::time::Duration;
 
-use sonic_rs::{JsonValueTrait as _, Value, json};
+use sonic_rs::{JsonValueTrait, Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
@@ -70,12 +70,23 @@ pub(crate) fn submitblock(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     Ok(Value::new_null())
 }
 
-pub(crate) fn prioritisetransaction(
-    _ctx: &Arc<Context>,
-    params: &Value,
-) -> Result<Value, RpcError> {
-    required_str(params, 0, "txid is required")?;
-    Ok(json!(true))
+pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    use core::str::FromStr as _;
+
+    let txid_str = required_str(params, 0, "txid is required")?;
+    let txid = bitcoin::Txid::from_str(txid_str)
+        .map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))?;
+    let array = params_array(params)?;
+    // params: [txid, dummy_or_fee_delta_priority_field, fee_delta]
+    // Bitcoin Core's API has the deprecated `priority_delta` middle param (now
+    // a dummy `0`) and a real `fee_delta` final param. Accept whichever order.
+    let fee_delta = array
+        .get(2)
+        .and_then(JsonValueTrait::as_i64)
+        .or_else(|| array.get(1).and_then(JsonValueTrait::as_i64))
+        .ok_or(RpcError::InvalidParams("fee_delta is required"))?;
+    let bumped = ctx.mempool.write().prioritise(txid, fee_delta);
+    Ok(json!(bumped))
 }
 #[cfg(test)]
 mod submitblock_tests {
