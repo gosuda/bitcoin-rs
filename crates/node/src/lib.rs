@@ -14,6 +14,10 @@ pub mod apply;
 pub mod bip9_context;
 /// Bitcoin Core configuration compatibility.
 pub mod bitcoin_conf_compat;
+/// Adapter.
+///
+/// Bridges in-memory block records to the index crate's BlockSource trait.
+pub mod block_source;
 /// Layered node configuration.
 pub mod config;
 /// Startup crash recovery.
@@ -41,6 +45,7 @@ pub mod utxo_view;
 
 pub use bip9_context::BlockTreeContext;
 pub use bitcoin_rs_primitives::Network;
+pub use block_source::NodeBlockSource;
 pub use config::{Auth, Config};
 pub use run::run;
 pub use state::ApplyError;
