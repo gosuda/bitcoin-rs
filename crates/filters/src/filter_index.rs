@@ -80,6 +80,26 @@ impl<S: KvStore> FilterIndex<S> {
         Ok(count)
     }
 
+    /// Iterates every persisted block-filter hash in storage order without
+    /// materializing the filter payload.
+    ///
+    /// Cheaper than `iter_filters` when only the block-hash list matters
+    /// (e.g., IBD progress dashboards, BIP157 service-advertisement). Linear
+    /// scan over the `Filters` CF key space.
+    pub fn iter_block_hashes(
+        &self,
+    ) -> Result<Vec<bitcoin_rs_primitives::Hash256>, FilterIndexError> {
+        let iter = self.store.iter_prefix(ColumnFamily::Filters, &[])?;
+        let mut out = Vec::new();
+        for entry in iter {
+            let (key, _value) = entry.map_err(FilterIndexError::Storage)?;
+            if let Ok(hash_bytes) = <[u8; 32]>::try_from(key.as_slice()) {
+                out.push(bitcoin_rs_primitives::Hash256::from_le_bytes(&hash_bytes));
+            }
+        }
+        Ok(out)
+    }
+
     /// Iterates every persisted block-filter pair `(block_hash, filter_bytes)` in storage order.
     ///
     /// Used by SPV-style range queries that need every filter (e.g., wallet rescan).
@@ -274,6 +294,27 @@ mod iter_filters_tests {
         let _ = index.put_filter(block_hash, prev_header, &filter_bytes)?;
 
         assert_eq!(index.filter_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn iter_block_hashes_returns_empty_for_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, index) = filter_index()?;
+        assert!(index.iter_block_hashes()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn iter_block_hashes_returns_inserted_hash_after_put_filter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, index) = filter_index()?;
+        let block_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[7_u8; 32]);
+        let prev_header = bitcoin_rs_primitives::Hash256::from_le_bytes(&[2_u8; 32]);
+        let filter_bytes = vec![0xab_u8; 16];
+        let _ = index.put_filter(block_hash, prev_header, &filter_bytes)?;
+        let hashes = index.iter_block_hashes()?;
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0], block_hash);
         Ok(())
     }
 
