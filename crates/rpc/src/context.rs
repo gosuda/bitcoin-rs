@@ -319,6 +319,20 @@ impl Context {
             .find(|record| record.hash == hash)
             .cloned()
     }
+
+    /// Returns the `BlockRecord` at the given height, if known.
+    ///
+    /// Linear scan over the in-memory block log. Returns the first matching
+    /// record. Suitable for handlers and Electrum resolvers needing a block
+    /// reference; not a hot path on an indexed store.
+    #[must_use]
+    pub fn block_by_height(&self, height: u32) -> Option<BlockRecord> {
+        self.blocks
+            .read()
+            .iter()
+            .find(|record| record.height == height)
+            .cloned()
+    }
 }
 
 #[cfg(test)]
@@ -370,5 +384,19 @@ mod tests {
             Arc::ptr_eq(&ctx.filter_index, &filter_index),
             "filter_index must be shared with caller"
         );
+    }
+
+    #[test]
+    fn block_by_height_returns_record_after_add_block() {
+        use bitcoin_rs_primitives::Hash256;
+
+        let ctx = Context::new();
+        let record = BlockRecord::synthetic(42, Hash256::default());
+        ctx.add_block(record);
+
+        let Some(found) = ctx.block_by_height(42) else {
+            panic!("expected record at height 42");
+        };
+        assert_eq!(found.height, 42);
     }
 }
