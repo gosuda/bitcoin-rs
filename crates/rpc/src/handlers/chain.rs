@@ -230,6 +230,13 @@ fn block_json_verbose(
     let version_hex = u32::from_le_bytes(version.to_le_bytes());
     let bits = header.bits.to_consensus();
     let bits_hex = format!("{bits:08x}");
+    let mediantime = ctx.median_time_past_for_hash(record.hash).unwrap_or(0);
+    let chainwork = ctx
+        .chain_work_hex_for_hash(record.hash)
+        .unwrap_or_else(|| "00".to_owned());
+    let next_hash = ctx
+        .next_block_hash_for_height(record.height)
+        .map(bitcoin_rs_primitives::Hash256::to_string_be);
 
     if !include_block_fields {
         return json!({
@@ -240,17 +247,14 @@ fn block_json_verbose(
             "versionHex": format!("{version_hex:08x}"),
             "merkleroot": header.merkle_root.to_string(),
             "time": header.time,
-            // TODO(blocktree): populate from the block tree median-time-past index.
-            "mediantime": 0,
+            "mediantime": mediantime,
             "nonce": header.nonce,
             "bits": bits_hex,
             "difficulty": 0,
-            // TODO(blocktree): populate from accumulated chainwork on the active chain.
-            "chainwork": "00",
+            "chainwork": chainwork,
             "nTx": record.tx_count,
             "previousblockhash": header.prev_blockhash.to_string(),
-            // TODO(blocktree): populate from the active-chain successor index.
-            "nextblockhash": null
+            "nextblockhash": next_hash
         });
     }
 
@@ -275,17 +279,14 @@ fn block_json_verbose(
         "versionHex": format!("{version_hex:08x}"),
         "merkleroot": header.merkle_root.to_string(),
         "time": header.time,
-        // TODO(blocktree): populate from the block tree median-time-past index.
-        "mediantime": 0,
+        "mediantime": mediantime,
         "nonce": header.nonce,
         "bits": bits_hex,
         "difficulty": 0,
-        // TODO(blocktree): populate from accumulated chainwork on the active chain.
-        "chainwork": "00",
+        "chainwork": chainwork,
         "nTx": record.tx_count,
         "previousblockhash": header.prev_blockhash.to_string(),
-        // TODO(blocktree): populate from the active-chain successor index.
-        "nextblockhash": null,
+        "nextblockhash": next_hash,
         "strippedsize": record.block_hex.len() / 2,
         "size": record.block_hex.len() / 2,
         "weight": block.weight().to_wu(),
@@ -353,16 +354,13 @@ fn synthetic_block_json(ctx: &Context, record: &BlockRecord, include_block_field
             "versionHex": "00000000",
             "merkleroot": Hash256::default().to_string_be(),
             "time": 0,
-            // TODO(blocktree): populate from the block tree median-time-past index.
             "mediantime": 0,
             "nonce": 0,
             "bits": "00000000",
             "difficulty": 0,
-            // TODO(blocktree): populate from accumulated chainwork on the active chain.
             "chainwork": "00",
             "nTx": record.tx_count,
             "previousblockhash": null,
-            // TODO(blocktree): populate from the active-chain successor index.
             "nextblockhash": null
         });
     }
@@ -375,16 +373,13 @@ fn synthetic_block_json(ctx: &Context, record: &BlockRecord, include_block_field
         "versionHex": "00000000",
         "merkleroot": Hash256::default().to_string_be(),
         "time": 0,
-        // TODO(blocktree): populate from the block tree median-time-past index.
         "mediantime": 0,
         "nonce": 0,
         "bits": "00000000",
         "difficulty": 0,
-        // TODO(blocktree): populate from accumulated chainwork on the active chain.
         "chainwork": "00",
         "nTx": record.tx_count,
         "previousblockhash": null,
-        // TODO(blocktree): populate from the active-chain successor index.
         "nextblockhash": null,
         "strippedsize": 0,
         "size": record.block_hex.len() / 2,

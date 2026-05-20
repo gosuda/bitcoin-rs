@@ -33,6 +33,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let network = state.network();
     let mining_template_id = state.mining_template_id();
     let peers = state.peers();
+    let block_tree = state.block_tree();
 
     let ctx = Context::from_handles(
         Arc::clone(&chain_tip),
@@ -46,6 +47,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::clone(&network),
         Arc::clone(&mining_template_id),
         Arc::clone(&peers),
+        Arc::clone(&block_tree),
     );
 
     assert!(
@@ -86,6 +88,10 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         "mining_template_id must share identity"
     );
     assert!(Arc::ptr_eq(&ctx.peers, &peers), "peers must share identity");
+    assert!(
+        Arc::ptr_eq(&ctx.block_tree, &block_tree),
+        "block_tree must share identity"
+    );
 
     Ok(())
 }

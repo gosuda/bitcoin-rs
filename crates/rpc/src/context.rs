@@ -127,6 +127,8 @@ pub struct Context {
     pub network: Arc<RwLock<NetworkState>>,
     /// Shared registry of currently-handshook peers.
     pub peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
+    /// Shared in-memory block tree.
+    pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
     /// Current getblocktemplate long-poll id.
     pub mining_template_id: Arc<ArcSwap<CompactString>>,
     /// Receiver notified when mining template inputs change.
@@ -175,6 +177,7 @@ impl Context {
             filter_index: noop_filter_index(),
             network: Arc::new(RwLock::new(NetworkState::default())),
             peers: Arc::new(RwLock::new(Vec::new())),
+            block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             mining_notifications,
             mining_sender,
@@ -200,6 +203,7 @@ impl Context {
         network: Arc<RwLock<NetworkState>>,
         mining_template_id: Arc<ArcSwap<CompactString>>,
         peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
+        block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
     ) -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -213,6 +217,7 @@ impl Context {
             filter_index,
             network,
             peers,
+            block_tree,
             mining_template_id,
             mining_notifications,
             mining_sender,
@@ -333,6 +338,39 @@ impl Context {
             .find(|record| record.height == height)
             .cloned()
     }
+
+    /// Returns the median-time-past at the block with `hash`, or `None` if the
+    /// block is not in the tree.
+    #[must_use]
+    pub fn median_time_past_for_hash(&self, hash: bitcoin_rs_primitives::Hash256) -> Option<u32> {
+        let tree = self.block_tree.read();
+        let node_id = tree.lookup(hash)?;
+        tree.median_time_past_at(node_id, 11)
+    }
+
+    /// Returns the 64-char lowercase hex chainwork at the block with `hash`.
+    #[must_use]
+    pub fn chain_work_hex_for_hash(&self, hash: bitcoin_rs_primitives::Hash256) -> Option<String> {
+        let tree = self.block_tree.read();
+        let node_id = tree.lookup(hash)?;
+        let node = tree.node(node_id).ok()?;
+        let bytes: [u8; 32] = node.chainwork.to_be_bytes();
+        Some(bytes.to_lower_hex_string())
+    }
+
+    /// Returns the hash of the block at `height + 1` on the active chain.
+    #[must_use]
+    pub fn next_block_hash_for_height(
+        &self,
+        height: u32,
+    ) -> Option<bitcoin_rs_primitives::Hash256> {
+        let tree = self.block_tree.read();
+        let tip = tree.tip()?;
+        let next_height = height.checked_add(1)?;
+        let node_id = tree.node_at_height_from(tip.tip_id, next_height)?;
+        let node = tree.node(node_id).ok()?;
+        Some(node.hash)
+    }
 }
 
 #[cfg(test)]
@@ -351,6 +389,7 @@ mod tests {
             bitcoin_rs_coinstats::CoinStats::default(),
         ));
         let filter_index = noop_filter_index();
+        let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
         let ctx = Context::from_handles(
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
@@ -363,6 +402,7 @@ mod tests {
             Arc::new(RwLock::new(NetworkState::default())),
             Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             Arc::new(RwLock::new(Vec::new())),
+            Arc::clone(&block_tree),
         );
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
@@ -383,6 +423,10 @@ mod tests {
         assert!(
             Arc::ptr_eq(&ctx.filter_index, &filter_index),
             "filter_index must be shared with caller"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.block_tree, &block_tree),
+            "block_tree must be shared with caller"
         );
     }
 
