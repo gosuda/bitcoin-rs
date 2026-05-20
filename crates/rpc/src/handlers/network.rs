@@ -77,13 +77,34 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 pub(crate) fn addnode(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "node is required")?;
-    required_str(params, 1, "command is required")?;
+    use core::str::FromStr as _;
+
+    let node = required_str(params, 0, "node is required")?;
+    let command = required_str(params, 1, "command is required")?;
+    // Parse the address. Accept host:port form via SocketAddr::from_str; bare
+    // hostnames need DNS resolution which is deferred.
+    std::net::SocketAddr::from_str(node)
+        .map_err(|_| RpcError::InvalidParams("node must be a valid host:port address"))?;
+    match command {
+        "add" | "remove" | "onetry" => {}
+        _ => {
+            return Err(RpcError::InvalidParams(
+                "command must be one of: add, remove, onetry",
+            ));
+        }
+    }
+    // TODO(p2p-outbound): wire to a Sender<NetworkCommand> on Context so the
+    // node's P2P listener can establish/teardown the outbound connection.
     Ok(Value::new_null())
 }
 
 pub(crate) fn disconnectnode(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "address is required")?;
+    use core::str::FromStr as _;
+
+    let address = required_str(params, 0, "address is required")?;
+    std::net::SocketAddr::from_str(address)
+        .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
+    // TODO(p2p-outbound): wire to a disconnection sender on Context.
     Ok(Value::new_null())
 }
 
@@ -133,5 +154,49 @@ mod tests {
             panic!("connections_in missing: {result:?}");
         };
         assert_eq!(connections_in, 0);
+    }
+}
+
+#[cfg(test)]
+mod addnode_validation_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use sonic_rs::JsonValueTrait;
+
+    #[test]
+    fn addnode_rejects_bad_address() {
+        let ctx = Arc::new(Context::new());
+        let result = addnode(&ctx, &json!(["definitely-not-an-address", "add"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn addnode_rejects_unknown_command() {
+        let ctx = Arc::new(Context::new());
+        let result = addnode(&ctx, &json!(["127.0.0.1:8333", "frobnicate"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn addnode_accepts_well_formed_input() {
+        let ctx = Arc::new(Context::new());
+        let result = addnode(&ctx, &json!(["127.0.0.1:8333", "onetry"]))
+            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn disconnectnode_rejects_bad_address() {
+        let ctx = Arc::new(Context::new());
+        let result = disconnectnode(&ctx, &json!(["definitely-not-an-address"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn disconnectnode_accepts_well_formed_address() {
+        let ctx = Arc::new(Context::new());
+        let result = disconnectnode(&ctx, &json!(["127.0.0.1:8333"]))
+            .unwrap_or_else(|err| panic!("disconnectnode failed: {err}"));
+        assert!(result.is_null());
     }
 }
