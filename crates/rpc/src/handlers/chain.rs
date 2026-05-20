@@ -230,50 +230,106 @@ pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value
 }
 
 pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    use bitcoin::consensus::encode::deserialize;
+    use bitcoin::hex::FromHex as _;
+
     let target = params_array(params)?
         .first()
         .ok_or(RpcError::InvalidParams("hash_or_height is required"))?;
     let height = if let Some(height) = target.as_u64() {
         u32::try_from(height).map_err(|_| RpcError::InvalidParams("height exceeds u32"))?
     } else if let Some(hash) = target.as_str() {
-        parse_hash(hash)?;
-        ctx.height()
+        let block_hash = parse_hash(hash)?;
+        ctx.height_for_hash(block_hash)
+            .unwrap_or_else(|| ctx.height())
     } else {
         return Err(RpcError::InvalidType(
             "hash_or_height must be string or number",
         ));
     };
+
+    let block_hash = ctx.block_hash_at_height(height).unwrap_or_default();
+    let subsidy_sat = subsidy_at_height(height);
+    let record = ctx.block_by_hash(block_hash);
+    let time = record.as_ref().map_or(0, |r| r.time);
+    let mediantime = ctx.median_time_past_for_hash(block_hash).unwrap_or(0);
+
+    let mut total_size: u64 = 0;
+    let mut total_weight: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut ins: u64 = 0;
+    let mut outs: u64 = 0;
+    let mut txs: u64 = 0;
+    let mut swtxs: u64 = 0;
+    let mut swtotal_size: u64 = 0;
+    let mut swtotal_weight: u64 = 0;
+    if let Some(record) = record.as_ref() {
+        if let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) {
+            total_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if let Ok(block) = deserialize::<bitcoin::Block>(&bytes) {
+                total_weight = block.weight().to_wu();
+                txs = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
+                for tx in &block.txdata {
+                    ins = ins.saturating_add(u64::try_from(tx.input.len()).unwrap_or(u64::MAX));
+                    outs = outs.saturating_add(u64::try_from(tx.output.len()).unwrap_or(u64::MAX));
+                    for output in &tx.output {
+                        total_out = total_out.saturating_add(output.value.to_sat());
+                    }
+                    if tx.input.iter().any(|i| !i.witness.is_empty()) {
+                        swtxs = swtxs.saturating_add(1);
+                        let tx_size = bitcoin::consensus::encode::serialize(tx).len();
+                        swtotal_size =
+                            swtotal_size.saturating_add(u64::try_from(tx_size).unwrap_or(u64::MAX));
+                        swtotal_weight = swtotal_weight.saturating_add(tx.weight().to_wu());
+                    }
+                }
+            }
+        }
+    }
+
     Ok(json!({
         "avgfee": 0,
         "avgfeerate": 0,
         "avgtxsize": 0,
-        "blockhash": ctx.block_hash_at_height(height).unwrap_or_default().to_string_be(),
+        "blockhash": block_hash.to_string_be(),
         "feerate_percentiles": [0, 0, 0, 0, 0],
         "height": height,
-        "ins": 0,
+        "ins": ins,
         "maxfee": 0,
         "maxfeerate": 0,
         "maxtxsize": 0,
         "medianfee": 0,
-        "mediantime": 0,
+        "mediantime": mediantime,
         "mediantxsize": 0,
         "minfee": 0,
         "minfeerate": 0,
         "mintxsize": 0,
-        "outs": 0,
-        "subsidy": 0,
-        "swtotal_size": 0,
-        "swtotal_weight": 0,
-        "swtxs": 0,
-        "time": 0,
-        "total_out": 0,
-        "total_size": 0,
-        "total_weight": 0,
+        "outs": outs,
+        "subsidy": subsidy_sat,
+        "swtotal_size": swtotal_size,
+        "swtotal_weight": swtotal_weight,
+        "swtxs": swtxs,
+        "time": time,
+        "total_out": total_out,
+        "total_size": total_size,
+        "total_weight": total_weight,
         "totalfee": 0,
-        "txs": 0,
+        "txs": txs,
         "utxo_increase": 0,
         "utxo_size_inc": 0
     }))
+}
+
+/// Bitcoin block subsidy at `height` in satoshis. 50 BTC initially, halving
+/// every 210,000 blocks, saturating to zero after ~64 halvings.
+fn subsidy_at_height(height: u32) -> u64 {
+    const INITIAL_SUBSIDY_SAT: u64 = 5_000_000_000;
+    const HALVING_INTERVAL: u32 = 210_000;
+    let halvings = height / HALVING_INTERVAL;
+    if halvings >= 64 {
+        return 0;
+    }
+    INITIAL_SUBSIDY_SAT >> halvings
 }
 pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let height = required_u64(params, 0, "height is required")?;
@@ -667,6 +723,22 @@ mod tests {
 
     use super::*;
     use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+
+    #[test]
+    fn subsidy_at_height_genesis_is_50_btc() {
+        assert_eq!(subsidy_at_height(0), 5_000_000_000);
+    }
+
+    #[test]
+    fn subsidy_at_height_first_halving_is_25_btc() {
+        assert_eq!(subsidy_at_height(210_000), 2_500_000_000);
+    }
+
+    #[test]
+    fn subsidy_at_height_after_64_halvings_is_zero() {
+        assert_eq!(subsidy_at_height(64 * 210_000), 0);
+        assert_eq!(subsidy_at_height(u32::MAX), 0);
+    }
 
     #[test]
     fn getblock_populates_real_header_fields_from_stored_record()
