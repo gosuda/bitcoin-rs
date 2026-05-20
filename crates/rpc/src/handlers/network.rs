@@ -6,6 +6,9 @@ use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, required_str};
 
+const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
+const DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB: f64 = 0.00001;
+
 pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let peers = ctx.peers.read();
@@ -29,8 +32,8 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
             {"name": "ipv6", "limited": false, "reachable": true, "proxy": "", "proxy_randomize_credentials": false},
             {"name": "onion", "limited": true, "reachable": false, "proxy": "", "proxy_randomize_credentials": false}
         ],
-        "relayfee": 0.0,
-        "incrementalfee": 0.0,
+        "relayfee": DEFAULT_RELAY_FEE_BTC_PER_KVB,
+        "incrementalfee": DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB,
         "localaddresses": Vec::<String>::new(),
         "warnings": ""
     }))
@@ -154,6 +157,22 @@ mod tests {
             panic!("connections_in missing: {result:?}");
         };
         assert_eq!(connections_in, 0);
+    }
+
+    #[test]
+    fn getnetworkinfo_emits_relayfee_default_of_one_sat_per_vbyte() {
+        use alloc::sync::Arc;
+
+        let ctx = Arc::new(Context::new());
+        let result = getnetworkinfo(&ctx, &json!(null))
+            .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
+        let Some(relayfee) = result.get("relayfee").and_then(JsonValueTrait::as_f64) else {
+            panic!("relayfee missing: {result:?}");
+        };
+        assert!(
+            (relayfee - 0.00001).abs() < 1e-9,
+            "expected ~0.00001, got {relayfee}"
+        );
     }
 }
 
