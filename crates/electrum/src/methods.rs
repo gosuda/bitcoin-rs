@@ -508,6 +508,7 @@ pub fn dispatch(
         "blockchain.scripthash.get_history" => scripthash_get_history(index, mempool, params),
         "blockchain.scripthash.get_balance" => scripthash_get_balance(index, mempool, params),
         "blockchain.scripthash.subscribe" => scripthash_subscribe(index, mempool, params),
+        "blockchain.scripthash.unsubscribe" => scripthash_unsubscribe(index, mempool, params),
         "blockchain.scripthash.listunspent" => scripthash_listunspent(index, mempool, params),
         "blockchain.transaction.get" => transaction_get(index, mempool, params),
         "blockchain.transaction.broadcast" => transaction_broadcast(index, mempool, params),
@@ -650,6 +651,17 @@ pub(crate) fn scripthash_subscribe(
 ) -> Result<Value, ElectrumError> {
     let scripthash = parse_scripthash_param(params)?;
     Ok(status_json(index, mempool, scripthash))
+}
+pub(crate) fn scripthash_unsubscribe(
+    _index: &IndexHandle,
+    _mempool: &MempoolHandle,
+    params: &Value,
+) -> Result<Value, ElectrumError> {
+    // Validate the scripthash format; we don't track per-session subscriptions
+    // in this dispatch, so always confirm the unsubscribe. Matches electrs' v1.4
+    // behavior where unsubscribe is best-effort.
+    let _scripthash = parse_scripthash_param(params)?;
+    Ok(json!(true))
 }
 
 pub(crate) fn scripthash_listunspent(
@@ -1095,5 +1107,39 @@ mod history_reader_tests {
             .unwrap_or_else(|| panic!("expected array"));
 
         assert_eq!(rows.len(), 1, "expected one row: {result:?}");
+    }
+}
+#[cfg(test)]
+mod scripthash_unsubscribe_tests {
+    use super::*;
+
+    #[test]
+    fn scripthash_unsubscribe_returns_true() {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let scripthash_hex = [0xee_u8; 32].to_lower_hex_string();
+        let result = dispatch(
+            "blockchain.scripthash.unsubscribe",
+            &index,
+            &mempool,
+            &json!([scripthash_hex]),
+        )
+        .unwrap_or_else(|err| panic!("unsubscribe failed: {err}"));
+
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn scripthash_unsubscribe_rejects_invalid_hex() {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let result = dispatch(
+            "blockchain.scripthash.unsubscribe",
+            &index,
+            &mempool,
+            &json!(["not hex"]),
+        );
+
+        assert!(result.is_err());
     }
 }
