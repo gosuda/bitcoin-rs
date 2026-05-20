@@ -10,9 +10,17 @@ use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, required_str, serde_to_sonic};
 
+// Bitcoin Core defaults for relay-fee policy until per-node configuration is
+// wired. Units: sat/kvB (the canonical workspace internal). 1000 sat/kvB =
+// 1 sat/vB = 0.00001 BTC/kvB.
+const DEFAULT_MIN_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
+const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
+
 pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
     let stats = ctx.mempool.read().stats();
+    let min_relay_fee = sat_per_kvb_to_btc(DEFAULT_MIN_RELAY_FEE_SAT_PER_KVB);
+    let incremental_relay_fee = sat_per_kvb_to_btc(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB);
     Ok(json!({
         "loaded": true,
         "size": stats.txs,
@@ -20,9 +28,9 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "usage": stats.bytes,
         "total_fee": sats_to_btc(stats.total_fee),
         "maxmempool": 300_000_000_u64,
-        "mempoolminfee": 0.0,
-        "minrelaytxfee": 0.0,
-        "incrementalrelayfee": 0.0,
+        "mempoolminfee": min_relay_fee,
+        "minrelaytxfee": min_relay_fee,
+        "incrementalrelayfee": incremental_relay_fee,
         "unbroadcastcount": 0,
         "fullrbf": true
     }))
@@ -171,6 +179,15 @@ fn sats_to_btc(sats: u64) -> f64 {
     bitcoin::Amount::from_sat(sats).to_btc()
 }
 
+// TODO(refactor): share fee-unit helpers via handlers::common.
+fn sat_per_kvb_to_btc(sat: u64) -> f64 {
+    if let Ok(small) = u32::try_from(sat) {
+        f64::from(small) / 100_000_000.0_f64
+    } else {
+        f64::from(u32::MAX) / 100_000_000.0_f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
@@ -178,9 +195,27 @@ mod tests {
 
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
     use bitcoin_rs_mempool::MempoolEntry;
-    use sonic_rs::{JsonContainerTrait, JsonValueTrait as _, json};
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait, json};
 
     use super::*;
+
+    #[test]
+    fn getmempoolinfo_emits_one_sat_per_vbyte_default_for_relay_fees() {
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolinfo", &json!([]))
+            .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
+        let Some(min_relay) = result.get("minrelaytxfee").and_then(JsonValueTrait::as_f64) else {
+            panic!("minrelaytxfee missing: {result:?}");
+        };
+
+        // 1000 sat/kvB / 100_000_000 = 0.00001
+        assert!(
+            (min_relay - 0.00001).abs() < 1e-9,
+            "expected ~0.00001, got {min_relay}"
+        );
+    }
 
     #[test]
     fn getmempooldescendants_walks_real_descendant_graph() -> Result<(), Box<dyn std::error::Error>>
