@@ -218,6 +218,18 @@ impl Mempool {
         self.entry_by_txid(txid).map(|entry| Arc::clone(&entry.tx))
     }
 
+    /// Returns the txids of every entry in the pool.
+    ///
+    /// Order is the underlying slab iteration order (i.e., NOT fee-rate sorted;
+    /// use `iter_by_fee_rate_desc` for that).
+    #[must_use]
+    pub fn iter_txids(&self) -> Vec<bitcoin::Txid> {
+        self.entries
+            .iter()
+            .map(|(_id, entry)| entry.tx.compute_txid())
+            .collect()
+    }
+
     /// Returns txids of mempool entries signalling BIP-125 RBF eligibility.
     ///
     /// An entry is replaceable when ANY of its inputs has `sequence < 0xFFFFFFFE`
@@ -932,6 +944,47 @@ mod tests {
         let pool = Mempool::new(MempoolLimits::default());
         let absent = bitcoin::Txid::from_byte_array([0xff; 32]);
         assert!(pool.transaction_by_txid(&absent).is_none());
+    }
+
+    #[test]
+    fn iter_txids_returns_empty_for_empty_pool() {
+        let pool = Mempool::new(MempoolLimits::default());
+        assert!(pool.iter_txids().is_empty());
+    }
+
+    #[test]
+    fn iter_txids_returns_all_inserted_txids() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let tx_a = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(100),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        };
+        let txid_a = tx_a.compute_txid();
+        let tx_b = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(200),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        };
+        let txid_b = tx_b.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx_a), 500, 100, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx_b), 500, 100, 2, 7))?;
+        let txids = pool.iter_txids();
+        assert_eq!(txids.len(), 2);
+        assert!(txids.contains(&txid_a));
+        assert!(txids.contains(&txid_b));
+        Ok(())
     }
 
     #[test]
