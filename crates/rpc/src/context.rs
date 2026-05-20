@@ -144,6 +144,9 @@ pub struct Context {
     /// `BlockSync::tick` for the canonical apply path. `None` when no node is
     /// wired (tests, embedded callers).
     pub inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
+    /// Optional outbound channel for `addnode` to request new P2P connections.
+    /// `None` for embedded/test callers without a live P2P listener.
+    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
     mining_sender: Sender<()>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
@@ -193,6 +196,7 @@ impl Context {
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             mining_notifications,
             inbound_blocks_sender: None,
+            p2p_outbound_sender: None,
             mining_sender,
         }
     }
@@ -219,6 +223,7 @@ impl Context {
         block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
         chain_network: Network,
         inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
+        p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
     ) -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -237,6 +242,7 @@ impl Context {
             mining_template_id,
             mining_notifications,
             inbound_blocks_sender,
+            p2p_outbound_sender,
             mining_sender,
         }
     }
@@ -451,6 +457,7 @@ mod tests {
             Arc::new(RwLock::new(Vec::new())),
             Arc::clone(&block_tree),
             Network::Mainnet,
+            None,
             None,
         );
         assert!(

@@ -17,6 +17,16 @@ const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 const RPC_MAX_CONNECTIONS: usize = 128;
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+type PeerRegistry = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>;
+type PeerOutboundMap = Arc<
+    parking_lot::RwLock<
+        hashbrown::HashMap<
+            std::net::SocketAddr,
+            crossbeam_channel::Sender<bitcoin_rs_p2p::Message>,
+        >,
+    >,
+>;
+
 fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
     match node_auth {
         crate::Auth::Basic { user, password } => {
@@ -73,15 +83,8 @@ fn spawn_electrum_listener(
 fn spawn_p2p_listeners(
     config: &bitcoin_rs_node::Config,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    peers: &Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
-    peer_outbound: &Arc<
-        parking_lot::RwLock<
-            hashbrown::HashMap<
-                std::net::SocketAddr,
-                crossbeam_channel::Sender<bitcoin_rs_p2p::Message>,
-            >,
-        >,
-    >,
+    peers: &PeerRegistry,
+    peer_outbound: &PeerOutboundMap,
     inbound_headers_tx: crossbeam_channel::Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin::Block>,
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>
@@ -112,6 +115,47 @@ fn spawn_p2p_listeners(
         handles.push(handle);
     }
     Ok(handles)
+}
+
+fn spawn_p2p_outbound_drain(
+    config: &bitcoin_rs_node::Config,
+    state: &NodeState,
+    shutdown: &Arc<AtomicBool>,
+    peers: &PeerRegistry,
+    peer_outbound: &PeerOutboundMap,
+) -> anyhow::Result<std::thread::JoinHandle<()>> {
+    let outbound_rx = state.p2p_outbound_receiver();
+    let magic = bitcoin::p2p::Magic::from_bytes(config.network.magic());
+    let outbound_registry = Arc::clone(peers);
+    let outbound_peer_outbound = Arc::clone(peer_outbound);
+    let outbound_headers_tx = state.inbound_headers_sender();
+    let outbound_blocks_tx = state.inbound_blocks_sender();
+    let outbound_shutdown = Arc::clone(shutdown);
+
+    Ok(std::thread::Builder::new()
+        .name("bitcoin-rs-p2p-outbound-drain".to_owned())
+        .spawn(move || {
+            while !outbound_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                let recv = {
+                    let guard = outbound_rx.lock();
+                    guard.recv_timeout(Duration::from_secs(1))
+                };
+                match recv {
+                    Ok(addr) => {
+                        let _handle = bitcoin_rs_p2p::spawn_outbound_connection(
+                            addr,
+                            magic,
+                            Arc::clone(&outbound_registry),
+                            Arc::clone(&outbound_peer_outbound),
+                            outbound_headers_tx.clone(),
+                            outbound_blocks_tx.clone(),
+                        );
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })?)
 }
 
 /// Boots the node from a resolved [`Config`] and runs until shutdown.
@@ -166,6 +210,7 @@ pub fn run(mut config: Config) -> Result<()> {
         state.block_tree(),
         state.config().network,
         Some(state.inbound_blocks_sender()),
+        Some(state.p2p_outbound_sender()),
     );
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
@@ -193,6 +238,8 @@ pub fn run(mut config: Config) -> Result<()> {
         state.inbound_headers_sender(),
         state.inbound_blocks_sender(),
     )?;
+    let _outbound_worker =
+        spawn_p2p_outbound_drain(state.config(), &state, &shutdown, &peers, &peer_outbound)?;
     loop_handle.spin(&shutdown)?;
     if let Some(handle) = electrum_thread {
         match handle.join() {

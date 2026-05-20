@@ -36,6 +36,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let peers = state.peers();
     let block_tree = state.block_tree();
     let inbound_blocks_sender = state.inbound_blocks_sender();
+    let p2p_outbound = Some(state.p2p_outbound_sender());
 
     let ctx = Context::from_handles(
         Arc::clone(&chain_tip),
@@ -52,6 +53,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::clone(&block_tree),
         chain_network,
         Some(inbound_blocks_sender),
+        p2p_outbound,
     );
 
     assert!(
@@ -104,6 +106,10 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     assert!(
         ctx.inbound_blocks_sender.is_some(),
         "inbound_blocks_sender must be Some"
+    );
+    assert!(
+        ctx.p2p_outbound_sender.is_some(),
+        "p2p_outbound_sender must be Some"
     );
 
     Ok(())

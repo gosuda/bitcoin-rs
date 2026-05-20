@@ -121,25 +121,31 @@ pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErro
     Ok(Value::new_null())
 }
 
-pub(crate) fn addnode(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     use core::str::FromStr as _;
 
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;
-    // Parse the address. Accept host:port form via SocketAddr::from_str; bare
-    // hostnames need DNS resolution which is deferred.
-    std::net::SocketAddr::from_str(node)
+    let addr = std::net::SocketAddr::from_str(node)
         .map_err(|_| RpcError::InvalidParams("node must be a valid host:port address"))?;
     match command {
-        "add" | "remove" | "onetry" => {}
+        "add" | "onetry" => {
+            if let Some(sender) = &ctx.p2p_outbound_sender
+                && sender.send(addr).is_err()
+            {
+                return Err(RpcError::Internal("p2p outbound channel closed".to_owned()));
+            }
+        }
+        "remove" => {
+            // Removing an added node is no-op; real ban-list integration is
+            // deferred to a future strand.
+        }
         _ => {
             return Err(RpcError::InvalidParams(
                 "command must be one of: add, remove, onetry",
             ));
         }
     }
-    // TODO(p2p-outbound): wire to a Sender<NetworkCommand> on Context so the
-    // node's P2P listener can establish/teardown the outbound connection.
     Ok(Value::new_null())
 }
 
@@ -257,6 +263,22 @@ mod addnode_validation_tests {
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "onetry"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
         assert!(result.is_null());
+    }
+
+    #[test]
+    fn addnode_add_sends_outbound_request() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut ctx = Context::new();
+        ctx.p2p_outbound_sender = Some(tx);
+        let ctx = Arc::new(ctx);
+        let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
+            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
+
+        assert!(result.is_null());
+        let Ok(sent) = rx.try_recv() else {
+            panic!("addnode did not send outbound request");
+        };
+        assert_eq!(sent, std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
     }
 
     #[test]

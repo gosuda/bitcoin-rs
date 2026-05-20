@@ -339,6 +339,8 @@ pub struct NodeState {
     peer_outbound: Arc<
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     >,
+    p2p_outbound_tx: crossbeam_channel::Sender<std::net::SocketAddr>,
+    p2p_outbound_rx: Arc<Mutex<crossbeam_channel::Receiver<std::net::SocketAddr>>>,
     inbound_headers_tx: Sender<Vec<Header>>,
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<Header>>>>,
     inbound_blocks_tx: Sender<bitcoin::Block>,
@@ -375,6 +377,8 @@ impl NodeState {
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let peers = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (p2p_outbound_tx, p2p_outbound_rx_raw) = crossbeam_channel::unbounded();
+        let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
         let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
         let (inbound_headers_tx, inbound_headers_rx_raw) =
             crossbeam_channel::unbounded::<Vec<Header>>();
@@ -425,6 +429,8 @@ impl NodeState {
             network,
             peers,
             peer_outbound,
+            p2p_outbound_tx,
+            p2p_outbound_rx,
             inbound_headers_tx,
             inbound_headers_rx,
             inbound_blocks_tx,
@@ -563,6 +569,20 @@ impl NodeState {
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     > {
         Arc::clone(&self.peer_outbound)
+    }
+
+    /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
+    #[must_use]
+    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<std::net::SocketAddr> {
+        self.p2p_outbound_tx.clone()
+    }
+
+    /// Returns the shared receiver consumed by the outbound P2P drain worker.
+    #[must_use]
+    pub fn p2p_outbound_receiver(
+        &self,
+    ) -> Arc<Mutex<crossbeam_channel::Receiver<std::net::SocketAddr>>> {
+        Arc::clone(&self.p2p_outbound_rx)
     }
 
     /// Returns a cloned `Sender` that the P2P listener pushes inbound
