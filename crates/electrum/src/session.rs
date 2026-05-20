@@ -148,6 +148,13 @@ impl SessionState {
                 self.subscriptions.subscribe_headers(result.clone());
                 Ok(result)
             }
+            "blockchain.scripthash.unsubscribe" => {
+                let scripthash = parse_scripthash_param(&request.params)?;
+                self.subscriptions.unsubscribe_scripthash(scripthash);
+                // Preserve the dispatch's `true` return value; the underlying methods.rs
+                // handler already validated the scripthash and returned the bool.
+                Ok(result)
+            }
             _ => Ok(result),
         }
     }
@@ -210,4 +217,66 @@ fn error_response(id: &Value, code: i64, message: &str) -> Value {
 /// Parses a scripthash from a subscription response path.
 pub fn parse_subscribed_scripthash(params: &Value) -> Result<ScriptHash, ElectrumError> {
     parse_scripthash_param(params)
+}
+
+#[cfg(test)]
+mod unsubscribe_tests {
+    use std::io::Cursor;
+
+    use bitcoin_rs_index::ScriptHash;
+    use sonic_rs::{JsonValueTrait as _, Value, json};
+
+    use super::Session;
+    use crate::methods::{IndexHandle, MempoolHandle, scripthash_hex};
+
+    #[test]
+    fn scripthash_unsubscribe_removes_session_subscription_but_preserves_dispatch_result() {
+        let mut session = Session::new(
+            Cursor::new(Vec::new()),
+            IndexHandle::new(),
+            MempoolHandle::default(),
+        );
+        let scripthash = ScriptHash::from_byte_array([0xab_u8; 32]);
+        let subscribe = request_line(1, "blockchain.scripthash.subscribe", scripthash);
+
+        let responses = session
+            .handle_line(&subscribe)
+            .unwrap_or_else(|err| panic!("subscribe failed: {err}"));
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(session.subscriptions_mut().len(), 1);
+
+        let unsubscribe = request_line(2, "blockchain.scripthash.unsubscribe", scripthash);
+        let responses = session
+            .handle_line(&unsubscribe)
+            .unwrap_or_else(|err| panic!("unsubscribe failed: {err}"));
+
+        let [response] = responses.as_slice() else {
+            panic!("expected exactly one unsubscribe response");
+        };
+        assert_eq!(session.subscriptions_mut().len(), 0);
+        assert_response_result_bool(&response.line, true);
+    }
+
+    fn request_line(id: u64, method: &str, scripthash: ScriptHash) -> String {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": [scripthash_hex(scripthash)],
+        });
+
+        sonic_rs::to_string(&request)
+            .unwrap_or_else(|err| panic!("request serialization failed: {err}"))
+    }
+
+    fn assert_response_result_bool(line: &str, expected: bool) {
+        let response = sonic_rs::from_str::<Value>(line)
+            .unwrap_or_else(|err| panic!("response parsing failed: {err}"));
+
+        assert_eq!(
+            response.get("result").and_then(Value::as_bool),
+            Some(expected)
+        );
+    }
 }
