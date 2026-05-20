@@ -20,15 +20,28 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .ok()
             .map_or(0.0, |node| ctx.difficulty_for_bits(node.header.bits))
     });
+    let verification_progress = if headers > 0 {
+        f64::from(applied) / f64::from(headers)
+    } else {
+        0.0
+    };
+    let chain = match ctx.chain_network {
+        bitcoin_rs_primitives::Network::Mainnet => "main",
+        bitcoin_rs_primitives::Network::Testnet3 | bitcoin_rs_primitives::Network::Testnet4 => {
+            "test"
+        }
+        bitcoin_rs_primitives::Network::Signet => "signet",
+        bitcoin_rs_primitives::Network::Regtest => "regtest",
+    };
     Ok(json!({
-        "chain": "main",
+        "chain": chain,
         "blocks": applied,
         "headers": headers,
         "bestblockhash": ctx.applied_hash().to_string_be(),
         "difficulty": difficulty,
         "time": 0,
         "mediantime": 0,
-        "verificationprogress": 0.0,
+        "verificationprogress": verification_progress,
         "initialblockdownload": applied < headers,
         "chainwork": ctx.chainwork_hex(),
         "size_on_disk": 0,
@@ -402,6 +415,7 @@ mod tests {
     use bitcoin::blockdata::constants::genesis_block;
 
     use super::*;
+    use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 
     #[test]
     fn getblock_populates_real_header_fields_from_stored_record()
@@ -466,5 +480,52 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn verificationprogress_reports_half_when_applied_is_half_of_headers() {
+        let ctx = Arc::new(Context::new());
+        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        ctx.set_chain_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 100,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 50,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        let result = getblockchaininfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+        let Some(progress) = result
+            .get("verificationprogress")
+            .and_then(JsonValueTrait::as_f64)
+        else {
+            panic!("verificationprogress missing: {result:?}");
+        };
+        assert!(
+            (progress - 0.5).abs() < 1e-6,
+            "expected ~0.5, got {progress}"
+        );
+    }
+
+    #[test]
+    fn verificationprogress_reports_zero_when_headers_unset() {
+        let ctx = Arc::new(Context::new());
+        let result = getblockchaininfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+        let Some(progress) = result
+            .get("verificationprogress")
+            .and_then(JsonValueTrait::as_f64)
+        else {
+            panic!("verificationprogress missing: {result:?}");
+        };
+        assert!(
+            progress.abs() < f64::EPSILON,
+            "expected 0.0, got {progress}"
+        );
     }
 }
