@@ -30,8 +30,29 @@ pub(crate) fn getdescriptorinfo(_ctx: &Arc<Context>, params: &Value) -> Result<V
 }
 
 pub(crate) fn deriveaddresses(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "descriptor is required")?;
+    let descriptor = required_str(params, 0, "descriptor is required")?;
+    // Strip optional #checksum suffix.
+    let payload = descriptor
+        .rsplit_once('#')
+        .map_or(descriptor, |(body, _)| body);
+    // Match addr(...) wrapper.
+    if let Some(inner) = strip_addr_wrapper(payload) {
+        if inner.contains('*') {
+            // TODO(miniscript): support ranged addr() once miniscript+derivation
+            // is wired. For now return empty since we cannot enumerate.
+            return Ok(json!([]));
+        }
+        return Ok(json!([inner]));
+    }
+    // TODO(miniscript): other wrappers (pkh, sh, wpkh, tr, wsh, multi, ...) need
+    // miniscript-based key derivation. Return empty until then.
     Ok(json!([]))
+}
+
+fn strip_addr_wrapper(payload: &str) -> Option<&str> {
+    let stripped = payload.strip_prefix("addr(")?;
+    let stripped = stripped.strip_suffix(')')?;
+    Some(stripped)
 }
 
 pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -400,6 +421,50 @@ mod descriptor_checksum_tests {
             desc.starts_with("addr(x)#"),
             "expected addr(x)# prefix: {desc}"
         );
+    }
+}
+
+#[cfg(test)]
+mod deriveaddresses_tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn deriveaddresses_returns_addr_argument_for_single_addr_descriptor() {
+        let ctx = Arc::new(Context::new());
+        let result = deriveaddresses(&ctx, &json!(["addr(1111111111111111111114oLvT2)"]))
+            .unwrap_or_else(|err| panic!("deriveaddresses failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        assert_eq!(arr.len(), 1);
+        let Some(first) = arr.first().and_then(Value::as_str) else {
+            panic!("expected string element: {result:?}");
+        };
+        assert_eq!(first, "1111111111111111111114oLvT2");
+    }
+
+    #[test]
+    fn deriveaddresses_handles_checksum_suffix() {
+        let ctx = Arc::new(Context::new());
+        let result = deriveaddresses(&ctx, &json!(["addr(bc1qfoo)#aaaaaaaa"]))
+            .unwrap_or_else(|err| panic!("deriveaddresses failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        assert_eq!(arr.len(), 1);
+    }
+
+    #[test]
+    fn deriveaddresses_empty_for_ranged_descriptors() {
+        let ctx = Arc::new(Context::new());
+        let result = deriveaddresses(&ctx, &json!(["wpkh(xpub.../0/*)"]))
+            .unwrap_or_else(|err| panic!("deriveaddresses failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        assert!(arr.is_empty());
     }
 }
 
