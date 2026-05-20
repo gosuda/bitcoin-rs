@@ -59,6 +59,38 @@ impl PeerInfo {
             inbound: false,
         }
     }
+
+    /// Returns Bitcoin Core service-flag names decoded from `self.services`.
+    ///
+    /// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
+    #[must_use]
+    pub fn services_names(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = Vec::new();
+
+        if self.services & 1_u64 != 0 {
+            names.push("NETWORK");
+        }
+        if self.services & (1_u64 << 1) != 0 {
+            names.push("GETUTXO");
+        }
+        if self.services & (1_u64 << 2) != 0 {
+            names.push("BLOOM");
+        }
+        if self.services & (1_u64 << 3) != 0 {
+            names.push("WITNESS");
+        }
+        if self.services & (1_u64 << 6) != 0 {
+            names.push("COMPACT_FILTERS");
+        }
+        if self.services & (1_u64 << 10) != 0 {
+            names.push("NETWORK_LIMITED");
+        }
+        if self.services & (1_u64 << 11) != 0 {
+            names.push("P2P_V2");
+        }
+
+        names
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -106,5 +138,29 @@ mod tests {
         let version = fake_version();
         let info = PeerInfo::inbound_from_version(addr, &version, 100);
         assert!(info.inbound);
+    }
+
+    #[test]
+    fn services_names_decodes_inbound_peer_with_network_witness() {
+        let mut version = fake_version();
+        version.services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        let info = PeerInfo::inbound_from_version(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333),
+            &version,
+            0,
+        );
+        assert_eq!(info.services_names(), vec!["NETWORK", "WITNESS"]);
+    }
+
+    #[test]
+    fn services_names_empty_for_no_flags() {
+        let mut version = fake_version();
+        version.services = ServiceFlags::NONE;
+        let info = PeerInfo::inbound_from_version(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333),
+            &version,
+            0,
+        );
+        assert!(info.services_names().is_empty());
     }
 }
