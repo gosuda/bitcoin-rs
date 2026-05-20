@@ -106,6 +106,12 @@ impl Mempool {
         self.sequence.load(core::sync::atomic::Ordering::Acquire)
     }
 
+    /// Returns the configured min-relay-fee rate in sat/kvB.
+    #[must_use]
+    pub const fn min_relay_fee_sat_per_kvb(&self) -> u64 {
+        self.limits.min_relay_fee_sat_per_kvb
+    }
+
     fn bump_sequence(&self) {
         let _ = self
             .sequence
@@ -600,6 +606,22 @@ mod tests {
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 
     use super::*;
+
+    #[test]
+    fn default_min_relay_fee_is_1_sat_per_vbyte() {
+        let pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.min_relay_fee_sat_per_kvb(), 1_000);
+    }
+
+    #[test]
+    fn custom_min_relay_fee_round_trips() {
+        let limits = MempoolLimits {
+            min_relay_fee_sat_per_kvb: 5_000,
+            ..MempoolLimits::default()
+        };
+        let pool = Mempool::new(limits);
+        assert_eq!(pool.min_relay_fee_sat_per_kvb(), 5_000);
+    }
 
     #[test]
     fn stats_reports_empty_and_inserted_entry_counters() -> Result<(), MempoolError> {

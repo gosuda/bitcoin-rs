@@ -14,6 +14,9 @@ pub struct MempoolLimits {
     /// Maximum total mempool size in vbytes. Default 300 MB (Bitcoin Core default).
     /// Set to 0 to disable size-bound eviction.
     pub max_total_bytes: u64,
+    /// Minimum relay fee rate in sat/kvB. Transactions with lower `fee_rate` are
+    /// not relayed. Default 1000 sat/kvB = 1 sat/vB (Bitcoin Core default).
+    pub min_relay_fee_sat_per_kvb: u64,
 }
 
 impl Default for MempoolLimits {
@@ -24,6 +27,7 @@ impl Default for MempoolLimits {
             max_descendants: 25,
             max_replacement_evictions: 100,
             max_total_bytes: 300_000_000,
+            min_relay_fee_sat_per_kvb: 1_000,
         }
     }
 }
