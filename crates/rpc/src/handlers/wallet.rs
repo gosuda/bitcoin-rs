@@ -26,16 +26,32 @@ pub(crate) fn deriveaddresses(_ctx: &Arc<Context>, params: &Value) -> Result<Val
     Ok(json!([]))
 }
 
-pub(crate) fn scantxoutset(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "action is required")?;
-    Ok(json!({
-        "success": true,
-        "txouts": 0,
-        "height": 0,
-        "bestblock": bitcoin_rs_primitives::Hash256::default().to_string_be(),
-        "unspents": [],
-        "total_amount": 0.0
-    }))
+pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let action = required_str(params, 0, "action is required")?;
+    match action {
+        "start" => {
+            // Aggregate UTXO-set summary. Descriptor filtering is NOT applied in v1;
+            // the descriptor argument is accepted but ignored. A future strand will
+            // wire a real descriptor-matched scan.
+            // TODO(descriptors): match `params[1]` against `bitcoin::miniscript::Descriptor`
+            // and stream only matching outpoints into `unspents`.
+            let snapshot = ctx.coin_stats.snapshot();
+            let total_amount_btc = bitcoin::Amount::from_sat(snapshot.total_amount).to_btc();
+            Ok(json!({
+                "success": true,
+                "txouts": ctx.utxo.len(),
+                "height": ctx.applied_height(),
+                "bestblock": ctx.applied_hash().to_string_be(),
+                "unspents": [],
+                "total_amount": total_amount_btc
+            }))
+        }
+        "abort" => Ok(json!(false)),
+        "status" => Ok(Value::new_null()),
+        _ => Err(RpcError::InvalidParams(
+            "action must be one of: start, abort, status",
+        )),
+    }
 }
 
 pub(crate) fn walletcreatefundedpsbt(
@@ -79,4 +95,40 @@ pub(crate) fn bumpfee(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         "fee": 0.0,
         "errors": []
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use sonic_rs::JsonValueTrait as _;
+
+    use super::*;
+
+    #[test]
+    fn scantxoutset_start_returns_real_summary_from_utxoset() {
+        let ctx = Arc::new(Context::new());
+        let result = scantxoutset(&ctx, &json!(["start"]))
+            .unwrap_or_else(|err| panic!("scantxoutset failed: {err}"));
+        let Some(success) = result.get("success").and_then(Value::as_bool) else {
+            panic!("success missing: {result:?}");
+        };
+        assert!(
+            success,
+            "scantxoutset start should report success: {result:?}"
+        );
+        let Some(_height) = result.get("height").and_then(Value::as_u64) else {
+            panic!("height missing: {result:?}");
+        };
+        let Some(txouts) = result.get("txouts").and_then(Value::as_u64) else {
+            panic!("txouts missing: {result:?}");
+        };
+        assert_eq!(txouts, 0, "fresh ctx has empty utxoset");
+    }
+
+    #[test]
+    fn scantxoutset_abort_returns_false() {
+        let ctx = Arc::new(Context::new());
+        let result = scantxoutset(&ctx, &json!(["abort"]))
+            .unwrap_or_else(|err| panic!("scantxoutset abort failed: {err}"));
+        assert_eq!(result.as_bool(), Some(false));
+    }
 }
