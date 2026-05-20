@@ -16,6 +16,29 @@ use crate::handlers::{optional_bool, params_array, required_str, required_u64, s
 pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let verbose = optional_bool(params, 1, false)?;
+    let blockhash_str = params_array(params)?
+        .get(2)
+        .and_then(JsonValueTrait::as_str);
+    if let Some(hash_str) = blockhash_str {
+        let hash = Hash256::from_str(hash_str)
+            .map_err(|_| RpcError::InvalidParams("blockhash must be 64 hex characters"))?;
+        let Some(record) = ctx.block_by_hash(hash) else {
+            return Err(RpcError::NotFound("block not found"));
+        };
+        let bytes = Vec::<u8>::from_hex(&record.block_hex)
+            .map_err(|_| RpcError::Internal("stored block hex is corrupt".to_owned()))?;
+        let block: bitcoin::Block = deserialize(&bytes)
+            .map_err(|_| RpcError::Internal("stored block bytes failed decode".to_owned()))?;
+        for tx in &block.txdata {
+            if tx.compute_txid() == txid {
+                if !verbose {
+                    return Ok(json!(serialize(tx).to_lower_hex_string()));
+                }
+                return tx_to_value(tx);
+            }
+        }
+        return Err(RpcError::NotFound("transaction not in specified block"));
+    }
     {
         let transactions = ctx.transactions.read();
         if let Some(tx) = transactions.get(&txid) {
@@ -243,6 +266,7 @@ mod tests {
 
     use bitcoin::blockdata::constants::genesis_block;
     use bitcoin::consensus::encode::serialize;
+    use bitcoin::hashes::Hash as _;
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_mempool::MempoolEntry;
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -276,6 +300,43 @@ mod tests {
         let expected = serialize(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
         Ok(())
+    }
+
+    #[test]
+    fn getrawtransaction_with_blockhash_finds_tx_in_specific_block() {
+        let ctx = Arc::new(Context::new());
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let Some(coinbase) = genesis.txdata.first() else {
+            panic!("genesis has no transactions");
+        };
+        let txid = coinbase.compute_txid();
+        let block_hash =
+            bitcoin_rs_primitives::Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        let handler = Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch(
+                "getrawtransaction",
+                &json!([txid.to_string(), false, block_hash.to_string_be()]),
+            )
+            .unwrap_or_else(|err| panic!("getrawtransaction with blockhash: {err}"));
+        assert!(result.is_str(), "expected hex string, got {result:?}");
+    }
+
+    #[test]
+    fn getrawtransaction_with_unknown_blockhash_errors() {
+        let ctx = Arc::new(Context::new());
+        let handler = Handler::new(Arc::clone(&ctx));
+        let bogus_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[7_u8; 32]).to_string_be();
+        let result = handler.dispatch(
+            "getrawtransaction",
+            &json!([
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                false,
+                bogus_hash
+            ]),
+        );
+        assert!(result.is_err());
     }
 
     #[test]
