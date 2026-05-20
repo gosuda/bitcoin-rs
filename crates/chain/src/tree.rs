@@ -94,6 +94,28 @@ impl BlockTree {
         None
     }
 
+    /// Returns up to `limit` parent `NodeId`s of `start` (excluding `start` itself).
+    ///
+    /// Walks parent pointers in order from nearest to farthest. Stops at the root
+    /// (no parent) or after `limit` ancestors. Used by header-distance queries and
+    /// reorg cost analysis.
+    #[must_use]
+    pub fn ancestors(&self, start: NodeId, limit: usize) -> Vec<NodeId> {
+        let mut out = Vec::with_capacity(limit);
+        let mut cursor = start;
+        while out.len() < limit {
+            let Ok(node) = self.node(cursor) else {
+                break;
+            };
+            let Some(parent_id) = node.parent else {
+                break;
+            };
+            out.push(parent_id);
+            cursor = parent_id;
+        }
+        out
+    }
+
     /// Looks up a node id by header hash.
     #[must_use]
     pub fn lookup(&self, hash: Hash256) -> Option<NodeId> {
@@ -536,6 +558,58 @@ mod tests {
         assert_eq!(tree.node_at_height_from(tip_id, 0), Some(genesis_id));
         assert_eq!(tree.node_at_height_from(tip_id, 4), Some(tip_id));
         assert_eq!(tree.node_at_height_from(tip_id, 99), None);
+        Ok(())
+    }
+
+    #[test]
+    fn ancestors_returns_empty_for_root() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let result = tree.ancestors(genesis_id, 10);
+        assert!(result.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ancestors_walks_parent_chain_in_order() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let child = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            1,
+        );
+        let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
+        let grandchild = test_header(
+            BlockHash::from_byte_array(hash_from_header(&child).to_le_bytes()),
+            2,
+        );
+        let grandchild_id =
+            tree.insert_node(Some(child_id), grandchild, NodeStatus::HeaderValid)?;
+        let result = tree.ancestors(grandchild_id, 10);
+        assert_eq!(result, vec![child_id, genesis_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn ancestors_respects_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let child = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            1,
+        );
+        let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
+        let grandchild = test_header(
+            BlockHash::from_byte_array(hash_from_header(&child).to_le_bytes()),
+            2,
+        );
+        let grandchild_id =
+            tree.insert_node(Some(child_id), grandchild, NodeStatus::HeaderValid)?;
+        let result = tree.ancestors(grandchild_id, 1);
+        assert_eq!(result, vec![child_id]);
         Ok(())
     }
 
