@@ -350,8 +350,10 @@ impl Fixture {
                 merkle_root: bitcoin::merkle_tree::calculate_root(std::iter::once(
                     tx.compute_txid().to_raw_hash(),
                 ))
-                .map(|root| bitcoin::TxMerkleNode::from_raw_hash(root))
-                .unwrap_or_else(bitcoin::TxMerkleNode::all_zeros),
+                .map_or_else(
+                    bitcoin::TxMerkleNode::all_zeros,
+                    bitcoin::TxMerkleNode::from_raw_hash,
+                ),
                 time: 1_231_006_505,
                 bits: bitcoin::CompactTarget::from_consensus(0x1d00_ffff),
                 nonce: 0,
