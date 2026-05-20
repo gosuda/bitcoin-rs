@@ -187,6 +187,15 @@ impl Mempool {
         self.entries.is_empty()
     }
 
+    /// Returns `true` when `txid` is present in the mempool.
+    ///
+    /// Constant-time wrapper over `by_txid.contains_key`. Cheaper than `entry()`
+    /// for callers that only need a presence check.
+    #[must_use]
+    pub fn contains_txid(&self, txid: &bitcoin::Txid) -> bool {
+        self.by_txid.contains_key(txid)
+    }
+
     /// Returns the total virtual size of all entries.
     #[must_use]
     pub fn total_vsize(&self) -> u64 {
@@ -745,6 +754,24 @@ mod tests {
         assert_eq!(stats.bytes, expected_vsize);
         assert_eq!(stats.total_fee, expected_fee);
         Ok(())
+    }
+    #[test]
+    fn contains_txid_returns_true_after_insert() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(99_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let txid = tx.compute_txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7));
+        assert!(pool.contains_txid(&txid));
+        let other = bitcoin::Txid::from_byte_array([0xff; 32]);
+        assert!(!pool.contains_txid(&other));
     }
 
     #[test]
