@@ -53,4 +53,4 @@ pub use run::run;
 pub use state::ApplyError;
 pub use sync::BlockSync;
 pub use utxo_view::UtxoSetView;
-pub use zmq_publisher::{NoOpZmqPublisher, ZmqPublisher};
+pub use zmq_publisher::{NoOpZmqPublisher, TracingZmqPublisher, ZmqPublisher};
