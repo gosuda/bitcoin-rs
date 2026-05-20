@@ -1,11 +1,15 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use sonic_rs::{Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{required_str, required_u64, serde_to_sonic};
+
+static SERVER_START: OnceLock<Instant> = OnceLock::new();
 
 const BLOCK_VSIZE_TARGET: u64 = 1_000_000;
 const DEFAULT_MIN_FEERATE_SAT_PER_KVB: u64 = 1_000; // 1 sat/vB
@@ -46,6 +50,13 @@ fn estimate_feerate_sat_per_kvb(ctx: &Context, conf_target: u64) -> u64 {
 
 fn sat_per_kvb_to_btc_per_kvb(sat: u64) -> f64 {
     f64::from(u32::try_from(sat).unwrap_or(u32::MAX)) / 100_000_000.0_f64
+}
+
+pub(crate) fn uptime(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    crate::handlers::ensure_no_params(params)?;
+    let start = SERVER_START.get_or_init(Instant::now);
+    let secs = start.elapsed().as_secs();
+    Ok(json!(secs))
 }
 
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -145,6 +156,16 @@ mod tests {
         assert!(
             feerate > 0.0,
             "empty mempool should still return a min feerate: {result:?}"
+        );
+    }
+
+    #[test]
+    fn uptime_returns_u64_seconds() {
+        let ctx = Arc::new(Context::new());
+        let result = uptime(&ctx, &json!([])).unwrap_or_else(|err| panic!("uptime failed: {err}"));
+        assert!(
+            result.is_u64() || result.is_i64(),
+            "uptime returns numeric: {result:?}"
         );
     }
 }

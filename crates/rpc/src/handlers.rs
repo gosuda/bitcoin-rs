@@ -56,6 +56,7 @@ impl Handler {
             "getmempoolancestors" => mempool::getmempoolancestors(&self.ctx, params),
             "getmempooldescendants" => mempool::getmempooldescendants(&self.ctx, params),
             "estimatesmartfee" => util::estimatesmartfee(&self.ctx, params),
+            "uptime" => util::uptime(&self.ctx, params),
             "estimaterawfee" => util::estimaterawfee(&self.ctx, params),
             "validateaddress" => util::validateaddress(&self.ctx, params),
             "getnetworkinfo" => network::getnetworkinfo(&self.ctx, params),
