@@ -80,6 +80,13 @@ impl<S: KvStore> Indexer<S> {
         Ok(rows)
     }
 
+    /// Returns the number of persisted block headers via `iter_block_headers`.
+    ///
+    /// Cost O(N) since the iterator pulls each row; cache if called frequently.
+    pub fn header_count(&self) -> Result<usize, IndexError> {
+        self.iter_block_headers().map(|rows| rows.len())
+    }
+
     /// Iterates confirmed funding rows for `scripthash`.
     ///
     /// Returns every `HashPrefixRow` whose 8-byte prefix matches the scripthash's
@@ -501,6 +508,18 @@ mod tests {
 
         let rows = indexer.iter_block_headers()?;
         assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn header_count_returns_one_after_genesis_ingest() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, mut indexer) = indexer()?;
+        assert_eq!(indexer.header_count()?, 0);
+
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        indexer.ingest_block(&serialize(&genesis), 0)?;
+
+        assert_eq!(indexer.header_count()?, 1);
         Ok(())
     }
 
