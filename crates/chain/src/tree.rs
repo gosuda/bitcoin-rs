@@ -137,6 +137,15 @@ impl BlockTree {
         self.node(self.lookup(hash)?).ok()
     }
 
+    /// Returns the height of the block at `hash`, or `None` if no node with
+    /// that hash exists in the tree.
+    ///
+    /// Composes [`node_by_hash`] + `.height` projection.
+    #[must_use]
+    pub fn height_of_hash(&self, hash: Hash256) -> Option<u32> {
+        self.node_by_hash(hash).map(|node| node.height)
+    }
+
     /// Returns the `NodeId`s of every node not referenced as a parent.
     ///
     /// A leaf is a tip of either the active chain (most common: 1 leaf, the
@@ -562,6 +571,26 @@ mod tests {
             panic!("node_by_hash returned None for inserted genesis");
         };
         assert_eq!(node.hash, genesis_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn height_of_hash_returns_none_for_unknown_hash() {
+        let tree = BlockTree::new();
+        let unknown = Hash256::from_le_bytes(&[0xff_u8; 32]);
+        assert!(tree.height_of_hash(unknown).is_none());
+    }
+
+    #[test]
+    fn height_of_hash_returns_node_height_for_inserted_block()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+        let expected_height = tree.node(genesis_id)?.height;
+
+        assert_eq!(tree.height_of_hash(genesis_hash), Some(expected_height));
         Ok(())
     }
 
