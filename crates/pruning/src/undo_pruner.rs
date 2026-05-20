@@ -7,7 +7,7 @@ use crate::block_pruner::prune_prefixed_rows;
 use crate::{PruneError, PruneOutcome, PrunePolicy};
 
 const BLOCK_UNDO_PREFIX: u8 = b'u';
-const BLOCK_UNDO_PREFIX_BYTES: &[u8] = b"u";
+pub(crate) const BLOCK_UNDO_PREFIX_BYTES: &[u8] = b"u";
 const HEIGHT_START: usize = 1;
 const HEIGHT_END: usize = 5;
 const KEY_LEN: usize = 37;

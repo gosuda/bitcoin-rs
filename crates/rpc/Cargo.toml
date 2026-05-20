@@ -31,6 +31,7 @@ bitcoin-rs-coinstats.workspace = true
 bitcoin-rs-mining.workspace = true
 bitcoin-rs-wallet.workspace = true
 bitcoin-rs-storage.workspace = true
+bitcoin-rs-pruning.workspace = true
 bitcoin.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true

@@ -6,7 +6,7 @@ use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
 use crate::{PruneError, PruneOutcome, PrunePolicy, row_len_u64};
 
 const BLOCK_BODY_PREFIX: u8 = b'b';
-const BLOCK_BODY_PREFIX_BYTES: &[u8] = b"b";
+pub(crate) const BLOCK_BODY_PREFIX_BYTES: &[u8] = b"b";
 const HEIGHT_START: usize = 1;
 const HEIGHT_END: usize = 5;
 const KEY_LEN: usize = 37;
@@ -64,6 +64,29 @@ pub(crate) fn prune_prefixed_rows<S: KvStore>(
     current_tip_height: u32,
     policy: PrunePolicy,
 ) -> Result<PruneOutcome, PruneError> {
+    let mut batch = store.new_batch();
+    let outcome =
+        prune_prefixed_rows_into_batch(store, &mut batch, prefix, current_tip_height, policy)?;
+
+    if !outcome.is_empty() {
+        store.write(batch)?;
+        tracing::debug!(
+            bytes_freed = outcome.bytes_freed,
+            blocks_removed = outcome.blocks_removed,
+            "pruned block storage rows"
+        );
+    }
+
+    Ok(outcome)
+}
+
+pub(crate) fn prune_prefixed_rows_into_batch<S: KvStore>(
+    store: &S,
+    batch: &mut S::WriteBatch,
+    prefix: &[u8],
+    current_tip_height: u32,
+    policy: PrunePolicy,
+) -> Result<PruneOutcome, PruneError> {
     let target_bytes = policy.target_size_bytes();
     let prune_below_height = current_tip_height.saturating_sub(policy.retention_depth());
     let mut total_bytes = 0_u64;
@@ -87,7 +110,6 @@ pub(crate) fn prune_prefixed_rows<S: KvStore>(
 
     let mut remaining_bytes = total_bytes;
     let mut outcome = PruneOutcome::default();
-    let mut batch = store.new_batch();
 
     for (key, row_bytes) in candidates {
         if remaining_bytes <= target_bytes {
@@ -97,15 +119,6 @@ pub(crate) fn prune_prefixed_rows<S: KvStore>(
         batch.delete(BLOCK_DATA_CF, &key);
         remaining_bytes = remaining_bytes.saturating_sub(row_bytes);
         outcome.record_removed(row_bytes);
-    }
-
-    if !outcome.is_empty() {
-        store.write(batch)?;
-        tracing::debug!(
-            bytes_freed = outcome.bytes_freed,
-            blocks_removed = outcome.blocks_removed,
-            "pruned block storage rows"
-        );
     }
 
     Ok(outcome)

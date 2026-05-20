@@ -5,6 +5,7 @@ use core::str::FromStr as _;
 
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_pruning::policy::CORE_REORG_SAFETY_MARGIN;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::context::{BlockRecord, Context};
@@ -41,21 +42,27 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .map(|record| u64::try_from(record.block_hex.len() / 2).unwrap_or(u64::MAX))
             .fold(0_u64, u64::saturating_add)
     };
-    Ok(json!({
-        "chain": chain,
-        "blocks": applied,
-        "headers": headers,
-        "bestblockhash": ctx.applied_hash().to_string_be(),
-        "difficulty": difficulty,
-        "time": 0,
-        "mediantime": 0,
-        "verificationprogress": verification_progress,
-        "initialblockdownload": applied < headers,
-        "chainwork": ctx.chainwork_hex(),
-        "size_on_disk": size_on_disk,
-        "pruned": false,
-        "warnings": ""
-    }))
+    let prune_status = ctx.prune_status();
+    let bestblockhash = ctx.applied_hash().to_string_be();
+    let chainwork = ctx.chainwork_hex();
+    let mut response = sonic_rs::Object::new();
+    let _ = response.insert(&"chain", chain);
+    let _ = response.insert(&"blocks", applied);
+    let _ = response.insert(&"headers", headers);
+    let _ = response.insert(&"bestblockhash", bestblockhash.as_str());
+    let _ = response.insert(&"difficulty", json!(difficulty));
+    let _ = response.insert(&"time", 0_u64);
+    let _ = response.insert(&"mediantime", 0_u64);
+    let _ = response.insert(&"verificationprogress", json!(verification_progress));
+    let _ = response.insert(&"initialblockdownload", applied < headers);
+    let _ = response.insert(&"chainwork", chainwork.as_str());
+    let _ = response.insert(&"size_on_disk", size_on_disk);
+    let _ = response.insert(&"pruned", prune_status.pruned);
+    if let Some(pruneheight) = prune_status.pruneheight {
+        let _ = response.insert(&"pruneheight", pruneheight);
+    }
+    let _ = response.insert(&"warnings", "");
+    Ok(Value::from(response))
 }
 pub(crate) fn getdifficulty(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
@@ -213,6 +220,9 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         }
         return Ok(synthetic_block_json(ctx, &record, true));
     };
+    if record.block_hex.is_empty() {
+        return Err(RpcError::NotFound("block data pruned"));
+    }
     if verbosity == 0 {
         return Ok(json!(record.block_hex));
     }
@@ -237,9 +247,6 @@ pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value
 }
 
 pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    use bitcoin::consensus::encode::deserialize;
-    use bitcoin::hex::FromHex as _;
-
     let target = params_array(params)?
         .first()
         .ok_or(RpcError::InvalidParams("hash_or_height is required"))?;
@@ -272,28 +279,26 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut swtotal_weight: u64 = 0;
     let mut tx_sizes: Vec<u64> = Vec::new();
     let mut fee_fields = FeeFields::default();
-    if let Some(record) = record.as_ref() {
-        if let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) {
-            total_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            if let Ok(block) = deserialize::<bitcoin::Block>(&bytes) {
-                total_weight = block.weight().to_wu();
-                fee_fields = compute_fee_fields(ctx, &block);
-                txs = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
-                for tx in &block.txdata {
-                    ins = ins.saturating_add(u64::try_from(tx.input.len()).unwrap_or(u64::MAX));
-                    outs = outs.saturating_add(u64::try_from(tx.output.len()).unwrap_or(u64::MAX));
-                    for output in &tx.output {
-                        total_out = total_out.saturating_add(output.value.to_sat());
-                    }
-                    let tx_size = bitcoin::consensus::encode::serialize(tx).len();
-                    let tx_size_u64 = u64::try_from(tx_size).unwrap_or(u64::MAX);
-                    tx_sizes.push(tx_size_u64);
-                    if tx.input.iter().any(|i| !i.witness.is_empty()) {
-                        swtxs = swtxs.saturating_add(1);
-                        swtotal_size = swtotal_size.saturating_add(tx_size_u64);
-                        swtotal_weight = swtotal_weight.saturating_add(tx.weight().to_wu());
-                    }
-                }
+    if let Some(record) = record.as_ref()
+        && let Some((bytes, block)) = decode_record_block(record)?
+    {
+        total_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        total_weight = block.weight().to_wu();
+        fee_fields = compute_fee_fields(ctx, &block);
+        txs = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
+        for tx in &block.txdata {
+            ins = ins.saturating_add(u64::try_from(tx.input.len()).unwrap_or(u64::MAX));
+            outs = outs.saturating_add(u64::try_from(tx.output.len()).unwrap_or(u64::MAX));
+            for output in &tx.output {
+                total_out = total_out.saturating_add(output.value.to_sat());
+            }
+            let tx_size = bitcoin::consensus::encode::serialize(tx).len();
+            let tx_size_u64 = u64::try_from(tx_size).unwrap_or(u64::MAX);
+            tx_sizes.push(tx_size_u64);
+            if tx.input.iter().any(|i| !i.witness.is_empty()) {
+                swtxs = swtxs.saturating_add(1);
+                swtotal_size = swtotal_size.saturating_add(tx_size_u64);
+                swtotal_weight = swtotal_weight.saturating_add(tx.weight().to_wu());
             }
         }
     }
@@ -342,6 +347,23 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         "utxo_increase": 0,
         "utxo_size_inc": 0
     }))
+}
+fn decode_record_block(
+    record: &BlockRecord,
+) -> Result<Option<(Vec<u8>, bitcoin::Block)>, RpcError> {
+    use bitcoin::consensus::encode::deserialize;
+    use bitcoin::hex::FromHex as _;
+
+    if record.block_hex.is_empty() {
+        return Err(RpcError::NotFound("block data pruned"));
+    }
+    let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) else {
+        return Ok(None);
+    };
+    let Ok(block) = deserialize::<bitcoin::Block>(&bytes) else {
+        return Ok(None);
+    };
+    Ok(Some((bytes, block)))
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -497,17 +519,28 @@ fn subsidy_at_height(height: u32) -> u64 {
     INITIAL_SUBSIDY_SAT >> halvings
 }
 pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let height = required_u64(params, 0, "height is required")?;
-    let applied = u64::from(ctx.applied_height());
-    if height > applied {
+    let requested = required_u64(params, 0, "height is required")?;
+    let requested_height =
+        u32::try_from(requested).map_err(|_| RpcError::InvalidParams("height exceeds u32"))?;
+    let Some(prune_service) = ctx.prune_service.as_ref() else {
+        return Err(RpcError::MethodDisabled("pruning is disabled"));
+    };
+    let applied = ctx.applied_height();
+    if requested_height > applied {
         return Err(RpcError::InvalidParams(
             "prune height cannot exceed applied tip",
         ));
     }
-
-    // TODO(prune-engine): dispatch into `bitcoin_rs_pruning` to actually delete
-    // historical blocks below `height`. v1 reports the requested height as-is.
-    Ok(json!(height))
+    let safe_prune_height = applied.saturating_sub(CORE_REORG_SAFETY_MARGIN);
+    if requested_height > safe_prune_height {
+        return Err(RpcError::InvalidParams(
+            "prune height is within reorg safety margin",
+        ));
+    }
+    let result = prune_service
+        .prune_to_height(requested_height)
+        .map_err(|err| RpcError::Internal(err.to_string()))?;
+    Ok(json!(result.pruneheight))
 }
 
 pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -1234,33 +1267,181 @@ mod getdifficulty_tests {
 mod pruneblockchain_tests {
     use alloc::sync::Arc;
 
+    use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+    use bitcoin_rs_primitives::Hash256;
+
     use super::*;
 
-    #[test]
-    fn pruneblockchain_returns_requested_height_when_below_tip() {
-        use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
-        use bitcoin_rs_primitives::Hash256;
+    struct FakePruneService {
+        status: crate::context::PruneStatus,
+        result_pruneheight: Option<u32>,
+    }
 
-        let ctx = Arc::new(Context::new());
+    impl crate::context::PruneService for FakePruneService {
+        fn prune_to_height(
+            &self,
+            requested_height: u32,
+        ) -> Result<crate::context::PruneResult, crate::context::PruneServiceError> {
+            Ok(crate::context::PruneResult {
+                requested_height,
+                pruneheight: self.result_pruneheight.unwrap_or(requested_height),
+                block_rows_removed: 0,
+                undo_rows_removed: 0,
+                bytes_freed: 0,
+            })
+        }
+
+        fn status(&self) -> crate::context::PruneStatus {
+            self.status
+        }
+    }
+
+    fn set_applied_tip(ctx: &Context, height: u32) {
         ctx.set_applied_tip(TipSnapshot {
             tip_id: NodeId::new(0),
-            height: 100,
+            height,
             chainwork: ChainWork::ZERO,
             hash: Hash256::default(),
         });
-        let result = pruneblockchain(&ctx, &json!([50]))
+    }
+
+    fn pruning_context() -> Arc<Context> {
+        Arc::new(
+            Context::new().with_prune_service(Arc::new(FakePruneService {
+                status: crate::context::PruneStatus {
+                    pruned: true,
+                    pruneheight: None,
+                },
+                result_pruneheight: None,
+            })),
+        )
+    }
+
+    #[test]
+    fn pruneblockchain_returns_requested_height_after_service_succeeds() {
+        let ctx = pruning_context();
+        set_applied_tip(&ctx, 400);
+
+        let result = pruneblockchain(&ctx, &json!([100]))
             .unwrap_or_else(|err| panic!("pruneblockchain failed: {err}"));
-        assert_eq!(result.as_u64(), Some(50));
+
+        assert_eq!(result.as_u64(), Some(100));
+    }
+
+    #[test]
+    fn pruneblockchain_returns_service_pruneheight() {
+        let ctx = Arc::new(
+            Context::new().with_prune_service(Arc::new(FakePruneService {
+                status: crate::context::PruneStatus {
+                    pruned: true,
+                    pruneheight: Some(150),
+                },
+                result_pruneheight: Some(150),
+            })),
+        );
+        set_applied_tip(&ctx, 400);
+
+        let result = pruneblockchain(&ctx, &json!([100]))
+            .unwrap_or_else(|err| panic!("pruneblockchain failed: {err}"));
+
+        assert_eq!(result.as_u64(), Some(150));
+    }
+
+    #[test]
+    fn pruneblockchain_returns_method_disabled_without_service() {
+        let ctx = Arc::new(Context::new());
+
+        let result = pruneblockchain(&ctx, &json!([100]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::MethodDisabled("pruning is disabled"))
+        ));
+    }
+
+    #[test]
+    fn pruneblockchain_rejects_unsafe_height() {
+        let ctx = pruning_context();
+        set_applied_tip(&ctx, 400);
+
+        let result = pruneblockchain(&ctx, &json!([200]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::InvalidParams(
+                "prune height is within reorg safety margin"
+            ))
+        ));
     }
 
     #[test]
     fn pruneblockchain_rejects_height_above_tip() {
+        let ctx = pruning_context();
+        set_applied_tip(&ctx, 400);
+
+        let result = pruneblockchain(&ctx, &json!([401]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::InvalidParams(
+                "prune height cannot exceed applied tip"
+            ))
+        ));
+    }
+
+    #[test]
+    fn getblockchaininfo_reports_pruned_status_and_pruneheight() {
+        let ctx = Arc::new(
+            Context::new().with_prune_service(Arc::new(FakePruneService {
+                status: crate::context::PruneStatus {
+                    pruned: true,
+                    pruneheight: Some(42),
+                },
+                result_pruneheight: None,
+            })),
+        );
+
+        let result = getblockchaininfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+
+        assert_eq!(
+            result.get("pruned").and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            result.get("pruneheight").and_then(JsonValueTrait::as_u64),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn getblock_returns_not_found_after_block_body_is_cleared() {
         let ctx = Arc::new(Context::new());
-        let result = pruneblockchain(&ctx, &json!([100]));
-        assert!(result.is_err());
+        let hash = Hash256::default();
+        ctx.add_block(BlockRecord::synthetic(1, hash));
+
+        let result = getblock(&ctx, &json!([hash.to_string_be(), 0]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::NotFound("block data pruned"))
+        ));
+    }
+
+    #[test]
+    fn getblockstats_returns_not_found_after_block_body_is_cleared() {
+        let ctx = Arc::new(Context::new());
+        let hash = Hash256::default();
+        ctx.add_block(BlockRecord::synthetic(1, hash));
+
+        let result = getblockstats(&ctx, &json!([1]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::NotFound("block data pruned"))
+        ));
     }
 }
-
 #[cfg(test)]
 mod getchaintips_tests {
     use alloc::sync::Arc;

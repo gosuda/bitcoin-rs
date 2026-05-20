@@ -23,7 +23,9 @@ pub mod handlers;
 pub mod server;
 
 pub use auth::Auth;
-pub use context::{BlockRecord, Context, NetworkState};
+pub use context::{
+    BlockRecord, Context, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
+};
 pub use error::RpcError;
 pub use handlers::Handler;
 pub use server::RpcServer;

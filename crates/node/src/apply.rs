@@ -13,6 +13,7 @@ use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 use crate::state::ApplyError;
+use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError, WriteBatch as _};
 
 /// Number of blocks after a coinbase that its outputs become spendable.
 /// Consensus rule since Bitcoin v0.3.1; universal across networks.
@@ -22,6 +23,32 @@ const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
 const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
 const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
+
+pub(crate) trait PruneBodyStore: Send + Sync {
+    fn persist_block_body(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+        body: &[u8],
+    ) -> Result<(), StorageError>;
+}
+
+impl<S: KvStore> PruneBodyStore for S {
+    fn persist_block_body(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut batch = self.new_batch();
+        batch.put(
+            ColumnFamily::BlockTree,
+            &bitcoin_rs_pruning::block_body_key(height, hash),
+            body,
+        );
+        self.write(batch)
+    }
+}
 
 /// Owned shared handle set needed by `apply_block` to perform a block apply.
 pub struct ApplyHandles {
@@ -49,9 +76,44 @@ pub struct ApplyHandles {
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
     pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
+    pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
 }
 
 impl ApplyHandles {
+    /// Builds the full shared handle set used by `apply_block`.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        network: Network,
+        chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        block_tree: Arc<RwLock<BlockTree>>,
+        utxo: Arc<UtxoSet>,
+        coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
+        tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
+        filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+        mempool: Arc<RwLock<Mempool>>,
+        blocks: Arc<RwLock<Vec<BlockRecord>>>,
+        transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
+        zmq_publisher: Arc<dyn crate::ZmqPublisher>,
+    ) -> Self {
+        Self {
+            network,
+            chain_tip,
+            applied_tip,
+            block_tree,
+            utxo,
+            coin_stats,
+            tx_index,
+            filter_index,
+            mempool,
+            blocks,
+            transactions,
+            zmq_publisher,
+            block_body_store: None,
+        }
+    }
+
     /// Returns `self` with `zmq_publisher` swapped to `publisher`.
     ///
     /// Useful for tests + integration scenarios that want a custom publisher
@@ -183,7 +245,15 @@ pub fn apply_block(
         Vec::new()
     });
 
+    let block_bytes = bitcoin::consensus::encode::serialize(block);
+
     let changes = build_utxo_changes(block, height)?;
+    if let Some(store) = &handles.block_body_store {
+        store
+            .persist_block_body(height, block_hash, &block_bytes)
+            .map_err(ApplyError::BlockBodyPersistence)?;
+    }
+
     let utxo_commit_started = quanta::Instant::now();
     let utxo_commit_result = handles.utxo.commit_block(&changes, &block_hash);
     let utxo_commit_dur = utxo_commit_started.elapsed();
@@ -242,7 +312,6 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
         .record(coin_stats_dur.as_secs_f64());
     let tx_index_ingest_started = quanta::Instant::now();
-    let block_bytes = bitcoin::consensus::encode::serialize(block);
     let tx_index_ingest_result = handles.tx_index.lock().ingest_block(&block_bytes, height);
     match tx_index_ingest_result {
         Ok(counts) => {

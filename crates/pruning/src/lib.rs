@@ -20,6 +20,39 @@ pub use utreexo_only::{BlockProcessed, UtreexoOnlyCoordinator};
 use bitcoin_rs_storage::StorageError;
 use thiserror::Error;
 
+/// Stages block-body and undo-row pruning into a caller-owned atomic batch.
+///
+/// This is intentionally narrow: node wiring uses it to combine manual-prune
+/// row deletion with prune-height metadata in one backend commit.
+#[doc(hidden)]
+pub fn stage_block_and_undo_prune<S: bitcoin_rs_storage::KvStore>(
+    store: &S,
+    batch: &mut S::WriteBatch,
+    current_tip_height: u32,
+    policy: PrunePolicy,
+) -> Result<(PruneOutcome, PruneOutcome), PruneError> {
+    if policy.is_full_node() {
+        return Ok((PruneOutcome::default(), PruneOutcome::default()));
+    }
+
+    let block_outcome = block_pruner::prune_prefixed_rows_into_batch(
+        store,
+        batch,
+        block_pruner::BLOCK_BODY_PREFIX_BYTES,
+        current_tip_height,
+        policy,
+    )?;
+    let undo_outcome = block_pruner::prune_prefixed_rows_into_batch(
+        store,
+        batch,
+        undo_pruner::BLOCK_UNDO_PREFIX_BYTES,
+        current_tip_height,
+        policy,
+    )?;
+
+    Ok((block_outcome, undo_outcome))
+}
+
 /// Result of one pruning pass.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PruneOutcome {

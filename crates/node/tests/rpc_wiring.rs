@@ -16,6 +16,7 @@ use tempfile::tempdir;
 
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
+#[allow(clippy::too_many_lines)]
 fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let dir = tempdir()?;
     let mut config = Config::default();

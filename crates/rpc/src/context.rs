@@ -76,6 +76,54 @@ pub struct NetworkState {
     pub timestamp: u64,
 }
 
+/// Current pruning state reported by chain RPCs.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PruneStatus {
+    /// Whether block pruning is enabled for this node.
+    pub pruned: bool,
+    /// Highest manual prune height completed by the backing service.
+    pub pruneheight: Option<u32>,
+}
+
+/// Summary of one completed manual prune request.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PruneResult {
+    /// Height requested by the RPC caller.
+    pub requested_height: u32,
+    /// Highest prune height now recorded by the service.
+    pub pruneheight: u32,
+    /// Serialized block-body rows removed from storage.
+    pub block_rows_removed: u64,
+    /// Serialized undo rows removed from storage.
+    pub undo_rows_removed: u64,
+    /// Payload bytes removed from storage.
+    pub bytes_freed: u64,
+}
+
+/// Error returned by the node-owned pruning implementation.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PruneServiceError {
+    /// Storage or backend-specific pruning failure.
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl PruneServiceError {
+    /// Wraps a concrete backend error message without coupling RPC to a storage crate.
+    #[must_use]
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(message.into())
+    }
+}
+
+/// Node-owned storage mutator used by `pruneblockchain`.
+pub trait PruneService: Send + Sync {
+    /// Deletes persisted block/undo data below `requested_height`.
+    fn prune_to_height(&self, requested_height: u32) -> Result<PruneResult, PruneServiceError>;
+
+    /// Reports whether pruning is enabled and the highest completed prune height.
+    fn status(&self) -> PruneStatus;
+}
 #[derive(Debug, Default)]
 struct NoopFilterIndex;
 
@@ -127,6 +175,8 @@ pub struct Context {
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
     /// BIP157/158 compact-filter index used by filter RPCs.
     pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+    /// Optional storage pruning mutator.
+    pub prune_service: Option<Arc<dyn PruneService>>,
     /// Optional shared confirmed-block indexer used to resolve prevout values for fee statistics.
     /// `None` for embedded/test callers without txindex.
     pub indexer: Option<Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
@@ -197,6 +247,7 @@ impl Context {
             )),
             filter_index: noop_filter_index(),
             indexer: None,
+            prune_service: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
             chain_network: Network::Mainnet,
             peers: Arc::new(RwLock::new(Vec::new())),
@@ -259,8 +310,24 @@ impl Context {
             p2p_outbound_sender,
             banned,
             added_nodes,
+            prune_service: None,
             mining_sender,
         }
+    }
+
+    /// Attaches the node-owned pruning mutator used by `pruneblockchain`.
+    #[must_use]
+    pub fn with_prune_service(mut self, prune_service: Arc<dyn PruneService>) -> Self {
+        self.prune_service = Some(prune_service);
+        self
+    }
+
+    /// Returns the pruning state reported by `getblockchaininfo`.
+    #[must_use]
+    pub fn prune_status(&self) -> PruneStatus {
+        self.prune_service
+            .as_ref()
+            .map_or_else(PruneStatus::default, |service| service.status())
     }
 
     /// Returns the f64 difficulty for `bits`, computed against the network's

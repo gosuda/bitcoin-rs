@@ -525,6 +525,7 @@ dependencies = [
  "bitcoin-rs-mining",
  "bitcoin-rs-p2p",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-pruning",
  "bitcoin-rs-storage",
  "bitcoin-rs-utxo",
  "bitcoin-rs-wallet",

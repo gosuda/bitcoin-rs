@@ -205,7 +205,7 @@ pub fn run(mut config: Config) -> Result<()> {
     let banned = state.banned_subnets();
     let loop_handle = EventLoop::new(shutdown_rx, state.sync());
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
-    let rpc_context = bitcoin_rs_rpc::Context::from_handles(
+    let mut rpc_context = bitcoin_rs_rpc::Context::from_handles(
         state.chain_tip(),
         state.applied_tip(),
         state.mempool(),
@@ -225,6 +225,9 @@ pub fn run(mut config: Config) -> Result<()> {
         Arc::new(parking_lot::RwLock::new(Vec::new())),
         Some(state.tx_index()),
     );
+    if let Some(prune_service) = state.prune_service() {
+        rpc_context = rpc_context.with_prune_service(prune_service);
+    }
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
         state.config().rpc_bind,

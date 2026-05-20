@@ -153,22 +153,22 @@ fn apply_handles(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
 ) -> ApplyHandles {
-    ApplyHandles {
+    ApplyHandles::new(
         network,
         chain_tip,
         applied_tip,
         block_tree,
-        utxo: Arc::new(UtxoSet::new()),
-        coin_stats: Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+        Arc::new(UtxoSet::new()),
+        Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
             bitcoin_rs_coinstats::CoinStats::default(),
         )),
-        tx_index: noop_tx_index(),
-        filter_index: noop_filter_index(),
-        mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-        blocks: Arc::new(RwLock::new(Vec::new())),
-        transactions: Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
-        zmq_publisher: Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
-    }
+        noop_tx_index(),
+        noop_filter_index(),
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        Arc::new(RwLock::new(Vec::new())),
+        Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
+        Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
+    )
 }
 
 struct NoopIndexer;
