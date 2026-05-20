@@ -127,6 +127,37 @@ impl BlockTree {
         }
         locator
     }
+    /// Walks backward from `start_id` via parent pointers to the node at
+    /// `target_height`. Returns the `NodeId` at that height, or None if
+    /// `target_height > start_id.height` or the chain is broken.
+    #[must_use]
+    pub fn node_at_height_from(&self, start_id: NodeId, target_height: u32) -> Option<NodeId> {
+        let Ok(start_node) = self.node(start_id) else {
+            return None;
+        };
+        if target_height > start_node.height {
+            return None;
+        }
+        if target_height == start_node.height {
+            return Some(start_id);
+        }
+
+        let mut cursor = start_id;
+        loop {
+            let Ok(node) = self.node(cursor) else {
+                return None;
+            };
+            if node.height == target_height {
+                return Some(cursor);
+            }
+            if node.height < target_height {
+                return None;
+            }
+            let parent = node.parent?;
+            cursor = parent;
+        }
+    }
+
     /// Returns the median time of the most recent `window` blocks, inclusive
     /// of `start_id`, walking backward via parent pointers.
     ///
@@ -373,6 +404,44 @@ mod tests {
             panic!("chain has 11 blocks should yield Some");
         };
         assert_eq!(mtp, 1_003_000);
+        Ok(())
+    }
+
+    #[test]
+    fn node_at_height_from_walks_back_to_requested_height() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut tree = BlockTree::new();
+        let mut prev_hash = BlockHash::all_zeros();
+        let mut genesis_id = None;
+        let mut tip_id = None;
+
+        for height in 0..5_u32 {
+            let header = BlockHeader {
+                version: Version::ONE,
+                prev_blockhash: prev_hash,
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_000_000 + height * 600,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: height,
+            };
+            prev_hash = header.block_hash();
+            let node_id = tree.insert_header(header, NodeStatus::HeaderValid)?;
+            if height == 0 {
+                genesis_id = Some(node_id);
+            }
+            tip_id = Some(node_id);
+        }
+
+        let Some(genesis_id) = genesis_id else {
+            panic!("chain has 5 blocks should yield a genesis node");
+        };
+        let Some(tip_id) = tip_id else {
+            panic!("chain has 5 blocks should yield a tip");
+        };
+
+        assert_eq!(tree.node_at_height_from(tip_id, 0), Some(genesis_id));
+        assert_eq!(tree.node_at_height_from(tip_id, 4), Some(tip_id));
+        assert_eq!(tree.node_at_height_from(tip_id, 99), None);
         Ok(())
     }
 

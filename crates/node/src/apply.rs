@@ -21,6 +21,7 @@ const COINBASE_MATURITY: u32 = 100;
 const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
 const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
+const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
 
 /// Owned shared handle set needed by `apply_block` to perform a block apply.
 pub struct ApplyHandles {
@@ -107,7 +108,7 @@ pub fn apply_block(
     verify_block_transactions(handles, block, height, prev_tip_state.median_time_past)?;
 
     check_coinbase_maturity(handles, block, height)?;
-    check_bip68_sequence_locks(handles, block, height)?;
+    check_bip68_sequence_locks(handles, block, height, prev_tip_state.median_time_past)?;
 
     let changes = build_utxo_changes(block, height)?;
     handles
@@ -235,6 +236,7 @@ fn check_bip68_sequence_locks(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
     height: u32,
+    mtp: u32,
 ) -> core::result::Result<(), ApplyError> {
     use bitcoin::hashes::Hash as _;
 
@@ -256,10 +258,41 @@ fn check_bip68_sequence_locks(
             }
             let is_time_based = sequence & BIP68_TYPE_FLAG != 0;
             if is_time_based {
-                tracing::warn!(
-                    sequence = %format_args!("0x{sequence:08x}"),
-                    "BIP68 time-based sequence lock observed; enforcement deferred"
+                let relative_intervals = sequence & BIP68_MASK;
+                let prev_outpoint = OutPoint::new(
+                    bitcoin_rs_primitives::Hash256::from_le_bytes(
+                        tx_input.previous_output.txid.as_byte_array(),
+                    ),
+                    tx_input.previous_output.vout,
                 );
+                let Some(entry) = handles.utxo.get_entry(&prev_outpoint) else {
+                    continue;
+                };
+                let prevout_mtp = {
+                    let tree = handles.block_tree.read();
+                    let Some(chain_tip) = handles.chain_tip.load_full() else {
+                        continue;
+                    };
+                    let Some(prev_block_node) =
+                        tree.node_at_height_from(chain_tip.tip_id, entry.height)
+                    else {
+                        continue;
+                    };
+                    tree.median_time_past_at(prev_block_node, 11).unwrap_or(0)
+                };
+                let earliest_time = prevout_mtp.saturating_add(
+                    relative_intervals.saturating_mul(BIP68_TIME_GRANULARITY_SECONDS),
+                );
+                if mtp < earliest_time {
+                    return Err(ApplyError::Consensus(
+                        bitcoin_rs_consensus::ConsensusError::Bip {
+                            bip: "BIP68",
+                            reason: format!(
+                                "input sequence time-based lock unmet: prevout mtp {prevout_mtp} + {relative_intervals}*512s = {earliest_time} > current mtp {mtp}",
+                            ),
+                        },
+                    ));
+                }
                 continue;
             }
 
