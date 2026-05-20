@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use bitcoin::consensus::encode::deserialize;
+use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use core::str::FromStr as _;
 
@@ -134,10 +134,7 @@ pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Val
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
-    let verbosity = params_array(params)?
-        .get(1)
-        .and_then(JsonValueTrait::as_u64)
-        .unwrap_or(1);
+    let verbosity = getblock_verbosity(params)?;
     let Some(record) = ctx.block_by_hash(hash) else {
         let record = BlockRecord::synthetic(ctx.height(), hash);
         if verbosity == 0 {
@@ -148,7 +145,7 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     if verbosity == 0 {
         return Ok(json!(record.block_hex));
     }
-    Ok(block_json_verbose(ctx, &record, true, verbosity == 1))
+    Ok(block_json_verbose(ctx, &record, true, verbosity))
 }
 
 pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -164,7 +161,7 @@ pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value
     if !verbose {
         return Ok(json!(record.header_hex));
     }
-    Ok(block_json_verbose(ctx, &record, false, false))
+    Ok(block_json_verbose(ctx, &record, false, 1))
 }
 
 pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -366,6 +363,22 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     }
 }
 
+fn getblock_verbosity(params: &Value) -> Result<u64, RpcError> {
+    let Some(value) = params_array(params)?.get(1) else {
+        return Ok(1);
+    };
+    if value.is_null() {
+        return Ok(1);
+    }
+    if let Some(verbosity) = value.as_u64() {
+        return Ok(verbosity);
+    }
+    if let Some(verbose) = value.as_bool() {
+        return Ok(u64::from(verbose));
+    }
+    Err(RpcError::InvalidType("verbosity must be number or boolean"))
+}
+
 fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
     Hash256::from_str(value).map_err(|_| RpcError::InvalidParams("hash must be 64 hex characters"))
 }
@@ -378,7 +391,7 @@ fn block_json_verbose(
     ctx: &Context,
     record: &BlockRecord,
     include_block_fields: bool,
-    include_txids: bool,
+    verbosity: u64,
 ) -> Value {
     let Some(header) = decode_header(record) else {
         return synthetic_block_json(ctx, record, include_block_fields);
@@ -420,14 +433,14 @@ fn block_json_verbose(
     let Some(block) = decode_block(record) else {
         return synthetic_block_json(ctx, record, true);
     };
-    let txids: Vec<String> = if include_txids {
+    let tx_array: Vec<Value> = if verbosity >= 2 {
+        block.txdata.iter().map(tx_summary_for_block).collect()
+    } else {
         block
             .txdata
             .iter()
-            .map(|tx| tx.compute_txid().to_string())
+            .map(|tx| json!(tx.compute_txid().to_string()))
             .collect()
-    } else {
-        Vec::new()
     };
 
     json!({
@@ -449,7 +462,21 @@ fn block_json_verbose(
         "strippedsize": record.block_hex.len() / 2,
         "size": record.block_hex.len() / 2,
         "weight": block.weight().to_wu(),
-        "tx": txids
+        "tx": tx_array
+    })
+}
+
+fn tx_summary_for_block(tx: &bitcoin::Transaction) -> Value {
+    let encoded = serialize(tx);
+    json!({
+        "txid": tx.compute_txid().to_string(),
+        "hash": tx.compute_wtxid().to_string(),
+        "version": i64::from(tx.version.0),
+        "size": encoded.len(),
+        "vsize": tx.vsize(),
+        "weight": tx.weight().to_wu(),
+        "locktime": tx.lock_time.to_consensus_u32(),
+        "hex": encoded.to_lower_hex_string(),
     })
 }
 
@@ -619,6 +646,31 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn getblock_verbosity_2_emits_tx_object_per_transaction() {
+        use bitcoin::Network;
+        use bitcoin::hashes::Hash as _;
+
+        let ctx = Arc::new(Context::new());
+        let genesis = bitcoin::blockdata::constants::genesis_block(Network::Regtest);
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        let block_hash =
+            bitcoin_rs_primitives::Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        let result = getblock(&ctx, &json!([block_hash.to_string_be(), 2]))
+            .unwrap_or_else(|err| panic!("getblock failed: {err}"));
+        let Some(tx_array) = result.get("tx").and_then(|value| value.as_array()) else {
+            panic!("tx field missing: {result:?}");
+        };
+        let Some(first) = tx_array.first() else {
+            panic!("expected at least one tx");
+        };
+        assert!(
+            first.get("hex").is_some(),
+            "verbosity=2 tx must include hex field: {first:?}"
+        );
+        assert!(first.get("vsize").is_some());
     }
 
     #[test]
