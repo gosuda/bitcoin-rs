@@ -3,6 +3,7 @@ use core::str::FromStr as _;
 
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin::{Amount, Transaction, Txid};
 use bitcoin_rs_primitives::Hash256;
 use serde_json::json as serde_json_value;
@@ -64,17 +65,71 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     }))
 }
 
-pub(crate) fn gettxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let array = params_array(params)?;
-    if array.is_empty() {
+    let txids_value = array
+        .first()
+        .and_then(|value| value.as_array())
+        .ok_or(RpcError::InvalidParams("txids must be an array"))?;
+    if txids_value.is_empty() {
         return Err(RpcError::InvalidParams("txids are required"));
     }
-    Ok(json!(""))
+
+    let mut wanted = hashbrown::HashSet::new();
+    for value in txids_value {
+        let Some(txid) = value.as_str() else {
+            return Err(RpcError::InvalidType("each txid must be a string"));
+        };
+        wanted.insert(parse_txid(txid)?);
+    }
+
+    let blocks = ctx.blocks.read();
+    for record in blocks.iter() {
+        let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) else {
+            continue;
+        };
+        let Ok(block) = deserialize::<bitcoin::Block>(&bytes) else {
+            continue;
+        };
+        let block_txids = block
+            .txdata
+            .iter()
+            .map(bitcoin::Transaction::compute_txid)
+            .collect::<hashbrown::HashSet<Txid>>();
+        if !wanted.iter().all(|txid| block_txids.contains(txid)) {
+            continue;
+        }
+
+        let merkle_block =
+            MerkleBlock::from_block_with_predicate(&block, |txid| wanted.contains(txid));
+        return Ok(json!(serialize(&merkle_block).to_lower_hex_string()));
+    }
+
+    Err(RpcError::NotFound("no block contains all requested txids"))
 }
 
 pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "proof is required")?;
-    Ok(json!([]))
+    let proof_hex = required_str(params, 0, "proof is required")?;
+    let bytes = Vec::<u8>::from_hex(proof_hex)
+        .map_err(|_| RpcError::InvalidParams("proof must be valid hex"))?;
+    let Ok(merkle_block) = deserialize::<MerkleBlock>(&bytes) else {
+        return Ok(json!([]));
+    };
+
+    let mut matched_txids = Vec::new();
+    let mut indexes = Vec::new();
+    if merkle_block
+        .extract_matches(&mut matched_txids, &mut indexes)
+        .is_err()
+    {
+        return Ok(json!([]));
+    }
+
+    let result = matched_txids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    Ok(json!(result))
 }
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -190,10 +245,11 @@ mod tests {
     use bitcoin::consensus::encode::serialize;
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_mempool::MempoolEntry;
-    use sonic_rs::{JsonValueTrait as _, json};
+    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
     use super::getrawtransaction;
-    use crate::context::Context;
+    use crate::Handler;
+    use crate::context::{BlockRecord, Context};
     use crate::error::RpcError;
 
     #[test]
@@ -224,5 +280,31 @@ mod tests {
         let expected = serialize(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
         Ok(())
+    }
+
+    #[test]
+    fn gettxoutproof_finds_genesis_coinbase() {
+        let ctx = Arc::new(Context::new());
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let Some(coinbase) = genesis.txdata.first() else {
+            panic!("genesis has no transactions");
+        };
+        let txid = coinbase.compute_txid();
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        let handler = Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("gettxoutproof", &json!([[txid.to_string()]]))
+            .unwrap_or_else(|err| panic!("gettxoutproof failed: {err}"));
+        let Some(proof_hex) = result.as_str() else {
+            panic!("expected string, got {result:?}");
+        };
+
+        let extracted = handler
+            .dispatch("verifytxoutproof", &json!([proof_hex]))
+            .unwrap_or_else(|err| panic!("verifytxoutproof failed: {err}"));
+        let Some(arr) = extracted.as_array() else {
+            panic!("expected array, got {extracted:?}");
+        };
+        assert_eq!(arr.len(), 1);
     }
 }
