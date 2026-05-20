@@ -43,7 +43,9 @@ fn spawn_electrum_listener(
         );
     }
 
-    let index = state.electrum_index_handle();
+    let index = state
+        .electrum_index_handle()
+        .with_history_reader(state.electrum_history_reader());
     let mempool = bitcoin_rs_electrum::MempoolHandle::from_arc(state.mempool());
     let cfg = bitcoin_rs_electrum::ServerConfig::default();
     let server = bitcoin_rs_electrum::ElectrumServer::bind(addr, index, mempool, cfg)

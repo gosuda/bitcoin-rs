@@ -60,13 +60,104 @@ impl ElectrumError {
     }
 }
 
+/// Read-side history reader for the Electrum scripthash RPCs.
+///
+/// Implementations resolve the lossy index prefix back to full transaction
+/// identities via a [`bitcoin_rs_index::BlockSource`]. Used by
+/// [`IndexHandle::confirmed_history`] to prefer real index reads over the
+/// synthetic in-memory fallback.
+pub trait ConfirmedHistoryReader: Send + Sync + core::fmt::Debug {
+    /// Returns confirmed history records for `scripthash`, in iteration order
+    /// of the index. Empty [`Vec`] on missing data.
+    fn confirmed_history(&self, scripthash: ScriptHash) -> Vec<HistoryRecord>;
+}
+
+/// `ConfirmedHistoryReader` backed by a workspace `Indexer` and a `BlockSource`.
+pub struct IndexerHistoryReader<S, B>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+    B: bitcoin_rs_index::BlockSource + Send + Sync + 'static,
+{
+    indexer: Arc<bitcoin_rs_index::Indexer<S>>,
+    block_source: B,
+}
+
+impl<S, B> IndexerHistoryReader<S, B>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+    B: bitcoin_rs_index::BlockSource + Send + Sync + 'static,
+{
+    /// Builds a reader over `indexer` and `block_source`.
+    #[must_use]
+    pub const fn new(indexer: Arc<bitcoin_rs_index::Indexer<S>>, block_source: B) -> Self {
+        Self {
+            indexer,
+            block_source,
+        }
+    }
+}
+
+impl<S, B> core::fmt::Debug for IndexerHistoryReader<S, B>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+    B: bitcoin_rs_index::BlockSource + Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IndexerHistoryReader")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S, B> ConfirmedHistoryReader for IndexerHistoryReader<S, B>
+where
+    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
+    B: bitcoin_rs_index::BlockSource + Send + Sync + 'static,
+{
+    fn confirmed_history(&self, scripthash: ScriptHash) -> Vec<HistoryRecord> {
+        let Ok(entries) = self
+            .indexer
+            .resolve_script_history(scripthash, &self.block_source)
+        else {
+            return Vec::new();
+        };
+
+        entries
+            .into_iter()
+            .map(|entry| {
+                let height = match entry.height {
+                    bitcoin_rs_index::HistoryHeight::Confirmed(h) => i64::from(h),
+                    bitcoin_rs_index::HistoryHeight::Unconfirmed {
+                        has_unconfirmed_inputs: true,
+                    } => -1,
+                    bitcoin_rs_index::HistoryHeight::Unconfirmed {
+                        has_unconfirmed_inputs: false,
+                    } => 0,
+                };
+                HistoryRecord {
+                    txid: entry.txid,
+                    height,
+                    value: 0,
+                    vout: 0,
+                    spent: false,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Electrum history row exposed by scripthash history RPCs.
 #[derive(Copy, Clone, Debug)]
-struct HistoryRecord {
-    txid: Txid,
-    height: i64,
-    value: u64,
-    vout: u32,
-    spent: bool,
+pub struct HistoryRecord {
+    /// Transaction identifier.
+    pub txid: Txid,
+    /// Electrum history height: confirmed height, `0` for local mempool, `-1` for unconfirmed inputs.
+    pub height: i64,
+    /// Output value in satoshis when known.
+    pub value: u64,
+    /// Output index when known.
+    pub vout: u32,
+    /// Whether the output is spent.
+    pub spent: bool,
 }
 
 #[derive(Default)]
@@ -75,6 +166,7 @@ struct IndexState {
     transactions: RwLock<HashMap<Txid, Vec<u8>>>,
     headers: RwLock<Vec<[u8; 80]>>,
     store: RwLock<Option<Arc<dyn IndexReader>>>,
+    reader: RwLock<Option<Arc<dyn ConfirmedHistoryReader>>>,
 }
 
 /// Read-only Electrum index handle used by method handlers.
@@ -105,6 +197,16 @@ impl IndexHandle {
         let handle = Self::new();
         *handle.state.store.write() = Some(Arc::new(StoreIndexReader { store }));
         handle
+    }
+
+    /// Attaches a `ConfirmedHistoryReader` to this handle.
+    ///
+    /// When set, `confirmed_history` calls the reader instead of returning rows
+    /// from the synthetic in-memory map.
+    #[must_use]
+    pub fn with_history_reader(self, reader: Arc<dyn ConfirmedHistoryReader>) -> Self {
+        *self.state.reader.write() = Some(reader);
+        self
     }
 
     /// Adds a synthetic confirmed history row.
@@ -152,6 +254,11 @@ impl IndexHandle {
     }
 
     fn confirmed_history(&self, scripthash: ScriptHash) -> Vec<HistoryRecord> {
+        let reader = self.state.reader.read().clone();
+        if let Some(reader) = reader {
+            return reader.confirmed_history(scripthash);
+        }
+
         let mut records = self
             .state
             .histories
@@ -698,5 +805,57 @@ mod tests {
         let handle = MempoolHandle::from_arc(Arc::clone(&pool));
 
         assert!(Arc::ptr_eq(&pool, &handle.pool));
+    }
+}
+
+#[cfg(test)]
+mod history_reader_tests {
+    use super::*;
+    use alloc::sync::Arc;
+
+    #[derive(Debug)]
+    struct StubReader;
+
+    impl ConfirmedHistoryReader for StubReader {
+        fn confirmed_history(&self, _: ScriptHash) -> Vec<HistoryRecord> {
+            use bitcoin::hashes::Hash as _;
+
+            let mut hash = [0_u8; 32];
+            hash[0] = 0xff;
+            let txid = bitcoin::Txid::from_byte_array(hash);
+            vec![HistoryRecord {
+                txid,
+                height: 7,
+                value: 0,
+                vout: 0,
+                spent: false,
+            }]
+        }
+    }
+
+    #[test]
+    fn with_history_reader_overrides_synthetic_history() {
+        use bitcoin::hashes::Hash as _;
+
+        let handle = IndexHandle::new().with_history_reader(Arc::new(StubReader));
+        let mut scripthash_bytes = [0_u8; 32];
+        scripthash_bytes[0] = 0xab;
+        let scripthash = ScriptHash::from_byte_array(scripthash_bytes);
+
+        let mut synthetic_txid_bytes = [0_u8; 32];
+        synthetic_txid_bytes[0] = 0x11;
+        handle.add_history_entry(
+            scripthash,
+            bitcoin::Txid::from_byte_array(synthetic_txid_bytes),
+            3,
+            100,
+            1,
+            true,
+        );
+
+        let records = handle.confirmed_history(scripthash);
+
+        assert_eq!(records.len(), 1);
+        assert!(records.iter().any(|record| record.height == 7));
     }
 }

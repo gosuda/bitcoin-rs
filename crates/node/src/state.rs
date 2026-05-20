@@ -169,6 +169,47 @@ impl TxIndexStorage {
             Self::Mdbx(store) => bitcoin_rs_electrum::IndexHandle::from_store(Arc::clone(store)),
         }
     }
+
+    fn electrum_history_reader(
+        &self,
+        blocks: Arc<RwLock<Vec<bitcoin_rs_rpc::BlockRecord>>>,
+    ) -> Arc<dyn bitcoin_rs_electrum::methods::ConfirmedHistoryReader> {
+        let block_source = crate::NodeBlockSource::new(blocks);
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(store) => {
+                let indexer = Arc::new(bitcoin_rs_index::Indexer::new(Arc::clone(store)));
+                Arc::new(bitcoin_rs_electrum::methods::IndexerHistoryReader::new(
+                    indexer,
+                    block_source,
+                ))
+            }
+            #[cfg(feature = "fjall")]
+            Self::Fjall(store) => {
+                let indexer = Arc::new(bitcoin_rs_index::Indexer::new(Arc::clone(store)));
+                Arc::new(bitcoin_rs_electrum::methods::IndexerHistoryReader::new(
+                    indexer,
+                    block_source,
+                ))
+            }
+            #[cfg(feature = "redb")]
+            Self::Redb(store) => {
+                let indexer = Arc::new(bitcoin_rs_index::Indexer::new(Arc::clone(store)));
+                Arc::new(bitcoin_rs_electrum::methods::IndexerHistoryReader::new(
+                    indexer,
+                    block_source,
+                ))
+            }
+            #[cfg(feature = "mdbx")]
+            Self::Mdbx(store) => {
+                let indexer = Arc::new(bitcoin_rs_index::Indexer::new(Arc::clone(store)));
+                Arc::new(bitcoin_rs_electrum::methods::IndexerHistoryReader::new(
+                    indexer,
+                    block_source,
+                ))
+            }
+        }
+    }
 }
 
 const COMPILED_STORAGE_FEATURES: &[&str] = &[
@@ -438,6 +479,16 @@ impl NodeState {
     #[must_use]
     pub fn electrum_index_handle(&self) -> bitcoin_rs_electrum::IndexHandle {
         self.tx_index_storage.electrum_index_handle()
+    }
+
+    /// Builds an Electrum-side history reader wired through the live txindex store
+    /// and the in-memory block log. The handle can be attached to `IndexHandle`
+    /// via `with_history_reader`.
+    #[must_use]
+    pub fn electrum_history_reader(
+        &self,
+    ) -> Arc<dyn bitcoin_rs_electrum::methods::ConfirmedHistoryReader> {
+        self.tx_index_storage.electrum_history_reader(self.blocks())
     }
 
     /// Returns the shared compact-filter index handle.
