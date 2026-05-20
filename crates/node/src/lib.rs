@@ -42,6 +42,8 @@ pub mod state;
 pub mod sync;
 /// UTXO view adapter for consensus transaction checks.
 pub mod utxo_view;
+/// ZMQ publisher trait + NoOp impl for the notification subsystem.
+pub mod zmq_publisher;
 
 pub use bip9_context::BlockTreeContext;
 pub use bitcoin_rs_primitives::Network;
@@ -51,3 +53,4 @@ pub use run::run;
 pub use state::ApplyError;
 pub use sync::BlockSync;
 pub use utxo_view::UtxoSetView;
+pub use zmq_publisher::{NoOpZmqPublisher, ZmqPublisher};
