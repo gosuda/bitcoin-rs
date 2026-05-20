@@ -121,6 +121,15 @@ impl Mempool {
     /// Inserts an entry after applying ancestor and descendant policy checks.
     pub fn insert_entry(&mut self, mut entry: MempoolEntry) -> Result<EntryId, MempoolError> {
         let txid = entry.tx.compute_txid();
+        let min_rate = self.limits.min_relay_fee_sat_per_kvb;
+        if min_rate > 0 && entry.fee_rate < min_rate {
+            return Err(PolicyError::BelowMinRelayFee {
+                tx_rate: entry.fee_rate,
+                min_rate,
+            }
+            .into());
+        }
+
         if self.by_txid.contains_key(&txid) {
             return Err(MempoolError::DuplicateTransaction);
         }
@@ -624,6 +633,37 @@ mod tests {
     }
 
     #[test]
+    fn insert_entry_rejects_below_min_relay_fee() {
+        let limits = MempoolLimits {
+            min_relay_fee_sat_per_kvb: 5_000,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 100, 1, 7);
+        let result = pool.insert_entry(entry);
+
+        assert!(
+            matches!(
+                result,
+                Err(MempoolError::Policy(PolicyError::BelowMinRelayFee {
+                    tx_rate: 1_000,
+                    min_rate: 5_000
+                }))
+            ),
+            "expected BelowMinRelayFee rejection, got {result:?}"
+        );
+    }
+
+    #[test]
     fn stats_reports_empty_and_inserted_entry_counters() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
         assert_eq!(pool.stats(), MempoolStats::default());
@@ -834,7 +874,10 @@ mod tests {
 
     #[test]
     fn evict_below_fee_rate_removes_low_fee_entries_only() -> Result<(), MempoolError> {
-        let mut pool = Mempool::new(MempoolLimits::default());
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
         let low = Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -869,7 +912,10 @@ mod tests {
 
     #[test]
     fn enforce_size_limit_evicts_lowest_fee_until_below_target() -> Result<(), MempoolError> {
-        let mut pool = Mempool::new(MempoolLimits::default());
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
 
         let low = Transaction {
             version: bitcoin::transaction::Version::TWO,
@@ -908,6 +954,7 @@ mod tests {
     fn insert_entry_triggers_size_limit_eviction_when_overflow() {
         let limits = MempoolLimits {
             max_total_bytes: 1_000,
+            min_relay_fee_sat_per_kvb: 0,
             ..MempoolLimits::default()
         };
         let mut pool = Mempool::new(limits);

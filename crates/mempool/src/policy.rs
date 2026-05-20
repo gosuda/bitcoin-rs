@@ -38,6 +38,14 @@ pub enum PolicyError {
     /// The transaction would exceed the configured ancestor count limit.
     #[error("too many unconfirmed ancestors")]
     TooManyAncestors,
+    /// Transaction's `fee_rate` is below the configured min-relay-fee floor.
+    #[error("fee rate {tx_rate} sat/kvB below min-relay-fee {min_rate} sat/kvB")]
+    BelowMinRelayFee {
+        /// The transaction's effective `fee_rate` in sat/kvB.
+        tx_rate: u64,
+        /// The configured min-relay-fee floor.
+        min_rate: u64,
+    },
     /// The transaction would exceed the configured ancestor package size limit.
     #[error("ancestor package is too large")]
     AncestorSizeLimit,
