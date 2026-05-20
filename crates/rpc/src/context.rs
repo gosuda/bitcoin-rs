@@ -8,7 +8,7 @@ use bitcoin::hex::DisplayHex as _;
 use bitcoin::{Block, Transaction, Txid};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, Network};
 use compact_str::CompactString;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use hashbrown::HashMap;
@@ -125,6 +125,9 @@ pub struct Context {
     pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
+    /// Network selector used by handlers needing consensus parameters (e.g.
+    /// difficulty calculation).
+    pub chain_network: Network,
     /// Shared registry of currently-handshook peers.
     pub peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
     /// Shared in-memory block tree.
@@ -176,6 +179,7 @@ impl Context {
             )),
             filter_index: noop_filter_index(),
             network: Arc::new(RwLock::new(NetworkState::default())),
+            chain_network: Network::Mainnet,
             peers: Arc::new(RwLock::new(Vec::new())),
             block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
@@ -204,6 +208,7 @@ impl Context {
         mining_template_id: Arc<ArcSwap<CompactString>>,
         peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
         block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
+        chain_network: Network,
     ) -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -216,12 +221,26 @@ impl Context {
             coin_stats,
             filter_index,
             network,
+            chain_network,
             peers,
             block_tree,
             mining_template_id,
             mining_notifications,
             mining_sender,
         }
+    }
+
+    /// Returns the f64 difficulty for `bits`, computed against the network's
+    /// `PoW` limit. Returns `0.0` on any conversion failure.
+    #[must_use]
+    pub fn difficulty_for_bits(&self, bits: bitcoin::CompactTarget) -> f64 {
+        let params = bitcoin::params::Params::new(bitcoin_network(self.chain_network));
+        let current_target = bitcoin::pow::Target::from_compact(bits);
+        if current_target == bitcoin::pow::Target::ZERO {
+            return 0.0;
+        }
+
+        target_to_f64(params.max_attainable_target) / target_to_f64(current_target)
     }
 
     /// Publishes a new best-chain tip and wakes getblocktemplate long polls.
@@ -373,6 +392,23 @@ impl Context {
     }
 }
 
+fn bitcoin_network(network: Network) -> bitcoin::Network {
+    match network {
+        Network::Mainnet => bitcoin::Network::Bitcoin,
+        Network::Testnet3 => bitcoin::Network::Testnet,
+        Network::Testnet4 => bitcoin::Network::Testnet4,
+        Network::Signet => bitcoin::Network::Signet,
+        Network::Regtest => bitcoin::Network::Regtest,
+    }
+}
+
+fn target_to_f64(target: bitcoin::pow::Target) -> f64 {
+    target
+        .to_be_bytes()
+        .iter()
+        .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +439,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::clone(&block_tree),
+            Network::Mainnet,
         );
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),

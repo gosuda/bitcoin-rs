@@ -14,12 +14,18 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     ensure_no_params(params)?;
     let applied = ctx.applied_height();
     let headers = ctx.height();
+    let difficulty = ctx.applied_tip.load_full().map_or(0.0, |tip| {
+        let tree = ctx.block_tree.read();
+        tree.node(tip.tip_id)
+            .ok()
+            .map_or(0.0, |node| ctx.difficulty_for_bits(node.header.bits))
+    });
     Ok(json!({
         "chain": "main",
         "blocks": applied,
         "headers": headers,
         "bestblockhash": ctx.applied_hash().to_string_be(),
-        "difficulty": 0,
+        "difficulty": difficulty,
         "time": 0,
         "mediantime": 0,
         "verificationprogress": 0.0,
@@ -237,6 +243,7 @@ fn block_json_verbose(
     let next_hash = ctx
         .next_block_hash_for_height(record.height)
         .map(bitcoin_rs_primitives::Hash256::to_string_be);
+    let difficulty = ctx.difficulty_for_bits(header.bits);
 
     if !include_block_fields {
         return json!({
@@ -250,7 +257,7 @@ fn block_json_verbose(
             "mediantime": mediantime,
             "nonce": header.nonce,
             "bits": bits_hex,
-            "difficulty": 0,
+            "difficulty": difficulty,
             "chainwork": chainwork,
             "nTx": record.tx_count,
             "previousblockhash": header.prev_blockhash.to_string(),
@@ -282,7 +289,7 @@ fn block_json_verbose(
         "mediantime": mediantime,
         "nonce": header.nonce,
         "bits": bits_hex,
-        "difficulty": 0,
+        "difficulty": difficulty,
         "chainwork": chainwork,
         "nTx": record.tx_count,
         "previousblockhash": header.prev_blockhash.to_string(),
