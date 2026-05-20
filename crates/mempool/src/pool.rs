@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
@@ -205,6 +206,16 @@ impl Mempool {
     pub fn entry_by_txid(&self, txid: &bitcoin::Txid) -> Option<&MempoolEntry> {
         let id = *self.by_txid.get(txid)?;
         self.entry(id)
+    }
+
+    /// Returns a clone of the shared `Arc<Transaction>` for `txid`, or `None`
+    /// if the transaction is not in the pool.
+    ///
+    /// Cheaper than [`entry_by_txid`] when only the transaction body is needed
+    /// — no `MempoolEntry` indirection, just an `Arc::clone`.
+    #[must_use]
+    pub fn transaction_by_txid(&self, txid: &bitcoin::Txid) -> Option<Arc<bitcoin::Transaction>> {
+        self.entry_by_txid(txid).map(|entry| Arc::clone(&entry.tx))
     }
 
     /// Returns txids of mempool entries signalling BIP-125 RBF eligibility.
@@ -890,6 +901,37 @@ mod tests {
         let pool = Mempool::new(MempoolLimits::default());
         let absent = bitcoin::Txid::from_byte_array([0xff; 32]);
         assert!(pool.entry_by_txid(&absent).is_none());
+    }
+
+    #[test]
+    fn transaction_by_txid_returns_arc_for_inserted_tx() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let txid = tx.compute_txid();
+        let tx_arc = Arc::new(tx);
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&tx_arc), 500, 100, 1, 7))?;
+        let Some(retrieved) = pool.transaction_by_txid(&txid) else {
+            panic!("transaction_by_txid returned None");
+        };
+        assert_eq!(retrieved.compute_txid(), txid);
+        // The retrieved Arc should be the same allocation as the inserted one.
+        assert!(Arc::ptr_eq(&tx_arc, &retrieved));
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_by_txid_returns_none_for_absent_tx() {
+        let pool = Mempool::new(MempoolLimits::default());
+        let absent = bitcoin::Txid::from_byte_array([0xff; 32]);
+        assert!(pool.transaction_by_txid(&absent).is_none());
     }
 
     #[test]
