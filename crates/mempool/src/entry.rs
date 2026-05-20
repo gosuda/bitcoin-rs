@@ -60,6 +60,20 @@ impl MempoolEntry {
     pub const fn descendant_fee_rate(&self) -> u64 {
         fee_rate(self.descendant_fee, self.descendant_size)
     }
+
+    /// Returns whether this transaction signals BIP-125 replaceability
+    /// (any input has `sequence < 0xFFFF_FFFE`).
+    ///
+    /// Bitcoin Core's `bip125-replaceable` mempool entry field is derived from
+    /// this predicate. Lifted from the inline check in `Mempool::iter_replaceable_txids`.
+    #[must_use]
+    pub fn is_replaceable(&self) -> bool {
+        const RBF_FLAG_THRESHOLD: u32 = 0xFFFF_FFFE;
+        self.tx
+            .input
+            .iter()
+            .any(|input| input.sequence.0 < RBF_FLAG_THRESHOLD)
+    }
 }
 
 pub(crate) const fn fee_rate(fee: u64, vsize: u64) -> u64 {
@@ -67,4 +81,54 @@ pub(crate) const fn fee_rate(fee: u64, vsize: u64) -> u64 {
         return 0;
     }
     fee.saturating_mul(1_000) / vsize
+}
+#[cfg(test)]
+mod is_replaceable_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn entry_with_sequence(sequence: u32) -> MempoolEntry {
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::default(),
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(sequence),
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![],
+        };
+        MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7)
+    }
+
+    #[test]
+    fn is_replaceable_true_for_rbf_signal() {
+        let entry = entry_with_sequence(0xFFFF_FFFD);
+        assert!(entry.is_replaceable());
+    }
+
+    #[test]
+    fn is_replaceable_false_for_max_sequence() {
+        let entry = entry_with_sequence(0xFFFF_FFFE);
+        assert!(!entry.is_replaceable());
+    }
+
+    #[test]
+    fn is_replaceable_false_for_disabled_sequence() {
+        let entry = entry_with_sequence(0xFFFF_FFFF);
+        assert!(!entry.is_replaceable());
+    }
+
+    #[test]
+    fn is_replaceable_false_for_no_inputs() {
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+        assert!(!entry.is_replaceable());
+    }
 }
