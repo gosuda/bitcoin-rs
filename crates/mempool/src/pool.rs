@@ -228,6 +228,22 @@ impl Mempool {
             .and_then(|index| self.entries.get(index))
     }
 
+    /// Returns the txid of the in-mempool transaction that spends `outpoint`,
+    /// or `None` if no entry spends it. Linear scan over entries; acceptable
+    /// for early IBD where the pool is small, future strands may add a per-
+    /// outpoint index.
+    #[must_use]
+    pub fn find_by_outpoint(&self, outpoint: &bitcoin::OutPoint) -> Option<bitcoin::Txid> {
+        for (_id, entry) in &self.entries {
+            for input in &entry.tx.input {
+                if input.previous_output == *outpoint {
+                    return Some(entry.tx.compute_txid());
+                }
+            }
+        }
+        None
+    }
+
     /// Adjusts the effective fee of `txid` in the pool by `fee_delta` satoshis.
     ///
     /// The delta can be negative (saturating at 0). Bumps the entry's `fee`,
@@ -739,6 +755,43 @@ mod tests {
         assert!(pool.pareto.is_empty());
         assert!(pool.sequence_number() > seq_before_clear);
         Ok(())
+    }
+
+    #[test]
+    fn find_by_outpoint_locates_spending_tx() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let prev_txid = bitcoin::Txid::from_byte_array([0xaa; 32]);
+        let outpoint = bitcoin::OutPoint {
+            txid: prev_txid,
+            vout: 7,
+        };
+        let spending = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: outpoint,
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(99_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let spending_txid = spending.compute_txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7));
+        assert_eq!(pool.find_by_outpoint(&outpoint), Some(spending_txid));
+    }
+
+    #[test]
+    fn find_by_outpoint_returns_none_for_unspent_outpoint() {
+        let pool = Mempool::new(MempoolLimits::default());
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0xff; 32]),
+            vout: 0,
+        };
+        assert_eq!(pool.find_by_outpoint(&outpoint), None);
     }
 
     #[test]
