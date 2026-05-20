@@ -237,21 +237,11 @@ impl Mempool {
     /// queries.
     #[must_use]
     pub fn iter_replaceable_txids(&self) -> Vec<bitcoin::Txid> {
-        const RBF_FLAG_THRESHOLD: u32 = 0xFFFF_FFFE;
-        let mut out = Vec::new();
-        for (_id, entry) in &self.entries {
-            let opts_in = entry
-                .tx
-                .input
-                .iter()
-                .any(|input| input.sequence.0 < RBF_FLAG_THRESHOLD);
-            if opts_in {
-                out.push(entry.tx.compute_txid());
-            }
-        }
-        out.sort();
-        out.dedup();
-        out
+        self.entries
+            .iter()
+            .filter(|(_id, entry)| entry.is_replaceable())
+            .map(|(_id, entry)| entry.tx.compute_txid())
+            .collect()
     }
 
     /// Returns the total virtual size of all entries.
