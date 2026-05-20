@@ -15,14 +15,28 @@ use crate::handlers::{optional_bool, params_array, required_str, required_u64, s
 pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let verbose = optional_bool(params, 1, false)?;
-    let transactions = ctx.transactions.read();
-    let tx = transactions
-        .get(&txid)
-        .ok_or(RpcError::NotFound("transaction not found"))?;
-    if !verbose {
-        return Ok(json!(serialize(tx).to_lower_hex_string()));
+    {
+        let transactions = ctx.transactions.read();
+        if let Some(tx) = transactions.get(&txid) {
+            if !verbose {
+                return Ok(json!(serialize(tx).to_lower_hex_string()));
+            }
+            return tx_to_value(tx);
+        }
     }
-    tx_to_value(tx)
+    {
+        let pool = ctx.mempool.read();
+        if let Some(id) = pool.by_txid.get(&txid) {
+            if let Some(entry) = pool.entry(*id) {
+                let tx = entry.tx.as_ref();
+                if !verbose {
+                    return Ok(json!(serialize(tx).to_lower_hex_string()));
+                }
+                return tx_to_value(tx);
+            }
+        }
+    }
+    Err(RpcError::NotFound("transaction not found"))
 }
 
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -167,4 +181,48 @@ fn usize_to_u64(value: usize) -> Result<u64, RpcError> {
 
 fn btc_value(sats: u64) -> f64 {
     Amount::from_sat(sats).to_btc()
+}
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::blockdata::constants::genesis_block;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::hex::DisplayHex as _;
+    use bitcoin_rs_mempool::MempoolEntry;
+    use sonic_rs::{JsonValueTrait as _, json};
+
+    use super::getrawtransaction;
+    use crate::context::Context;
+    use crate::error::RpcError;
+
+    #[test]
+    fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = Arc::new(Context::new());
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let coinbase = genesis
+            .txdata
+            .first()
+            .ok_or_else(|| RpcError::Internal("genesis has no transactions".to_owned()))?
+            .clone();
+        let txid = coinbase.compute_txid();
+        {
+            let mut pool = ctx.mempool.write();
+            let entry = MempoolEntry::new(
+                Arc::new(coinbase.clone()),
+                u32::try_from(coinbase.vsize())?,
+                0,
+                0,
+                0,
+            );
+            pool.insert_entry(entry)?;
+        }
+
+        let result = getrawtransaction(&ctx, &json!([txid.to_string()]))?;
+
+        let expected = serialize(&coinbase).to_lower_hex_string();
+        assert_eq!(result.as_str(), Some(expected.as_str()));
+        Ok(())
+    }
 }
