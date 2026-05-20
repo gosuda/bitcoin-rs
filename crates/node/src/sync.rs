@@ -305,6 +305,7 @@ mod tests {
         pow::CompactTarget,
     };
     use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus, TipSnapshot};
+    use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
     use bitcoin_rs_index::{IndexError, IndexRowCounts, IndexerLike};
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
     use bitcoin_rs_p2p::PeerInfo;
@@ -482,6 +483,7 @@ mod tests {
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
             tx_index: noop_tx_index(),
+            filter_index: noop_filter_index(),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
@@ -503,6 +505,31 @@ mod tests {
     fn noop_tx_index() -> Arc<Mutex<Box<dyn IndexerLike>>> {
         let indexer: Box<dyn IndexerLike> = Box::new(NoopIndexer);
         Arc::new(Mutex::new(indexer))
+    }
+
+    struct NoopFilterIndex;
+
+    impl FilterIndexLike for NoopFilterIndex {
+        fn put_filter(
+            &self,
+            _block_hash: bitcoin_rs_primitives::Hash256,
+            _prev_header: bitcoin_rs_primitives::Hash256,
+            _filter_bytes: &[u8],
+        ) -> Result<bitcoin_rs_primitives::Hash256, FilterIndexError> {
+            Ok(bitcoin_rs_primitives::Hash256::default())
+        }
+
+        fn filter_header(
+            &self,
+            _block_hash: bitcoin_rs_primitives::Hash256,
+        ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError> {
+            Ok(None)
+        }
+    }
+
+    fn noop_filter_index() -> Arc<Box<dyn FilterIndexLike>> {
+        let filter_index: Box<dyn FilterIndexLike> = Box::new(NoopFilterIndex);
+        Arc::new(filter_index)
     }
 
     fn test_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {

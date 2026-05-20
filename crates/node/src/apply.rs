@@ -39,6 +39,8 @@ pub struct ApplyHandles {
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
     /// Shared best-effort confirmed transaction indexer.
     pub tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
+    /// Shared best-effort compact-filter indexer.
+    pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
     /// Shared mempool.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Shared block records exposed to RPC handlers.
@@ -159,6 +161,13 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
+    let filter_bytes = compute_basic_filter(block, handles).unwrap_or_else(|| {
+        tracing::trace!(
+            "BIP158 filter generation unavailable; storing empty filter as placeholder"
+        );
+        Vec::new()
+    });
+
     let changes = build_utxo_changes(block, height)?;
     let utxo_commit_started = quanta::Instant::now();
     let utxo_commit_result = handles.utxo.commit_block(&changes, &block_hash);
@@ -242,6 +251,30 @@ pub fn apply_block(
     let tx_index_ingest_dur = tx_index_ingest_started.elapsed();
     metrics::histogram!("node.apply_block.tx_index_ingest_seconds")
         .record(tx_index_ingest_dur.as_secs_f64());
+    let filter_started = quanta::Instant::now();
+    let prev_filter_header = handles
+        .applied_tip
+        .load_full()
+        .and_then(|tip| handles.filter_index.filter_header(tip.hash).ok().flatten())
+        .unwrap_or_default();
+    match handles
+        .filter_index
+        .put_filter(block_hash, prev_filter_header, &filter_bytes)
+    {
+        Ok(filter_header) => {
+            tracing::debug!(
+                height,
+                %filter_header,
+                bytes = filter_bytes.len(),
+                "filter_index stored block filter"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(height, %error, "filter_index failed to store block filter");
+        }
+    }
+    let filter_dur = filter_started.elapsed();
+    metrics::histogram!("node.apply_block.filter_index_seconds").record(filter_dur.as_secs_f64());
     let total_dur = total_started.elapsed();
     metrics::histogram!("node.apply_block.total_seconds").record(total_dur.as_secs_f64());
     metrics::counter!("node.apply_block.txs_applied").increment(tx_count_delta);
@@ -262,6 +295,7 @@ pub fn apply_block(
         mempool_evict_us = mempool_evict_dur.as_micros(),
         tx_index_us = tx_index_dur.as_micros(),
         tx_index_ingest_us = tx_index_ingest_dur.as_micros(),
+        filter_index_us = filter_dur.as_micros(),
         coin_stats_us = coin_stats_dur.as_micros(),
         total_us = total_dur.as_micros(),
         "apply_block: profile"
@@ -279,6 +313,24 @@ fn insert_active_header(
         .write()
         .insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?;
     Ok(())
+}
+
+fn compute_basic_filter(block: &bitcoin::Block, handles: &ApplyHandles) -> Option<Vec<u8>> {
+    use bitcoin::hashes::Hash as _;
+
+    let filter = bitcoin::bip158::BlockFilter::new_script_filter(block, |outpoint| {
+        let prev_outpoint = OutPoint::new(
+            bitcoin_rs_primitives::Hash256::from_le_bytes(outpoint.txid.as_byte_array()),
+            outpoint.vout,
+        );
+        handles
+            .utxo
+            .get(&prev_outpoint)
+            .map(|txout| txout.script_pubkey)
+            .ok_or(bitcoin::bip158::Error::UtxoMissing(*outpoint))
+    })
+    .ok()?;
+    Some(filter.content)
 }
 
 fn verify_block_transactions(

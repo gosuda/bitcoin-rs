@@ -87,3 +87,38 @@ impl<S: KvStore> FilterIndex<S> {
         Ok(Some(Hash256::from_le_bytes(&header)))
     }
 }
+
+/// Storage-agnostic compact-filter ingest interface.
+pub trait FilterIndexLike: Send + Sync {
+    /// Stores a block filter and returns its chained BIP157 filter header.
+    fn put_filter(
+        &self,
+        block_hash: bitcoin_rs_primitives::Hash256,
+        prev_header: bitcoin_rs_primitives::Hash256,
+        filter_bytes: &[u8],
+    ) -> Result<bitcoin_rs_primitives::Hash256, FilterIndexError>;
+
+    /// Loads the BIP157 filter header for a block, if indexed.
+    fn filter_header(
+        &self,
+        block_hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError>;
+}
+
+impl<S: KvStore + Send + Sync + 'static> FilterIndexLike for FilterIndex<S> {
+    fn put_filter(
+        &self,
+        block_hash: bitcoin_rs_primitives::Hash256,
+        prev_header: bitcoin_rs_primitives::Hash256,
+        filter_bytes: &[u8],
+    ) -> Result<bitcoin_rs_primitives::Hash256, FilterIndexError> {
+        Self::put_filter(self, block_hash, prev_header, filter_bytes)
+    }
+
+    fn filter_header(
+        &self,
+        block_hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError> {
+        Self::filter_header(self, block_hash)
+    }
+}

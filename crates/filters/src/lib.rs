@@ -8,4 +8,4 @@ pub mod filter_index;
 /// BIP158 Golomb-coded set codec.
 pub mod gcs;
 
-pub use filter_index::{FilterIndex, FilterIndexError};
+pub use filter_index::{FilterIndex, FilterIndexError, FilterIndexLike};
