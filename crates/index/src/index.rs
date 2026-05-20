@@ -127,6 +127,50 @@ impl<S: KvStore> Indexer<S> {
         }
         Ok(entries)
     }
+    /// Resolves confirmed unspent-output candidates for `scripthash` via `source`.
+    ///
+    /// For every funding-row (prefix, height), fetches the block and emits a
+    /// triple `(txid, vout, value_sats)` for every output whose scriptPubKey
+    /// hashes to `scripthash`. Spending checks are NOT performed here — callers
+    /// compose with `iter_spending_rows` to filter out spent outputs.
+    ///
+    /// The lossy 8-byte prefix is exact-resolved here: only outputs whose script
+    /// hashes match the full 32-byte `scripthash` are emitted.
+    pub fn resolve_unspent_outputs<B: BlockSource>(
+        &self,
+        scripthash: crate::ScriptHash,
+        source: &B,
+    ) -> Result<Vec<(bitcoin::Txid, u32, u64)>, IndexError> {
+        let rows = self.iter_funding_rows(scripthash)?;
+        let mut outputs = Vec::new();
+        let mut last_height: Option<u32> = None;
+        let mut cached_block: Option<bitcoin::Block> = None;
+        for row in &rows {
+            let height = row.height();
+            if last_height != Some(height) {
+                cached_block = source.block_at_height(height);
+                last_height = Some(height);
+            }
+            let Some(block) = cached_block.as_ref() else {
+                continue;
+            };
+            for tx in &block.txdata {
+                let txid = tx.compute_txid();
+                for (vout_idx, output) in tx.output.iter().enumerate() {
+                    if crate::ScriptHash::from_script_bytes(output.script_pubkey.as_bytes())
+                        != scripthash
+                    {
+                        continue;
+                    }
+                    let Ok(vout) = u32::try_from(vout_idx) else {
+                        continue;
+                    };
+                    outputs.push((txid, vout, output.value.to_sat()));
+                }
+            }
+        }
+        Ok(outputs)
+    }
 
     /// Iterates confirmed spending rows that spent `outpoint`.
     ///
@@ -424,6 +468,32 @@ mod tests {
         let entries = indexer.resolve_script_history(scripthash, &source)?;
 
         assert_eq!(entries, vec![HistoryEntry::confirmed(txid, 0)]);
+        Ok(())
+    }
+    #[test]
+    fn resolve_unspent_outputs_returns_txid_vout_value_for_funded_scripthash()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let Some(output) = tx.output.first() else {
+            return Err(std::io::Error::other("genesis transaction has no outputs").into());
+        };
+        let scripthash = ScriptHash::from_script_bytes(output.script_pubkey.as_bytes());
+        let txid = tx.compute_txid();
+        let value = output.value.to_sat();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let outputs = indexer.resolve_unspent_outputs(scripthash, &source)?;
+
+        assert_eq!(outputs, vec![(txid, 0, value)]);
         Ok(())
     }
 
