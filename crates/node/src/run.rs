@@ -211,6 +211,8 @@ pub fn run(mut config: Config) -> Result<()> {
         state.config().network,
         Some(state.inbound_blocks_sender()),
         Some(state.p2p_outbound_sender()),
+        Arc::new(parking_lot::RwLock::new(hashbrown::HashSet::new())),
+        Arc::new(parking_lot::RwLock::new(Vec::new())),
     );
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(

@@ -37,7 +37,8 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let block_tree = state.block_tree();
     let inbound_blocks_sender = state.inbound_blocks_sender();
     let p2p_outbound = Some(state.p2p_outbound_sender());
-
+    let banned = Arc::new(parking_lot::RwLock::new(hashbrown::HashSet::new()));
+    let added_nodes = Arc::new(parking_lot::RwLock::new(Vec::new()));
     let ctx = Context::from_handles(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
@@ -54,6 +55,8 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         chain_network,
         Some(inbound_blocks_sender),
         p2p_outbound,
+        Arc::clone(&banned),
+        Arc::clone(&added_nodes),
     );
 
     assert!(
