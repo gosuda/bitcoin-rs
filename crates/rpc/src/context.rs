@@ -394,6 +394,15 @@ impl Context {
         tree.median_time_past_at(node_id, 11)
     }
 
+    /// Returns the block height for `hash` via the in-memory `BlockTree`, or
+    /// `None` if no node with that hash is known to the tree.
+    ///
+    /// Composes `BlockTree::height_of_hash` (chain crate commit `ef9ff41`).
+    #[must_use]
+    pub fn height_for_hash(&self, hash: bitcoin_rs_primitives::Hash256) -> Option<u32> {
+        self.block_tree.read().height_of_hash(hash)
+    }
+
     /// Returns the 64-char lowercase hex chainwork at the block with `hash`.
     #[must_use]
     pub fn chain_work_hex_for_hash(&self, hash: bitcoin_rs_primitives::Hash256) -> Option<String> {
@@ -520,5 +529,13 @@ mod tests {
             panic!("expected record at height 42");
         };
         assert_eq!(found.height, 42);
+    }
+
+    #[test]
+    fn height_for_hash_returns_none_when_tree_empty() {
+        let ctx = Context::new();
+        let unknown = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xff_u8; 32]);
+
+        assert!(ctx.height_for_hash(unknown).is_none());
     }
 }

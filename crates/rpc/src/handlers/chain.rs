@@ -199,7 +199,8 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbosity = getblock_verbosity(params)?;
     let Some(record) = ctx.block_by_hash(hash) else {
-        let record = BlockRecord::synthetic(ctx.height(), hash);
+        let synthetic_height = ctx.height_for_hash(hash).unwrap_or_else(|| ctx.height());
+        let record = BlockRecord::synthetic(synthetic_height, hash);
         if verbosity == 0 {
             return Ok(json!(record.block_hex));
         }
@@ -215,7 +216,8 @@ pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbose = optional_bool(params, 1, true)?;
     let Some(record) = ctx.block_by_hash(hash) else {
-        let record = BlockRecord::synthetic(ctx.height(), hash);
+        let synthetic_height = ctx.height_for_hash(hash).unwrap_or_else(|| ctx.height());
+        let record = BlockRecord::synthetic(synthetic_height, hash);
         if !verbose {
             return Ok(json!(record.header_hex));
         }
