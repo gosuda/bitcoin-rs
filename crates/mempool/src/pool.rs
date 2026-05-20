@@ -258,6 +258,30 @@ impl Mempool {
         self.remove_entry_and_descendants(id)
     }
 
+    /// Removes every entry whose `fee_rate` (sat/kvB) is strictly below
+    /// `threshold_sat_per_kvb`. Returns the evicted transaction ids.
+    ///
+    /// Bumps the sequence counter for each successful removal. Use this for
+    /// min-relay-fee tightening or size-bound eviction policies.
+    #[must_use]
+    pub fn evict_below_fee_rate(&mut self, threshold_sat_per_kvb: u64) -> Vec<bitcoin::Txid> {
+        let mut to_evict: Vec<bitcoin::Txid> = Vec::new();
+        for (_id, entry) in &self.entries {
+            if entry.fee_rate < threshold_sat_per_kvb {
+                to_evict.push(entry.tx.compute_txid());
+            }
+        }
+
+        let mut evicted = Vec::with_capacity(to_evict.len());
+        for txid in to_evict {
+            let removed = self.remove_by_txid(&txid);
+            if !removed.is_empty() {
+                evicted.push(txid);
+            }
+        }
+        evicted
+    }
+
     pub(crate) fn conflicts_for(&self, tx: &Transaction) -> Vec<EntryId> {
         let mut conflicts = Vec::new();
         for input in &tx.input {
@@ -771,6 +795,41 @@ mod tests {
         assert!(pool.prioritise(lower_fee_txid, 2_000));
 
         assert_eq!(pool.pareto.top_n(1).collect::<Vec<_>>(), vec![lower_fee_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn evict_below_fee_rate_removes_low_fee_entries_only() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let low = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let low_txid = low.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 100, 100, 1, 7))?;
+
+        let high = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x52]),
+            }],
+        };
+        let high_txid = high.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(high), 100, 10_000, 1, 7))?;
+
+        let evicted = pool.evict_below_fee_rate(5_000);
+
+        assert_eq!(evicted, vec![low_txid]);
+        assert!(!pool.by_txid.contains_key(&low_txid));
+        assert!(pool.by_txid.contains_key(&high_txid));
         Ok(())
     }
 
