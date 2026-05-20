@@ -91,6 +91,15 @@ pub trait ConfirmedHistoryReader: Send + Sync + core::fmt::Debug {
         let _ = height;
         None
     }
+    /// Returns the satoshi value of the transaction output at `op`, or `None`
+    /// when the prevout is not indexed.
+    ///
+    /// Default returns `None` so existing implementors retain the previous
+    /// behavior; production readers should override to enable real fee derivation.
+    fn outpoint_value(&self, op: &bitcoin::OutPoint) -> Option<u64> {
+        let _ = op;
+        None
+    }
 }
 
 /// `ConfirmedHistoryReader` backed by a workspace `Indexer` and a `BlockSource`.
@@ -175,6 +184,13 @@ where
 
     fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
         self.block_source.block_at_height(height)
+    }
+
+    fn outpoint_value(&self, op: &bitcoin::OutPoint) -> Option<u64> {
+        self.indexer
+            .resolve_outpoint_value(*op, &self.block_source)
+            .ok()
+            .flatten()
     }
 
     fn unspent_outputs(&self, scripthash: ScriptHash) -> Vec<HistoryRecord> {
@@ -387,6 +403,13 @@ impl IndexHandle {
     #[must_use]
     pub fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
         self.state.reader.read().clone()?.block_at_height(height)
+    }
+
+    /// Returns the satoshi value at `op` via the attached `ConfirmedHistoryReader`,
+    /// or `None` if no reader is attached or the prevout is not indexed.
+    #[must_use]
+    pub fn outpoint_value(&self, op: &bitcoin::OutPoint) -> Option<u64> {
+        self.state.reader.read().clone()?.outpoint_value(op)
     }
 
     fn headers(&self) -> Vec<[u8; 80]> {
@@ -906,7 +929,7 @@ pub(crate) fn transaction_id_from_pos(
 }
 
 pub(crate) fn transaction_broadcast(
-    _index: &IndexHandle,
+    index: &IndexHandle,
     mempool: &MempoolHandle,
     params: &Value,
 ) -> Result<Value, ElectrumError> {
@@ -922,8 +945,30 @@ pub(crate) fn transaction_broadcast(
         .map_err(|error| ElectrumError::TransactionDecode(error.to_string()))?;
     let tx = deserialize::<Transaction>(&bytes)
         .map_err(|error| ElectrumError::TransactionDecode(error.to_string()))?;
+
+    // Derive real fee = sum_in - sum_out when every prevout resolves via index.
+    // Otherwise fall back to the vsize placeholder.
     let placeholder_fee = u64::try_from(tx.vsize()).unwrap_or(u64::MAX);
-    let txid = mempool.insert_transaction(tx, placeholder_fee, 0, 0)?;
+    let mut sum_in: u64 = 0;
+    let mut all_resolved = true;
+    for input in &tx.input {
+        if let Some(value) = index.outpoint_value(&input.previous_output) {
+            sum_in = sum_in.saturating_add(value);
+        } else {
+            all_resolved = false;
+            break;
+        }
+    }
+    let fee = if all_resolved {
+        let sum_out: u64 = tx.output.iter().fold(0_u64, |acc, output| {
+            acc.saturating_add(output.value.to_sat())
+        });
+        sum_in.saturating_sub(sum_out)
+    } else {
+        placeholder_fee
+    };
+
+    let txid = mempool.insert_transaction(tx, fee, 0, 0)?;
     Ok(json!(txid.to_string()))
 }
 
@@ -1291,6 +1336,18 @@ mod history_reader_tests {
         }
     }
 
+    #[test]
+    fn outpoint_value_returns_none_when_no_reader_attached() {
+        use bitcoin::hashes::Hash as _;
+
+        let index = IndexHandle::new();
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0xab; 32]),
+            vout: 0,
+        };
+
+        assert!(index.outpoint_value(&outpoint).is_none());
+    }
     #[test]
     fn with_history_reader_overrides_synthetic_history() {
         use bitcoin::hashes::Hash as _;
