@@ -213,6 +213,38 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         "utxo_size_inc": 0
     }))
 }
+pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let array = params_array(params)?;
+    let _checklevel = array.first().and_then(JsonValueTrait::as_u64).unwrap_or(3);
+    let nblocks_param = array.get(1).and_then(JsonValueTrait::as_u64).unwrap_or(6);
+    let Ok(nblocks) = u32::try_from(nblocks_param) else {
+        return Err(RpcError::InvalidParams("nblocks exceeds u32"));
+    };
+    let tree = ctx.block_tree.read();
+    let Some(applied) = ctx.applied_tip.load_full() else {
+        // No applied tip yet; trivially passes.
+        return Ok(json!(true));
+    };
+    let mut cursor = applied.tip_id;
+    let mut checked: u32 = 0;
+    loop {
+        if checked >= nblocks {
+            break;
+        }
+        let Ok(node) = tree.node(cursor) else {
+            return Ok(json!(false));
+        };
+        if node.header.validate_pow(node.header.target()).is_err() {
+            return Ok(json!(false));
+        }
+        checked = checked.saturating_add(1);
+        let Some(parent_id) = node.parent else {
+            break;
+        };
+        cursor = parent_id;
+    }
+    Ok(json!(true))
+}
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
@@ -763,6 +795,29 @@ mod getchaintips_tests {
         );
         assert_eq!(sibling_height, 1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod verifychain_tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn verifychain_returns_true_on_empty_chain() {
+        let ctx = Arc::new(Context::new());
+        let result =
+            verifychain(&ctx, &json!([])).unwrap_or_else(|err| panic!("verifychain failed: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn verifychain_accepts_default_params() {
+        let ctx = Arc::new(Context::new());
+        let result = verifychain(&ctx, &json!([3, 6]))
+            .unwrap_or_else(|err| panic!("verifychain failed: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
     }
 }
 
