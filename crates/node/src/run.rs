@@ -43,9 +43,17 @@ fn spawn_electrum_listener(
         );
     }
 
+    let network = match state.config().network {
+        bitcoin_rs_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
+        bitcoin_rs_primitives::Network::Testnet3 => bitcoin::Network::Testnet,
+        bitcoin_rs_primitives::Network::Testnet4 => bitcoin::Network::Testnet4,
+        bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
+        bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
+    };
     let index = state
         .electrum_index_handle()
-        .with_history_reader(state.electrum_history_reader());
+        .with_history_reader(state.electrum_history_reader())
+        .with_network(network);
     let mempool = bitcoin_rs_electrum::MempoolHandle::from_arc(state.mempool());
     let cfg = bitcoin_rs_electrum::ServerConfig::default();
     let server = bitcoin_rs_electrum::ElectrumServer::bind(addr, index, mempool, cfg)

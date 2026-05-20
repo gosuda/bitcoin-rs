@@ -214,13 +214,26 @@ pub struct HistoryRecord {
     pub spent: bool,
 }
 
-#[derive(Default)]
 struct IndexState {
     histories: RwLock<HashMap<ScriptHash, Vec<HistoryRecord>>>,
     transactions: RwLock<HashMap<Txid, Vec<u8>>>,
     headers: RwLock<Vec<[u8; 80]>>,
     store: RwLock<Option<Arc<dyn IndexReader>>>,
     reader: RwLock<Option<Arc<dyn ConfirmedHistoryReader>>>,
+    network: RwLock<bitcoin::Network>,
+}
+
+impl Default for IndexState {
+    fn default() -> Self {
+        Self {
+            histories: RwLock::new(HashMap::new()),
+            transactions: RwLock::new(HashMap::new()),
+            headers: RwLock::new(Vec::new()),
+            store: RwLock::new(None),
+            reader: RwLock::new(None),
+            network: RwLock::new(bitcoin::Network::Bitcoin),
+        }
+    }
 }
 
 /// Read-only Electrum index handle used by method handlers.
@@ -260,6 +273,14 @@ impl IndexHandle {
     #[must_use]
     pub fn with_history_reader(self, reader: Arc<dyn ConfirmedHistoryReader>) -> Self {
         *self.state.reader.write() = Some(reader);
+        self
+    }
+
+    /// Configures the chain selector used by network-aware methods like
+    /// `server.features.genesis_hash`. Default is mainnet.
+    #[must_use]
+    pub fn with_network(self, network: bitcoin::Network) -> Self {
+        *self.state.network.write() = network;
         self
     }
 
@@ -545,14 +566,13 @@ pub(crate) fn server_banner(
 }
 
 pub(crate) fn server_features(
-    _index: &IndexHandle,
+    index: &IndexHandle,
     _mempool: &MempoolHandle,
     params: &Value,
 ) -> Result<Value, ElectrumError> {
     ensure_array_len(params, 0)?;
-    // TODO(per-network-config): replace mainnet hardcode with the active chain's
-    // genesis when network selection threads through Electrum dispatch.
-    let genesis_hash = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin)
+    let network = *index.state.network.read();
+    let genesis_hash = bitcoin::blockdata::constants::genesis_block(network)
         .block_hash()
         .to_string();
     Ok(json!({
@@ -968,6 +988,21 @@ mod server_features_tests {
             panic!("protocol_min missing: {result:?}");
         };
         assert_eq!(protocol_min, "1.4");
+    }
+
+    #[test]
+    fn server_features_uses_configured_network_genesis() {
+        let index = IndexHandle::new().with_network(bitcoin::Network::Regtest);
+        let mempool = MempoolHandle::default();
+        let result = dispatch("server.features", &index, &mempool, &json!([]))
+            .unwrap_or_else(|err| panic!("server.features failed: {err}"));
+        let Some(genesis) = result.get("genesis_hash").and_then(JsonValueTrait::as_str) else {
+            panic!("genesis_hash missing: {result:?}");
+        };
+        let expected = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+            .block_hash()
+            .to_string();
+        assert_eq!(genesis, expected);
     }
 }
 
