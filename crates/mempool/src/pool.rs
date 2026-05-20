@@ -177,36 +177,41 @@ impl Mempool {
 
     /// Adjusts the effective fee of `txid` in the pool by `fee_delta` satoshis.
     ///
-    /// The delta can be negative (saturating at 0). Bumps the entry's `fee` and
-    /// recomputes `fee_rate` against the existing `vsize`. Returns `true` when
-    /// the txid was present and the adjustment was applied; `false` when the
-    /// txid was not in the mempool.
-    ///
-    /// Note: ancestor/descendant fee accounting is not propagated by this
-    /// adjustment; that's deferred to a follow-up strand that walks the spend
-    /// graph after each prioritise.
+    /// The delta can be negative (saturating at 0). Bumps the entry's `fee`,
+    /// recomputes `fee_rate` against the existing `vsize`, and propagates the
+    /// realized delta into ancestor and descendant aggregate fees. Returns
+    /// `true` when the txid was present and the adjustment was applied; `false`
+    /// when the txid was not in the mempool.
     #[must_use]
     pub fn prioritise(&mut self, txid: Txid, fee_delta: i64) -> bool {
         let Some(&id) = self.by_txid.get(&txid) else {
             return false;
         };
 
-        {
+        let actual_delta = {
             let Some(entry) = self.entry_mut(id) else {
                 return false;
             };
-            let new_fee = if fee_delta >= 0 {
-                entry
-                    .fee
-                    .saturating_add(u64::try_from(fee_delta).unwrap_or(0))
-            } else {
-                let neg = fee_delta.saturating_neg();
-                let abs = u64::try_from(neg).unwrap_or(0);
-                entry.fee.saturating_sub(abs)
-            };
+            let new_fee = apply_fee_delta(entry.fee, fee_delta);
+            let actual_delta = i128::from(new_fee).saturating_sub(i128::from(entry.fee));
             entry.fee = new_fee;
             let denom = u64::from(entry.vsize).max(1);
             entry.fee_rate = new_fee.saturating_mul(1_000) / denom;
+            entry.ancestor_fee = apply_delta_u64(entry.ancestor_fee, actual_delta);
+            actual_delta
+        };
+
+        let ancestor_ids = self.ancestor_ids_for_entry(id);
+        let descendant_ids = self.descendant_ids_for_entry(id);
+        for ancestor_id in ancestor_ids {
+            if let Some(ancestor) = self.entry_mut(ancestor_id) {
+                ancestor.descendant_fee = apply_delta_u64(ancestor.descendant_fee, actual_delta);
+            }
+        }
+        for descendant_id in descendant_ids {
+            if let Some(descendant) = self.entry_mut(descendant_id) {
+                descendant.ancestor_fee = apply_delta_u64(descendant.ancestor_fee, actual_delta);
+            }
         }
 
         let Some(entry) = self.entry(id).cloned() else {
@@ -510,6 +515,23 @@ pub(crate) fn tx_fee_rate(fee: u64, vsize: u32) -> u64 {
     fee_rate(fee, u64::from(vsize))
 }
 
+fn apply_fee_delta(fee: u64, delta: i64) -> u64 {
+    if delta >= 0 {
+        fee.saturating_add(delta.unsigned_abs())
+    } else {
+        fee.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+fn apply_delta_u64(value: u64, delta: i128) -> u64 {
+    let magnitude = u64::try_from(delta.unsigned_abs()).unwrap_or(u64::MAX);
+    if delta >= 0 {
+        value.saturating_add(magnitude)
+    } else {
+        value.saturating_sub(magnitude)
+    }
+}
+
 const fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(OutPoint, EntryId)> {
     (outpoint, EntryId::MIN)..=(outpoint, EntryId::MAX)
 }
@@ -631,6 +653,58 @@ mod tests {
         };
         assert_eq!(entry.fee, 0);
         assert_eq!(entry.fee_rate, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_propagates_delta_to_ancestor_descendant_fees() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(5, Vec::new());
+        let parent_txid = parent.compute_txid();
+        let parent_id = pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
+        let child = tx(6, vec![OutPoint::new(parent_txid, 0)]);
+        let child_txid = child.compute_txid();
+        let child_id = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 2_000, 0, 0))?;
+        let grandchild = tx(7, vec![OutPoint::new(child_txid, 0)]);
+        let grandchild_id =
+            pool.insert_entry(MempoolEntry::new(Arc::new(grandchild), 100, 3_000, 0, 0))?;
+
+        let Some(parent_before) = pool.entry(parent_id) else {
+            panic!("missing parent");
+        };
+        let parent_descendant_fee = parent_before.descendant_fee;
+        let Some(child_before) = pool.entry(child_id) else {
+            panic!("missing child");
+        };
+        let child_ancestor_fee = child_before.ancestor_fee;
+        let Some(grandchild_before) = pool.entry(grandchild_id) else {
+            panic!("missing grandchild");
+        };
+        let grandchild_ancestor_fee = grandchild_before.ancestor_fee;
+
+        assert!(pool.prioritise(child_txid, 500));
+
+        let Some(parent_after) = pool.entry(parent_id) else {
+            panic!("missing parent");
+        };
+        assert_eq!(
+            parent_after.descendant_fee,
+            parent_descendant_fee.saturating_add(500)
+        );
+        let Some(child_after) = pool.entry(child_id) else {
+            panic!("missing child");
+        };
+        assert_eq!(
+            child_after.ancestor_fee,
+            child_ancestor_fee.saturating_add(500)
+        );
+        let Some(grandchild_after) = pool.entry(grandchild_id) else {
+            panic!("missing grandchild");
+        };
+        assert_eq!(
+            grandchild_after.ancestor_fee,
+            grandchild_ancestor_fee.saturating_add(500)
+        );
         Ok(())
     }
 
