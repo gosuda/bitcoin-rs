@@ -213,6 +213,20 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         "utxo_size_inc": 0
     }))
 }
+pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let height = required_u64(params, 0, "height is required")?;
+    let applied = u64::from(ctx.applied_height());
+    if height > applied {
+        return Err(RpcError::InvalidParams(
+            "prune height cannot exceed applied tip",
+        ));
+    }
+
+    // TODO(prune-engine): dispatch into `bitcoin_rs_pruning` to actually delete
+    // historical blocks below `height`. v1 reports the requested height as-is.
+    Ok(json!(height))
+}
+
 pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let _checklevel = array.first().and_then(JsonValueTrait::as_u64).unwrap_or(3);
@@ -622,6 +636,37 @@ mod tests {
             progress.abs() < f64::EPSILON,
             "expected 0.0, got {progress}"
         );
+    }
+}
+
+#[cfg(test)]
+mod pruneblockchain_tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn pruneblockchain_returns_requested_height_when_below_tip() {
+        use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+        use bitcoin_rs_primitives::Hash256;
+
+        let ctx = Arc::new(Context::new());
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 100,
+            chainwork: ChainWork::ZERO,
+            hash: Hash256::default(),
+        });
+        let result = pruneblockchain(&ctx, &json!([50]))
+            .unwrap_or_else(|err| panic!("pruneblockchain failed: {err}"));
+        assert_eq!(result.as_u64(), Some(50));
+    }
+
+    #[test]
+    fn pruneblockchain_rejects_height_above_tip() {
+        let ctx = Arc::new(Context::new());
+        let result = pruneblockchain(&ctx, &json!([100]));
+        assert!(result.is_err());
     }
 }
 
