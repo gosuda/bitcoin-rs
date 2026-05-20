@@ -3,11 +3,11 @@ use alloc::vec::Vec;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use sonic_rs::{Value, json};
+use sonic_rs::{JsonValueTrait, Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{required_str, required_u64, serde_to_sonic};
+use crate::handlers::{params_array, required_str, required_u64, serde_to_sonic};
 
 static SERVER_START: OnceLock<Instant> = OnceLock::new();
 
@@ -66,6 +66,46 @@ pub(crate) fn getrpcinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         "active_commands": Vec::<String>::new(),
         "logpath": ""
     }))
+}
+
+pub(crate) fn getmemoryinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let array = params_array(params)?;
+    let mode = array
+        .first()
+        .and_then(JsonValueTrait::as_str)
+        .unwrap_or("stats");
+    if mode != "stats" {
+        // "mallocinfo" requires XML output; not implemented.
+        return Err(RpcError::InvalidParams(
+            "only mode=stats is supported in this implementation",
+        ));
+    }
+
+    // Bitcoin Core reports locked-pool allocator stats. This implementation
+    // exposes resident set size from Linux /proc as the available v1 proxy.
+    let rss_bytes = read_linux_rss_bytes().unwrap_or(0);
+    Ok(json!({
+        "locked": {
+            "used": rss_bytes,
+            "free": 0_u64,
+            "total": rss_bytes,
+            "locked": 0_u64,
+            "chunks_used": 0_u64,
+            "chunks_free": 0_u64
+        }
+    }))
+}
+
+fn read_linux_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let trimmed = rest.trim().trim_end_matches(" kB");
+            let kb: u64 = trimmed.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
 }
 
 pub(crate) fn getzmqnotifications(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -198,6 +238,30 @@ mod tests {
             panic!("logpath missing: {result:?}");
         };
         assert_eq!(logpath, "");
+    }
+
+    #[test]
+    fn getmemoryinfo_returns_locked_stats_shape() {
+        use alloc::sync::Arc;
+
+        let ctx = Arc::new(Context::new());
+        let result = getmemoryinfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getmemoryinfo failed: {err}"));
+        assert!(result.get("locked").is_some(), "locked missing: {result:?}");
+        let Some(locked) = result.get("locked") else {
+            panic!("locked missing");
+        };
+        assert!(locked.get("used").is_some());
+        assert!(locked.get("total").is_some());
+    }
+
+    #[test]
+    fn getmemoryinfo_rejects_mallocinfo_mode() {
+        use alloc::sync::Arc;
+
+        let ctx = Arc::new(Context::new());
+        let result = getmemoryinfo(&ctx, &json!(["mallocinfo"]));
+        assert!(result.is_err());
     }
 
     #[test]

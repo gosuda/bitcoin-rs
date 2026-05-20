@@ -62,6 +62,7 @@ impl Handler {
             "estimatesmartfee" => util::estimatesmartfee(&self.ctx, params),
             "uptime" => util::uptime(&self.ctx, params),
             "getrpcinfo" => util::getrpcinfo(&self.ctx, params),
+            "getmemoryinfo" => util::getmemoryinfo(&self.ctx, params),
             "estimaterawfee" => util::estimaterawfee(&self.ctx, params),
             "getzmqnotifications" => util::getzmqnotifications(&self.ctx, params),
             "validateaddress" => util::validateaddress(&self.ctx, params),
