@@ -219,9 +219,25 @@ impl Mempool {
         conflicts
     }
 
-    pub(crate) fn ancestor_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
+    /// Returns all ancestor entry ids for `id`, excluding `id` itself.
+    #[must_use]
+    pub fn ancestor_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
         self.entry(id)
             .map_or_else(Vec::new, |entry| self.ancestor_ids_for_tx(&entry.tx))
+    }
+
+    /// Returns all descendant entry ids for `id`, EXCLUDING `id` itself.
+    ///
+    /// Walks the spend graph forward via output references. Empty Vec when the
+    /// entry has no descendants or is unknown.
+    #[must_use]
+    pub fn descendant_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
+        let mut ids = Vec::new();
+        self.collect_descendants_inclusive(id, &mut ids);
+        ids.retain(|other| *other != id);
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     pub(crate) fn signals_rbf_including_ancestors(&self, id: EntryId) -> bool {
@@ -461,7 +477,7 @@ mod tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use bitcoin::Transaction;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 
     use super::*;
 
@@ -518,5 +534,40 @@ mod tests {
         assert_eq!(removed.first().copied(), Some(id));
         assert_eq!(pool.len(), 0);
         Ok(())
+    }
+
+    #[test]
+    fn descendant_ids_for_entry_returns_descendants_excluding_origin() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(1, Vec::new());
+        let parent_txid = parent.compute_txid();
+        let parent_id = pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
+        let child = tx(2, vec![OutPoint::new(parent_txid, 0)]);
+        let child_id = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0))?;
+
+        let descendants = pool.descendant_ids_for_entry(parent_id);
+
+        assert_eq!(descendants, vec![child_id]);
+        Ok(())
+    }
+
+    fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: previous_outputs
+                .into_iter()
+                .map(|previous_output| TxIn {
+                    previous_output,
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(5_000 + u64::from(label)),
+                script_pubkey: ScriptBuf::from_bytes(vec![label]),
+            }],
+        }
     }
 }
