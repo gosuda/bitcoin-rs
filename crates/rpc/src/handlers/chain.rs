@@ -290,15 +290,22 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 }
 
 pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    use bitcoin::consensus::encode::deserialize;
+    use bitcoin::hex::FromHex as _;
+
     let array = params_array(params)?;
-    let _checklevel = array.first().and_then(JsonValueTrait::as_u64).unwrap_or(3);
+    let checklevel = array.first().and_then(JsonValueTrait::as_u64).unwrap_or(3);
     let nblocks_param = array.get(1).and_then(JsonValueTrait::as_u64).unwrap_or(6);
     let Ok(nblocks) = u32::try_from(nblocks_param) else {
         return Err(RpcError::InvalidParams("nblocks exceeds u32"));
     };
+    if checklevel == 0 {
+        // Bitcoin Core: checklevel 0 reads blocks from disk without per-block verification.
+        // bitcoin-rs reports pass since this v1 doesn't surface block-read failures here.
+        return Ok(json!(true));
+    }
     let tree = ctx.block_tree.read();
     let Some(applied) = ctx.applied_tip.load_full() else {
-        // No applied tip yet; trivially passes.
         return Ok(json!(true));
     };
     let mut cursor = applied.tip_id;
@@ -310,9 +317,27 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         let Ok(node) = tree.node(cursor) else {
             return Ok(json!(false));
         };
+        // L1+: PoW self-consistency check.
         if node.header.validate_pow(node.header.target()).is_err() {
             return Ok(json!(false));
         }
+        // L2+: Merkle-root sanity when block body is available. Absent blocks
+        // (header-only / pruned) skip the merkle check.
+        if checklevel >= 2 {
+            if let Some(record) = ctx.block_by_hash(node.hash) {
+                if let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) {
+                    if let Ok(block) = deserialize::<bitcoin::Block>(&bytes) {
+                        if let Some(computed) = block.compute_merkle_root() {
+                            if computed != node.header.merkle_root {
+                                return Ok(json!(false));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // L3+: behaves as L2 in this v1 — a future strand wires per-tx structural
+        // checks (e.g., max-size, witness sanity). L4 (full UTXO replay) is deferred.
         checked = checked.saturating_add(1);
         let Some(parent_id) = node.parent else {
             break;
@@ -1127,6 +1152,14 @@ mod verifychain_tests {
         let result = verifychain(&ctx, &json!([3, 6]))
             .unwrap_or_else(|err| panic!("verifychain failed: {err}"));
         assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn verifychain_returns_true_for_checklevel_zero() {
+        let ctx = Arc::new(Context::new());
+        let result = verifychain(&ctx, &json!([0, 6]))
+            .unwrap_or_else(|err| panic!("verifychain failed: {err}"));
+        assert!(result.as_bool() == Some(true));
     }
 }
 
