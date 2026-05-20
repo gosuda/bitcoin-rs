@@ -386,12 +386,15 @@ pub(crate) fn bumpfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
             }
             Err(err) => return Err(RpcError::Internal(format!("bumpfee: {err}"))),
         };
+    let weight_wu = bumped.unsigned_tx.weight().to_wu();
+    let target_fee_sats = new_rate_sat_per_kvb.saturating_mul(weight_wu) / 4_000;
+    let target_fee_btc = bitcoin::Amount::from_sat(target_fee_sats).to_btc();
     let bumped_b64 = encode_base64(&bumped.serialize());
 
     Ok(json!({
         "psbt": bumped_b64,
         "origfee": bitcoin::Amount::from_sat(original_fee).to_btc(),
-        "fee": 0.0,
+        "fee": target_fee_btc,
         "errors": Vec::<String>::new()
     }))
 }
@@ -635,5 +638,50 @@ mod bumpfee_tests {
         let txid = ctx.add_transaction(tx);
         let result = bumpfee(&ctx, &json!([txid.to_string()]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn bumpfee_emits_nonzero_fee_when_bump_succeeds() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let ctx = Arc::new(Context::new());
+        // Build an RBF-enabled tx (sequence < 0xfffffffe = explicit RBF).
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0xab; 32]),
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(0x0000_0001),
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(10_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let txid = tx.compute_txid();
+        {
+            let mut pool = ctx.mempool.write();
+            let entry = MempoolEntry::new(Arc::new(tx), 250, 5_000, 1, 7);
+            let _ = pool.insert_entry(entry);
+        }
+
+        let result = bumpfee(&ctx, &json!([txid.to_string()]));
+        if let Ok(value) = result {
+            if value
+                .get("errors")
+                .and_then(Value::as_array)
+                .is_none_or(sonic_rs::Array::is_empty)
+            {
+                let Some(fee) = value.get("fee").and_then(Value::as_f64) else {
+                    panic!("fee missing: {value:?}");
+                };
+                assert!(fee > 0.0, "expected positive fee on bump, got {fee}");
+            }
+        }
     }
 }
