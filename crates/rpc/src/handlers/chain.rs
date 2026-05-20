@@ -447,7 +447,12 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
 }
 
 fn confirmations(ctx: &Context, height: u32) -> u32 {
-    ctx.height().saturating_sub(height).saturating_add(1)
+    let applied = ctx.applied_height();
+    if height > applied {
+        0
+    } else {
+        applied.saturating_sub(height).saturating_add(1)
+    }
 }
 
 fn block_json_verbose(
@@ -755,6 +760,32 @@ mod tests {
         let ctx = Arc::new(Context::new());
         let result = gettxoutsetinfo(&ctx, &json!(["sha3"]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn confirmations_uses_applied_height_not_header_tip() {
+        use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+        use bitcoin_rs_primitives::Hash256;
+
+        let ctx = Context::new();
+        // Header tip at 100, applied tip at 50.
+        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        ctx.set_chain_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 100,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 50,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        // Block at height 10: confirmations = applied(50) - 10 + 1 = 41.
+        assert_eq!(confirmations(&ctx, 10), 41);
+        // Block at height 60 (above applied tip): confirmations = 0.
+        assert_eq!(confirmations(&ctx, 60), 0);
     }
 
     #[test]
