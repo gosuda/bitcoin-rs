@@ -6,6 +6,17 @@ use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, params_array, required_str};
 
+// Local service flags this node advertises:
+// - NODE_NETWORK (1 << 0) = 1 — full block serving.
+// - NODE_WITNESS (1 << 3) = 8 — segwit data.
+// - NODE_COMPACT_FILTERS (1 << 6) = 64 — BIP157 filters.
+// Sum = 73 = 0x49.
+const LOCAL_SERVICES_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 3) | (1_u64 << 6);
+const LOCAL_SERVICES_HEX: &str = "0000000000000049";
+const LOCAL_SERVICES_NAMES: &[&str] = &["NETWORK", "WITNESS", "COMPACT_FILTERS"];
+
+const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x49);
+
 const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 const DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB: f64 = 0.00001;
 
@@ -19,8 +30,11 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "version": 10000,
         "subversion": "/bitcoin-rs:0.1.0/",
         "protocolversion": 70016_i64,
-        "localservices": "0000000000000000",
-        "localservicesnames": Vec::<String>::new(),
+        "localservices": LOCAL_SERVICES_HEX,
+        "localservicesnames": LOCAL_SERVICES_NAMES
+            .iter()
+            .map(|&s| s.to_owned())
+            .collect::<Vec<_>>(),
         "localrelay": true,
         "timeoffset": 0,
         "networkactive": true,
@@ -226,7 +240,7 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 mod tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::JsonValueTrait;
+    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
 
     #[test]
     fn getnetworkinfo_reports_zero_connections_on_fresh_context() {
@@ -260,6 +274,34 @@ mod tests {
             (relayfee - 0.00001).abs() < 1e-9,
             "expected ~0.00001, got {relayfee}"
         );
+    }
+
+    #[test]
+    fn getnetworkinfo_localservices_advertises_network_witness_filters() {
+        let ctx = Arc::new(Context::new());
+        let result = getnetworkinfo(&ctx, &json!(null))
+            .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
+        assert_eq!(
+            result.get("localservices").and_then(|v| v.as_str()),
+            Some("0000000000000049")
+        );
+        let names: Vec<String> = result
+            .get("localservicesnames")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(names.contains(&"NETWORK".to_owned()));
+        assert!(names.contains(&"WITNESS".to_owned()));
+        assert!(names.contains(&"COMPACT_FILTERS".to_owned()));
+    }
+
+    #[test]
+    fn local_services_flags_hex_matches_bitmask() {
+        assert_eq!(format!("{LOCAL_SERVICES_FLAGS:016x}"), LOCAL_SERVICES_HEX);
     }
 }
 #[cfg(test)]
