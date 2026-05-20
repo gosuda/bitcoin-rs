@@ -176,13 +176,8 @@ fn entry_to_value(
 }
 
 fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> serde_json::Value {
-    const BIP125_THRESHOLD: u32 = 0xFFFF_FFFE;
     let txid = entry.tx.compute_txid();
-    let bip125_replaceable = entry
-        .tx
-        .input
-        .iter()
-        .any(|input| input.sequence.0 < BIP125_THRESHOLD);
+    let bip125_replaceable = entry.is_replaceable();
     let mut depends = Vec::new();
     for input in &entry.tx.input {
         let prev_txid = input.previous_output.txid;
