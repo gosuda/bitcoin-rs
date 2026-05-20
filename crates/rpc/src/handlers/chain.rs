@@ -263,6 +263,7 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut swtxs: u64 = 0;
     let mut swtotal_size: u64 = 0;
     let mut swtotal_weight: u64 = 0;
+    let mut tx_sizes: Vec<u64> = Vec::new();
     if let Some(record) = record.as_ref() {
         if let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) {
             total_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
@@ -275,11 +276,12 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
                     for output in &tx.output {
                         total_out = total_out.saturating_add(output.value.to_sat());
                     }
+                    let tx_size = bitcoin::consensus::encode::serialize(tx).len();
+                    let tx_size_u64 = u64::try_from(tx_size).unwrap_or(u64::MAX);
+                    tx_sizes.push(tx_size_u64);
                     if tx.input.iter().any(|i| !i.witness.is_empty()) {
                         swtxs = swtxs.saturating_add(1);
-                        let tx_size = bitcoin::consensus::encode::serialize(tx).len();
-                        swtotal_size =
-                            swtotal_size.saturating_add(u64::try_from(tx_size).unwrap_or(u64::MAX));
+                        swtotal_size = swtotal_size.saturating_add(tx_size_u64);
                         swtotal_weight = swtotal_weight.saturating_add(tx.weight().to_wu());
                     }
                 }
@@ -287,23 +289,36 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         }
     }
 
+    let (avgtxsize, maxtxsize, mintxsize, mediantxsize) = if tx_sizes.is_empty() {
+        (0_u64, 0_u64, 0_u64, 0_u64)
+    } else {
+        let mut sorted = tx_sizes.clone();
+        sorted.sort_unstable();
+        let max = sorted.last().copied().unwrap_or(0);
+        let min = sorted.first().copied().unwrap_or(0);
+        let median = sorted[sorted.len() / 2];
+        let sum: u64 = sorted.iter().fold(0_u64, |acc, n| acc.saturating_add(*n));
+        let avg = sum / u64::try_from(sorted.len()).unwrap_or(1);
+        (avg, max, min, median)
+    };
+
     Ok(json!({
         "avgfee": 0,
         "avgfeerate": 0,
-        "avgtxsize": 0,
+        "avgtxsize": avgtxsize,
         "blockhash": block_hash.to_string_be(),
         "feerate_percentiles": [0, 0, 0, 0, 0],
         "height": height,
         "ins": ins,
         "maxfee": 0,
         "maxfeerate": 0,
-        "maxtxsize": 0,
+        "maxtxsize": maxtxsize,
         "medianfee": 0,
         "mediantime": mediantime,
-        "mediantxsize": 0,
+        "mediantxsize": mediantxsize,
         "minfee": 0,
         "minfeerate": 0,
-        "mintxsize": 0,
+        "mintxsize": mintxsize,
         "outs": outs,
         "subsidy": subsidy_sat,
         "swtotal_size": swtotal_size,
@@ -732,6 +747,11 @@ mod tests {
     #[test]
     fn subsidy_at_height_first_halving_is_25_btc() {
         assert_eq!(subsidy_at_height(210_000), 2_500_000_000);
+    }
+
+    #[test]
+    fn subsidy_at_height_third_halving_is_6_25_btc() {
+        assert_eq!(subsidy_at_height(3 * 210_000), 5_000_000_000 / 8);
     }
 
     #[test]
