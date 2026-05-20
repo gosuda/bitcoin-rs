@@ -4,19 +4,15 @@ extern crate alloc;
 use alloc::sync::Arc;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use arc_swap::{ArcSwap, ArcSwapOption};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_p2p::PeerInfo;
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_rpc::{BlockRecord, Context, Handler, NetworkState, RpcError};
-use bitcoin_rs_utxo::UtxoSet;
-use compact_str::CompactString;
-use hashbrown::HashMap;
+use bitcoin_rs_rpc::{BlockRecord, Context, Handler, RpcError};
 use parking_lot::RwLock;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
@@ -163,6 +159,30 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>> {
+    let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
+    let header = Hash256::from_le_bytes(&[8_u8; 32]);
+    let mut ctx = Context::new();
+    let filter_index: Box<dyn FilterIndexLike> = Box::new(StaticFilterIndex {
+        block_hash,
+        filter: vec![0xab, 0xcd],
+        header,
+    });
+    ctx.filter_index = Arc::new(filter_index);
+    let handler = Handler::new(Arc::new(ctx));
+    let block_hash_hex = block_hash.to_string_be();
+
+    let result = handler.dispatch("getblockfilter", &json!([block_hash_hex.as_str()]))?;
+
+    assert_eq!(result.get("filter").as_str(), Some("abcd"));
+    assert_eq!(
+        result.get("header").as_str(),
+        Some(header.to_string_be().as_str())
+    );
+    Ok(())
+}
+
+#[test]
 fn empty_context_is_not_initial_block_download() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(Arc::new(Context::new()));
 
@@ -256,6 +276,38 @@ fn signing_methods_are_disabled() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct StaticFilterIndex {
+    block_hash: Hash256,
+    filter: Vec<u8>,
+    header: Hash256,
+}
+
+impl FilterIndexLike for StaticFilterIndex {
+    fn put_filter(
+        &self,
+        _block_hash: bitcoin_rs_primitives::Hash256,
+        _prev_header: bitcoin_rs_primitives::Hash256,
+        _filter_bytes: &[u8],
+    ) -> Result<bitcoin_rs_primitives::Hash256, FilterIndexError> {
+        Ok(self.header)
+    }
+
+    fn filter_header(
+        &self,
+        block_hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError> {
+        Ok((block_hash == self.block_hash).then_some(self.header))
+    }
+
+    fn filter(
+        &self,
+        block_hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<Vec<u8>>, FilterIndexError> {
+        Ok((block_hash == self.block_hash).then(|| self.filter.clone()))
+    }
+}
+
 struct Fixture {
     ctx: Arc<Context>,
     tx: Transaction,
@@ -295,20 +347,9 @@ impl Fixture {
 
 #[allow(clippy::arc_with_non_send_sync)]
 fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
-    Arc::new(Context::from_handles(
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-        Arc::new(RwLock::new(Vec::new())),
-        Arc::new(RwLock::new(HashMap::new())),
-        Arc::new(UtxoSet::new()),
-        Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
-            bitcoin_rs_coinstats::CoinStats::default(),
-        )),
-        Arc::new(RwLock::new(NetworkState::default())),
-        Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
-        peers,
-    ))
+    let mut ctx = Context::new();
+    ctx.peers = peers;
+    Arc::new(ctx)
 }
 
 fn tx(label: u8, script_pubkey: ScriptBuf) -> Transaction {

@@ -103,6 +103,13 @@ pub trait FilterIndexLike: Send + Sync {
         &self,
         block_hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError>;
+    /// Loads the raw filter bytes for a block, if indexed.
+    fn filter(
+        &self,
+        _block_hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<Vec<u8>>, FilterIndexError> {
+        Ok(None)
+    }
 }
 
 impl<S: KvStore + Send + Sync + 'static> FilterIndexLike for FilterIndex<S> {
@@ -120,5 +127,12 @@ impl<S: KvStore + Send + Sync + 'static> FilterIndexLike for FilterIndex<S> {
         block_hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError> {
         Self::filter_header(self, block_hash)
+    }
+
+    fn filter(
+        &self,
+        block_hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<Vec<u8>>, FilterIndexError> {
+        Self::filter(self, block_hash)
     }
 }

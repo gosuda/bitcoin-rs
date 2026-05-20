@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use bitcoin::hex::DisplayHex as _;
 use core::str::FromStr as _;
 
 use bitcoin_rs_primitives::Hash256;
@@ -181,12 +182,22 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     }))
 }
 
-pub(crate) fn getblockfilter(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = required_str(params, 0, "block hash is required")?;
-    parse_hash(hash)?;
+    let hash = parse_hash(hash)?;
+    let filter_bytes = ctx
+        .filter_index
+        .filter(hash)
+        .map_err(|error| RpcError::Internal(error.to_string()))?
+        .unwrap_or_default();
+    let header = ctx
+        .filter_index
+        .filter_header(hash)
+        .map_err(|error| RpcError::Internal(error.to_string()))?
+        .unwrap_or_default();
     Ok(json!({
-        "filter": "",
-        "header": Hash256::default().to_string_be()
+        "filter": filter_bytes.to_lower_hex_string(),
+        "header": header.to_string_be()
     }))
 }
 
