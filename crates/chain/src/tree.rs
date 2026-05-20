@@ -253,6 +253,14 @@ impl BlockTree {
         self.node(node_id).ok()
     }
 
+    /// Returns the `BlockHeader` at active-chain `height`, looking up via the
+    /// published tip. Returns `None` when no tip is published or no active-chain
+    /// node exists at that height.
+    #[must_use]
+    pub fn header_at_active_height(&self, height: u32) -> Option<&BlockHeader> {
+        self.active_node_at_height(height).map(|node| &node.header)
+    }
+
     /// Returns the median time of the most recent `window` blocks, inclusive
     /// of `start_id`, walking backward via parent pointers.
     ///
@@ -520,6 +528,33 @@ mod tests {
         };
         assert_eq!(node.height, 0);
         assert_eq!(node.hash, tree.node(genesis_id)?.hash);
+        Ok(())
+    }
+
+    #[test]
+    fn header_at_active_height_returns_genesis_header_after_publish_tip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+
+        let Some(header) = tree.header_at_active_height(0) else {
+            panic!("expected header at height 0");
+        };
+
+        assert_eq!(hash_from_header(header), genesis_hash);
+        Ok(())
+    }
+
+    #[test]
+    fn header_at_active_height_returns_none_above_tip() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let _genesis_hash = tree.node(genesis_id)?.hash;
+
+        assert!(tree.header_at_active_height(1).is_none());
         Ok(())
     }
 
