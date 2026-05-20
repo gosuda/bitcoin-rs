@@ -228,6 +228,26 @@ impl Mempool {
             .and_then(|index| self.entries.get(index))
     }
 
+    /// Returns mempool entry ids in order of descending `fee_rate` (sat/kvB).
+    ///
+    /// Walks `entries` and sorts; cost O(N log N) per call. Used by mining
+    /// template builders and fee estimators that want fee-ordered traversal
+    /// without going through `ParetoFront` (which uses ancestor-aware
+    /// scoring).
+    #[must_use]
+    pub fn iter_by_fee_rate_desc(&self) -> Vec<EntryId> {
+        let mut pairs: Vec<(u64, EntryId)> = self
+            .entries
+            .iter()
+            .filter_map(|(index, entry)| {
+                let id = EntryId::try_from(index).ok()?;
+                Some((entry.fee_rate, id))
+            })
+            .collect();
+        pairs.sort_by(|a, b| b.0.cmp(&a.0));
+        pairs.into_iter().map(|(_, id)| id).collect()
+    }
+
     /// Returns the txid of the in-mempool transaction that spends `outpoint`,
     /// or `None` if no entry spends it. Linear scan over entries; acceptable
     /// for early IBD where the pool is small, future strands may add a per-
@@ -712,6 +732,50 @@ mod tests {
         assert_eq!(stats.bytes, expected_vsize);
         assert_eq!(stats.total_fee, expected_fee);
         Ok(())
+    }
+
+    #[test]
+    fn iter_by_fee_rate_desc_orders_highest_first() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        // Two distinct txs with different fee rates.
+        let low_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let low_txid = low_tx.compute_txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7));
+        let high_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(99_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x52]),
+            }],
+        };
+        let high_txid = high_tx.compute_txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7));
+        let ordered = pool.iter_by_fee_rate_desc();
+        assert_eq!(ordered.len(), 2);
+        let Some(&first_id) = ordered.first() else {
+            panic!("expected at least one entry");
+        };
+        let Some(first_entry) = pool.entry(first_id) else {
+            panic!("first entry missing");
+        };
+        assert_eq!(first_entry.tx.compute_txid(), high_txid);
+        let Some(&second_id) = ordered.get(1) else {
+            panic!("expected two entries");
+        };
+        let Some(second_entry) = pool.entry(second_id) else {
+            panic!("second entry missing");
+        };
+        assert_eq!(second_entry.tx.compute_txid(), low_txid);
     }
 
     #[test]
