@@ -16,6 +16,34 @@ const LOCAL_SERVICES_HEX: &str = "0000000000000049";
 const LOCAL_SERVICES_NAMES: &[&str] = &["NETWORK", "WITNESS", "COMPACT_FILTERS"];
 
 const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x49);
+/// Decodes a Bitcoin service-flags bitmask into a list of name strings.
+///
+/// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
+fn services_names_from_flags(flags: u64) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if flags & (1_u64 << 0) != 0 {
+        names.push("NETWORK".to_owned());
+    }
+    if flags & (1_u64 << 1) != 0 {
+        names.push("GETUTXO".to_owned());
+    }
+    if flags & (1_u64 << 2) != 0 {
+        names.push("BLOOM".to_owned());
+    }
+    if flags & (1_u64 << 3) != 0 {
+        names.push("WITNESS".to_owned());
+    }
+    if flags & (1_u64 << 6) != 0 {
+        names.push("COMPACT_FILTERS".to_owned());
+    }
+    if flags & (1_u64 << 10) != 0 {
+        names.push("NETWORK_LIMITED".to_owned());
+    }
+    if flags & (1_u64 << 11) != 0 {
+        names.push("P2P_V2".to_owned());
+    }
+    names
+}
 
 const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 const DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB: f64 = 0.00001;
@@ -63,7 +91,7 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             "addr": peer.addr.to_string(),
             "addrbind": peer.addr.to_string(),
             "services": format!("{:016x}", peer.services),
-            "servicesnames": Vec::<String>::new(),
+            "servicesnames": services_names_from_flags(peer.services),
             "relaytxes": true,
             "lastsend": 0,
             "lastrecv": 0,
@@ -302,6 +330,34 @@ mod tests {
     #[test]
     fn local_services_flags_hex_matches_bitmask() {
         assert_eq!(format!("{LOCAL_SERVICES_FLAGS:016x}"), LOCAL_SERVICES_HEX);
+    }
+
+    #[test]
+    fn services_names_from_flags_decodes_known_bits() {
+        let names = services_names_from_flags(0_u64);
+        assert!(names.is_empty());
+
+        let names = services_names_from_flags((1_u64 << 0) | (1_u64 << 3));
+        assert_eq!(names, vec!["NETWORK".to_owned(), "WITNESS".to_owned()]);
+
+        let names =
+            services_names_from_flags((1_u64 << 0) | (1_u64 << 3) | (1_u64 << 6) | (1_u64 << 10));
+        assert_eq!(
+            names,
+            vec![
+                "NETWORK".to_owned(),
+                "WITNESS".to_owned(),
+                "COMPACT_FILTERS".to_owned(),
+                "NETWORK_LIMITED".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn services_names_from_flags_ignores_unknown_bits() {
+        // Bit 63 is not in the decoder's recognized set.
+        let names = services_names_from_flags(1_u64 << 63);
+        assert!(names.is_empty());
     }
 }
 #[cfg(test)]
