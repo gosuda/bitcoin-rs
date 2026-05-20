@@ -20,6 +20,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let pool = ctx.mempool.read();
     let stats = pool.stats();
     let mempool_sequence = pool.sequence_number();
+    let maxmempool = pool.limits.max_total_bytes;
     let live_min_relay_sat_per_kvb = pool.min_relay_fee_sat_per_kvb();
     let min_relay_fee = sat_per_kvb_to_btc(live_min_relay_sat_per_kvb);
     let incremental_relay_fee = sat_per_kvb_to_btc(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB);
@@ -29,7 +30,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "bytes": stats.bytes,
         "usage": stats.bytes,
         "total_fee": sats_to_btc(stats.total_fee),
-        "maxmempool": 300_000_000_u64,
+        "maxmempool": maxmempool,
         "mempoolminfee": min_relay_fee,
         "minrelaytxfee": min_relay_fee,
         "incrementalrelayfee": incremental_relay_fee,
@@ -268,6 +269,25 @@ mod tests {
             (mempool_min_fee - 0.00005).abs() < 1e-9,
             "expected ~0.00005, got {mempool_min_fee}"
         );
+    }
+
+    #[test]
+    fn getmempoolinfo_maxmempool_reflects_custom_limit() {
+        let ctx = Context::new();
+        *ctx.mempool.write() =
+            bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits {
+                max_total_bytes: 50_000_000,
+                ..bitcoin_rs_mempool::MempoolLimits::default()
+            });
+        let ctx = Arc::new(ctx);
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolinfo", &json!([]))
+            .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
+        let Some(maxmempool) = result.get("maxmempool").and_then(JsonValueTrait::as_u64) else {
+            panic!("maxmempool missing: {result:?}");
+        };
+        assert_eq!(maxmempool, 50_000_000);
     }
 
     #[test]
