@@ -74,6 +74,38 @@ impl BlockTree {
             .copied()
     }
 
+    /// Returns the `NodeId`s of every node not referenced as a parent.
+    ///
+    /// A leaf is a tip of either the active chain (most common: 1 leaf, the
+    /// canonical tip) or a stale/fork branch. Multi-tip RPCs like Bitcoin
+    /// Core's `getchaintips` enumerate these.
+    ///
+    /// Order is iteration order of the underlying slab.
+    #[must_use]
+    pub fn leaf_node_ids(&self) -> Vec<NodeId> {
+        let mut parents: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
+        for (_index, node) in &self.nodes {
+            if let Some(parent_id) = node.parent
+                && let Some(parent_index) = parent_id.index()
+            {
+                // NodeId stores a u32; track parent indices to skip them later.
+                if let Ok(idx_u32) = u32::try_from(parent_index) {
+                    parents.insert(idx_u32);
+                }
+            }
+        }
+
+        let mut leaves = Vec::new();
+        for (index, _node) in &self.nodes {
+            if let Ok(idx_u32) = u32::try_from(index)
+                && !parents.contains(&idx_u32)
+            {
+                leaves.push(NodeId::new(idx_u32));
+            }
+        }
+        leaves
+    }
+
     /// Returns the currently published best tip snapshot.
     #[must_use]
     pub fn tip(&self) -> Option<Arc<TipSnapshot>> {
@@ -442,6 +474,55 @@ mod tests {
         assert_eq!(tree.node_at_height_from(tip_id, 0), Some(genesis_id));
         assert_eq!(tree.node_at_height_from(tip_id, 4), Some(tip_id));
         assert_eq!(tree.node_at_height_from(tip_id, 99), None);
+        Ok(())
+    }
+
+    #[test]
+    fn leaf_node_ids_returns_only_tip_on_linear_chain() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let child = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            1,
+        );
+        let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
+
+        let leaves = tree.leaf_node_ids();
+
+        assert_eq!(leaves.len(), 1, "expected single leaf, got {leaves:?}");
+        assert_eq!(leaves[0], child_id);
+        Ok(())
+    }
+
+    #[test]
+    fn leaf_node_ids_returns_all_branches_when_forked() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut variant_a = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            1,
+        );
+        variant_a.nonce = 1;
+        let mut variant_b = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            2,
+        );
+        variant_b.nonce = 2;
+        let leaf_a = tree.insert_node(Some(genesis_id), variant_a, NodeStatus::HeaderValid)?;
+        let leaf_b = tree.insert_node(Some(genesis_id), variant_b, NodeStatus::HeaderValid)?;
+
+        let mut leaves = tree.leaf_node_ids();
+        leaves.sort_by_key(|id| id.index().unwrap_or(usize::MAX));
+
+        assert_eq!(
+            leaves.len(),
+            2,
+            "expected two leaves on fork, got {leaves:?}"
+        );
+        assert!(leaves.contains(&leaf_a));
+        assert!(leaves.contains(&leaf_b));
         Ok(())
     }
 
