@@ -10,6 +10,8 @@ extern crate alloc;
 
 /// Block-apply pipeline executed by `NodeState::apply_block` and `BlockSync::tick`.
 pub mod apply;
+/// BIP9 deployment-state adapter over `BlockTree`.
+pub mod bip9_context;
 /// Bitcoin Core configuration compatibility.
 pub mod bitcoin_conf_compat;
 /// Layered node configuration.
@@ -37,6 +39,7 @@ pub mod sync;
 /// UTXO view adapter for consensus transaction checks.
 pub mod utxo_view;
 
+pub use bip9_context::BlockTreeContext;
 pub use bitcoin_rs_primitives::Network;
 pub use config::{Auth, Config};
 pub use run::run;
