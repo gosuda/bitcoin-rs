@@ -115,3 +115,17 @@ fn same_unconfirmed_inputs(base: &Psbt, replacement: &Psbt) -> bool {
             .zip(&replacement.unsigned_tx.input)
             .all(|(left, right)| left.previous_output == right.previous_output)
 }
+
+/// Wrapper around [`bump_psbt`] that accepts a raw sat/kvB fee rate from RPC
+/// callers without exposing the `bdk_coin_select::FeeRate` type.
+pub fn bump_psbt_with_rate_sat_per_kvb(base: &Psbt, sat_per_kvb: u64) -> Result<Psbt, WalletError> {
+    let sat_per_vb_u64 = sat_per_kvb / 1_000;
+    let sat_per_vb_f32 = if let Ok(small) = u32::try_from(sat_per_vb_u64) {
+        let inner = u16::try_from(small.min(u32::from(u16::MAX))).unwrap_or(u16::MAX);
+        f32::from(inner)
+    } else {
+        f32::from(u16::MAX)
+    };
+    let rate = FeeRate::from_sat_per_vb(sat_per_vb_f32);
+    bump_psbt(base, rate)
+}

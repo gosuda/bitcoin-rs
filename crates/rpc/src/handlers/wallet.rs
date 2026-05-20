@@ -339,13 +339,60 @@ fn descriptor_checksum(payload: &str) -> Option<String> {
     Some(out)
 }
 
-pub(crate) fn bumpfee(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "txid is required")?;
+pub(crate) fn bumpfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    use core::str::FromStr as _;
+
+    let txid_str = required_str(params, 0, "txid is required")?;
+    let txid = bitcoin::Txid::from_str(txid_str)
+        .map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))?;
+
+    // Locate the tx: prefer mempool (unconfirmed bumpable), fall back to confirmed.
+    let (original_tx, original_fee, original_fee_rate_sat_per_kvb) = {
+        let pool = ctx.mempool.read();
+        if let Some(&id) = pool.by_txid.get(&txid) {
+            if let Some(entry) = pool.entry(id) {
+                ((*entry.tx).clone(), entry.fee, entry.fee_rate)
+            } else {
+                return Err(RpcError::NotFound("transaction not in mempool"));
+            }
+        } else {
+            drop(pool);
+            let confirmed = ctx.transactions.read();
+            let Some(tx) = confirmed.get(&txid) else {
+                return Err(RpcError::NotFound("transaction not found"));
+            };
+            // Confirmed txs cannot be bumped via RBF; reject.
+            let _ = tx;
+            return Err(RpcError::InvalidParams(
+                "cannot bump fee on confirmed transaction",
+            ));
+        }
+    };
+
+    // Bump fee rate by 25% as a default policy.
+    let new_rate_sat_per_kvb = original_fee_rate_sat_per_kvb.saturating_mul(125) / 100;
+    let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(original_tx)
+        .map_err(|err| RpcError::Internal(format!("psbt build: {err}")))?;
+    let bumped =
+        match bitcoin_rs_wallet::bump_psbt_with_rate_sat_per_kvb(&psbt, new_rate_sat_per_kvb) {
+            Ok(bumped) => bumped,
+            Err(bitcoin_rs_wallet::WalletError::Bip125(message)) => {
+                return Ok(json!({
+                    "psbt": "",
+                    "origfee": bitcoin::Amount::from_sat(original_fee).to_btc(),
+                    "fee": 0.0,
+                    "errors": [message]
+                }));
+            }
+            Err(err) => return Err(RpcError::Internal(format!("bumpfee: {err}"))),
+        };
+    let bumped_b64 = encode_base64(&bumped.serialize());
+
     Ok(json!({
-        "psbt": "",
-        "origfee": 0.0,
+        "psbt": bumped_b64,
+        "origfee": bitcoin::Amount::from_sat(original_fee).to_btc(),
         "fee": 0.0,
-        "errors": []
+        "errors": Vec::<String>::new()
     }))
 }
 
@@ -554,5 +601,39 @@ mod psbt_process_tests {
             panic!("hex missing: {result:?}");
         };
         assert_eq!(hex, "");
+    }
+}
+
+#[cfg(test)]
+mod bumpfee_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::hashes::Hash as _;
+
+    use super::*;
+
+    #[test]
+    fn bumpfee_returns_not_found_for_unknown_txid() {
+        let ctx = Arc::new(Context::new());
+        let mut bytes = [0_u8; 32];
+        bytes[0] = 0xaa;
+        let txid = bitcoin::Txid::from_byte_array(bytes);
+        let result = bumpfee(&ctx, &json!([txid.to_string()]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bumpfee_rejects_confirmed_transaction() {
+        let ctx = Arc::new(Context::new());
+        // Insert a confirmed tx (not in mempool).
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let txid = ctx.add_transaction(tx);
+        let result = bumpfee(&ctx, &json!([txid.to_string()]));
+        assert!(result.is_err());
     }
 }

@@ -27,7 +27,7 @@ pub mod watcher;
 
 pub use coin_selection::{Candidate, SelectStrategy, Selection, Target, select_coins};
 pub use descriptor::{BIP32Derivation, Descriptor};
-pub use fee_bump::{FeeBumpPlan, bump_fee, bump_psbt};
+pub use fee_bump::{FeeBumpPlan, bump_fee, bump_psbt, bump_psbt_with_rate_sat_per_kvb};
 pub use finalize::{FinalizeError, finalize_signed};
 pub use psbt::{PrevUtxo, PsbtBuilder};
 pub use signer_iface::{ExternalSigner, SignerError};
