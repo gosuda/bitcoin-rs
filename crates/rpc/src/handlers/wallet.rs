@@ -1,6 +1,5 @@
 use alloc::sync::Arc;
 
-use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::hex::DisplayHex as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
@@ -12,12 +11,19 @@ const _: fn() -> Value = invalid_psbt;
 
 pub(crate) fn getdescriptorinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let descriptor = required_str(params, 0, "descriptor is required")?;
-    let checksum =
-        sha256::Hash::hash(descriptor.as_bytes()).as_byte_array()[..4].to_lower_hex_string();
+    // Strip any existing #XXXXXXXX checksum suffix.
+    let payload = if let Some((body, _)) = descriptor.rsplit_once('#') {
+        body
+    } else {
+        descriptor
+    };
+    let checksum = descriptor_checksum(payload).ok_or(RpcError::InvalidParams(
+        "descriptor contains invalid characters",
+    ))?;
     Ok(json!({
-        "descriptor": descriptor,
+        "descriptor": format!("{payload}#{checksum}"),
         "checksum": checksum,
-        "isrange": descriptor.contains('*'),
+        "isrange": payload.contains('*'),
         "issolvable": false,
         "hasprivatekeys": false
     }))
@@ -244,6 +250,74 @@ fn encode_base64(bytes: &[u8]) -> String {
     out
 }
 
+const BIP380_INPUT_CHARSET: &str = "0123456789()[],'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#\"\\ ";
+const BIP380_CHECKSUM_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const BIP380_GENERATOR: [u64; 5] = [
+    0x00f5_dee5_1989,
+    0x00a9_fdca_3312,
+    0x001b_ab10_e32d,
+    0x0037_06b1_677a,
+    0x0064_4d62_6ffd,
+];
+
+fn descriptor_polymod(c: u64, val: u32) -> u64 {
+    let c0 = c >> 35;
+    let mut result = ((c & 0x0007_ffff_ffff) << 5) ^ u64::from(val);
+    let mut bit = 0;
+    while bit < 5 {
+        if (c0 >> bit) & 1 != 0 {
+            result ^= BIP380_GENERATOR[bit];
+        }
+        bit += 1;
+    }
+    result
+}
+
+fn descriptor_checksum(payload: &str) -> Option<String> {
+    let mut c: u64 = 1;
+    let mut cls: u64 = 0;
+    let mut clscount: u64 = 0;
+    for ch in payload.chars() {
+        // INPUT_CHARSET is ASCII-only; find ch's byte position.
+        let mut byte = [0_u8; 4];
+        let encoded = ch.encode_utf8(&mut byte);
+        if encoded.len() != 1 {
+            return None;
+        }
+        let needle = encoded.as_bytes()[0];
+        let pos = BIP380_INPUT_CHARSET
+            .as_bytes()
+            .iter()
+            .position(|b| *b == needle)?;
+        let pos_u64 = u64::try_from(pos).ok()?;
+        let val = u32::try_from(pos_u64 & 31).ok()?;
+        c = descriptor_polymod(c, val);
+        cls = cls * 3 + (pos_u64 >> 5);
+        clscount = clscount.saturating_add(1);
+        if clscount == 3 {
+            let val = u32::try_from(cls).ok()?;
+            c = descriptor_polymod(c, val);
+            cls = 0;
+            clscount = 0;
+        }
+    }
+    if clscount > 0 {
+        let val = u32::try_from(cls).ok()?;
+        c = descriptor_polymod(c, val);
+    }
+    for _ in 0..8_u32 {
+        c = descriptor_polymod(c, 0);
+    }
+    c ^= 1;
+    let mut out = String::with_capacity(8);
+    for i in 0..8_u32 {
+        let shift = 5_u32 * (7 - i);
+        let idx = usize::try_from((c >> shift) & 31).ok()?;
+        out.push(char::from(BIP380_CHECKSUM_CHARSET[idx]));
+    }
+    Some(out)
+}
+
 pub(crate) fn bumpfee(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     required_str(params, 0, "txid is required")?;
     Ok(json!({
@@ -287,6 +361,45 @@ mod tests {
         let result = scantxoutset(&ctx, &json!(["abort"]))
             .unwrap_or_else(|err| panic!("scantxoutset abort failed: {err}"));
         assert_eq!(result.as_bool(), Some(false));
+    }
+}
+
+#[cfg(test)]
+mod descriptor_checksum_tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn getdescriptorinfo_emits_8_char_bech32_checksum() {
+        let ctx = Arc::new(Context::new());
+        let result = getdescriptorinfo(&ctx, &json!(["addr(1111111111111111111114oLvT2)"]))
+            .unwrap_or_else(|err| panic!("getdescriptorinfo failed: {err}"));
+        let Some(checksum) = result.get("checksum").and_then(|v| v.as_str()) else {
+            panic!("checksum missing: {result:?}");
+        };
+        assert_eq!(checksum.len(), 8, "checksum must be 8 chars: {checksum}");
+        // All chars should be in the bech32 charset.
+        for ch in checksum.chars() {
+            assert!(
+                BIP380_CHECKSUM_CHARSET.iter().any(|b| char::from(*b) == ch),
+                "checksum char {ch} not in bech32 charset"
+            );
+        }
+    }
+
+    #[test]
+    fn getdescriptorinfo_strips_existing_checksum() {
+        let ctx = Arc::new(Context::new());
+        let result = getdescriptorinfo(&ctx, &json!(["addr(x)#whatever"]))
+            .unwrap_or_else(|err| panic!("getdescriptorinfo failed: {err}"));
+        let Some(desc) = result.get("descriptor").and_then(|v| v.as_str()) else {
+            panic!("descriptor missing: {result:?}");
+        };
+        assert!(
+            desc.starts_with("addr(x)#"),
+            "expected addr(x)# prefix: {desc}"
+        );
     }
 }
 
