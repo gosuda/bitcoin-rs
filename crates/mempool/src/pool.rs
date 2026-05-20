@@ -100,6 +100,17 @@ impl Mempool {
         }
     }
 
+    /// Removes all entries from the pool, clears every index, and bumps the
+    /// sequence counter to signal a wholesale invalidation to subscribers.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.by_txid.clear();
+        self.funding.clear();
+        self.spending.clear();
+        self.pareto = ParetoFront::new();
+        self.bump_sequence();
+    }
+
     /// Returns the current sequence number. Increments on every insert/remove.
     #[must_use]
     pub fn sequence_number(&self) -> u64 {
@@ -701,6 +712,32 @@ mod tests {
         pool.insert_entry(entry)?;
         let after = pool.sequence_number();
         assert!(after > before, "expected sequence to bump");
+        Ok(())
+    }
+
+    #[test]
+    fn clear_removes_all_entries_and_bumps_sequence() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(99_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))?;
+        let seq_before_clear = pool.sequence_number();
+
+        pool.clear();
+
+        assert_eq!(pool.len(), 0);
+        assert!(pool.by_txid.is_empty());
+        assert!(pool.funding.is_empty());
+        assert!(pool.spending.is_empty());
+        assert!(pool.pareto.is_empty());
+        assert!(pool.sequence_number() > seq_before_clear);
         Ok(())
     }
 
