@@ -46,12 +46,14 @@ pub struct ApplyHandles {
 }
 
 /// Synthetically applies `block` as the next tip after consensus checks.
+#[allow(clippy::too_many_lines)]
 pub fn apply_block(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
+    let total_started = quanta::Instant::now();
     let block_hash =
         bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
     let prev_hash =
@@ -77,8 +79,13 @@ pub fn apply_block(
     // any structural checks. Contextual difficulty-adjustment validation
     // (verifying the declared target matches the network's expected
     // difficulty at this height) requires `BlockTree` state — deferred.
+    let pow_self_started = quanta::Instant::now();
     let declared_target = block.header.target();
-    if block.header.validate_pow(declared_target).is_err() {
+    let pow_self_result = block.header.validate_pow(declared_target);
+    let pow_self_dur = pow_self_started.elapsed();
+    metrics::histogram!("node.apply_block.pow_self_consistency_seconds")
+        .record(pow_self_dur.as_secs_f64());
+    if pow_self_result.is_err() {
         return Err(ApplyError::ProofOfWork { hash: block_hash });
     }
 
@@ -101,27 +108,72 @@ pub fn apply_block(
             median_time_past: 0,
         },
     };
-    bitcoin_rs_consensus::verify_block::verify_block_rules_borrowed(block, &prev_tip_state)?;
+    let block_rules_started = quanta::Instant::now();
+    let block_rules_result =
+        bitcoin_rs_consensus::verify_block::verify_block_rules_borrowed(block, &prev_tip_state);
+    let block_rules_dur = block_rules_started.elapsed();
+    metrics::histogram!("node.apply_block.block_rules_seconds")
+        .record(block_rules_dur.as_secs_f64());
+    block_rules_result?;
     // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
-    check_bip30_and_bip34(handles, block, height)?;
+    let bip30_bip34_started = quanta::Instant::now();
+    let bip30_bip34_result = check_bip30_and_bip34(handles, block, height);
+    let bip30_bip34_dur = bip30_bip34_started.elapsed();
+    metrics::histogram!("node.apply_block.bip30_bip34_seconds")
+        .record(bip30_bip34_dur.as_secs_f64());
+    bip30_bip34_result?;
     // PoW limit + DAA non-retarget continuity.
-    check_pow_limit_and_continuity(handles, block, height)?;
+    let pow_limit_started = quanta::Instant::now();
+    let pow_limit_result = check_pow_limit_and_continuity(handles, block, height);
+    let pow_limit_dur = pow_limit_started.elapsed();
+    metrics::histogram!("node.apply_block.pow_limit_continuity_seconds")
+        .record(pow_limit_dur.as_secs_f64());
+    pow_limit_result?;
 
-    verify_block_transactions(handles, block, height, prev_tip_state.median_time_past)?;
+    let bip113_started = quanta::Instant::now();
+    let bip113_result = check_bip113_finality(block, height, prev_tip_state.median_time_past);
+    let bip113_dur = bip113_started.elapsed();
+    metrics::histogram!("node.apply_block.bip113_seconds").record(bip113_dur.as_secs_f64());
+    bip113_result?;
 
-    check_coinbase_maturity(handles, block, height)?;
-    check_bip68_sequence_locks(handles, block, height, prev_tip_state.median_time_past)?;
+    let script_verify_started = quanta::Instant::now();
+    let script_verify_result =
+        verify_block_transactions(handles, block, height, prev_tip_state.median_time_past);
+    let script_verify_dur = script_verify_started.elapsed();
+    metrics::histogram!("node.apply_block.script_verify_seconds")
+        .record(script_verify_dur.as_secs_f64());
+    script_verify_result?;
+
+    let coinbase_maturity_started = quanta::Instant::now();
+    let coinbase_maturity_result = check_coinbase_maturity(handles, block, height);
+    let coinbase_maturity_dur = coinbase_maturity_started.elapsed();
+    metrics::histogram!("node.apply_block.coinbase_maturity_seconds")
+        .record(coinbase_maturity_dur.as_secs_f64());
+    coinbase_maturity_result?;
+    let bip68_started = quanta::Instant::now();
+    let bip68_result =
+        check_bip68_sequence_locks(handles, block, height, prev_tip_state.median_time_past);
+    let bip68_dur = bip68_started.elapsed();
+    metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
+    bip68_result?;
 
     let changes = build_utxo_changes(block, height)?;
-    handles
-        .utxo
-        .commit_block(&changes, &block_hash)
-        .map_err(ApplyError::UtxoCommit)?;
+    let utxo_commit_started = quanta::Instant::now();
+    let utxo_commit_result = handles.utxo.commit_block(&changes, &block_hash);
+    let utxo_commit_dur = utxo_commit_started.elapsed();
+    metrics::histogram!("node.apply_block.utxo_commit_seconds")
+        .record(utxo_commit_dur.as_secs_f64());
+    utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
 
     // Persist the header into the in-memory block tree after validation and
     // UTXO commit have succeeded. `BlockTree` publishes the canonical
     // best-tip snapshot as part of `insert_header`.
-    insert_active_header(handles, block)?;
+    let block_tree_insert_started = quanta::Instant::now();
+    let block_tree_insert_result = insert_active_header(handles, block);
+    let block_tree_insert_dur = block_tree_insert_started.elapsed();
+    metrics::histogram!("node.apply_block.block_tree_insert_seconds")
+        .record(block_tree_insert_dur.as_secs_f64());
+    block_tree_insert_result?;
 
     let tip = handles
         .chain_tip
@@ -139,21 +191,52 @@ pub fn apply_block(
         .blocks
         .write()
         .push(bitcoin_rs_rpc::BlockRecord::from_block(height, block));
+    let mempool_evict_started = quanta::Instant::now();
     for tx in &block.txdata {
         let txid = tx.compute_txid();
         let evicted_count = handles.mempool.write().remove_by_txid(&txid).len();
         tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
-        handles.transactions.write().insert(txid, tx.clone());
     }
+    let mempool_evict_dur = mempool_evict_started.elapsed();
+    metrics::histogram!("node.apply_block.mempool_evict_seconds")
+        .record(mempool_evict_dur.as_secs_f64());
+    let tx_index_started = quanta::Instant::now();
+    for tx in &block.txdata {
+        handles
+            .transactions
+            .write()
+            .insert(tx.compute_txid(), tx.clone());
+    }
+    let tx_index_dur = tx_index_started.elapsed();
+    metrics::histogram!("node.apply_block.tx_index_seconds").record(tx_index_dur.as_secs_f64());
     let tx_count_delta = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
+    let coin_stats_started = quanta::Instant::now();
     handles.coin_stats.finish_block(height, tx_count_delta);
+    let coin_stats_dur = coin_stats_started.elapsed();
+    metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
+        .record(coin_stats_dur.as_secs_f64());
+    let total_dur = total_started.elapsed();
+    metrics::histogram!("node.apply_block.total_seconds").record(total_dur.as_secs_f64());
+    metrics::counter!("node.apply_block.txs_applied").increment(tx_count_delta);
     tracing::info!(
         height,
         %block_hash,
         tx_count = block.txdata.len(),
-        utxo_adds = changes.add_count(),
-        utxo_removes = changes.remove_count(),
-        "apply_block: chain advance committed"
+        pow_self_us = pow_self_dur.as_micros(),
+        pow_limit_us = pow_limit_dur.as_micros(),
+        block_rules_us = block_rules_dur.as_micros(),
+        bip30_bip34_us = bip30_bip34_dur.as_micros(),
+        bip113_us = bip113_dur.as_micros(),
+        script_verify_us = script_verify_dur.as_micros(),
+        coinbase_maturity_us = coinbase_maturity_dur.as_micros(),
+        bip68_us = bip68_dur.as_micros(),
+        utxo_commit_us = utxo_commit_dur.as_micros(),
+        block_tree_insert_us = block_tree_insert_dur.as_micros(),
+        mempool_evict_us = mempool_evict_dur.as_micros(),
+        tx_index_us = tx_index_dur.as_micros(),
+        coin_stats_us = coin_stats_dur.as_micros(),
+        total_us = total_dur.as_micros(),
+        "apply_block: profile"
     );
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
     Ok(tip)
@@ -193,6 +276,31 @@ fn verify_block_transactions(
             median_time_past,
             flags,
         )?;
+    }
+    Ok(())
+}
+
+fn check_bip113_finality(
+    block: &bitcoin::Block,
+    height: u32,
+    median_time_past: u32,
+) -> core::result::Result<(), ApplyError> {
+    for tx in &block.txdata {
+        if tx.is_coinbase() {
+            continue;
+        }
+        if bitcoin_rs_consensus::verify_tx::is_final_tx(tx, height, median_time_past) {
+            continue;
+        }
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "BIP113",
+                reason: format!(
+                    "non-final transaction at height {height} mtp {median_time_past}: locktime {}",
+                    tx.lock_time.to_consensus_u32()
+                ),
+            },
+        ));
     }
     Ok(())
 }
