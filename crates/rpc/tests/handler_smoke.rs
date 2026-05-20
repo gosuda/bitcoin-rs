@@ -68,8 +68,8 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         ),
         ("scantxoutset", json!(["start", []])),
         ("walletcreatefundedpsbt", json!([[], []])),
-        ("walletprocesspsbt", json!([""])),
-        ("finalizepsbt", json!([""])),
+        ("walletprocesspsbt", json!([valid_psbt.as_str()])),
+        ("finalizepsbt", json!([valid_psbt.as_str()])),
         ("combinepsbt", json!([[valid_psbt.as_str()]])),
         ("bumpfee", json!([txid.as_str()])),
     ];
@@ -342,7 +342,24 @@ struct Fixture {
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
-        let block_hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        let tx = tx(1, ScriptBuf::from_bytes(vec![0x51]));
+        let block = bitcoin::Block {
+            header: bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash: bitcoin::BlockHash::all_zeros(),
+                merkle_root: bitcoin::merkle_tree::calculate_root(std::iter::once(
+                    tx.compute_txid().to_raw_hash(),
+                ))
+                .map(|root| bitcoin::TxMerkleNode::from_raw_hash(root))
+                .unwrap_or_else(bitcoin::TxMerkleNode::all_zeros),
+                time: 1_231_006_505,
+                bits: bitcoin::CompactTarget::from_consensus(0x1d00_ffff),
+                nonce: 0,
+            },
+            txdata: vec![tx.clone()],
+        };
+        let block_hash_bytes = block.block_hash();
+        let block_hash = Hash256::from_le_bytes(block_hash_bytes.as_byte_array());
         ctx.set_chain_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 7,
@@ -355,8 +372,7 @@ impl Fixture {
             chainwork: ChainWork::ZERO,
             hash: block_hash,
         });
-        ctx.add_block(BlockRecord::synthetic(7, block_hash));
-        let tx = tx(1, ScriptBuf::from_bytes(vec![0x51]));
+        ctx.add_block(BlockRecord::from_block(7, &block));
         let txid = ctx.add_transaction(tx.clone());
         let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7);
         ctx.mempool.write().insert_entry(entry)?;
