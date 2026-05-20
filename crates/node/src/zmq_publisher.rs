@@ -47,6 +47,52 @@ impl ZmqPublisher for NoOpZmqPublisher {
     fn publish_rawtx(&self, _bytes: &[u8]) {}
 }
 
+/// `ZmqPublisher` that emits each event via `tracing::info!`.
+///
+/// Stepping stone before a production socket-backed publisher: events surface
+/// in the structured-log stream so operators can verify the apply pipeline is
+/// firing notifications. Each event logs the topic + a compact-hex encoding
+/// of the payload (for hash topics) or payload byte length (for raw topics).
+///
+/// Configure structured-log subscribers to filter `target="bitcoin_rs_node::zmq"`
+/// for this stream.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TracingZmqPublisher;
+
+impl ZmqPublisher for TracingZmqPublisher {
+    fn publish_hashblock(&self, hash: Hash256) {
+        tracing::info!(
+            target: "bitcoin_rs_node::zmq",
+            topic = "hashblock",
+            hash = %hash.to_string_be(),
+        );
+    }
+
+    fn publish_hashtx(&self, txid: Txid) {
+        tracing::info!(
+            target: "bitcoin_rs_node::zmq",
+            topic = "hashtx",
+            txid = %txid,
+        );
+    }
+
+    fn publish_rawblock(&self, bytes: &[u8]) {
+        tracing::info!(
+            target: "bitcoin_rs_node::zmq",
+            topic = "rawblock",
+            len = bytes.len(),
+        );
+    }
+
+    fn publish_rawtx(&self, bytes: &[u8]) {
+        tracing::info!(
+            target: "bitcoin_rs_node::zmq",
+            topic = "rawtx",
+            len = bytes.len(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +105,14 @@ mod tests {
         publisher.publish_hashtx(bitcoin::Txid::from_byte_array([0; 32]));
         publisher.publish_rawblock(&[]);
         publisher.publish_rawtx(&[]);
+    }
+
+    #[test]
+    fn tracing_publisher_methods_are_callable() {
+        let publisher = TracingZmqPublisher;
+        publisher.publish_hashblock(Hash256::default());
+        publisher.publish_hashtx(bitcoin::Txid::from_byte_array([0; 32]));
+        publisher.publish_rawblock(&[1, 2, 3]);
+        publisher.publish_rawtx(&[4, 5, 6]);
     }
 }
