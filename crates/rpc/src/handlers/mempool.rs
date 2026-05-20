@@ -10,10 +10,9 @@ use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, required_str, serde_to_sonic};
 
-// Bitcoin Core defaults for relay-fee policy until per-node configuration is
-// wired. Units: sat/kvB (the canonical workspace internal). 1000 sat/kvB =
-// 1 sat/vB = 0.00001 BTC/kvB.
-const DEFAULT_MIN_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
+// Bitcoin Core default for incremental relay-fee policy until per-node
+// configuration is wired. Units: sat/kvB (the canonical workspace internal).
+// 1000 sat/kvB = 1 sat/vB = 0.00001 BTC/kvB.
 const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
 
 pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -21,7 +20,8 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let pool = ctx.mempool.read();
     let stats = pool.stats();
     let mempool_sequence = pool.sequence_number();
-    let min_relay_fee = sat_per_kvb_to_btc(DEFAULT_MIN_RELAY_FEE_SAT_PER_KVB);
+    let live_min_relay_sat_per_kvb = pool.min_relay_fee_sat_per_kvb();
+    let min_relay_fee = sat_per_kvb_to_btc(live_min_relay_sat_per_kvb);
     let incremental_relay_fee = sat_per_kvb_to_btc(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB);
     Ok(json!({
         "loaded": true,
@@ -234,6 +234,39 @@ mod tests {
         assert!(
             (min_relay - 0.00001).abs() < 1e-9,
             "expected ~0.00001, got {min_relay}"
+        );
+    }
+
+    #[test]
+    fn getmempoolinfo_minrelaytxfee_reflects_custom_mempool_floor() {
+        let ctx = Arc::new(Context::new());
+        {
+            let mut pool = ctx.mempool.write();
+            *pool = bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits {
+                min_relay_fee_sat_per_kvb: 5_000,
+                ..bitcoin_rs_mempool::MempoolLimits::default()
+            });
+        }
+
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolinfo", &json!([]))
+            .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
+        let Some(min_relay) = result.get("minrelaytxfee").and_then(JsonValueTrait::as_f64) else {
+            panic!("minrelaytxfee missing: {result:?}");
+        };
+        let Some(mempool_min_fee) = result.get("mempoolminfee").and_then(JsonValueTrait::as_f64)
+        else {
+            panic!("mempoolminfee missing: {result:?}");
+        };
+
+        assert!(
+            (min_relay - 0.00005).abs() < 1e-9,
+            "expected ~0.00005, got {min_relay}"
+        );
+        assert!(
+            (mempool_min_fee - 0.00005).abs() < 1e-9,
+            "expected ~0.00005, got {mempool_min_fee}"
         );
     }
 
