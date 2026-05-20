@@ -85,6 +85,12 @@ pub trait ConfirmedHistoryReader: Send + Sync + core::fmt::Debug {
         let _ = txid;
         None
     }
+    /// Returns the Bitcoin block at `height` (active chain), or `None` if not
+    /// available via the underlying `BlockSource`.
+    fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
+        let _ = height;
+        None
+    }
 }
 
 /// `ConfirmedHistoryReader` backed by a workspace `Indexer` and a `BlockSource`.
@@ -165,6 +171,10 @@ where
             .ok()
             .flatten()?;
         Some(serialize(&tx).to_lower_hex_string())
+    }
+
+    fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
+        self.block_source.block_at_height(height)
     }
 
     fn unspent_outputs(&self, scripthash: ScriptHash) -> Vec<HistoryRecord> {
@@ -372,6 +382,13 @@ impl IndexHandle {
             .map(|bytes| bytes.as_slice().to_lower_hex_string())
     }
 
+    /// Returns the Bitcoin block at `height` via the attached `ConfirmedHistoryReader`'s
+    /// `BlockSource`. Returns `None` when no reader is attached or no block at that height.
+    #[must_use]
+    pub fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
+        self.state.reader.read().clone()?.block_at_height(height)
+    }
+
     fn headers(&self) -> Vec<[u8; 80]> {
         let headers = self.state.headers.read().clone();
         if !headers.is_empty() {
@@ -533,6 +550,7 @@ pub fn dispatch(
         "blockchain.scripthash.unsubscribe" => scripthash_unsubscribe(index, mempool, params),
         "blockchain.scripthash.listunspent" => scripthash_listunspent(index, mempool, params),
         "blockchain.transaction.get" => transaction_get(index, mempool, params),
+        "blockchain.transaction.id_from_pos" => transaction_id_from_pos(index, mempool, params),
         "blockchain.transaction.broadcast" => transaction_broadcast(index, mempool, params),
         "blockchain.estimatefee" => estimate_fee(index, mempool, params),
         "blockchain.relayfee" => blockchain_relayfee(index, mempool, params),
@@ -762,6 +780,55 @@ pub(crate) fn transaction_get(
         return Ok(json!({"txid": txid.to_string(), "hex": hex}));
     }
     Ok(json!(hex))
+}
+
+pub(crate) fn transaction_id_from_pos(
+    index: &IndexHandle,
+    _mempool: &MempoolHandle,
+    params: &Value,
+) -> Result<Value, ElectrumError> {
+    let array = params_array(params)?;
+    let height_u64 =
+        array
+            .first()
+            .and_then(JsonValueTrait::as_u64)
+            .ok_or(ElectrumError::InvalidParams(
+                "transaction.id_from_pos height",
+            ))?;
+    let pos_u64 =
+        array
+            .get(1)
+            .and_then(JsonValueTrait::as_u64)
+            .ok_or(ElectrumError::InvalidParams(
+                "transaction.id_from_pos tx_pos",
+            ))?;
+    let Ok(height) = u32::try_from(height_u64) else {
+        return Err(ElectrumError::InvalidParams("height exceeds u32"));
+    };
+    let Ok(pos) = usize::try_from(pos_u64) else {
+        return Err(ElectrumError::InvalidParams("tx_pos exceeds usize"));
+    };
+    let Some(block) = index.block_at_height(height) else {
+        return Err(ElectrumError::InvalidParams(
+            "block at height not available",
+        ));
+    };
+    let Some(tx) = block.txdata.get(pos) else {
+        return Err(ElectrumError::InvalidParams("tx_pos out of range"));
+    };
+    let merkle_requested = array
+        .get(2)
+        .and_then(JsonValueTrait::as_bool)
+        .unwrap_or(false);
+    if merkle_requested {
+        // TODO: compute the Electrum merkle path for this transaction.
+        Ok(json!({
+            "tx_hash": tx.compute_txid().to_string(),
+            "merkle": Vec::<String>::new(),
+        }))
+    } else {
+        Ok(json!(tx.compute_txid().to_string()))
+    }
 }
 
 pub(crate) fn transaction_broadcast(
@@ -1204,6 +1271,67 @@ mod history_reader_tests {
             .unwrap_or_else(|| panic!("expected array"));
 
         assert_eq!(rows.len(), 1, "expected one row: {result:?}");
+    }
+}
+
+#[cfg(test)]
+mod id_from_pos_tests {
+    use super::*;
+    use alloc::sync::Arc;
+
+    #[derive(Debug)]
+    struct StubReader;
+
+    impl ConfirmedHistoryReader for StubReader {
+        fn confirmed_history(&self, _: ScriptHash) -> Vec<HistoryRecord> {
+            Vec::new()
+        }
+
+        fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
+            if height == 0 {
+                Some(bitcoin::blockdata::constants::genesis_block(
+                    bitcoin::Network::Regtest,
+                ))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn id_from_pos_returns_txid_for_genesis_coinbase() {
+        let index = IndexHandle::new().with_history_reader(Arc::new(StubReader));
+        let mempool = MempoolHandle::default();
+        let result = dispatch(
+            "blockchain.transaction.id_from_pos",
+            &index,
+            &mempool,
+            &json!([0, 0]),
+        )
+        .unwrap_or_else(|err| panic!("id_from_pos failed: {err}"));
+        let Some(txid_hex) = result.as_str() else {
+            panic!("expected string: {result:?}");
+        };
+        let expected = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest)
+            .txdata
+            .first()
+            .unwrap_or_else(|| panic!("genesis has no tx"))
+            .compute_txid()
+            .to_string();
+        assert_eq!(txid_hex, expected);
+    }
+
+    #[test]
+    fn id_from_pos_rejects_out_of_range_pos() {
+        let index = IndexHandle::new().with_history_reader(Arc::new(StubReader));
+        let mempool = MempoolHandle::default();
+        let result = dispatch(
+            "blockchain.transaction.id_from_pos",
+            &index,
+            &mempool,
+            &json!([0, 999]),
+        );
+        assert!(result.is_err());
     }
 }
 #[cfg(test)]
