@@ -27,6 +27,8 @@ pub struct BlockRecord {
     pub header_hex: String,
     /// Transaction count in the block.
     pub tx_count: usize,
+    /// Block header timestamp (UNIX seconds).
+    pub time: u32,
 }
 
 impl BlockRecord {
@@ -43,6 +45,7 @@ impl BlockRecord {
             block_hex,
             header_hex,
             tx_count: block.txdata.len(),
+            time: block.header.time,
         }
     }
 
@@ -55,6 +58,7 @@ impl BlockRecord {
             block_hex: String::new(),
             header_hex: String::new(),
             tx_count: 0,
+            time: 0,
         }
     }
 }

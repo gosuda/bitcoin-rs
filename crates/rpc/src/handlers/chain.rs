@@ -135,15 +135,33 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         .filter(|record| u64::from(record.height) >= lowest_window_height)
         .map(|record| u64::try_from(record.tx_count).unwrap_or(0))
         .sum();
+    let tip_time = blocks_guard
+        .iter()
+        .find(|record| record.height == applied_height)
+        .map_or(0, |record| record.time);
+    let earliest_window_time = blocks_guard
+        .iter()
+        .filter(|record| u64::from(record.height) >= lowest_window_height)
+        .map(|record| record.time)
+        .min()
+        .unwrap_or(tip_time);
+    let window_interval = u64::from(tip_time).saturating_sub(u64::from(earliest_window_time));
+    let txrate = if window_interval > 0 {
+        let count_small = u32::try_from(window_tx_count).unwrap_or(u32::MAX);
+        let interval_small = u32::try_from(window_interval).unwrap_or(u32::MAX);
+        f64::from(count_small) / f64::from(interval_small)
+    } else {
+        0.0_f64
+    };
     Ok(json!({
-        "time": 0_u64, // TODO: thread timestamps via BlockRecord
+        "time": tip_time,
         "txcount": total_tx_count,
         "window_final_block_hash": ctx.applied_hash().to_string_be(),
         "window_final_block_height": applied_height,
         "window_block_count": window_block_count,
         "window_tx_count": window_tx_count,
-        "window_interval": 0_u64, // TODO: span from earliest to latest in window
-        "txrate": 0.0_f64 // TODO: tx/s once window_interval is real
+        "window_interval": window_interval,
+        "txrate": txrate
     }))
 }
 
@@ -801,6 +819,30 @@ mod tests {
         };
         // Genesis block has 1 tx (coinbase).
         assert_eq!(txcount, 1);
+    }
+
+    #[test]
+    fn getchaintxstats_time_reflects_tip_block_header_timestamp() {
+        use bitcoin::Network;
+        use bitcoin::hashes::Hash as _;
+
+        let ctx = Arc::new(Context::new());
+        let genesis = bitcoin::blockdata::constants::genesis_block(Network::Regtest);
+        let expected_time = genesis.header.time;
+        let hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 0,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        let result = getchaintxstats(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
+        let Some(time) = result.get("time").and_then(JsonValueTrait::as_u64) else {
+            panic!("time missing: {result:?}");
+        };
+        assert_eq!(time, u64::from(expected_time));
     }
 }
 
