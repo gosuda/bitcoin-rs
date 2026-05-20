@@ -62,6 +62,38 @@ impl BlockTree {
             .ok_or(ChainError::UnknownNode { id })
     }
 
+    /// Returns the highest shared ancestor of `a` and `b`, walking parent pointers.
+    ///
+    /// Returns `None` when either node is unknown or the chains share no common
+    /// ancestor (e.g. disconnected roots). Used by reorg planning to identify the
+    /// rollback point.
+    #[must_use]
+    pub fn find_common_ancestor(&self, a: NodeId, b: NodeId) -> Option<NodeId> {
+        let mut a_ancestors: hashbrown::HashSet<NodeId> = hashbrown::HashSet::new();
+
+        let mut cursor = Some(a);
+        while let Some(id) = cursor {
+            let Ok(node) = self.node(id) else {
+                return None;
+            };
+            a_ancestors.insert(id);
+            cursor = node.parent;
+        }
+
+        let mut cursor = Some(b);
+        while let Some(id) = cursor {
+            let Ok(node) = self.node(id) else {
+                return None;
+            };
+            if a_ancestors.contains(&id) {
+                return Some(id);
+            }
+            cursor = node.parent;
+        }
+
+        None
+    }
+
     /// Looks up a node id by header hash.
     #[must_use]
     pub fn lookup(&self, hash: Hash256) -> Option<NodeId> {
@@ -553,6 +585,55 @@ mod tests {
         );
         assert!(leaves.contains(&leaf_a));
         assert!(leaves.contains(&leaf_b));
+        Ok(())
+    }
+
+    #[test]
+    fn find_common_ancestor_returns_genesis_on_linear_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let child = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            1,
+        );
+        let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
+
+        assert_eq!(
+            tree.find_common_ancestor(genesis_id, genesis_id),
+            Some(genesis_id)
+        );
+        assert_eq!(
+            tree.find_common_ancestor(genesis_id, child_id),
+            Some(genesis_id)
+        );
+        assert_eq!(
+            tree.find_common_ancestor(child_id, genesis_id),
+            Some(genesis_id)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn find_common_ancestor_returns_parent_for_fork() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut variant_a = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            1,
+        );
+        variant_a.nonce = 1;
+        let mut variant_b = test_header(
+            BlockHash::from_byte_array(hash_from_header(&genesis).to_le_bytes()),
+            2,
+        );
+        variant_b.nonce = 2;
+        let leaf_a = tree.insert_node(Some(genesis_id), variant_a, NodeStatus::HeaderValid)?;
+        let leaf_b = tree.insert_node(Some(genesis_id), variant_b, NodeStatus::HeaderValid)?;
+
+        assert_eq!(tree.find_common_ancestor(leaf_a, leaf_b), Some(genesis_id));
         Ok(())
     }
 
