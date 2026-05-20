@@ -180,6 +180,13 @@ impl BlockTree {
         self.tip().map(|tip| tip.height)
     }
 
+    /// Returns the hash of the published tip, or `None` if no tip is
+    /// published yet.
+    #[must_use]
+    pub fn tip_hash(&self) -> Option<Hash256> {
+        self.tip().map(|tip| tip.hash)
+    }
+
     /// Returns a cheap-clonable handle to the canonical best-tip pointer.
     ///
     /// Sharing this handle lets lock-free readers observe tip advances
@@ -548,6 +555,12 @@ mod tests {
     }
 
     #[test]
+    fn tip_hash_returns_none_before_publish() {
+        let tree = BlockTree::new();
+        assert!(tree.tip_hash().is_none());
+    }
+
+    #[test]
     fn tip_chainwork_returns_published_tip_chainwork() -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let genesis = test_header(BlockHash::all_zeros(), 0);
@@ -571,6 +584,22 @@ mod tests {
             hash: genesis_hash,
         })));
         assert_eq!(tree.tip_height(), Some(7));
+        Ok(())
+    }
+
+    #[test]
+    fn tip_hash_returns_published_tip_hash() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+        tree.tip_handle().store(Some(Arc::new(TipSnapshot {
+            tip_id: genesis_id,
+            height: 0,
+            chainwork: ChainWork::ZERO,
+            hash: genesis_hash,
+        })));
+        assert_eq!(tree.tip_hash(), Some(genesis_hash));
         Ok(())
     }
 
