@@ -8,6 +8,8 @@ use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{invalid_psbt, params_array, required_str};
 
+const _: fn() -> Value = invalid_psbt;
+
 pub(crate) fn getdescriptorinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let descriptor = required_str(params, 0, "descriptor is required")?;
     let checksum =
@@ -70,13 +72,52 @@ pub(crate) fn walletcreatefundedpsbt(
 }
 
 pub(crate) fn walletprocesspsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "psbt is required")?;
-    Ok(invalid_psbt())
+    let raw = required_str(params, 0, "psbt is required")?;
+    let decoded = decode_base64(raw)?;
+    let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&decoded) else {
+        return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+    };
+    let serialized = encode_base64(&psbt.serialize());
+    // No signing in this PSBT-only wallet; `complete` reflects whether every
+    // input is already finalized by an external signer that previously processed it.
+    let complete = !psbt.inputs.is_empty()
+        && psbt
+            .inputs
+            .iter()
+            .all(|input| input.final_script_sig.is_some() || input.final_script_witness.is_some());
+    Ok(json!({
+        "psbt": serialized,
+        "complete": complete,
+    }))
 }
 
 pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "psbt is required")?;
-    Ok(json!({"hex": "", "complete": false}))
+    let raw = required_str(params, 0, "psbt is required")?;
+    let decoded = decode_base64(raw)?;
+    let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&decoded) else {
+        return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+    };
+    let serialized = encode_base64(&psbt.serialize());
+    let complete = !psbt.inputs.is_empty()
+        && psbt
+            .inputs
+            .iter()
+            .all(|input| input.final_script_sig.is_some() || input.final_script_witness.is_some());
+    if complete {
+        let tx = psbt.extract_tx_unchecked_fee_rate();
+        let hex = bitcoin::consensus::encode::serialize(&tx).to_lower_hex_string();
+        Ok(json!({
+            "psbt": serialized,
+            "hex": hex,
+            "complete": true,
+        }))
+    } else {
+        Ok(json!({
+            "psbt": serialized,
+            "hex": "",
+            "complete": false,
+        }))
+    }
 }
 
 pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -286,5 +327,54 @@ mod combinepsbt_tests {
         let ctx = Arc::new(Context::new());
         let result = combinepsbt(&ctx, &json!([[]]));
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod psbt_process_tests {
+    use alloc::sync::Arc;
+
+    use sonic_rs::JsonValueTrait as _;
+
+    use super::*;
+
+    fn empty_psbt() -> String {
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let psbt =
+            bitcoin::psbt::Psbt::from_unsigned_tx(tx).unwrap_or_else(|err| panic!("psbt: {err}"));
+        encode_base64(&psbt.serialize())
+    }
+
+    #[test]
+    fn walletprocesspsbt_returns_same_psbt_with_complete_false() {
+        let ctx = Arc::new(Context::new());
+        let raw = empty_psbt();
+        let result = walletprocesspsbt(&ctx, &json!([raw.as_str()]))
+            .unwrap_or_else(|err| panic!("walletprocesspsbt failed: {err}"));
+        let Some(complete) = result.get("complete").and_then(Value::as_bool) else {
+            panic!("complete missing: {result:?}");
+        };
+        assert!(!complete);
+    }
+
+    #[test]
+    fn finalizepsbt_returns_incomplete_for_unfinalized_inputs() {
+        let ctx = Arc::new(Context::new());
+        let raw = empty_psbt();
+        let result = finalizepsbt(&ctx, &json!([raw.as_str()]))
+            .unwrap_or_else(|err| panic!("finalizepsbt failed: {err}"));
+        let Some(complete) = result.get("complete").and_then(Value::as_bool) else {
+            panic!("complete missing: {result:?}");
+        };
+        assert!(!complete);
+        let Some(hex) = result.get("hex").and_then(Value::as_str) else {
+            panic!("hex missing: {result:?}");
+        };
+        assert_eq!(hex, "");
     }
 }
