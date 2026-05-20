@@ -166,6 +166,13 @@ impl BlockTree {
         self.tip.load_full()
     }
 
+    /// Returns the chainwork of the published tip, or `None` if no tip is
+    /// published yet.
+    #[must_use]
+    pub fn tip_chainwork(&self) -> Option<ChainWork> {
+        self.tip().map(|tip| tip.chainwork)
+    }
+
     /// Returns a cheap-clonable handle to the canonical best-tip pointer.
     ///
     /// Sharing this handle lets lock-free readers observe tip advances
@@ -514,6 +521,23 @@ mod tests {
     fn active_node_at_height_returns_none_when_no_tip() {
         let tree = BlockTree::new();
         assert!(tree.active_node_at_height(0).is_none());
+    }
+
+    #[test]
+    fn tip_chainwork_returns_none_before_publish() {
+        let tree = BlockTree::new();
+        assert!(tree.tip_chainwork().is_none());
+    }
+
+    #[test]
+    fn tip_chainwork_returns_published_tip_chainwork() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let cw = tree.node(genesis_id)?.chainwork;
+
+        assert_eq!(tree.tip_chainwork(), Some(cw));
+        Ok(())
     }
 
     #[test]
