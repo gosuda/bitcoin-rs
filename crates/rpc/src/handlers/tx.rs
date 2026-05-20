@@ -2,10 +2,11 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 
 use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin::{Transaction, Txid};
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, OutPoint};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::context::Context;
@@ -63,25 +64,25 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let vout = required_u64(params, 1, "vout is required")?;
-    let vout = usize::try_from(vout).map_err(|_| RpcError::InvalidParams("vout exceeds usize"))?;
-    let transactions = ctx.transactions.read();
-    let Some(tx) = transactions.get(&txid) else {
+    let vout_u32 = u32::try_from(vout).map_err(|_| RpcError::InvalidParams("vout exceeds u32"))?;
+    let outpoint = OutPoint::new(Hash256::from_le_bytes(txid.as_byte_array()), vout_u32);
+    let Some(live) = ctx.utxo.get_entry(&outpoint) else {
+        // Spent or never existed: Core-spec returns JSON null.
         return Ok(Value::new_null());
     };
-    let Some(output) = tx.output.get(vout) else {
-        return Ok(Value::new_null());
-    };
+    let applied = ctx.applied_height();
+    let confirmations = applied.saturating_sub(live.height).saturating_add(1);
     Ok(json!({
         "bestblock": ctx.best_hash().to_string_be(),
-        "confirmations": 0,
-        "value": super::tx_render::btc_value(output.value.to_sat()),
+        "confirmations": confirmations,
+        "value": super::tx_render::btc_value(live.txout.value.to_sat()),
         "scriptPubKey": {
             "asm": "",
             "desc": "raw()",
-            "hex": output.script_pubkey.as_bytes().to_lower_hex_string(),
+            "hex": live.txout.script_pubkey.as_bytes().to_lower_hex_string(),
             "type": "nonstandard"
         },
-        "coinbase": false
+        "coinbase": live.coinbase
     }))
 }
 
@@ -303,5 +304,42 @@ mod tests {
             panic!("expected array, got {extracted:?}");
         };
         assert_eq!(arr.len(), 1);
+    }
+}
+#[cfg(test)]
+mod gettxout_via_utxo_tests {
+    use super::*;
+
+    #[test]
+    fn gettxout_returns_null_for_unknown_outpoint() {
+        let ctx = Arc::new(Context::new());
+        let txid_hex = "a".repeat(64);
+        let params = json!([txid_hex.as_str(), 0_u64]);
+        let value = gettxout(&ctx, &params).unwrap_or_else(|err| panic!("gettxout failed: {err}"));
+        assert!(
+            value.is_null(),
+            "expected null for unknown outpoint, got {value:?}"
+        );
+    }
+
+    #[test]
+    fn gettxout_returns_null_for_transaction_output_absent_from_utxo() {
+        let ctx = Arc::new(Context::new());
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(50_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let txid = ctx.add_transaction(tx);
+        let params = json!([txid.to_string(), 0_u64]);
+        let value = gettxout(&ctx, &params).unwrap_or_else(|err| panic!("gettxout failed: {err}"));
+        assert!(
+            value.is_null(),
+            "expected null for output absent from UTXO set, got {value:?}"
+        );
     }
 }
