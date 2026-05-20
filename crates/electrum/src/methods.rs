@@ -550,6 +550,7 @@ pub fn dispatch(
         "blockchain.scripthash.unsubscribe" => scripthash_unsubscribe(index, mempool, params),
         "blockchain.scripthash.listunspent" => scripthash_listunspent(index, mempool, params),
         "blockchain.transaction.get" => transaction_get(index, mempool, params),
+        "blockchain.transaction.get_merkle" => transaction_get_merkle(index, mempool, params),
         "blockchain.transaction.id_from_pos" => transaction_id_from_pos(index, mempool, params),
         "blockchain.transaction.broadcast" => transaction_broadcast(index, mempool, params),
         "blockchain.estimatefee" => estimate_fee(index, mempool, params),
@@ -782,6 +783,80 @@ pub(crate) fn transaction_get(
     Ok(json!(hex))
 }
 
+fn merkle_inclusion_proof(txdata: &[Transaction], pos: usize) -> Option<Vec<String>> {
+    use bitcoin::hashes::{Hash as _, sha256d};
+
+    if pos >= txdata.len() {
+        return None;
+    }
+
+    let mut current: Vec<sha256d::Hash> = txdata
+        .iter()
+        .map(|tx| tx.compute_txid().to_raw_hash())
+        .collect();
+    let mut current_pos = pos;
+    let mut path = Vec::new();
+    while current.len() > 1 {
+        if !current.len().is_multiple_of(2) {
+            let last = current[current.len() - 1];
+            current.push(last);
+        }
+
+        let sibling_idx = if current_pos.is_multiple_of(2) {
+            current_pos + 1
+        } else {
+            current_pos - 1
+        };
+        if let Some(sibling) = current.get(sibling_idx).copied() {
+            path.push(sibling.to_byte_array().to_lower_hex_string());
+        }
+
+        let mut next = Vec::with_capacity(current.len() / 2);
+        for pair in current.chunks(2) {
+            let mut combined = Vec::with_capacity(64);
+            combined.extend_from_slice(pair[0].as_byte_array());
+            combined.extend_from_slice(pair[1].as_byte_array());
+            next.push(sha256d::Hash::hash(&combined));
+        }
+        current = next;
+        current_pos /= 2;
+    }
+    Some(path)
+}
+
+pub(crate) fn transaction_get_merkle(
+    index: &IndexHandle,
+    _mempool: &MempoolHandle,
+    params: &Value,
+) -> Result<Value, ElectrumError> {
+    let array = params_array(params)?;
+    let txid = parse_txid(array.first(), "blockchain.transaction.get_merkle txid")?;
+    let height_u64 =
+        array
+            .get(1)
+            .and_then(JsonValueTrait::as_u64)
+            .ok_or(ElectrumError::InvalidParams(
+                "transaction.get_merkle height",
+            ))?;
+    let Ok(height) = u32::try_from(height_u64) else {
+        return Err(ElectrumError::InvalidParams("height exceeds u32"));
+    };
+    let Some(block) = index.block_at_height(height) else {
+        return Err(ElectrumError::InvalidParams(
+            "block at height not available",
+        ));
+    };
+    let Some(pos) = block.txdata.iter().position(|t| t.compute_txid() == txid) else {
+        return Err(ElectrumError::InvalidParams("txid not in block"));
+    };
+    let merkle = merkle_inclusion_proof(&block.txdata, pos).unwrap_or_default();
+    Ok(json!({
+        "block_height": height,
+        "merkle": merkle,
+        "pos": pos,
+    }))
+}
+
 pub(crate) fn transaction_id_from_pos(
     index: &IndexHandle,
     _mempool: &MempoolHandle,
@@ -821,10 +896,10 @@ pub(crate) fn transaction_id_from_pos(
         .and_then(JsonValueTrait::as_bool)
         .unwrap_or(false);
     if merkle_requested {
-        // TODO: compute the Electrum merkle path for this transaction.
+        let merkle = merkle_inclusion_proof(&block.txdata, pos).unwrap_or_default();
         Ok(json!({
             "tx_hash": tx.compute_txid().to_string(),
-            "merkle": Vec::<String>::new(),
+            "merkle": merkle,
         }))
     } else {
         Ok(json!(tx.compute_txid().to_string()))
@@ -1332,6 +1407,55 @@ mod id_from_pos_tests {
             &json!([0, 999]),
         );
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod merkle_proof_tests {
+    use super::*;
+    use alloc::sync::Arc;
+
+    #[derive(Debug)]
+    struct StubReaderRegtestGenesis;
+
+    impl ConfirmedHistoryReader for StubReaderRegtestGenesis {
+        fn confirmed_history(&self, _: ScriptHash) -> Vec<HistoryRecord> {
+            Vec::new()
+        }
+
+        fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
+            if height == 0 {
+                Some(bitcoin::blockdata::constants::genesis_block(
+                    bitcoin::Network::Regtest,
+                ))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn transaction_get_merkle_returns_proof_for_genesis_coinbase() {
+        let index = IndexHandle::new().with_history_reader(Arc::new(StubReaderRegtestGenesis));
+        let mempool = MempoolHandle::default();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(coinbase) = genesis.txdata.first() else {
+            panic!("genesis has no tx");
+        };
+        let txid_hex = coinbase.compute_txid().to_string();
+        let result = dispatch(
+            "blockchain.transaction.get_merkle",
+            &index,
+            &mempool,
+            &json!([txid_hex, 0]),
+        )
+        .unwrap_or_else(|err| panic!("get_merkle failed: {err}"));
+        assert!(result.get("merkle").is_some());
+        assert_eq!(result.get("pos").and_then(JsonValueTrait::as_u64), Some(0));
+        assert_eq!(
+            result.get("block_height").and_then(JsonValueTrait::as_u64),
+            Some(0)
+        );
     }
 }
 #[cfg(test)]
