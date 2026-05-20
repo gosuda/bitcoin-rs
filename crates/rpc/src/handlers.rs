@@ -33,6 +33,7 @@ impl Handler {
     pub fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
         match method {
             "getblockchaininfo" => chain::getblockchaininfo(&self.ctx, params),
+            "getdifficulty" => chain::getdifficulty(&self.ctx, params),
             "getchaintips" => chain::getchaintips(&self.ctx, params),
             "getchaintxstats" => chain::getchaintxstats(&self.ctx, params),
             "getblockcount" => chain::getblockcount(&self.ctx, params),
@@ -68,6 +69,7 @@ impl Handler {
             "validateaddress" => util::validateaddress(&self.ctx, params),
             "getnetworkinfo" => network::getnetworkinfo(&self.ctx, params),
             "getpeerinfo" => network::getpeerinfo(&self.ctx, params),
+            "ping" => network::ping(&self.ctx, params),
             "addnode" => network::addnode(&self.ctx, params),
             "disconnectnode" => network::disconnectnode(&self.ctx, params),
             "getconnectioncount" => network::getconnectioncount(&self.ctx, params),

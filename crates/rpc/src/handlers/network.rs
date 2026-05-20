@@ -78,6 +78,13 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
     }
     Ok(json!(array))
 }
+pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    // Core's `ping` schedules a P2P ping; we don't have async-ping wiring yet,
+    // so we return null per the Core contract. Per-peer pingtime surfaces via
+    // getpeerinfo when measurements are available.
+    Ok(Value::new_null())
+}
 
 pub(crate) fn addnode(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     use core::str::FromStr as _;
@@ -173,6 +180,19 @@ mod tests {
             (relayfee - 0.00001).abs() < 1e-9,
             "expected ~0.00001, got {relayfee}"
         );
+    }
+}
+#[cfg(test)]
+mod ping_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use sonic_rs::JsonValueTrait;
+
+    #[test]
+    fn ping_returns_null() {
+        let ctx = Arc::new(Context::new());
+        let result = ping(&ctx, &json!([])).unwrap_or_else(|err| panic!("ping failed: {err}"));
+        assert!(result.is_null());
     }
 }
 

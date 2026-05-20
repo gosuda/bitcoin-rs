@@ -50,6 +50,17 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         "warnings": ""
     }))
 }
+pub(crate) fn getdifficulty(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    let difficulty = {
+        let tree = ctx.block_tree.read();
+        ctx.applied_tip
+            .load_full()
+            .and_then(|tip| tree.node(tip.tip_id).ok().map(|node| node.header.bits))
+            .map_or(0.0, |bits| ctx.difficulty_for_bits(bits))
+    };
+    Ok(json!(difficulty))
+}
 
 pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
@@ -843,6 +854,19 @@ mod tests {
             panic!("time missing: {result:?}");
         };
         assert_eq!(time, u64::from(expected_time));
+    }
+}
+#[cfg(test)]
+mod getdifficulty_tests {
+    use super::*;
+    use alloc::sync::Arc;
+
+    #[test]
+    fn getdifficulty_returns_zero_on_fresh_context() {
+        let ctx = Arc::new(Context::new());
+        let result = getdifficulty(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getdifficulty failed: {err}"));
+        assert_eq!(result.as_f64(), Some(0.0));
     }
 }
 
