@@ -537,6 +537,7 @@ pub fn dispatch(
         "blockchain.estimatefee" => estimate_fee(index, mempool, params),
         "blockchain.relayfee" => blockchain_relayfee(index, mempool, params),
         "mempool.get_fee_histogram" => mempool_get_fee_histogram(index, mempool, params),
+        "blockchain.block.header" => block_header(index, mempool, params),
         "blockchain.block.headers" => block_headers(index, mempool, params),
         "blockchain.headers.subscribe" => headers_subscribe(index, mempool, params),
         _ => Err(ElectrumError::MethodNotFound(method.to_compact_string())),
@@ -820,6 +821,29 @@ pub(crate) fn mempool_get_fee_histogram(
         .map(|(rate, vsize)| json!([rate, vsize]))
         .collect::<Vec<_>>();
     Ok(json!(rows))
+}
+
+pub(crate) fn block_header(
+    index: &IndexHandle,
+    _mempool: &MempoolHandle,
+    params: &Value,
+) -> Result<Value, ElectrumError> {
+    let array = params_array(params)?;
+    let height =
+        array
+            .first()
+            .and_then(JsonValueTrait::as_u64)
+            .ok_or(ElectrumError::InvalidParams(
+                "blockchain.block.header height",
+            ))?;
+    let headers = index.headers();
+    let Ok(index_usize) = usize::try_from(height) else {
+        return Err(ElectrumError::InvalidParams("height exceeds usize"));
+    };
+    let Some(header) = headers.get(index_usize) else {
+        return Err(ElectrumError::InvalidParams("height out of range"));
+    };
+    Ok(json!(header.to_lower_hex_string()))
 }
 
 pub(crate) fn block_headers(
@@ -1180,6 +1204,38 @@ mod history_reader_tests {
             .unwrap_or_else(|| panic!("expected array"));
 
         assert_eq!(rows.len(), 1, "expected one row: {result:?}");
+    }
+}
+#[cfg(test)]
+mod block_header_tests {
+    use super::*;
+
+    #[test]
+    fn block_header_returns_synthetic_header_hex() {
+        let index = IndexHandle::new();
+        index.add_header(0, [0xab_u8; 80]);
+        let mempool = MempoolHandle::default();
+        let result = dispatch("blockchain.block.header", &index, &mempool, &json!([0]))
+            .unwrap_or_else(|err| panic!("block.header failed: {err}"));
+        let Some(hex) = result.as_str() else {
+            panic!("expected hex string: {result:?}");
+        };
+        // 80 bytes hex-encoded = 160 chars, all 'ab'.
+        assert_eq!(hex.len(), 160);
+        assert!(hex.starts_with("ab"));
+    }
+
+    #[test]
+    fn block_header_rejects_out_of_range_height() {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let result = dispatch(
+            "blockchain.block.header",
+            &index,
+            &mempool,
+            &json!([999_999]),
+        );
+        assert!(result.is_err());
     }
 }
 #[cfg(test)]
