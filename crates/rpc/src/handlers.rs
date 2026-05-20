@@ -56,6 +56,7 @@ impl Handler {
             "getmempoolinfo" => mempool::getmempoolinfo(&self.ctx, params),
             "getmempoolentry" => mempool::getmempoolentry(&self.ctx, params),
             "getrawmempool" => mempool::getrawmempool(&self.ctx, params),
+            "clearmempool" => mempool::clearmempool(&self.ctx, params),
             "getmempoolancestors" => mempool::getmempoolancestors(&self.ctx, params),
             "getmempooldescendants" => mempool::getmempooldescendants(&self.ctx, params),
             "estimatesmartfee" => util::estimatesmartfee(&self.ctx, params),

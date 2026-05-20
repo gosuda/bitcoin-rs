@@ -91,6 +91,18 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     Ok(json!(txids))
 }
 
+pub(crate) fn clearmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    crate::handlers::ensure_no_params(params)?;
+    let mut pool = ctx.mempool.write();
+    let txids: Vec<String> = pool
+        .entries
+        .iter()
+        .map(|(_id, entry)| entry.tx.compute_txid().to_string())
+        .collect();
+    pool.clear();
+    Ok(json!(txids))
+}
+
 pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let verbose = optional_bool(params, 1, false)?;
@@ -331,6 +343,41 @@ mod tests {
             .dispatch("getrawmempool", &json!([]))
             .unwrap_or_else(|err| panic!("getrawmempool failed: {err}"));
         assert!(result.is_array(), "expected bare array: {result:?}");
+    }
+
+    #[test]
+    fn clearmempool_removes_entries_and_returns_their_txids() {
+        let ctx = Arc::new(Context::new());
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(99_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let txid = tx.compute_txid();
+        {
+            let mut pool = ctx.mempool.write();
+            let Ok(_) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            else {
+                panic!("mempool insert failed");
+            };
+        }
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("clearmempool", &json!([]))
+            .unwrap_or_else(|err| panic!("clearmempool failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        assert_eq!(arr.len(), 1);
+        let Some(returned_txid) = arr.first().and_then(|value| value.as_str()) else {
+            panic!("txid not string");
+        };
+        assert_eq!(returned_txid, txid.to_string());
+        assert!(ctx.mempool.read().entries.is_empty());
     }
 
     #[test]
