@@ -3,7 +3,7 @@ use bitcoin::hex::DisplayHex as _;
 use core::str::FromStr as _;
 
 use bitcoin_rs_primitives::Hash256;
-use sonic_rs::{JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::context::{BlockRecord, Context};
 use crate::error::RpcError;
@@ -199,6 +199,40 @@ pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "filter": filter_bytes.to_lower_hex_string(),
         "header": header.to_string_be()
     }))
+}
+
+pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let filter = if params.is_null() {
+        None
+    } else if let Some(array) = params.as_array() {
+        if array.is_empty() {
+            None
+        } else {
+            Some(required_str(params, 0, "index_name must be a string")?)
+        }
+    } else {
+        return Err(RpcError::InvalidParams("params must be null or array"));
+    };
+
+    let header_height = ctx.height();
+    let applied_height = ctx.applied_height();
+    let synced = header_height > 0 && applied_height >= header_height;
+    let entry = || {
+        json!({
+            "synced": synced,
+            "best_block_height": applied_height,
+        })
+    };
+
+    match filter {
+        None => Ok(json!({
+            "txindex": entry(),
+            "basicblockfilterindex": entry(),
+        })),
+        Some("txindex") => Ok(json!({ "txindex": entry() })),
+        Some("basicblockfilterindex") => Ok(json!({ "basicblockfilterindex": entry() })),
+        Some(_) => Ok(json!({})),
+    }
 }
 
 fn parse_hash(value: &str) -> Result<Hash256, RpcError> {

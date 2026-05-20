@@ -183,6 +183,29 @@ fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn getindexinfo_returns_both_indexes() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let result = handler.dispatch("getindexinfo", &json!([]))?;
+
+    let txindex = result.get("txindex");
+    assert!(txindex.is_some(), "txindex entry missing: {result:?}");
+    assert_eq!(txindex.get("synced").as_bool(), Some(false));
+    assert_eq!(txindex.get("best_block_height").as_u64(), Some(0));
+
+    let filter_index = result.get("basicblockfilterindex");
+    assert!(
+        filter_index.is_some(),
+        "basicblockfilterindex entry missing: {result:?}"
+    );
+    assert_eq!(filter_index.get("synced").as_bool(), Some(false));
+    assert_eq!(filter_index.get("best_block_height").as_u64(), Some(0));
+
+    Ok(())
+}
+
+#[test]
 fn empty_context_is_not_initial_block_download() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(Arc::new(Context::new()));
 

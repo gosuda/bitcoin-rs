@@ -40,6 +40,7 @@ impl Handler {
             "getblockstats" => chain::getblockstats(&self.ctx, params),
             "gettxoutsetinfo" => chain::gettxoutsetinfo(&self.ctx, params),
             "getblockfilter" => chain::getblockfilter(&self.ctx, params),
+            "getindexinfo" => chain::getindexinfo(&self.ctx, params),
             "getrawtransaction" => tx::getrawtransaction(&self.ctx, params),
             "gettxout" => tx::gettxout(&self.ctx, params),
             "gettxoutproof" => tx::gettxoutproof(&self.ctx, params),
