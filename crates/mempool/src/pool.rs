@@ -196,6 +196,17 @@ impl Mempool {
         self.by_txid.contains_key(txid)
     }
 
+    /// Returns a reference to the `MempoolEntry` for `txid`, or `None` if the
+    /// transaction is not in the pool.
+    ///
+    /// Composite of `self.by_txid.get(txid)` and `self.entry(*id)`. Saves the
+    /// 2-step lookup pattern at electrum/rpc handler callsites.
+    #[must_use]
+    pub fn entry_by_txid(&self, txid: &bitcoin::Txid) -> Option<&MempoolEntry> {
+        let id = *self.by_txid.get(txid)?;
+        self.entry(id)
+    }
+
     /// Returns txids of mempool entries signalling BIP-125 RBF eligibility.
     ///
     /// An entry is replaceable when ANY of its inputs has `sequence < 0xFFFFFFFE`
@@ -834,6 +845,34 @@ mod tests {
         assert!(pool.contains_txid(&txid));
         let other = bitcoin::Txid::from_byte_array([0xff; 32]);
         assert!(!pool.contains_txid(&other));
+    }
+
+    #[test]
+    fn entry_by_txid_returns_some_for_inserted_tx() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let txid = tx.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))?;
+        let Some(entry) = pool.entry_by_txid(&txid) else {
+            panic!("entry_by_txid returned None for inserted tx");
+        };
+        assert_eq!(entry.tx.compute_txid(), txid);
+        Ok(())
+    }
+
+    #[test]
+    fn entry_by_txid_returns_none_for_absent_tx() {
+        let pool = Mempool::new(MempoolLimits::default());
+        let absent = bitcoin::Txid::from_byte_array([0xff; 32]);
+        assert!(pool.entry_by_txid(&absent).is_none());
     }
 
     #[test]
