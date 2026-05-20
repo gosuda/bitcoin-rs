@@ -17,6 +17,7 @@ use thiserror::Error;
 const PROTOCOL_VERSION: &str = "1.4";
 const SERVER_VERSION: &str = "bitcoin-rs-electrum/0.1.0";
 const MAX_HEADERS: usize = 2_016;
+const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 
 /// Error returned by Electrum method and session handling.
 #[derive(Debug, Error)]
@@ -511,6 +512,7 @@ pub fn dispatch(
         "blockchain.transaction.get" => transaction_get(index, mempool, params),
         "blockchain.transaction.broadcast" => transaction_broadcast(index, mempool, params),
         "blockchain.estimatefee" => estimate_fee(index, mempool, params),
+        "blockchain.relayfee" => blockchain_relayfee(index, mempool, params),
         "mempool.get_fee_histogram" => mempool_get_fee_histogram(index, mempool, params),
         "blockchain.block.headers" => block_headers(index, mempool, params),
         "blockchain.headers.subscribe" => headers_subscribe(index, mempool, params),
@@ -749,6 +751,15 @@ pub(crate) fn estimate_fee(
     Ok(json!(-1))
 }
 
+pub(crate) fn blockchain_relayfee(
+    _index: &IndexHandle,
+    _mempool: &MempoolHandle,
+    params: &Value,
+) -> Result<Value, ElectrumError> {
+    ensure_array_len(params, 0)?;
+    Ok(json!(DEFAULT_RELAY_FEE_BTC_PER_KVB))
+}
+
 pub(crate) fn mempool_get_fee_histogram(
     _index: &IndexHandle,
     mempool: &MempoolHandle,
@@ -945,6 +956,26 @@ mod server_features_tests {
             panic!("protocol_min missing: {result:?}");
         };
         assert_eq!(protocol_min, "1.4");
+    }
+}
+
+#[cfg(test)]
+mod blockchain_relayfee_tests {
+    use super::*;
+
+    #[test]
+    fn blockchain_relayfee_returns_default() {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let result = dispatch("blockchain.relayfee", &index, &mempool, &json!([]))
+            .unwrap_or_else(|err| panic!("blockchain.relayfee failed: {err}"));
+        let Some(rate) = result.as_f64() else {
+            panic!("relayfee not numeric: {result:?}");
+        };
+        assert!(
+            (rate - 0.00001).abs() < 1e-9,
+            "expected ~0.00001, got {rate}"
+        );
     }
 }
 
