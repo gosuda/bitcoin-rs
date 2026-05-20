@@ -18,7 +18,7 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
                 if longpollid == current.as_str() {
                     let _result = ctx
                         .mining_notifications
-                        .recv_timeout(Duration::from_secs(60));
+                        .recv_timeout(Duration::from_mins(1));
                 }
             }
         }

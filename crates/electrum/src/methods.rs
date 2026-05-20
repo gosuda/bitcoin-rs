@@ -207,8 +207,7 @@ where
             let spent = self
                 .indexer
                 .iter_spending_rows(&outpoint)
-                .map(|rows| !rows.is_empty())
-                .unwrap_or(false);
+                .is_ok_and(|rows| !rows.is_empty());
             if spent {
                 continue;
             }
@@ -546,7 +545,7 @@ impl MempoolHandle {
                 .or_insert(u64::from(entry.vsize));
         }
         let mut rows = buckets.into_iter().collect::<Vec<_>>();
-        rows.sort_by(|left, right| right.0.cmp(&left.0));
+        rows.sort_by_key(|right| core::cmp::Reverse(right.0));
         rows
     }
 }

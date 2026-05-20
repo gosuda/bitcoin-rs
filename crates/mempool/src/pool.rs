@@ -317,7 +317,7 @@ impl Mempool {
                 Some((entry.fee_rate, id))
             })
             .collect();
-        pairs.sort_by(|a, b| b.0.cmp(&a.0));
+        pairs.sort_by_key(|pair| core::cmp::Reverse(pair.0));
         pairs.into_iter().map(|(_, id)| id).collect()
     }
 

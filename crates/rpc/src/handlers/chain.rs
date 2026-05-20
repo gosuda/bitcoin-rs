@@ -444,21 +444,16 @@ fn compute_fee_fields(ctx: &Context, block: &bitcoin::Block) -> FeeFields {
         .fold(0_u64, |sum, (_fee, weight)| sum.saturating_add(*weight));
     let tx_count = u64::try_from(per_tx.len()).map_or(1, |count| count);
     let avgfee = totalfee / tx_count;
-    let avgfeerate = if total_weight == 0 {
-        0
-    } else {
-        totalfee.saturating_mul(4) / total_weight
-    };
+    let avgfeerate = totalfee
+        .saturating_mul(4)
+        .checked_div(total_weight)
+        .unwrap_or(0);
 
     let mut fees = Vec::with_capacity(per_tx.len());
     let mut rates = Vec::with_capacity(per_tx.len());
     for (fee, weight) in &per_tx {
         fees.push(*fee);
-        let rate = if *weight == 0 {
-            0
-        } else {
-            (*fee).saturating_mul(4) / *weight
-        };
+        let rate = (*fee).saturating_mul(4).checked_div(*weight).unwrap_or(0);
         rates.push((rate, *weight));
     }
 

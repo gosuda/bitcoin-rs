@@ -32,7 +32,7 @@ fn estimate_feerate_sat_per_kvb(ctx: &Context, conf_target: u64) -> u64 {
         *bucket_vsize = bucket_vsize.saturating_add(u64::from(entry.vsize));
     }
 
-    buckets.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    buckets.sort_unstable_by_key(|bucket| core::cmp::Reverse(bucket.0));
 
     let target_vsize = BLOCK_VSIZE_TARGET.saturating_mul(conf_target.max(1));
     let mut cumulative: u64 = 0;

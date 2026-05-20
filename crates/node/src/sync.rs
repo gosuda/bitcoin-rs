@@ -28,7 +28,7 @@ const PROTOCOL_VERSION: u32 = 70_016;
 /// Maximum number of block inventory entries we request per tick.
 const GETDATA_BATCH_SIZE: usize = 16;
 /// Time after which a pending getdata is considered stuck and re-requestable.
-const PENDING_TIMEOUT: Duration = Duration::from_secs(60);
+const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 const PENDING_BUDGET: usize = 128;
 
