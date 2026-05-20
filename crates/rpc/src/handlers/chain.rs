@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
-use bitcoin::hex::DisplayHex as _;
+use bitcoin::consensus::encode::deserialize;
+use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use core::str::FromStr as _;
 
 use bitcoin_rs_primitives::Hash256;
@@ -55,61 +56,33 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         .get(1)
         .and_then(JsonValueTrait::as_u64)
         .unwrap_or(1);
-    let record = ctx
-        .block_by_hash(hash)
-        .unwrap_or_else(|| BlockRecord::synthetic(ctx.height(), hash));
+    let Some(record) = ctx.block_by_hash(hash) else {
+        let record = BlockRecord::synthetic(ctx.height(), hash);
+        if verbosity == 0 {
+            return Ok(json!(record.block_hex));
+        }
+        return Ok(synthetic_block_json(ctx, &record, true));
+    };
     if verbosity == 0 {
         return Ok(json!(record.block_hex));
     }
-    Ok(json!({
-        "hash": record.hash.to_string_be(),
-        "confirmations": confirmations(ctx, record.height),
-        "height": record.height,
-        "version": 0,
-        "versionHex": "00000000",
-        "merkleroot": Hash256::default().to_string_be(),
-        "time": 0,
-        "mediantime": 0,
-        "nonce": 0,
-        "bits": "00000000",
-        "difficulty": 0,
-        "chainwork": "00",
-        "nTx": record.tx_count,
-        "previousblockhash": null,
-        "nextblockhash": null,
-        "strippedsize": 0,
-        "size": record.block_hex.len() / 2,
-        "weight": 0,
-        "tx": []
-    }))
+    Ok(block_json_verbose(ctx, &record, true, verbosity == 1))
 }
 
 pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbose = optional_bool(params, 1, true)?;
-    let record = ctx
-        .block_by_hash(hash)
-        .unwrap_or_else(|| BlockRecord::synthetic(ctx.height(), hash));
+    let Some(record) = ctx.block_by_hash(hash) else {
+        let record = BlockRecord::synthetic(ctx.height(), hash);
+        if !verbose {
+            return Ok(json!(record.header_hex));
+        }
+        return Ok(synthetic_block_json(ctx, &record, false));
+    };
     if !verbose {
         return Ok(json!(record.header_hex));
     }
-    Ok(json!({
-        "hash": record.hash.to_string_be(),
-        "confirmations": confirmations(ctx, record.height),
-        "height": record.height,
-        "version": 0,
-        "versionHex": "00000000",
-        "merkleroot": Hash256::default().to_string_be(),
-        "time": 0,
-        "mediantime": 0,
-        "nonce": 0,
-        "bits": "00000000",
-        "difficulty": 0,
-        "chainwork": "00",
-        "nTx": record.tx_count,
-        "previousblockhash": null,
-        "nextblockhash": null
-    }))
+    Ok(block_json_verbose(ctx, &record, false, false))
 }
 
 pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -241,4 +214,255 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
 
 fn confirmations(ctx: &Context, height: u32) -> u32 {
     ctx.height().saturating_sub(height).saturating_add(1)
+}
+
+fn block_json_verbose(
+    ctx: &Context,
+    record: &BlockRecord,
+    include_block_fields: bool,
+    include_txids: bool,
+) -> Value {
+    let Some(header) = decode_header(record) else {
+        return synthetic_block_json(ctx, record, include_block_fields);
+    };
+
+    let version = header.version.to_consensus();
+    let version_hex = u32::from_le_bytes(version.to_le_bytes());
+    let bits = header.bits.to_consensus();
+    let bits_hex = format!("{bits:08x}");
+
+    if !include_block_fields {
+        return json!({
+            "hash": record.hash.to_string_be(),
+            "confirmations": confirmations(ctx, record.height),
+            "height": record.height,
+            "version": i64::from(version),
+            "versionHex": format!("{version_hex:08x}"),
+            "merkleroot": header.merkle_root.to_string(),
+            "time": header.time,
+            // TODO(blocktree): populate from the block tree median-time-past index.
+            "mediantime": 0,
+            "nonce": header.nonce,
+            "bits": bits_hex,
+            "difficulty": 0,
+            // TODO(blocktree): populate from accumulated chainwork on the active chain.
+            "chainwork": "00",
+            "nTx": record.tx_count,
+            "previousblockhash": header.prev_blockhash.to_string(),
+            // TODO(blocktree): populate from the active-chain successor index.
+            "nextblockhash": null
+        });
+    }
+
+    let Some(block) = decode_block(record) else {
+        return synthetic_block_json(ctx, record, true);
+    };
+    let txids: Vec<String> = if include_txids {
+        block
+            .txdata
+            .iter()
+            .map(|tx| tx.compute_txid().to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    json!({
+        "hash": record.hash.to_string_be(),
+        "confirmations": confirmations(ctx, record.height),
+        "height": record.height,
+        "version": i64::from(version),
+        "versionHex": format!("{version_hex:08x}"),
+        "merkleroot": header.merkle_root.to_string(),
+        "time": header.time,
+        // TODO(blocktree): populate from the block tree median-time-past index.
+        "mediantime": 0,
+        "nonce": header.nonce,
+        "bits": bits_hex,
+        "difficulty": 0,
+        // TODO(blocktree): populate from accumulated chainwork on the active chain.
+        "chainwork": "00",
+        "nTx": record.tx_count,
+        "previousblockhash": header.prev_blockhash.to_string(),
+        // TODO(blocktree): populate from the active-chain successor index.
+        "nextblockhash": null,
+        "strippedsize": record.block_hex.len() / 2,
+        "size": record.block_hex.len() / 2,
+        "weight": block.weight().to_wu(),
+        "tx": txids
+    })
+}
+
+fn decode_header(record: &BlockRecord) -> Option<bitcoin::block::Header> {
+    let bytes = match Vec::<u8>::from_hex(&record.header_hex) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                block_hash = %record.hash.to_string_be(),
+                %error,
+                "stored block header hex is invalid"
+            );
+            return None;
+        }
+    };
+    match deserialize(&bytes) {
+        Ok(header) => Some(header),
+        Err(error) => {
+            tracing::warn!(
+                block_hash = %record.hash.to_string_be(),
+                %error,
+                "stored block header bytes are invalid"
+            );
+            None
+        }
+    }
+}
+
+fn decode_block(record: &BlockRecord) -> Option<bitcoin::Block> {
+    let bytes = match Vec::<u8>::from_hex(&record.block_hex) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                block_hash = %record.hash.to_string_be(),
+                %error,
+                "stored block hex is invalid"
+            );
+            return None;
+        }
+    };
+    match deserialize(&bytes) {
+        Ok(block) => Some(block),
+        Err(error) => {
+            tracing::warn!(
+                block_hash = %record.hash.to_string_be(),
+                %error,
+                "stored block bytes are invalid"
+            );
+            None
+        }
+    }
+}
+
+fn synthetic_block_json(ctx: &Context, record: &BlockRecord, include_block_fields: bool) -> Value {
+    if !include_block_fields {
+        return json!({
+            "hash": record.hash.to_string_be(),
+            "confirmations": confirmations(ctx, record.height),
+            "height": record.height,
+            "version": 0,
+            "versionHex": "00000000",
+            "merkleroot": Hash256::default().to_string_be(),
+            "time": 0,
+            // TODO(blocktree): populate from the block tree median-time-past index.
+            "mediantime": 0,
+            "nonce": 0,
+            "bits": "00000000",
+            "difficulty": 0,
+            // TODO(blocktree): populate from accumulated chainwork on the active chain.
+            "chainwork": "00",
+            "nTx": record.tx_count,
+            "previousblockhash": null,
+            // TODO(blocktree): populate from the active-chain successor index.
+            "nextblockhash": null
+        });
+    }
+
+    json!({
+        "hash": record.hash.to_string_be(),
+        "confirmations": confirmations(ctx, record.height),
+        "height": record.height,
+        "version": 0,
+        "versionHex": "00000000",
+        "merkleroot": Hash256::default().to_string_be(),
+        "time": 0,
+        // TODO(blocktree): populate from the block tree median-time-past index.
+        "mediantime": 0,
+        "nonce": 0,
+        "bits": "00000000",
+        "difficulty": 0,
+        // TODO(blocktree): populate from accumulated chainwork on the active chain.
+        "chainwork": "00",
+        "nTx": record.tx_count,
+        "previousblockhash": null,
+        // TODO(blocktree): populate from the active-chain successor index.
+        "nextblockhash": null,
+        "strippedsize": 0,
+        "size": record.block_hex.len() / 2,
+        "weight": 0,
+        "tx": []
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::blockdata::constants::genesis_block;
+
+    use super::*;
+
+    #[test]
+    fn getblock_populates_real_header_fields_from_stored_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = Arc::new(Context::new());
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let record = BlockRecord::from_block(0, &genesis);
+        let block_hash_hex = record.hash.to_string_be();
+        let block_size = u64::try_from(record.block_hex.len() / 2)?;
+        let tx_count = u64::try_from(record.tx_count)?;
+        ctx.add_block(record);
+
+        let block_json = getblock(&ctx, &json!([block_hash_hex.as_str(), 1]))?;
+        let header_json = getblockheader(&ctx, &json!([block_hash_hex.as_str(), true]))?;
+        let header = &genesis.header;
+        let version_hex_value = u32::from_le_bytes(header.version.to_consensus().to_le_bytes());
+        let version_hex = format!("{version_hex_value:08x}");
+        let bits = header.bits.to_consensus();
+        let bits_hex = format!("{bits:08x}");
+        let merkle_root = header.merkle_root.to_string();
+        let previous_block_hash = header.prev_blockhash.to_string();
+        let expected_txid = genesis
+            .txdata
+            .first()
+            .ok_or("genesis block must contain a coinbase transaction")?
+            .compute_txid()
+            .to_string();
+
+        for value in [&block_json, &header_json] {
+            assert_eq!(value.get("hash").as_str(), Some(block_hash_hex.as_str()));
+            assert_eq!(value.get("height").as_u64(), Some(0));
+            assert_eq!(
+                value.get("version").as_u64(),
+                Some(u64::try_from(header.version.to_consensus())?)
+            );
+            assert_eq!(value.get("versionHex").as_str(), Some(version_hex.as_str()));
+            assert_eq!(value.get("merkleroot").as_str(), Some(merkle_root.as_str()));
+            assert_eq!(value.get("time").as_u64(), Some(u64::from(header.time)));
+            assert_eq!(value.get("nonce").as_u64(), Some(u64::from(header.nonce)));
+            assert_eq!(value.get("bits").as_str(), Some(bits_hex.as_str()));
+            assert_eq!(
+                value.get("previousblockhash").as_str(),
+                Some(previous_block_hash.as_str())
+            );
+            assert_eq!(value.get("nTx").as_u64(), Some(tx_count));
+        }
+
+        assert_eq!(block_json.get("size").as_u64(), Some(block_size));
+        assert_eq!(block_json.get("strippedsize").as_u64(), Some(block_size));
+        assert_eq!(
+            block_json.get("weight").as_u64(),
+            Some(genesis.weight().to_wu())
+        );
+        let tx_value = block_json.get("tx");
+        let tx = tx_value
+            .as_array()
+            .ok_or("getblock tx field must be an array")?;
+        assert_eq!(tx.len(), 1);
+        assert_eq!(
+            tx.first().and_then(JsonValueTrait::as_str),
+            Some(expected_txid.as_str())
+        );
+
+        Ok(())
+    }
 }
