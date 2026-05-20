@@ -59,6 +59,15 @@ pub(crate) fn uptime(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
     Ok(json!(secs))
 }
 
+pub(crate) fn getrpcinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    crate::handlers::ensure_no_params(params)?;
+    // TODO(logpath): wire from Config.log_file once configured.
+    Ok(json!({
+        "active_commands": Vec::<String>::new(),
+        "logpath": ""
+    }))
+}
+
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
     let rate_sat_per_kvb = estimate_feerate_sat_per_kvb(ctx, conf_target);
@@ -142,7 +151,7 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 mod tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::JsonValueTrait;
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
     #[test]
     fn estimate_returns_default_when_mempool_empty() {
@@ -167,6 +176,21 @@ mod tests {
             result.is_u64() || result.is_i64(),
             "uptime returns numeric: {result:?}"
         );
+    }
+
+    #[test]
+    fn getrpcinfo_returns_active_commands_array_and_logpath() {
+        let ctx = Arc::new(Context::new());
+        let result =
+            getrpcinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getrpcinfo failed: {err}"));
+        let Some(active) = result.get("active_commands").and_then(|v| v.as_array()) else {
+            panic!("active_commands missing: {result:?}");
+        };
+        assert!(active.is_empty());
+        let Some(logpath) = result.get("logpath").and_then(|v| v.as_str()) else {
+            panic!("logpath missing: {result:?}");
+        };
+        assert_eq!(logpath, "");
     }
 }
 
