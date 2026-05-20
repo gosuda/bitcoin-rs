@@ -171,6 +171,7 @@ pub struct NodeState {
     data_dir: PathBuf,
     storage: NodeStorage,
     utxo: Arc<UtxoSet>,
+    coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -202,7 +203,13 @@ impl NodeState {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let storage = NodeStorage::open(&config)?;
-        let utxo = Arc::new(UtxoSet::new());
+        let mut utxo_set = bitcoin_rs_utxo::UtxoSet::new();
+        let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
+            bitcoin_rs_coinstats::CoinStats::default(),
+        );
+        utxo_set.set_listener(Box::new(coin_stats_listener.clone()));
+        let utxo = Arc::new(utxo_set);
+        let coin_stats = Arc::new(coin_stats_listener);
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
         let chain_tip = block_tree.read().tip_handle();
@@ -226,6 +233,7 @@ impl NodeState {
                 applied_tip: Arc::clone(&applied_tip),
                 block_tree: Arc::clone(&block_tree),
                 utxo: Arc::clone(&utxo),
+                coin_stats: Arc::clone(&coin_stats),
                 mempool: Arc::clone(&mempool),
                 blocks: Arc::clone(&blocks),
                 transactions: Arc::clone(&transactions),
@@ -246,6 +254,7 @@ impl NodeState {
             data_dir,
             storage,
             utxo,
+            coin_stats,
             mempool,
             chain_tip,
             applied_tip,
@@ -287,6 +296,12 @@ impl NodeState {
     #[must_use]
     pub fn utxo(&self) -> Arc<UtxoSet> {
         Arc::clone(&self.utxo)
+    }
+
+    /// Returns the shared coinstats listener handle.
+    #[must_use]
+    pub fn coin_stats(&self) -> Arc<bitcoin_rs_coinstats::CoinStatsListener> {
+        Arc::clone(&self.coin_stats)
     }
 
     /// Returns the shared mempool handle.
@@ -435,6 +450,7 @@ impl NodeState {
             applied_tip: Arc::clone(&self.applied_tip),
             block_tree: Arc::clone(&self.block_tree),
             utxo: Arc::clone(&self.utxo),
+            coin_stats: Arc::clone(&self.coin_stats),
             mempool: Arc::clone(&self.mempool),
             blocks: Arc::clone(&self.blocks),
             transactions: Arc::clone(&self.transactions),
@@ -503,6 +519,21 @@ mod tests {
         assert!(
             tree.read().is_empty(),
             "freshly opened tree has zero headers"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_coin_stats_listener() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let snapshot = state.coin_stats().snapshot();
+        assert_eq!(
+            snapshot.tx_count, 0,
+            "freshly opened coin_stats has zero txs"
         );
         Ok(())
     }

@@ -151,6 +151,14 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::
 
     assert_eq!(result.get("txouts").as_u64(), Some(0));
     assert_eq!(result.get("transactions").as_u64(), Some(0));
+    assert_eq!(result.get("bogosize").as_u64(), Some(0));
+    assert_eq!(result.get("total_amount").as_f64(), Some(0.0));
+    let hash_serialized_value = result.get("hash_serialized_2");
+    let hash_serialized = hash_serialized_value
+        .as_str()
+        .ok_or("hash_serialized_2 must be a string")?;
+    assert_eq!(hash_serialized.len(), 768);
+    assert!(hash_serialized.ends_with("01"));
     Ok(())
 }
 
@@ -294,6 +302,9 @@ fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
         Arc::new(RwLock::new(Vec::new())),
         Arc::new(RwLock::new(HashMap::new())),
         Arc::new(UtxoSet::new()),
+        Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+            bitcoin_rs_coinstats::CoinStats::default(),
+        )),
         Arc::new(RwLock::new(NetworkState::default())),
         Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
         peers,

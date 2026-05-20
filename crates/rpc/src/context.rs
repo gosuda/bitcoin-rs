@@ -86,6 +86,8 @@ pub struct Context {
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// UTXO set snapshot handle used by chain metadata RPCs.
     pub utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
+    /// Incremental UTXO-set statistics.
+    pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
     /// Shared registry of currently-handshook peers.
@@ -132,6 +134,9 @@ impl Context {
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
             utxo: Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
+            coin_stats: Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+                bitcoin_rs_coinstats::CoinStats::default(),
+            )),
             network: Arc::new(RwLock::new(NetworkState::default())),
             peers: Arc::new(RwLock::new(Vec::new())),
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
@@ -154,6 +159,7 @@ impl Context {
         blocks: Arc<RwLock<Vec<BlockRecord>>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
         utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
+        coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
         network: Arc<RwLock<NetworkState>>,
         mining_template_id: Arc<ArcSwap<CompactString>>,
         peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
@@ -166,6 +172,7 @@ impl Context {
             blocks,
             transactions,
             utxo,
+            coin_stats,
             network,
             peers,
             mining_template_id,
@@ -288,6 +295,9 @@ mod tests {
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
+        let coin_stats = Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+            bitcoin_rs_coinstats::CoinStats::default(),
+        ));
         let ctx = Context::from_handles(
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
@@ -295,6 +305,7 @@ mod tests {
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&utxo),
+            Arc::clone(&coin_stats),
             Arc::new(RwLock::new(NetworkState::default())),
             Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             Arc::new(RwLock::new(Vec::new())),
@@ -310,6 +321,10 @@ mod tests {
         assert!(
             Arc::ptr_eq(&ctx.utxo, &utxo),
             "utxo must be shared with caller"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx.coin_stats, &coin_stats),
+            "coin_stats must be shared with caller"
         );
     }
 }

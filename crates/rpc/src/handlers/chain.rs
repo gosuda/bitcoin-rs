@@ -160,13 +160,22 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
+    let snapshot = ctx.coin_stats.snapshot();
+    let muhash_bytes = snapshot.muhash.finalize();
+    let mut muhash_hex = String::with_capacity(muhash_bytes.len() * 2);
+    for byte in muhash_bytes {
+        use core::fmt::Write as _;
+
+        let _: core::fmt::Result = write!(&mut muhash_hex, "{byte:02x}");
+    }
+    let total_amount_btc = bitcoin::Amount::from_sat(snapshot.total_amount).to_btc();
     Ok(json!({
         "height": ctx.applied_height(),
         "bestblock": ctx.applied_hash().to_string_be(),
         "txouts": ctx.utxo.len(),
-        "bogosize": 0,
-        "hash_serialized_2": Hash256::default().to_string_be(),
-        "total_amount": 0.0,
+        "bogosize": snapshot.bogo_size,
+        "hash_serialized_2": muhash_hex,
+        "total_amount": total_amount_btc,
         "transactions": ctx.utxo.record_count(),
         "disk_size": 0
     }))

@@ -147,6 +147,7 @@ pub fn run(mut config: Config) -> Result<()> {
         state.blocks(),
         state.transactions(),
         state.utxo(),
+        state.coin_stats(),
         state.network(),
         state.mining_template_id(),
         state.peers(),

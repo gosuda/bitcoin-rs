@@ -13,9 +13,9 @@ workspace = true
 
 [features]
 default = []
-rocksdb = ["bitcoin-rs-storage/rocksdb", "bitcoin-rs-p2p/rocksdb"]
-fjall = ["bitcoin-rs-storage/fjall", "bitcoin-rs-p2p/fjall"]
-redb = ["bitcoin-rs-storage/redb", "bitcoin-rs-p2p/redb"]
+rocksdb = ["bitcoin-rs-coinstats/rocksdb", "bitcoin-rs-storage/rocksdb", "bitcoin-rs-p2p/rocksdb"]
+fjall = ["bitcoin-rs-coinstats/fjall", "bitcoin-rs-storage/fjall", "bitcoin-rs-p2p/fjall"]
+redb = ["bitcoin-rs-coinstats/redb", "bitcoin-rs-storage/redb", "bitcoin-rs-p2p/redb"]
 mdbx = ["bitcoin-rs-storage/mdbx"]
 
 [dependencies]

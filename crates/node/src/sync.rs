@@ -477,6 +477,9 @@ mod tests {
             applied_tip,
             block_tree,
             utxo: Arc::new(UtxoSet::new()),
+            coin_stats: Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+                bitcoin_rs_coinstats::CoinStats::default(),
+            )),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),

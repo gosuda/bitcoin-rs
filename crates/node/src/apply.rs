@@ -35,6 +35,8 @@ pub struct ApplyHandles {
     pub block_tree: Arc<RwLock<BlockTree>>,
     /// Shared UTXO set.
     pub utxo: Arc<UtxoSet>,
+    /// Shared coinstats listener.
+    pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
     /// Shared mempool.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Shared block records exposed to RPC handlers.
@@ -143,6 +145,8 @@ pub fn apply_block(
         tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
         handles.transactions.write().insert(txid, tx.clone());
     }
+    let tx_count_delta = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
+    handles.coin_stats.finish_block(height, tx_count_delta);
     tracing::info!(
         height,
         %block_hash,

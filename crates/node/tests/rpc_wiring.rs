@@ -28,6 +28,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let blocks = state.blocks();
     let transactions = state.transactions();
     let utxo = Arc::new(UtxoSet::new());
+    let coin_stats = state.coin_stats();
     let network = state.network();
     let mining_template_id = state.mining_template_id();
     let peers = state.peers();
@@ -39,6 +40,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::clone(&blocks),
         Arc::clone(&transactions),
         Arc::clone(&utxo),
+        Arc::clone(&coin_stats),
         Arc::clone(&network),
         Arc::clone(&mining_template_id),
         Arc::clone(&peers),
@@ -65,6 +67,10 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         "transactions must share identity"
     );
     assert!(Arc::ptr_eq(&ctx.utxo, &utxo), "utxo must share identity");
+    assert!(
+        Arc::ptr_eq(&ctx.coin_stats, &coin_stats),
+        "coin_stats must share identity"
+    );
     assert!(
         Arc::ptr_eq(&ctx.network, &network),
         "network must share identity"
