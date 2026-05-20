@@ -101,6 +101,20 @@ impl<S: KvStore> FilterIndex<S> {
         Ok(out)
     }
 
+    /// Returns whether a block filter is stored for `block_hash`.
+    ///
+    /// Cheaper than `filter_header` when only presence matters: probes the
+    /// `FilterHeaders` column family for the header row without materializing
+    /// the 32-byte payload.
+    ///
+    /// Per `put_filter`'s atomic write contract, the presence of a filter
+    /// header implies the corresponding filter body is also stored.
+    pub fn has_filter(&self, block_hash: Hash256) -> Result<bool, FilterIndexError> {
+        let key = block_hash.to_le_bytes();
+        let maybe = self.store.get(ColumnFamily::FilterHeaders, &key)?;
+        Ok(maybe.is_some())
+    }
+
     /// Loads the BIP157 filter header for a block, if indexed.
     pub fn filter_header(&self, block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
         let Some(bytes) = self
@@ -219,6 +233,13 @@ mod iter_filters_tests {
         }
     }
 
+    fn filter_index() -> Result<(TestDir, FilterIndex<RocksDbStore>), Box<dyn std::error::Error>> {
+        let dir = TestDir::new()?;
+        let store = RocksDbStore::open(dir.path())?;
+        let index = FilterIndex::new(store);
+        Ok((dir, index))
+    }
+
     #[test]
     fn iter_filters_returns_empty_on_fresh_index() -> Result<(), Box<dyn std::error::Error>> {
         let dir = TestDir::new()?;
@@ -253,6 +274,25 @@ mod iter_filters_tests {
         let _ = index.put_filter(block_hash, prev_header, &filter_bytes)?;
 
         assert_eq!(index.filter_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn has_filter_returns_false_for_unindexed_hash() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, index) = filter_index()?;
+        let block_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xee_u8; 32]);
+        assert!(!index.has_filter(block_hash)?);
+        Ok(())
+    }
+
+    #[test]
+    fn has_filter_returns_true_after_put_filter() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, index) = filter_index()?;
+        let block_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[1_u8; 32]);
+        let prev_header = bitcoin_rs_primitives::Hash256::from_le_bytes(&[2_u8; 32]);
+        let filter_bytes = vec![0xab_u8; 16];
+        let _ = index.put_filter(block_hash, prev_header, &filter_bytes)?;
+        assert!(index.has_filter(block_hash)?);
         Ok(())
     }
 
