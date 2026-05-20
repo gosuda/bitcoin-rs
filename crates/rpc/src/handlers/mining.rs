@@ -8,6 +8,7 @@ use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, params_array, required_str};
 
 const NETWORK_HASHPS_WINDOW: u32 = 120;
+const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 
 pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     if !params.is_null() {
@@ -51,6 +52,7 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
 
 pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
+    let (current_block_weight, current_block_tx) = estimate_current_block(ctx);
 
     let blocks = ctx.applied_height();
     let pooledtx = ctx.mempool.read().stats().txs;
@@ -71,14 +73,38 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 
     Ok(json!({
         "blocks": blocks,
-        "currentblockweight": 0_u64,
-        "currentblocktx": 0_u64,
+        "currentblockweight": current_block_weight,
+        "currentblocktx": current_block_tx,
         "difficulty": difficulty,
         "networkhashps": estimate_network_hashps(ctx),
         "pooledtx": pooledtx,
         "chain": chain,
         "warnings": ""
     }))
+}
+
+fn estimate_current_block(ctx: &Context) -> (u64, u64) {
+    let pool = ctx.mempool.read();
+    let mut candidates: Vec<(u64, u64)> = Vec::with_capacity(pool.entries.len());
+    for (_id, entry) in &pool.entries {
+        let weight = u64::from(entry.vsize).saturating_mul(4);
+        candidates.push((entry.fee_rate, weight));
+    }
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut total_weight: u64 = 0;
+    let mut tx_count: u64 = 0;
+    for (_rate, weight) in candidates {
+        let next = total_weight.saturating_add(weight);
+        if next > MAX_BLOCK_WEIGHT {
+            break;
+        }
+        total_weight = next;
+        tx_count = tx_count.saturating_add(1);
+    }
+
+    (total_weight, tx_count)
 }
 
 fn estimate_network_hashps(ctx: &Context) -> f64 {
@@ -213,6 +239,43 @@ mod getmininginfo_tests {
             panic!("pooledtx missing: {result:?}");
         };
         assert_eq!(pooledtx, 0);
+    }
+
+    #[test]
+    fn getmininginfo_currentblockweight_reflects_mempool_when_populated() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let ctx = Arc::new(Context::new());
+        {
+            let mut pool = ctx.mempool.write();
+            let tx = bitcoin::Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: Vec::new(),
+            };
+            let entry = MempoolEntry::new(Arc::new(tx), 250, 5_000, 1, 7);
+            pool.insert_entry(entry)
+                .unwrap_or_else(|err| panic!("insert_entry failed: {err}"));
+        }
+
+        let result = getmininginfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
+        let Some(weight) = result
+            .get("currentblockweight")
+            .and_then(JsonValueTrait::as_u64)
+        else {
+            panic!("currentblockweight missing: {result:?}");
+        };
+        let Some(tx_count) = result
+            .get("currentblocktx")
+            .and_then(JsonValueTrait::as_u64)
+        else {
+            panic!("currentblocktx missing: {result:?}");
+        };
+
+        assert_eq!(weight, 1_000);
+        assert_eq!(tx_count, 1);
     }
 
     #[test]
