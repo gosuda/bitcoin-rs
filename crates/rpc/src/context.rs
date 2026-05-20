@@ -407,8 +407,7 @@ impl Context {
     #[must_use]
     pub fn chain_work_hex_for_hash(&self, hash: bitcoin_rs_primitives::Hash256) -> Option<String> {
         let tree = self.block_tree.read();
-        let node_id = tree.lookup(hash)?;
-        let node = tree.node(node_id).ok()?;
+        let node = tree.node_by_hash(hash)?;
         let bytes: [u8; 32] = node.chainwork.to_be_bytes();
         Some(bytes.to_lower_hex_string())
     }
