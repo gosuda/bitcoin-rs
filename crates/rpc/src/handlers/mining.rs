@@ -7,6 +7,8 @@ use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, params_array, required_str};
 
+const NETWORK_HASHPS_WINDOW: u32 = 120;
+
 pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     if !params.is_null() {
         let request = params_array(params)?.first();
@@ -72,11 +74,48 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         "currentblockweight": 0_u64,
         "currentblocktx": 0_u64,
         "difficulty": difficulty,
-        "networkhashps": 0.0_f64,
+        "networkhashps": estimate_network_hashps(ctx),
         "pooledtx": pooledtx,
         "chain": chain,
         "warnings": ""
     }))
+}
+
+fn estimate_network_hashps(ctx: &Context) -> f64 {
+    let tree = ctx.block_tree.read();
+    let Some(tip_snapshot) = ctx.applied_tip.load_full() else {
+        return 0.0;
+    };
+    let tip_id = tip_snapshot.tip_id;
+    let Ok(tip_node) = tree.node(tip_id) else {
+        return 0.0;
+    };
+    let target_height = tip_node.height.saturating_sub(NETWORK_HASHPS_WINDOW);
+    let Some(earliest_id) = tree.node_at_height_from(tip_id, target_height) else {
+        return 0.0;
+    };
+    let Ok(earliest_node) = tree.node(earliest_id) else {
+        return 0.0;
+    };
+    if earliest_node.height == tip_node.height {
+        return 0.0;
+    }
+
+    let work_delta = tip_node.chainwork.saturating_sub(earliest_node.chainwork);
+    let time_delta_secs =
+        i64::from(tip_node.header.time).saturating_sub(i64::from(earliest_node.header.time));
+    if time_delta_secs <= 0 {
+        return 0.0;
+    }
+
+    chainwork_to_f64(work_delta) / f64::from(u32::try_from(time_delta_secs).unwrap_or(u32::MAX))
+}
+
+fn chainwork_to_f64(work: bitcoin_rs_chain::ChainWork) -> f64 {
+    let bytes: [u8; 32] = work.to_be_bytes();
+    bytes
+        .iter()
+        .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)))
 }
 
 pub(crate) fn submitblock(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -174,5 +213,16 @@ mod getmininginfo_tests {
             panic!("pooledtx missing: {result:?}");
         };
         assert_eq!(pooledtx, 0);
+    }
+
+    #[test]
+    fn getmininginfo_networkhashps_zero_when_no_applied_tip() {
+        let ctx = Arc::new(Context::new());
+        let result = getmininginfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
+        let Some(rate) = result.get("networkhashps").and_then(JsonValueTrait::as_f64) else {
+            panic!("networkhashps missing: {result:?}");
+        };
+        assert!(rate.abs() < f64::EPSILON, "expected zero, got {rate}");
     }
 }
