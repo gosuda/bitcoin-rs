@@ -48,7 +48,25 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
 }
 
 pub(crate) fn submitblock(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    required_str(params, 0, "block hex is required")?;
+    use bitcoin::consensus::encode::deserialize;
+    use bitcoin::hex::FromHex as _;
+
+    let hex = required_str(params, 0, "block hex is required")?;
+    let bytes = Vec::<u8>::from_hex(hex)
+        .map_err(|_| RpcError::InvalidParams("block hex is not valid hexadecimal"))?;
+    let block: bitcoin::Block = match deserialize(&bytes) {
+        Ok(block) => block,
+        Err(_) => return Ok(json!("bad-block-encoding")),
+    };
+    let target = block.header.target();
+    if block.header.validate_pow(target).is_err() {
+        return Ok(json!("high-hash"));
+    }
+
+    // TODO(node-channel): push block bytes to BlockSync via a Sender<Vec<u8>>;
+    // until then, accept the block as parseable + PoW-self-consistent and
+    // return null per Bitcoin Core's accept signal. Real apply will happen
+    // when the node-side channel is wired.
     Ok(Value::new_null())
 }
 
@@ -58,4 +76,35 @@ pub(crate) fn prioritisetransaction(
 ) -> Result<Value, RpcError> {
     required_str(params, 0, "txid is required")?;
     Ok(json!(true))
+}
+#[cfg(test)]
+mod submitblock_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::hex::DisplayHex as _;
+
+    #[test]
+    fn submitblock_accepts_regtest_genesis() {
+        let ctx = Arc::new(Context::new());
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_hex = serialize(&genesis).to_lower_hex_string();
+        let result = submitblock(&ctx, &json!([block_hex]))
+            .unwrap_or_else(|err| panic!("submitblock failed: {err}"));
+        assert!(
+            result.is_null(),
+            "expected null accept signal, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn submitblock_rejects_garbage() {
+        let ctx = Arc::new(Context::new());
+        let result = submitblock(&ctx, &json!(["deadbeef"]))
+            .unwrap_or_else(|err| panic!("submitblock failed: {err}"));
+        let Some(s) = result.as_str() else {
+            panic!("expected string rejection, got {result:?}");
+        };
+        assert_eq!(s, "bad-block-encoding");
+    }
 }
