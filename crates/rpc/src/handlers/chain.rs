@@ -3,6 +3,7 @@ use bitcoin::consensus::encode::deserialize;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use core::str::FromStr as _;
 
+use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::Hash256;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
@@ -52,17 +53,67 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
 
 pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
+    let tree = ctx.block_tree.read();
+    let active_tip = ctx.chain_tip.load_full();
+    let active_tip_id = active_tip.as_ref().map(|tip| tip.tip_id);
+    let active_height = active_tip.as_ref().map_or(0_u32, |tip| tip.height);
     let mut tips = Vec::new();
-    if let Some(snapshot) = ctx.chain_tip.load_full() {
+    for leaf_id in tree.leaf_node_ids() {
+        let Ok(node) = tree.node(leaf_id) else {
+            continue;
+        };
+        let is_active = Some(leaf_id) == active_tip_id;
+        let status = if is_active {
+            "active"
+        } else {
+            match node.status {
+                NodeStatus::Active | NodeStatus::Stale => "valid-fork",
+                NodeStatus::HeaderValid => "headers-only",
+                NodeStatus::Invalid => "invalid",
+            }
+        };
+        // Approximate branchlen: active = 0; otherwise depth below active tip.
+        // (Common-ancestor walk is deferred; this matches Core's behavior when
+        // the leaf's chain hasn't crossed the active chain.)
+        let branchlen = if is_active {
+            0
+        } else {
+            active_height.saturating_sub(node.height)
+        };
         tips.push(json!({
-            "height": snapshot.height,
-            "hash": snapshot.hash.to_string_be(),
-            "branchlen": 0_u64,
-            "status": "active",
+            "height": node.height,
+            "hash": node.hash.to_string_be(),
+            "branchlen": branchlen,
+            "status": status,
         }));
     }
-    // TODO(multi-tip): once BlockTree exposes a leaf iterator, enumerate
-    // valid-fork / headers-only / invalid tips here.
+    // Sort with active first, then by height descending.
+    tips.sort_by(|a, b| {
+        let a_status = a
+            .get("status")
+            .and_then(JsonValueTrait::as_str)
+            .unwrap_or("");
+        let b_status = b
+            .get("status")
+            .and_then(JsonValueTrait::as_str)
+            .unwrap_or("");
+        match (a_status, b_status) {
+            ("active", "active") => core::cmp::Ordering::Equal,
+            ("active", _) => core::cmp::Ordering::Less,
+            (_, "active") => core::cmp::Ordering::Greater,
+            _ => {
+                let a_height = a
+                    .get("height")
+                    .and_then(JsonValueTrait::as_u64)
+                    .unwrap_or(0);
+                let b_height = b
+                    .get("height")
+                    .and_then(JsonValueTrait::as_u64)
+                    .unwrap_or(0);
+                b_height.cmp(&a_height)
+            }
+        }
+    });
     Ok(json!(tips))
 }
 
@@ -550,10 +601,27 @@ mod tests {
 mod getchaintips_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
+    use bitcoin_rs_chain::{ChainWork, TipSnapshot};
     use bitcoin_rs_primitives::Hash256;
 
     use super::*;
+
+    fn synthetic_header(prev_blockhash: BlockHash, time: u32) -> bitcoin::block::Header {
+        bitcoin::block::Header {
+            version: bitcoin::block::Version::ONE,
+            prev_blockhash,
+            merkle_root: TxMerkleNode::all_zeros(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        }
+    }
+
+    fn hash_from_header(header: &bitcoin::block::Header) -> Hash256 {
+        Hash256::from_le_bytes(header.block_hash().as_byte_array())
+    }
 
     #[test]
     fn getchaintips_returns_empty_on_fresh_context() {
@@ -567,12 +635,18 @@ mod getchaintips_tests {
     }
 
     #[test]
-    fn getchaintips_emits_active_tip_from_chain_tip_snapshot() {
+    fn getchaintips_emits_active_tip_from_chain_tip_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
-        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        let genesis = synthetic_header(BlockHash::all_zeros(), 1_000_000);
+        let hash = hash_from_header(&genesis);
+        let tip_id = {
+            let mut tree = ctx.block_tree.write();
+            tree.insert_node(None, genesis, NodeStatus::Active)?
+        };
         ctx.set_chain_tip(TipSnapshot {
-            tip_id: NodeId::new(0),
-            height: 42,
+            tip_id,
+            height: 0,
             chainwork: ChainWork::ZERO,
             hash,
         });
@@ -588,10 +662,61 @@ mod getchaintips_tests {
         let Some(height) = first.get("height").and_then(JsonValueTrait::as_u64) else {
             panic!("height missing");
         };
-        assert_eq!(height, 42);
+        assert_eq!(height, 0);
         let Some(status) = first.get("status").and_then(JsonValueTrait::as_str) else {
             panic!("status missing");
         };
         assert_eq!(status, "active");
+        Ok(())
+    }
+
+    #[test]
+    fn getchaintips_emits_two_tips_when_chain_is_forked() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let ctx = Arc::new(Context::new());
+        let (active_tip_id, active_chainwork, active_hash) = {
+            let mut tree = ctx.block_tree.write();
+            let genesis = synthetic_header(BlockHash::all_zeros(), 1_000_000);
+            let genesis_hash = genesis.block_hash();
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+            let child_b_header = synthetic_header(genesis_hash, 1_000_900);
+            let active_tip =
+                tree.insert_node(Some(genesis_id), child_b_header, NodeStatus::Active)?;
+            let mut child_a = synthetic_header(genesis_hash, 1_000_600);
+            child_a.nonce = 1;
+            let _header_tip =
+                tree.insert_node(Some(genesis_id), child_a, NodeStatus::HeaderValid)?;
+            let active_node = tree.node(active_tip)?;
+            (active_tip, active_node.chainwork, active_node.hash)
+        };
+        ctx.set_chain_tip(TipSnapshot {
+            tip_id: active_tip_id,
+            height: 1,
+            chainwork: active_chainwork,
+            hash: active_hash,
+        });
+
+        let result = getchaintips(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        assert_eq!(arr.len(), 2, "expected two leaves: {arr:?}");
+        let active_count = arr
+            .iter()
+            .filter(|tip| tip.get("status").and_then(JsonValueTrait::as_str) == Some("active"))
+            .count();
+        let headers_only_count = arr
+            .iter()
+            .filter(|tip| {
+                tip.get("status").and_then(JsonValueTrait::as_str) == Some("headers-only")
+            })
+            .count();
+        assert_eq!(active_count, 1, "expected one active tip: {arr:?}");
+        assert_eq!(
+            headers_only_count, 1,
+            "expected one headers-only tip: {arr:?}"
+        );
+        Ok(())
     }
 }
