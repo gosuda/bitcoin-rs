@@ -707,7 +707,8 @@ pub(crate) fn transaction_broadcast(
         .map_err(|error| ElectrumError::TransactionDecode(error.to_string()))?;
     let tx = deserialize::<Transaction>(&bytes)
         .map_err(|error| ElectrumError::TransactionDecode(error.to_string()))?;
-    let txid = mempool.insert_transaction(tx, 0, 0, 0)?;
+    let placeholder_fee = u64::try_from(tx.vsize()).unwrap_or(u64::MAX);
+    let txid = mempool.insert_transaction(tx, placeholder_fee, 0, 0)?;
     Ok(json!(txid.to_string()))
 }
 

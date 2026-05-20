@@ -22,7 +22,7 @@ fn chain_of_twenty_six_unconfirmed_transactions_rejects_twenty_sixth() -> Result
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx),
             4_000,
-            1_000,
+            4_000,
             u64::from(height),
             1,
         ))?;
@@ -30,7 +30,7 @@ fn chain_of_twenty_six_unconfirmed_transactions_rejects_twenty_sixth() -> Result
 
     let rejected = chained_tx(40, previous);
     let err = pool
-        .insert_entry(MempoolEntry::new(Arc::new(rejected), 4_000, 1_000, 26, 1))
+        .insert_entry(MempoolEntry::new(Arc::new(rejected), 4_000, 4_000, 26, 1))
         .err();
 
     assert_eq!(

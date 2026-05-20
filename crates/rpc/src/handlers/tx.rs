@@ -265,13 +265,9 @@ mod tests {
         let txid = coinbase.compute_txid();
         {
             let mut pool = ctx.mempool.write();
-            let entry = MempoolEntry::new(
-                Arc::new(coinbase.clone()),
-                u32::try_from(coinbase.vsize())?,
-                0,
-                0,
-                0,
-            );
+            let vsize = u32::try_from(coinbase.vsize())?;
+            let entry =
+                MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
             pool.insert_entry(entry)?;
         }
 
