@@ -61,6 +61,26 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
     Err(RpcError::NotFound("transaction not found"))
 }
 
+fn classify_script(script: &bitcoin::Script) -> &'static str {
+    if script.is_p2tr() {
+        "witness_v1_taproot"
+    } else if script.is_p2wsh() {
+        "witness_v0_scripthash"
+    } else if script.is_p2wpkh() {
+        "witness_v0_keyhash"
+    } else if script.is_p2sh() {
+        "scripthash"
+    } else if script.is_p2pkh() {
+        "pubkeyhash"
+    } else if script.is_p2pk() {
+        "pubkey"
+    } else if script.is_op_return() {
+        "nulldata"
+    } else {
+        "nonstandard"
+    }
+}
+
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let vout = required_u64(params, 1, "vout is required")?;
@@ -77,10 +97,10 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         "confirmations": confirmations,
         "value": super::tx_render::btc_value(live.txout.value.to_sat()),
         "scriptPubKey": {
-            "asm": "",
+            "asm": live.txout.script_pubkey.to_asm_string(),
             "desc": "raw()",
             "hex": live.txout.script_pubkey.as_bytes().to_lower_hex_string(),
-            "type": "nonstandard"
+            "type": classify_script(&live.txout.script_pubkey)
         },
         "coinbase": live.coinbase
     }))
@@ -304,6 +324,24 @@ mod tests {
             panic!("expected array, got {extracted:?}");
         };
         assert_eq!(arr.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod classify_script_tests {
+    use super::*;
+    use bitcoin::ScriptBuf;
+
+    #[test]
+    fn classify_op_return_is_nulldata() {
+        let script = ScriptBuf::new_op_return(b"hello");
+        assert_eq!(classify_script(&script), "nulldata");
+    }
+
+    #[test]
+    fn classify_empty_is_nonstandard() {
+        let script = ScriptBuf::new();
+        assert_eq!(classify_script(&script), "nonstandard");
     }
 }
 #[cfg(test)]
