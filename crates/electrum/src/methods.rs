@@ -500,6 +500,7 @@ pub fn dispatch(
     match method {
         "server.version" => server_version(index, mempool, params),
         "server.banner" => server_banner(index, mempool, params),
+        "server.features" => server_features(index, mempool, params),
         "server.donation_address" => server_donation_address(index, mempool, params),
         "server.peers.subscribe" => server_peers_subscribe(index, mempool, params),
         "server.ping" => server_ping(index, mempool, params),
@@ -538,6 +539,28 @@ pub(crate) fn server_banner(
 ) -> Result<Value, ElectrumError> {
     ensure_array_len(params, 0)?;
     Ok(json!("bitcoin-rs electrum"))
+}
+
+pub(crate) fn server_features(
+    _index: &IndexHandle,
+    _mempool: &MempoolHandle,
+    params: &Value,
+) -> Result<Value, ElectrumError> {
+    ensure_array_len(params, 0)?;
+    // TODO(per-network-config): replace mainnet hardcode with the active chain's
+    // genesis when network selection threads through Electrum dispatch.
+    let genesis_hash = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin)
+        .block_hash()
+        .to_string();
+    Ok(json!({
+        "hosts": json!({}),
+        "pruning": Value::new_null(),
+        "genesis_hash": genesis_hash,
+        "server_version": SERVER_VERSION,
+        "protocol_min": PROTOCOL_VERSION,
+        "protocol_max": PROTOCOL_VERSION,
+        "hash_function": "sha256",
+    }))
 }
 
 pub(crate) fn server_donation_address(
@@ -897,6 +920,31 @@ mod tests {
         let handle = MempoolHandle::from_arc(Arc::clone(&pool));
 
         assert!(Arc::ptr_eq(&pool, &handle.pool));
+    }
+}
+
+#[cfg(test)]
+mod server_features_tests {
+    use super::*;
+
+    #[test]
+    fn server_features_returns_protocol_version_and_genesis_hash() {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let result = dispatch("server.features", &index, &mempool, &json!([]))
+            .unwrap_or_else(|err| panic!("server.features failed: {err}"));
+        let Some(genesis) = result.get("genesis_hash").and_then(JsonValueTrait::as_str) else {
+            panic!("genesis_hash missing: {result:?}");
+        };
+        // Bitcoin mainnet genesis (big-endian display).
+        assert_eq!(
+            genesis,
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+        );
+        let Some(protocol_min) = result.get("protocol_min").and_then(JsonValueTrait::as_str) else {
+            panic!("protocol_min missing: {result:?}");
+        };
+        assert_eq!(protocol_min, "1.4");
     }
 }
 
