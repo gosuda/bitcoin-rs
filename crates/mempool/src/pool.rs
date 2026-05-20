@@ -248,6 +248,19 @@ impl Mempool {
         pairs.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// Returns mempool entry ids whose `fee_rate` >= `threshold_sat_per_kvb`.
+    ///
+    /// Linear scan over `entries`. Used by mining template builders and eviction
+    /// strategies that want a fee-rate cohort without sorting.
+    #[must_use]
+    pub fn iter_above_fee_rate(&self, threshold_sat_per_kvb: u64) -> Vec<EntryId> {
+        self.entries
+            .iter()
+            .filter(|(_index, entry)| entry.fee_rate >= threshold_sat_per_kvb)
+            .filter_map(|(index, _entry)| EntryId::try_from(index).ok())
+            .collect()
+    }
+
     /// Returns the txid of the in-mempool transaction that spends `outpoint`,
     /// or `None` if no entry spends it. Linear scan over entries; acceptable
     /// for early IBD where the pool is small, future strands may add a per-
@@ -776,6 +789,37 @@ mod tests {
             panic!("second entry missing");
         };
         assert_eq!(second_entry.tx.compute_txid(), low_txid);
+    }
+
+    #[test]
+    fn iter_above_fee_rate_filters_to_high_fee_only() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let low_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7)); // fee_rate = 1000
+        let high_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(99_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x52]),
+            }],
+        };
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7)); // fee_rate = 100_000
+        let high_only = pool.iter_above_fee_rate(50_000);
+        assert_eq!(high_only.len(), 1);
+        let both = pool.iter_above_fee_rate(500);
+        assert_eq!(both.len(), 2);
+        let none = pool.iter_above_fee_rate(200_000);
+        assert_eq!(none.len(), 0);
     }
 
     #[test]
