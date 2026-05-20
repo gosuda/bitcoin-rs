@@ -237,15 +237,25 @@ impl Mempool {
         crate::evict_lowest_fee_packages(self, max_bytes)
     }
 
+    /// Returns the sum of fees of all entries in the pool, in satoshis.
+    ///
+    /// Used by `getmempoolinfo.total_fee` (BTC = sats / 1e8). Wraps a single
+    /// linear pass over `self.entries`. Saturating add prevents overflow on a
+    /// pathological pool (would require ~92 quadrillion sat aggregate, well
+    /// above the 21M BTC monetary cap, so saturation here is purely defensive).
+    #[must_use]
+    pub fn aggregate_fees(&self) -> u64 {
+        self.entries
+            .iter()
+            .fold(0_u64, |acc, (_id, entry)| acc.saturating_add(entry.fee))
+    }
+
     /// Returns aggregate counters for the current pool.
     #[must_use]
     pub fn stats(&self) -> MempoolStats {
         let txs = u64::try_from(self.entries.len()).unwrap_or(u64::MAX);
         let bytes = self.total_vsize();
-        let total_fee = self
-            .entries
-            .iter()
-            .fold(0_u64, |acc, (_id, entry)| acc.saturating_add(entry.fee));
+        let total_fee = self.aggregate_fees();
         MempoolStats {
             txs,
             bytes,
@@ -777,6 +787,20 @@ mod tests {
         assert_eq!(stats.txs, 1);
         assert_eq!(stats.bytes, expected_vsize);
         assert_eq!(stats.total_fee, expected_fee);
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_fees_sums_entry_fees() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.aggregate_fees(), 0);
+
+        let entry_a = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 400, 500, 1, 7);
+        let entry_b = MempoolEntry::new(Arc::new(tx(2, Vec::new())), 900, 1_000, 2, 7);
+        pool.insert_entry(entry_a)?;
+        pool.insert_entry(entry_b)?;
+
+        assert_eq!(pool.aggregate_fees(), 1_500);
         Ok(())
     }
     #[test]
