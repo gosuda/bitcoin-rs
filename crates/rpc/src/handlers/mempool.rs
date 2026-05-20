@@ -92,9 +92,9 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     }
 
     let txids: Vec<String> = pool
-        .entries
-        .iter()
-        .map(|(_id, entry)| entry.tx.compute_txid().to_string())
+        .iter_txids()
+        .into_iter()
+        .map(|txid| txid.to_string())
         .collect();
     if include_sequence {
         return Ok(json!({
@@ -109,9 +109,9 @@ pub(crate) fn clearmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     crate::handlers::ensure_no_params(params)?;
     let mut pool = ctx.mempool.write();
     let txids: Vec<String> = pool
-        .entries
-        .iter()
-        .map(|(_id, entry)| entry.tx.compute_txid().to_string())
+        .iter_txids()
+        .into_iter()
+        .map(|txid| txid.to_string())
         .collect();
     pool.clear();
     Ok(json!(txids))
