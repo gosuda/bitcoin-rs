@@ -173,6 +173,13 @@ impl BlockTree {
         self.tip().map(|tip| tip.chainwork)
     }
 
+    /// Returns the height of the published tip, or `None` if no tip is
+    /// published yet.
+    #[must_use]
+    pub fn tip_height(&self) -> Option<u32> {
+        self.tip().map(|tip| tip.height)
+    }
+
     /// Returns a cheap-clonable handle to the canonical best-tip pointer.
     ///
     /// Sharing this handle lets lock-free readers observe tip advances
@@ -457,8 +464,13 @@ mod tests {
         pow::CompactTarget,
     };
 
+    use std::sync::Arc;
+
     use super::{BlockTree, hash_from_header};
-    use crate::node::NodeStatus;
+    use crate::{
+        node::{ChainWork, NodeStatus},
+        tip::TipSnapshot,
+    };
 
     #[test]
     fn block_locator_walks_back_to_genesis_on_short_chain() -> Result<(), Box<dyn std::error::Error>>
@@ -530,6 +542,12 @@ mod tests {
     }
 
     #[test]
+    fn tip_height_returns_none_before_publish() {
+        let tree = BlockTree::new();
+        assert!(tree.tip_height().is_none());
+    }
+
+    #[test]
     fn tip_chainwork_returns_published_tip_chainwork() -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let genesis = test_header(BlockHash::all_zeros(), 0);
@@ -537,6 +555,22 @@ mod tests {
         let cw = tree.node(genesis_id)?.chainwork;
 
         assert_eq!(tree.tip_chainwork(), Some(cw));
+        Ok(())
+    }
+
+    #[test]
+    fn tip_height_returns_published_tip_height() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+        tree.tip_handle().store(Some(Arc::new(TipSnapshot {
+            tip_id: genesis_id,
+            height: 7,
+            chainwork: ChainWork::ZERO,
+            hash: genesis_hash,
+        })));
+        assert_eq!(tree.tip_height(), Some(7));
         Ok(())
     }
 
