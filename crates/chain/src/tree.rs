@@ -205,6 +205,27 @@ impl BlockTree {
         self.tip().map(|tip| tip.hash)
     }
 
+    /// Returns all hashes on the published active chain from tip down to root.
+    ///
+    /// Returns an empty vec if no tip is published. Walks parent pointers via
+    /// `ancestor_chain(tip_id)`, then projects `.hash` per node.
+    ///
+    /// Cost: O(N) where N = active-chain length. For locator-style sampling
+    /// prefer `block_locator(tip_id, max_entries)`.
+    #[must_use]
+    pub fn iter_active_chain_hashes(&self) -> Vec<Hash256> {
+        let Some(tip) = self.tip() else {
+            return Vec::new();
+        };
+        let Ok(ids) = self.ancestor_chain(tip.tip_id) else {
+            return Vec::new();
+        };
+        ids.into_iter()
+            .filter_map(|id| self.node(id).ok())
+            .map(|node| node.hash)
+            .collect()
+    }
+
     /// Returns a cheap-clonable handle to the canonical best-tip pointer.
     ///
     /// Sharing this handle lets lock-free readers observe tip advances
@@ -616,6 +637,26 @@ mod tests {
     fn tip_hash_returns_none_before_publish() {
         let tree = BlockTree::new();
         assert!(tree.tip_hash().is_none());
+    }
+
+    #[test]
+    fn iter_active_chain_hashes_returns_empty_for_no_tip() {
+        let tree = BlockTree::new();
+        assert!(tree.iter_active_chain_hashes().is_empty());
+    }
+
+    #[test]
+    fn iter_active_chain_hashes_returns_genesis_only_for_singleton_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+
+        let hashes = tree.iter_active_chain_hashes();
+
+        assert_eq!(hashes, vec![genesis_hash]);
+        Ok(())
     }
 
     #[test]
