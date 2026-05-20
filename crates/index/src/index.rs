@@ -80,6 +80,31 @@ impl<S: KvStore> Indexer<S> {
         Ok(rows)
     }
 
+    /// Returns the hash of every indexed block header in storage order.
+    ///
+    /// Cheaper than `iter_block_headers` when only the hash list matters:
+    /// computes `BlockHash` from the 80-byte raw header bytes during iteration
+    /// without retaining the payload.
+    pub fn iter_block_header_hashes(
+        &self,
+    ) -> Result<Vec<bitcoin_rs_primitives::Hash256>, IndexError> {
+        use bitcoin::hashes::Hash as _;
+
+        let iter = self.store.iter_prefix(ColumnFamily::BlockHeaders, &[])?;
+        let mut out = Vec::new();
+        for entry in iter {
+            let (key, _value) = entry?;
+            if key.len() == crate::HEADER_ROW_SIZE {
+                // BlockHeader hash is the double-SHA256 of the 80-byte serialized header.
+                let block_hash = bitcoin::BlockHash::hash(&key);
+                out.push(bitcoin_rs_primitives::Hash256::from_le_bytes(
+                    &block_hash.to_byte_array(),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     /// Returns the number of persisted block headers via `iter_block_headers`.
     ///
     /// Cost O(N) since the iterator pulls each row; cache if called frequently.
@@ -557,6 +582,30 @@ mod tests {
 
         let rows = indexer.iter_block_headers()?;
         assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn iter_block_header_hashes_empty_index_returns_empty() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (_dir, indexer) = indexer()?;
+        assert!(indexer.iter_block_header_hashes()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn iter_block_header_hashes_returns_genesis_after_ingest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, mut indexer) = indexer()?;
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let bytes = bitcoin::consensus::encode::serialize(&block);
+        indexer.ingest_block(&bytes, 0)?;
+        let hashes = indexer.iter_block_header_hashes()?;
+        assert_eq!(hashes.len(), 1);
+        let expected = bitcoin_rs_primitives::Hash256::from_le_bytes(
+            &block.header.block_hash().to_byte_array(),
+        );
+        assert_eq!(hashes[0], expected);
         Ok(())
     }
 
