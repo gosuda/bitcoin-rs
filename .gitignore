@@ -17,3 +17,4 @@ core.*
 # Re-include project plan tracked in-repo (global ~/.gitignore drops PLAN.md).
 !PLAN.md
 !DEVIATIONS.md
+.antigravitycli/
