@@ -34,6 +34,7 @@ impl Handler {
         match method {
             "getblockchaininfo" => chain::getblockchaininfo(&self.ctx, params),
             "getchaintips" => chain::getchaintips(&self.ctx, params),
+            "getchaintxstats" => chain::getchaintxstats(&self.ctx, params),
             "getblockcount" => chain::getblockcount(&self.ctx, params),
             "getblockhash" => chain::getblockhash(&self.ctx, params),
             "getbestblockhash" => chain::getbestblockhash(&self.ctx, params),

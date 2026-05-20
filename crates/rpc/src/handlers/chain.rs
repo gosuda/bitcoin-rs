@@ -113,6 +113,40 @@ pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     Ok(json!(tips))
 }
 
+pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    const DEFAULT_WINDOW: u64 = 30 * 24 * 6; // ~1 month of 10-min blocks
+    let array = params_array(params)?;
+    let nblocks = array
+        .first()
+        .and_then(JsonValueTrait::as_u64)
+        .unwrap_or(DEFAULT_WINDOW);
+    let applied_height = ctx.applied_height();
+    let blocks_guard = ctx.blocks.read();
+    let total_tx_count: u64 = blocks_guard
+        .iter()
+        .map(|record| u64::try_from(record.tx_count).unwrap_or(0))
+        .sum();
+    let window_block_count = nblocks.min(u64::from(applied_height).saturating_add(1));
+    let lowest_window_height = u64::from(applied_height)
+        .saturating_add(1)
+        .saturating_sub(window_block_count);
+    let window_tx_count: u64 = blocks_guard
+        .iter()
+        .filter(|record| u64::from(record.height) >= lowest_window_height)
+        .map(|record| u64::try_from(record.tx_count).unwrap_or(0))
+        .sum();
+    Ok(json!({
+        "time": 0_u64, // TODO: thread timestamps via BlockRecord
+        "txcount": total_tx_count,
+        "window_final_block_hash": ctx.applied_hash().to_string_be(),
+        "window_final_block_height": applied_height,
+        "window_block_count": window_block_count,
+        "window_tx_count": window_tx_count,
+        "window_interval": 0_u64, // TODO: span from earliest to latest in window
+        "txrate": 0.0_f64 // TODO: tx/s once window_interval is real
+    }))
+}
+
 pub(crate) fn getblockcount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     Ok(json!(ctx.applied_height()))
@@ -739,6 +773,34 @@ mod tests {
             progress.abs() < f64::EPSILON,
             "expected 0.0, got {progress}"
         );
+    }
+    #[test]
+    fn getchaintxstats_emits_core_shape_with_zero_blocks() {
+        use alloc::sync::Arc;
+
+        let ctx = Arc::new(Context::new());
+        let result = getchaintxstats(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
+        assert!(result.get("time").is_some());
+        assert!(result.get("txcount").is_some());
+        assert!(result.get("window_final_block_height").is_some());
+    }
+
+    #[test]
+    fn getchaintxstats_window_tx_count_includes_in_range_blocks() {
+        use alloc::sync::Arc;
+        use bitcoin::Network;
+
+        let ctx = Arc::new(Context::new());
+        let genesis = bitcoin::blockdata::constants::genesis_block(Network::Regtest);
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        let result = getchaintxstats(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
+        let Some(txcount) = result.get("txcount").and_then(JsonValueTrait::as_u64) else {
+            panic!("txcount missing: {result:?}");
+        };
+        // Genesis block has 1 tx (coinbase).
+        assert_eq!(txcount, 1);
     }
 }
 
