@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// BIP9 deployment-state memoization cache.
+pub mod bip9_cache;
 /// Header acceptance and proof-of-work validation.
 pub mod header_sync;
 /// Block-tree node types.
@@ -15,6 +17,7 @@ pub mod tree;
 use bitcoin_rs_primitives::Hash256;
 use thiserror::Error;
 
+pub use bip9_cache::{Bip9Cache, CachedState};
 pub use bitcoin_rs_primitives::Network;
 pub use header_sync::accept_headers;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
