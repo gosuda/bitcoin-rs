@@ -261,26 +261,56 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    ensure_no_params(params)?;
+    let hash_type = if params.is_null() {
+        "hash_serialized_2"
+    } else {
+        match params_array(params)?.first() {
+            Some(value) if value.is_null() => "hash_serialized_2",
+            Some(value) => value
+                .as_str()
+                .ok_or(RpcError::InvalidType("hash_type must be a string"))?,
+            None => "hash_serialized_2",
+        }
+    };
     let snapshot = ctx.coin_stats.snapshot();
-    let muhash_bytes = snapshot.muhash.finalize();
-    let mut muhash_hex = String::with_capacity(muhash_bytes.len() * 2);
-    for byte in muhash_bytes {
-        use core::fmt::Write as _;
-
-        let _: core::fmt::Result = write!(&mut muhash_hex, "{byte:02x}");
-    }
     let total_amount_btc = bitcoin::Amount::from_sat(snapshot.total_amount).to_btc();
-    Ok(json!({
-        "height": ctx.applied_height(),
-        "bestblock": ctx.applied_hash().to_string_be(),
-        "txouts": ctx.utxo.len(),
-        "bogosize": snapshot.bogo_size,
-        "hash_serialized_2": muhash_hex,
-        "total_amount": total_amount_btc,
-        "transactions": ctx.utxo.record_count(),
-        "disk_size": 0
-    }))
+    let muhash_hex = {
+        let muhash_bytes = snapshot.muhash.finalize();
+        let mut hex = String::with_capacity(muhash_bytes.len() * 2);
+        for byte in muhash_bytes {
+            use core::fmt::Write as _;
+
+            let _: core::fmt::Result = write!(&mut hex, "{byte:02x}");
+        }
+        hex
+    };
+    let bestblock = ctx.applied_hash().to_string_be();
+    let mut response = sonic_rs::Object::new();
+    let _ = response.insert(&"height", ctx.applied_height());
+    let _ = response.insert(&"bestblock", bestblock.as_str());
+    let _ = response.insert(&"txouts", ctx.utxo.len());
+    let _ = response.insert(&"bogosize", snapshot.bogo_size);
+    let _ = response.insert(&"total_amount", json!(total_amount_btc));
+    let _ = response.insert(&"transactions", ctx.utxo.record_count());
+    let _ = response.insert(&"disk_size", 0_u64);
+    match hash_type {
+        "hash_serialized_2" => {
+            // TODO(hash_serialized_2): emit the canonical UTXO-serialization
+            // SHA256d hash. Until then we surface muhash under this key as a
+            // placeholder; muhash is a different commitment.
+            let _ = response.insert(&"hash_serialized_2", muhash_hex.as_str());
+        }
+        "muhash" => {
+            let _ = response.insert(&"muhash", muhash_hex.as_str());
+        }
+        "none" => {}
+        _ => {
+            return Err(RpcError::InvalidParams(
+                "hash_type must be one of: hash_serialized_2, muhash, none",
+            ));
+        }
+    }
+    Ok(Value::from(response))
 }
 
 pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -589,6 +619,29 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn gettxoutsetinfo_with_hash_type_none_omits_both_hashes() {
+        let ctx = Arc::new(Context::new());
+        let result = gettxoutsetinfo(&ctx, &json!(["none"]))
+            .unwrap_or_else(|err| panic!("gettxoutsetinfo failed: {err}"));
+        assert!(
+            result.get("muhash").is_none(),
+            "muhash should be absent for hash_type=none: {result:?}"
+        );
+        assert!(
+            result.get("hash_serialized_2").is_none(),
+            "hash_serialized_2 should be absent for hash_type=none: {result:?}"
+        );
+        assert!(result.get("height").is_some());
+    }
+
+    #[test]
+    fn gettxoutsetinfo_rejects_unknown_hash_type() {
+        let ctx = Arc::new(Context::new());
+        let result = gettxoutsetinfo(&ctx, &json!(["sha3"]));
+        assert!(result.is_err());
     }
 
     #[test]
