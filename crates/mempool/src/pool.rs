@@ -196,6 +196,30 @@ impl Mempool {
         self.by_txid.contains_key(txid)
     }
 
+    /// Returns txids of mempool entries signalling BIP-125 RBF eligibility.
+    ///
+    /// An entry is replaceable when ANY of its inputs has `sequence < 0xFFFFFFFE`
+    /// (the BIP-125 opt-in convention). Used by fee-bumping and replacement-eligibility
+    /// queries.
+    #[must_use]
+    pub fn iter_replaceable_txids(&self) -> Vec<bitcoin::Txid> {
+        const RBF_FLAG_THRESHOLD: u32 = 0xFFFF_FFFE;
+        let mut out = Vec::new();
+        for (_id, entry) in &self.entries {
+            let opts_in = entry
+                .tx
+                .input
+                .iter()
+                .any(|input| input.sequence.0 < RBF_FLAG_THRESHOLD);
+            if opts_in {
+                out.push(entry.tx.compute_txid());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Returns the total virtual size of all entries.
     #[must_use]
     pub fn total_vsize(&self) -> u64 {
@@ -847,6 +871,49 @@ mod tests {
         assert_eq!(both.len(), 2);
         let none = pool.iter_above_fee_rate(200_000);
         assert_eq!(none.len(), 0);
+    }
+
+    #[test]
+    fn iter_replaceable_txids_returns_only_rbf_signaled_txs() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        // RBF-signalled tx (sequence < 0xFFFFFFFE).
+        let rbf_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0xaa; 32]),
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(0x0000_0001),
+                witness: bitcoin::Witness::new(),
+            }],
+            output: Vec::new(),
+        };
+        let rbf_txid = rbf_tx.compute_txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7));
+        // Non-RBF tx (sequence = MAX = 0xFFFFFFFF).
+        let non_rbf_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0xbb; 32]),
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: Vec::new(),
+        };
+        let non_rbf_txid = non_rbf_tx.compute_txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(non_rbf_tx), 100, 10_000, 1, 7));
+        let replaceable = pool.iter_replaceable_txids();
+        assert!(replaceable.contains(&rbf_txid));
+        assert!(!replaceable.contains(&non_rbf_txid));
+        assert_eq!(replaceable.len(), 1);
     }
 
     #[test]
