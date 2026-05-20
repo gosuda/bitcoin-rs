@@ -21,6 +21,7 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
     let fixture = Fixture::new()?;
     let handler = Handler::new(Arc::clone(&fixture.ctx));
     let raw_tx = serialize_hex(&fixture.tx);
+    let valid_psbt = build_valid_base64_psbt(&fixture.tx)?;
     let txid = fixture.txid.to_string();
     let block_hash = fixture.block_hash.to_string_be();
 
@@ -69,7 +70,7 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         ("walletcreatefundedpsbt", json!([[], []])),
         ("walletprocesspsbt", json!([""])),
         ("finalizepsbt", json!([""])),
-        ("combinepsbt", json!([[""]])),
+        ("combinepsbt", json!([[valid_psbt.as_str()]])),
         ("bumpfee", json!([txid.as_str()])),
     ];
 
@@ -397,4 +398,35 @@ fn outpoint(label: u8) -> OutPoint {
         txid: Txid::from_byte_array([label; 32]),
         vout: 0,
     }
+}
+
+fn build_valid_base64_psbt(tx: &Transaction) -> Result<String, Box<dyn std::error::Error>> {
+    let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(tx.clone())?;
+    Ok(encode_base64(&psbt.serialize()))
+}
+
+const BASE64_TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn encode_base64(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(char::from(BASE64_TABLE[usize::from(b0 >> 2)]));
+        out.push(char::from(
+            BASE64_TABLE[usize::from(((b0 & 0x03) << 4) | (b1 >> 4))],
+        ));
+        out.push(if chunk.len() > 1 {
+            char::from(BASE64_TABLE[usize::from(((b1 & 0x0f) << 2) | (b2 >> 6))])
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            char::from(BASE64_TABLE[usize::from(b2 & 0x3f)])
+        } else {
+            '='
+        });
+    }
+    out
 }
