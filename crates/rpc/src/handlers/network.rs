@@ -1,10 +1,10 @@
 use alloc::sync::Arc;
 
-use sonic_rs::{Value, json};
+use sonic_rs::{JsonValueTrait, Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{ensure_no_params, required_str};
+use crate::handlers::{ensure_no_params, params_array, required_str};
 
 const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 const DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB: f64 = 0.00001;
@@ -77,6 +77,41 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         }));
     }
     Ok(json!(array))
+}
+
+pub(crate) fn getaddednodeinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    // Optional node-address filter. Accept and ignore.
+    let _ = params_array(params)?;
+    Ok(json!(Vec::<sonic_rs::Value>::new()))
+}
+
+pub(crate) fn listbanned(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    Ok(json!(Vec::<sonic_rs::Value>::new()))
+}
+
+pub(crate) fn setban(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    required_str(params, 0, "subnet is required")?;
+    let command = required_str(params, 1, "command is required")?;
+    match command {
+        "add" | "remove" => Ok(Value::new_null()),
+        _ => Err(RpcError::InvalidParams("command must be 'add' or 'remove'")),
+    }
+}
+
+pub(crate) fn clearbanned(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    Ok(Value::new_null())
+}
+
+pub(crate) fn setnetworkactive(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let array = params_array(params)?;
+    let state = array
+        .first()
+        .and_then(JsonValueTrait::as_bool)
+        .ok_or(RpcError::InvalidParams("state must be a boolean"))?;
+    // No-op until P2P kill-switch is wired; echo back the requested state.
+    Ok(json!(state))
 }
 pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
@@ -237,5 +272,56 @@ mod addnode_validation_tests {
         let result = disconnectnode(&ctx, &json!(["127.0.0.1:8333"]))
             .unwrap_or_else(|err| panic!("disconnectnode failed: {err}"));
         assert!(result.is_null());
+    }
+}
+
+#[cfg(test)]
+mod admin_rpc_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use sonic_rs::JsonContainerTrait;
+
+    #[test]
+    fn getaddednodeinfo_returns_empty_array() {
+        let ctx = Arc::new(Context::new());
+        let result = getaddednodeinfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getaddednodeinfo failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn listbanned_returns_empty_array() {
+        let ctx = Arc::new(Context::new());
+        let result =
+            listbanned(&ctx, &json!(null)).unwrap_or_else(|err| panic!("listbanned failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn setban_accepts_add_and_remove() {
+        let ctx = Arc::new(Context::new());
+        assert!(setban(&ctx, &json!(["10.0.0.0/8", "add"])).is_ok());
+        assert!(setban(&ctx, &json!(["10.0.0.0/8", "remove"])).is_ok());
+    }
+
+    #[test]
+    fn setban_rejects_unknown_command() {
+        let ctx = Arc::new(Context::new());
+        let result = setban(&ctx, &json!(["10.0.0.0/8", "frobnicate"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn setnetworkactive_echoes_state() {
+        let ctx = Arc::new(Context::new());
+        let result = setnetworkactive(&ctx, &json!([true]))
+            .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
     }
 }
