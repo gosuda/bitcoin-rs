@@ -313,7 +313,7 @@ impl<S: KvStore> Indexer<S> {
     ///
     /// The 8-byte prefix is lossy; this method exact-resolves it by comparing
     /// the full 32-byte txid before returning.
-    pub fn resolve_transaction<B: BlockSource>(
+    pub fn resolve_transaction<B: BlockSource + ?Sized>(
         &self,
         txid: bitcoin::Txid,
         source: &B,
@@ -346,7 +346,7 @@ impl<S: KvStore> Indexer<S> {
     /// Composes `resolve_transaction(outpoint.txid, source)` and reads the
     /// `output[vout].value.to_sat()`. Building block for real fee derivation
     /// in transaction-broadcast and prevout-value lookups.
-    pub fn resolve_outpoint_value<B: BlockSource>(
+    pub fn resolve_outpoint_value<B: BlockSource + ?Sized>(
         &self,
         outpoint: bitcoin::OutPoint,
         source: &B,
@@ -370,7 +370,7 @@ impl<S: KvStore> Indexer<S> {
     ///
     /// Cost: O(R + B) where R = number of prefix rows for `txid` and B = block
     /// fetch cost per candidate height.
-    pub fn resolve_tx_with_height<B: BlockSource>(
+    pub fn resolve_tx_with_height<B: BlockSource + ?Sized>(
         &self,
         txid: bitcoin::Txid,
         source: &B,
@@ -557,6 +557,19 @@ fn collect_prefix_rows(
 pub trait IndexerLike: Send + Sync {
     /// Walks `block` once and writes index rows. See `Indexer::ingest_block`.
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError>;
+
+    /// Resolves the satoshi value of the transaction output at `outpoint` via
+    /// `source`. Returns `Ok(None)` when the transaction is not indexed or the
+    /// `vout` is out of range.
+    ///
+    /// Composes `resolve_transaction(outpoint.txid, source)` and reads the
+    /// `output[vout].value.to_sat()`. Building block for real fee derivation
+    /// in transaction-broadcast and prevout-value lookups.
+    fn resolve_outpoint_value(
+        &self,
+        outpoint: bitcoin::OutPoint,
+        source: &dyn BlockSource,
+    ) -> Result<Option<u64>, IndexError>;
 }
 
 /// Provides block lookups for resolving lossy index prefixes to full identities.
@@ -574,6 +587,14 @@ pub trait BlockSource {
 impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError> {
         Self::ingest_block(self, block, height)
+    }
+
+    fn resolve_outpoint_value(
+        &self,
+        outpoint: bitcoin::OutPoint,
+        source: &dyn BlockSource,
+    ) -> Result<Option<u64>, IndexError> {
+        Self::resolve_outpoint_value(self, outpoint, source)
     }
 }
 
@@ -837,6 +858,31 @@ mod tests {
         };
         let outpoint = bitcoin::OutPoint { txid, vout: 0 };
         let value = indexer.resolve_outpoint_value(outpoint, &source)?;
+
+        assert_eq!(value, Some(5_000_000_000));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_outpoint_value_via_indexerlike_dyn_source() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let dyn_indexer: &dyn super::IndexerLike = &indexer;
+        let dyn_source: &dyn super::BlockSource = &source;
+        let outpoint = bitcoin::OutPoint { txid, vout: 0 };
+        let value = dyn_indexer.resolve_outpoint_value(outpoint, dyn_source)?;
 
         assert_eq!(value, Some(5_000_000_000));
         Ok(())

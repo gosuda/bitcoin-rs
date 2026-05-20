@@ -39,6 +39,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let p2p_outbound = Some(state.p2p_outbound_sender());
     let banned = Arc::new(parking_lot::RwLock::new(hashbrown::HashSet::new()));
     let added_nodes = Arc::new(parking_lot::RwLock::new(Vec::new()));
+    let tx_index = state.tx_index();
     let ctx = Context::from_handles(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
@@ -57,6 +58,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         p2p_outbound,
         Arc::clone(&banned),
         Arc::clone(&added_nodes),
+        Some(Arc::clone(&tx_index)),
     );
 
     assert!(
@@ -88,6 +90,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::ptr_eq(&ctx.filter_index, &filter_index),
         "filter_index must share identity"
     );
+    assert!(ctx.indexer.is_some(), "indexer handle must be wired");
     assert!(
         Arc::ptr_eq(&ctx.network, &network),
         "network must share identity"

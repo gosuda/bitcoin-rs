@@ -4,7 +4,7 @@ use core::fmt;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::DisplayHex as _;
+use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::{Block, Transaction, Txid};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
@@ -12,7 +12,7 @@ use bitcoin_rs_primitives::{Hash256, Network};
 use compact_str::CompactString;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use hashbrown::HashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 /// Block data made available to RPC handlers without forcing storage I/O.
 #[derive(Clone, Debug)]
@@ -127,6 +127,9 @@ pub struct Context {
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
     /// BIP157/158 compact-filter index used by filter RPCs.
     pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+    /// Optional shared confirmed-block indexer used to resolve prevout values for fee statistics.
+    /// `None` for embedded/test callers without txindex.
+    pub indexer: Option<Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
     /// Network selector used by handlers needing consensus parameters (e.g.
@@ -193,6 +196,7 @@ impl Context {
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
             filter_index: noop_filter_index(),
+            indexer: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
             chain_network: Network::Mainnet,
             peers: Arc::new(RwLock::new(Vec::new())),
@@ -232,6 +236,7 @@ impl Context {
         p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
         banned: Arc<parking_lot::RwLock<hashbrown::HashSet<std::net::SocketAddr>>>,
         added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
+        indexer: Option<Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
     ) -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -243,6 +248,7 @@ impl Context {
             utxo,
             coin_stats,
             filter_index,
+            indexer,
             network,
             chain_network,
             peers,
@@ -427,6 +433,22 @@ impl Context {
     }
 }
 
+impl bitcoin_rs_index::BlockSource for Context {
+    fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
+        let block_hex = self
+            .blocks
+            .read()
+            .iter()
+            .find(|record| record.height == height)
+            .map(|record| record.block_hex.clone())?;
+        if block_hex.is_empty() {
+            return None;
+        }
+        let bytes = Vec::<u8>::from_hex(&block_hex).ok()?;
+        bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes).ok()
+    }
+}
+
 fn bitcoin_network(network: Network) -> bitcoin::Network {
     match network {
         Network::Mainnet => bitcoin::Network::Bitcoin,
@@ -481,6 +503,7 @@ mod tests {
             None,
             Arc::clone(&banned),
             Arc::clone(&added_nodes),
+            None,
         );
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),

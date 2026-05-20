@@ -271,11 +271,13 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut swtotal_size: u64 = 0;
     let mut swtotal_weight: u64 = 0;
     let mut tx_sizes: Vec<u64> = Vec::new();
+    let mut fee_fields = FeeFields::default();
     if let Some(record) = record.as_ref() {
         if let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) {
             total_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             if let Ok(block) = deserialize::<bitcoin::Block>(&bytes) {
                 total_weight = block.weight().to_wu();
+                fee_fields = compute_fee_fields(ctx, &block);
                 txs = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
                 for tx in &block.txdata {
                     ins = ins.saturating_add(u64::try_from(tx.input.len()).unwrap_or(u64::MAX));
@@ -310,21 +312,21 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     };
 
     Ok(json!({
-        "avgfee": 0,
-        "avgfeerate": 0,
+        "avgfee": fee_fields.avgfee,
+        "avgfeerate": fee_fields.avgfeerate,
         "avgtxsize": avgtxsize,
         "blockhash": block_hash.to_string_be(),
-        "feerate_percentiles": [0, 0, 0, 0, 0],
+        "feerate_percentiles": fee_fields.feerate_percentiles,
         "height": height,
         "ins": ins,
-        "maxfee": 0,
-        "maxfeerate": 0,
+        "maxfee": fee_fields.maxfee,
+        "maxfeerate": fee_fields.maxfeerate,
         "maxtxsize": maxtxsize,
-        "medianfee": 0,
+        "medianfee": fee_fields.medianfee,
         "mediantime": mediantime,
         "mediantxsize": mediantxsize,
-        "minfee": 0,
-        "minfeerate": 0,
+        "minfee": fee_fields.minfee,
+        "minfeerate": fee_fields.minfeerate,
         "mintxsize": mintxsize,
         "outs": outs,
         "subsidy": subsidy_sat,
@@ -335,11 +337,157 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         "total_out": total_out,
         "total_size": total_size,
         "total_weight": total_weight,
-        "totalfee": 0,
+        "totalfee": fee_fields.totalfee,
         "txs": txs,
         "utxo_increase": 0,
         "utxo_size_inc": 0
     }))
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct FeeFields {
+    avgfee: u64,
+    avgfeerate: u64,
+    feerate_percentiles: [u64; 5],
+    maxfee: u64,
+    maxfeerate: u64,
+    medianfee: u64,
+    minfee: u64,
+    minfeerate: u64,
+    totalfee: u64,
+}
+
+fn resolve_per_tx_fees(ctx: &Context, block: &bitcoin::Block) -> Option<Vec<(u64, u64)>> {
+    let indexer = ctx.indexer.as_ref()?;
+    let tx_count = block.txdata.len().saturating_sub(1);
+    let mut fees = Vec::with_capacity(tx_count);
+    for tx in block.txdata.iter().skip(1) {
+        let mut total_in = 0_u64;
+        for input in &tx.input {
+            let value = indexer
+                .lock()
+                .resolve_outpoint_value(input.previous_output, ctx)
+                .ok()??;
+            total_in = total_in.saturating_add(value);
+        }
+        let total_out = tx.output.iter().fold(0_u64, |sum, output| {
+            sum.saturating_add(output.value.to_sat())
+        });
+        let fee = total_in.checked_sub(total_out)?;
+        fees.push((fee, tx.weight().to_wu()));
+    }
+    Some(fees)
+}
+
+fn percentiles_by_weight(scores: &mut [(u64, u64)], total_weight: u64) -> [u64; 5] {
+    const NUMERATORS: [u64; 5] = [1, 1, 1, 3, 9];
+    const DENOMINATORS: [u64; 5] = [10, 4, 2, 4, 10];
+
+    if scores.is_empty() || total_weight == 0 {
+        return [0; 5];
+    }
+
+    scores.sort_unstable_by(|(left_rate, left_weight), (right_rate, right_weight)| {
+        (*left_rate, *left_weight).cmp(&(*right_rate, *right_weight))
+    });
+    let mut out = [0_u64; 5];
+    let mut cumulative = 0_u64;
+    let mut percentile = 0_usize;
+    let mut last_rate = 0_u64;
+    for (rate, weight) in scores.iter().copied() {
+        last_rate = rate;
+        cumulative = cumulative.saturating_add(weight);
+        while percentile < out.len()
+            && u128::from(cumulative) * u128::from(DENOMINATORS[percentile])
+                >= u128::from(total_weight) * u128::from(NUMERATORS[percentile])
+        {
+            out[percentile] = rate;
+            percentile += 1;
+        }
+    }
+    while percentile < out.len() {
+        out[percentile] = last_rate;
+        percentile += 1;
+    }
+    out
+}
+
+fn truncated_median(values: &mut [u64]) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let mid = values.len() / 2;
+    if values.len() % 2 == 1 {
+        return values[mid];
+    }
+    let low = values[mid - 1];
+    let high = values[mid];
+    (low / 2)
+        .saturating_add(high / 2)
+        .saturating_add((low % 2).saturating_add(high % 2) / 2)
+}
+
+fn compute_fee_fields(ctx: &Context, block: &bitcoin::Block) -> FeeFields {
+    let Some(per_tx) = resolve_per_tx_fees(ctx, block) else {
+        return FeeFields::default();
+    };
+    if per_tx.is_empty() {
+        return FeeFields::default();
+    }
+
+    let totalfee = per_tx
+        .iter()
+        .fold(0_u64, |sum, (fee, _weight)| sum.saturating_add(*fee));
+    let total_weight = per_tx
+        .iter()
+        .fold(0_u64, |sum, (_fee, weight)| sum.saturating_add(*weight));
+    let tx_count = u64::try_from(per_tx.len()).map_or(1, |count| count);
+    let avgfee = totalfee / tx_count;
+    let avgfeerate = if total_weight == 0 {
+        0
+    } else {
+        totalfee.saturating_mul(4) / total_weight
+    };
+
+    let mut fees = Vec::with_capacity(per_tx.len());
+    let mut rates = Vec::with_capacity(per_tx.len());
+    for (fee, weight) in &per_tx {
+        fees.push(*fee);
+        let rate = if *weight == 0 {
+            0
+        } else {
+            (*fee).saturating_mul(4) / *weight
+        };
+        rates.push((rate, *weight));
+    }
+
+    let minfee = fees.iter().copied().min().map_or(0, |fee| fee);
+    let maxfee = fees.iter().copied().max().map_or(0, |fee| fee);
+    let medianfee = truncated_median(&mut fees);
+    let minfeerate = rates
+        .iter()
+        .map(|(rate, _weight)| *rate)
+        .min()
+        .map_or(0, |rate| rate);
+    let maxfeerate = rates
+        .iter()
+        .map(|(rate, _weight)| *rate)
+        .max()
+        .map_or(0, |rate| rate);
+    let feerate_percentiles = percentiles_by_weight(&mut rates, total_weight);
+
+    FeeFields {
+        avgfee,
+        avgfeerate,
+        feerate_percentiles,
+        maxfee,
+        maxfeerate,
+        medianfee,
+        minfee,
+        minfeerate,
+        totalfee,
+    }
 }
 
 /// Bitcoin block subsidy at `height` in satoshis. 50 BTC initially, halving
@@ -765,6 +913,54 @@ mod tests {
     fn subsidy_at_height_after_64_halvings_is_zero() {
         assert_eq!(subsidy_at_height(64 * 210_000), 0);
         assert_eq!(subsidy_at_height(u32::MAX), 0);
+    }
+
+    #[test]
+    fn percentiles_by_weight_empty_scores_are_zero() {
+        let mut scores = Vec::new();
+
+        assert_eq!(percentiles_by_weight(&mut scores, 0), [0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn percentiles_by_weight_single_tx_fills_all_slots() {
+        let mut scores = vec![(12, 400)];
+
+        assert_eq!(
+            percentiles_by_weight(&mut scores, 400),
+            [12, 12, 12, 12, 12]
+        );
+    }
+
+    #[test]
+    fn percentiles_by_weight_two_txs_use_core_thresholds() {
+        let mut scores = vec![(20, 100), (5, 100)];
+
+        assert_eq!(percentiles_by_weight(&mut scores, 200), [5, 5, 5, 20, 20]);
+    }
+
+    #[test]
+    fn percentiles_by_weight_fills_remaining_slots_with_last_rate() {
+        let mut scores = vec![(2, 1), (5, 1)];
+
+        assert_eq!(percentiles_by_weight(&mut scores, 100), [5, 5, 5, 5, 5]);
+    }
+
+    #[test]
+    fn truncated_median_handles_odd_and_even_lengths() {
+        let mut odd = vec![7, 1, 3];
+        let mut even = vec![1, 4];
+
+        assert_eq!(truncated_median(&mut odd), 3);
+        assert_eq!(truncated_median(&mut even), 2);
+    }
+
+    #[test]
+    fn compute_fee_fields_defaults_without_indexer() {
+        let ctx = Context::new();
+        let block = genesis_block(bitcoin::Network::Regtest);
+
+        assert_eq!(compute_fee_fields(&ctx, &block), FeeFields::default());
     }
 
     #[test]

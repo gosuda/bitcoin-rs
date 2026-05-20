@@ -8,7 +8,7 @@ use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::{BlockHash, Transaction, Txid};
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
-use bitcoin_rs_index::{IndexError, IndexRowCounts, IndexerLike};
+use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{BlockSync, Network, apply::ApplyHandles};
 use bitcoin_rs_p2p::{Message, PeerInfo};
@@ -176,6 +176,14 @@ struct NoopIndexer;
 impl IndexerLike for NoopIndexer {
     fn ingest_block(&mut self, _block: &[u8], _height: u32) -> Result<IndexRowCounts, IndexError> {
         Ok(IndexRowCounts::default())
+    }
+
+    fn resolve_outpoint_value(
+        &self,
+        _outpoint: bitcoin::OutPoint,
+        _source: &dyn BlockSource,
+    ) -> Result<Option<u64>, IndexError> {
+        Ok(None)
     }
 }
 

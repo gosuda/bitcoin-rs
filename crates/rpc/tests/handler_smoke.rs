@@ -2,6 +2,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use hashbrown::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use bitcoin::consensus::encode::serialize_hex;
@@ -9,11 +10,12 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
+use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_p2p::PeerInfo;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_rpc::{BlockRecord, Context, Handler, RpcError};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 #[test]
@@ -207,6 +209,63 @@ fn getindexinfo_returns_both_indexes() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn getblockstats_fee_fields_are_zero_without_indexer() -> Result<(), Box<dyn std::error::Error>> {
+    let (ctx, _low_tx, _high_tx) = fee_stats_context(None);
+    let handler = Handler::new(ctx);
+
+    let result = handler.dispatch("getblockstats", &json!([7]))?;
+
+    assert_fee_fields_zero(&result)?;
+    Ok(())
+}
+
+#[test]
+fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), Box<dyn std::error::Error>> {
+    let mut values = HashMap::new();
+    values.insert(outpoint(21), 10_000);
+    values.insert(outpoint(22), 10_000);
+    let (ctx, low_tx, high_tx) = fee_stats_context(Some(values));
+    let handler = Handler::new(ctx);
+
+    let result = handler.dispatch("getblockstats", &json!([7]))?;
+    let low_rate = 1_000_u64.saturating_mul(4) / low_tx.weight().to_wu();
+    let high_rate = 3_000_u64.saturating_mul(4) / high_tx.weight().to_wu();
+    let total_weight = low_tx
+        .weight()
+        .to_wu()
+        .saturating_add(high_tx.weight().to_wu());
+    let avg_rate = 4_000_u64.saturating_mul(4) / total_weight;
+
+    assert_eq!(result.get("totalfee").as_u64(), Some(4_000));
+    assert_eq!(result.get("avgfee").as_u64(), Some(2_000));
+    assert_eq!(result.get("avgfeerate").as_u64(), Some(avg_rate));
+    assert_eq!(result.get("medianfee").as_u64(), Some(2_000));
+    assert_eq!(result.get("minfee").as_u64(), Some(1_000));
+    assert_eq!(result.get("maxfee").as_u64(), Some(3_000));
+    assert_eq!(result.get("minfeerate").as_u64(), Some(low_rate));
+    assert_eq!(result.get("maxfeerate").as_u64(), Some(high_rate));
+    assert_percentiles(
+        &result,
+        &[low_rate, low_rate, low_rate, high_rate, high_rate],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn getblockstats_fee_fields_are_all_zero_when_any_prevout_missing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut values = HashMap::new();
+    values.insert(outpoint(21), 10_000);
+    let (ctx, _low_tx, _high_tx) = fee_stats_context(Some(values));
+    let handler = Handler::new(ctx);
+
+    let result = handler.dispatch("getblockstats", &json!([7]))?;
+
+    assert_fee_fields_zero(&result)?;
+    Ok(())
+}
+
+#[test]
 fn empty_context_is_not_initial_block_download() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(Arc::new(Context::new()));
 
@@ -330,6 +389,132 @@ impl FilterIndexLike for StaticFilterIndex {
     ) -> Result<Option<Vec<u8>>, FilterIndexError> {
         Ok((block_hash == self.block_hash).then(|| self.filter.clone()))
     }
+}
+
+struct FakeIndexer {
+    values: HashMap<OutPoint, u64>,
+}
+
+impl IndexerLike for FakeIndexer {
+    fn ingest_block(&mut self, _block: &[u8], _height: u32) -> Result<IndexRowCounts, IndexError> {
+        Ok(IndexRowCounts::default())
+    }
+
+    fn resolve_outpoint_value(
+        &self,
+        outpoint: OutPoint,
+        _source: &dyn BlockSource,
+    ) -> Result<Option<u64>, IndexError> {
+        Ok(self.values.get(&outpoint).copied())
+    }
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+fn fee_stats_context(
+    values: Option<HashMap<OutPoint, u64>>,
+) -> (Arc<Context>, Transaction, Transaction) {
+    let low_tx = fee_tx(21, 9_000);
+    let high_tx = fee_tx(22, 7_000);
+    let block = fee_block(low_tx.clone(), high_tx.clone());
+    let mut ctx = Context::new();
+    if let Some(values) = values {
+        let indexer: Box<dyn IndexerLike> = Box::new(FakeIndexer { values });
+        ctx.indexer = Some(Arc::new(Mutex::new(indexer)));
+    }
+    ctx.add_block(BlockRecord::from_block(7, &block));
+    (Arc::new(ctx), low_tx, high_tx)
+}
+
+fn fee_block(low_tx: Transaction, high_tx: Transaction) -> bitcoin::Block {
+    let coinbase = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0_u8; 32]),
+                vout: u32::MAX,
+            },
+            script_sig: ScriptBuf::from_bytes(vec![0x51]),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let txdata = vec![coinbase, low_tx, high_tx];
+    let merkle_root = bitcoin::merkle_tree::calculate_root(
+        txdata.iter().map(|tx| tx.compute_txid().to_raw_hash()),
+    )
+    .map_or_else(
+        bitcoin::TxMerkleNode::all_zeros,
+        bitcoin::TxMerkleNode::from_raw_hash,
+    );
+    bitcoin::Block {
+        header: bitcoin::block::Header {
+            version: bitcoin::block::Version::ONE,
+            prev_blockhash: bitcoin::BlockHash::all_zeros(),
+            merkle_root,
+            time: 1_231_006_505,
+            bits: bitcoin::CompactTarget::from_consensus(0x1d00_ffff),
+            nonce: 0,
+        },
+        txdata,
+    }
+}
+
+fn fee_tx(label: u8, output_sat: u64) -> Transaction {
+    Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: outpoint(label),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(output_sat),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    }
+}
+
+fn assert_fee_fields_zero(value: &sonic_rs::Value) -> Result<(), Box<dyn std::error::Error>> {
+    for field in [
+        "avgfee",
+        "avgfeerate",
+        "maxfee",
+        "maxfeerate",
+        "medianfee",
+        "minfee",
+        "minfeerate",
+        "totalfee",
+    ] {
+        assert_eq!(value.get(field).as_u64(), Some(0), "{field} must be zero");
+    }
+    assert_percentiles(value, &[0, 0, 0, 0, 0])
+}
+
+fn assert_percentiles(
+    value: &sonic_rs::Value,
+    expected: &[u64],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let percentile_value = value.get("feerate_percentiles");
+    let percentiles = percentile_value
+        .as_array()
+        .ok_or("feerate_percentiles must be an array")?;
+    let observed = percentiles
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| std::io::Error::other("percentile must be u64"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(observed.as_slice(), expected);
+    Ok(())
 }
 
 struct Fixture {

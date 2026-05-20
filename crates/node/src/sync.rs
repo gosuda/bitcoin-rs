@@ -306,7 +306,7 @@ mod tests {
     };
     use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus, TipSnapshot};
     use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
-    use bitcoin_rs_index::{IndexError, IndexRowCounts, IndexerLike};
+    use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
     use bitcoin_rs_p2p::PeerInfo;
     use bitcoin_rs_utxo::UtxoSet;
@@ -500,6 +500,14 @@ mod tests {
             _height: u32,
         ) -> Result<IndexRowCounts, IndexError> {
             Ok(IndexRowCounts::default())
+        }
+
+        fn resolve_outpoint_value(
+            &self,
+            _outpoint: bitcoin::OutPoint,
+            _source: &dyn BlockSource,
+        ) -> Result<Option<u64>, IndexError> {
+            Ok(None)
         }
     }
 
