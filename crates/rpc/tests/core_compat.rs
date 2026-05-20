@@ -54,6 +54,7 @@ fn selected_methods_match_core_documented_key_sets() -> Result<(), Box<dyn std::
             "incrementalrelayfee",
             "unbroadcastcount",
             "fullrbf",
+            "mempool_sequence",
         ],
     )?;
     assert_keys(
