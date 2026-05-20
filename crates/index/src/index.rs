@@ -314,6 +314,42 @@ impl<S: KvStore> Indexer<S> {
         Ok(None)
     }
 
+    /// Resolves a transaction by txid and returns it alongside the block
+    /// height where it was confirmed.
+    ///
+    /// Same scanning strategy as [`resolve_transaction`]: iterates the
+    /// `iter_txid_rows(txid)` prefix candidates, fetches each candidate height's
+    /// block via `source`, and compares full-32-byte txid for exact match.
+    /// Returns the first match.
+    ///
+    /// Cost: O(R + B) where R = number of prefix rows for `txid` and B = block
+    /// fetch cost per candidate height.
+    pub fn resolve_tx_with_height<B: BlockSource>(
+        &self,
+        txid: bitcoin::Txid,
+        source: &B,
+    ) -> Result<Option<(bitcoin::Transaction, u32)>, IndexError> {
+        let rows = self.iter_txid_rows(&txid)?;
+        let mut last_height: Option<u32> = None;
+        let mut cached_block: Option<bitcoin::Block> = None;
+        for row in &rows {
+            let height = row.height();
+            if last_height != Some(height) {
+                cached_block = source.block_at_height(height);
+                last_height = Some(height);
+            }
+            let Some(block) = cached_block.as_ref() else {
+                continue;
+            };
+            for tx in &block.txdata {
+                if tx.compute_txid() == txid {
+                    return Ok(Some((tx.clone(), height)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Walks one serialized block once with `bitcoin_slices` and writes electrs-shaped rows.
     pub fn ingest_block(
         &mut self,
@@ -673,6 +709,43 @@ mod tests {
         let resolved = indexer.resolve_transaction(txid, &source)?;
 
         assert_eq!(resolved, Some(coinbase));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_tx_with_height_returns_genesis_coinbase_at_height_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let coinbase = tx.clone();
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let resolved = indexer.resolve_tx_with_height(txid, &source)?;
+
+        assert_eq!(resolved, Some((coinbase, 0)));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_tx_with_height_returns_none_for_unknown_txid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, indexer) = indexer()?;
+        let txid = bitcoin::Txid::from_byte_array([0xff; 32]);
+        let source = FakeSource {
+            block: bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest),
+            target_height: 0,
+        };
+
+        assert_eq!(indexer.resolve_tx_with_height(txid, &source)?, None);
         Ok(())
     }
 
