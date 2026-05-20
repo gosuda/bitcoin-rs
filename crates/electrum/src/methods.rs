@@ -228,6 +228,16 @@ impl MempoolHandle {
         }
     }
 
+    /// Builds a handle that shares an existing `Arc<RwLock<Mempool>>`.
+    ///
+    /// Use this constructor when the mempool is owned elsewhere (e.g. by
+    /// `bitcoin_rs_node::NodeState`) and the Electrum server must observe
+    /// the same transactions the rest of the node sees.
+    #[must_use]
+    pub const fn from_arc(pool: Arc<RwLock<Mempool>>) -> Self {
+        Self { pool }
+    }
+
     /// Inserts a transaction with explicit policy metadata.
     pub fn insert_transaction(
         &self,
@@ -674,5 +684,19 @@ fn ensure_array_len(params: &Value, len: usize) -> Result<(), ElectrumError> {
         Ok(())
     } else {
         Err(ElectrumError::InvalidParams("unexpected parameter count"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arc, Mempool, MempoolHandle, MempoolLimits, RwLock};
+
+    #[test]
+    fn from_arc_reuses_existing_mempool_allocation() {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+
+        let handle = MempoolHandle::from_arc(Arc::clone(&pool));
+
+        assert!(Arc::ptr_eq(&pool, &handle.pool));
     }
 }

@@ -28,6 +28,7 @@ fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
 
 fn spawn_electrum_listener(
     config: &bitcoin_rs_node::Config,
+    state: &NodeState,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<Option<std::thread::JoinHandle<Result<(), bitcoin_rs_electrum::ElectrumError>>>>
 {
@@ -43,7 +44,7 @@ fn spawn_electrum_listener(
     }
 
     let index = bitcoin_rs_electrum::IndexHandle::new();
-    let mempool = bitcoin_rs_electrum::MempoolHandle::default();
+    let mempool = bitcoin_rs_electrum::MempoolHandle::from_arc(state.mempool());
     let cfg = bitcoin_rs_electrum::ServerConfig::default();
     let server = bitcoin_rs_electrum::ElectrumServer::bind(addr, index, mempool, cfg)
         .map_err(anyhow::Error::from)?;
@@ -168,7 +169,7 @@ pub fn run(mut config: Config) -> Result<()> {
     let rpc_thread = std::thread::Builder::new()
         .name("bitcoin-rs-rpc".into())
         .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
-    let electrum_thread = spawn_electrum_listener(state.config(), &shutdown)?;
+    let electrum_thread = spawn_electrum_listener(state.config(), &state, &shutdown)?;
     let peers = state.peers();
     let peer_outbound = state.peer_outbound();
     let p2p_threads = spawn_p2p_listeners(
