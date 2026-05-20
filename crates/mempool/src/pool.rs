@@ -693,10 +693,27 @@ impl Mempool {
         children
     }
 
-    fn descendant_count_inclusive(&self, id: EntryId) -> u32 {
+    /// Returns the descendant-package count for `id` (inclusive of `id` itself).
+    ///
+    /// Saturates at `u32::MAX` for pathological packages.
+    #[must_use]
+    pub fn descendant_count_inclusive(&self, id: EntryId) -> u32 {
         let mut descendants = Vec::new();
         self.collect_descendants_inclusive(id, &mut descendants);
         u32::try_from(descendants.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Returns the ancestor-package count for `id` (inclusive of `id` itself).
+    ///
+    /// Saturates at `u32::MAX` for pathological packages. Composes
+    /// `ancestor_ids_for_entry` + plus-one (caller is itself an ancestor of
+    /// the inclusive count).
+    #[must_use]
+    pub fn ancestor_count_inclusive(&self, id: EntryId) -> u32 {
+        let ancestors = self.ancestor_ids_for_entry(id);
+        u32::try_from(ancestors.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1)
     }
 
     fn entry_mut(&mut self, id: EntryId) -> Option<&mut MempoolEntry> {
@@ -1138,6 +1155,20 @@ mod tests {
         let descendants = pool.descendant_ids_for_entry(parent_id);
 
         assert_eq!(descendants, vec![child_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn descendant_count_inclusive_returns_one_for_lone_tx() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let lone = tx(1, Vec::new());
+        let lone_txid = lone.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(lone), 500, 1_000, 1, 7))?;
+        let Some(&id) = pool.by_txid.get(&lone_txid) else {
+            panic!("insert failed");
+        };
+        assert_eq!(pool.descendant_count_inclusive(id), 1);
+        assert_eq!(pool.ancestor_count_inclusive(id), 1);
         Ok(())
     }
 

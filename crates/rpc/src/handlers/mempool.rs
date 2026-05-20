@@ -205,14 +205,22 @@ fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> s
     spentby.sort();
     spentby.dedup();
 
+    let entry_id = pool.by_txid.get(&entry.tx.compute_txid()).copied();
+    let (descendantcount, ancestorcount) = entry_id.map_or((1, 1), |id| {
+        (
+            pool.descendant_count_inclusive(id),
+            pool.ancestor_count_inclusive(id),
+        )
+    });
+
     serde_json_value!({
         "vsize": entry.vsize,
         "weight": u64::from(entry.vsize).saturating_mul(4),
         "time": entry.time,
         "height": entry.height,
-        "descendantcount": 1,
+        "descendantcount": descendantcount,
         "descendantsize": entry.descendant_size,
-        "ancestorcount": 1,
+        "ancestorcount": ancestorcount,
         "ancestorsize": entry.ancestor_size,
         "wtxid": entry.tx.compute_wtxid().to_string(),
         "fees": {
