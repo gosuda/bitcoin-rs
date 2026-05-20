@@ -358,6 +358,16 @@ impl Mempool {
         None
     }
 
+    /// Returns whether any in-pool transaction spends `outpoint`.
+    ///
+    /// Composes `find_by_outpoint(...).is_some()`. Cheaper than
+    /// `find_by_outpoint` when only the presence answer matters — the wider
+    /// accessor returns the spending txid which callers may not need.
+    #[must_use]
+    pub fn is_outpoint_spent(&self, outpoint: &bitcoin::OutPoint) -> bool {
+        self.find_by_outpoint(outpoint).is_some()
+    }
+
     /// Adjusts the effective fee of `txid` in the pool by `fee_delta` satoshis.
     ///
     /// The delta can be negative (saturating at 0). Bumps the entry's `fee`,
@@ -1195,6 +1205,43 @@ mod tests {
             vout: 0,
         };
         assert_eq!(pool.find_by_outpoint(&outpoint), None);
+    }
+
+    #[test]
+    fn is_outpoint_spent_returns_true_after_insert() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let prev_txid = bitcoin::Txid::from_byte_array([0xaa_u8; 32]);
+        let outpoint = bitcoin::OutPoint {
+            txid: prev_txid,
+            vout: 1,
+        };
+        let spending = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: outpoint,
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(0xFFFF_FFFF),
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![],
+        };
+        pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7))?;
+        assert!(pool.is_outpoint_spent(&outpoint));
+        Ok(())
+    }
+
+    #[test]
+    fn is_outpoint_spent_returns_false_for_unspent_outpoint() {
+        let pool = Mempool::new(MempoolLimits::default());
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0xff_u8; 32]),
+            vout: 0,
+        };
+        assert!(!pool.is_outpoint_spent(&outpoint));
     }
 
     #[test]
