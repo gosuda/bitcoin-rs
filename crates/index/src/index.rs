@@ -172,6 +172,47 @@ impl<S: KvStore> Indexer<S> {
         Ok(outputs)
     }
 
+    /// Same as `resolve_unspent_outputs` but each tuple carries the funding height.
+    ///
+    /// Returns `(txid, vout, value_sats, funding_height)` quadruples. Use this
+    /// when callers need the confirmation height (e.g. Electrum `listunspent`
+    /// emits the height for each unspent output).
+    pub fn resolve_unspent_outputs_with_height<B: BlockSource>(
+        &self,
+        scripthash: crate::ScriptHash,
+        source: &B,
+    ) -> Result<Vec<(bitcoin::Txid, u32, u64, u32)>, IndexError> {
+        let rows = self.iter_funding_rows(scripthash)?;
+        let mut outputs = Vec::new();
+        let mut last_height: Option<u32> = None;
+        let mut cached_block: Option<bitcoin::Block> = None;
+        for row in &rows {
+            let height = row.height();
+            if last_height != Some(height) {
+                cached_block = source.block_at_height(height);
+                last_height = Some(height);
+            }
+            let Some(block) = cached_block.as_ref() else {
+                continue;
+            };
+            for tx in &block.txdata {
+                let txid = tx.compute_txid();
+                for (vout_idx, output) in tx.output.iter().enumerate() {
+                    if crate::ScriptHash::from_script_bytes(output.script_pubkey.as_bytes())
+                        != scripthash
+                    {
+                        continue;
+                    }
+                    let Ok(vout) = u32::try_from(vout_idx) else {
+                        continue;
+                    };
+                    outputs.push((txid, vout, output.value.to_sat(), height));
+                }
+            }
+        }
+        Ok(outputs)
+    }
+
     /// Iterates confirmed spending rows that spent `outpoint`.
     ///
     /// Returns every `HashPrefixRow` whose 8-byte prefix matches the outpoint's
@@ -198,6 +239,41 @@ impl<S: KvStore> Indexer<S> {
         let prefix = TxidRow::scan_prefix(txid);
         let iter = self.store.iter_prefix(ColumnFamily::TxConfirmed, &prefix)?;
         collect_prefix_rows(iter)
+    }
+
+    /// Resolves a transaction by txid via `source`.
+    ///
+    /// Scans `iter_txid_rows(txid)` for candidate `(prefix, height)` entries.
+    /// For each height, fetches the block and looks for the transaction whose
+    /// full computed txid matches `txid` exactly. Returns the first match, or
+    /// `None` if no candidates resolve to the requested txid.
+    ///
+    /// The 8-byte prefix is lossy; this method exact-resolves it by comparing
+    /// the full 32-byte txid before returning.
+    pub fn resolve_transaction<B: BlockSource>(
+        &self,
+        txid: bitcoin::Txid,
+        source: &B,
+    ) -> Result<Option<bitcoin::Transaction>, IndexError> {
+        let rows = self.iter_txid_rows(&txid)?;
+        let mut last_height: Option<u32> = None;
+        let mut cached_block: Option<bitcoin::Block> = None;
+        for row in &rows {
+            let height = row.height();
+            if last_height != Some(height) {
+                cached_block = source.block_at_height(height);
+                last_height = Some(height);
+            }
+            let Some(block) = cached_block.as_ref() else {
+                continue;
+            };
+            for tx in &block.txdata {
+                if tx.compute_txid() == txid {
+                    return Ok(Some(tx.clone()));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Walks one serialized block once with `bitcoin_slices` and writes electrs-shaped rows.
@@ -494,6 +570,56 @@ mod tests {
         let outputs = indexer.resolve_unspent_outputs(scripthash, &source)?;
 
         assert_eq!(outputs, vec![(txid, 0, value)]);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_transaction_returns_coinbase_for_genesis_block_indexed_at_height_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let coinbase = tx.clone();
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let resolved = indexer.resolve_transaction(txid, &source)?;
+
+        assert_eq!(resolved, Some(coinbase));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_unspent_outputs_with_height_returns_funding_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let Some(output) = tx.output.first() else {
+            return Err(std::io::Error::other("genesis transaction has no outputs").into());
+        };
+        let scripthash = ScriptHash::from_script_bytes(output.script_pubkey.as_bytes());
+        let txid = tx.compute_txid();
+        let value = output.value.to_sat();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let outputs = indexer.resolve_unspent_outputs_with_height(scripthash, &source)?;
+
+        assert_eq!(outputs, vec![(txid, 0, value, 0)]);
         Ok(())
     }
 
