@@ -199,3 +199,18 @@ impl Visitor for IndexBlockVisitor<'_> {
 fn is_null_prevout(prevout: &bsl::OutPoint<'_>) -> bool {
     prevout.vout() == u32::MAX && prevout.txid().iter().all(|byte| *byte == 0)
 }
+
+/// Storage-agnostic block-ingest interface.
+///
+/// Use this trait when consumers must hold the indexer behind a trait
+/// object (e.g. when the storage backend is selected at runtime).
+pub trait IndexerLike: Send + Sync {
+    /// Walks `block` once and writes index rows. See `Indexer::ingest_block`.
+    fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError>;
+}
+
+impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
+    fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError> {
+        Self::ingest_block(self, block, height)
+    }
+}

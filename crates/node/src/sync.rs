@@ -305,6 +305,7 @@ mod tests {
         pow::CompactTarget,
     };
     use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus, TipSnapshot};
+    use bitcoin_rs_index::{IndexError, IndexRowCounts, IndexerLike};
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
     use bitcoin_rs_p2p::PeerInfo;
     use bitcoin_rs_utxo::UtxoSet;
@@ -480,10 +481,28 @@ mod tests {
             coin_stats: Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
+            tx_index: noop_tx_index(),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
         }
+    }
+
+    struct NoopIndexer;
+
+    impl IndexerLike for NoopIndexer {
+        fn ingest_block(
+            &mut self,
+            _block: &[u8],
+            _height: u32,
+        ) -> Result<IndexRowCounts, IndexError> {
+            Ok(IndexRowCounts::default())
+        }
+    }
+
+    fn noop_tx_index() -> Arc<Mutex<Box<dyn IndexerLike>>> {
+        let indexer: Box<dyn IndexerLike> = Box::new(NoopIndexer);
+        Arc::new(Mutex::new(indexer))
     }
 
     fn test_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {

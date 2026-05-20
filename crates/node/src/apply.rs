@@ -37,6 +37,8 @@ pub struct ApplyHandles {
     pub utxo: Arc<UtxoSet>,
     /// Shared coinstats listener.
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
+    /// Shared best-effort confirmed transaction indexer.
+    pub tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
     /// Shared mempool.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Shared block records exposed to RPC handlers.
@@ -215,6 +217,31 @@ pub fn apply_block(
     let coin_stats_dur = coin_stats_started.elapsed();
     metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
         .record(coin_stats_dur.as_secs_f64());
+    let tx_index_ingest_started = quanta::Instant::now();
+    let block_bytes = bitcoin::consensus::encode::serialize(block);
+    let tx_index_ingest_result = handles.tx_index.lock().ingest_block(&block_bytes, height);
+    match tx_index_ingest_result {
+        Ok(counts) => {
+            tracing::debug!(
+                height,
+                txids = counts.txids,
+                funding = counts.funding,
+                spending = counts.spending,
+                headers = counts.headers,
+                "tx_index ingested block"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                height,
+                %error,
+                "tx_index failed to ingest block; best-effort path continues"
+            );
+        }
+    }
+    let tx_index_ingest_dur = tx_index_ingest_started.elapsed();
+    metrics::histogram!("node.apply_block.tx_index_ingest_seconds")
+        .record(tx_index_ingest_dur.as_secs_f64());
     let total_dur = total_started.elapsed();
     metrics::histogram!("node.apply_block.total_seconds").record(total_dur.as_secs_f64());
     metrics::counter!("node.apply_block.txs_applied").increment(tx_count_delta);
@@ -234,6 +261,7 @@ pub fn apply_block(
         block_tree_insert_us = block_tree_insert_dur.as_micros(),
         mempool_evict_us = mempool_evict_dur.as_micros(),
         tx_index_us = tx_index_dur.as_micros(),
+        tx_index_ingest_us = tx_index_ingest_dur.as_micros(),
         coin_stats_us = coin_stats_dur.as_micros(),
         total_us = total_dur.as_micros(),
         "apply_block: profile"

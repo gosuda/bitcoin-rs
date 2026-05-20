@@ -23,6 +23,8 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
 
+type TxIndexHandle = Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>;
+
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -165,6 +167,40 @@ impl fmt::Display for CompiledStorageFeatures {
     }
 }
 
+fn open_tx_index(config: &Config) -> Result<TxIndexHandle> {
+    let txindex_dir = config.data_dir.join("txindex");
+    std::fs::create_dir_all(&txindex_dir)
+        .with_context(|| format!("create txindex_dir {}", txindex_dir.display()))?;
+    let tx_index: Box<dyn bitcoin_rs_index::IndexerLike> = match config.storage_backend.as_str() {
+        #[cfg(feature = "rocksdb")]
+        "rocksdb" => {
+            let store =
+                bitcoin_rs_storage::RocksDbStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
+            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+        }
+        #[cfg(feature = "fjall")]
+        "fjall" => {
+            let store =
+                bitcoin_rs_storage::FjallStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
+            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+        }
+        #[cfg(feature = "redb")]
+        "redb" => {
+            let store =
+                bitcoin_rs_storage::RedbStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
+            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+        }
+        #[cfg(feature = "mdbx")]
+        "mdbx" => {
+            let store =
+                bitcoin_rs_storage::MdbxStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
+            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+        }
+        other => bail!("unsupported storage backend for txindex: {other}"),
+    };
+    Ok(Arc::new(Mutex::new(tx_index)))
+}
+
 /// Aggregate handle to a running node.
 pub struct NodeState {
     config: Config,
@@ -172,6 +208,7 @@ pub struct NodeState {
     storage: NodeStorage,
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
+    tx_index: TxIndexHandle,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -203,6 +240,7 @@ impl NodeState {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let storage = NodeStorage::open(&config)?;
+        let tx_index = open_tx_index(&config)?;
         let mut utxo_set = bitcoin_rs_utxo::UtxoSet::new();
         let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
             bitcoin_rs_coinstats::CoinStats::default(),
@@ -234,6 +272,7 @@ impl NodeState {
                 block_tree: Arc::clone(&block_tree),
                 utxo: Arc::clone(&utxo),
                 coin_stats: Arc::clone(&coin_stats),
+                tx_index: Arc::clone(&tx_index),
                 mempool: Arc::clone(&mempool),
                 blocks: Arc::clone(&blocks),
                 transactions: Arc::clone(&transactions),
@@ -255,6 +294,7 @@ impl NodeState {
             storage,
             utxo,
             coin_stats,
+            tx_index,
             mempool,
             chain_tip,
             applied_tip,
@@ -302,6 +342,12 @@ impl NodeState {
     #[must_use]
     pub fn coin_stats(&self) -> Arc<bitcoin_rs_coinstats::CoinStatsListener> {
         Arc::clone(&self.coin_stats)
+    }
+
+    /// Returns the shared block indexer handle.
+    #[must_use]
+    pub fn tx_index(&self) -> Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>> {
+        Arc::clone(&self.tx_index)
     }
 
     /// Returns the shared mempool handle.
@@ -451,6 +497,7 @@ impl NodeState {
             block_tree: Arc::clone(&self.block_tree),
             utxo: Arc::clone(&self.utxo),
             coin_stats: Arc::clone(&self.coin_stats),
+            tx_index: Arc::clone(&self.tx_index),
             mempool: Arc::clone(&self.mempool),
             blocks: Arc::clone(&self.blocks),
             transactions: Arc::clone(&self.transactions),
@@ -535,6 +582,19 @@ mod tests {
             snapshot.tx_count, 0,
             "freshly opened coin_stats has zero txs"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_tx_index() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let a = state.tx_index();
+        let b = state.tx_index();
+        assert!(Arc::ptr_eq(&a, &b), "tx_index handle stable across calls");
         Ok(())
     }
 
