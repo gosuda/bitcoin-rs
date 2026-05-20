@@ -325,6 +325,7 @@ pub struct NodeState {
     tx_index: TxIndexHandle,
     tx_index_storage: Arc<TxIndexStorage>,
     filter_index: FilterIndexHandle,
+    zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -361,6 +362,7 @@ impl NodeState {
         let (tx_index, tx_index_storage) = open_tx_index(&config)?;
         let tx_index_storage = Arc::new(tx_index_storage);
         let filter_index = open_filter_index(&config)?;
+        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(crate::NoOpZmqPublisher);
         let mut utxo_set = bitcoin_rs_utxo::UtxoSet::new();
         let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
             bitcoin_rs_coinstats::CoinStats::default(),
@@ -420,6 +422,7 @@ impl NodeState {
             tx_index,
             tx_index_storage: Arc::clone(&tx_index_storage),
             filter_index,
+            zmq_publisher,
             mempool,
             chain_tip,
             applied_tip,
@@ -501,6 +504,12 @@ impl NodeState {
     #[must_use]
     pub fn filter_index(&self) -> FilterIndexHandle {
         Arc::clone(&self.filter_index)
+    }
+
+    /// Returns the configured ZMQ publisher handle (default: `NoOpZmqPublisher`).
+    #[must_use]
+    pub fn zmq_publisher(&self) -> Arc<dyn crate::ZmqPublisher> {
+        Arc::clone(&self.zmq_publisher)
     }
 
     /// Returns the shared mempool handle.
@@ -856,6 +865,19 @@ mod tests {
         let state = NodeState::open(config)?;
 
         assert!(state.peer_outbound().read().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn zmq_publisher_handle_defaults_to_noop() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let publisher = state.zmq_publisher();
+        // No-op publisher accepts publish calls silently.
+        publisher.publish_hashblock(bitcoin_rs_primitives::Hash256::default());
         Ok(())
     }
 
