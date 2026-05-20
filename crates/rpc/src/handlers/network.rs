@@ -13,7 +13,6 @@ use crate::handlers::{ensure_no_params, params_array, required_str};
 // Sum = 73 = 0x49.
 const LOCAL_SERVICES_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 3) | (1_u64 << 6);
 const LOCAL_SERVICES_HEX: &str = "0000000000000049";
-const LOCAL_SERVICES_NAMES: &[&str] = &["NETWORK", "WITNESS", "COMPACT_FILTERS"];
 
 const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x49);
 /// Decodes a Bitcoin service-flags bitmask into a list of name strings.
@@ -59,10 +58,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "subversion": "/bitcoin-rs:0.1.0/",
         "protocolversion": 70016_i64,
         "localservices": LOCAL_SERVICES_HEX,
-        "localservicesnames": LOCAL_SERVICES_NAMES
-            .iter()
-            .map(|&s| s.to_owned())
-            .collect::<Vec<_>>(),
+        "localservicesnames": services_names_from_flags(LOCAL_SERVICES_FLAGS),
         "localrelay": true,
         "timeoffset": 0,
         "networkactive": true,
@@ -91,7 +87,7 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             "addr": peer.addr.to_string(),
             "addrbind": peer.addr.to_string(),
             "services": format!("{:016x}", peer.services),
-            "servicesnames": services_names_from_flags(peer.services),
+            "servicesnames": peer.services_names().into_iter().map(str::to_owned).collect::<Vec<_>>(),
             "relaytxes": true,
             "lastsend": 0,
             "lastrecv": 0,
@@ -351,6 +347,23 @@ mod tests {
                 "NETWORK_LIMITED".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn getpeerinfo_servicesnames_matches_peer_info_services_names() {
+        use bitcoin_rs_p2p::PeerInfo;
+
+        let info = PeerInfo {
+            addr: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
+            version: 70_016,
+            services: (1_u64 << 0) | (1_u64 << 3),
+            user_agent: "stub".to_owned(),
+            start_height: 0,
+            conn_time: 0,
+            inbound: false,
+        };
+
+        assert_eq!(info.services_names(), vec!["NETWORK", "WITNESS"]);
     }
 
     #[test]
