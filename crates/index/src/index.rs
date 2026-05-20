@@ -80,6 +80,54 @@ impl<S: KvStore> Indexer<S> {
         collect_prefix_rows(iter)
     }
 
+    /// Resolves confirmed script-history entries for `scripthash` via `source`.
+    ///
+    /// Walks `iter_funding_rows(scripthash)` to get every (prefix, height) pair,
+    /// fetches each block via `source.block_at_height(height)`, and yields a
+    /// `HistoryEntry::confirmed` for every transaction in that block that has
+    /// at least one output matching `scripthash` exactly.
+    ///
+    /// Entries are returned in iteration order (lexicographic by prefix||height).
+    /// Heights not resolvable by `source` are skipped.
+    ///
+    /// The lossy 8-byte prefix is exact-resolved here: only transactions whose
+    /// output scripthash matches the full 32-byte `scripthash` are emitted.
+    pub fn resolve_script_history<B: BlockSource>(
+        &self,
+        scripthash: crate::ScriptHash,
+        source: &B,
+    ) -> Result<Vec<crate::HistoryEntry>, IndexError> {
+        let rows = self.iter_funding_rows(scripthash)?;
+        let mut entries = Vec::new();
+        let mut last_height: Option<u32> = None;
+        let mut cached_block: Option<bitcoin::Block> = None;
+        for row in &rows {
+            let height = row.height();
+            if last_height != Some(height) {
+                cached_block = source.block_at_height(height);
+                last_height = Some(height);
+            }
+            let Some(block) = cached_block.as_ref() else {
+                continue;
+            };
+            for tx in &block.txdata {
+                let mut matched = false;
+                for output in &tx.output {
+                    if crate::ScriptHash::from_script_bytes(output.script_pubkey.as_bytes())
+                        == scripthash
+                    {
+                        matched = true;
+                        break;
+                    }
+                }
+                if matched {
+                    entries.push(crate::HistoryEntry::confirmed(tx.compute_txid(), height));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Iterates confirmed spending rows that spent `outpoint`.
     ///
     /// Returns every `HashPrefixRow` whose 8-byte prefix matches the outpoint's
@@ -271,6 +319,18 @@ pub trait IndexerLike: Send + Sync {
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError>;
 }
 
+/// Provides block lookups for resolving lossy index prefixes to full identities.
+///
+/// The index column families store 8-byte prefixes of txids/scripthashes/outpoints.
+/// To recover the full Bitcoin identities behind a `HashPrefixRow`, callers need
+/// to fetch the block at the row's height and walk its transactions. `BlockSource`
+/// is the trait that hides where blocks come from (in-memory store, raw-block KV
+/// database, peer fetch).
+pub trait BlockSource {
+    /// Returns the Bitcoin block at `height` on the active chain, if known.
+    fn block_at_height(&self, height: u32) -> Option<bitcoin::Block>;
+}
+
 impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError> {
         Self::ingest_block(self, block, height)
@@ -289,8 +349,8 @@ mod tests {
     };
     use bitcoin_rs_storage::RocksDbStore;
 
-    use super::Indexer;
-    use crate::{ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow};
+    use super::{BlockSource, Indexer};
+    use crate::{HistoryEntry, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow};
 
     const HEIGHT: u32 = 42;
 
@@ -339,6 +399,46 @@ mod tests {
         let rows = indexer.iter_txid_rows(&txid)?;
         assert!(rows.contains(&TxidRow::row(&txid, HEIGHT)));
         Ok(())
+    }
+
+    #[test]
+    fn resolve_script_history_returns_entries_for_funded_scripthash()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let Some(output) = tx.output.first() else {
+            return Err(std::io::Error::other("genesis transaction has no outputs").into());
+        };
+        let scripthash = ScriptHash::from_script_bytes(output.script_pubkey.as_bytes());
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let entries = indexer.resolve_script_history(scripthash, &source)?;
+
+        assert_eq!(entries, vec![HistoryEntry::confirmed(txid, 0)]);
+        Ok(())
+    }
+
+    struct FakeSource {
+        block: Block,
+        target_height: u32,
+    }
+
+    impl BlockSource for FakeSource {
+        fn block_at_height(&self, height: u32) -> Option<Block> {
+            if height == self.target_height {
+                return Some(self.block.clone());
+            }
+            None
+        }
     }
 
     fn indexer() -> Result<(tempfile::TempDir, Indexer<RocksDbStore>), Box<dyn std::error::Error>> {
