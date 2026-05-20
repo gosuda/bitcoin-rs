@@ -34,6 +34,13 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         bitcoin_rs_primitives::Network::Signet => "signet",
         bitcoin_rs_primitives::Network::Regtest => "regtest",
     };
+    let size_on_disk: u64 = {
+        let blocks = ctx.blocks.read();
+        blocks
+            .iter()
+            .map(|record| u64::try_from(record.block_hex.len() / 2).unwrap_or(u64::MAX))
+            .fold(0_u64, u64::saturating_add)
+    };
     Ok(json!({
         "chain": chain,
         "blocks": applied,
@@ -45,7 +52,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         "verificationprogress": verification_progress,
         "initialblockdownload": applied < headers,
         "chainwork": ctx.chainwork_hex(),
-        "size_on_disk": 0,
+        "size_on_disk": size_on_disk,
         "pruned": false,
         "warnings": ""
     }))
@@ -953,6 +960,18 @@ mod tests {
             "expected 0.0, got {progress}"
         );
     }
+
+    #[test]
+    fn getblockchaininfo_size_on_disk_zero_for_empty_blocks() {
+        let ctx = Arc::new(Context::new());
+        let result = getblockchaininfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+        assert_eq!(
+            result.get("size_on_disk").and_then(JsonValueTrait::as_u64),
+            Some(0)
+        );
+    }
+
     #[test]
     fn getchaintxstats_emits_core_shape_with_zero_blocks() {
         use alloc::sync::Arc;
