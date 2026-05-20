@@ -63,6 +63,7 @@ impl Handler {
             "getconnectioncount" => network::getconnectioncount(&self.ctx, params),
             "getnettotals" => network::getnettotals(&self.ctx, params),
             "getblocktemplate" => mining::getblocktemplate(&self.ctx, params),
+            "getmininginfo" => mining::getmininginfo(&self.ctx, params),
             "submitblock" => mining::submitblock(&self.ctx, params),
             "prioritisetransaction" => mining::prioritisetransaction(&self.ctx, params),
             "getdescriptorinfo" => wallet::getdescriptorinfo(&self.ctx, params),

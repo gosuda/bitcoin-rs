@@ -5,7 +5,7 @@ use sonic_rs::{JsonValueTrait, Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{params_array, required_str};
+use crate::handlers::{ensure_no_params, params_array, required_str};
 
 pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     if !params.is_null() {
@@ -44,6 +44,38 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
         "bits": "00000000",
         "height": ctx.height().saturating_add(1),
         "default_witness_commitment": ""
+    }))
+}
+
+pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+
+    let blocks = ctx.applied_height();
+    let pooledtx = ctx.mempool.read().stats().txs;
+    let tip_bits = {
+        let tree = ctx.block_tree.read();
+        let snapshot = ctx.applied_tip.load_full();
+        snapshot.and_then(|tip| tree.node(tip.tip_id).ok().map(|node| node.header.bits))
+    };
+    let difficulty = tip_bits.map_or(0.0, |bits| ctx.difficulty_for_bits(bits));
+    let chain = match ctx.chain_network {
+        bitcoin_rs_primitives::Network::Mainnet => "main",
+        bitcoin_rs_primitives::Network::Testnet3 | bitcoin_rs_primitives::Network::Testnet4 => {
+            "test"
+        }
+        bitcoin_rs_primitives::Network::Signet => "signet",
+        bitcoin_rs_primitives::Network::Regtest => "regtest",
+    };
+
+    Ok(json!({
+        "blocks": blocks,
+        "currentblockweight": 0_u64,
+        "currentblocktx": 0_u64,
+        "difficulty": difficulty,
+        "networkhashps": 0.0_f64,
+        "pooledtx": pooledtx,
+        "chain": chain,
+        "warnings": ""
     }))
 }
 
@@ -117,5 +149,30 @@ mod submitblock_tests {
             panic!("expected string rejection, got {result:?}");
         };
         assert_eq!(s, "bad-block-encoding");
+    }
+}
+
+#[cfg(test)]
+mod getmininginfo_tests {
+    use super::*;
+    use alloc::sync::Arc;
+
+    #[test]
+    fn getmininginfo_returns_core_shape_on_fresh_context() {
+        let ctx = Arc::new(Context::new());
+        let result = getmininginfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
+        let Some(chain) = result.get("chain").and_then(JsonValueTrait::as_str) else {
+            panic!("chain missing: {result:?}");
+        };
+        assert_eq!(chain, "main");
+        let Some(blocks) = result.get("blocks").and_then(JsonValueTrait::as_u64) else {
+            panic!("blocks missing: {result:?}");
+        };
+        assert_eq!(blocks, 0);
+        let Some(pooledtx) = result.get("pooledtx").and_then(JsonValueTrait::as_u64) else {
+            panic!("pooledtx missing: {result:?}");
+        };
+        assert_eq!(pooledtx, 0);
     }
 }
