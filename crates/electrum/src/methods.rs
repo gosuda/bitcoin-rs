@@ -526,6 +526,7 @@ pub fn dispatch(
         "server.donation_address" => server_donation_address(index, mempool, params),
         "server.peers.subscribe" => server_peers_subscribe(index, mempool, params),
         "server.ping" => server_ping(index, mempool, params),
+        "server.add_peer" => server_add_peer(index, mempool, params),
         "blockchain.scripthash.get_history" => scripthash_get_history(index, mempool, params),
         "blockchain.scripthash.get_balance" => scripthash_get_balance(index, mempool, params),
         "blockchain.scripthash.subscribe" => scripthash_subscribe(index, mempool, params),
@@ -602,6 +603,21 @@ pub(crate) fn server_peers_subscribe(
 ) -> Result<Value, ElectrumError> {
     ensure_array_len(params, 0)?;
     Ok(json!([]))
+}
+pub(crate) fn server_add_peer(
+    _index: &IndexHandle,
+    _mempool: &MempoolHandle,
+    params: &Value,
+) -> Result<Value, ElectrumError> {
+    // We don't track Electrum-server peers; reject the advert per electrs's
+    // behavior. The params shape is the advertised peer's features object;
+    // we accept any well-formed array (even with extra args).
+    if params.is_null() {
+        return Err(ElectrumError::InvalidParams(
+            "server.add_peer expects an array",
+        ));
+    }
+    Ok(json!(false))
 }
 
 pub(crate) fn server_ping(
@@ -1003,6 +1019,28 @@ mod server_features_tests {
             .block_hash()
             .to_string();
         assert_eq!(genesis, expected);
+    }
+}
+
+#[cfg(test)]
+mod server_add_peer_tests {
+    use super::*;
+
+    #[test]
+    fn server_add_peer_returns_false() {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let result = dispatch("server.add_peer", &index, &mempool, &json!([{}]))
+            .unwrap_or_else(|err| panic!("server.add_peer failed: {err}"));
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn server_add_peer_rejects_null_params() {
+        let index = IndexHandle::new();
+        let mempool = MempoolHandle::default();
+        let result = dispatch("server.add_peer", &index, &mempool, &Value::new_null());
+        assert!(result.is_err());
     }
 }
 
