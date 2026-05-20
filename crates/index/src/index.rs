@@ -87,6 +87,19 @@ impl<S: KvStore> Indexer<S> {
         self.iter_block_headers().map(|rows| rows.len())
     }
 
+    /// Returns the highest indexed header height, or `None` if no headers are
+    /// indexed.
+    ///
+    /// Cost O(N) since `header_count` pulls every row. Cache if called
+    /// frequently. Convenience for IBD progress reporting and status surfaces.
+    pub fn tip_height_indexed(&self) -> Result<Option<u32>, IndexError> {
+        let count = self.header_count()?;
+        if count == 0 {
+            return Ok(None);
+        }
+        Ok(u32::try_from(count.saturating_sub(1)).ok())
+    }
+
     /// Iterates confirmed funding rows for `scripthash`.
     ///
     /// Returns every `HashPrefixRow` whose 8-byte prefix matches the scripthash's
@@ -520,6 +533,24 @@ mod tests {
         indexer.ingest_block(&serialize(&genesis), 0)?;
 
         assert_eq!(indexer.header_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn tip_height_indexed_returns_none_for_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, indexer) = indexer()?;
+        assert!(indexer.tip_height_indexed()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn tip_height_indexed_returns_zero_after_genesis_ingest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, mut indexer) = indexer()?;
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        indexer.ingest_block(&serialize(&genesis), 0)?;
+
+        assert_eq!(indexer.tip_height_indexed()?, Some(0));
         Ok(())
     }
 
