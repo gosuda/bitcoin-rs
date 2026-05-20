@@ -1,3 +1,4 @@
+use bitcoin_rs_primitives::Hash256;
 use ruint::Uint;
 use sha2::{Digest, Sha256};
 
@@ -51,6 +52,18 @@ impl MuHash3072 {
             None => U3072::ZERO,
         };
         quotient.to_be_bytes::<BYTE_LEN>()
+    }
+
+    /// Finalizes to Bitcoin Core's 32-byte `MuHash` digest.
+    ///
+    /// Core hashes the finalized 3072-bit group element in little-endian
+    /// byte order, then exposes the resulting `uint256` with `GetHex()`.
+    #[must_use]
+    pub fn finalize_hash(&self) -> Hash256 {
+        let mut element = self.finalize();
+        element.reverse();
+        let digest: [u8; 32] = Sha256::digest(element).into();
+        Hash256::from_le_bytes(&digest)
     }
 
     pub(crate) fn from_parts(numerator: &[u8; BYTE_LEN], denominator: &[u8; BYTE_LEN]) -> Self {

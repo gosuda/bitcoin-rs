@@ -22,6 +22,10 @@ pub mod snapshot;
 
 pub use key::{UtxoBuildHasher, UtxoKey};
 pub use record::{OneUtxoOut, UtxoRecord};
-pub use set::{BlockChanges, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoError, UtxoSet};
+pub use set::{
+    BlockChanges, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoError, UtxoSet, UtxoSetView,
+};
 pub use shard::LiveOutput;
-pub use snapshot::{SnapshotLoad, aggregate_hash, read_snapshot, write_snapshot};
+pub use snapshot::{
+    SnapshotLoad, aggregate_hash, hash_serialized_3, read_snapshot, write_snapshot,
+};

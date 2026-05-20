@@ -23,9 +23,20 @@ const HELLO_MUHASH: [u8; 384] = hex_384(
      163fcbbcd305fe34ef44491e73a6df582",
 );
 
+const IDENTITY_CORE_HASH: &str = "dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8";
+const HELLO_CORE_HASH: &str = "981bf4c996ee963cd067e765c15111a6c8d3d6f0257fda0af7371f77fca8c472";
+
 #[test]
 fn empty_muhash_finalizes_to_identity_element() {
     assert_eq!(MuHash3072::new().finalize(), IDENTITY);
+}
+
+#[test]
+fn empty_muhash_hash_matches_core_digest() {
+    assert_eq!(
+        MuHash3072::new().finalize_hash().to_string_be(),
+        IDENTITY_CORE_HASH
+    );
 }
 
 #[test]
@@ -34,6 +45,14 @@ fn single_insert_matches_known_answer() {
     muhash.insert(b"hello");
 
     assert_eq!(muhash.finalize(), HELLO_MUHASH);
+}
+
+#[test]
+fn single_insert_hash_matches_core_digest() {
+    let mut muhash = MuHash3072::new();
+    muhash.insert(b"hello");
+
+    assert_eq!(muhash.finalize_hash().to_string_be(), HELLO_CORE_HASH);
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use bitcoin::{Amount, ScriptBuf};
-use bitcoin_rs_primitives::TxOut;
+use bitcoin_rs_primitives::{Hash256, TxOut};
 use bumpalo::{Bump, collections::Vec as BumpVec};
 use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
@@ -88,7 +88,7 @@ impl Shard {
 
     pub(crate) fn commit_batch(
         &self,
-        adds: &[(UtxoKey, BuildPayload<'_>)],
+        adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
         removes: &[SpendPayload<'_>],
         listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
     ) -> Result<(), UtxoError> {
@@ -100,8 +100,8 @@ impl Shard {
                 }
             }
             for chunk in adds.chunks(OPS_AT_ONCE) {
-                for (key, payload) in chunk {
-                    apply_add(arena, table, *key, payload, listener)?;
+                for (key, txid, payload) in chunk {
+                    apply_add(arena, table, *key, *txid, payload, listener)?;
                 }
             }
             Ok::<(), UtxoError>(())
@@ -110,12 +110,12 @@ impl Shard {
 
     /// Returns an owned transaction output if `key:vout` is live in this shard.
     #[must_use]
-    pub fn get(&self, key: &UtxoKey, vout: u32) -> Option<TxOut> {
+    pub fn get(&self, key: &UtxoKey, txid: &Hash256, vout: u32) -> Option<TxOut> {
         let cell = self.inner.read();
         cell.with_dependent(|_arena, table| {
-            let record = table
-                .table
-                .find(key.hash(), |record| record.key() == *key)?;
+            let record = table.table.find(key.hash(), |record| {
+                record.key() == *key && record.txid() == *txid
+            })?;
             let output = record.find_output(vout)?;
             let script = script_slice(table, output)?;
             Some(txout_from_parts(output.value, script))
@@ -125,12 +125,12 @@ impl Shard {
     /// Returns the full live-output entry (txout + coinbase + height)
     /// if `key:vout` is live in this shard.
     #[must_use]
-    pub fn get_entry(&self, key: &UtxoKey, vout: u32) -> Option<LiveOutput> {
+    pub fn get_entry(&self, key: &UtxoKey, txid: &Hash256, vout: u32) -> Option<LiveOutput> {
         let cell = self.inner.read();
         cell.with_dependent(|_arena, table| {
-            let record = table
-                .table
-                .find(key.hash(), |record| record.key() == *key)?;
+            let record = table.table.find(key.hash(), |record| {
+                record.key() == *key && record.txid() == *txid
+            })?;
             let output = record.find_output(vout)?;
             let script = script_slice(table, output)?;
             Some(LiveOutput {
@@ -163,12 +163,13 @@ impl Shard {
     pub(crate) fn insert_owned_record(
         &self,
         key: UtxoKey,
+        txid: Hash256,
         outputs: &[OwnedUtxoOut],
     ) -> Result<(), UtxoError> {
         let mut cell = self.inner.write();
         cell.with_dependent_mut(|arena, table| {
-            let _old = take_record(table, key);
-            let mut record = UtxoRecord::new(key);
+            let _old = take_record(table, key, txid);
+            let mut record = UtxoRecord::new(key, txid);
             for output in outputs {
                 append_owned_output(table, &mut record, output)?;
             }
@@ -186,7 +187,7 @@ impl Shard {
             let live = table.table.len();
             let total = live.saturating_add(deleted);
             if total == 0 || deleted.saturating_mul(4) <= total {
-                Ok::<Option<Vec<(UtxoKey, Vec<OwnedUtxoOut>)>>, UtxoError>(None)
+                Ok::<Option<Vec<(UtxoKey, Hash256, Vec<OwnedUtxoOut>)>>, UtxoError>(None)
             } else {
                 collect_owned_records(table).map(Some)
             }
@@ -202,8 +203,8 @@ impl Shard {
             table
         });
         replacement.with_dependent_mut(|arena, table| {
-            for (key, outputs) in &records {
-                let mut record = UtxoRecord::new(*key);
+            for (key, txid, outputs) in &records {
+                let mut record = UtxoRecord::new(*key, *txid);
                 for output in outputs {
                     append_owned_output(table, &mut record, output)?;
                 }
@@ -231,11 +232,12 @@ fn apply_add<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
     key: UtxoKey,
+    txid: Hash256,
     payload: &BuildPayload<'_>,
     listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
 ) -> Result<(), UtxoError> {
     validate_bitmap_vout(payload.vout)?;
-    let mut record = take_record(table, key).unwrap_or_else(|| UtxoRecord::new(key));
+    let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
     let script = payload.txout.script_pubkey.as_bytes();
     let script_len =
         u16::try_from(script.len()).map_err(|_| UtxoError::ScriptTooLarge { len: script.len() })?;
@@ -272,7 +274,7 @@ fn apply_remove<'arena>(
     listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
 ) -> Result<(), UtxoError> {
     validate_bitmap_vout(remove.vout)?;
-    let Some(mut record) = take_record(table, remove.key) else {
+    let Some(mut record) = take_record(table, remove.key, remove.txid) else {
         return Ok(());
     };
     let removed_output = record.find_output(remove.vout).and_then(|output| {
@@ -321,10 +323,16 @@ fn append_owned_output<'arena>(
     })
 }
 
-fn take_record<'arena>(table: &mut ShardTable<'arena>, key: UtxoKey) -> Option<UtxoRecord<'arena>> {
+fn take_record<'arena>(
+    table: &mut ShardTable<'arena>,
+    key: UtxoKey,
+    txid: Hash256,
+) -> Option<UtxoRecord<'arena>> {
     let entry = table
         .table
-        .find_entry(key.hash(), |record| record.key() == key)
+        .find_entry(key.hash(), |record| {
+            record.key() == key && record.txid() == txid
+        })
         .ok()?;
     let (record, _vacant) = entry.remove();
     table.deleted = table.deleted.saturating_add(1);
@@ -345,7 +353,7 @@ fn insert_record<'arena>(
 
 fn collect_owned_records(
     table: &ShardTable<'_>,
-) -> Result<Vec<(UtxoKey, Vec<OwnedUtxoOut>)>, UtxoError> {
+) -> Result<Vec<(UtxoKey, Hash256, Vec<OwnedUtxoOut>)>, UtxoError> {
     let mut records = Vec::with_capacity(table.table.len());
     for record in &table.table {
         let mut outputs = Vec::with_capacity(record.output_count());
@@ -359,7 +367,7 @@ fn collect_owned_records(
                 output.height,
             ));
         }
-        records.push((record.key(), outputs));
+        records.push((record.key(), record.txid(), outputs));
     }
     Ok(records)
 }

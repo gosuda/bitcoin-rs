@@ -15,6 +15,7 @@ use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_p2p::PeerInfo;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_rpc::{BlockRecord, Context, Handler, RpcError};
+use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use parking_lot::{Mutex, RwLock};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
@@ -152,12 +153,79 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::
     assert_eq!(result.get("transactions").as_u64(), Some(0));
     assert_eq!(result.get("bogosize").as_u64(), Some(0));
     assert_eq!(result.get("total_amount").as_f64(), Some(0.0));
-    let hash_serialized_value = result.get("hash_serialized_2");
+    let hash_serialized_value = result.get("hash_serialized_3");
     let hash_serialized = hash_serialized_value
         .as_str()
-        .ok_or("hash_serialized_2 must be a string")?;
-    assert_eq!(hash_serialized.len(), 768);
-    assert!(hash_serialized.ends_with("01"));
+        .ok_or("hash_serialized_3 must be a string")?;
+    assert_eq!(hash_serialized.len(), 64);
+    assert!(
+        hash_serialized
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "hash_serialized_3 must be lowercase hex"
+    );
+    Ok(())
+}
+
+#[test]
+fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let txid = Hash256::from_le_bytes(&[0x42; 32]);
+    let outpoint = bitcoin_rs_primitives::OutPoint::new(txid, 0);
+    let txout = TxOut {
+        value: Amount::from_sat(12_345),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    };
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(outpoint, txout, true, 9));
+    ctx.utxo
+        .commit_block(&changes, &Hash256::from_le_bytes(&[0x24; 32]))?;
+    let expected_hash = bitcoin_rs_utxo::hash_serialized_3(&ctx.utxo)?.to_string_be();
+    let expected_muhash = ctx
+        .coin_stats
+        .snapshot()
+        .muhash
+        .finalize_hash()
+        .to_string_be();
+    let handler = Handler::new(ctx);
+
+    let default_result = handler.dispatch("gettxoutsetinfo", &json!([]))?;
+    assert_eq!(
+        default_result.get("hash_serialized_3").as_str(),
+        Some(expected_hash.as_str())
+    );
+    assert!(default_result.get("muhash").is_none());
+
+    let explicit_result = handler.dispatch("gettxoutsetinfo", &json!(["hash_serialized_3"]))?;
+    assert_eq!(
+        explicit_result.get("hash_serialized_3").as_str(),
+        Some(expected_hash.as_str())
+    );
+    assert!(explicit_result.get("muhash").is_none());
+
+    let muhash_result = handler.dispatch("gettxoutsetinfo", &json!(["muhash"]))?;
+    let muhash_value = muhash_result.get("muhash");
+    let muhash = muhash_value.as_str().ok_or("muhash must be a string")?;
+    assert_eq!(muhash.len(), 64);
+    assert_eq!(muhash, expected_muhash.as_str());
+    assert!(
+        muhash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "muhash must be lowercase hex"
+    );
+    assert!(muhash_result.get("hash_serialized_3").is_none());
+
+    let none_result = handler.dispatch("gettxoutsetinfo", &json!(["none"]))?;
+    assert!(none_result.get("hash_serialized_3").is_none());
+    assert!(none_result.get("muhash").is_none());
+
+    assert!(matches!(
+        handler.dispatch("gettxoutsetinfo", &json!(["sha3"])),
+        Err(RpcError::InvalidParams(
+            "hash_type must be one of: hash_serialized_3, muhash, none"
+        ))
+    ));
     Ok(())
 }
 

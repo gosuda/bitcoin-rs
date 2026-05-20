@@ -1,5 +1,6 @@
 use core::marker::PhantomData;
 
+use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
 use tinyvec::ArrayVec;
 
@@ -31,6 +32,7 @@ pub struct OneUtxoOut {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtxoRecord<'arena> {
     pub(crate) key: UtxoKey,
+    pub(crate) txid: Hash256,
     /// Bitmap of live originating transaction outputs; supports vouts `0..64`.
     pub vout_bitmap: u64,
     /// Inline live outputs.
@@ -41,9 +43,10 @@ pub struct UtxoRecord<'arena> {
 }
 
 impl UtxoRecord<'_> {
-    pub(crate) fn new(key: UtxoKey) -> Self {
+    pub(crate) fn new(key: UtxoKey, txid: Hash256) -> Self {
         Self {
             key,
+            txid,
             vout_bitmap: 0,
             vouts: ArrayVec::new(),
             overflow: SmallVec::new(),
@@ -53,6 +56,10 @@ impl UtxoRecord<'_> {
 
     pub(crate) const fn key(&self) -> UtxoKey {
         self.key
+    }
+
+    pub(crate) const fn txid(&self) -> Hash256 {
+        self.txid
     }
 
     pub(crate) fn add_output(&mut self, output: OneUtxoOut) -> Result<(), UtxoError> {

@@ -23,7 +23,7 @@ fn txout(seed: u64) -> TxOut {
 }
 
 fn build_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, Box<dyn std::error::Error>> {
-    let mut live: Vec<(OutPoint, TxOut)> = Vec::new();
+    let mut live: Vec<UtxoAdd> = Vec::new();
     let mut blocks = Vec::with_capacity(10);
 
     for height in 1_u32..=10 {
@@ -32,22 +32,18 @@ fn build_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, Box<dyn std::error::
 
         let remove_count = live.len().min(50);
         for _ in 0..remove_count {
-            let (outpoint, txout) = live.remove(0);
-            changes.remove(outpoint);
-            undo.restore(UtxoAdd::new(
-                outpoint,
-                txout,
-                false,
-                height.saturating_sub(1),
-            ));
+            let add = live.remove(0);
+            changes.remove(add.outpoint);
+            undo.restore(add);
         }
 
         for n in 0_u64..100 {
             let seed = u64::from(height) * 1_000 + n;
             let outpoint = OutPoint::new(txid(seed), u32::try_from(n % 3)?);
             let txout = txout(seed);
-            live.push((outpoint, txout.clone()));
-            changes.add(UtxoAdd::new(outpoint, txout, height == 1, height));
+            let add = UtxoAdd::new(outpoint, txout, height == 1, height);
+            live.push(add.clone());
+            changes.add(add);
             undo.remove(outpoint);
         }
 

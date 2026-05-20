@@ -1,7 +1,7 @@
 use std::io;
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use thiserror::Error;
 
 use crate::{
@@ -77,6 +77,9 @@ pub enum UtxoError {
         /// Shard implied by the key prefix.
         key_shard: u8,
     },
+    /// Snapshot full txid does not match the stored key prefix.
+    #[error("snapshot txid prefix does not match record key prefix")]
+    SnapshotTxidPrefixMismatch,
 }
 
 /// Receives UTXO mutations committed to durable shard state.
@@ -211,13 +214,63 @@ pub(crate) struct SpendPayload<'a> {
     pub(crate) op: &'a OutPoint,
     pub(crate) key: UtxoKey,
     pub(crate) vout: u32,
+    pub(crate) txid: Hash256,
 }
 
 /// In-memory 256-shard UTXO set.
 pub struct UtxoSet {
     pub(crate) shards: [Shard; UtxoKey::SHARD_COUNT],
     pub(crate) last_defragged_shard: Mutex<u8>,
+    stable_view_lock: RwLock<()>,
     listener: Option<Box<dyn UtxoChangeListener + Send + Sync>>,
+}
+
+/// Read guard for a stable whole-set UTXO view.
+pub struct UtxoSetView<'a> {
+    set: &'a UtxoSet,
+    _guard: RwLockReadGuard<'a, ()>,
+}
+
+impl UtxoSetView<'_> {
+    /// Returns the number of live outpoint entries in this stable view.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.set.shards.iter().map(Shard::output_count).sum()
+    }
+
+    /// Returns true when this stable view has no live outpoint entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the number of transaction-level records in this stable view.
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.set.shards.iter().map(Shard::record_count).sum()
+    }
+
+    /// Returns each shard's script-slab high-water mark in this stable view.
+    #[must_use]
+    pub fn arena_high_water_by_shard(&self) -> [usize; UtxoKey::SHARD_COUNT] {
+        core::array::from_fn(|idx| self.set.shards[idx].arena_high_water())
+    }
+
+    /// Computes Bitcoin Core's `hash_serialized_3` commitment for this stable view.
+    pub fn hash_serialized_3(&self) -> Result<Hash256, UtxoError> {
+        crate::snapshot::hash_serialized_3_stable(self)
+    }
+
+    pub(crate) const fn shard(&self, idx: usize) -> &Shard {
+        &self.set.shards[idx]
+    }
+
+    pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
+        self.set
+            .listener
+            .as_deref()
+            .and_then(UtxoChangeListener::muhash3072)
+    }
 }
 
 impl UtxoSet {
@@ -227,6 +280,7 @@ impl UtxoSet {
         Self {
             shards: [(); UtxoKey::SHARD_COUNT].map(|()| Shard::new()),
             last_defragged_shard: Mutex::new(0),
+            stable_view_lock: RwLock::new(()),
             listener: None,
         }
     }
@@ -234,6 +288,16 @@ impl UtxoSet {
     /// Installs a listener for subsequently committed UTXO changes.
     pub fn set_listener(&mut self, listener: Box<dyn UtxoChangeListener + Send + Sync>) {
         self.listener = Some(listener);
+    }
+
+    /// Runs `read` while commits are blocked, yielding a stable whole-set view.
+    pub fn with_stable_view<R>(&self, read: impl FnOnce(&UtxoSetView<'_>) -> R) -> R {
+        let guard = self.stable_view_lock.read();
+        let view = UtxoSetView {
+            set: self,
+            _guard: guard,
+        };
+        read(&view)
     }
 
     /// Applies all UTXO changes for a connected block.
@@ -250,7 +314,7 @@ impl UtxoSet {
     #[must_use]
     pub fn get(&self, op: &OutPoint) -> Option<TxOut> {
         let key = UtxoKey::from_txid(&op.txid);
-        self.shards[usize::from(key.shard())].get(&key, op.vout)
+        self.shards[usize::from(key.shard())].get(&key, &op.txid, op.vout)
     }
 
     /// Returns the full live-output entry (txout + coinbase + height)
@@ -258,7 +322,7 @@ impl UtxoSet {
     #[must_use]
     pub fn get_entry(&self, op: &OutPoint) -> Option<crate::shard::LiveOutput> {
         let key = UtxoKey::from_txid(&op.txid);
-        self.shards[usize::from(key.shard())].get_entry(&key, op.vout)
+        self.shards[usize::from(key.shard())].get_entry(&key, &op.txid, op.vout)
     }
 
     /// Reverses one connected block using its undo data.
@@ -269,7 +333,7 @@ impl UtxoSet {
     /// Returns the number of live outpoint entries.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.shards.iter().map(Shard::output_count).sum()
+        self.with_stable_view(stable_view_len)
     }
 
     /// Returns true when the set has no live outpoint entries.
@@ -281,31 +345,22 @@ impl UtxoSet {
     /// Returns the number of transaction-level records.
     #[must_use]
     pub fn record_count(&self) -> usize {
-        self.shards.iter().map(Shard::record_count).sum()
+        self.with_stable_view(stable_view_record_count)
     }
 
     /// Returns each shard's script-slab high-water mark.
     #[must_use]
     pub fn arena_high_water_by_shard(&self) -> [usize; UtxoKey::SHARD_COUNT] {
-        core::array::from_fn(|idx| self.shards[idx].arena_high_water())
-    }
-
-    pub(crate) const fn shard(&self, idx: usize) -> &Shard {
-        &self.shards[idx]
+        self.with_stable_view(stable_view_arena_high_water_by_shard)
     }
 
     pub(crate) fn insert_snapshot_record(
         &self,
         key: UtxoKey,
+        txid: Hash256,
         outputs: &[OwnedUtxoOut],
     ) -> Result<(), UtxoError> {
-        self.shards[usize::from(key.shard())].insert_owned_record(key, outputs)
-    }
-
-    pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
-        self.listener
-            .as_deref()
-            .and_then(UtxoChangeListener::muhash3072)
+        self.shards[usize::from(key.shard())].insert_owned_record(key, txid, outputs)
     }
 
     fn commit_adds_and_removes(
@@ -319,7 +374,7 @@ impl UtxoSet {
         for add in adds {
             validate_add(add)?;
             let key = UtxoKey::from_txid(&add.outpoint.txid);
-            adds_by_shard[usize::from(key.shard())].push((key, add.payload()));
+            adds_by_shard[usize::from(key.shard())].push((key, add.outpoint.txid, add.payload()));
         }
         for remove in removes {
             validate_bitmap_vout(remove.vout)?;
@@ -328,8 +383,11 @@ impl UtxoSet {
                 op: remove,
                 key,
                 vout: remove.vout,
+                txid: remove.txid,
             });
         }
+
+        let _stable_commit = self.stable_view_lock.write();
 
         let errors = Mutex::new(Vec::new());
         let listener = self.listener.as_deref();
@@ -373,10 +431,21 @@ fn validate_add(add: &UtxoAdd) -> Result<(), UtxoError> {
     Ok(())
 }
 
-fn empty_add_buckets<'a>() -> Vec<Vec<(UtxoKey, BuildPayload<'a>)>> {
+fn empty_add_buckets<'a>() -> Vec<Vec<(UtxoKey, Hash256, BuildPayload<'a>)>> {
     (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
 }
 
 fn empty_remove_buckets<'a>() -> Vec<Vec<SpendPayload<'a>>> {
     (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
+}
+fn stable_view_len(view: &UtxoSetView<'_>) -> usize {
+    view.len()
+}
+
+fn stable_view_record_count(view: &UtxoSetView<'_>) -> usize {
+    view.record_count()
+}
+
+fn stable_view_arena_high_water_by_shard(view: &UtxoSetView<'_>) -> [usize; UtxoKey::SHARD_COUNT] {
+    view.arena_high_water_by_shard()
 }

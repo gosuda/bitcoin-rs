@@ -603,53 +603,48 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash_type = if params.is_null() {
-        "hash_serialized_2"
+        "hash_serialized_3"
     } else {
         match params_array(params)?.first() {
-            Some(value) if value.is_null() => "hash_serialized_2",
+            Some(value) if value.is_null() => "hash_serialized_3",
             Some(value) => value
                 .as_str()
                 .ok_or(RpcError::InvalidType("hash_type must be a string"))?,
-            None => "hash_serialized_2",
+            None => "hash_serialized_3",
         }
     };
-    let snapshot = ctx.coin_stats.snapshot();
+    let (snapshot, txouts, transactions, set_hash) = ctx.utxo.with_stable_view(|view| {
+        let snapshot = ctx.coin_stats.snapshot();
+        let set_hash = match hash_type {
+            "hash_serialized_3" => Some((
+                "hash_serialized_3",
+                view.hash_serialized_3()
+                    .map_err(|err| RpcError::Internal(err.to_string()))?
+                    .to_string_be(),
+            )),
+            "muhash" => Some(("muhash", snapshot.muhash.finalize_hash().to_string_be())),
+            "none" => None,
+            _ => {
+                return Err(RpcError::InvalidParams(
+                    "hash_type must be one of: hash_serialized_3, muhash, none",
+                ));
+            }
+        };
+        Ok::<_, RpcError>((snapshot, view.len(), view.record_count(), set_hash))
+    })?;
     let total_amount_btc = bitcoin::Amount::from_sat(snapshot.total_amount).to_btc();
-    let muhash_hex = {
-        let muhash_bytes = snapshot.muhash.finalize();
-        let mut hex = String::with_capacity(muhash_bytes.len() * 2);
-        for byte in muhash_bytes {
-            use core::fmt::Write as _;
 
-            let _: core::fmt::Result = write!(&mut hex, "{byte:02x}");
-        }
-        hex
-    };
     let bestblock = ctx.applied_hash().to_string_be();
     let mut response = sonic_rs::Object::new();
     let _ = response.insert(&"height", ctx.applied_height());
     let _ = response.insert(&"bestblock", bestblock.as_str());
-    let _ = response.insert(&"txouts", ctx.utxo.len());
+    let _ = response.insert(&"txouts", txouts);
     let _ = response.insert(&"bogosize", snapshot.bogo_size);
     let _ = response.insert(&"total_amount", json!(total_amount_btc));
-    let _ = response.insert(&"transactions", ctx.utxo.record_count());
+    let _ = response.insert(&"transactions", transactions);
     let _ = response.insert(&"disk_size", 0_u64);
-    match hash_type {
-        "hash_serialized_2" => {
-            // TODO(hash_serialized_2): emit the canonical UTXO-serialization
-            // SHA256d hash. Until then we surface muhash under this key as a
-            // placeholder; muhash is a different commitment.
-            let _ = response.insert(&"hash_serialized_2", muhash_hex.as_str());
-        }
-        "muhash" => {
-            let _ = response.insert(&"muhash", muhash_hex.as_str());
-        }
-        "none" => {}
-        _ => {
-            return Err(RpcError::InvalidParams(
-                "hash_type must be one of: hash_serialized_2, muhash, none",
-            ));
-        }
+    if let Some((field, hash)) = set_hash {
+        let _ = response.insert(&field, hash.as_str());
     }
     Ok(Value::from(response))
 }
@@ -1099,8 +1094,8 @@ mod tests {
             "muhash should be absent for hash_type=none: {result:?}"
         );
         assert!(
-            result.get("hash_serialized_2").is_none(),
-            "hash_serialized_2 should be absent for hash_type=none: {result:?}"
+            result.get("hash_serialized_3").is_none(),
+            "hash_serialized_3 should be absent for hash_type=none: {result:?}"
         );
         assert!(result.get("height").is_some());
     }

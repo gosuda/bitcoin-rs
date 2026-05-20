@@ -235,16 +235,20 @@ impl Context {
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
         let (mining_sender, mining_notifications) = unbounded();
+        let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
+            bitcoin_rs_coinstats::CoinStats::default(),
+        );
+        let mut utxo = bitcoin_rs_utxo::UtxoSet::new();
+        utxo.set_listener(Box::new(coin_stats_listener.clone()));
+        let coin_stats = Arc::new(coin_stats_listener);
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip: Arc::new(ArcSwapOption::empty()),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
-            utxo: Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
-            coin_stats: Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
-                bitcoin_rs_coinstats::CoinStats::default(),
-            )),
+            utxo: Arc::new(utxo),
+            coin_stats,
             filter_index: noop_filter_index(),
             indexer: None,
             prune_service: None,
@@ -604,6 +608,30 @@ mod tests {
             Arc::ptr_eq(&ctx.added_nodes, &added_nodes),
             "added_nodes must be shared with caller"
         );
+    }
+
+    #[test]
+    fn new_context_wires_utxo_commits_to_coin_stats() {
+        use bitcoin::{Amount, ScriptBuf};
+        use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+        use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
+
+        let ctx = Context::new();
+        let outpoint = OutPoint::new(Hash256::from_le_bytes(&[1_u8; 32]), 0);
+        let txout = TxOut {
+            value: Amount::from_sat(125_000),
+            script_pubkey: ScriptBuf::new(),
+        };
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(outpoint, txout, true, 7));
+
+        ctx.utxo
+            .commit_block(&changes, &Hash256::default())
+            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+
+        let snapshot = ctx.coin_stats.snapshot();
+        assert_eq!(snapshot.utxo_count, 1);
+        assert_eq!(snapshot.total_amount, 125_000);
     }
 
     #[test]
