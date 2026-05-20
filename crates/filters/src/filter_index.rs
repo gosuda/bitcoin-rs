@@ -68,6 +68,27 @@ impl<S: KvStore> FilterIndex<S> {
             .get(ColumnFamily::Filters, &block_hash.to_le_bytes())?)
     }
 
+    /// Iterates every persisted block-filter pair `(block_hash, filter_bytes)` in storage order.
+    ///
+    /// Used by SPV-style range queries that need every filter (e.g., wallet rescan).
+    /// Linear scan; cost O(N) for N filters.
+    pub fn iter_filters(
+        &self,
+    ) -> Result<Vec<(bitcoin_rs_primitives::Hash256, Vec<u8>)>, FilterIndexError> {
+        let iter = self.store.iter_prefix(ColumnFamily::Filters, &[])?;
+        let mut out = Vec::new();
+        for entry in iter {
+            let (key, value) = entry.map_err(FilterIndexError::Storage)?;
+            if let Ok(hash_bytes) = <[u8; 32]>::try_from(key.as_slice()) {
+                out.push((
+                    bitcoin_rs_primitives::Hash256::from_le_bytes(&hash_bytes),
+                    value,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
     /// Loads the BIP157 filter header for a block, if indexed.
     pub fn filter_header(&self, block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
         let Some(bytes) = self
@@ -110,6 +131,13 @@ pub trait FilterIndexLike: Send + Sync {
     ) -> Result<Option<Vec<u8>>, FilterIndexError> {
         Ok(None)
     }
+
+    /// Iterates every persisted block-filter pair `(block_hash, filter_bytes)` in storage order.
+    fn iter_filters(
+        &self,
+    ) -> Result<Vec<(bitcoin_rs_primitives::Hash256, Vec<u8>)>, FilterIndexError> {
+        Ok(Vec::new())
+    }
 }
 
 impl<S: KvStore + Send + Sync + 'static> FilterIndexLike for FilterIndex<S> {
@@ -134,5 +162,80 @@ impl<S: KvStore + Send + Sync + 'static> FilterIndexLike for FilterIndex<S> {
         block_hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, FilterIndexError> {
         Self::filter(self, block_hash)
+    }
+
+    fn iter_filters(
+        &self,
+    ) -> Result<Vec<(bitcoin_rs_primitives::Hash256, Vec<u8>)>, FilterIndexError> {
+        Self::iter_filters(self)
+    }
+}
+
+#[cfg(all(test, feature = "rocksdb"))]
+mod iter_filters_tests {
+    use std::{
+        env, fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use bitcoin_rs_storage::RocksDbStore;
+
+    use super::*;
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let mut path = env::temp_dir();
+            path.push(format!("bitcoin-rs-filters-{}-{nonce}", std::process::id()));
+            fs::create_dir(&path)?;
+            Ok(Self { path })
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn iter_filters_returns_empty_on_fresh_index() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TestDir::new()?;
+        let store = RocksDbStore::open(dir.path())?;
+        let index = FilterIndex::new(store);
+
+        let filters = index.iter_filters()?;
+
+        assert!(filters.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn iter_filters_returns_persisted_filters_in_storage_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TestDir::new()?;
+        let store = RocksDbStore::open(dir.path())?;
+        let index = FilterIndex::new(store);
+        let prev_header = Hash256::from_le_bytes(&[0_u8; 32]);
+        let low_hash = Hash256::from_le_bytes(&[1_u8; 32]);
+        let high_hash = Hash256::from_le_bytes(&[2_u8; 32]);
+
+        index.put_filter(high_hash, prev_header, b"high")?;
+        index.put_filter(low_hash, prev_header, b"low")?;
+
+        assert_eq!(
+            index.iter_filters()?,
+            vec![(low_hash, b"low".to_vec()), (high_hash, b"high".to_vec()),]
+        );
+        Ok(())
     }
 }
