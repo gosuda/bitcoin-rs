@@ -166,6 +166,15 @@ impl Mempool {
         })
     }
 
+    /// Evicts the lowest-fee packages until the pool's total vsize is at or below
+    /// `max_bytes`. Returns the evicted entry ids.
+    ///
+    /// Delegates to the free-function `evict_lowest_fee_packages`; removals bump
+    /// the sequence counter through `remove_entry_and_descendants`.
+    pub fn enforce_size_limit(&mut self, max_bytes: u64) -> Vec<EntryId> {
+        crate::evict_lowest_fee_packages(self, max_bytes)
+    }
+
     /// Returns aggregate counters for the current pool.
     #[must_use]
     pub fn stats(&self) -> MempoolStats {
@@ -830,6 +839,43 @@ mod tests {
         assert_eq!(evicted, vec![low_txid]);
         assert!(!pool.by_txid.contains_key(&low_txid));
         assert!(pool.by_txid.contains_key(&high_txid));
+        Ok(())
+    }
+
+    #[test]
+    fn enforce_size_limit_evicts_lowest_fee_until_below_target() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+
+        let low = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let low_txid = low.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 500, 100, 1, 7))?;
+
+        let high = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x52]),
+            }],
+        };
+        let high_txid = high.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(high), 500, 10_000, 1, 7))?;
+
+        let evicted = pool.enforce_size_limit(600);
+
+        assert_eq!(evicted.len(), 1);
+        assert!(!pool.by_txid.contains_key(&low_txid));
+        assert!(pool.by_txid.contains_key(&high_txid));
+        assert!(pool.total_vsize() <= 600);
         Ok(())
     }
 
