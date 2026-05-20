@@ -1,10 +1,15 @@
 use alloc::sync::Arc;
 
-use sonic_rs::{JsonValueTrait, Value, json};
+use core::str::FromStr;
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{ensure_no_params, params_array, required_str};
+use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str};
 
 // Local service flags this node advertises:
 // - NODE_NETWORK (1 << 0) = 1 — full block serving.
@@ -46,6 +51,59 @@ fn services_names_from_flags(flags: u64) -> Vec<String> {
 
 const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 const DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB: f64 = 0.00001;
+const DEFAULT_BAN_TIME_SECS: u64 = 24 * 60 * 60;
+
+fn parse_setban_target(raw: &str) -> Result<IpSubnet, RpcError> {
+    if let Ok(subnet) = IpSubnet::from_str(raw) {
+        return Ok(subnet);
+    }
+
+    if let Ok(socket) = SocketAddr::from_str(raw) {
+        return Ok(IpSubnet::from_ip(socket.ip()));
+    }
+
+    if let Ok(ip) = IpAddr::from_str(raw) {
+        return Ok(IpSubnet::from_ip(ip));
+    }
+
+    Err(RpcError::InvalidParams(
+        "subnet must be IP, IP/prefix, or host:port",
+    ))
+}
+
+fn epoch_seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Option<SystemTime> {
+    if absolute {
+        return UNIX_EPOCH.checked_add(Duration::from_secs(bantime));
+    }
+
+    let duration = if bantime == 0 {
+        Duration::from_secs(DEFAULT_BAN_TIME_SECS)
+    } else {
+        Duration::from_secs(bantime)
+    };
+    now.checked_add(duration)
+}
+
+fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
+    let Some(array) = params.as_array() else {
+        return Ok(default);
+    };
+    let Some(value) = array.get(index) else {
+        return Ok(default);
+    };
+    if value.is_null() {
+        return Ok(default);
+    }
+    value
+        .as_u64()
+        .ok_or(RpcError::InvalidType("parameter must be unsigned integer"))
+}
 
 pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
@@ -138,12 +196,12 @@ pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, Rp
     let banned = ctx.banned.read();
     let entries: Vec<sonic_rs::Value> = banned
         .iter()
-        .map(|addr| {
+        .map(|entry| {
             json!({
-                "address": addr.to_string(),
-                "banned_until": 0_u64,
-                "ban_created": 0_u64,
-                "ban_reason": "manual",
+                "address": entry.subnet.to_string(),
+                "banned_until": entry.banned_until.map_or(0, epoch_seconds),
+                "ban_created": epoch_seconds(entry.ban_created),
+                "ban_reason": entry.reason.clone(),
             })
         })
         .collect();
@@ -151,18 +209,25 @@ pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, Rp
 }
 
 pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    use core::str::FromStr as _;
-
     let subnet_str = required_str(params, 0, "subnet is required")?;
     let command = required_str(params, 1, "command is required")?;
-    let addr = std::net::SocketAddr::from_str(subnet_str)
-        .map_err(|_| RpcError::InvalidParams("subnet must be a valid host:port"))?;
+    let subnet = parse_setban_target(subnet_str)?;
     match command {
         "add" => {
-            ctx.banned.write().insert(addr);
+            let now = SystemTime::now();
+            let bantime = optional_u64(params, 2, 0)?;
+            let absolute = optional_bool(params, 3, false)?;
+            let mut banned = ctx.banned.write();
+            banned.retain(|entry| entry.subnet != subnet);
+            banned.push(BannedSubnet {
+                subnet,
+                banned_until: ban_until(now, bantime, absolute),
+                ban_created: now,
+                reason: "manual".to_owned(),
+            });
         }
         "remove" => {
-            ctx.banned.write().remove(&addr);
+            ctx.banned.write().retain(|entry| entry.subnet != subnet);
         }
         _ => return Err(RpcError::InvalidParams("command must be 'add' or 'remove'")),
     }
@@ -193,14 +258,19 @@ pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErro
 }
 
 pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    use core::str::FromStr as _;
-
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;
-    let addr = std::net::SocketAddr::from_str(node)
+    let addr = SocketAddr::from_str(node)
         .map_err(|_| RpcError::InvalidParams("node must be a valid host:port address"))?;
     match command {
         "add" | "onetry" => {
+            let now = SystemTime::now();
+            let banned = ctx.banned.read();
+            if bitcoin_rs_p2p::subnet::is_banned(banned.as_slice(), addr.ip(), now) {
+                return Err(RpcError::InvalidParams("node is banned"));
+            }
+            drop(banned);
+
             if command == "add" {
                 let mut list = ctx.added_nodes.write();
                 if !list.contains(&addr) {
@@ -227,10 +297,8 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
 }
 
 pub(crate) fn disconnectnode(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    use core::str::FromStr as _;
-
     let address = required_str(params, 0, "address is required")?;
-    std::net::SocketAddr::from_str(address)
+    SocketAddr::from_str(address)
         .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
     // TODO(p2p-outbound): wire to a disconnection sender on Context.
     Ok(Value::new_null())
@@ -264,7 +332,7 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 mod tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
+    use sonic_rs::JsonValueTrait;
 
     #[test]
     fn getnetworkinfo_reports_zero_connections_on_fresh_context() {
@@ -432,6 +500,26 @@ mod addnode_validation_tests {
     }
 
     #[test]
+    fn addnode_rejects_manually_banned_subnet() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut ctx = Context::new();
+        ctx.p2p_outbound_sender = Some(tx);
+        let ctx = Arc::new(ctx);
+        if let Err(err) = setban(&ctx, &json!(["127.0.0.0/24", "add"])) {
+            panic!("setban failed: {err}");
+        }
+
+        let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::InvalidParams("node is banned"))
+        ));
+        assert!(ctx.added_nodes.read().is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn disconnectnode_rejects_bad_address() {
         let ctx = Arc::new(Context::new());
         let result = disconnectnode(&ctx, &json!(["definitely-not-an-address"]));
@@ -451,7 +539,7 @@ mod addnode_validation_tests {
 mod admin_rpc_tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::JsonContainerTrait;
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
     #[test]
     fn getaddednodeinfo_returns_empty_array() {
@@ -479,7 +567,22 @@ mod admin_rpc_tests {
     fn setban_accepts_add_and_remove() {
         let ctx = Arc::new(Context::new());
         assert!(setban(&ctx, &json!(["10.0.0.1:8333", "add"])).is_ok());
+        let result = match listbanned(&ctx, &json!(null)) {
+            Ok(result) => result,
+            Err(err) => panic!("listbanned failed: {err}"),
+        };
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        let Some(entry) = arr.first() else {
+            panic!("expected one ban entry");
+        };
+        assert_eq!(
+            entry.get("address").and_then(JsonValueTrait::as_str),
+            Some("10.0.0.1/32")
+        );
         assert!(setban(&ctx, &json!(["10.0.0.1:8333", "remove"])).is_ok());
+        assert!(ctx.banned.read().is_empty());
     }
 
     #[test]
@@ -501,13 +604,51 @@ mod admin_rpc_tests {
 mod ban_state_tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::JsonContainerTrait;
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
+
+    fn listbanned_ok(ctx: &Arc<Context>) -> Value {
+        match listbanned(ctx, &json!(null)) {
+            Ok(result) => result,
+            Err(err) => panic!("listbanned failed: {err}"),
+        }
+    }
+
+    fn setban_ok(ctx: &Arc<Context>, target: &str, command: &str) {
+        if let Err(err) = setban(ctx, &json!([target, command])) {
+            panic!("setban failed: {err}");
+        }
+    }
+
+    fn clearbanned_ok(ctx: &Arc<Context>) {
+        if let Err(err) = clearbanned(ctx, &json!(null)) {
+            panic!("clearbanned failed: {err}");
+        }
+    }
+
+    fn list_addresses(ctx: &Arc<Context>) -> Vec<String> {
+        let result = listbanned_ok(ctx);
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        arr.iter()
+            .filter_map(|entry| entry.get("address").and_then(JsonValueTrait::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn sole_address(ctx: &Arc<Context>) -> String {
+        let addresses = list_addresses(ctx);
+        assert_eq!(addresses.len(), 1);
+        let Some(address) = addresses.first() else {
+            panic!("expected one ban address");
+        };
+        address.to_owned()
+    }
 
     #[test]
     fn setban_add_persists_in_context() {
         let ctx = Arc::new(Context::new());
-        let _ = setban(&ctx, &json!(["127.0.0.1:8333", "add"]))
-            .unwrap_or_else(|err| panic!("setban failed: {err}"));
+        setban_ok(&ctx, "127.0.0.1:8333", "add");
         let banned = ctx.banned.read();
         assert_eq!(banned.len(), 1);
     }
@@ -515,27 +656,92 @@ mod ban_state_tests {
     #[test]
     fn listbanned_returns_added_entries() {
         let ctx = Arc::new(Context::new());
-        ctx.banned.write().insert(std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
-            8333,
-        ));
-        let result =
-            listbanned(&ctx, &json!(null)).unwrap_or_else(|err| panic!("listbanned failed: {err}"));
+        setban_ok(&ctx, "192.168.1.1:8333", "add");
+        let result = listbanned_ok(&ctx);
         let Some(arr) = result.as_array() else {
             panic!("expected array: {result:?}");
         };
-        assert_eq!(arr.len(), 1);
+        let Some(entry) = arr.first() else {
+            panic!("expected one ban entry");
+        };
+        assert_eq!(
+            entry.get("address").and_then(JsonValueTrait::as_str),
+            Some("192.168.1.1/32")
+        );
+        assert_eq!(
+            entry.get("ban_reason").and_then(JsonValueTrait::as_str),
+            Some("manual")
+        );
+        let Some(created) = entry.get("ban_created").and_then(JsonValueTrait::as_u64) else {
+            panic!("ban_created missing");
+        };
+        let Some(until) = entry.get("banned_until").and_then(JsonValueTrait::as_u64) else {
+            panic!("banned_until missing");
+        };
+        assert!(until >= created);
     }
 
     #[test]
-    fn clearbanned_empties_set() {
+    fn setban_cidr_add_list_roundtrip() {
         let ctx = Arc::new(Context::new());
-        ctx.banned.write().insert(std::net::SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
-            8333,
+        setban_ok(&ctx, "10.0.0.0/8", "add");
+
+        assert_eq!(sole_address(&ctx), "10.0.0.0/8");
+    }
+
+    #[test]
+    fn setban_normalizes_host_bits() {
+        let ctx = Arc::new(Context::new());
+        setban_ok(&ctx, "192.168.1.99/24", "add");
+
+        assert_eq!(sole_address(&ctx), "192.168.1.0/24");
+    }
+
+    #[test]
+    fn setban_bare_ip_stores_single_address_subnet() {
+        let ctx = Arc::new(Context::new());
+        setban_ok(&ctx, "192.168.1.99", "add");
+
+        assert_eq!(sole_address(&ctx), "192.168.1.99/32");
+    }
+
+    #[test]
+    fn setban_ipv6_cidr_canonicalizes() {
+        let ctx = Arc::new(Context::new());
+        setban_ok(&ctx, "2001:db8::1/64", "add");
+
+        assert_eq!(sole_address(&ctx), "2001:db8::/64");
+    }
+
+    #[test]
+    fn setban_rejects_invalid_subnet() {
+        let ctx = Arc::new(Context::new());
+        let result = setban(&ctx, &json!(["10.0.0.1/33", "add"]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::InvalidParams(
+                "subnet must be IP, IP/prefix, or host:port"
+            ))
         ));
-        let _ = clearbanned(&ctx, &json!(null))
-            .unwrap_or_else(|err| panic!("clearbanned failed: {err}"));
+    }
+
+    #[test]
+    fn setban_remove_matches_exact_subnet() {
+        let ctx = Arc::new(Context::new());
+        setban_ok(&ctx, "10.0.0.0/24", "add");
+        setban_ok(&ctx, "10.0.0.1", "add");
+
+        setban_ok(&ctx, "10.0.0.1", "remove");
+
+        assert_eq!(list_addresses(&ctx), vec!["10.0.0.0/24".to_owned()]);
+    }
+
+    #[test]
+    fn clearbanned_empties_vec() {
+        let ctx = Arc::new(Context::new());
+        setban_ok(&ctx, "192.168.1.1", "add");
+        clearbanned_ok(&ctx);
         assert!(ctx.banned.read().is_empty());
     }
 

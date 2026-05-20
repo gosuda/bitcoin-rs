@@ -21,6 +21,8 @@ pub mod listener;
 pub mod peer;
 /// Peer metadata published after a successful handshake.
 pub mod peer_info;
+/// Manual IP subnet banning primitives.
+pub mod subnet;
 /// Bitcoin P2P wire codec.
 pub mod wire;
 /// BIP339 wtxid-relay state.
@@ -29,4 +31,5 @@ pub mod wtxid;
 pub use listener::spawn_outbound_connection;
 pub use peer::{DnsResolver, Peer, PeerManager, PeerState};
 pub use peer_info::PeerInfo;
+pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};

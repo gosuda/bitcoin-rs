@@ -27,8 +27,10 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let (inbound_headers_tx, _inbound_headers_rx) =
         crossbeam_channel::unbounded::<Vec<bitcoin::block::Header>>();
     let (inbound_blocks_tx, _inbound_blocks_rx) = crossbeam_channel::unbounded::<bitcoin::Block>();
+    let banned = Arc::new(parking_lot::RwLock::new(Vec::new()));
 
     let listener_outbound = Arc::clone(&outbound);
+    let listener_banned = Arc::clone(&banned);
     let handle = thread::spawn(move || {
         let result = serve_with_shutdown(
             addr,
@@ -38,6 +40,7 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
             listener_outbound,
             inbound_headers_tx,
             inbound_blocks_tx,
+            listener_banned,
         );
         let _ = tx.send(result);
     });

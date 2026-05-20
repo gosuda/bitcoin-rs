@@ -26,6 +26,7 @@ type PeerOutboundMap = Arc<
         >,
     >,
 >;
+type BannedSubnets = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>;
 
 fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
     match node_auth {
@@ -79,12 +80,13 @@ fn spawn_electrum_listener(
     ))
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 fn spawn_p2p_listeners(
     config: &bitcoin_rs_node::Config,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     peers: &PeerRegistry,
     peer_outbound: &PeerOutboundMap,
+    banned: BannedSubnets,
     inbound_headers_tx: crossbeam_channel::Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin::Block>,
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>
@@ -96,6 +98,7 @@ fn spawn_p2p_listeners(
         let listener_shutdown = std::sync::Arc::clone(shutdown);
         let listener_peers = Arc::clone(peers);
         let listener_peer_outbound = Arc::clone(peer_outbound);
+        let listener_banned = Arc::clone(&banned);
         let listener_inbound_headers_tx = inbound_headers_tx.clone();
         let listener_inbound_blocks_tx = inbound_blocks_tx.clone();
         let handle = std::thread::Builder::new()
@@ -109,6 +112,7 @@ fn spawn_p2p_listeners(
                     listener_peer_outbound,
                     listener_inbound_headers_tx,
                     listener_inbound_blocks_tx,
+                    listener_banned,
                 )
             })?;
         tracing::info!(addr = %listener_addr, "p2p listener bound");
@@ -117,17 +121,20 @@ fn spawn_p2p_listeners(
     Ok(handles)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn spawn_p2p_outbound_drain(
     config: &bitcoin_rs_node::Config,
     state: &NodeState,
     shutdown: &Arc<AtomicBool>,
     peers: &PeerRegistry,
     peer_outbound: &PeerOutboundMap,
+    banned: BannedSubnets,
 ) -> anyhow::Result<std::thread::JoinHandle<()>> {
     let outbound_rx = state.p2p_outbound_receiver();
     let magic = bitcoin::p2p::Magic::from_bytes(config.network.magic());
     let outbound_registry = Arc::clone(peers);
     let outbound_peer_outbound = Arc::clone(peer_outbound);
+    let outbound_banned = Arc::clone(&banned);
     let outbound_headers_tx = state.inbound_headers_sender();
     let outbound_blocks_tx = state.inbound_blocks_sender();
     let outbound_shutdown = Arc::clone(shutdown);
@@ -149,6 +156,7 @@ fn spawn_p2p_outbound_drain(
                             Arc::clone(&outbound_peer_outbound),
                             outbound_headers_tx.clone(),
                             outbound_blocks_tx.clone(),
+                            Arc::clone(&outbound_banned),
                         );
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
@@ -169,6 +177,7 @@ fn spawn_p2p_outbound_drain(
 ///    handler (production).
 /// 5. Spin the event loop until shutdown is requested.
 /// 6. Drain subsystems within [`DRAIN_DEADLINE`].
+#[allow(clippy::too_many_lines)]
 pub fn run(mut config: Config) -> Result<()> {
     logging::install_tracing(&config.log_level)?;
 
@@ -193,6 +202,7 @@ pub fn run(mut config: Config) -> Result<()> {
     };
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let banned = state.banned_subnets();
     let loop_handle = EventLoop::new(shutdown_rx, state.sync());
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
     let rpc_context = bitcoin_rs_rpc::Context::from_handles(
@@ -211,7 +221,7 @@ pub fn run(mut config: Config) -> Result<()> {
         state.config().network,
         Some(state.inbound_blocks_sender()),
         Some(state.p2p_outbound_sender()),
-        Arc::new(parking_lot::RwLock::new(hashbrown::HashSet::new())),
+        Arc::clone(&banned),
         Arc::new(parking_lot::RwLock::new(Vec::new())),
         Some(state.tx_index()),
     );
@@ -238,11 +248,18 @@ pub fn run(mut config: Config) -> Result<()> {
         &shutdown,
         &peers,
         &peer_outbound,
+        Arc::clone(&banned),
         state.inbound_headers_sender(),
         state.inbound_blocks_sender(),
     )?;
-    let _outbound_worker =
-        spawn_p2p_outbound_drain(state.config(), &state, &shutdown, &peers, &peer_outbound)?;
+    let _outbound_worker = spawn_p2p_outbound_drain(
+        state.config(),
+        &state,
+        &shutdown,
+        &peers,
+        &peer_outbound,
+        Arc::clone(&banned),
+    )?;
     loop_handle.spin(&shutdown)?;
     if let Some(handle) = electrum_thread {
         match handle.join() {

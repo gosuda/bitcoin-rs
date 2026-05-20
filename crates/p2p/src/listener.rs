@@ -2,7 +2,7 @@ use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bitcoin::p2p::Magic;
 use crossbeam_channel::Sender;
@@ -14,7 +14,7 @@ use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Errors returned by the P2P listener accept loop.
 #[derive(Debug, Error)]
@@ -50,7 +50,7 @@ pub enum ListenerError {
 /// Successful inbound handshakes append their public metadata to
 /// `peer_registry`. The peer is removed from `peer_registry` when the
 /// per-connection thread exits.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub fn serve_with_shutdown(
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
@@ -59,6 +59,7 @@ pub fn serve_with_shutdown(
     peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
     inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: Sender<bitcoin::Block>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
 ) -> Result<(), ListenerError> {
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
@@ -68,6 +69,11 @@ pub fn serve_with_shutdown(
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer_addr)) => {
+                if crate::subnet::is_banned(&banned.read(), peer_addr.ip(), SystemTime::now()) {
+                    drop(stream);
+                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: banned");
+                    continue;
+                }
                 spawn_handshake_thread(
                     stream,
                     peer_addr,
@@ -100,6 +106,7 @@ pub fn spawn_outbound_connection(
     peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
     inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: Sender<bitcoin::Block>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
@@ -112,6 +119,7 @@ pub fn spawn_outbound_connection(
                 &peer_outbound,
                 &inbound_headers_tx,
                 &inbound_blocks_tx,
+                &banned,
             )
         });
 
@@ -135,7 +143,12 @@ fn run_outbound_connection(
     peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
     inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: &Sender<bitcoin::Block>,
+    banned: &RwLock<Vec<crate::BannedSubnet>>,
 ) -> Result<(), crate::wire::PeerError> {
+    if crate::subnet::is_banned(&banned.read(), addr.ip(), SystemTime::now()) {
+        return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
+    }
+
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(crate::wire::PeerError::Io)?;
     stream
@@ -328,7 +341,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     use crate::peer::PeerState;
     use std::time::Instant;
 
-    const IDLE_DISCONNECT: Duration = Duration::from_secs(60);
+    const IDLE_DISCONNECT: Duration = Duration::from_mins(1);
 
     let mut last_inbound = Instant::now();
 
@@ -426,6 +439,7 @@ mod outbound_tests {
         let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let banned = Arc::new(RwLock::new(Vec::new()));
 
         let handle = spawn_outbound_connection(
             addr,
@@ -434,6 +448,7 @@ mod outbound_tests {
             outbound,
             headers_tx,
             blocks_tx,
+            banned,
         );
         let inner = match handle.join() {
             Ok(inner) => inner,

@@ -150,8 +150,8 @@ pub struct Context {
     /// Optional outbound channel for `addnode` to request new P2P connections.
     /// `None` for embedded/test callers without a live P2P listener.
     pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
-    /// Best-effort ban list (host:port). Subnet bans are not yet supported.
-    pub banned: Arc<parking_lot::RwLock<hashbrown::HashSet<std::net::SocketAddr>>>,
+    /// Manual IP/CIDR bans shared with P2P enforcement.
+    pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
     pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
     mining_sender: Sender<()>,
@@ -205,7 +205,7 @@ impl Context {
             mining_notifications,
             inbound_blocks_sender: None,
             p2p_outbound_sender: None,
-            banned: Arc::new(parking_lot::RwLock::new(hashbrown::HashSet::new())),
+            banned: Arc::new(parking_lot::RwLock::new(Vec::new())),
             added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
             mining_sender,
         }
@@ -234,7 +234,7 @@ impl Context {
         chain_network: Network,
         inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
         p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
-        banned: Arc<parking_lot::RwLock<hashbrown::HashSet<std::net::SocketAddr>>>,
+        banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
         added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
         indexer: Option<Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
     ) -> Self {
@@ -483,7 +483,7 @@ mod tests {
         ));
         let filter_index = noop_filter_index();
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
-        let banned = Arc::new(RwLock::new(hashbrown::HashSet::new()));
+        let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
         let added_nodes = Arc::new(RwLock::new(Vec::new()));
         let ctx = Context::from_handles(
             Arc::clone(&chain_tip),

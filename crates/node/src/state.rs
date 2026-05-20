@@ -340,6 +340,7 @@ pub struct NodeState {
     peer_outbound: Arc<
         RwLock<HashMap<std::net::SocketAddr, crossbeam_channel::Sender<bitcoin_rs_p2p::Message>>>,
     >,
+    banned: Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     p2p_outbound_tx: crossbeam_channel::Sender<std::net::SocketAddr>,
     p2p_outbound_rx: Arc<Mutex<crossbeam_channel::Receiver<std::net::SocketAddr>>>,
     inbound_headers_tx: Sender<Vec<Header>>,
@@ -378,6 +379,7 @@ impl NodeState {
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let peers = Arc::new(RwLock::new(Vec::new()));
+        let banned = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (p2p_outbound_tx, p2p_outbound_rx_raw) = crossbeam_channel::unbounded();
         let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
@@ -433,6 +435,7 @@ impl NodeState {
             network,
             peers,
             peer_outbound,
+            banned,
             p2p_outbound_tx,
             p2p_outbound_rx,
             inbound_headers_tx,
@@ -566,6 +569,12 @@ impl NodeState {
         Arc::clone(&self.peers)
     }
 
+    /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
+    #[must_use]
+    pub fn banned_subnets(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>> {
+        Arc::clone(&self.banned)
+    }
+
     /// Returns the shared per-peer outbound message-sender map.
     ///
     /// External callers can look up a peer's `Sender<Message>` by socket
@@ -580,7 +589,6 @@ impl NodeState {
     > {
         Arc::clone(&self.peer_outbound)
     }
-
     /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
     #[must_use]
     pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<std::net::SocketAddr> {

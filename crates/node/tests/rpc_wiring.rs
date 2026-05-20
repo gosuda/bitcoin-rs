@@ -37,7 +37,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let block_tree = state.block_tree();
     let inbound_blocks_sender = state.inbound_blocks_sender();
     let p2p_outbound = Some(state.p2p_outbound_sender());
-    let banned = Arc::new(parking_lot::RwLock::new(hashbrown::HashSet::new()));
+    let banned = state.banned_subnets();
     let added_nodes = Arc::new(parking_lot::RwLock::new(Vec::new()));
     let tx_index = state.tx_index();
     let ctx = Context::from_handles(
@@ -116,6 +116,10 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     assert!(
         ctx.p2p_outbound_sender.is_some(),
         "p2p_outbound_sender must be Some"
+    );
+    assert!(
+        Arc::ptr_eq(&ctx.banned, &banned),
+        "banned must share identity"
     );
 
     Ok(())

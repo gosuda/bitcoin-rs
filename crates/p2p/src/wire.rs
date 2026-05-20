@@ -53,6 +53,9 @@ pub enum PeerError {
     /// The finite-state machine rejected the message in the current state.
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
+    /// Attempted destination is currently banned.
+    #[error("banned destination {0}")]
+    BannedDestination(std::net::IpAddr),
     /// Ban-list persistence data was malformed.
     #[error("invalid ban-list entry: {0}")]
     InvalidBanEntry(String),
