@@ -393,11 +393,7 @@ fn check_pow_limit_and_continuity(
     let retarget_interval = handles.network.retarget_interval();
     let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
     if is_retarget {
-        // Retarget heights compute a new target from the last 2016 blocks'
-        // timespan; full computation is deferred to a follow-up. For now
-        // we already verified `declared <= max_target` above, so we let
-        // any retarget-height nBits through.
-        return Ok(());
+        return check_daa_retarget(handles, block, height, retarget_interval);
     }
 
     // Non-retarget: look up the parent header via the BlockTree.
@@ -418,6 +414,81 @@ fn check_pow_limit_and_continuity(
             height,
         });
     }
+    Ok(())
+}
+
+fn check_daa_retarget(
+    handles: &ApplyHandles,
+    block: &bitcoin::Block,
+    height: u32,
+    retarget_interval: u32,
+) -> core::result::Result<(), ApplyError> {
+    let prior_tip = handles.chain_tip.load_full();
+    let Some(prior_tip) = prior_tip else {
+        return Ok(());
+    };
+
+    let tree = handles.block_tree.read();
+    let Some(anchor_height) = height.checked_sub(retarget_interval) else {
+        return Ok(());
+    };
+    let Some(anchor_id) = tree.node_at_height_from(prior_tip.tip_id, anchor_height) else {
+        return Ok(());
+    };
+    let Ok(anchor_node) = tree.node(anchor_id) else {
+        return Ok(());
+    };
+    let Ok(prev_node) = tree.node(prior_tip.tip_id) else {
+        return Ok(());
+    };
+
+    let actual_timespan = prev_node
+        .header
+        .time
+        .saturating_sub(anchor_node.header.time);
+    let expected_timespan = retarget_interval.saturating_mul(600);
+    if expected_timespan == 0 {
+        return Ok(());
+    }
+
+    let min_timespan = expected_timespan / 4;
+    let max_timespan = expected_timespan.saturating_mul(4);
+    let actual_clamped = actual_timespan.clamp(min_timespan, max_timespan);
+
+    let prev_target_be = prev_node.header.target().to_be_bytes();
+    let prev_target = bitcoin_rs_chain::node::ChainWork::from_be_bytes(prev_target_be);
+    let actual_u256 = bitcoin_rs_chain::node::ChainWork::from(actual_clamped);
+    let expected_u256 = bitcoin_rs_chain::node::ChainWork::from(expected_timespan);
+    let max_target = handles.network.max_target();
+    let quotient = prev_target / expected_u256;
+    let remainder = prev_target % expected_u256;
+    let Some(scaled_quotient) = quotient.checked_mul(actual_u256) else {
+        return compare_retarget_bits(block, height, max_target);
+    };
+    let scaled_remainder = remainder.saturating_mul(actual_u256) / expected_u256;
+    let new_target_raw = scaled_quotient.saturating_add(scaled_remainder);
+    let new_target = new_target_raw.min(max_target);
+    compare_retarget_bits(block, height, new_target)
+}
+
+fn compare_retarget_bits(
+    block: &bitcoin::Block,
+    height: u32,
+    expected_target: bitcoin_rs_chain::node::ChainWork,
+) -> core::result::Result<(), ApplyError> {
+    let expected = bitcoin::Target::from_be_bytes(expected_target.to_be_bytes::<32>())
+        .to_compact_lossy()
+        .to_consensus();
+    let actual = block.header.bits.to_consensus();
+
+    if actual != expected {
+        return Err(ApplyError::NbitsNonRetargetMismatch {
+            actual,
+            expected,
+            height,
+        });
+    }
+
     Ok(())
 }
 
