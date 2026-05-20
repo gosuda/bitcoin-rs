@@ -157,10 +157,7 @@ fn run_outbound_connection(
     let conn_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
-    // `PeerInfo` lives outside this strand's owned files, so reuse the
-    // inbound constructor and patch the direction bit locally.
-    let mut info = crate::PeerInfo::inbound_from_version(addr, remote_version, conn_time);
-    info.inbound = false;
+    let info = crate::PeerInfo::outbound_from_version(addr, remote_version, conn_time);
     peer_registry.write().push(info);
 
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
