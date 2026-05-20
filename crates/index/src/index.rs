@@ -339,6 +339,27 @@ impl<S: KvStore> Indexer<S> {
         Ok(None)
     }
 
+    /// Resolves the satoshi value of the transaction output at `outpoint` via
+    /// `source`. Returns `Ok(None)` when the transaction is not indexed or the
+    /// `vout` is out of range.
+    ///
+    /// Composes `resolve_transaction(outpoint.txid, source)` and reads the
+    /// `output[vout].value.to_sat()`. Building block for real fee derivation
+    /// in transaction-broadcast and prevout-value lookups.
+    pub fn resolve_outpoint_value<B: BlockSource>(
+        &self,
+        outpoint: bitcoin::OutPoint,
+        source: &B,
+    ) -> Result<Option<u64>, IndexError> {
+        let Some(tx) = self.resolve_transaction(outpoint.txid, source)? else {
+            return Ok(None);
+        };
+        let Ok(vout_idx) = usize::try_from(outpoint.vout) else {
+            return Ok(None);
+        };
+        Ok(tx.output.get(vout_idx).map(|output| output.value.to_sat()))
+    }
+
     /// Resolves a transaction by txid and returns it alongside the block
     /// height where it was confirmed.
     ///
@@ -795,6 +816,68 @@ mod tests {
         };
 
         assert_eq!(indexer.resolve_tx_with_height(txid, &source)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_outpoint_value_returns_genesis_coinbase_subsidy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let outpoint = bitcoin::OutPoint { txid, vout: 0 };
+        let value = indexer.resolve_outpoint_value(outpoint, &source)?;
+
+        assert_eq!(value, Some(5_000_000_000));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_outpoint_value_returns_none_for_vout_out_of_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 0,
+        };
+        let outpoint = bitcoin::OutPoint { txid, vout: 99 };
+
+        assert_eq!(indexer.resolve_outpoint_value(outpoint, &source)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_outpoint_value_returns_none_for_unknown_txid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, indexer) = indexer()?;
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0xff; 32]),
+            vout: 0,
+        };
+        let source = FakeSource {
+            block: bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest),
+            target_height: 0,
+        };
+
+        assert_eq!(indexer.resolve_outpoint_value(outpoint, &source)?, None);
         Ok(())
     }
 
