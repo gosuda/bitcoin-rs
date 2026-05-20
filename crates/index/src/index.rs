@@ -62,6 +62,52 @@ impl<S: KvStore> Indexer<S> {
         self.last_counts
     }
 
+    /// Iterates confirmed funding rows for `scripthash`.
+    ///
+    /// Returns every `HashPrefixRow` whose 8-byte prefix matches the scripthash's
+    /// scan prefix, decoded from `ColumnFamily::Funding`. Rows are returned in
+    /// the iteration order of the underlying store (typically lexicographic, so
+    /// (prefix, height) ascending).
+    ///
+    /// The 8-byte prefix is lossy: callers MUST resolve heights back to full
+    /// transactions via block storage to confirm scripthash identity.
+    pub fn iter_funding_rows(
+        &self,
+        scripthash: crate::ScriptHash,
+    ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
+        let prefix = ScriptHashRow::scan_prefix(scripthash);
+        let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
+        collect_prefix_rows(iter)
+    }
+
+    /// Iterates confirmed spending rows that spent `outpoint`.
+    ///
+    /// Returns every `HashPrefixRow` whose 8-byte prefix matches the outpoint's
+    /// spending scan prefix, decoded from `ColumnFamily::Spending`. The 8-byte
+    /// prefix is lossy as above.
+    pub fn iter_spending_rows(
+        &self,
+        outpoint: &bitcoin::OutPoint,
+    ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
+        let prefix = SpendingPrefixRow::scan_prefix(outpoint);
+        let iter = self.store.iter_prefix(ColumnFamily::Spending, &prefix)?;
+        collect_prefix_rows(iter)
+    }
+
+    /// Iterates confirmed transaction-id rows matching `txid`.
+    ///
+    /// Returns every `HashPrefixRow` whose 8-byte prefix matches the txid's scan
+    /// prefix, decoded from `ColumnFamily::TxConfirmed`. The 8-byte prefix is
+    /// lossy; multiple txids can share a prefix.
+    pub fn iter_txid_rows(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
+        let prefix = TxidRow::scan_prefix(txid);
+        let iter = self.store.iter_prefix(ColumnFamily::TxConfirmed, &prefix)?;
+        collect_prefix_rows(iter)
+    }
+
     /// Walks one serialized block once with `bitcoin_slices` and writes electrs-shaped rows.
     pub fn ingest_block(
         &mut self,
@@ -200,6 +246,22 @@ fn is_null_prevout(prevout: &bsl::OutPoint<'_>) -> bool {
     prevout.vout() == u32::MAX && prevout.txid().iter().all(|byte| *byte == 0)
 }
 
+fn collect_prefix_rows(
+    iter: bitcoin_rs_storage::KvIter<'_>,
+) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
+    let mut rows = Vec::new();
+    for entry in iter {
+        let (key, _value) = entry?;
+        if key.len() == crate::HASH_PREFIX_ROW_SIZE {
+            rows.push(
+                zerocopy::FromBytes::read_from_bytes(&key[..])
+                    .map_err(|_| IndexError::InvalidHeaderLength { len: key.len() })?,
+            );
+        }
+    }
+    Ok(rows)
+}
+
 /// Storage-agnostic block-ingest interface.
 ///
 /// Use this trait when consumers must hold the indexer behind a trait
@@ -212,5 +274,114 @@ pub trait IndexerLike: Send + Sync {
 impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError> {
         Self::ingest_block(self, block, height)
+    }
+}
+
+#[cfg(all(test, feature = "rocksdb"))]
+mod tests {
+    use std::sync::Arc;
+
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{
+        Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Txid, Witness, absolute, block, transaction,
+    };
+    use bitcoin_rs_storage::RocksDbStore;
+
+    use super::Indexer;
+    use crate::{ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow};
+
+    const HEIGHT: u32 = 42;
+
+    #[test]
+    fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+        let script = ScriptBuf::from_bytes(vec![0x51, 0x01]);
+        let tx = tx(spent_outpoint(1, 0), script.clone());
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block(vec![tx])), HEIGHT)?;
+
+        let scripthash = ScriptHash::from_script_bytes(script.as_bytes());
+        assert_eq!(
+            indexer.iter_funding_rows(scripthash)?,
+            vec![ScriptHashRow::row(scripthash, HEIGHT)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+        let outpoint = spent_outpoint(2, 3);
+        let tx = tx(outpoint, ScriptBuf::from_bytes(vec![0x51, 0x02]));
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block(vec![tx])), HEIGHT)?;
+
+        assert_eq!(
+            indexer.iter_spending_rows(&outpoint)?,
+            vec![SpendingPrefixRow::row(&outpoint, HEIGHT)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn iter_txid_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+        let tx = tx(
+            spent_outpoint(4, 5),
+            ScriptBuf::from_bytes(vec![0x51, 0x03]),
+        );
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block(vec![tx])), HEIGHT)?;
+
+        let rows = indexer.iter_txid_rows(&txid)?;
+        assert!(rows.contains(&TxidRow::row(&txid, HEIGHT)));
+        Ok(())
+    }
+
+    fn indexer() -> Result<(tempfile::TempDir, Indexer<RocksDbStore>), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
+        Ok((dir, Indexer::new(store)))
+    }
+
+    fn block(txdata: Vec<Transaction>) -> Block {
+        Block {
+            header: block::Header {
+                version: block::Version::ONE,
+                prev_blockhash: BlockHash::all_zeros(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 0,
+                bits: CompactTarget::from_consensus(0),
+                nonce: 0,
+            },
+            txdata,
+        }
+    }
+
+    fn tx(previous_output: OutPoint, script_pubkey: ScriptBuf) -> Transaction {
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(5_000),
+                script_pubkey,
+            }],
+        }
+    }
+
+    fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
+        OutPoint {
+            txid: Txid::from_byte_array([label; 32]),
+            vout,
+        }
     }
 }
