@@ -78,6 +78,12 @@ pub trait ConfirmedHistoryReader: Send + Sync + core::fmt::Debug {
     fn unspent_outputs(&self, _scripthash: ScriptHash) -> Vec<HistoryRecord> {
         Vec::new()
     }
+    /// Returns the lowercase-hex serialized confirmed transaction for `txid`,
+    /// resolved via the underlying index + `BlockSource`. `None` if not found.
+    fn transaction_hex(&self, txid: bitcoin::Txid) -> Option<String> {
+        let _ = txid;
+        None
+    }
 }
 
 /// `ConfirmedHistoryReader` backed by a workspace `Indexer` and a `BlockSource`.
@@ -151,17 +157,25 @@ where
             })
             .collect()
     }
+    fn transaction_hex(&self, txid: bitcoin::Txid) -> Option<String> {
+        let tx = self
+            .indexer
+            .resolve_transaction(txid, &self.block_source)
+            .ok()
+            .flatten()?;
+        Some(serialize(&tx).to_lower_hex_string())
+    }
 
     fn unspent_outputs(&self, scripthash: ScriptHash) -> Vec<HistoryRecord> {
         let Ok(outputs) = self
             .indexer
-            .resolve_unspent_outputs(scripthash, &self.block_source)
+            .resolve_unspent_outputs_with_height(scripthash, &self.block_source)
         else {
             return Vec::new();
         };
 
         let mut records = Vec::with_capacity(outputs.len());
-        for (txid, vout, value) in outputs {
+        for (txid, vout, value, height) in outputs {
             let outpoint = bitcoin::OutPoint { txid, vout };
             let spent = self
                 .indexer
@@ -171,11 +185,10 @@ where
             if spent {
                 continue;
             }
-
-            // TODO: thread funding height through resolve_unspent_outputs.
+            let height_i64 = i64::from(height);
             records.push(HistoryRecord {
                 txid,
-                height: 0,
+                height: height_i64,
                 value,
                 vout,
                 spent: false,
@@ -319,7 +332,17 @@ impl IndexHandle {
         Vec::new()
     }
 
-    fn get_transaction_hex(&self, txid: &Txid) -> Option<String> {
+    /// Returns the lowercase-hex serialized confirmed transaction for `txid`.
+    ///
+    /// Prefers a reader-backed lookup when one is attached via `with_history_reader`;
+    /// otherwise falls back to the synthetic in-memory transactions map.
+    #[must_use]
+    pub fn transaction_hex(&self, txid: &Txid) -> Option<String> {
+        if let Some(reader) = self.state.reader.read().clone()
+            && let Some(hex) = reader.transaction_hex(*txid)
+        {
+            return Some(hex);
+        }
         self.state
             .transactions
             .read()
@@ -653,20 +676,18 @@ pub(crate) fn transaction_get(
 ) -> Result<Value, ElectrumError> {
     let params = params_array(params)?;
     let txid = parse_txid(params.first(), "blockchain.transaction.get txid")?;
+    let hex = index
+        .transaction_hex(&txid)
+        .or_else(|| mempool.get_transaction_hex(&txid))
+        .ok_or(ElectrumError::InvalidParams("transaction not found"))?;
     if params
         .get(1)
         .and_then(JsonValueTrait::as_bool)
         .unwrap_or(false)
     {
-        return Ok(
-            json!({"txid": txid.to_string(), "hex": mempool.get_transaction_hex(&txid).or_else(|| index.get_transaction_hex(&txid))}),
-        );
+        return Ok(json!({"txid": txid.to_string(), "hex": hex}));
     }
-    mempool
-        .get_transaction_hex(&txid)
-        .or_else(|| index.get_transaction_hex(&txid))
-        .map(|hex| json!(hex))
-        .ok_or(ElectrumError::InvalidParams("unknown transaction"))
+    Ok(json!(hex))
 }
 
 pub(crate) fn transaction_broadcast(
@@ -927,6 +948,19 @@ mod history_reader_tests {
         }
     }
 
+    #[derive(Debug)]
+    struct StubReaderTxHex;
+
+    impl ConfirmedHistoryReader for StubReaderTxHex {
+        fn confirmed_history(&self, _: ScriptHash) -> Vec<HistoryRecord> {
+            Vec::new()
+        }
+
+        fn transaction_hex(&self, _: bitcoin::Txid) -> Option<String> {
+            Some("deadbeef".to_owned())
+        }
+    }
+
     #[test]
     fn with_history_reader_overrides_synthetic_history() {
         use bitcoin::hashes::Hash as _;
@@ -951,6 +985,19 @@ mod history_reader_tests {
 
         assert_eq!(records.len(), 1);
         assert!(records.iter().any(|record| record.height == 7));
+    }
+
+    #[test]
+    fn transaction_hex_prefers_reader_over_synthetic() {
+        use bitcoin::hashes::Hash as _;
+
+        let handle = IndexHandle::new().with_history_reader(Arc::new(StubReaderTxHex));
+        let mut hash = [0_u8; 32];
+        hash[0] = 0xee;
+        let txid = bitcoin::Txid::from_byte_array(hash);
+        let hex = handle.transaction_hex(&txid);
+
+        assert_eq!(hex.as_deref(), Some("deadbeef"));
     }
 
     #[test]
