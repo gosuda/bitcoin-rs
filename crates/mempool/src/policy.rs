@@ -11,6 +11,9 @@ pub struct MempoolLimits {
     pub max_descendants: u32,
     /// Maximum number of transactions a single BIP125 replacement may evict.
     pub max_replacement_evictions: u32,
+    /// Maximum total mempool size in vbytes. Default 300 MB (Bitcoin Core default).
+    /// Set to 0 to disable size-bound eviction.
+    pub max_total_bytes: u64,
 }
 
 impl Default for MempoolLimits {
@@ -20,6 +23,7 @@ impl Default for MempoolLimits {
             max_ancestor_size: 101_000,
             max_descendants: 25,
             max_replacement_evictions: 100,
+            max_total_bytes: 300_000_000,
         }
     }
 }

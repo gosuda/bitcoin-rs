@@ -195,6 +195,7 @@ fn pool_with_conflict(
             max_ancestor_size: 1_000_000,
             max_descendants: 200,
             max_replacement_evictions: 100,
+            ..MempoolLimits::default()
         }
     };
     let mut pool = Mempool::new(limits);

@@ -143,6 +143,9 @@ impl Mempool {
         self.index_entry(id);
         self.recompute_all_metadata();
         self.bump_sequence();
+        if self.limits.max_total_bytes > 0 && self.total_vsize() > self.limits.max_total_bytes {
+            let _evicted = self.enforce_size_limit(self.limits.max_total_bytes);
+        }
         Ok(id)
     }
 
@@ -877,6 +880,39 @@ mod tests {
         assert!(pool.by_txid.contains_key(&high_txid));
         assert!(pool.total_vsize() <= 600);
         Ok(())
+    }
+
+    #[test]
+    fn insert_entry_triggers_size_limit_eviction_when_overflow() {
+        let limits = MempoolLimits {
+            max_total_bytes: 1_000,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        for nonce in 0..2_u32 {
+            let tx = bitcoin::Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(1_000 + u64::from(nonce)),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![
+                        0x51,
+                        u8::try_from(nonce).unwrap_or(0),
+                    ]),
+                }],
+            };
+            let fee = 100_u64.saturating_add(u64::from(nonce).saturating_mul(50));
+
+            let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 600, fee, 1, 7));
+        }
+
+        assert!(
+            pool.total_vsize() <= 1_000,
+            "size limit must hold after inserts: {}",
+            pool.total_vsize()
+        );
     }
 
     fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Transaction {
