@@ -32,6 +32,7 @@ impl Handler {
     pub fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
         match method {
             "getblockchaininfo" => chain::getblockchaininfo(&self.ctx, params),
+            "getchaintips" => chain::getchaintips(&self.ctx, params),
             "getblockcount" => chain::getblockcount(&self.ctx, params),
             "getblockhash" => chain::getblockhash(&self.ctx, params),
             "getbestblockhash" => chain::getbestblockhash(&self.ctx, params),

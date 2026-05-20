@@ -50,6 +50,22 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }))
 }
 
+pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    let mut tips = Vec::new();
+    if let Some(snapshot) = ctx.chain_tip.load_full() {
+        tips.push(json!({
+            "height": snapshot.height,
+            "hash": snapshot.hash.to_string_be(),
+            "branchlen": 0_u64,
+            "status": "active",
+        }));
+    }
+    // TODO(multi-tip): once BlockTree exposes a leaf iterator, enumerate
+    // valid-fork / headers-only / invalid tips here.
+    Ok(json!(tips))
+}
+
 pub(crate) fn getblockcount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     Ok(json!(ctx.applied_height()))
@@ -527,5 +543,55 @@ mod tests {
             progress.abs() < f64::EPSILON,
             "expected 0.0, got {progress}"
         );
+    }
+}
+
+#[cfg(test)]
+mod getchaintips_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+    use bitcoin_rs_primitives::Hash256;
+
+    use super::*;
+
+    #[test]
+    fn getchaintips_returns_empty_on_fresh_context() {
+        let ctx = Arc::new(Context::new());
+        let result = getchaintips(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn getchaintips_emits_active_tip_from_chain_tip_snapshot() {
+        let ctx = Arc::new(Context::new());
+        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        ctx.set_chain_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 42,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        let result = getchaintips(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        assert_eq!(arr.len(), 1);
+        let Some(first) = arr.first() else {
+            panic!("expected first element");
+        };
+        let Some(height) = first.get("height").and_then(JsonValueTrait::as_u64) else {
+            panic!("height missing");
+        };
+        assert_eq!(height, 42);
+        let Some(status) = first.get("status").and_then(JsonValueTrait::as_str) else {
+            panic!("status missing");
+        };
+        assert_eq!(status, "active");
     }
 }
