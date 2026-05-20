@@ -100,7 +100,7 @@ pub fn apply_block(
     // PoW limit + DAA non-retarget continuity.
     check_pow_limit_and_continuity(handles, block, height)?;
 
-    verify_block_transactions(handles, block, height)?;
+    verify_block_transactions(handles, block, height, prev_tip_state.median_time_past)?;
 
     check_coinbase_maturity(handles, block, height)?;
 
@@ -164,6 +164,7 @@ fn verify_block_transactions(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
     height: u32,
+    median_time_past: u32,
 ) -> core::result::Result<(), ApplyError> {
     // Per-tx script verification. The view borrows the UTXO set as it
     // stood BEFORE this block's outputs were committed — inputs in this
@@ -175,7 +176,13 @@ fn verify_block_transactions(
         if tx.is_coinbase() {
             continue;
         }
-        bitcoin_rs_consensus::verify_transaction_borrowed(tx, &view, height, flags)?;
+        bitcoin_rs_consensus::verify_transaction_borrowed_with_mtp(
+            tx,
+            &view,
+            height,
+            median_time_past,
+            flags,
+        )?;
     }
     Ok(())
 }

@@ -6,23 +6,89 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 use crate::rust_path::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, MAX_MONEY};
 
-/// Verifies non-contextual and input-script transaction rules.
+const LOCKTIME_THRESHOLD: u32 = 500_000_000;
+const SEQUENCE_FINAL: u32 = 0xffff_ffff;
+
+/// Returns `true` iff the transaction is locktime-final at `block_height` and `median_time_past`.
+///
+/// Implements Bitcoin Core's `IsFinalTx`:
+///   - locktime == 0: always final.
+///   - locktime < `LOCKTIME_THRESHOLD`: height-based; final iff locktime < `block_height`.
+///   - locktime >= `LOCKTIME_THRESHOLD`: timestamp-based; final iff locktime < `median_time_past`.
+///   - all inputs have sequence == `SEQUENCE_FINAL`: final regardless of locktime.
+///
+/// BIP113 enforces using `median_time_past` for timestamp-based comparison after activation.
+#[must_use]
+pub fn is_final_tx(tx: &bitcoin::Transaction, block_height: u32, median_time_past: u32) -> bool {
+    let lock_time = tx.lock_time.to_consensus_u32();
+    if lock_time == 0 {
+        return true;
+    }
+
+    let threshold = if lock_time < LOCKTIME_THRESHOLD {
+        block_height
+    } else {
+        median_time_past
+    };
+    if lock_time < threshold {
+        return true;
+    }
+
+    let sequence_final = bitcoin::Sequence::from_consensus(SEQUENCE_FINAL);
+    tx.input
+        .iter()
+        .all(|input| input.sequence == sequence_final)
+}
+
+/// Verifies non-contextual and input-script transaction rules without contextual MTP checks.
 pub fn verify_transaction(
     tx: &Tx,
     prevouts: &impl UtxoView,
     height: u32,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    verify_transaction_borrowed(&tx.0, prevouts, height, flags)
+    verify_transaction_with_mtp(tx, prevouts, height, 0, flags)
 }
 
-/// Verifies non-contextual and input-script transaction rules for a borrowed transaction.
+/// Verifies non-contextual and input-script transaction rules with BIP113 MTP checks.
+pub fn verify_transaction_with_mtp(
+    tx: &Tx,
+    prevouts: &impl UtxoView,
+    height: u32,
+    median_time_past: u32,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    verify_transaction_borrowed_with_mtp(&tx.0, prevouts, height, median_time_past, flags)
+}
+
+/// Verifies non-contextual and input-script transaction rules for a borrowed transaction without contextual MTP checks.
 pub fn verify_transaction_borrowed(
     tx: &bitcoin::Transaction,
     prevouts: &impl UtxoView,
-    _height: u32,
+    height: u32,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
+    verify_transaction_borrowed_with_mtp(tx, prevouts, height, 0, flags)
+}
+
+/// Verifies non-contextual and input-script transaction rules for a borrowed transaction.
+pub fn verify_transaction_borrowed_with_mtp(
+    tx: &bitcoin::Transaction,
+    prevouts: &impl UtxoView,
+    height: u32,
+    median_time_past: u32,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    if !is_final_tx(tx, height, median_time_past) {
+        return Err(ConsensusError::Bip {
+            bip: "BIP113",
+            reason: format!(
+                "non-final transaction at height {height} mtp {median_time_past}: locktime {}",
+                tx.lock_time.to_consensus_u32()
+            ),
+        });
+    }
+
     if tx.input.is_empty() {
         return Err(ConsensusError::EmptyInputs);
     }
@@ -113,7 +179,7 @@ mod tests {
     use bitcoin_rs_primitives::Tx;
     use bitcoin_rs_script::VerifyFlags;
 
-    use super::verify_transaction;
+    use super::{verify_transaction, verify_transaction_with_mtp};
     use crate::ConsensusError;
 
     #[test]
@@ -166,6 +232,32 @@ mod tests {
             verify_transaction(&tx, &utxos, 0, VerifyFlags::NONE),
             Err(ConsensusError::DuplicateInput { input_index: 1 })
         );
+    }
+
+    #[test]
+    fn verify_transaction_rejects_non_final_height_lock() {
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::from_consensus(200),
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus(0),
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let utxos = BTreeMap::new();
+
+        let result = verify_transaction_with_mtp(&tx, &utxos, 100, 0, VerifyFlags::MANDATORY);
+
+        assert!(matches!(
+            result,
+            Err(ConsensusError::Bip { bip: "BIP113", .. })
+        ));
     }
 
     fn spending_input(outpoint: OutPoint) -> TxIn {

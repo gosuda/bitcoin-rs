@@ -45,7 +45,10 @@ pub mod verify_tx;
 pub use connect_block::connect_block_dual_path;
 pub use rust_path::{BlockState, RustValidator, TipState, UtxoView};
 pub use verify_block::{verify_block_rules, verify_block_rules_borrowed};
-pub use verify_tx::{verify_transaction, verify_transaction_borrowed};
+pub use verify_tx::{
+    is_final_tx, verify_transaction, verify_transaction_borrowed,
+    verify_transaction_borrowed_with_mtp, verify_transaction_with_mtp,
+};
 
 use thiserror::Error;
 
