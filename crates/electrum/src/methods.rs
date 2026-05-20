@@ -509,8 +509,7 @@ impl MempoolHandle {
 
     fn get_transaction_hex(&self, txid: &Txid) -> Option<String> {
         let pool = self.pool.read();
-        let id = pool.by_txid.get(txid)?;
-        pool.entry(*id)
+        pool.entry_by_txid(txid)
             .map(|entry| serialize(entry.tx.as_ref()).to_lower_hex_string())
     }
 

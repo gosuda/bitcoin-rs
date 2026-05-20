@@ -349,12 +349,8 @@ pub(crate) fn bumpfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
     // Locate the tx: prefer mempool (unconfirmed bumpable), fall back to confirmed.
     let (original_tx, original_fee, original_fee_rate_sat_per_kvb) = {
         let pool = ctx.mempool.read();
-        if let Some(&id) = pool.by_txid.get(&txid) {
-            if let Some(entry) = pool.entry(id) {
-                ((*entry.tx).clone(), entry.fee, entry.fee_rate)
-            } else {
-                return Err(RpcError::NotFound("transaction not in mempool"));
-            }
+        if let Some(entry) = pool.entry_by_txid(&txid) {
+            ((*entry.tx).clone(), entry.fee, entry.fee_rate)
         } else {
             drop(pool);
             let confirmed = ctx.transactions.read();

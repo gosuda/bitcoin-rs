@@ -49,14 +49,12 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }
     {
         let pool = ctx.mempool.read();
-        if let Some(id) = pool.by_txid.get(&txid) {
-            if let Some(entry) = pool.entry(*id) {
-                let tx = entry.tx.as_ref();
-                if !verbose {
-                    return Ok(json!(serialize(tx).to_lower_hex_string()));
-                }
-                return super::tx_render::tx_to_value(tx);
+        if let Some(entry) = pool.entry_by_txid(&txid) {
+            let tx = entry.tx.as_ref();
+            if !verbose {
+                return Ok(json!(serialize(tx).to_lower_hex_string()));
             }
+            return super::tx_render::tx_to_value(tx);
         }
     }
     Err(RpcError::NotFound("transaction not found"))
