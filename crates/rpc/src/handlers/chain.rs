@@ -56,7 +56,6 @@ pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     let tree = ctx.block_tree.read();
     let active_tip = ctx.chain_tip.load_full();
     let active_tip_id = active_tip.as_ref().map(|tip| tip.tip_id);
-    let active_height = active_tip.as_ref().map_or(0_u32, |tip| tip.height);
     let mut tips = Vec::new();
     for leaf_id in tree.leaf_node_ids() {
         let Ok(node) = tree.node(leaf_id) else {
@@ -72,13 +71,10 @@ pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
                 NodeStatus::Invalid => "invalid",
             }
         };
-        // Approximate branchlen: active = 0; otherwise depth below active tip.
-        // (Common-ancestor walk is deferred; this matches Core's behavior when
-        // the leaf's chain hasn't crossed the active chain.)
         let branchlen = if is_active {
             0
         } else {
-            active_height.saturating_sub(node.height)
+            compute_branchlen(&tree, leaf_id, node.height, active_tip_id)
         };
         tips.push(json!({
             "height": node.height,
@@ -718,5 +714,80 @@ mod getchaintips_tests {
             "expected one headers-only tip: {arr:?}"
         );
         Ok(())
+    }
+    #[test]
+    fn getchaintips_emits_branchlen_one_for_non_active_sibling_of_active_tip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = Arc::new(Context::new());
+
+        // Build: genesis (active) -> sibling (header-only). Active tip stays at genesis.
+        let sibling_height = {
+            let mut tree = ctx.block_tree.write();
+            let genesis = synthetic_header(BlockHash::all_zeros(), 1_000_000);
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+            let genesis_hash = tree.node(genesis_id)?.hash;
+            let mut sibling = synthetic_header(genesis.block_hash(), 1_000_600);
+            sibling.nonce = 9;
+            let sibling_id =
+                tree.insert_node(Some(genesis_id), sibling, NodeStatus::HeaderValid)?;
+            ctx.set_chain_tip(TipSnapshot {
+                tip_id: genesis_id,
+                height: 0,
+                chainwork: ChainWork::ZERO,
+                hash: genesis_hash,
+            });
+            tree.node(sibling_id)?.height
+        };
+
+        let result = getchaintips(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array: {result:?}");
+        };
+        let Some(sibling_entry) = arr
+            .iter()
+            .find(|entry| entry.get("status").and_then(JsonValueTrait::as_str) != Some("active"))
+        else {
+            panic!("expected non-active tip: {result:?}");
+        };
+        let Some(branchlen) = sibling_entry
+            .get("branchlen")
+            .and_then(JsonValueTrait::as_u64)
+        else {
+            panic!("branchlen missing: {sibling_entry:?}");
+        };
+
+        assert_eq!(
+            branchlen, 1,
+            "sibling at height 1 should have branchlen 1: {sibling_entry:?}"
+        );
+        assert_eq!(sibling_height, 1);
+        Ok(())
+    }
+}
+
+fn compute_branchlen(
+    tree: &bitcoin_rs_chain::BlockTree,
+    leaf_id: bitcoin_rs_chain::NodeId,
+    leaf_height: u32,
+    active_tip_id: Option<bitcoin_rs_chain::NodeId>,
+) -> u32 {
+    let Some(active_id) = active_tip_id else {
+        return leaf_height;
+    };
+
+    // Walk parents from leaf until we hit a node also on the active chain.
+    let mut cursor = leaf_id;
+    loop {
+        let Ok(node) = tree.node(cursor) else {
+            return leaf_height;
+        };
+        if tree.node_at_height_from(active_id, node.height) == Some(cursor) {
+            return leaf_height.saturating_sub(node.height);
+        }
+        let Some(parent_id) = node.parent else {
+            return leaf_height;
+        };
+        cursor = parent_id;
     }
 }
