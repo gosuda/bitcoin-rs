@@ -17,6 +17,10 @@ use crate::state::ApplyError;
 /// Number of blocks after a coinbase that its outputs become spendable.
 /// Consensus rule since Bitcoin v0.3.1; universal across networks.
 const COINBASE_MATURITY: u32 = 100;
+/// BIP68 sequence-bit masks.
+const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
+const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
+const BIP68_MASK: u32 = 0x0000_ffff;
 
 /// Owned shared handle set needed by `apply_block` to perform a block apply.
 pub struct ApplyHandles {
@@ -103,6 +107,7 @@ pub fn apply_block(
     verify_block_transactions(handles, block, height, prev_tip_state.median_time_past)?;
 
     check_coinbase_maturity(handles, block, height)?;
+    check_bip68_sequence_locks(handles, block, height)?;
 
     let changes = build_utxo_changes(block, height)?;
     handles
@@ -223,6 +228,66 @@ pub(crate) fn check_coinbase_maturity(
             }
         }
     }
+    Ok(())
+}
+
+fn check_bip68_sequence_locks(
+    handles: &ApplyHandles,
+    block: &bitcoin::Block,
+    height: u32,
+) -> core::result::Result<(), ApplyError> {
+    use bitcoin::hashes::Hash as _;
+
+    if !handles.network.is_csv_active(height) {
+        return Ok(());
+    }
+
+    for tx in &block.txdata {
+        if tx.is_coinbase() {
+            continue;
+        }
+        if tx.version.0 < 2 {
+            continue;
+        }
+        for tx_input in &tx.input {
+            let sequence = tx_input.sequence.to_consensus_u32();
+            if sequence & BIP68_DISABLE_FLAG != 0 {
+                continue;
+            }
+            let is_time_based = sequence & BIP68_TYPE_FLAG != 0;
+            if is_time_based {
+                tracing::warn!(
+                    sequence = %format_args!("0x{sequence:08x}"),
+                    "BIP68 time-based sequence lock observed; enforcement deferred"
+                );
+                continue;
+            }
+
+            let relative_blocks = sequence & BIP68_MASK;
+            let prev_outpoint = OutPoint::new(
+                bitcoin_rs_primitives::Hash256::from_le_bytes(
+                    tx_input.previous_output.txid.as_byte_array(),
+                ),
+                tx_input.previous_output.vout,
+            );
+            let Some(entry) = handles.utxo.get_entry(&prev_outpoint) else {
+                continue;
+            };
+            let earliest_height = entry.height.saturating_add(relative_blocks);
+            if height < earliest_height {
+                return Err(ApplyError::Consensus(
+                    bitcoin_rs_consensus::ConsensusError::Bip {
+                        bip: "BIP68",
+                        reason: format!(
+                            "input sequence height-based lock unmet: prevout at height {} + {} blocks > current {}",
+                            entry.height, relative_blocks, height
+                        ),
+                    },
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
 
