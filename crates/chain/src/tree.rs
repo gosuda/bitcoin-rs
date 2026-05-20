@@ -128,6 +128,15 @@ impl BlockTree {
             .copied()
     }
 
+    /// Returns a reference to the node whose header hash matches `hash`, or
+    /// `None` if no such node exists.
+    ///
+    /// Composite of [`lookup`] + [`node`] for the common 2-step pattern.
+    #[must_use]
+    pub fn node_by_hash(&self, hash: Hash256) -> Option<&BlockTreeNode> {
+        self.node(self.lookup(hash)?).ok()
+    }
+
     /// Returns the `NodeId`s of every node not referenced as a parent.
     ///
     /// A leaf is a tip of either the active chain (most common: 1 leaf, the
@@ -473,7 +482,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use super::{BlockTree, hash_from_header};
+    use super::{BlockTree, Hash256, hash_from_header};
     use crate::{
         node::{ChainWork, NodeStatus},
         tip::TipSnapshot,
@@ -533,6 +542,26 @@ mod tests {
             panic!("chain has 11 blocks should yield Some");
         };
         assert_eq!(mtp, 1_003_000);
+        Ok(())
+    }
+
+    #[test]
+    fn node_by_hash_returns_none_for_unknown_hash() {
+        let tree = BlockTree::new();
+        let unknown = Hash256::from_le_bytes(&[0xab_u8; 32]);
+        assert!(tree.node_by_hash(unknown).is_none());
+    }
+
+    #[test]
+    fn node_by_hash_returns_inserted_node() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+        let Some(node) = tree.node_by_hash(genesis_hash) else {
+            panic!("node_by_hash returned None for inserted genesis");
+        };
+        assert_eq!(node.hash, genesis_hash);
         Ok(())
     }
 
