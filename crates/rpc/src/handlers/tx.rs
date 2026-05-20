@@ -81,6 +81,22 @@ fn classify_script(script: &bitcoin::Script) -> &'static str {
     }
 }
 
+fn script_to_address(
+    script: &bitcoin::Script,
+    chain_network: bitcoin_rs_primitives::Network,
+) -> Option<String> {
+    let network = match chain_network {
+        bitcoin_rs_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
+        bitcoin_rs_primitives::Network::Testnet3 => bitcoin::Network::Testnet,
+        bitcoin_rs_primitives::Network::Testnet4 => bitcoin::Network::Testnet4,
+        bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
+        bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
+    };
+    bitcoin::Address::from_script(script, network)
+        .ok()
+        .map(|address| address.to_string())
+}
+
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let vout = required_u64(params, 1, "vout is required")?;
@@ -92,16 +108,26 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     };
     let applied = ctx.applied_height();
     let confirmations = applied.saturating_sub(live.height).saturating_add(1);
+    let script_hex = live.txout.script_pubkey.as_bytes().to_lower_hex_string();
+    let address = script_to_address(&live.txout.script_pubkey, ctx.chain_network);
+    let desc = address.as_deref().map_or_else(
+        || format!("raw({script_hex})"),
+        |addr| format!("addr({addr})"),
+    );
+    let mut script_pubkey = json!({
+        "asm": live.txout.script_pubkey.to_asm_string(),
+        "desc": desc,
+        "hex": script_hex,
+        "type": classify_script(&live.txout.script_pubkey)
+    });
+    if let Some(addr) = address {
+        let _ = script_pubkey.insert("address", json!(addr));
+    }
     Ok(json!({
         "bestblock": ctx.best_hash().to_string_be(),
         "confirmations": confirmations,
         "value": super::tx_render::btc_value(live.txout.value.to_sat()),
-        "scriptPubKey": {
-            "asm": live.txout.script_pubkey.to_asm_string(),
-            "desc": "raw()",
-            "hex": live.txout.script_pubkey.as_bytes().to_lower_hex_string(),
-            "type": classify_script(&live.txout.script_pubkey)
-        },
+        "scriptPubKey": script_pubkey,
         "coinbase": live.coinbase
     }))
 }
@@ -342,6 +368,39 @@ mod classify_script_tests {
     fn classify_empty_is_nonstandard() {
         let script = ScriptBuf::new();
         assert_eq!(classify_script(&script), "nonstandard");
+    }
+
+    #[test]
+    fn script_to_address_returns_some_for_p2wpkh_on_mainnet() {
+        use bitcoin::hex::FromHex as _;
+
+        let script_hex = "00141111111111111111111111111111111111111111";
+        let bytes = match Vec::<u8>::from_hex(script_hex) {
+            Ok(bytes) => bytes,
+            Err(error) => panic!("hex: {error}"),
+        };
+        let script = ScriptBuf::from_bytes(bytes);
+
+        let address = script_to_address(&script, bitcoin_rs_primitives::Network::Mainnet);
+
+        assert!(
+            address.is_some(),
+            "P2WPKH script must yield mainnet bech32 address"
+        );
+        let Some(addr) = address else {
+            panic!("address");
+        };
+        assert!(
+            addr.starts_with("bc1"),
+            "mainnet P2WPKH should bech32-encode with bc1 prefix: {addr}"
+        );
+    }
+
+    #[test]
+    fn script_to_address_returns_none_for_nonstandard_script() {
+        let script = ScriptBuf::new();
+
+        assert!(script_to_address(&script, bitcoin_rs_primitives::Network::Mainnet).is_none());
     }
 }
 #[cfg(test)]
