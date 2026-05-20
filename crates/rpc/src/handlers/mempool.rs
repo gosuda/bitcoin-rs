@@ -18,7 +18,9 @@ const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
 
 pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
-    let stats = ctx.mempool.read().stats();
+    let pool = ctx.mempool.read();
+    let stats = pool.stats();
+    let mempool_sequence = pool.sequence_number();
     let min_relay_fee = sat_per_kvb_to_btc(DEFAULT_MIN_RELAY_FEE_SAT_PER_KVB);
     let incremental_relay_fee = sat_per_kvb_to_btc(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB);
     Ok(json!({
@@ -31,6 +33,9 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "mempoolminfee": min_relay_fee,
         "minrelaytxfee": min_relay_fee,
         "incrementalrelayfee": incremental_relay_fee,
+        // Deviation: Bitcoin Core exposes this via getrawmempool's
+        // mempool_sequence argument; this v1 surface emits it here instead.
+        "mempool_sequence": mempool_sequence,
         "unbroadcastcount": 0,
         "fullrbf": true
     }))
@@ -214,6 +219,19 @@ mod tests {
         assert!(
             (min_relay - 0.00001).abs() < 1e-9,
             "expected ~0.00001, got {min_relay}"
+        );
+    }
+
+    #[test]
+    fn getmempoolinfo_emits_mempool_sequence_field() {
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolinfo", &json!([]))
+            .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
+        assert!(
+            result.get("mempool_sequence").is_some(),
+            "mempool_sequence missing: {result:?}"
         );
     }
 

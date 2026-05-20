@@ -71,6 +71,7 @@ pub struct Mempool {
     pub pareto: ParetoFront,
     /// Active mempool policy limits.
     pub limits: MempoolLimits,
+    sequence: core::sync::atomic::AtomicU64,
 }
 /// Aggregate mempool counters surfaced through the JSON-RPC `getmempoolinfo`
 /// and Electrum `mempool.get_fee_histogram` surfaces.
@@ -95,7 +96,20 @@ impl Mempool {
             spending: std::collections::BTreeSet::new(),
             pareto: ParetoFront::new(),
             limits,
+            sequence: core::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Returns the current sequence number. Increments on every insert/remove.
+    #[must_use]
+    pub fn sequence_number(&self) -> u64 {
+        self.sequence.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    fn bump_sequence(&self) {
+        let _ = self
+            .sequence
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
     }
 
     /// Inserts an entry after applying ancestor and descendant policy checks.
@@ -128,6 +142,7 @@ impl Mempool {
         self.by_txid.insert(txid, id);
         self.index_entry(id);
         self.recompute_all_metadata();
+        self.bump_sequence();
         Ok(id)
     }
 
@@ -218,6 +233,7 @@ impl Mempool {
             return false;
         };
         self.pareto.insert(id, &entry);
+        self.bump_sequence();
         true
     }
 
@@ -299,6 +315,7 @@ impl Mempool {
     }
 
     fn remove_entries(&mut self, ids: &[EntryId]) {
+        let mut removed_any = false;
         for id in ids {
             let Some(index) = usize::try_from(*id).ok() else {
                 continue;
@@ -307,6 +324,7 @@ impl Mempool {
                 continue;
             }
             let entry = self.entries.remove(index);
+            removed_any = true;
             self.by_txid.remove(&entry.tx.compute_txid());
             self.pareto.remove(*id);
             for (vout, output) in entry.tx.output.iter().enumerate() {
@@ -322,6 +340,9 @@ impl Mempool {
             }
         }
         self.recompute_all_metadata();
+        if removed_any {
+            self.bump_sequence();
+        }
     }
 
     fn index_entry(&mut self, id: EntryId) {
@@ -565,6 +586,23 @@ mod tests {
         assert_eq!(stats.txs, 1);
         assert_eq!(stats.bytes, expected_vsize);
         assert_eq!(stats.total_fee, expected_fee);
+        Ok(())
+    }
+
+    #[test]
+    fn sequence_number_bumps_on_successful_insert() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let before = pool.sequence_number();
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
+        pool.insert_entry(entry)?;
+        let after = pool.sequence_number();
+        assert!(after > before, "expected sequence to bump");
         Ok(())
     }
 
