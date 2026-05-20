@@ -26,6 +26,7 @@ pub mod wire;
 /// BIP339 wtxid-relay state.
 pub mod wtxid;
 
+pub use listener::spawn_outbound_connection;
 pub use peer::{DnsResolver, Peer, PeerManager, PeerState};
 pub use peer_info::PeerInfo;
 pub use wire::{Message, PeerError};

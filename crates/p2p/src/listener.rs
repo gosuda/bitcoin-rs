@@ -87,6 +87,134 @@ pub fn serve_with_shutdown(
     Ok(())
 }
 
+/// Spawns an outbound TCP connection to `addr`, performs the outbound P2P
+/// handshake, and enters the same message loop the inbound path uses.
+///
+/// Returns a `JoinHandle` for the spawned thread. Errors during connect or
+/// handshake bubble up via the `JoinHandle`'s `Result`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn spawn_outbound_connection(
+    addr: SocketAddr,
+    magic: Magic,
+    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
+    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
+    let result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            run_outbound_connection(
+                addr,
+                magic,
+                &peer_registry,
+                &peer_outbound,
+                &inbound_headers_tx,
+                &inbound_blocks_tx,
+            )
+        });
+
+    match result {
+        Ok(handle) => handle,
+        Err(error) => {
+            tracing::warn!(
+                addr = %addr,
+                %error,
+                "p2p outbound spawn failed",
+            );
+            std::thread::spawn(move || Err(crate::wire::PeerError::Io(error)))
+        }
+    }
+}
+
+fn run_outbound_connection(
+    addr: SocketAddr,
+    magic: Magic,
+    peer_registry: &RwLock<Vec<crate::PeerInfo>>,
+    peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
+    inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: &Sender<bitcoin::Block>,
+) -> Result<(), crate::wire::PeerError> {
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(crate::wire::PeerError::Io)?;
+    stream
+        .set_read_timeout(Some(HANDSHAKE_READ_TIMEOUT))
+        .map_err(crate::wire::PeerError::Io)?;
+    stream
+        .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
+        .map_err(crate::wire::PeerError::Io)?;
+
+    let nonce = generate_nonce(addr);
+    let mut peer = Peer::new(stream, magic);
+    run_outbound_handshake(&mut peer, nonce, 0)?;
+
+    let Some(remote_version) = peer.remote_version.as_ref() else {
+        return Err(crate::wire::PeerError::Protocol(
+            "missing remote version after outbound handshake",
+        ));
+    };
+    let conn_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    // `PeerInfo` lives outside this strand's owned files, so reuse the
+    // inbound constructor and patch the direction bit locally.
+    let mut info = crate::PeerInfo::inbound_from_version(addr, remote_version, conn_time);
+    info.inbound = false;
+    peer_registry.write().push(info);
+
+    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
+    peer_outbound.write().insert(addr, outbound_tx);
+
+    tracing::info!(
+        peer_addr = %addr,
+        "p2p outbound handshake complete; entering message loop",
+    );
+
+    let loop_result = (|| {
+        peer.stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(crate::wire::PeerError::Io)?;
+        run_message_loop(
+            &mut peer,
+            addr,
+            &outbound_rx,
+            inbound_headers_tx,
+            inbound_blocks_tx,
+        )
+    })();
+
+    peer_outbound.write().remove(&addr);
+    peer_registry.write().retain(|p| p.addr != addr);
+    if let Err(error) = &loop_result {
+        tracing::warn!(peer_addr = %addr, %error, "p2p outbound peer disconnected with error");
+    } else {
+        tracing::debug!(peer_addr = %addr, "p2p outbound peer disconnected cleanly");
+    }
+    loop_result
+}
+
+fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
+    peer: &mut Peer<S>,
+    nonce: u64,
+    start_height: i32,
+) -> Result<(), crate::wire::PeerError> {
+    let outbound_messages = crate::handshake::start(peer, nonce, start_height);
+    for message in outbound_messages {
+        peer.send(&message)?;
+    }
+
+    while peer.state != crate::peer::PeerState::Ready {
+        let inbound = crate::wire::read_message(&mut peer.stream, peer.magic)?;
+        let responses = crate::dispatch::dispatch_inbound(peer, &inbound)?;
+        for response in responses {
+            peer.send(&response)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn spawn_handshake_thread(
     stream: TcpStream,
     peer_addr: SocketAddr,
@@ -278,4 +406,48 @@ fn generate_nonce(peer_addr: SocketAddr) -> u64 {
         duration.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod outbound_tests {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::sync::Arc;
+
+    use bitcoin::p2p::Magic;
+    use parking_lot::RwLock;
+
+    use super::spawn_outbound_connection;
+
+    #[test]
+    fn spawn_outbound_connection_to_closed_port_fails_quickly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+        let addr = listener.local_addr()?;
+        drop(listener);
+
+        let registry = Arc::new(RwLock::new(Vec::new()));
+        let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+
+        let handle = spawn_outbound_connection(
+            addr,
+            Magic::BITCOIN,
+            registry,
+            outbound,
+            headers_tx,
+            blocks_tx,
+        );
+        let inner = match handle.join() {
+            Ok(inner) => inner,
+            Err(error) => std::panic::resume_unwind(error),
+        };
+
+        assert!(
+            inner.is_err(),
+            "expected connection failure to unlistened port"
+        );
+
+        Ok(())
+    }
 }
