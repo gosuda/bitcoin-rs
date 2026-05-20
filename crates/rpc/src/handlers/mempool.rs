@@ -162,7 +162,13 @@ fn entry_to_value(
 }
 
 fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> serde_json::Value {
+    const BIP125_THRESHOLD: u32 = 0xFFFF_FFFE;
     let txid = entry.tx.compute_txid();
+    let bip125_replaceable = entry
+        .tx
+        .input
+        .iter()
+        .any(|input| input.sequence.0 < BIP125_THRESHOLD);
     let mut depends = Vec::new();
     for input in &entry.tx.input {
         let prev_txid = input.previous_output.txid;
@@ -203,7 +209,7 @@ fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> s
         },
         "depends": depends,
         "spentby": spentby,
-        "bip125-replaceable": false,
+        "bip125-replaceable": bip125_replaceable,
         "unbroadcast": false
     })
 }
@@ -225,6 +231,7 @@ fn sat_per_kvb_to_btc(sat: u64) -> f64 {
 mod tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
+    use bitcoin::hashes::Hash as _;
 
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
     use bitcoin_rs_mempool::MempoolEntry;
@@ -503,6 +510,46 @@ mod tests {
             panic!("depends missing: {result:?}");
         };
         assert_eq!(depends.len(), 1, "expected one depends entry");
+    }
+
+    #[test]
+    fn getmempoolentry_bip125_replaceable_reflects_input_sequence() {
+        let ctx = Arc::new(Context::new());
+        let rbf_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0xaa; 32]),
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(0x0000_0001),
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let rbf_txid = rbf_tx.compute_txid();
+        {
+            let mut pool = ctx.mempool.write();
+            let Ok(_) = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7))
+            else {
+                panic!("mempool insert failed");
+            };
+        }
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolentry", &json!([rbf_txid.to_string()]))
+            .unwrap_or_else(|err| panic!("getmempoolentry failed: {err}"));
+        assert_eq!(
+            result
+                .get("bip125-replaceable")
+                .and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
     }
 
     fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Transaction {
