@@ -144,26 +144,27 @@ fn chainwork_to_f64(work: bitcoin_rs_chain::ChainWork) -> f64 {
         .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)))
 }
 
-pub(crate) fn submitblock(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     use bitcoin::consensus::encode::deserialize;
-    use bitcoin::hex::FromHex as _;
+    use bitcoin::hex::FromHex;
 
     let hex = required_str(params, 0, "block hex is required")?;
-    let bytes = Vec::<u8>::from_hex(hex)
+    let bytes = <Vec<u8> as FromHex>::from_hex(hex)
         .map_err(|_| RpcError::InvalidParams("block hex is not valid hexadecimal"))?;
     let block: bitcoin::Block = match deserialize(&bytes) {
-        Ok(block) => block,
+        Ok(b) => b,
         Err(_) => return Ok(json!("bad-block-encoding")),
     };
     let target = block.header.target();
     if block.header.validate_pow(target).is_err() {
         return Ok(json!("high-hash"));
     }
-
-    // TODO(node-channel): push block bytes to BlockSync via a Sender<Vec<u8>>;
-    // until then, accept the block as parseable + PoW-self-consistent and
-    // return null per Bitcoin Core's accept signal. Real apply will happen
-    // when the node-side channel is wired.
+    if let Some(sender) = &ctx.inbound_blocks_sender {
+        if sender.send(block).is_err() {
+            return Ok(json!("channel-closed"));
+        }
+    }
+    // Successful enqueue (or no-sender accept path) returns null.
     Ok(Value::new_null())
 }
 
@@ -203,6 +204,23 @@ mod submitblock_tests {
             result.is_null(),
             "expected null accept signal, got {result:?}"
         );
+    }
+
+    #[test]
+    fn submitblock_pushes_to_channel_when_present() {
+        let (tx, rx) = crossbeam_channel::unbounded::<bitcoin::Block>();
+        let mut ctx = Context::new();
+        ctx.inbound_blocks_sender = Some(tx);
+        let ctx = Arc::new(ctx);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let hex = serialize(&genesis).to_lower_hex_string();
+        let result = submitblock(&ctx, &json!([hex]))
+            .unwrap_or_else(|err| panic!("submitblock failed: {err}"));
+        assert!(result.is_null());
+        let received = rx
+            .try_recv()
+            .unwrap_or_else(|err| panic!("channel did not receive block: {err}"));
+        assert_eq!(received.block_hash(), genesis.block_hash());
     }
 
     #[test]

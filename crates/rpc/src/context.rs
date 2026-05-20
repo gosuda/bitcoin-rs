@@ -136,6 +136,10 @@ pub struct Context {
     pub mining_template_id: Arc<ArcSwap<CompactString>>,
     /// Receiver notified when mining template inputs change.
     pub mining_notifications: Receiver<()>,
+    /// Optional outbound channel that submits decoded blocks back to the node's
+    /// `BlockSync::tick` for the canonical apply path. `None` when no node is
+    /// wired (tests, embedded callers).
+    pub inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
     mining_sender: Sender<()>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
@@ -184,6 +188,7 @@ impl Context {
             block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             mining_notifications,
+            inbound_blocks_sender: None,
             mining_sender,
         }
     }
@@ -209,6 +214,7 @@ impl Context {
         peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
         block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
         chain_network: Network,
+        inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
     ) -> Self {
         let (mining_sender, mining_notifications) = unbounded();
         Self {
@@ -226,6 +232,7 @@ impl Context {
             block_tree,
             mining_template_id,
             mining_notifications,
+            inbound_blocks_sender,
             mining_sender,
         }
     }
@@ -440,6 +447,7 @@ mod tests {
             Arc::new(RwLock::new(Vec::new())),
             Arc::clone(&block_tree),
             Network::Mainnet,
+            None,
         );
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
