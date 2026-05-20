@@ -56,23 +56,38 @@ pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 
 pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let verbose = optional_bool(params, 0, false)?;
+    let include_sequence = optional_bool(params, 1, false)?;
     let pool = ctx.mempool.read();
-    if !verbose {
-        let txids = pool
-            .entries
-            .iter()
-            .map(|(_id, entry)| entry.tx.compute_txid().to_string())
-            .collect::<Vec<_>>();
-        return Ok(json!(txids));
+    let sequence = pool.sequence_number();
+    if verbose {
+        let mut object = serde_json::Map::new();
+        for (_id, entry) in &pool.entries {
+            object.insert(
+                entry.tx.compute_txid().to_string(),
+                entry_to_serde(entry, &pool),
+            );
+        }
+        if include_sequence {
+            object.insert(
+                "mempool_sequence".to_owned(),
+                serde_json::Value::Number(serde_json::Number::from(sequence)),
+            );
+        }
+        return serde_to_sonic(&serde_json::Value::Object(object));
     }
-    let mut object = serde_json::Map::new();
-    for (_id, entry) in &pool.entries {
-        object.insert(
-            entry.tx.compute_txid().to_string(),
-            entry_to_serde(entry, &pool),
-        );
+
+    let txids: Vec<String> = pool
+        .entries
+        .iter()
+        .map(|(_id, entry)| entry.tx.compute_txid().to_string())
+        .collect();
+    if include_sequence {
+        return Ok(json!({
+            "txids": txids,
+            "mempool_sequence": sequence,
+        }));
     }
-    serde_to_sonic(&serde_json::Value::Object(object))
+    Ok(json!(txids))
 }
 
 pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -232,6 +247,56 @@ mod tests {
         assert!(
             result.get("mempool_sequence").is_some(),
             "mempool_sequence missing: {result:?}"
+        );
+    }
+
+    #[test]
+    fn getrawmempool_with_sequence_flag_wraps_response() {
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getrawmempool", &json!([false, true]))
+            .unwrap_or_else(|err| panic!("getrawmempool failed: {err}"));
+        let Some(seq) = result
+            .get("mempool_sequence")
+            .and_then(JsonValueTrait::as_u64)
+        else {
+            panic!("mempool_sequence missing: {result:?}");
+        };
+        assert_eq!(seq, 0);
+        let Some(txids) = result.get("txids").and_then(JsonContainerTrait::as_array) else {
+            panic!("txids missing: {result:?}");
+        };
+        assert!(txids.is_empty());
+    }
+
+    #[test]
+    fn getrawmempool_without_sequence_flag_returns_bare_array() {
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getrawmempool", &json!([]))
+            .unwrap_or_else(|err| panic!("getrawmempool failed: {err}"));
+        assert!(result.is_array(), "expected bare array: {result:?}");
+    }
+
+    #[test]
+    fn getrawmempool_verbose_sequence_flag_flattens_response() {
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getrawmempool", &json!([true, true]))
+            .unwrap_or_else(|err| panic!("getrawmempool failed: {err}"));
+        let Some(seq) = result
+            .get("mempool_sequence")
+            .and_then(JsonValueTrait::as_u64)
+        else {
+            panic!("mempool_sequence missing: {result:?}");
+        };
+        assert_eq!(seq, 0);
+        assert!(
+            result.get("txids").is_none(),
+            "verbose response must not use txids wrapper: {result:?}"
         );
     }
 
