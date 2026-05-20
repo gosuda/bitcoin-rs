@@ -24,6 +24,20 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let live_min_relay_sat_per_kvb = pool.min_relay_fee_sat_per_kvb();
     let min_relay_fee = sat_per_kvb_to_btc(live_min_relay_sat_per_kvb);
     let incremental_relay_fee = sat_per_kvb_to_btc(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB);
+    // `mempoolminfee` rises above `minrelaytxfee` when the pool approaches its
+    // `maxmempool` byte limit. Bitcoin Core uses the eviction-floor heuristic:
+    // once the pool exceeds 50% of `maxmempool`, new txs must pay strictly
+    // more than the cheapest currently-evictable tx by `incrementalrelayfee`.
+    let mempool_min_fee_sat_per_kvb = if maxmempool > 0
+        && stats.bytes.saturating_mul(2) >= maxmempool
+        && let Some(lowest) = pool.lowest_fee_rate()
+    {
+        live_min_relay_sat_per_kvb
+            .max(lowest.saturating_add(DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB))
+    } else {
+        live_min_relay_sat_per_kvb
+    };
+    let mempool_min_fee_btc = sat_per_kvb_to_btc(mempool_min_fee_sat_per_kvb);
     Ok(json!({
         "loaded": true,
         "size": stats.txs,
@@ -31,7 +45,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "usage": stats.bytes,
         "total_fee": sats_to_btc(stats.total_fee),
         "maxmempool": maxmempool,
-        "mempoolminfee": min_relay_fee,
+        "mempoolminfee": mempool_min_fee_btc,
         "minrelaytxfee": min_relay_fee,
         "incrementalrelayfee": incremental_relay_fee,
         // Deviation: Bitcoin Core exposes this via getrawmempool's
@@ -224,6 +238,30 @@ fn sat_per_kvb_to_btc(sat: u64) -> f64 {
         f64::from(small) / 100_000_000.0_f64
     } else {
         f64::from(u32::MAX) / 100_000_000.0_f64
+    }
+}
+
+#[cfg(test)]
+mod mempoolminfee_pressure_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use sonic_rs::JsonValueTrait;
+
+    #[test]
+    fn mempoolminfee_equals_minrelay_when_pool_below_pressure() {
+        let ctx = Arc::new(Context::new());
+        // Empty pool, default limits: mempoolminfee == minrelaytxfee.
+        let value =
+            getmempoolinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getmempoolinfo: {err}"));
+        let Some(mempool_min) = value.get("mempoolminfee").and_then(JsonValueTrait::as_f64) else {
+            panic!("mempoolminfee missing");
+        };
+        let Some(min_relay) = value.get("minrelaytxfee").and_then(JsonValueTrait::as_f64) else {
+            panic!("minrelaytxfee missing");
+        };
+        // Both should equal the default 0.00001 BTC/kvB (1000 sat/kvB).
+        assert!((mempool_min - min_relay).abs() < 1e-9);
     }
 }
 
