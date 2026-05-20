@@ -401,6 +401,7 @@ impl NodeState {
                 mempool: Arc::clone(&mempool),
                 blocks: Arc::clone(&blocks),
                 transactions: Arc::clone(&transactions),
+                zmq_publisher: Arc::clone(&zmq_publisher),
             },
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
@@ -678,6 +679,7 @@ impl NodeState {
             mempool: Arc::clone(&self.mempool),
             blocks: Arc::clone(&self.blocks),
             transactions: Arc::clone(&self.transactions),
+            zmq_publisher: Arc::clone(&self.zmq_publisher),
         }
     }
 

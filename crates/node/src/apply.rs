@@ -47,6 +47,8 @@ pub struct ApplyHandles {
     pub blocks: Arc<RwLock<Vec<BlockRecord>>>,
     /// Shared transaction map exposed to RPC handlers.
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
+    /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
+    pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
 }
 
 /// Synthetically applies `block` as the next tip after consensus checks.
@@ -300,6 +302,15 @@ pub fn apply_block(
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
+    // Best-effort ZMQ event emission. Failures must not propagate per the
+    // ZmqPublisher contract; the trait's methods return `()`.
+    handles.zmq_publisher.publish_hashblock(tip.hash);
+    handles.zmq_publisher.publish_rawblock(&block_bytes);
+    for tx in &block.txdata {
+        handles.zmq_publisher.publish_hashtx(tx.compute_txid());
+        let rawtx_bytes = bitcoin::consensus::encode::serialize(tx);
+        handles.zmq_publisher.publish_rawtx(&rawtx_bytes);
+    }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
     Ok(tip)
 }
@@ -745,4 +756,60 @@ const fn compute_verify_flags(network: Network, height: u32) -> bitcoin_rs_scrip
         flags = flags.union(VerifyFlags::TAPROOT);
     }
     flags
+}
+#[cfg(test)]
+mod zmq_emit_tests {
+    use super::*;
+    use bitcoin::hashes::Hash as _;
+    use parking_lot::Mutex as TestMutex;
+
+    #[derive(Debug, Default)]
+    struct CapturingPublisher {
+        events: TestMutex<Vec<String>>,
+    }
+
+    impl crate::ZmqPublisher for CapturingPublisher {
+        fn publish_hashblock(&self, hash: bitcoin_rs_primitives::Hash256) {
+            self.events
+                .lock()
+                .push(format!("hashblock:{}", hash.to_string_be()));
+        }
+
+        fn publish_hashtx(&self, txid: bitcoin::Txid) {
+            self.events.lock().push(format!("hashtx:{txid}"));
+        }
+
+        fn publish_rawblock(&self, _bytes: &[u8]) {
+            self.events.lock().push("rawblock".to_owned());
+        }
+
+        fn publish_rawtx(&self, _bytes: &[u8]) {
+            self.events.lock().push("rawtx".to_owned());
+        }
+    }
+
+    #[test]
+    fn captures_event_count_smoke() {
+        let capturing = Arc::new(CapturingPublisher::default());
+        let publisher: Arc<dyn crate::ZmqPublisher> = capturing.clone();
+
+        publisher.publish_hashblock(bitcoin_rs_primitives::Hash256::default());
+        publisher.publish_hashtx(bitcoin::Txid::from_byte_array([0; 32]));
+        publisher.publish_rawblock(&[]);
+        publisher.publish_rawtx(&[]);
+
+        let events = capturing.events.lock().clone();
+        assert_eq!(
+            events,
+            vec![
+                format!(
+                    "hashblock:{}",
+                    bitcoin_rs_primitives::Hash256::default().to_string_be()
+                ),
+                format!("hashtx:{}", bitcoin::Txid::from_byte_array([0; 32])),
+                "rawblock".to_owned(),
+                "rawtx".to_owned(),
+            ]
+        );
+    }
 }

@@ -167,6 +167,7 @@ fn apply_handles(
         mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         blocks: Arc::new(RwLock::new(Vec::new())),
         transactions: Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
+        zmq_publisher: Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
     }
 }
 
