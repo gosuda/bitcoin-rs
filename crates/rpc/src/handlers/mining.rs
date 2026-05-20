@@ -8,7 +8,6 @@ use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, params_array, required_str};
 
 const NETWORK_HASHPS_WINDOW: u32 = 120;
-const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 
 pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     if !params.is_null() {
@@ -84,27 +83,21 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 }
 
 fn estimate_current_block(ctx: &Context) -> (u64, u64) {
+    const MAX_BLOCK_WEIGHT: u32 = 4_000_000;
+
+    let policy = bitcoin_rs_mining::MiningPolicy;
     let pool = ctx.mempool.read();
-    let mut candidates: Vec<(u64, u64)> = Vec::with_capacity(pool.entries.len());
-    for (_id, entry) in &pool.entries {
-        let weight = u64::from(entry.vsize).saturating_mul(4);
-        candidates.push((entry.fee_rate, weight));
+    let selected = policy.select_transactions(&pool, MAX_BLOCK_WEIGHT);
+    let mut weight: u64 = 0;
+    let mut count: u64 = 0;
+    for entry_id in &selected {
+        let Some(entry) = pool.entry(*entry_id) else {
+            continue;
+        };
+        weight = weight.saturating_add(u64::from(entry.vsize).saturating_mul(4));
+        count = count.saturating_add(1);
     }
-
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let mut total_weight: u64 = 0;
-    let mut tx_count: u64 = 0;
-    for (_rate, weight) in candidates {
-        let next = total_weight.saturating_add(weight);
-        if next > MAX_BLOCK_WEIGHT {
-            break;
-        }
-        total_weight = next;
-        tx_count = tx_count.saturating_add(1);
-    }
-
-    (total_weight, tx_count)
+    (weight, count)
 }
 
 fn estimate_network_hashps(ctx: &Context) -> f64 {
@@ -294,6 +287,27 @@ mod getmininginfo_tests {
 
         assert_eq!(weight, 1_000);
         assert_eq!(tx_count, 1);
+    }
+
+    #[test]
+    fn getmininginfo_currentblocktx_zero_when_mempool_empty() {
+        let ctx = Arc::new(Context::new());
+        let result = getmininginfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
+        let Some(weight) = result
+            .get("currentblockweight")
+            .and_then(JsonValueTrait::as_u64)
+        else {
+            panic!("currentblockweight missing");
+        };
+        let Some(count) = result
+            .get("currentblocktx")
+            .and_then(JsonValueTrait::as_u64)
+        else {
+            panic!("currentblocktx missing");
+        };
+        assert_eq!(weight, 0);
+        assert_eq!(count, 0);
     }
 
     #[test]
