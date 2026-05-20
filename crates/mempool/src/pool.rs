@@ -291,6 +291,20 @@ impl Mempool {
         pairs.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// Returns the minimum `fee_rate` (sat/kvB) among all entries, or `None`
+    /// for an empty pool.
+    ///
+    /// Linear pass over `self.entries`. Used for `mempoolminfee` tightening
+    /// and fee-histogram tail bounds. The min is over `MempoolEntry.fee_rate`
+    /// which is already pre-computed at insert time.
+    #[must_use]
+    pub fn lowest_fee_rate(&self) -> Option<u64> {
+        self.entries
+            .iter()
+            .map(|(_index, entry)| entry.fee_rate)
+            .min()
+    }
+
     /// Returns mempool entry ids whose `fee_rate` >= `threshold_sat_per_kvb`.
     ///
     /// Linear scan over `entries`. Used by mining template builders and eviction
@@ -864,6 +878,28 @@ mod tests {
             panic!("second entry missing");
         };
         assert_eq!(second_entry.tx.compute_txid(), low_txid);
+    }
+
+    #[test]
+    fn lowest_fee_rate_returns_none_for_empty_pool() {
+        let pool = Mempool::new(MempoolLimits::default());
+        assert!(pool.lowest_fee_rate().is_none());
+    }
+
+    #[test]
+    fn lowest_fee_rate_returns_minimum_across_entries() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+
+        let high = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 1_000, 5_000, 1, 7);
+        let low = MempoolEntry::new(Arc::new(tx(2, Vec::new())), 1_000, 1_500, 1, 7);
+        pool.insert_entry(high)?;
+        pool.insert_entry(low)?;
+
+        assert_eq!(pool.lowest_fee_rate(), Some(1_500));
+        Ok(())
     }
 
     #[test]
