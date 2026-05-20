@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::consensus::encode::deserialize;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use core::str::FromStr as _;
 
@@ -145,7 +145,7 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     if verbosity == 0 {
         return Ok(json!(record.block_hex));
     }
-    Ok(block_json_verbose(ctx, &record, true, verbosity))
+    block_json_verbose(ctx, &record, true, verbosity)
 }
 
 pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -161,7 +161,7 @@ pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value
     if !verbose {
         return Ok(json!(record.header_hex));
     }
-    Ok(block_json_verbose(ctx, &record, false, 1))
+    block_json_verbose(ctx, &record, false, 1)
 }
 
 pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -392,9 +392,9 @@ fn block_json_verbose(
     record: &BlockRecord,
     include_block_fields: bool,
     verbosity: u64,
-) -> Value {
+) -> Result<Value, RpcError> {
     let Some(header) = decode_header(record) else {
-        return synthetic_block_json(ctx, record, include_block_fields);
+        return Ok(synthetic_block_json(ctx, record, include_block_fields));
     };
 
     let version = header.version.to_consensus();
@@ -411,7 +411,7 @@ fn block_json_verbose(
     let difficulty = ctx.difficulty_for_bits(header.bits);
 
     if !include_block_fields {
-        return json!({
+        return Ok(json!({
             "hash": record.hash.to_string_be(),
             "confirmations": confirmations(ctx, record.height),
             "height": record.height,
@@ -427,14 +427,18 @@ fn block_json_verbose(
             "nTx": record.tx_count,
             "previousblockhash": header.prev_blockhash.to_string(),
             "nextblockhash": next_hash
-        });
+        }));
     }
 
     let Some(block) = decode_block(record) else {
-        return synthetic_block_json(ctx, record, true);
+        return Ok(synthetic_block_json(ctx, record, true));
     };
     let tx_array: Vec<Value> = if verbosity >= 2 {
-        block.txdata.iter().map(tx_summary_for_block).collect()
+        block
+            .txdata
+            .iter()
+            .map(super::tx_render::tx_to_value)
+            .collect::<Result<Vec<_>, _>>()?
     } else {
         block
             .txdata
@@ -443,7 +447,7 @@ fn block_json_verbose(
             .collect()
     };
 
-    json!({
+    Ok(json!({
         "hash": record.hash.to_string_be(),
         "confirmations": confirmations(ctx, record.height),
         "height": record.height,
@@ -463,21 +467,7 @@ fn block_json_verbose(
         "size": record.block_hex.len() / 2,
         "weight": block.weight().to_wu(),
         "tx": tx_array
-    })
-}
-
-fn tx_summary_for_block(tx: &bitcoin::Transaction) -> Value {
-    let encoded = serialize(tx);
-    json!({
-        "txid": tx.compute_txid().to_string(),
-        "hash": tx.compute_wtxid().to_string(),
-        "version": i64::from(tx.version.0),
-        "size": encoded.len(),
-        "vsize": tx.vsize(),
-        "weight": tx.weight().to_wu(),
-        "locktime": tx.lock_time.to_consensus_u32(),
-        "hex": encoded.to_lower_hex_string(),
-    })
+    }))
 }
 
 fn decode_header(record: &BlockRecord) -> Option<bitcoin::block::Header> {
@@ -671,6 +661,14 @@ mod tests {
             "verbosity=2 tx must include hex field: {first:?}"
         );
         assert!(first.get("vsize").is_some());
+        assert!(
+            first.get("vin").is_some(),
+            "shared tx_to_value should emit vin: {first:?}"
+        );
+        assert!(
+            first.get("vout").is_some(),
+            "shared tx_to_value should emit vout: {first:?}"
+        );
     }
 
     #[test]
