@@ -70,6 +70,14 @@ pub trait ConfirmedHistoryReader: Send + Sync + core::fmt::Debug {
     /// Returns confirmed history records for `scripthash`, in iteration order
     /// of the index. Empty [`Vec`] on missing data.
     fn confirmed_history(&self, scripthash: ScriptHash) -> Vec<HistoryRecord>;
+    /// Returns confirmed unspent-output records for `scripthash`.
+    ///
+    /// Resolves the lossy 8-byte prefix to full `(txid, vout, value_sats)`
+    /// triples via the wrapped `BlockSource` and filters out outpoints with
+    /// any matching spending row. Empty [`Vec`] on missing data.
+    fn unspent_outputs(&self, _scripthash: ScriptHash) -> Vec<HistoryRecord> {
+        Vec::new()
+    }
 }
 
 /// `ConfirmedHistoryReader` backed by a workspace `Indexer` and a `BlockSource`.
@@ -142,6 +150,38 @@ where
                 }
             })
             .collect()
+    }
+
+    fn unspent_outputs(&self, scripthash: ScriptHash) -> Vec<HistoryRecord> {
+        let Ok(outputs) = self
+            .indexer
+            .resolve_unspent_outputs(scripthash, &self.block_source)
+        else {
+            return Vec::new();
+        };
+
+        let mut records = Vec::with_capacity(outputs.len());
+        for (txid, vout, value) in outputs {
+            let outpoint = bitcoin::OutPoint { txid, vout };
+            let spent = self
+                .indexer
+                .iter_spending_rows(&outpoint)
+                .map(|rows| !rows.is_empty())
+                .unwrap_or(false);
+            if spent {
+                continue;
+            }
+
+            // TODO: thread funding height through resolve_unspent_outputs.
+            records.push(HistoryRecord {
+                txid,
+                height: 0,
+                value,
+                vout,
+                spent: false,
+            });
+        }
+        records
     }
 }
 
@@ -268,6 +308,15 @@ impl IndexHandle {
             .unwrap_or_default();
         records.sort_by_key(|record| (record.height, record.txid));
         records
+    }
+
+    pub(crate) fn unspent_outputs(&self, scripthash: ScriptHash) -> Vec<HistoryRecord> {
+        let reader = self.state.reader.read().clone();
+        if let Some(reader) = reader {
+            return reader.unspent_outputs(scripthash);
+        }
+
+        Vec::new()
     }
 
     fn get_transaction_hex(&self, txid: &Txid) -> Option<String> {
@@ -516,13 +565,27 @@ pub(crate) fn scripthash_get_balance(
     let scripthash = parse_scripthash_param(params)?;
     let spends = mempool.mempool_spends();
     let mut confirmed = 0_u64;
-    for record in index.confirmed_history(scripthash) {
-        let spent_by_mempool = spends.contains(&OutPoint {
-            txid: record.txid,
-            vout: record.vout,
-        });
-        if !record.spent && !spent_by_mempool {
-            confirmed = confirmed.saturating_add(record.value);
+    let reader_records = index.unspent_outputs(scripthash);
+    if reader_records.is_empty() {
+        // Fallback: synthetic confirmed_history path.
+        for record in index.confirmed_history(scripthash) {
+            let spent_by_mempool = spends.contains(&OutPoint {
+                txid: record.txid,
+                vout: record.vout,
+            });
+            if !record.spent && !spent_by_mempool {
+                confirmed = confirmed.saturating_add(record.value);
+            }
+        }
+    } else {
+        for record in reader_records {
+            let spent_by_mempool = spends.contains(&OutPoint {
+                txid: record.txid,
+                vout: record.vout,
+            });
+            if !spent_by_mempool {
+                confirmed = confirmed.saturating_add(record.value);
+            }
         }
     }
     let mut unconfirmed = 0_u64;
@@ -549,7 +612,14 @@ pub(crate) fn scripthash_listunspent(
     let scripthash = parse_scripthash_param(params)?;
     let spends = mempool.mempool_spends();
     let mut rows = Vec::new();
-    for record in index.confirmed_history(scripthash) {
+    // Prefer reader-backed (real index) data when set.
+    let reader_records = index.unspent_outputs(scripthash);
+    let confirmed_iter: Box<dyn Iterator<Item = HistoryRecord>> = if reader_records.is_empty() {
+        Box::new(index.confirmed_history(scripthash).into_iter())
+    } else {
+        Box::new(reader_records.into_iter())
+    };
+    for record in confirmed_iter {
         if record.spent
             || spends.contains(&OutPoint {
                 txid: record.txid,
@@ -561,8 +631,8 @@ pub(crate) fn scripthash_listunspent(
         rows.push(json!({
             "tx_hash": record.txid.to_string(),
             "tx_pos": record.vout,
-            "height": record.height,
             "value": record.value,
+            "height": record.height,
         }));
     }
     for record in mempool.mempool_history(scripthash) {
@@ -833,6 +903,30 @@ mod history_reader_tests {
         }
     }
 
+    #[derive(Debug)]
+    struct StubReaderUnspent;
+
+    impl ConfirmedHistoryReader for StubReaderUnspent {
+        fn confirmed_history(&self, _: ScriptHash) -> Vec<HistoryRecord> {
+            Vec::new()
+        }
+
+        fn unspent_outputs(&self, _: ScriptHash) -> Vec<HistoryRecord> {
+            use bitcoin::hashes::Hash as _;
+
+            let mut hash = [0_u8; 32];
+            hash[0] = 0xfe;
+            let txid = bitcoin::Txid::from_byte_array(hash);
+            vec![HistoryRecord {
+                txid,
+                height: 0,
+                value: 100_000,
+                vout: 0,
+                spent: false,
+            }]
+        }
+    }
+
     #[test]
     fn with_history_reader_overrides_synthetic_history() {
         use bitcoin::hashes::Hash as _;
@@ -857,5 +951,22 @@ mod history_reader_tests {
 
         assert_eq!(records.len(), 1);
         assert!(records.iter().any(|record| record.height == 7));
+    }
+
+    #[test]
+    fn unspent_outputs_reader_drives_scripthash_listunspent() {
+        let handle = IndexHandle::new().with_history_reader(Arc::new(StubReaderUnspent));
+        let mempool = MempoolHandle::default();
+        let mut scripthash_bytes = [0_u8; 32];
+        scripthash_bytes[0] = 0xcc;
+        let params = json!([scripthash_bytes.to_lower_hex_string()]);
+
+        let result = scripthash_listunspent(&handle, &mempool, &params)
+            .unwrap_or_else(|err| panic!("listunspent failed: {err}"));
+        let rows = result
+            .as_array()
+            .unwrap_or_else(|| panic!("expected array"));
+
+        assert_eq!(rows.len(), 1, "expected one row: {result:?}");
     }
 }
