@@ -68,6 +68,13 @@ pub(crate) fn getrpcinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, R
     }))
 }
 
+pub(crate) fn getzmqnotifications(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    crate::handlers::ensure_no_params(params)?;
+    // bitcoin-rs does not yet support ZMQ pub/sub. Future strand may wire a real
+    // notification publisher; meanwhile expose the canonical empty-array shape.
+    Ok(json!(Vec::<sonic_rs::Value>::new()))
+}
+
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
     let rate_sat_per_kvb = estimate_feerate_sat_per_kvb(ctx, conf_target);
@@ -191,6 +198,19 @@ mod tests {
             panic!("logpath missing: {result:?}");
         };
         assert_eq!(logpath, "");
+    }
+
+    #[test]
+    fn getzmqnotifications_returns_empty_array() {
+        use alloc::sync::Arc;
+
+        let ctx = Arc::new(Context::new());
+        let result = getzmqnotifications(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getzmqnotifications failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        assert!(arr.is_empty());
     }
 }
 
