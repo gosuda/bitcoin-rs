@@ -182,12 +182,6 @@ impl Mempool {
         self.entries.len()
     }
 
-    /// Returns `true` if the mempool is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Returns `true` when `txid` is present in the mempool.
     ///
     /// Constant-time wrapper over `by_txid.contains_key`. Cheaper than `entry()`
@@ -216,6 +210,18 @@ impl Mempool {
     #[must_use]
     pub fn transaction_by_txid(&self, txid: &bitcoin::Txid) -> Option<Arc<bitcoin::Transaction>> {
         self.entry_by_txid(txid).map(|entry| Arc::clone(&entry.tx))
+    }
+
+    /// Returns whether the pool currently holds zero entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns the count of in-pool transactions.
+    #[must_use]
+    pub fn tx_count(&self) -> usize {
+        self.entries.len()
     }
 
     /// Returns the txids of every entry in the pool.
@@ -852,6 +858,31 @@ mod tests {
         assert_eq!(stats.txs, 1);
         assert_eq!(stats.bytes, expected_vsize);
         assert_eq!(stats.total_fee, expected_fee);
+        Ok(())
+    }
+
+    #[test]
+    fn is_empty_true_for_default_pool() {
+        let pool = Mempool::new(MempoolLimits::default());
+        assert!(pool.is_empty());
+        assert_eq!(pool.tx_count(), 0);
+    }
+
+    #[test]
+    fn tx_count_increments_with_insert() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))?;
+        assert!(!pool.is_empty());
+        assert_eq!(pool.tx_count(), 1);
         Ok(())
     }
 
