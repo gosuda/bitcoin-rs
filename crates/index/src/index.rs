@@ -62,6 +62,24 @@ impl<S: KvStore> Indexer<S> {
         self.last_counts
     }
 
+    /// Iterates every persisted block header in the `BlockHeaders` column family.
+    ///
+    /// Returns the raw 80-byte header rows in storage order (lexicographic by key).
+    /// Used by SPV-style range queries that need contiguous headers from genesis.
+    pub fn iter_block_headers(&self) -> Result<Vec<[u8; crate::HEADER_ROW_SIZE]>, IndexError> {
+        let iter = self.store.iter_prefix(ColumnFamily::BlockHeaders, &[])?;
+        let mut rows = Vec::new();
+        for entry in iter {
+            let (key, _value) = entry?;
+            if key.len() == crate::HEADER_ROW_SIZE {
+                let mut header = [0_u8; crate::HEADER_ROW_SIZE];
+                header.copy_from_slice(&key);
+                rows.push(header);
+            }
+        }
+        Ok(rows)
+    }
+
     /// Iterates confirmed funding rows for `scripthash`.
     ///
     /// Returns every `HashPrefixRow` whose 8-byte prefix matches the scripthash's
@@ -473,6 +491,18 @@ mod tests {
     use crate::{HistoryEntry, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow};
 
     const HEIGHT: u32 = 42;
+
+    #[test]
+    fn iter_block_headers_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, mut indexer) = indexer()?;
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+
+        indexer.ingest_block(&serialize(&genesis), 0)?;
+
+        let rows = indexer.iter_block_headers()?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    }
 
     #[test]
     fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
