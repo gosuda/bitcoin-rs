@@ -140,6 +140,37 @@ impl NodeStorage {
     }
 }
 
+/// Concrete txindex store handles retained per backend.
+///
+/// Mirrors `NodeStorage` but for the txindex sub-database. Kept alongside the
+/// erased `Arc<Mutex<Box<dyn IndexerLike>>>` so the Electrum `IndexHandle` can
+/// observe the live `KvStore` for header reads.
+enum TxIndexStorage {
+    #[cfg(feature = "rocksdb")]
+    RocksDb(Arc<bitcoin_rs_storage::RocksDbStore>),
+    #[cfg(feature = "fjall")]
+    Fjall(Arc<bitcoin_rs_storage::FjallStore>),
+    #[cfg(feature = "redb")]
+    Redb(Arc<bitcoin_rs_storage::RedbStore>),
+    #[cfg(feature = "mdbx")]
+    Mdbx(Arc<bitcoin_rs_storage::MdbxStore>),
+}
+
+impl TxIndexStorage {
+    fn electrum_index_handle(&self) -> bitcoin_rs_electrum::IndexHandle {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(store) => bitcoin_rs_electrum::IndexHandle::from_store(Arc::clone(store)),
+            #[cfg(feature = "fjall")]
+            Self::Fjall(store) => bitcoin_rs_electrum::IndexHandle::from_store(Arc::clone(store)),
+            #[cfg(feature = "redb")]
+            Self::Redb(store) => bitcoin_rs_electrum::IndexHandle::from_store(Arc::clone(store)),
+            #[cfg(feature = "mdbx")]
+            Self::Mdbx(store) => bitcoin_rs_electrum::IndexHandle::from_store(Arc::clone(store)),
+        }
+    }
+}
+
 const COMPILED_STORAGE_FEATURES: &[&str] = &[
     #[cfg(feature = "rocksdb")]
     "rocksdb",
@@ -168,38 +199,52 @@ impl fmt::Display for CompiledStorageFeatures {
     }
 }
 
-fn open_tx_index(config: &Config) -> Result<TxIndexHandle> {
+fn open_tx_index(config: &Config) -> Result<(TxIndexHandle, TxIndexStorage)> {
     let txindex_dir = config.data_dir.join("txindex");
     std::fs::create_dir_all(&txindex_dir)
         .with_context(|| format!("create txindex_dir {}", txindex_dir.display()))?;
-    let tx_index: Box<dyn bitcoin_rs_index::IndexerLike> = match config.storage_backend.as_str() {
+    match config.storage_backend.as_str() {
         #[cfg(feature = "rocksdb")]
         "rocksdb" => {
-            let store =
-                bitcoin_rs_storage::RocksDbStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
-            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+            let store = Arc::new(
+                bitcoin_rs_storage::RocksDbStore::open(&txindex_dir).map_err(anyhow::Error::new)?,
+            );
+            let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
+                Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
+            Ok((
+                Arc::new(Mutex::new(indexer)),
+                TxIndexStorage::RocksDb(store),
+            ))
         }
         #[cfg(feature = "fjall")]
         "fjall" => {
-            let store =
-                bitcoin_rs_storage::FjallStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
-            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+            let store = Arc::new(
+                bitcoin_rs_storage::FjallStore::open(&txindex_dir).map_err(anyhow::Error::new)?,
+            );
+            let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
+                Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
+            Ok((Arc::new(Mutex::new(indexer)), TxIndexStorage::Fjall(store)))
         }
         #[cfg(feature = "redb")]
         "redb" => {
-            let store =
-                bitcoin_rs_storage::RedbStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
-            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+            let store = Arc::new(
+                bitcoin_rs_storage::RedbStore::open(&txindex_dir).map_err(anyhow::Error::new)?,
+            );
+            let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
+                Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
+            Ok((Arc::new(Mutex::new(indexer)), TxIndexStorage::Redb(store)))
         }
         #[cfg(feature = "mdbx")]
         "mdbx" => {
-            let store =
-                bitcoin_rs_storage::MdbxStore::open(&txindex_dir).map_err(anyhow::Error::new)?;
-            Box::new(bitcoin_rs_index::Indexer::new(Arc::new(store)))
+            let store = Arc::new(
+                bitcoin_rs_storage::MdbxStore::open(&txindex_dir).map_err(anyhow::Error::new)?,
+            );
+            let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
+                Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
+            Ok((Arc::new(Mutex::new(indexer)), TxIndexStorage::Mdbx(store)))
         }
         other => bail!("unsupported storage backend for txindex: {other}"),
-    };
-    Ok(Arc::new(Mutex::new(tx_index)))
+    }
 }
 
 fn open_filter_index(config: &Config) -> Result<FilterIndexHandle> {
@@ -237,6 +282,7 @@ pub struct NodeState {
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
     tx_index: TxIndexHandle,
+    tx_index_storage: Arc<TxIndexStorage>,
     filter_index: FilterIndexHandle,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -269,7 +315,8 @@ impl NodeState {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let storage = NodeStorage::open(&config)?;
-        let tx_index = open_tx_index(&config)?;
+        let (tx_index, tx_index_storage) = open_tx_index(&config)?;
+        let tx_index_storage = Arc::new(tx_index_storage);
         let filter_index = open_filter_index(&config)?;
         let mut utxo_set = bitcoin_rs_utxo::UtxoSet::new();
         let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
@@ -326,6 +373,7 @@ impl NodeState {
             utxo,
             coin_stats,
             tx_index,
+            tx_index_storage: Arc::clone(&tx_index_storage),
             filter_index,
             mempool,
             chain_tip,
@@ -380,6 +428,16 @@ impl NodeState {
     #[must_use]
     pub fn tx_index(&self) -> Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>> {
         Arc::clone(&self.tx_index)
+    }
+
+    /// Builds an Electrum `IndexHandle` backed by the live txindex store.
+    ///
+    /// The handle observes the same `KvStore` the writer side ingests into via
+    /// `apply_block`, so `blockchain.block.headers` returns real data once IBD
+    /// is underway.
+    #[must_use]
+    pub fn electrum_index_handle(&self) -> bitcoin_rs_electrum::IndexHandle {
+        self.tx_index_storage.electrum_index_handle()
     }
 
     /// Returns the shared compact-filter index handle.
@@ -634,6 +692,21 @@ mod tests {
         let a = state.tx_index();
         let b = state.tx_index();
         assert!(Arc::ptr_eq(&a, &b), "tx_index handle stable across calls");
+        Ok(())
+    }
+
+    #[test]
+    fn electrum_index_handle_constructs_with_real_txindex_store() -> anyhow::Result<()> {
+        use tempfile::tempdir;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let handle = state.electrum_index_handle();
+
+        assert!(!format!("{handle:?}").is_empty());
         Ok(())
     }
 

@@ -43,7 +43,7 @@ fn spawn_electrum_listener(
         );
     }
 
-    let index = bitcoin_rs_electrum::IndexHandle::new();
+    let index = state.electrum_index_handle();
     let mempool = bitcoin_rs_electrum::MempoolHandle::from_arc(state.mempool());
     let cfg = bitcoin_rs_electrum::ServerConfig::default();
     let server = bitcoin_rs_electrum::ElectrumServer::bind(addr, index, mempool, cfg)
