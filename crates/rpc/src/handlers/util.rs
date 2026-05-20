@@ -5,7 +5,7 @@ use sonic_rs::{Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::required_u64;
+use crate::handlers::{required_str, required_u64, serde_to_sonic};
 
 const BLOCK_VSIZE_TARGET: u64 = 1_000_000;
 const DEFAULT_MIN_FEERATE_SAT_PER_KVB: u64 = 1_000; // 1 sat/vB
@@ -68,6 +68,65 @@ pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "long": {"feerate": feerate, "decay": 0.962, "scale": 1}
     }))
 }
+
+pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    use core::str::FromStr as _;
+
+    use bitcoin::hex::DisplayHex as _;
+
+    let address_str = required_str(params, 0, "address is required")?;
+    let network = match ctx.chain_network {
+        bitcoin_rs_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
+        bitcoin_rs_primitives::Network::Testnet3 => bitcoin::Network::Testnet,
+        bitcoin_rs_primitives::Network::Testnet4 => bitcoin::Network::Testnet4,
+        bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
+        bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
+    };
+    let Ok(unchecked) = bitcoin::Address::from_str(address_str) else {
+        return Ok(json!({ "isvalid": false }));
+    };
+    let Ok(address) = unchecked.require_network(network) else {
+        return Ok(json!({ "isvalid": false }));
+    };
+
+    let script = address.script_pubkey();
+    let script_hex = script.as_bytes().to_lower_hex_string();
+    let address_canon = address.to_string();
+    let mut response = serde_json::Map::new();
+    response.insert("isvalid".to_owned(), serde_json::Value::Bool(true));
+    response.insert(
+        "address".to_owned(),
+        serde_json::Value::String(address_canon),
+    );
+    response.insert(
+        "scriptPubKey".to_owned(),
+        serde_json::Value::String(script_hex),
+    );
+    response.insert(
+        "isscript".to_owned(),
+        serde_json::Value::Bool(script.is_p2sh() || script.is_p2wsh()),
+    );
+    response.insert(
+        "iswitness".to_owned(),
+        serde_json::Value::Bool(script.is_witness_program()),
+    );
+    if let Some(version) = script.witness_version() {
+        response.insert(
+            "witness_version".to_owned(),
+            serde_json::Value::Number(i64::from(version.to_num()).into()),
+        );
+        // Witness program is the bytes after the 1-byte version prefix and 1-byte push opcode.
+        let bytes = script.as_bytes();
+        if bytes.len() >= 2 {
+            response.insert(
+                "witness_program".to_owned(),
+                serde_json::Value::String(bytes[2..].to_lower_hex_string()),
+            );
+        }
+    }
+
+    serde_to_sonic(&serde_json::Value::Object(response))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +146,42 @@ mod tests {
             feerate > 0.0,
             "empty mempool should still return a min feerate: {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod validateaddress_tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use sonic_rs::JsonValueTrait;
+
+    #[test]
+    fn validateaddress_returns_isvalid_false_for_garbage() {
+        let ctx = Arc::new(Context::new());
+        let result = validateaddress(&ctx, &json!(["not a real address"]))
+            .unwrap_or_else(|err| panic!("validateaddress failed: {err}"));
+        let Some(isvalid) = result
+            .get("isvalid")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+        else {
+            panic!("isvalid missing: {result:?}");
+        };
+        assert!(!isvalid);
+    }
+
+    #[test]
+    fn validateaddress_returns_isvalid_true_for_p2pkh_mainnet() {
+        // ctx defaults to Mainnet network selector.
+        let ctx = Arc::new(Context::new());
+        // 1BoatSLRHtKNngkdXEeobR76b53LETtpyT is a famous P2PKH address.
+        let result = validateaddress(&ctx, &json!(["1BoatSLRHtKNngkdXEeobR76b53LETtpyT"]))
+            .unwrap_or_else(|err| panic!("validateaddress failed: {err}"));
+        let Some(isvalid) = result
+            .get("isvalid")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+        else {
+            panic!("isvalid missing: {result:?}");
+        };
+        assert!(isvalid, "expected valid: {result:?}");
     }
 }
