@@ -38,7 +38,7 @@ pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     let entry = pool
         .entry(*id)
         .ok_or(RpcError::NotFound("transaction not in mempool"))?;
-    entry_to_value(entry)
+    entry_to_value(entry, &pool)
 }
 
 pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -54,7 +54,10 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     }
     let mut object = serde_json::Map::new();
     for (_id, entry) in &pool.entries {
-        object.insert(entry.tx.compute_txid().to_string(), entry_to_serde(entry));
+        object.insert(
+            entry.tx.compute_txid().to_string(),
+            entry_to_serde(entry, &pool),
+        );
     }
     serde_to_sonic(&serde_json::Value::Object(object))
 }
@@ -91,7 +94,7 @@ fn render_relatives(
         for id in ids {
             if let Some(entry) = pool.entry(*id) {
                 let txid = entry.tx.compute_txid().to_string();
-                object.insert(txid, entry_to_serde(entry));
+                object.insert(txid, entry_to_serde(entry, pool));
             }
         }
         serde_to_sonic(&serde_json::Value::Object(object))
@@ -110,11 +113,37 @@ fn parse_txid(value: &str) -> Result<Txid, RpcError> {
     Txid::from_str(value).map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))
 }
 
-fn entry_to_value(entry: &MempoolEntry) -> Result<Value, RpcError> {
-    serde_to_sonic(&entry_to_serde(entry))
+fn entry_to_value(
+    entry: &MempoolEntry,
+    pool: &bitcoin_rs_mempool::Mempool,
+) -> Result<Value, RpcError> {
+    serde_to_sonic(&entry_to_serde(entry, pool))
 }
 
-fn entry_to_serde(entry: &MempoolEntry) -> serde_json::Value {
+fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> serde_json::Value {
+    let txid = entry.tx.compute_txid();
+    let mut depends = Vec::new();
+    for input in &entry.tx.input {
+        let prev_txid = input.previous_output.txid;
+        if pool.by_txid.contains_key(&prev_txid) {
+            depends.push(prev_txid.to_string());
+        }
+    }
+    depends.sort();
+    depends.dedup();
+
+    let mut spentby = Vec::new();
+    for (_id, candidate) in &pool.entries {
+        for input in &candidate.tx.input {
+            if input.previous_output.txid == txid {
+                spentby.push(candidate.tx.compute_txid().to_string());
+                break;
+            }
+        }
+    }
+    spentby.sort();
+    spentby.dedup();
+
     serde_json_value!({
         "vsize": entry.vsize,
         "weight": u64::from(entry.vsize).saturating_mul(4),
@@ -131,8 +160,8 @@ fn entry_to_serde(entry: &MempoolEntry) -> serde_json::Value {
             "ancestor": sats_to_btc(entry.ancestor_fee),
             "descendant": sats_to_btc(entry.descendant_fee)
         },
-        "depends": [],
-        "spentby": [],
+        "depends": depends,
+        "spentby": spentby,
         "bip125-replaceable": false,
         "unbroadcast": false
     })
@@ -149,7 +178,7 @@ mod tests {
 
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
     use bitcoin_rs_mempool::MempoolEntry;
-    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait as _, json};
 
     use super::*;
 
@@ -205,6 +234,57 @@ mod tests {
             Some(parent_txid_string.as_str())
         );
         Ok(())
+    }
+
+    #[test]
+    fn getmempoolentry_emits_depends_when_input_spends_mempool_tx() {
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let parent = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let parent_txid = parent.compute_txid();
+        let child = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: parent_txid,
+                    vout: 0,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: Vec::new(),
+        };
+        let child_txid = child.compute_txid();
+        {
+            let mut pool = ctx.mempool.write();
+            let parent_entry =
+                bitcoin_rs_mempool::MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7);
+            let Ok(_) = pool.insert_entry(parent_entry) else {
+                panic!("parent insert failed");
+            };
+            let child_entry =
+                bitcoin_rs_mempool::MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7);
+            let Ok(_) = pool.insert_entry(child_entry) else {
+                panic!("child insert failed");
+            };
+        }
+        let result = handler
+            .dispatch("getmempoolentry", &json!([child_txid.to_string()]))
+            .unwrap_or_else(|err| panic!("getmempoolentry: {err}"));
+        let Some(depends) = result.get("depends").and_then(JsonContainerTrait::as_array) else {
+            panic!("depends missing: {result:?}");
+        };
+        assert_eq!(depends.len(), 1, "expected one depends entry");
     }
 
     fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Transaction {
