@@ -67,6 +67,18 @@ impl<S: KvStore> FilterIndex<S> {
             .store
             .get(ColumnFamily::Filters, &block_hash.to_le_bytes())?)
     }
+    /// Returns the count of stored block filters without materializing values.
+    ///
+    /// Cost O(N) iteration (no per-row value materialization).
+    pub fn filter_count(&self) -> Result<usize, FilterIndexError> {
+        let iter = self.store.iter_prefix(ColumnFamily::Filters, &[])?;
+        let mut count = 0_usize;
+        for entry in iter {
+            let (_key, _value) = entry.map_err(FilterIndexError::Storage)?;
+            count = count.saturating_add(1);
+        }
+        Ok(count)
+    }
 
     /// Iterates every persisted block-filter pair `(block_hash, filter_bytes)` in storage order.
     ///
@@ -216,6 +228,31 @@ mod iter_filters_tests {
         let filters = index.iter_filters()?;
 
         assert!(filters.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn filter_count_returns_zero_for_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TestDir::new()?;
+        let store = RocksDbStore::open(dir.path())?;
+        let index = FilterIndex::new(store);
+
+        assert_eq!(index.filter_count()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn filter_count_returns_one_after_put_filter() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TestDir::new()?;
+        let store = RocksDbStore::open(dir.path())?;
+        let index = FilterIndex::new(store);
+        let block_hash = Hash256::from_le_bytes(&[1_u8; 32]);
+        let prev_header = Hash256::from_le_bytes(&[2_u8; 32]);
+        let filter_bytes = vec![0xab_u8; 16];
+
+        let _ = index.put_filter(block_hash, prev_header, &filter_bytes)?;
+
+        assert_eq!(index.filter_count()?, 1);
         Ok(())
     }
 
