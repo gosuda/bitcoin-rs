@@ -22,7 +22,6 @@ mod enabled {
                 Network::Testnet4 => bitcoinkernel::ChainType::Testnet4,
                 Network::Signet => bitcoinkernel::ChainType::Signet,
                 Network::Regtest => bitcoinkernel::ChainType::Regtest,
-                _ => bitcoinkernel::ChainType::Mainnet,
             };
             bitcoinkernel::ContextBuilder::new()
                 .chain_type(chain_type)
