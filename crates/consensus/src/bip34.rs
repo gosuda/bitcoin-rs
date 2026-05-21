@@ -41,6 +41,12 @@ mod tests {
     }
 
     #[test]
+    fn signet_block_one_coinbase_prefix_passes() {
+        let script = ScriptBuf::from_bytes(vec![0x51, 0x51]);
+        assert_eq!(check_bip34(1, script.as_script()), Ok(()));
+    }
+
+    #[test]
     fn pushdata_encoding_for_small_height_fails() {
         let script = ScriptBuf::from_bytes(vec![0x01, 0x01]);
         assert!(check_bip34(1, script.as_script()).is_err());
