@@ -199,8 +199,9 @@ redb = { version = ">=4.1, <5", default-features = false }
 serde      = { version = ">=1, <2",     default-features = false, features = ["derive", "std", "alloc"] }
 serde_json = { version = ">=1, <2",     default-features = false, features = ["std", "raw_value"] }
 sonic-rs   = { version = ">=0.5, <0.6", default-features = false }
-# toml: `+default = [parse, display]`. Latest 1.1.2 — bump floor past 0.8.
-toml       = { version = ">=0.8.23, <2", default-features = false, features = ["parse", "display", "serde"] }
+# toml: the `serde` feature only exists in 1.x (0.8 uses serde unconditionally, so the
+# feature name is absent there). Floor must stay >=1 or publish picks 0.8 and fails.
+toml       = { version = ">=1, <2", default-features = false, features = ["parse", "display", "serde"] }
 clap       = { version = ">=4.6, <5",   default-features = false, features = [
     "std", "color", "error-context", "help", "suggestions", "usage",
     "derive", "env", "wrap_help",
