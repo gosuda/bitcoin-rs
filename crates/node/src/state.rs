@@ -35,6 +35,10 @@ use crate::Config;
 type TxIndexHandle = Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>;
 type FilterIndexHandle = Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>;
 
+// One active generation of outbound requests is enough to keep the drain fed;
+// extra backlog is overload and must fail fast at producers.
+pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
+
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -676,7 +680,8 @@ impl NodeState {
         let peers = Arc::new(RwLock::new(Vec::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
-        let (p2p_outbound_tx, p2p_outbound_rx_raw) = crossbeam_channel::unbounded();
+        let (p2p_outbound_tx, p2p_outbound_rx_raw) =
+            crossbeam_channel::bounded(P2P_OUTBOUND_QUEUE_LIMIT);
         let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
         let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
         let (inbound_headers_tx, inbound_headers_rx_raw) =

@@ -28,7 +28,7 @@ pub mod wtxid;
 
 pub use dispatch::{ChainQuery, InventoryResponse};
 pub use listener::spawn_outbound_connection;
-pub use peer::{DnsResolver, Peer, PeerManager, PeerState};
+pub use peer::{DnsResolver, Peer, PeerManager, PeerState, SystemDnsResolver};
 pub use peer_info::PeerInfo;
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};

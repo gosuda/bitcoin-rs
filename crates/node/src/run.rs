@@ -1,12 +1,13 @@
 //! Top-level orchestration: wire subsystems, spin the event loop, drain.
 
 use crate as bitcoin_rs_node;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossbeam_channel::{Receiver, bounded};
+use crossbeam_channel::{Receiver, TrySendError, bounded};
 
 use crate::config::Config;
 use crate::event_loop::EventLoop;
@@ -16,6 +17,8 @@ use crate::{crash_recovery, logging, shutdown};
 const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 const RPC_MAX_CONNECTIONS: usize = 128;
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DNS_BOOTSTRAP_ADDR_LIMIT: usize = 8;
+const P2P_OUTBOUND_ACTIVE_LIMIT: usize = crate::state::P2P_OUTBOUND_QUEUE_LIMIT;
 
 type PeerRegistry = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>;
 type PeerOutboundMap = Arc<
@@ -28,6 +31,8 @@ type PeerOutboundMap = Arc<
 >;
 type BannedSubnets = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>;
 type P2pChainQuery = Arc<dyn bitcoin_rs_p2p::ChainQuery>;
+type OutboundConnectionHandle =
+    std::thread::JoinHandle<core::result::Result<(), bitcoin_rs_p2p::PeerError>>;
 
 fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
     match node_auth {
@@ -125,6 +130,44 @@ fn spawn_p2p_listeners(
     Ok(handles)
 }
 
+fn reap_finished_outbound_connections(
+    active: &mut hashbrown::HashSet<SocketAddr>,
+    handles: &mut Vec<(SocketAddr, OutboundConnectionHandle)>,
+) {
+    let mut index = 0;
+    while index < handles.len() {
+        if !handles[index].1.is_finished() {
+            index += 1;
+            continue;
+        }
+
+        let (addr, handle) = handles.swap_remove(index);
+        active.remove(&addr);
+        match handle.join() {
+            Ok(Ok(())) => tracing::debug!(addr = %addr, "p2p outbound connection exited cleanly"),
+            Ok(Err(error)) => {
+                tracing::warn!(addr = %addr, %error, "p2p outbound connection exited with error");
+            }
+            Err(_) => tracing::warn!(addr = %addr, "p2p outbound connection panicked"),
+        }
+    }
+}
+
+fn outbound_addr_available(
+    addr: SocketAddr,
+    active: &hashbrown::HashSet<SocketAddr>,
+    peers: &PeerRegistry,
+    peer_outbound: &PeerOutboundMap,
+) -> bool {
+    if active.contains(&addr) {
+        return false;
+    }
+    if peer_outbound.read().contains_key(&addr) {
+        return false;
+    }
+    !peers.read().iter().any(|peer| peer.addr == addr)
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn spawn_p2p_outbound_drain(
     config: &bitcoin_rs_node::Config,
@@ -148,30 +191,130 @@ fn spawn_p2p_outbound_drain(
     Ok(std::thread::Builder::new()
         .name("bitcoin-rs-p2p-outbound-drain".to_owned())
         .spawn(move || {
+            let mut active = hashbrown::HashSet::new();
+            let mut handles = Vec::new();
             while !outbound_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                reap_finished_outbound_connections(&mut active, &mut handles);
+                if active.len() >= P2P_OUTBOUND_ACTIVE_LIMIT {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+
                 let recv = {
                     let guard = outbound_rx.lock();
                     guard.recv_timeout(Duration::from_secs(1))
                 };
                 match recv {
                     Ok(addr) => {
-                        let _handle =
-                            bitcoin_rs_p2p::listener::spawn_outbound_connection_with_chain(
-                                addr,
-                                magic,
-                                Arc::clone(&outbound_registry),
-                                Arc::clone(&outbound_peer_outbound),
-                                outbound_headers_tx.clone(),
-                                outbound_blocks_tx.clone(),
-                                Arc::clone(&outbound_banned),
-                                Some(Arc::clone(&outbound_chain_query)),
-                            );
+                        if !outbound_addr_available(
+                            addr,
+                            &active,
+                            &outbound_registry,
+                            &outbound_peer_outbound,
+                        ) {
+                            tracing::debug!(addr = %addr, "p2p outbound request skipped: already active");
+                            continue;
+                        }
+                        let handle = bitcoin_rs_p2p::listener::spawn_outbound_connection_with_chain(
+                            addr,
+                            magic,
+                            Arc::clone(&outbound_registry),
+                            Arc::clone(&outbound_peer_outbound),
+                            outbound_headers_tx.clone(),
+                            outbound_blocks_tx.clone(),
+                            Arc::clone(&outbound_banned),
+                            Some(Arc::clone(&outbound_chain_query)),
+                        );
+                        active.insert(addr);
+                        handles.push((addr, handle));
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
             }
         })?)
+}
+
+fn spawn_dns_seed_bootstrap(
+    config: Config,
+    outbound_tx: crossbeam_channel::Sender<SocketAddr>,
+) -> anyhow::Result<Option<std::thread::JoinHandle<()>>> {
+    if !config.dns_seeds_enabled {
+        tracing::debug!("dns peer bootstrap disabled");
+        return Ok(None);
+    }
+    if matches!(config.network, bitcoin_rs_primitives::Network::Regtest) {
+        tracing::debug!("dns peer bootstrap skipped for regtest");
+        return Ok(None);
+    }
+
+    Ok(Some(
+        std::thread::Builder::new()
+            .name("bitcoin-rs-dns-bootstrap".to_owned())
+            .spawn(move || {
+                let resolver =
+                    bitcoin_rs_p2p::SystemDnsResolver::new(config.network.default_p2p_port());
+                match queue_dns_seed_bootstrap(&config, &resolver, &outbound_tx) {
+                    Ok(queued) => tracing::info!(queued, "dns peer bootstrap queued addresses"),
+                    Err(error) => tracing::warn!(%error, "dns peer bootstrap failed"),
+                }
+            })?,
+    ))
+}
+
+fn queue_dns_seed_bootstrap<R>(
+    config: &Config,
+    resolver: &R,
+    outbound_tx: &crossbeam_channel::Sender<SocketAddr>,
+) -> anyhow::Result<usize>
+where
+    R: bitcoin_rs_p2p::DnsResolver + ?Sized,
+{
+    if !config.dns_seeds_enabled
+        || matches!(config.network, bitcoin_rs_primitives::Network::Regtest)
+    {
+        return Ok(0);
+    }
+
+    let mut queued = Vec::new();
+    for seed in config.network.dns_seeds() {
+        let addresses = match resolver.resolve(seed) {
+            Ok(addresses) => addresses,
+            Err(error) => {
+                tracing::warn!(seed = %seed, %error, "dns seed resolution failed");
+                continue;
+            }
+        };
+        for addr in addresses {
+            if queued.contains(&addr) {
+                continue;
+            }
+            match outbound_tx.try_send(addr) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    tracing::info!("dns peer bootstrap stopped: outbound queue full");
+                    return Ok(queued.len());
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(anyhow::anyhow!(
+                        "p2p outbound channel closed during DNS bootstrap"
+                    ));
+                }
+            }
+            queued.push(addr);
+            if queued.len() == DNS_BOOTSTRAP_ADDR_LIMIT {
+                tracing::info!(
+                    limit = DNS_BOOTSTRAP_ADDR_LIMIT,
+                    "dns peer bootstrap limit reached"
+                );
+                return Ok(queued.len());
+            }
+        }
+    }
+    if queued.is_empty() {
+        tracing::warn!("dns peer bootstrap yielded no addresses");
+    }
+    Ok(queued.len())
 }
 
 /// Boots the node from a resolved [`Config`] and runs until shutdown.
@@ -278,6 +421,8 @@ pub fn run(mut config: Config) -> Result<()> {
         Arc::clone(&banned),
         Arc::clone(&p2p_chain_query),
     )?;
+    let _bootstrap_worker =
+        spawn_dns_seed_bootstrap(state.config().clone(), state.p2p_outbound_sender())?;
     loop_handle.spin(&shutdown)?;
     if let Some(handle) = electrum_thread {
         match handle.join() {
@@ -309,4 +454,158 @@ pub fn run(mut config: Config) -> Result<()> {
     shutdown::drain_and_shutdown(DRAIN_DEADLINE)?;
     tracing::info!("bitcoin-rs node exited cleanly");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StaticResolver;
+
+    impl bitcoin_rs_p2p::DnsResolver for StaticResolver {
+        fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, bitcoin_rs_p2p::PeerError> {
+            let port = match seed {
+                "seed.signet.bitcoin.sprovoost.nl." => 38333,
+                "seed.signet.achownodes.xyz." => 38334,
+                _ => return Ok(Vec::new()),
+            };
+            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+        }
+    }
+
+    struct ManyAddressResolver;
+
+    impl bitcoin_rs_p2p::DnsResolver for ManyAddressResolver {
+        fn resolve(&self, _seed: &str) -> Result<Vec<SocketAddr>, bitcoin_rs_p2p::PeerError> {
+            Ok((0..16)
+                .map(|offset| SocketAddr::from(([127, 0, 0, 1], 10_000 + offset)))
+                .collect())
+        }
+    }
+
+    struct FailingResolver;
+
+    impl bitcoin_rs_p2p::DnsResolver for FailingResolver {
+        fn resolve(&self, _seed: &str) -> Result<Vec<SocketAddr>, bitcoin_rs_p2p::PeerError> {
+            Err(bitcoin_rs_p2p::PeerError::Protocol("test resolver failure"))
+        }
+    }
+
+    #[test]
+    fn dns_seed_bootstrap_queues_resolved_public_seed_addresses() -> anyhow::Result<()> {
+        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        assert_eq!(queue_dns_seed_bootstrap(&config, &StaticResolver, &tx)?, 2);
+        assert_eq!(rx.try_recv()?, SocketAddr::from(([127, 0, 0, 1], 38333)));
+        assert_eq!(rx.try_recv()?, SocketAddr::from(([127, 0, 0, 1], 38334)));
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn dns_seed_bootstrap_caps_queued_addresses() -> anyhow::Result<()> {
+        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        assert_eq!(
+            queue_dns_seed_bootstrap(&config, &ManyAddressResolver, &tx)?,
+            DNS_BOOTSTRAP_ADDR_LIMIT
+        );
+        assert_eq!(rx.try_iter().count(), DNS_BOOTSTRAP_ADDR_LIMIT);
+        Ok(())
+    }
+
+    #[test]
+    fn dns_seed_bootstrap_stops_when_outbound_queue_is_full() -> anyhow::Result<()> {
+        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+
+        assert_eq!(
+            queue_dns_seed_bootstrap(&config, &ManyAddressResolver, &tx)?,
+            1
+        );
+        assert_eq!(rx.try_iter().count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn dns_seed_bootstrap_reports_closed_outbound_queue() {
+        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+
+        assert!(queue_dns_seed_bootstrap(&config, &StaticResolver, &tx).is_err());
+    }
+
+    #[test]
+    fn outbound_addr_available_rejects_active_duplicate() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let mut active = hashbrown::HashSet::new();
+        active.insert(addr);
+        let peers: PeerRegistry = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let peer_outbound: PeerOutboundMap =
+            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
+
+        assert!(!outbound_addr_available(
+            addr,
+            &active,
+            &peers,
+            &peer_outbound
+        ));
+    }
+
+    #[test]
+    fn outbound_addr_available_rejects_connected_duplicate() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let active = hashbrown::HashSet::new();
+        let peers: PeerRegistry = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let peer_outbound: PeerOutboundMap =
+            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        peer_outbound.write().insert(addr, tx);
+
+        assert!(!outbound_addr_available(
+            addr,
+            &active,
+            &peers,
+            &peer_outbound
+        ));
+    }
+
+    #[test]
+    fn outbound_drain_reaps_finished_attempts() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let mut active = hashbrown::HashSet::new();
+        active.insert(addr);
+        let handle = std::thread::spawn(|| Ok::<(), bitcoin_rs_p2p::PeerError>(()));
+        while !handle.is_finished() {
+            std::thread::yield_now();
+        }
+        let mut handles = vec![(addr, handle)];
+
+        reap_finished_outbound_connections(&mut active, &mut handles);
+
+        assert!(active.is_empty());
+        assert!(handles.is_empty());
+    }
+
+    #[test]
+    fn dns_seed_bootstrap_skips_disabled_and_regtest_configs() -> anyhow::Result<()> {
+        let mut disabled = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        disabled.dns_seeds_enabled = false;
+        let regtest = Config::default_for_network(bitcoin_rs_primitives::Network::Regtest);
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        assert_eq!(
+            queue_dns_seed_bootstrap(&disabled, &FailingResolver, &tx)?,
+            0
+        );
+        assert_eq!(
+            queue_dns_seed_bootstrap(&regtest, &FailingResolver, &tx)?,
+            0
+        );
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
 }

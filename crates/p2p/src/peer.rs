@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_network::VersionMessage;
@@ -139,5 +139,75 @@ impl PeerManager {
             addresses.extend(self.dns_resolver.resolve(seed)?);
         }
         Ok(addresses)
+    }
+}
+
+/// DNS resolver backed by the operating system resolver.
+#[derive(Debug, Clone, Copy)]
+pub struct SystemDnsResolver {
+    port: u16,
+}
+
+impl SystemDnsResolver {
+    /// Create a DNS resolver that attaches `port` to each resolved seed host.
+    #[must_use]
+    pub const fn new(port: u16) -> Self {
+        Self { port }
+    }
+}
+
+impl DnsResolver for SystemDnsResolver {
+    fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError> {
+        let seed = seed.trim_end_matches('.');
+        (seed, self.port)
+            .to_socket_addrs()
+            .map(std::iter::Iterator::collect)
+            .map_err(PeerError::Io)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_manager_resolves_configured_seeds() -> Result<(), PeerError> {
+        struct StaticResolver;
+
+        impl DnsResolver for StaticResolver {
+            fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError> {
+                let port = match seed {
+                    "seed-one.example" => 8333,
+                    "seed-two.example" => 18333,
+                    _ => return Err(PeerError::Protocol("unexpected test seed")),
+                };
+                Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+            }
+        }
+
+        let mut manager = PeerManager::new(Box::new(StaticResolver));
+        manager.add_seed("seed-one.example");
+        manager.add_seed("seed-two.example");
+
+        assert_eq!(
+            manager.bootstrap_addresses()?,
+            vec![
+                SocketAddr::from(([127, 0, 0, 1], 8333)),
+                SocketAddr::from(([127, 0, 0, 1], 18333)),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn system_dns_resolver_uses_configured_port_for_literal_hosts() -> Result<(), PeerError> {
+        let resolver = SystemDnsResolver::new(8333);
+
+        assert!(
+            resolver
+                .resolve("127.0.0.1.")?
+                .contains(&SocketAddr::from(([127, 0, 0, 1], 8333)))
+        );
+        Ok(())
     }
 }
