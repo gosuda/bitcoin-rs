@@ -28,6 +28,7 @@ pub mod wire;
 /// BIP339 wtxid-relay state.
 pub mod wtxid;
 
+pub use dispatch::{ChainQuery, InventoryResponse};
 pub use listener::spawn_outbound_connection;
 pub use peer::{DnsResolver, Peer, PeerManager, PeerState};
 pub use peer_info::PeerInfo;

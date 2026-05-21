@@ -27,6 +27,7 @@ type PeerOutboundMap = Arc<
     >,
 >;
 type BannedSubnets = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>;
+type P2pChainQuery = Arc<dyn bitcoin_rs_p2p::ChainQuery>;
 
 fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
     match node_auth {
@@ -89,6 +90,7 @@ fn spawn_p2p_listeners(
     banned: BannedSubnets,
     inbound_headers_tx: crossbeam_channel::Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin::Block>,
+    chain_query: P2pChainQuery,
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>
 {
     let mut handles = Vec::with_capacity(config.p2p_listen.len());
@@ -101,10 +103,11 @@ fn spawn_p2p_listeners(
         let listener_banned = Arc::clone(&banned);
         let listener_inbound_headers_tx = inbound_headers_tx.clone();
         let listener_inbound_blocks_tx = inbound_blocks_tx.clone();
+        let listener_chain_query = Arc::clone(&chain_query);
         let handle = std::thread::Builder::new()
             .name(format!("bitcoin-rs-p2p-{listener_addr}"))
             .spawn(move || {
-                bitcoin_rs_p2p::listener::serve_with_shutdown(
+                bitcoin_rs_p2p::listener::serve_with_shutdown_with_chain(
                     listener_addr,
                     listener_shutdown,
                     magic,
@@ -113,6 +116,7 @@ fn spawn_p2p_listeners(
                     listener_inbound_headers_tx,
                     listener_inbound_blocks_tx,
                     listener_banned,
+                    Some(listener_chain_query),
                 )
             })?;
         tracing::info!(addr = %listener_addr, "p2p listener bound");
@@ -129,6 +133,7 @@ fn spawn_p2p_outbound_drain(
     peers: &PeerRegistry,
     peer_outbound: &PeerOutboundMap,
     banned: BannedSubnets,
+    chain_query: P2pChainQuery,
 ) -> anyhow::Result<std::thread::JoinHandle<()>> {
     let outbound_rx = state.p2p_outbound_receiver();
     let magic = bitcoin::p2p::Magic::from_bytes(config.network.magic());
@@ -138,6 +143,7 @@ fn spawn_p2p_outbound_drain(
     let outbound_headers_tx = state.inbound_headers_sender();
     let outbound_blocks_tx = state.inbound_blocks_sender();
     let outbound_shutdown = Arc::clone(shutdown);
+    let outbound_chain_query = Arc::clone(&chain_query);
 
     Ok(std::thread::Builder::new()
         .name("bitcoin-rs-p2p-outbound-drain".to_owned())
@@ -149,15 +155,17 @@ fn spawn_p2p_outbound_drain(
                 };
                 match recv {
                     Ok(addr) => {
-                        let _handle = bitcoin_rs_p2p::spawn_outbound_connection(
-                            addr,
-                            magic,
-                            Arc::clone(&outbound_registry),
-                            Arc::clone(&outbound_peer_outbound),
-                            outbound_headers_tx.clone(),
-                            outbound_blocks_tx.clone(),
-                            Arc::clone(&outbound_banned),
-                        );
+                        let _handle =
+                            bitcoin_rs_p2p::listener::spawn_outbound_connection_with_chain(
+                                addr,
+                                magic,
+                                Arc::clone(&outbound_registry),
+                                Arc::clone(&outbound_peer_outbound),
+                                outbound_headers_tx.clone(),
+                                outbound_blocks_tx.clone(),
+                                Arc::clone(&outbound_banned),
+                                Some(Arc::clone(&outbound_chain_query)),
+                            );
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -203,6 +211,10 @@ pub fn run(mut config: Config) -> Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let banned = state.banned_subnets();
+    let p2p_chain_query: P2pChainQuery = Arc::new(crate::NodeP2pChainQuery::new(
+        state.block_tree(),
+        state.blocks(),
+    ));
     let loop_handle = EventLoop::new(shutdown_rx, state.sync());
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
     let mut rpc_context = bitcoin_rs_rpc::Context::from_handles(
@@ -255,6 +267,7 @@ pub fn run(mut config: Config) -> Result<()> {
         Arc::clone(&banned),
         state.inbound_headers_sender(),
         state.inbound_blocks_sender(),
+        Arc::clone(&p2p_chain_query),
     )?;
     let _outbound_worker = spawn_p2p_outbound_drain(
         state.config(),
@@ -263,6 +276,7 @@ pub fn run(mut config: Config) -> Result<()> {
         &peers,
         &peer_outbound,
         Arc::clone(&banned),
+        Arc::clone(&p2p_chain_query),
     )?;
     loop_handle.spin(&shutdown)?;
     if let Some(handle) = electrum_thread {

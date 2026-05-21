@@ -30,6 +30,8 @@ pub mod import;
 pub mod logging;
 /// Metrics instrumentation and optional exposition.
 pub mod metrics;
+/// Node-side active-chain view for server-side P2P responders.
+pub mod p2p_chain;
 /// Top-level node runner.
 pub mod run;
 /// Graceful shutdown.
@@ -49,6 +51,7 @@ pub use bip9_context::BlockTreeContext;
 pub use bitcoin_rs_primitives::Network;
 pub use block_source::NodeBlockSource;
 pub use config::{Auth, Config};
+pub use p2p_chain::NodeP2pChainQuery;
 pub use run::run;
 pub use state::ApplyError;
 pub use sync::BlockSync;

@@ -15,6 +15,7 @@ use crate::peer::Peer;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
+type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 
 /// Errors returned by the P2P listener accept loop.
 #[derive(Debug, Error)]
@@ -61,6 +62,32 @@ pub fn serve_with_shutdown(
     inbound_blocks_tx: Sender<bitcoin::Block>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
 ) -> Result<(), ListenerError> {
+    serve_with_shutdown_with_chain(
+        addr,
+        shutdown,
+        magic,
+        peer_registry,
+        peer_outbound,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        banned,
+        None,
+    )
+}
+
+/// Binds `addr` and runs an accept loop with an optional active-chain responder.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn serve_with_shutdown_with_chain(
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    magic: Magic,
+    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
+    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
+) -> Result<(), ListenerError> {
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
     listener
@@ -82,6 +109,7 @@ pub fn serve_with_shutdown(
                     Arc::clone(&peer_outbound),
                     inbound_headers_tx.clone(),
                     inbound_blocks_tx.clone(),
+                    chain_query.clone(),
                 );
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -108,6 +136,30 @@ pub fn spawn_outbound_connection(
     inbound_blocks_tx: Sender<bitcoin::Block>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    spawn_outbound_connection_with_chain(
+        addr,
+        magic,
+        peer_registry,
+        peer_outbound,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        banned,
+        None,
+    )
+}
+
+/// Spawns an outbound connection with an optional active-chain responder.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn spawn_outbound_connection_with_chain(
+    addr: SocketAddr,
+    magic: Magic,
+    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
+    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
@@ -120,6 +172,7 @@ pub fn spawn_outbound_connection(
                 &inbound_headers_tx,
                 &inbound_blocks_tx,
                 &banned,
+                &chain_query,
             )
         });
 
@@ -144,6 +197,7 @@ fn run_outbound_connection(
     inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: &Sender<bitcoin::Block>,
     banned: &RwLock<Vec<crate::BannedSubnet>>,
+    chain_query: &ChainQueryHandle,
 ) -> Result<(), crate::wire::PeerError> {
     if crate::subnet::is_banned(&banned.read(), addr.ip(), SystemTime::now()) {
         return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
@@ -191,6 +245,7 @@ fn run_outbound_connection(
             &outbound_rx,
             inbound_headers_tx,
             inbound_blocks_tx,
+            chain_query.as_deref(),
         )
     })();
 
@@ -233,6 +288,7 @@ fn spawn_handshake_thread(
     peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
     inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: Sender<bitcoin::Block>,
+    chain_query: ChainQueryHandle,
 ) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
     let spawn_result = std::thread::Builder::new()
@@ -246,6 +302,7 @@ fn spawn_handshake_thread(
                 &peer_outbound,
                 &inbound_headers_tx,
                 &inbound_blocks_tx,
+                &chain_query,
             ) {
                 tracing::warn!(
                     peer_addr = %peer_addr,
@@ -274,6 +331,7 @@ fn run_handshake(
     peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
     inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: &Sender<bitcoin::Block>,
+    chain_query: &ChainQueryHandle,
 ) -> Result<(), crate::wire::PeerError> {
     stream
         .set_nonblocking(false)
@@ -318,6 +376,7 @@ fn run_handshake(
             &outbound_rx,
             inbound_headers_tx,
             inbound_blocks_tx,
+            chain_query.as_deref(),
         )
     })();
 
@@ -337,6 +396,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
     inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: &Sender<bitcoin::Block>,
+    chain_query: Option<&dyn crate::dispatch::ChainQuery>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
     use std::time::Instant;
@@ -386,7 +446,8 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         );
                     }
                 }
-                let responses = crate::dispatch::dispatch_inbound(peer, &message)?;
+                let responses =
+                    crate::dispatch::dispatch_inbound_with_chain(peer, &message, chain_query)?;
                 for response in responses {
                     peer.send(&response)?;
                 }

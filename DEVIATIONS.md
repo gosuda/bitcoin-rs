@@ -190,8 +190,10 @@ closed by wiring the source-of-truth subsystem handles into the node
 lifecycle. The wiring covers the active-chain consensus pipeline through
 PoW, DAA `nBits` continuity/retarget checks, non-contextual rules,
 BIP30/34, contextual BIP113/BIP68 checks, BIP9 CSV/Segwit activation,
-BlockTree insertion, and script verification. The listener-side P2P
-handshake is wired; block-download orchestration remains deferred.
+BlockTree insertion, and script verification. The P2P handshake, per-peer
+outbound queues, block-sync `getheaders` / `getdata` download loop, and bounded
+server-side `getheaders` / `getdata` responses are wired; persisted block-body
+serving remains deferred.
 
 ### What is now wired
 
@@ -225,7 +227,8 @@ handshake is wired; block-download orchestration remains deferred.
   Failed validation at steps 1–8 leaves no orphan header in the BlockTree.
   `import_block` flips `ImportOutcome::applied` to `true` on success.
 - **NodeState's `chain_tip` is single-sourced.** `NodeState` caches `Arc::clone(&block_tree.read().tip_handle())` at construction; RPC `Context::from_handles` receives this same Arc. There is no synthetic `self.chain_tip.store(...)` in `apply_block` — the BlockTree publishes the tip via `insert_header`.
-- **P2P listener runs full Bitcoin v1 handshake + message-dispatch loop.** `bitcoin_rs_p2p::handshake::run_inbound_handshake` exchanges Version / WtxidRelay / SendAddrV2 / SendHeaders / Verack with the remote. After handshake the per-connection thread enters `run_message_loop` which routes inbound messages via `dispatch::dispatch_inbound`, sends responses (Pong on Ping, etc.), and exits cleanly on idle (60s read timeout), wire error, or explicit `Disconnecting`. On exit, the peer is removed from the shared registry via address-match retain.
+- **P2P listener runs full Bitcoin v1 handshake + message-dispatch loop.** `bitcoin_rs_p2p::handshake::run_inbound_handshake` exchanges Version / WtxidRelay / SendAddrV2 / SendHeaders / Verack with the remote. After handshake the per-connection thread enters `run_message_loop` which routes inbound messages via the state-backed dispatch path, sends responses (Pong on Ping, `headers` on `getheaders`, `block` / `notfound` on `getdata`, etc.), and exits cleanly on idle (60s read timeout), wire error, or explicit `Disconnecting`. On exit, the peer is removed from the shared registry via address-match retain.
+- **P2P server-side header/block requests are bounded by the active in-memory chain view.** Post-handshake `getheaders` replies are built from the active `BlockTree` and stop at the requested stop hash or the 2,000-header response cap. `getdata` serves active-chain `block` / `witness block` inventory only when the matching body is still present in the shared `BlockRecord` cache; pruned, absent, transaction, compact-block, and unknown inventory is answered with `notfound`. Persisted pruned-body reads remain deferred rather than hidden behind the P2P boundary.
 - **Peer registry surfaced via RPC.** `bitcoin_rs_p2p::PeerInfo` (addr, version, services, user_agent, start_height, conn_time, inbound) is collected on handshake success and pushed to `NodeState`'s shared `Arc<RwLock<Vec<PeerInfo>>>`. `rpc::Context::from_handles` takes this handle; `getpeerinfo` enumerates it into Core-compatible JSON; `getconnectioncount` returns the real `len()`.
 - `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via `Mempool::stats()`.
 - `getblockchaininfo` surfaces real `chainwork` as a 64-character lowercase big-endian hex string via `rpc::Context::chainwork_hex()`.
@@ -239,8 +242,7 @@ handshake is wired; block-download orchestration remains deferred.
 
 - **No historical DAA fixture parity.** The active-chain retarget calculation is unit-covered, but it is not yet checked against historical mainnet/testnet retarget windows.
 - **Contextual transaction checks remain node-local.** BIP113 MTP nLocktime, BIP68 sequence locks, and BIP9 CSV/Segwit activation are wired through the node apply path, but the lower-level consensus crate still exposes `verify_transaction(tx, prevouts, height, flags)` rather than a reusable context-rich transaction API.
-- **No outbound message channel per peer.** The post-handshake dispatch loop reads inbound and writes responses derived from `dispatch_inbound`, but external callers (e.g. a block download orchestrator) have no path to inject messages addressed to a specific peer — the peer's `TcpStream` is owned by the per-connection thread.
-- **No block download orchestrator.** No code path connects accepted peers to `import_block` via `getheaders` / `getdata` / `block` exchange. `import_block` only fires from tests.
+- **No persisted block-body serving path for P2P.** P2P `getdata` can serve bodies still present in the in-memory `BlockRecord` cache, but it does not read persisted pruned-body rows after restart or cache eviction; unavailable inventory is reported with `notfound`.
 - **No index / filter / coinstats updates triggered by tip advance.** Electrum index, BIP158 filter generation, and coinstats remain stale until a follow-up wires the listener side.
 - **G14 empirical validation still deferred.** The `faster than Bitcoin
   Core` claim requires multi-day live mainnet IBD against `bitcoind`
