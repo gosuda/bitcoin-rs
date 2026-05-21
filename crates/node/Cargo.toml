@@ -12,7 +12,13 @@ description = "bitcoin-rs :: node"
 workspace = true
 
 [features]
-default = []
+# A node is non-functional without a storage backend, and its `NodeStorage` /
+# `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the
+# `match self` arms are non-exhaustive and the crate fails to compile under
+# default features (e.g. `cargo publish` per-crate verify). rocksdb is the
+# documented default backend; this keeps the published crate self-contained.
+# Local/CI builds pin `--no-default-features --features "..."` and are unaffected.
+default = ["rocksdb"]
 rocksdb = [
     "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-coinstats/rocksdb",
