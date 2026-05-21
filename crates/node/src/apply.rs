@@ -869,13 +869,13 @@ fn compute_verify_flags(
 }
 
 #[cfg(test)]
-mod bip30_tests {
+mod consensus_rule_tests {
     use std::sync::Arc;
 
     use arc_swap::ArcSwapOption;
     use bitcoin::hashes::Hash as _;
     use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_chain::{BlockTree, node::NodeStatus};
     use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
     use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
@@ -885,6 +885,118 @@ mod bip30_tests {
     use parking_lot::{Mutex, RwLock};
 
     use super::*;
+
+    const BIP68_TEST_PREVOUT_HEIGHT: u32 = 100;
+    const BIP68_TEST_PREVOUT_MTP: u32 = 1_000_000;
+
+    #[test]
+    fn bip68_height_lock_enforces_boundary_when_csv_active()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x68; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
+        let handles = apply_handles(utxo);
+        let block = block_with_transaction(spending_transaction(previous_output, 2));
+        let active = softfork_state(true);
+
+        let error = match check_bip68_sequence_locks(&handles, &block, 101, 0, active, None) {
+            Ok(()) => panic!("BIP68 height lock must reject one block before maturity"),
+            Err(error) => error,
+        };
+        assert_bip_error(&error, "BIP68");
+        assert!(check_bip68_sequence_locks(&handles, &block, 102, 0, active, None).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn bip68_time_lock_enforces_mtp_boundary_when_csv_active()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x69; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
+        let handles = apply_handles(utxo);
+        let previous_tip_id = seed_block_tree_for_bip68_time(&handles)?;
+        let sequence = BIP68_TYPE_FLAG | 2;
+        let block = block_with_transaction(spending_transaction(previous_output, sequence));
+        let active = softfork_state(true);
+        let required_mtp = BIP68_TEST_PREVOUT_MTP + 2 * BIP68_TIME_GRANULARITY_SECONDS;
+
+        let error = match check_bip68_sequence_locks(
+            &handles,
+            &block,
+            0,
+            required_mtp - 1,
+            active,
+            Some(previous_tip_id),
+        ) {
+            Ok(()) => panic!("BIP68 time lock must reject one second before maturity"),
+            Err(error) => error,
+        };
+        assert_bip_error(&error, "BIP68");
+        assert!(
+            check_bip68_sequence_locks(
+                &handles,
+                &block,
+                0,
+                required_mtp,
+                active,
+                Some(previous_tip_id)
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bip68_inactive_csv_skips_unmet_sequence_lock() -> Result<(), Box<dyn std::error::Error>> {
+        let previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x70; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
+        let handles = apply_handles(utxo);
+        let block = block_with_transaction(spending_transaction(previous_output, 2));
+
+        assert!(
+            check_bip68_sequence_locks(&handles, &block, 101, 0, softfork_state(false), None)
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bip68_ignores_version_one_and_disabled_sequences() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x71; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
+        let handles = apply_handles(utxo);
+        let active = softfork_state(true);
+
+        let version_one_block = block_with_transaction(spending_transaction_with_version(
+            previous_output,
+            2,
+            bitcoin::transaction::Version::ONE,
+        ));
+        assert!(
+            check_bip68_sequence_locks(&handles, &version_one_block, 101, 0, active, None).is_ok()
+        );
+
+        let disabled_block = block_with_transaction(spending_transaction(
+            previous_output,
+            BIP68_DISABLE_FLAG | 2,
+        ));
+        assert!(
+            check_bip68_sequence_locks(&handles, &disabled_block, 101, 0, active, None).is_ok()
+        );
+        Ok(())
+    }
 
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
@@ -948,6 +1060,115 @@ mod bip30_tests {
                 script_pubkey: ScriptBuf::new(),
             }],
         }
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn utxo_with_output(
+        previous_output: bitcoin::OutPoint,
+        height: u32,
+    ) -> Result<Arc<UtxoSet>, bitcoin_rs_utxo::UtxoError> {
+        let txid = Hash256::from_le_bytes(previous_output.txid.as_byte_array());
+        let utxo = Arc::new(UtxoSet::new());
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(txid, previous_output.vout),
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            },
+            false,
+            height,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
+        Ok(utxo)
+    }
+
+    fn block_with_transaction(tx: Transaction) -> bitcoin::Block {
+        bitcoin::Block {
+            header: bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash: bitcoin::BlockHash::all_zeros(),
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: 0,
+                bits: bitcoin::pow::CompactTarget::from_consensus(0),
+                nonce: 0,
+            },
+            txdata: vec![tx],
+        }
+    }
+
+    fn spending_transaction(previous_output: bitcoin::OutPoint, sequence: u32) -> Transaction {
+        spending_transaction_with_version(
+            previous_output,
+            sequence,
+            bitcoin::transaction::Version::TWO,
+        )
+    }
+
+    fn spending_transaction_with_version(
+        previous_output: bitcoin::OutPoint,
+        sequence: u32,
+        version: bitcoin::transaction::Version,
+    ) -> Transaction {
+        Transaction {
+            version,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus(sequence),
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
+    }
+
+    fn softfork_state(csv_active: bool) -> crate::bip9_context::ContextualSoftforkState {
+        crate::bip9_context::ContextualSoftforkState {
+            csv_active,
+            segwit_active: false,
+        }
+    }
+
+    fn seed_block_tree_for_bip68_time(
+        handles: &ApplyHandles,
+    ) -> Result<bitcoin_rs_chain::node::NodeId, ApplyError> {
+        let mut tree = handles.block_tree.write();
+        let mut parent = None;
+        let mut tip = None;
+        for height in 0..=BIP68_TEST_PREVOUT_HEIGHT {
+            let header = bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash: parent
+                    .and_then(|id| {
+                        tree.node(id).ok().map(|node| {
+                            bitcoin::BlockHash::from_byte_array(node.hash.to_le_bytes())
+                        })
+                    })
+                    .unwrap_or_else(bitcoin::BlockHash::all_zeros),
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: BIP68_TEST_PREVOUT_MTP,
+                bits: bitcoin::pow::CompactTarget::from_consensus(0x207f_ffff),
+                nonce: height,
+            };
+            let id = tree.insert_node(parent, header, NodeStatus::Active)?;
+            parent = Some(id);
+            tip = Some(id);
+        }
+        match tip {
+            Some(tip) => Ok(tip),
+            None => Err(ApplyError::HeightOverflow(0)),
+        }
+    }
+
+    fn assert_bip_error(error: &ApplyError, bip: &str) {
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: actual, .. }) if *actual == bip
+        ));
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
