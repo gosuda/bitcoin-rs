@@ -200,6 +200,46 @@ impl Network {
         }
     }
 
+    /// Returns the proof-of-work target spacing in seconds.
+    #[must_use]
+    pub const fn target_spacing_seconds(self) -> u32 {
+        10 * 60
+    }
+
+    /// Returns the proof-of-work retarget timespan in seconds.
+    #[must_use]
+    pub const fn target_timespan_seconds(self) -> u32 {
+        self.retarget_interval()
+            .saturating_mul(self.target_spacing_seconds())
+    }
+
+    /// Returns whether non-retarget blocks may use the test-network minimum-difficulty rule.
+    #[must_use]
+    pub const fn allow_min_difficulty_blocks(self) -> bool {
+        match self {
+            Self::Testnet3 | Self::Testnet4 | Self::Regtest => true,
+            Self::Mainnet | Self::Signet => false,
+        }
+    }
+
+    /// Returns whether retarget heights keep the previous difficulty unchanged.
+    #[must_use]
+    pub const fn pow_no_retargeting(self) -> bool {
+        match self {
+            Self::Regtest => true,
+            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Signet => false,
+        }
+    }
+
+    /// Returns whether retargeting uses the first block of the period as the base difficulty.
+    #[must_use]
+    pub const fn enforce_bip94(self) -> bool {
+        match self {
+            Self::Testnet4 => true,
+            Self::Mainnet | Self::Testnet3 | Self::Signet | Self::Regtest => false,
+        }
+    }
+
     /// Returns the genesis block hash.
     #[must_use]
     pub fn genesis_block_hash(self) -> Hash256 {
@@ -248,6 +288,52 @@ mod tests {
         assert_eq!(Network::Signet.magic(), [0x0a, 0x03, 0xcf, 0x40]);
         assert_eq!(Network::Regtest.magic(), [0xfa, 0xbf, 0xb5, 0xda]);
         assert_eq!(Network::Regtest.retarget_interval(), 144);
+    }
+
+    #[test]
+    fn pow_difficulty_parameters_match_core_chainparams() {
+        for network in [
+            Network::Mainnet,
+            Network::Testnet3,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            assert_eq!(network.target_spacing_seconds(), 600);
+        }
+
+        assert_eq!(
+            Network::Mainnet.target_timespan_seconds(),
+            14 * 24 * 60 * 60
+        );
+        assert_eq!(
+            Network::Testnet3.target_timespan_seconds(),
+            14 * 24 * 60 * 60
+        );
+        assert_eq!(
+            Network::Testnet4.target_timespan_seconds(),
+            14 * 24 * 60 * 60
+        );
+        assert_eq!(Network::Signet.target_timespan_seconds(), 14 * 24 * 60 * 60);
+        assert_eq!(Network::Regtest.target_timespan_seconds(), 24 * 60 * 60);
+
+        assert!(!Network::Mainnet.allow_min_difficulty_blocks());
+        assert!(Network::Testnet3.allow_min_difficulty_blocks());
+        assert!(Network::Testnet4.allow_min_difficulty_blocks());
+        assert!(!Network::Signet.allow_min_difficulty_blocks());
+        assert!(Network::Regtest.allow_min_difficulty_blocks());
+
+        assert!(!Network::Mainnet.pow_no_retargeting());
+        assert!(!Network::Testnet3.pow_no_retargeting());
+        assert!(!Network::Testnet4.pow_no_retargeting());
+        assert!(!Network::Signet.pow_no_retargeting());
+        assert!(Network::Regtest.pow_no_retargeting());
+
+        assert!(!Network::Mainnet.enforce_bip94());
+        assert!(!Network::Testnet3.enforce_bip94());
+        assert!(Network::Testnet4.enforce_bip94());
+        assert!(!Network::Signet.enforce_bip94());
+        assert!(!Network::Regtest.enforce_bip94());
     }
 
     #[test]

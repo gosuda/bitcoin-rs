@@ -230,7 +230,7 @@ handshake is wired; block-download orchestration remains deferred.
 - `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via `Mempool::stats()`.
 - `getblockchaininfo` surfaces real `chainwork` as a 64-character lowercase big-endian hex string via `rpc::Context::chainwork_hex()`.
 - `Network::is_{bip34,bip65,bip66,csv,segwit,taproot}_active(height) -> bool` const fns carry the per-network activation tables from Core's `chainparams.cpp`.
-- Active-chain DAA retarget validation is wired into `apply_block`: non-retarget heights must inherit parent `nBits`, retarget heights recompute the expected target over the prior interval with Core's 4x timespan clamp and the network proof-of-work limit cap. Unit coverage pins the boundary accept/reject cases and clamp behavior.
+- Active-chain DAA retarget validation is wired into `apply_block`: non-retarget heights inherit parent `nBits` unless the network's minimum-difficulty exception applies, retarget heights recompute the expected target over the prior interval with Core's 4x timespan clamp, the network proof-of-work limit cap, and Testnet4's BIP94 period-base rule. Unit coverage pins the boundary accept/reject cases, clamp behavior, testnet minimum-difficulty exception, and Testnet4 BIP94 behavior.
 - Electrum TLS cert config is honored as plaintext-with-warning until a
   matching `electrum_tls_key` field lands; the warning surfaces on every
   boot that configures `electrum_tls_cert` without TLS wiring.
@@ -238,7 +238,6 @@ handshake is wired; block-download orchestration remains deferred.
 ### What is NOT yet wired (consensus correctness gates)
 
 - **No historical DAA fixture parity.** The active-chain retarget calculation is unit-covered, but it is not yet checked against historical mainnet/testnet retarget windows.
-- **No testnet minimum-difficulty exception handling.** The active-chain DAA path validates the regular retarget schedule only; it does not model Bitcoin Core's test-network minimum-difficulty exception rules.
 - **Contextual transaction checks remain node-local.** BIP113 MTP nLocktime, BIP68 sequence locks, and BIP9 CSV/Segwit activation are wired through the node apply path, but the lower-level consensus crate still exposes `verify_transaction(tx, prevouts, height, flags)` rather than a reusable context-rich transaction API.
 - **No outbound message channel per peer.** The post-handshake dispatch loop reads inbound and writes responses derived from `dispatch_inbound`, but external callers (e.g. a block download orchestrator) have no path to inject messages addressed to a specific peer — the peer's `TcpStream` is owned by the per-connection thread.
 - **No block download orchestrator.** No code path connects accepted peers to `import_block` via `getheaders` / `getdata` / `block` exchange. `import_block` only fires from tests.
