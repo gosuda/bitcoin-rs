@@ -9,7 +9,7 @@ use hashbrown::HashTable;
 use slab::Slab;
 
 use crate::{
-    ChainError,
+    Bip9Cache, CachedState, ChainError,
     node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus},
     tip::TipSnapshot,
 };
@@ -19,6 +19,7 @@ pub struct BlockTree {
     nodes: Slab<BlockTreeNode>,
     by_hash: HashTable<NodeId>,
     tip: Arc<ArcSwapOption<TipSnapshot>>,
+    bip9_cache: Bip9Cache,
 }
 
 impl BlockTree {
@@ -29,6 +30,7 @@ impl BlockTree {
             nodes: Slab::new(),
             by_hash: HashTable::new(),
             tip: Arc::new(ArcSwapOption::empty()),
+            bip9_cache: Bip9Cache::new(),
         }
     }
 
@@ -248,6 +250,23 @@ impl BlockTree {
     #[must_use]
     pub fn tip_handle(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
         Arc::clone(&self.tip)
+    }
+
+    /// Returns the cached BIP9 deployment state for `(node_id, deployment_id)`, if any.
+    #[must_use]
+    pub fn cached_bip9_state(&self, node_id: NodeId, deployment_id: u32) -> Option<CachedState> {
+        self.bip9_cache.get(node_id, deployment_id)
+    }
+
+    /// Stores the cached BIP9 deployment state for `(node_id, deployment_id)`.
+    pub fn cache_bip9_state(&self, node_id: NodeId, deployment_id: u32, state: CachedState) {
+        self.bip9_cache.insert(node_id, deployment_id, state);
+    }
+
+    /// Returns the number of cached BIP9 deployment-state entries.
+    #[must_use]
+    pub fn cached_bip9_state_len(&self) -> usize {
+        self.bip9_cache.len()
     }
 
     /// Builds a block locator starting from `tip_id`. Returns the chain of

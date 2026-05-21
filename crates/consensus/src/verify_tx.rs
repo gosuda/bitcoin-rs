@@ -9,17 +9,29 @@ use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, MAX_MONEY};
 const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 const SEQUENCE_FINAL: u32 = 0xffff_ffff;
 
-/// Returns `true` iff the transaction is locktime-final at `block_height` and `median_time_past`.
+/// Returns `true` iff the transaction is locktime-final at `block_height` and the timestamp cutoff.
 ///
 /// Implements Bitcoin Core's `IsFinalTx`:
 ///   - locktime == 0: always final.
 ///   - locktime < `LOCKTIME_THRESHOLD`: height-based; final iff locktime < `block_height`.
-///   - locktime >= `LOCKTIME_THRESHOLD`: timestamp-based; final iff locktime < `median_time_past`.
+///   - locktime >= `LOCKTIME_THRESHOLD`: timestamp-based; final iff locktime < `locktime_cutoff`.
 ///   - all inputs have sequence == `SEQUENCE_FINAL`: final regardless of locktime.
 ///
-/// BIP113 enforces using `median_time_past` for timestamp-based comparison after activation.
+/// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
 #[must_use]
-pub fn is_final_tx(tx: &bitcoin::Transaction, block_height: u32, median_time_past: u32) -> bool {
+pub fn is_final_tx(tx: &bitcoin::Transaction, block_height: u32, locktime_cutoff: u32) -> bool {
+    is_final_tx_with_locktime_cutoff(tx, block_height, locktime_cutoff)
+}
+
+/// Returns `true` iff the transaction is locktime-final at `block_height` and `locktime_cutoff`.
+///
+/// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
+#[must_use]
+fn is_final_tx_with_locktime_cutoff(
+    tx: &bitcoin::Transaction,
+    block_height: u32,
+    locktime_cutoff: u32,
+) -> bool {
     let lock_time = tx.lock_time.to_consensus_u32();
     if lock_time == 0 {
         return true;
@@ -28,7 +40,7 @@ pub fn is_final_tx(tx: &bitcoin::Transaction, block_height: u32, median_time_pas
     let threshold = if lock_time < LOCKTIME_THRESHOLD {
         block_height
     } else {
-        median_time_past
+        locktime_cutoff
     };
     if lock_time < threshold {
         return true;
@@ -50,15 +62,18 @@ pub fn verify_transaction(
     verify_transaction_with_mtp(tx, prevouts, height, 0, flags)
 }
 
-/// Verifies non-contextual and input-script transaction rules with BIP113 MTP checks.
+/// Verifies non-contextual and input-script transaction rules with a caller-selected timestamp cutoff.
+///
+/// The historical `_with_mtp` suffix is retained for source compatibility. Callers pass block
+/// header time before BIP113 activation and previous-tip MTP after activation.
 pub fn verify_transaction_with_mtp(
     tx: &Tx,
     prevouts: &impl UtxoView,
     height: u32,
-    median_time_past: u32,
+    locktime_cutoff: u32,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    verify_transaction_borrowed_with_mtp(&tx.0, prevouts, height, median_time_past, flags)
+    verify_transaction_borrowed_with_mtp(&tx.0, prevouts, height, locktime_cutoff, flags)
 }
 
 /// Verifies non-contextual and input-script transaction rules for a borrowed transaction without contextual MTP checks.
@@ -72,18 +87,33 @@ pub fn verify_transaction_borrowed(
 }
 
 /// Verifies non-contextual and input-script transaction rules for a borrowed transaction.
+///
+/// The historical `_with_mtp` suffix is retained for source compatibility. Callers pass block
+/// header time before BIP113 activation and previous-tip MTP after activation.
 pub fn verify_transaction_borrowed_with_mtp(
     tx: &bitcoin::Transaction,
     prevouts: &impl UtxoView,
     height: u32,
-    median_time_past: u32,
+    locktime_cutoff: u32,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    if !is_final_tx(tx, height, median_time_past) {
+    verify_transaction_borrowed_with_locktime_cutoff(tx, prevouts, height, locktime_cutoff, flags)
+}
+
+/// Verifies non-contextual and input-script transaction rules for a borrowed transaction.
+fn verify_transaction_borrowed_with_locktime_cutoff(
+    tx: &bitcoin::Transaction,
+    prevouts: &impl UtxoView,
+    height: u32,
+    locktime_cutoff: u32,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    if !is_final_tx_with_locktime_cutoff(tx, height, locktime_cutoff) {
         return Err(ConsensusError::Bip {
             bip: "BIP113",
             reason: format!(
-                "non-final transaction at height {height} mtp {median_time_past}: locktime {}",
+                "non-final transaction at height {height} locktime cutoff \
+                 {locktime_cutoff}: locktime {}",
                 tx.lock_time.to_consensus_u32()
             ),
         });
@@ -179,7 +209,9 @@ mod tests {
     use bitcoin_rs_primitives::Tx;
     use bitcoin_rs_script::VerifyFlags;
 
-    use super::{verify_transaction, verify_transaction_with_mtp};
+    use super::{
+        is_final_tx_with_locktime_cutoff, verify_transaction, verify_transaction_with_mtp,
+    };
     use crate::ConsensusError;
 
     #[test]
@@ -258,6 +290,27 @@ mod tests {
             result,
             Err(ConsensusError::Bip { bip: "BIP113", .. })
         ));
+    }
+
+    #[test]
+    fn timestamp_locktime_uses_caller_supplied_cutoff() {
+        let tx = Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::from_consensus(500_000_100),
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus(0),
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+
+        assert!(!is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_100));
+        assert!(is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_101));
     }
 
     fn spending_input(outpoint: OutPoint) -> TxIn {

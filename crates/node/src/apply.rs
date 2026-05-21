@@ -170,28 +170,47 @@ pub fn apply_block(
         return Err(ApplyError::ProofOfWork { hash: block_hash });
     }
 
-    let prev_tip_state = match prior.as_deref() {
-        Some(tip) => {
-            let mtp = handles
-                .block_tree
-                .read()
-                .median_time_past_at(tip.tip_id, 11)
-                .unwrap_or(0);
+    let (prev_tip_state, softfork_state) = if let Some(tip) = prior.as_deref() {
+        let tree = handles.block_tree.read();
+        let mtp = tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0);
+        let softfork_state = crate::bip9_context::contextual_softfork_state(
+            &tree,
+            handles.network,
+            Some(tip.tip_id),
+            height,
+        );
+        (
             bitcoin_rs_consensus::rust_path::TipState {
                 height: Some(tip.height),
                 block_hash: None,
                 median_time_past: mtp,
-            }
-        }
-        None => bitcoin_rs_consensus::rust_path::TipState {
-            height: None,
-            block_hash: None,
-            median_time_past: 0,
-        },
+            },
+            softfork_state,
+        )
+    } else {
+        let tree = handles.block_tree.read();
+        (
+            bitcoin_rs_consensus::rust_path::TipState {
+                height: None,
+                block_hash: None,
+                median_time_past: 0,
+            },
+            crate::bip9_context::contextual_softfork_state(&tree, handles.network, None, height),
+        )
+    };
+    let locktime_cutoff = if softfork_state.csv_active {
+        prev_tip_state.median_time_past
+    } else {
+        block.header.time
     };
     let block_rules_started = quanta::Instant::now();
-    let block_rules_result =
-        bitcoin_rs_consensus::verify_block::verify_block_rules_borrowed(block, &prev_tip_state);
+    let block_rules_result = bitcoin_rs_consensus::verify_block_rules_borrowed_contextual(
+        block,
+        &prev_tip_state,
+        bitcoin_rs_consensus::BlockRuleContext {
+            segwit_active: softfork_state.segwit_active,
+        },
+    );
     let block_rules_dur = block_rules_started.elapsed();
     metrics::histogram!("node.apply_block.block_rules_seconds")
         .record(block_rules_dur.as_secs_f64());
@@ -212,14 +231,15 @@ pub fn apply_block(
     pow_limit_result?;
 
     let bip113_started = quanta::Instant::now();
-    let bip113_result = check_bip113_finality(block, height, prev_tip_state.median_time_past);
+    let bip113_result = check_bip113_finality(block, height, locktime_cutoff);
     let bip113_dur = bip113_started.elapsed();
     metrics::histogram!("node.apply_block.bip113_seconds").record(bip113_dur.as_secs_f64());
     bip113_result?;
 
     let script_verify_started = quanta::Instant::now();
+    let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
     let script_verify_result =
-        verify_block_transactions(handles, block, height, prev_tip_state.median_time_past);
+        verify_block_transactions(handles, block, height, locktime_cutoff, verify_flags);
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
         .record(script_verify_dur.as_secs_f64());
@@ -232,8 +252,15 @@ pub fn apply_block(
         .record(coinbase_maturity_dur.as_secs_f64());
     coinbase_maturity_result?;
     let bip68_started = quanta::Instant::now();
-    let bip68_result =
-        check_bip68_sequence_locks(handles, block, height, prev_tip_state.median_time_past);
+    let previous_tip_id = prior.as_deref().map(|tip| tip.tip_id);
+    let bip68_result = check_bip68_sequence_locks(
+        handles,
+        block,
+        height,
+        prev_tip_state.median_time_past,
+        softfork_state,
+        previous_tip_id,
+    );
     let bip68_dur = bip68_started.elapsed();
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
@@ -430,23 +457,23 @@ fn verify_block_transactions(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
     height: u32,
-    median_time_past: u32,
+    locktime_cutoff: u32,
+    flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     // Per-tx script verification. The view borrows the UTXO set as it
     // stood BEFORE this block's outputs were committed — inputs in this
     // block can only spend outputs from earlier blocks. Coinbase txs have
     // no prevouts to verify here.
-    let flags = compute_verify_flags(handles.network, height);
     let view = crate::utxo_view::UtxoSetView::new(Arc::clone(&handles.utxo));
     for tx in &block.txdata {
         if tx.is_coinbase() {
             continue;
         }
-        bitcoin_rs_consensus::verify_transaction_borrowed_with_mtp(
+        bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
             tx,
             &view,
             height,
-            median_time_past,
+            locktime_cutoff,
             flags,
         )?;
     }
@@ -456,20 +483,21 @@ fn verify_block_transactions(
 fn check_bip113_finality(
     block: &bitcoin::Block,
     height: u32,
-    median_time_past: u32,
+    locktime_cutoff: u32,
 ) -> core::result::Result<(), ApplyError> {
     for tx in &block.txdata {
         if tx.is_coinbase() {
             continue;
         }
-        if bitcoin_rs_consensus::verify_tx::is_final_tx(tx, height, median_time_past) {
+        if bitcoin_rs_consensus::verify_tx::is_final_tx(tx, height, locktime_cutoff) {
             continue;
         }
         return Err(ApplyError::Consensus(
             bitcoin_rs_consensus::ConsensusError::Bip {
                 bip: "BIP113",
                 reason: format!(
-                    "non-final transaction at height {height} mtp {median_time_past}: locktime {}",
+                    "non-final transaction at height {height} locktime cutoff \
+                     {locktime_cutoff}: locktime {}",
                     tx.lock_time.to_consensus_u32()
                 ),
             },
@@ -522,10 +550,12 @@ fn check_bip68_sequence_locks(
     block: &bitcoin::Block,
     height: u32,
     mtp: u32,
+    softfork_state: crate::bip9_context::ContextualSoftforkState,
+    previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
 ) -> core::result::Result<(), ApplyError> {
     use bitcoin::hashes::Hash as _;
 
-    if !handles.network.is_csv_active(height) {
+    if !softfork_state.csv_active {
         return Ok(());
     }
 
@@ -555,11 +585,11 @@ fn check_bip68_sequence_locks(
                 };
                 let prevout_mtp = {
                     let tree = handles.block_tree.read();
-                    let Some(chain_tip) = handles.chain_tip.load_full() else {
+                    let Some(previous_tip_id) = previous_tip_id else {
                         continue;
                     };
                     let Some(prev_block_node) =
-                        tree.node_at_height_from(chain_tip.tip_id, entry.height)
+                        tree.node_at_height_from(previous_tip_id, entry.height)
                     else {
                         continue;
                     };
@@ -815,7 +845,11 @@ fn build_utxo_changes(
 }
 
 #[must_use]
-const fn compute_verify_flags(network: Network, height: u32) -> bitcoin_rs_script::VerifyFlags {
+fn compute_verify_flags(
+    network: Network,
+    height: u32,
+    softfork_state: crate::bip9_context::ContextualSoftforkState,
+) -> bitcoin_rs_script::VerifyFlags {
     use bitcoin_rs_script::VerifyFlags;
 
     // P2SH (BIP16) is effectively always-on for supported validation paths.
@@ -826,10 +860,10 @@ const fn compute_verify_flags(network: Network, height: u32) -> bitcoin_rs_scrip
     if network.is_bip65_active(height) {
         flags = flags.union(VerifyFlags::CHECKLOCKTIMEVERIFY);
     }
-    if network.is_csv_active(height) {
+    if softfork_state.csv_active {
         flags = flags.union(VerifyFlags::CHECKSEQUENCEVERIFY);
     }
-    if network.is_segwit_active(height) {
+    if softfork_state.segwit_active {
         flags = flags
             .union(VerifyFlags::WITNESS)
             .union(VerifyFlags::NULLDUMMY);
@@ -838,6 +872,35 @@ const fn compute_verify_flags(network: Network, height: u32) -> bitcoin_rs_scrip
         flags = flags.union(VerifyFlags::TAPROOT);
     }
     flags
+}
+
+#[cfg(test)]
+mod contextual_softfork_tests {
+    use bitcoin_rs_script::VerifyFlags;
+
+    use super::*;
+
+    #[test]
+    fn verify_flags_use_contextual_csv_and_segwit_state() {
+        let inactive = crate::bip9_context::ContextualSoftforkState {
+            csv_active: false,
+            segwit_active: false,
+        };
+        let active = crate::bip9_context::ContextualSoftforkState {
+            csv_active: true,
+            segwit_active: true,
+        };
+
+        let inactive_flags = compute_verify_flags(Network::Mainnet, 481_824, inactive);
+        assert!(!inactive_flags.contains(VerifyFlags::CHECKSEQUENCEVERIFY));
+        assert!(!inactive_flags.contains(VerifyFlags::WITNESS));
+        assert!(!inactive_flags.contains(VerifyFlags::NULLDUMMY));
+
+        let active_flags = compute_verify_flags(Network::Mainnet, 1, active);
+        assert!(active_flags.contains(VerifyFlags::CHECKSEQUENCEVERIFY));
+        assert!(active_flags.contains(VerifyFlags::WITNESS));
+        assert!(active_flags.contains(VerifyFlags::NULLDUMMY));
+    }
 }
 #[cfg(test)]
 mod zmq_emit_tests {

@@ -1,4 +1,6 @@
 use crate::ConsensusError;
+const VERSIONBITS_TOP_MASK: u32 = 0xe000_0000;
+const VERSIONBITS_TOP_BITS: u32 = 0x2000_0000;
 
 /// Versionbits deployment parameters for a BIP9 deployment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +25,33 @@ pub enum DeploymentState {
     Active,
     /// Deployment failed (timeout reached without lock-in). Terminal.
     Failed,
+}
+
+impl DeploymentState {
+    /// Encodes this state as a stable cache tag.
+    #[must_use]
+    pub const fn cache_tag(self) -> u8 {
+        match self {
+            Self::Defined => 0,
+            Self::Started => 1,
+            Self::LockedIn => 2,
+            Self::Active => 3,
+            Self::Failed => 4,
+        }
+    }
+
+    /// Decodes a stable cache tag.
+    #[must_use]
+    pub const fn from_cache_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Defined),
+            1 => Some(Self::Started),
+            2 => Some(Self::LockedIn),
+            3 => Some(Self::Active),
+            4 => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 
 /// Extended deployment parameters for the BIP9 state machine.
@@ -141,7 +170,8 @@ fn compute_state_at_boundary(
                     continue;
                 };
                 let version = u32::from_ne_bytes(version.to_ne_bytes());
-                if version & mask != 0 {
+                let has_bip9_top_bits = version & VERSIONBITS_TOP_MASK == VERSIONBITS_TOP_BITS;
+                if has_bip9_top_bits && version & mask != 0 {
                     count = count.saturating_add(1);
                 }
             }
@@ -272,7 +302,7 @@ mod tests {
         ctx.mtps.insert(9, 100);
         ctx.mtps.insert(19, 200);
         for height in 10..20 {
-            let version = i32::from(height < 18);
+            let version = if height < 18 { 0x2000_0001 } else { 0 };
             ctx.versions.insert(height, version);
         }
 
@@ -283,6 +313,52 @@ mod tests {
 
         ctx.mtps.insert(29, 300);
         assert_eq!(compute_state(&ctx, 30, params, 11), DeploymentState::Active);
+    }
+
+    #[test]
+    fn deployment_does_not_count_signal_without_bip9_top_bits() {
+        let params = DeploymentParams {
+            bit: 0,
+            start_time: 0,
+            timeout: 1_000_000,
+            period: 10,
+            threshold: 8,
+        };
+        let mut ctx = SyntheticCtx::new();
+
+        ctx.mtps.insert(9, 100);
+        ctx.mtps.insert(19, 200);
+        for height in 10..20 {
+            ctx.versions.insert(height, 1);
+        }
+
+        assert_eq!(
+            compute_state(&ctx, 20, params, 11),
+            DeploymentState::Started
+        );
+    }
+
+    #[test]
+    fn deployment_state_cache_tags_are_stable() {
+        let states = [
+            DeploymentState::Defined,
+            DeploymentState::Started,
+            DeploymentState::LockedIn,
+            DeploymentState::Active,
+            DeploymentState::Failed,
+        ];
+
+        for (tag, state) in [
+            (0_u8, states[0]),
+            (1_u8, states[1]),
+            (2_u8, states[2]),
+            (3_u8, states[3]),
+            (4_u8, states[4]),
+        ] {
+            assert_eq!(state.cache_tag(), tag);
+            assert_eq!(DeploymentState::from_cache_tag(tag), Some(state));
+        }
+        assert_eq!(DeploymentState::from_cache_tag(5), None);
     }
 
     #[test]

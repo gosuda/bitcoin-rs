@@ -18,8 +18,8 @@ use crate::node::NodeId;
 ///
 /// Wraps an interior `RwLock<HashMap>` so the cache is `Send + Sync` and the
 /// reader/writer paths are non-blocking under contention. State is stored as
-/// a `u8` tag (encoded by the deployment-state enum's discriminant) and a
-/// `u32` height marker for the activation epoch.
+/// a stable `u8` tag supplied by consensus and a `u32` height marker for the
+/// activation epoch.
 #[derive(Debug, Default)]
 pub struct Bip9Cache {
     entries: RwLock<HashMap<(NodeId, u32), CachedState>>,
@@ -27,8 +27,8 @@ pub struct Bip9Cache {
 
 /// Cached deployment-state record.
 ///
-/// The `tag` is an opaque u8 supplied by the deployment-state encoder; the
-/// chain crate does not interpret it. The `since_height` is the activation
+/// The `tag` is an opaque stable u8 supplied by the deployment-state encoder;
+/// the chain crate does not interpret it. The `since_height` is the activation
 /// (or start-of-current-period) height for diagnostic display.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CachedState {
