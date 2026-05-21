@@ -111,6 +111,30 @@ fn get_entry_surfaces_coinbase_and_height() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn scan_script_pubkeys_returns_matching_live_outputs() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let mut changes = BlockChanges::default();
+    let first = OutPoint::new(txid(52), 0);
+    let second = OutPoint::new(txid(53), 0);
+    let first_txout = txout(52);
+    let second_txout = txout(53);
+
+    changes.add(UtxoAdd::new(first, first_txout.clone(), false, 222));
+    changes.add(UtxoAdd::new(second, second_txout, true, 223));
+    set.commit_block(&changes, &txid(54))?;
+
+    let scan = set.scan_script_pubkeys(std::slice::from_ref(&first_txout.script_pubkey))?;
+
+    assert_eq!(scan.txouts, 2);
+    assert_eq!(scan.unspents.len(), 1);
+    assert_eq!(scan.unspents[0].outpoint, first);
+    assert_eq!(scan.unspents[0].txout, first_txout);
+    assert!(!scan.unspents[0].coinbase);
+    assert_eq!(scan.unspents[0].height, 222);
+    Ok(())
+}
+
+#[test]
 fn has_live_outputs_for_txid_tracks_any_remaining_vout() -> Result<(), Box<dyn std::error::Error>> {
     let set = UtxoSet::new();
     let live_txid = txid(77);

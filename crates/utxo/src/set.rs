@@ -1,5 +1,6 @@
 use std::io;
 
+use bitcoin::ScriptBuf;
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use thiserror::Error;
@@ -138,6 +139,28 @@ impl UtxoAdd {
     }
 }
 
+/// One live output found by a UTXO script scan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScannedUtxo {
+    /// Outpoint that identifies the live output.
+    pub outpoint: OutPoint,
+    /// Output payload stored in the UTXO set.
+    pub txout: TxOut,
+    /// Whether the creating transaction was coinbase.
+    pub coinbase: bool,
+    /// Creating block height.
+    pub height: u32,
+}
+
+/// Result of scanning a stable UTXO-set view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UtxoScan {
+    /// Number of live outputs visited during the scan.
+    pub txouts: usize,
+    /// Live outputs whose script matched the scan set.
+    pub unspents: Vec<ScannedUtxo>,
+}
+
 /// UTXO mutations produced by one connected block.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockChanges {
@@ -261,6 +284,15 @@ impl UtxoSetView<'_> {
         crate::snapshot::hash_serialized_3_stable(self)
     }
 
+    /// Scans every live output for exact scriptPubKey matches.
+    pub fn scan_script_pubkeys(&self, scripts: &[ScriptBuf]) -> Result<UtxoScan, UtxoError> {
+        let mut scan = UtxoScan::default();
+        for shard in &self.set.shards {
+            shard.scan_script_pubkeys(scripts, &mut scan)?;
+        }
+        Ok(scan)
+    }
+
     pub(crate) const fn shard(&self, idx: usize) -> &Shard {
         &self.set.shards[idx]
     }
@@ -323,6 +355,11 @@ impl UtxoSet {
     pub fn get_entry(&self, op: &OutPoint) -> Option<crate::shard::LiveOutput> {
         let key = UtxoKey::from_txid(&op.txid);
         self.shards[usize::from(key.shard())].get_entry(&key, &op.txid, op.vout)
+    }
+
+    /// Scans a stable whole-set view for exact scriptPubKey matches.
+    pub fn scan_script_pubkeys(&self, scripts: &[ScriptBuf]) -> Result<UtxoScan, UtxoError> {
+        self.with_stable_view(|view| view.scan_script_pubkeys(scripts))
     }
 
     /// Returns true when any output of `txid` is live in the set.

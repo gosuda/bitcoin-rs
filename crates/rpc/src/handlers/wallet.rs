@@ -55,15 +55,20 @@ fn strip_addr_wrapper(payload: &str) -> Option<&str> {
     Some(stripped)
 }
 
+#[derive(Clone, Debug)]
+struct ScanScript {
+    script_pubkey: bitcoin::ScriptBuf,
+    desc: String,
+}
+
 pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let action = required_str(params, 0, "action is required")?;
     match action {
         "start" => {
-            // Aggregate UTXO-set summary. Descriptor filtering is NOT applied in v1;
-            // the descriptor argument is accepted but ignored. A future strand will
-            // wire a real descriptor-matched scan.
-            // TODO(descriptors): match `params[1]` against `bitcoin::miniscript::Descriptor`
-            // and stream only matching outpoints into `unspents`.
+            if let Some(scanobjects) = scanobjects_param(params)? {
+                return scantxoutset_addr_scan(ctx, scanobjects);
+            }
+
             let snapshot = ctx.coin_stats.snapshot();
             let total_amount_btc = bitcoin::Amount::from_sat(snapshot.total_amount).to_btc();
             Ok(json!({
@@ -80,6 +85,157 @@ pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         _ => Err(RpcError::InvalidParams(
             "action must be one of: start, abort, status",
         )),
+    }
+}
+
+fn scanobjects_param(params: &Value) -> Result<Option<&sonic_rs::Array>, RpcError> {
+    let array = params_array(params)?;
+    let Some(scanobjects) = array.get(1) else {
+        return Ok(None);
+    };
+    scanobjects
+        .as_array()
+        .map(Some)
+        .ok_or(RpcError::InvalidType("scanobjects must be an array"))
+}
+
+fn scantxoutset_addr_scan(
+    ctx: &Arc<Context>,
+    scanobjects: &sonic_rs::Array,
+) -> Result<Value, RpcError> {
+    let scan_scripts = parse_scan_scripts(ctx.chain_network, scanobjects)?;
+    let scripts = scan_scripts
+        .iter()
+        .map(|scan| scan.script_pubkey.clone())
+        .collect::<Vec<_>>();
+    let scan = ctx
+        .utxo
+        .scan_script_pubkeys(&scripts)
+        .map_err(|error| RpcError::Internal(error.to_string()))?;
+    let (unspents, total_amount) = scan_unspents(&scan, &scan_scripts, ctx.applied_height());
+
+    Ok(json!({
+        "success": true,
+        "txouts": scan.txouts,
+        "height": ctx.applied_height(),
+        "bestblock": ctx.applied_hash().to_string_be(),
+        "unspents": unspents,
+        "total_amount": bitcoin::Amount::from_sat(total_amount).to_btc()
+    }))
+}
+
+fn parse_scan_scripts(
+    chain_network: bitcoin_rs_primitives::Network,
+    scanobjects: &sonic_rs::Array,
+) -> Result<Vec<ScanScript>, RpcError> {
+    let network = bitcoin_network(chain_network);
+    let mut scripts = Vec::with_capacity(scanobjects.len());
+    for scanobject in scanobjects {
+        let Some(descriptor) = scanobject.as_str() else {
+            return Err(RpcError::InvalidType(
+                "scan object must be a descriptor string",
+            ));
+        };
+        scripts.push(parse_addr_scan_script(descriptor, network)?);
+    }
+    Ok(scripts)
+}
+
+fn parse_addr_scan_script(
+    descriptor: &str,
+    network: bitcoin::Network,
+) -> Result<ScanScript, RpcError> {
+    use core::str::FromStr as _;
+
+    let payload = checked_descriptor_payload(descriptor)?;
+    let Some(address_text) = strip_addr_wrapper(payload) else {
+        return Err(RpcError::InvalidParams(
+            "unsupported scantxoutset descriptor; only addr() is supported",
+        ));
+    };
+    let Ok(unchecked) = bitcoin::Address::from_str(address_text) else {
+        return Err(RpcError::InvalidParams("Address is not valid"));
+    };
+    let Ok(address) = unchecked.require_network(network) else {
+        return Err(RpcError::InvalidParams("Address is not valid"));
+    };
+    let payload = format!("addr({address})");
+    let desc = descriptor_checksum(&payload).map_or_else(
+        || payload.clone(),
+        |checksum| format!("{payload}#{checksum}"),
+    );
+    Ok(ScanScript {
+        script_pubkey: address.script_pubkey(),
+        desc,
+    })
+}
+
+fn checked_descriptor_payload(descriptor: &str) -> Result<&str, RpcError> {
+    let Some((body, checksum)) = descriptor.rsplit_once('#') else {
+        return Ok(descriptor);
+    };
+    let expected = descriptor_checksum(body).ok_or(RpcError::InvalidParams(
+        "descriptor contains invalid characters",
+    ))?;
+    if checksum == expected {
+        Ok(body)
+    } else {
+        Err(RpcError::InvalidParams("descriptor checksum mismatch"))
+    }
+}
+
+fn scan_unspents(
+    scan: &bitcoin_rs_utxo::UtxoScan,
+    scan_scripts: &[ScanScript],
+    applied_height: u32,
+) -> (Vec<Value>, u64) {
+    let mut total_amount = 0_u64;
+    let unspents = scan
+        .unspents
+        .iter()
+        .map(|utxo| {
+            total_amount = total_amount.saturating_add(utxo.txout.value.to_sat());
+            let desc = desc_for_script(scan_scripts, &utxo.txout.script_pubkey);
+            let outpoint = utxo.outpoint;
+            let txid = outpoint.txid;
+            let vout = outpoint.vout;
+            json!({
+                "txid": txid.to_string_be(),
+                "vout": vout,
+                "scriptPubKey": utxo.txout.script_pubkey.as_bytes().to_lower_hex_string(),
+                "desc": desc,
+                "amount": utxo.txout.value.to_btc(),
+                "coinbase": utxo.coinbase,
+                "height": utxo.height,
+                "confirmations": confirmations(applied_height, utxo.height)
+            })
+        })
+        .collect();
+    (unspents, total_amount)
+}
+
+fn desc_for_script<'a>(scan_scripts: &'a [ScanScript], script: &bitcoin::Script) -> &'a str {
+    scan_scripts
+        .iter()
+        .find(|scan| scan.script_pubkey.as_script() == script)
+        .map_or("", |scan| scan.desc.as_str())
+}
+
+fn confirmations(applied_height: u32, output_height: u32) -> u64 {
+    if output_height > applied_height {
+        0
+    } else {
+        u64::from(applied_height - output_height) + 1
+    }
+}
+
+const fn bitcoin_network(chain_network: bitcoin_rs_primitives::Network) -> bitcoin::Network {
+    match chain_network {
+        bitcoin_rs_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
+        bitcoin_rs_primitives::Network::Testnet3 => bitcoin::Network::Testnet,
+        bitcoin_rs_primitives::Network::Testnet4 => bitcoin::Network::Testnet4,
+        bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
+        bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
     }
 }
 
@@ -397,9 +553,38 @@ pub(crate) fn bumpfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
+    use core::str::FromStr as _;
+
+    use bitcoin::{Amount, ScriptBuf};
+    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+    use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::JsonValueTrait as _;
 
     use super::*;
+
+    fn test_txid(seed: u64) -> Hash256 {
+        let mut bytes = [0_u8; 32];
+        bytes[..8].copy_from_slice(&seed.to_le_bytes());
+        bytes[8..16].copy_from_slice(&seed.rotate_left(7).to_le_bytes());
+        bytes[16..24].copy_from_slice(&seed.wrapping_mul(17).to_le_bytes());
+        bytes[24..32].copy_from_slice(&seed.wrapping_add(99).to_le_bytes());
+        Hash256::from_le_bytes(&bytes)
+    }
+
+    fn commit_test_utxo(
+        ctx: &Context,
+        outpoint: OutPoint,
+        txout: TxOut,
+        coinbase: bool,
+        height: u32,
+    ) {
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
+        ctx.utxo
+            .commit_block(&changes, &test_txid(8_000))
+            .unwrap_or_else(|err| panic!("commit utxo failed: {err}"));
+    }
 
     #[test]
     fn scantxoutset_start_returns_real_summary_from_utxoset() {
@@ -420,6 +605,136 @@ mod tests {
             panic!("txouts missing: {result:?}");
         };
         assert_eq!(txouts, 0, "fresh ctx has empty utxoset");
+    }
+
+    #[test]
+    fn scantxoutset_addr_returns_matching_unspents() {
+        let ctx = Arc::new(Context::new());
+        let address = "1111111111111111111114oLvT2";
+        let script = bitcoin::Address::from_str(address)
+            .unwrap_or_else(|err| panic!("address parse failed: {err}"))
+            .require_network(bitcoin::Network::Bitcoin)
+            .unwrap_or_else(|err| panic!("network check failed: {err}"))
+            .script_pubkey();
+        let txout = TxOut {
+            value: Amount::from_sat(12_345),
+            script_pubkey: script.clone(),
+        };
+        let outpoint = OutPoint::new(test_txid(11), 0);
+        commit_test_utxo(&ctx, outpoint, txout, true, 0);
+        commit_test_utxo(
+            &ctx,
+            OutPoint::new(test_txid(12), 0),
+            TxOut {
+                value: Amount::from_sat(9_999),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            false,
+            0,
+        );
+
+        let result = scantxoutset(&ctx, &json!(["start", [format!("addr({address})")]]))
+            .unwrap_or_else(|err| panic!("scantxoutset failed: {err}"));
+        let Some(unspents) = result.get("unspents").and_then(Value::as_array) else {
+            panic!("unspents missing: {result:?}");
+        };
+
+        assert_eq!(result.get("txouts").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            result.get("total_amount").and_then(Value::as_f64),
+            Some(0.000_123_45)
+        );
+        assert_eq!(unspents.len(), 1);
+        let first = &unspents[0];
+        let expected_txid = {
+            let txid = outpoint.txid;
+            txid.to_string_be()
+        };
+        assert_eq!(
+            first.get("txid").and_then(Value::as_str),
+            Some(expected_txid.as_str())
+        );
+        assert_eq!(first.get("vout").and_then(Value::as_u64), Some(0));
+        assert_eq!(
+            first.get("scriptPubKey").and_then(Value::as_str),
+            Some(script.as_bytes().to_lower_hex_string().as_str())
+        );
+        assert_eq!(
+            first.get("amount").and_then(Value::as_f64),
+            Some(0.000_123_45)
+        );
+        assert_eq!(first.get("coinbase").and_then(Value::as_bool), Some(true));
+        assert_eq!(first.get("height").and_then(Value::as_u64), Some(0));
+        assert_eq!(first.get("confirmations").and_then(Value::as_u64), Some(1));
+        let Some(desc) = first.get("desc").and_then(Value::as_str) else {
+            panic!("desc missing: {first:?}");
+        };
+        assert!(desc.starts_with("addr(1111111111111111111114oLvT2)#"));
+    }
+
+    #[test]
+    fn scantxoutset_rejects_unsupported_scan_descriptors() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(&ctx, &json!(["start", ["raw(51)"]])) {
+            Ok(value) => panic!("unsupported descriptor succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("only addr() is supported"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_bad_descriptor_checksum() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(
+            &ctx,
+            &json!(["start", ["addr(1111111111111111111114oLvT2)#badbadba"]]),
+        ) {
+            Ok(value) => panic!("bad checksum succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("checksum mismatch"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_wrong_network_address() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(
+            &ctx,
+            &json!([
+                "start",
+                ["addr(tb1qfm7h7nh4jjmzm0m2z8q9nu4n4yhndxj3x6gzt4)"]
+            ]),
+        ) {
+            Ok(value) => panic!("wrong network address succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("Address is not valid"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_non_array_scanobjects() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(&ctx, &json!(["start", "addr(1111111111111111111114oLvT2)"])) {
+            Ok(value) => panic!("non-array scanobjects succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("scanobjects must be an array"),
+            "wrong error: {err}"
+        );
     }
 
     #[test]

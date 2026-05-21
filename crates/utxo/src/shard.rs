@@ -1,5 +1,5 @@
 use bitcoin::{Amount, ScriptBuf};
-use bitcoin_rs_primitives::{Hash256, TxOut};
+use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bumpalo::{Bump, collections::Vec as BumpVec};
 use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
@@ -9,7 +9,7 @@ use self_cell::self_cell;
 use crate::{
     UtxoError, UtxoKey,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord, validate_bitmap_vout},
-    set::{BuildPayload, SpendPayload, UtxoChangeListener},
+    set::{BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoScan},
 };
 
 const OPS_AT_ONCE: usize = 32;
@@ -158,6 +158,31 @@ impl Shard {
     pub(crate) fn with_table<R>(&self, f: impl FnOnce(&ShardTable<'_>) -> R) -> R {
         let cell = self.inner.read();
         cell.with_dependent(|_arena, table| f(table))
+    }
+
+    pub(crate) fn scan_script_pubkeys(
+        &self,
+        scripts: &[ScriptBuf],
+        scan: &mut UtxoScan,
+    ) -> Result<(), UtxoError> {
+        let cell = self.inner.read();
+        cell.with_dependent(|_arena, table| {
+            for record in &table.table {
+                for output in record.iter_outputs() {
+                    scan.txouts = scan.txouts.saturating_add(1);
+                    let script = script_slice(table, output).ok_or(UtxoError::CorruptArena)?;
+                    if scripts.iter().any(|target| target.as_bytes() == script) {
+                        scan.unspents.push(ScannedUtxo {
+                            outpoint: OutPoint::new(record.txid(), output.vout),
+                            txout: txout_from_parts(output.value, script),
+                            coinbase: output.coinbase,
+                            height: output.height,
+                        });
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     pub(crate) fn record_count(&self) -> usize {
