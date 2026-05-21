@@ -325,6 +325,16 @@ impl UtxoSet {
         self.shards[usize::from(key.shard())].get_entry(&key, &op.txid, op.vout)
     }
 
+    /// Returns true when any output of `txid` is live in the set.
+    ///
+    /// This is the transaction-level BIP30 predicate: a duplicate txid is
+    /// forbidden while any earlier output for that txid remains unspent.
+    #[must_use]
+    pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
+        let key = UtxoKey::from_txid(txid);
+        self.shards[usize::from(key.shard())].has_live_outputs_for_txid(&key, txid)
+    }
+
     /// Reverses one connected block using its undo data.
     pub fn undo_block(&self, undo: &UndoBatch) -> Result<(), UtxoError> {
         self.commit_adds_and_removes(&undo.restores, &undo.removes)

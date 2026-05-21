@@ -109,6 +109,43 @@ fn get_entry_surfaces_coinbase_and_height() -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
+
+#[test]
+fn has_live_outputs_for_txid_tracks_any_remaining_vout() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let live_txid = txid(77);
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 1),
+        txout(77),
+        false,
+        200,
+    ));
+    changes.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 2),
+        txout(78),
+        false,
+        200,
+    ));
+    set.commit_block(&changes, &txid(78))?;
+
+    assert!(set.has_live_outputs_for_txid(&live_txid));
+    assert!(!set.has_live_outputs_for_txid(&txid(79)));
+
+    let mut first_spend = BlockChanges::default();
+    first_spend.remove(OutPoint::new(live_txid, 1));
+    set.commit_block(&first_spend, &txid(80))?;
+
+    assert!(set.has_live_outputs_for_txid(&live_txid));
+
+    let mut final_spend = BlockChanges::default();
+    final_spend.remove(OutPoint::new(live_txid, 2));
+    set.commit_block(&final_spend, &txid(81))?;
+
+    assert!(!set.has_live_outputs_for_txid(&live_txid));
+    Ok(())
+}
+
 #[test]
 fn hash_serialized_3_matches_independent_core_serialization_for_unsorted_utxos()
 -> Result<(), Box<dyn std::error::Error>> {

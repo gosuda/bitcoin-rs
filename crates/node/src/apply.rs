@@ -646,20 +646,14 @@ fn check_bip30_and_bip34(
 ) -> core::result::Result<(), ApplyError> {
     use bitcoin::hashes::Hash as _;
 
-    // BIP30: best-effort — reject if any tx in the block re-uses an
-    // outpoint that the UTXO set still considers live. The first vout
-    // (index 0) lookup catches the common-case duplicate-coinbase
-    // scenario that BIP30 was written to address. A proper any-vout
-    // sweep needs an accessor on `UtxoSet` that walks all live outputs
-    // for a given txid; see follow-up.
+    // BIP30: reject any txid that collides with an earlier transaction while
+    // any output of the earlier transaction remains unspent, except at the
+    // documented historical exception heights handled by `check_bip30`.
     let mut has_duplicate = false;
     for tx in &block.txdata {
         let txid = tx.compute_txid();
-        let outpoint = bitcoin_rs_primitives::OutPoint::new(
-            bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
-            0,
-        );
-        if handles.utxo.get(&outpoint).is_some() {
+        let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
+        if handles.utxo.has_live_outputs_for_txid(&txid) {
             has_duplicate = true;
             break;
         }
@@ -872,6 +866,156 @@ fn compute_verify_flags(
         flags = flags.union(VerifyFlags::TAPROOT);
     }
     flags
+}
+
+#[cfg(test)]
+mod bip30_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwapOption;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
+    use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
+    use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+    use bitcoin_rs_primitives::{Hash256, OutPoint};
+    use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
+    use hashbrown::HashMap;
+    use parking_lot::{Mutex, RwLock};
+
+    use super::*;
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn bip30_rejects_duplicate_txid_when_only_higher_vout_is_live()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let duplicate_tx = transaction(7);
+        let duplicate_txid = duplicate_tx.compute_txid();
+        let duplicate_hash = Hash256::from_le_bytes(duplicate_txid.as_byte_array());
+        let utxo = Arc::new(UtxoSet::new());
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(duplicate_hash, 1),
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            },
+            false,
+            0,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
+
+        let handles = apply_handles(utxo);
+        let block = bitcoin::Block {
+            header: bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash: bitcoin::BlockHash::all_zeros(),
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: 0,
+                bits: bitcoin::pow::CompactTarget::from_consensus(0),
+                nonce: 0,
+            },
+            txdata: vec![duplicate_tx],
+        };
+
+        let error = match check_bip30_and_bip34(&handles, &block, 1) {
+            Ok(()) => panic!("duplicate txid with live vout 1 must violate BIP30"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP30", .. })
+        ));
+        Ok(())
+    }
+
+    fn transaction(seed: u8) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([seed; 32]),
+                    vout: u32::from(seed),
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_handles(utxo: Arc<UtxoSet>) -> ApplyHandles {
+        ApplyHandles::new(
+            Network::Mainnet,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(RwLock::new(BlockTree::new())),
+            utxo,
+            Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+                bitcoin_rs_coinstats::CoinStats::default(),
+            )),
+            noop_tx_index(),
+            noop_filter_index(),
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),
+            Arc::new(crate::NoOpZmqPublisher),
+        )
+    }
+
+    struct NoopIndexer;
+
+    impl IndexerLike for NoopIndexer {
+        fn ingest_block(
+            &mut self,
+            _block: &[u8],
+            _height: u32,
+        ) -> Result<IndexRowCounts, IndexError> {
+            Ok(IndexRowCounts::default())
+        }
+
+        fn resolve_outpoint_value(
+            &self,
+            _outpoint: bitcoin::OutPoint,
+            _source: &dyn BlockSource,
+        ) -> Result<Option<u64>, IndexError> {
+            Ok(None)
+        }
+    }
+
+    fn noop_tx_index() -> Arc<Mutex<Box<dyn IndexerLike>>> {
+        let indexer: Box<dyn IndexerLike> = Box::new(NoopIndexer);
+        Arc::new(Mutex::new(indexer))
+    }
+
+    struct NoopFilterIndex;
+
+    impl FilterIndexLike for NoopFilterIndex {
+        fn put_filter(
+            &self,
+            _block_hash: Hash256,
+            _prev_header: Hash256,
+            _filter_bytes: &[u8],
+        ) -> Result<Hash256, FilterIndexError> {
+            Ok(Hash256::default())
+        }
+
+        fn filter_header(&self, _block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
+            Ok(None)
+        }
+    }
+
+    fn noop_filter_index() -> Arc<Box<dyn FilterIndexLike>> {
+        let filter_index: Box<dyn FilterIndexLike> = Box::new(NoopFilterIndex);
+        Arc::new(filter_index)
+    }
 }
 
 #[cfg(test)]

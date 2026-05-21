@@ -141,6 +141,20 @@ impl Shard {
         })
     }
 
+    /// Returns true when this shard has any live output for `txid`.
+    #[must_use]
+    pub fn has_live_outputs_for_txid(&self, key: &UtxoKey, txid: &Hash256) -> bool {
+        let cell = self.inner.read();
+        cell.with_dependent(|_arena, table| {
+            table
+                .table
+                .find(key.hash(), |record| {
+                    record.key() == *key && record.txid() == *txid
+                })
+                .is_some_and(|record| !record.is_empty())
+        })
+    }
+
     pub(crate) fn with_table<R>(&self, f: impl FnOnce(&ShardTable<'_>) -> R) -> R {
         let cell = self.inner.read();
         cell.with_dependent(|_arena, table| f(table))
