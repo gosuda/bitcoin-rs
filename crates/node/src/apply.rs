@@ -583,18 +583,7 @@ fn check_bip68_sequence_locks(
                 let Some(entry) = handles.utxo.get_entry(&prev_outpoint) else {
                     continue;
                 };
-                let prevout_mtp = {
-                    let tree = handles.block_tree.read();
-                    let Some(previous_tip_id) = previous_tip_id else {
-                        continue;
-                    };
-                    let Some(prev_block_node) =
-                        tree.node_at_height_from(previous_tip_id, entry.height)
-                    else {
-                        continue;
-                    };
-                    tree.median_time_past_at(prev_block_node, 11).unwrap_or(0)
-                };
+                let prevout_mtp = bip68_prevout_mtp(handles, previous_tip_id, entry.height)?;
                 let earliest_time = prevout_mtp.saturating_add(
                     relative_intervals.saturating_mul(BIP68_TIME_GRANULARITY_SECONDS),
                 );
@@ -637,6 +626,41 @@ fn check_bip68_sequence_locks(
     }
 
     Ok(())
+}
+
+fn bip68_prevout_mtp(
+    handles: &ApplyHandles,
+    previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
+    prevout_height: u32,
+) -> core::result::Result<u32, ApplyError> {
+    let tree = handles.block_tree.read();
+    let Some(previous_tip_id) = previous_tip_id else {
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "BIP68",
+                reason: "missing previous tip for time-based sequence lock".to_owned(),
+            },
+        ));
+    };
+    let Some(prev_block_node) = tree.node_at_height_from(previous_tip_id, prevout_height) else {
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "BIP68",
+                reason: format!(
+                    "missing prevout ancestry at height {prevout_height} for time-based sequence lock"
+                ),
+            },
+        ));
+    };
+    let Some(prevout_mtp) = tree.median_time_past_at(prev_block_node, 11) else {
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "BIP68",
+                reason: "missing prevout median-time-past for time-based sequence lock".to_owned(),
+            },
+        ));
+    };
+    Ok(prevout_mtp)
 }
 
 fn check_bip30_and_bip34(
@@ -888,6 +912,63 @@ mod consensus_rule_tests {
             )
             .is_ok()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bip68_time_lock_rejects_missing_previous_tip_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x6a; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
+        let handles = apply_handles(utxo);
+        let sequence = BIP68_TYPE_FLAG | 1;
+        let block = block_with_transaction(spending_transaction(previous_output, sequence));
+        let active = softfork_state(true);
+
+        let error = match check_bip68_sequence_locks(
+            &handles,
+            &block,
+            0,
+            BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
+            active,
+            None,
+        ) {
+            Ok(()) => panic!("BIP68 time lock must reject missing previous tip context"),
+            Err(error) => error,
+        };
+        assert_bip_error(&error, "BIP68");
+        Ok(())
+    }
+
+    #[test]
+    fn bip68_time_lock_rejects_missing_prevout_ancestor_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x6b; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
+        let handles = apply_handles(utxo);
+        let previous_tip_id = seed_block_tree_for_bip68_time_at_height(&handles, 0)?;
+        let sequence = BIP68_TYPE_FLAG | 1;
+        let block = block_with_transaction(spending_transaction(previous_output, sequence));
+        let active = softfork_state(true);
+
+        let error = match check_bip68_sequence_locks(
+            &handles,
+            &block,
+            0,
+            BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
+            active,
+            Some(previous_tip_id),
+        ) {
+            Ok(()) => panic!("BIP68 time lock must reject missing prevout ancestry"),
+            Err(error) => error,
+        };
+        assert_bip_error(&error, "BIP68");
         Ok(())
     }
 
@@ -1516,10 +1597,17 @@ mod consensus_rule_tests {
     fn seed_block_tree_for_bip68_time(
         handles: &ApplyHandles,
     ) -> Result<bitcoin_rs_chain::node::NodeId, ApplyError> {
+        seed_block_tree_for_bip68_time_at_height(handles, BIP68_TEST_PREVOUT_HEIGHT)
+    }
+
+    fn seed_block_tree_for_bip68_time_at_height(
+        handles: &ApplyHandles,
+        tip_height: u32,
+    ) -> Result<bitcoin_rs_chain::node::NodeId, ApplyError> {
         let mut tree = handles.block_tree.write();
         let mut parent = None;
         let mut tip = None;
-        for height in 0..=BIP68_TEST_PREVOUT_HEIGHT {
+        for height in 0..=tip_height {
             let header = bitcoin::block::Header {
                 version: bitcoin::block::Version::ONE,
                 prev_blockhash: parent
