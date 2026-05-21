@@ -5,8 +5,6 @@
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
-/// BIP152 compact-block relay state.
-pub mod compactblocks;
 /// Inbound message dispatcher.
 pub mod dispatch;
 /// Peer finite-state machine.
