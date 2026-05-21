@@ -84,6 +84,16 @@ pub enum ChainError {
         /// Header target decoded from nBits.
         target: ChainWork,
     },
+    /// A header's compact target does not match the network difficulty expected at its height.
+    #[error("nBits {actual:08x} does not match expected {expected:08x} at height {height}")]
+    NbitsMismatch {
+        /// Header's declared compact target.
+        actual: u32,
+        /// Expected compact target from the active parent chain.
+        expected: u32,
+        /// Candidate header height.
+        height: u32,
+    },
     /// Adding block work to parent chainwork overflowed 256 bits.
     #[error("chainwork overflow at header {hash}")]
     ChainworkOverflow {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::{Transaction, Txid};
-use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_primitives::{Network, OutPoint};
 use bitcoin_rs_rpc::BlockRecord;
@@ -224,7 +224,7 @@ pub fn apply_block(
     bip30_bip34_result?;
     // PoW limit + DAA non-retarget continuity.
     let pow_limit_started = quanta::Instant::now();
-    let pow_limit_result = check_pow_limit_and_continuity(handles, block, height);
+    let pow_limit_result = check_pow_limit_and_continuity(handles, prior.as_deref(), block, height);
     let pow_limit_dur = pow_limit_started.elapsed();
     metrics::histogram!("node.apply_block.pow_limit_continuity_seconds")
         .record(pow_limit_dur.as_secs_f64());
@@ -683,6 +683,7 @@ fn check_bip30_and_bip34(
 
 fn check_pow_limit_and_continuity(
     handles: &ApplyHandles,
+    prior: Option<&TipSnapshot>,
     block: &bitcoin::Block,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
@@ -694,162 +695,44 @@ fn check_pow_limit_and_continuity(
         return Err(ApplyError::TargetAboveLimit);
     }
 
-    // nBits continuity: at non-retarget heights, must match the parent.
-    // Genesis (height 0) has no parent; skip.
+    // Genesis (height 0) has no parent; skip contextual DAA.
     if height == 0 {
         return Ok(());
     }
-    let retarget_interval = handles.network.retarget_interval();
-    let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
-    if is_retarget {
-        return check_daa_retarget(handles, block, height, retarget_interval);
-    }
-
-    // Non-retarget: look up the parent header via the BlockTree.
-    // The parent is the current chain_tip (which apply_block has already
-    // verified equals block.header.prev_blockhash via the prev-hash check
-    // upstream).
-    let tree = handles.block_tree.read();
-    let Some(parent_id) = handles.chain_tip.load_full().map(|tip| tip.tip_id) else {
-        // No tip published yet — should not happen at height > 0 since
-        // apply_block's prev-hash check would have rejected. Defensive.
-        return Ok(());
-    };
-    let expected =
-        expected_non_retarget_bits(handles.network, &tree, parent_id, block, retarget_interval)?;
-    compare_expected_bits(block, height, expected)
-}
-
-fn expected_non_retarget_bits(
-    network: Network,
-    tree: &BlockTree,
-    parent_id: NodeId,
-    block: &bitcoin::Block,
-    retarget_interval: u32,
-) -> core::result::Result<bitcoin::CompactTarget, ApplyError> {
-    let parent = tree.node(parent_id).map_err(ApplyError::Chain)?;
-    if !network.allow_min_difficulty_blocks() {
-        return Ok(parent.header.bits);
-    }
-
-    let min_difficulty_time = parent
-        .header
-        .time
-        .saturating_add(network.target_spacing_seconds().saturating_mul(2));
-    if block.header.time > min_difficulty_time {
-        return Ok(pow_limit_bits(network));
-    }
-
-    let pow_limit = pow_limit_bits(network);
-    let mut cursor_id = parent_id;
-    loop {
-        let cursor = tree.node(cursor_id).map_err(ApplyError::Chain)?;
-        let at_period_boundary =
-            retarget_interval != 0 && cursor.height.is_multiple_of(retarget_interval);
-        if at_period_boundary || cursor.header.bits != pow_limit {
-            return Ok(cursor.header.bits);
-        }
-        let Some(previous_id) = cursor.parent else {
-            return Ok(cursor.header.bits);
-        };
-        cursor_id = previous_id;
-    }
-}
-
-fn check_daa_retarget(
-    handles: &ApplyHandles,
-    block: &bitcoin::Block,
-    height: u32,
-    retarget_interval: u32,
-) -> core::result::Result<(), ApplyError> {
-    let prior_tip = handles.chain_tip.load_full();
-    let Some(prior_tip) = prior_tip else {
-        return Ok(());
-    };
 
     let tree = handles.block_tree.read();
-    let Some(anchor_height) = height.checked_sub(retarget_interval) else {
-        return Ok(());
-    };
-    let Some(anchor_id) = tree.node_at_height_from(prior_tip.tip_id, anchor_height) else {
-        return Ok(());
-    };
-    let Ok(anchor_node) = tree.node(anchor_id) else {
-        return Ok(());
-    };
-    let Ok(prev_node) = tree.node(prior_tip.tip_id) else {
-        return Ok(());
-    };
+    let Some(parent_id) = prior.map(|tip| tip.tip_id) else {
+        use bitcoin::hashes::Hash as _;
 
-    if handles.network.pow_no_retargeting() {
-        return compare_expected_bits(block, height, prev_node.header.bits);
-    }
-
-    let actual_timespan = prev_node
-        .header
-        .time
-        .saturating_sub(anchor_node.header.time);
-    let expected_timespan = handles.network.target_timespan_seconds();
-    if expected_timespan == 0 {
-        return Ok(());
-    }
-
-    let min_timespan = expected_timespan / 4;
-    let max_timespan = expected_timespan.saturating_mul(4);
-    let actual_clamped = actual_timespan.clamp(min_timespan, max_timespan);
-
-    let base_header = if handles.network.enforce_bip94() {
-        &anchor_node.header
-    } else {
-        &prev_node.header
+        let prev_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(
+            block.header.prev_blockhash.as_byte_array(),
+        );
+        return Err(ApplyError::Chain(
+            bitcoin_rs_chain::ChainError::MissingParent { prev_hash },
+        ));
     };
-    let prev_target_be = base_header.target().to_be_bytes();
-    let prev_target = ChainWork::from_be_bytes(prev_target_be);
-    let actual_u256 = ChainWork::from(actual_clamped);
-    let expected_u256 = ChainWork::from(expected_timespan);
-    let max_target = handles.network.max_target();
-    let quotient = prev_target / expected_u256;
-    let remainder = prev_target % expected_u256;
-    let Some(scaled_quotient) = quotient.checked_mul(actual_u256) else {
-        return compare_retarget_bits(block, height, max_target);
-    };
-    let scaled_remainder = remainder.saturating_mul(actual_u256) / expected_u256;
-    let new_target_raw = scaled_quotient.saturating_add(scaled_remainder);
-    let new_target = new_target_raw.min(max_target);
-    compare_retarget_bits(block, height, new_target)
+    bitcoin_rs_chain::header_sync::validate_header_nbits(
+        &tree,
+        parent_id,
+        &block.header,
+        handles.network,
+    )
+    .map_err(apply_nbits_error)
 }
 
-fn compare_retarget_bits(
-    block: &bitcoin::Block,
-    height: u32,
-    expected_target: bitcoin_rs_chain::node::ChainWork,
-) -> core::result::Result<(), ApplyError> {
-    let expected =
-        bitcoin::Target::from_be_bytes(expected_target.to_be_bytes::<32>()).to_compact_lossy();
-    compare_expected_bits(block, height, expected)
-}
-
-fn compare_expected_bits(
-    block: &bitcoin::Block,
-    height: u32,
-    expected: bitcoin::CompactTarget,
-) -> core::result::Result<(), ApplyError> {
-    let expected = expected.to_consensus();
-    let actual = block.header.bits.to_consensus();
-
-    if actual != expected {
-        return Err(ApplyError::NbitsNonRetargetMismatch {
+fn apply_nbits_error(error: bitcoin_rs_chain::ChainError) -> ApplyError {
+    match error {
+        bitcoin_rs_chain::ChainError::NbitsMismatch {
             actual,
             expected,
             height,
-        });
+        } => ApplyError::NbitsNonRetargetMismatch {
+            actual,
+            expected,
+            height,
+        },
+        error => ApplyError::Chain(error),
     }
-
-    Ok(())
-}
-
-fn pow_limit_bits(network: Network) -> bitcoin::CompactTarget {
-    bitcoin::Target::from_be_bytes(network.max_target().to_be_bytes::<32>()).to_compact_lossy()
 }
 
 fn build_utxo_changes(
@@ -1116,7 +999,7 @@ mod consensus_rule_tests {
             2,
         );
 
-        let error = match check_pow_limit_and_continuity(&handles, &block, 2) {
+        let error = match check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, 2) {
             Ok(()) => panic!("non-retarget height must inherit parent nBits"),
             Err(error) => error,
         };
@@ -1148,7 +1031,7 @@ mod consensus_rule_tests {
             interval,
         );
 
-        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval).is_ok());
         Ok(())
     }
 
@@ -1171,7 +1054,8 @@ mod consensus_rule_tests {
             interval,
         );
 
-        let error = match check_pow_limit_and_continuity(&handles, &block, interval) {
+        let error = match check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval)
+        {
             Ok(()) => panic!("retarget height must reject non-computed nBits"),
             Err(error) => error,
         };
@@ -1204,7 +1088,7 @@ mod consensus_rule_tests {
             interval,
         );
 
-        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval).is_ok());
         Ok(())
     }
 
@@ -1235,7 +1119,7 @@ mod consensus_rule_tests {
             interval,
         );
 
-        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval).is_ok());
         Ok(())
     }
 
@@ -1258,7 +1142,7 @@ mod consensus_rule_tests {
             interval,
         );
 
-        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval).is_ok());
         Ok(())
     }
 
@@ -1276,7 +1160,7 @@ mod consensus_rule_tests {
         )?;
         let block = block_with_pow_header(parent_hash, pow_limit_bits, DAA_ANCHOR_TIME + 1_801, 2);
 
-        assert!(check_pow_limit_and_continuity(&handles, &block, 2).is_ok());
+        assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, 2).is_ok());
         Ok(())
     }
 
@@ -1296,10 +1180,10 @@ mod consensus_rule_tests {
         )?;
         let timely_time = DAA_ANCHOR_TIME + 2_400;
         let accepted = block_with_pow_header(parent_hash, regular_bits, timely_time, 3);
-        assert!(check_pow_limit_and_continuity(&handles, &accepted, 3).is_ok());
+        assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &accepted, 3).is_ok());
 
         let rejected = block_with_pow_header(parent_hash, pow_limit_bits, timely_time, 4);
-        let error = match check_pow_limit_and_continuity(&handles, &rejected, 3) {
+        let error = match check_pow_limit_and_continuity_for_seeded_tip(&handles, &rejected, 3) {
             Ok(()) => panic!("timely testnet block must inherit the last non-min nBits"),
             Err(error) => error,
         };
@@ -1326,7 +1210,7 @@ mod consensus_rule_tests {
         )?;
         let block = block_with_pow_header(parent_hash, pow_limit_bits, DAA_ANCHOR_TIME + 1_801, 2);
 
-        let error = match check_pow_limit_and_continuity(&handles, &block, 2) {
+        let error = match check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, 2) {
             Ok(()) => panic!("mainnet must not allow testnet minimum-difficulty exception"),
             Err(error) => error,
         };
@@ -1361,7 +1245,8 @@ mod consensus_rule_tests {
             interval,
         );
 
-        let error = match check_pow_limit_and_continuity(&handles, &block, interval) {
+        let error = match check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval)
+        {
             Ok(()) => panic!("testnet minimum-difficulty exception must not replace retarget math"),
             Err(error) => error,
         };
@@ -1397,7 +1282,7 @@ mod consensus_rule_tests {
             interval,
         );
 
-        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval).is_ok());
         Ok(())
     }
 
@@ -1866,4 +1751,14 @@ mod with_zmq_publisher_tests {
         publisher.publish_hashblock(bitcoin_rs_primitives::Hash256::default());
         assert_eq!(*publisher.tag.lock(), 42);
     }
+}
+
+#[cfg(test)]
+fn check_pow_limit_and_continuity_for_seeded_tip(
+    handles: &ApplyHandles,
+    block: &bitcoin::Block,
+    height: u32,
+) -> core::result::Result<(), ApplyError> {
+    let prior = handles.chain_tip.load_full();
+    check_pow_limit_and_continuity(handles, prior.as_deref(), block, height)
 }

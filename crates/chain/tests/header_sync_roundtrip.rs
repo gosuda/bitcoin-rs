@@ -36,6 +36,32 @@ fn accepts_valid_headers_across_batches_and_rejects_bad_bits()
     Ok(())
 }
 
+#[test]
+fn rejects_non_retarget_header_that_does_not_inherit_parent_bits_before_insertion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let parent_bits = CompactTarget::from_consensus(0x207e_ffff);
+    let easier_child_bits = CompactTarget::from_consensus(0x207f_ffff);
+    let parent = mine_header_with(BlockHash::all_zeros(), 0, 0, parent_bits);
+    let child = mine_header_with(
+        parent.block_hash(),
+        1,
+        Network::Regtest.target_spacing_seconds(),
+        easier_child_bits,
+    );
+
+    let err = match accept_headers(&mut tree, &[parent, child], Network::Regtest) {
+        Ok(_) => panic!("non-retarget header must inherit parent nBits before insertion"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(err, ChainError::NbitsMismatch { .. }));
+    let tip = tree.tip().ok_or("missing accepted parent tip")?;
+    assert_eq!(tip.height, 0);
+    assert_eq!(tree.len(), 1);
+    Ok(())
+}
+
 fn mine_headers(count: u32) -> Vec<BlockHeader> {
     let mut headers = Vec::new();
     let mut prev = BlockHash::all_zeros();
@@ -48,14 +74,28 @@ fn mine_headers(count: u32) -> Vec<BlockHeader> {
 }
 
 fn mine_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {
+    mine_header_with(
+        prev_blockhash,
+        height,
+        height,
+        CompactTarget::from_consensus(0x207f_ffff),
+    )
+}
+
+fn mine_header_with(
+    prev_blockhash: BlockHash,
+    height: u32,
+    time: u32,
+    bits: CompactTarget,
+) -> BlockHeader {
     let mut merkle = [0_u8; 32];
     merkle[..4].copy_from_slice(&height.to_le_bytes());
     let mut header = BlockHeader {
         version: Version::ONE,
         prev_blockhash,
         merkle_root: TxMerkleNode::from_byte_array(merkle),
-        time: height,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
+        time,
+        bits,
         nonce: 0,
     };
     while !header.target().is_met_by(header.block_hash()) {
