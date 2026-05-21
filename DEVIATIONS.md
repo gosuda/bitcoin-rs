@@ -188,9 +188,10 @@ placeholder. Live infrastructure runs are operator responsibilities.
 Follow-up to §4..§6. The session that opened with the T18..T20 scaffold
 closed by wiring the source-of-truth subsystem handles into the node
 lifecycle. The wiring covers the active-chain consensus pipeline through
-PoW, DAA `nBits` continuity/retarget checks, non-contextual rules,
-BIP30/34, contextual BIP113/BIP68 checks, BIP9 CSV/Segwit activation,
-BlockTree insertion, and script verification. The P2P handshake, per-peer
+PoW, header-side and block-apply DAA `nBits` continuity/retarget checks,
+non-contextual rules, BIP30/34, contextual BIP113/BIP68 checks, BIP9
+CSV/Segwit activation, BlockTree insertion, and script verification. The P2P
+handshake, per-peer
 outbound queues, block-sync `getheaders` / `getdata` download loop, and bounded
 server-side `getheaders` / `getdata` responses are wired; persisted block-body
 serving remains deferred.
@@ -233,14 +234,14 @@ serving remains deferred.
 - `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via `Mempool::stats()`.
 - `getblockchaininfo` surfaces real `chainwork` as a 64-character lowercase big-endian hex string via `rpc::Context::chainwork_hex()`.
 - `Network::is_{bip34,bip65,bip66,csv,segwit,taproot}_active(height) -> bool` const fns carry the per-network activation tables from Core's `chainparams.cpp`.
-- Active-chain DAA retarget validation is wired into `apply_block`: non-retarget heights inherit parent `nBits` unless the network's minimum-difficulty exception applies, retarget heights recompute the expected target over the prior interval with Core's 4x timespan clamp, the network proof-of-work limit cap, and Testnet4's BIP94 period-base rule. Unit coverage pins the boundary accept/reject cases, clamp behavior, testnet minimum-difficulty exception, and Testnet4 BIP94 behavior.
+- Active-chain DAA retarget validation is wired into header acceptance and `apply_block`: non-retarget heights inherit parent `nBits` unless the network's minimum-difficulty exception applies, retarget heights recompute the expected target over the prior interval with Core's 4x timespan clamp, the network proof-of-work limit cap, and Testnet4's BIP94 period-base rule. Unit coverage pins header pre-insertion rejection, boundary accept/reject cases, clamp behavior, testnet minimum-difficulty exception, and Testnet4 BIP94 behavior.
 - Electrum TLS cert config is honored as plaintext-with-warning until a
   matching `electrum_tls_key` field lands; the warning surfaces on every
   boot that configures `electrum_tls_cert` without TLS wiring.
 
 ### What is NOT yet wired (consensus correctness gates)
 
-- **No historical DAA fixture parity.** The active-chain retarget calculation is unit-covered, but it is not yet checked against historical mainnet/testnet retarget windows.
+- **No historical DAA fixture parity.** Header acceptance and active-chain retarget calculation are unit-covered, but they are not yet checked against historical mainnet/testnet retarget windows.
 - **Contextual transaction checks remain node-local.** BIP113 MTP nLocktime, BIP68 sequence locks, and BIP9 CSV/Segwit activation are wired through the node apply path, but the lower-level consensus crate still exposes `verify_transaction(tx, prevouts, height, flags)` rather than a reusable context-rich transaction API.
 - **No persisted block-body serving path for P2P.** P2P `getdata` can serve bodies still present in the in-memory `BlockRecord` cache, but it does not read persisted pruned-body rows after restart or cache eviction; unavailable inventory is reported with `notfound`.
 - **No index / filter / coinstats updates triggered by tip advance.** Electrum index, BIP158 filter generation, and coinstats remain stale until a follow-up wires the listener side.
