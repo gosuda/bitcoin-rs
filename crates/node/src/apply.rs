@@ -874,8 +874,11 @@ mod consensus_rule_tests {
 
     use arc_swap::ArcSwapOption;
     use bitcoin::hashes::Hash as _;
-    use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use bitcoin_rs_chain::{BlockTree, node::NodeStatus};
+    use bitcoin::{Amount, CompactTarget, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use bitcoin_rs_chain::{
+        BlockTree,
+        node::{ChainWork, NodeStatus},
+    };
     use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
     use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
@@ -888,6 +891,9 @@ mod consensus_rule_tests {
 
     const BIP68_TEST_PREVOUT_HEIGHT: u32 = 100;
     const BIP68_TEST_PREVOUT_MTP: u32 = 1_000_000;
+    const MAINNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
+    const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
+    const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
 
     #[test]
     fn bip68_height_lock_enforces_boundary_when_csv_active()
@@ -1042,6 +1048,169 @@ mod consensus_rule_tests {
         Ok(())
     }
 
+    #[test]
+    fn daa_non_retarget_height_requires_parent_bits() -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles();
+        let parent_hash = seed_pow_chain(
+            &handles,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_BITS),
+            DAA_ANCHOR_TIME,
+            DAA_ANCHOR_TIME + 600,
+            1,
+        )?;
+        let block = block_with_pow_header(
+            parent_hash,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_DIV_4_BITS),
+            DAA_ANCHOR_TIME + 1_200,
+            2,
+        );
+
+        let error = match check_pow_limit_and_continuity(&handles, &block, 2) {
+            Ok(()) => panic!("non-retarget height must inherit parent nBits"),
+            Err(error) => error,
+        };
+        assert_nbits_error(
+            &error,
+            MAINNET_POW_LIMIT_DIV_4_BITS,
+            MAINNET_POW_LIMIT_BITS,
+            2,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn daa_retarget_accepts_expected_bits_at_boundary() -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles();
+        let interval = handles.network.retarget_interval();
+        let expected_timespan = interval * 600;
+        let parent_hash = seed_pow_chain(
+            &handles,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_BITS),
+            DAA_ANCHOR_TIME,
+            DAA_ANCHOR_TIME + expected_timespan,
+            interval - 1,
+        )?;
+        let block = block_with_pow_header(
+            parent_hash,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_BITS),
+            DAA_ANCHOR_TIME + expected_timespan + 600,
+            interval,
+        );
+
+        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn daa_retarget_rejects_wrong_bits_at_boundary() -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles();
+        let interval = handles.network.retarget_interval();
+        let expected_timespan = interval * 600;
+        let parent_hash = seed_pow_chain(
+            &handles,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_BITS),
+            DAA_ANCHOR_TIME,
+            DAA_ANCHOR_TIME + expected_timespan,
+            interval - 1,
+        )?;
+        let block = block_with_pow_header(
+            parent_hash,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_DIV_4_BITS),
+            DAA_ANCHOR_TIME + expected_timespan + 600,
+            interval,
+        );
+
+        let error = match check_pow_limit_and_continuity(&handles, &block, interval) {
+            Ok(()) => panic!("retarget height must reject non-computed nBits"),
+            Err(error) => error,
+        };
+        assert_nbits_error(
+            &error,
+            MAINNET_POW_LIMIT_DIV_4_BITS,
+            MAINNET_POW_LIMIT_BITS,
+            interval,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn daa_retarget_clamps_fast_timespan_to_quarter_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles();
+        let interval = handles.network.retarget_interval();
+        let expected_timespan = interval * 600;
+        let parent_hash = seed_pow_chain(
+            &handles,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_BITS),
+            DAA_ANCHOR_TIME,
+            DAA_ANCHOR_TIME + (expected_timespan / 4) - 1,
+            interval - 1,
+        )?;
+        let block = block_with_pow_header(
+            parent_hash,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_DIV_4_BITS),
+            DAA_ANCHOR_TIME + expected_timespan,
+            interval,
+        );
+
+        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn daa_retarget_clamps_slow_timespan_to_quadruple_target()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles();
+        let interval = handles.network.retarget_interval();
+        let expected_timespan = interval * 600;
+        let start_bits = scaled_pow_limit_bits(&handles, 16);
+        let expected_bits = retarget_bits_for_test(
+            &handles,
+            start_bits,
+            (expected_timespan * 4) + 1,
+            expected_timespan,
+        );
+        let parent_hash = seed_pow_chain(
+            &handles,
+            start_bits,
+            DAA_ANCHOR_TIME,
+            DAA_ANCHOR_TIME + (expected_timespan * 4) + 1,
+            interval - 1,
+        )?;
+        let block = block_with_pow_header(
+            parent_hash,
+            expected_bits,
+            DAA_ANCHOR_TIME + (expected_timespan * 4) + 600,
+            interval,
+        );
+
+        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn daa_retarget_caps_slow_timespan_at_pow_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles();
+        let interval = handles.network.retarget_interval();
+        let expected_timespan = interval * 600;
+        let parent_hash = seed_pow_chain(
+            &handles,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_BITS),
+            DAA_ANCHOR_TIME,
+            DAA_ANCHOR_TIME + (expected_timespan * 4) + 1,
+            interval - 1,
+        )?;
+        let block = block_with_pow_header(
+            parent_hash,
+            CompactTarget::from_consensus(MAINNET_POW_LIMIT_BITS),
+            DAA_ANCHOR_TIME + (expected_timespan * 4) + 600,
+            interval,
+        );
+
+        assert!(check_pow_limit_and_continuity(&handles, &block, interval).is_ok());
+        Ok(())
+    }
+
     fn transaction(seed: u8) -> Transaction {
         Transaction {
             version: bitcoin::transaction::Version::TWO,
@@ -1095,6 +1264,98 @@ mod consensus_rule_tests {
             },
             txdata: vec![tx],
         }
+    }
+
+    fn block_with_pow_header(
+        prev_blockhash: bitcoin::BlockHash,
+        bits: CompactTarget,
+        time: u32,
+        nonce: u32,
+    ) -> bitcoin::Block {
+        bitcoin::Block {
+            header: pow_header(prev_blockhash, bits, time, nonce),
+            txdata: Vec::new(),
+        }
+    }
+
+    fn pow_header(
+        prev_blockhash: bitcoin::BlockHash,
+        bits: CompactTarget,
+        time: u32,
+        nonce: u32,
+    ) -> bitcoin::block::Header {
+        bitcoin::block::Header {
+            version: bitcoin::block::Version::ONE,
+            prev_blockhash,
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time,
+            bits,
+            nonce,
+        }
+    }
+
+    fn seed_pow_chain(
+        handles: &ApplyHandles,
+        bits: CompactTarget,
+        anchor_time: u32,
+        tip_time: u32,
+        tip_height: u32,
+    ) -> Result<bitcoin::BlockHash, Box<dyn std::error::Error>> {
+        let mut tree = handles.block_tree.write();
+        let mut parent = None;
+        let mut prev_hash = bitcoin::BlockHash::all_zeros();
+        for height in 0..=tip_height {
+            let time = interpolated_time(anchor_time, tip_time, height, tip_height);
+            let header = pow_header(prev_hash, bits, time, height);
+            prev_hash = header.block_hash();
+            parent = Some(tree.insert_node(parent, header, NodeStatus::Active)?);
+        }
+        handles.chain_tip.store(tree.tip());
+        Ok(prev_hash)
+    }
+
+    fn interpolated_time(anchor_time: u32, tip_time: u32, height: u32, tip_height: u32) -> u32 {
+        if height == 0 || tip_height == 0 {
+            return anchor_time;
+        }
+        let span = u64::from(tip_time.saturating_sub(anchor_time));
+        let offset = span.saturating_mul(u64::from(height)) / u64::from(tip_height);
+        anchor_time.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX))
+    }
+
+    fn scaled_pow_limit_bits(handles: &ApplyHandles, divisor: u64) -> CompactTarget {
+        let target = handles.network.max_target() / ChainWork::from(divisor);
+        bitcoin::Target::from_be_bytes(target.to_be_bytes::<32>()).to_compact_lossy()
+    }
+
+    fn retarget_bits_for_test(
+        handles: &ApplyHandles,
+        previous_bits: CompactTarget,
+        actual_timespan: u32,
+        expected_timespan: u32,
+    ) -> CompactTarget {
+        let min_timespan = expected_timespan / 4;
+        let max_timespan = expected_timespan * 4;
+        let actual_clamped = actual_timespan.clamp(min_timespan, max_timespan);
+        let previous_target =
+            ChainWork::from_be_bytes(bitcoin::Target::from_compact(previous_bits).to_be_bytes());
+        let actual = ChainWork::from(actual_clamped);
+        let expected = ChainWork::from(expected_timespan);
+        let target = ((previous_target / expected) * actual)
+            + (((previous_target % expected) * actual) / expected);
+        let target = target.min(handles.network.max_target());
+        bitcoin::Target::from_be_bytes(target.to_be_bytes::<32>()).to_compact_lossy()
+    }
+
+    fn assert_nbits_error(error: &ApplyError, actual: u32, expected: u32, height: u32) {
+        assert!(matches!(
+            error,
+            ApplyError::NbitsNonRetargetMismatch {
+                actual: got_actual,
+                expected: got_expected,
+                height: got_height,
+            } if *got_actual == actual && *got_expected == expected && *got_height == height
+        ));
     }
 
     fn spending_transaction(previous_output: bitcoin::OutPoint, sequence: u32) -> Transaction {
@@ -1169,6 +1430,11 @@ mod consensus_rule_tests {
             error,
             ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: actual, .. }) if *actual == bip
         ));
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn empty_apply_handles() -> ApplyHandles {
+        apply_handles(Arc::new(UtxoSet::new()))
     }
 
     #[allow(clippy::arc_with_non_send_sync)]

@@ -187,10 +187,11 @@ placeholder. Live infrastructure runs are operator responsibilities.
 
 Follow-up to §4..§6. The session that opened with the T18..T20 scaffold
 closed by wiring the source-of-truth subsystem handles into the node
-lifecycle. The wiring covers the full consensus pipeline non-contextually
-(PoW + non-contextual rules + BIP30/34 + BlockTree + script verify) and
-the listener-side P2P handshake; **contextual consensus (DAA, BIP9, MTP,
-BIP68) and block-download orchestration remain deferred**.
+lifecycle. The wiring covers the active-chain consensus pipeline through
+PoW, DAA `nBits` continuity/retarget checks, non-contextual rules,
+BIP30/34, contextual BIP113/BIP68 checks, BIP9 CSV/Segwit activation,
+BlockTree insertion, and script verification. The listener-side P2P
+handshake is wired; block-download orchestration remains deferred.
 
 ### What is now wired
 
@@ -229,15 +230,16 @@ BIP68) and block-download orchestration remain deferred**.
 - `getmempoolinfo` returns real `size`, `bytes`, `total_fee` numbers via `Mempool::stats()`.
 - `getblockchaininfo` surfaces real `chainwork` as a 64-character lowercase big-endian hex string via `rpc::Context::chainwork_hex()`.
 - `Network::is_{bip34,bip65,bip66,csv,segwit,taproot}_active(height) -> bool` const fns carry the per-network activation tables from Core's `chainparams.cpp`.
+- Active-chain DAA retarget validation is wired into `apply_block`: non-retarget heights must inherit parent `nBits`, retarget heights recompute the expected target over the prior interval with Core's 4x timespan clamp and the network proof-of-work limit cap. Unit coverage pins the boundary accept/reject cases and clamp behavior.
 - Electrum TLS cert config is honored as plaintext-with-warning until a
   matching `electrum_tls_key` field lands; the warning surfaces on every
   boot that configures `electrum_tls_cert` without TLS wiring.
 
 ### What is NOT yet wired (consensus correctness gates)
 
-- **No full DAA retarget computation.** `apply_block` checks PoW limit and nBits continuity at non-retarget heights, but at every 2016th block (mainnet retarget interval) the declared target is permitted to differ from the parent without verifying it matches the new target computed from the last 2016 blocks' timespan.
-- **No BIP113 MTP nLocktime check, no BIP68 sequence locks, no BIP9 deployment-state tracking.** `verify_transaction` takes only `(tx, prevouts, height, flags)` — adding median-time-past + relative-locktime context requires a consensus crate API extension.
-- **No `verify_transaction_borrowed`.** Per-tx script verify clones each `bitcoin::Transaction` into a `bitcoin_rs_primitives::Tx` wrapper because the consensus API takes `&Tx`. A borrowed adapter on the consensus crate (mirroring `verify_block_rules_borrowed`) drops the clone (perf lever; see TODO breadcrumb in `state.rs`). Also requires `Interpreter::execute` to accept `&bitcoin::Transaction`.
+- **No historical DAA fixture parity.** The active-chain retarget calculation is unit-covered, but it is not yet checked against historical mainnet/testnet retarget windows.
+- **No testnet minimum-difficulty exception handling.** The active-chain DAA path validates the regular retarget schedule only; it does not model Bitcoin Core's test-network minimum-difficulty exception rules.
+- **Contextual transaction checks remain node-local.** BIP113 MTP nLocktime, BIP68 sequence locks, and BIP9 CSV/Segwit activation are wired through the node apply path, but the lower-level consensus crate still exposes `verify_transaction(tx, prevouts, height, flags)` rather than a reusable context-rich transaction API.
 - **No outbound message channel per peer.** The post-handshake dispatch loop reads inbound and writes responses derived from `dispatch_inbound`, but external callers (e.g. a block download orchestrator) have no path to inject messages addressed to a specific peer — the peer's `TcpStream` is owned by the per-connection thread.
 - **No block download orchestrator.** No code path connects accepted peers to `import_block` via `getheaders` / `getdata` / `block` exchange. `import_block` only fires from tests.
 - **No index / filter / coinstats updates triggered by tip advance.** Electrum index, BIP158 filter generation, and coinstats remain stale until a follow-up wires the listener side.
