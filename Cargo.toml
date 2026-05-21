@@ -52,7 +52,7 @@ bitcoin-rs-filters    = { path = "crates/filters",    version = "0.1.0" }
 bitcoin-rs-coinstats  = { path = "crates/coinstats",  version = "0.1.0" }
 bitcoin-rs-pruning    = { path = "crates/pruning",    version = "0.1.0" }
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.1.0" }
-bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.1.0" }
+bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.1.1" }
 bitcoin-rs-wallet     = { path = "crates/wallet",     version = "0.1.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.1.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.1.0" }
