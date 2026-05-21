@@ -16,6 +16,7 @@ default = []
 rocksdb = ["bitcoin-rs-storage/rocksdb"]
 fjall = ["bitcoin-rs-storage/fjall"]
 redb = ["bitcoin-rs-storage/redb"]
+mdbx = ["bitcoin-rs-storage/mdbx"]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true

@@ -76,6 +76,8 @@ redb = [
 mdbx = [
     "bitcoin-rs-coinstats/mdbx",
     "bitcoin-rs-electrum/mdbx",
+    "bitcoin-rs-filters/mdbx",
+    "bitcoin-rs-index/mdbx",
     "bitcoin-rs-mining/mdbx",
     "bitcoin-rs-pruning/mdbx",
     "bitcoin-rs-rpc/mdbx",
