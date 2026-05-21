@@ -1,13 +1,13 @@
-use bitcoin::Script;
+use bitcoin::{Script, script::Builder};
 
 use crate::ConsensusError;
 
 /// Checks that the coinbase script starts with the minimally encoded block height.
 pub fn check_bip34(height: u32, coinbase_script_sig: &Script) -> Result<(), ConsensusError> {
-    let expected = encode_script_number(i64::from(height));
-    let bytes = coinbase_script_sig.as_bytes();
-    if bytes.first().copied() == u8::try_from(expected.len()).ok()
-        && bytes.get(1..=expected.len()) == Some(expected.as_slice())
+    let expected = Builder::new().push_int(i64::from(height)).into_script();
+    if coinbase_script_sig
+        .as_bytes()
+        .starts_with(expected.as_bytes())
     {
         return Ok(());
     }
@@ -17,30 +17,9 @@ pub fn check_bip34(height: u32, coinbase_script_sig: &Script) -> Result<(), Cons
     })
 }
 
-fn encode_script_number(value: i64) -> Vec<u8> {
-    if value == 0 {
-        return Vec::new();
-    }
-    let mut abs = value.unsigned_abs();
-    let mut result = Vec::new();
-    while abs > 0 {
-        result.push(abs.to_le_bytes()[0]);
-        abs >>= 8;
-    }
-    let negative = value.is_negative();
-    if let Some(last) = result.last_mut() {
-        if *last & 0x80 != 0 {
-            result.push(if negative { 0x80 } else { 0 });
-        } else if negative {
-            *last |= 0x80;
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
-    use bitcoin::script::Builder;
+    use bitcoin::{ScriptBuf, script::Builder};
 
     use super::check_bip34;
 
@@ -48,6 +27,30 @@ mod tests {
     fn matching_coinbase_height_passes() {
         let script = Builder::new().push_int(100).into_script();
         assert_eq!(check_bip34(100, script.as_script()), Ok(()));
+    }
+
+    #[test]
+    fn small_coinbase_heights_use_opcode_prefixes() {
+        let height_one = Builder::new().push_int(1).push_int(1).into_script();
+        assert_eq!(height_one.as_bytes(), &[0x51, 0x51]);
+        assert_eq!(check_bip34(1, height_one.as_script()), Ok(()));
+
+        let height_sixteen = Builder::new().push_int(16).into_script();
+        assert_eq!(height_sixteen.as_bytes(), &[0x60]);
+        assert_eq!(check_bip34(16, height_sixteen.as_script()), Ok(()));
+    }
+
+    #[test]
+    fn pushdata_encoding_for_small_height_fails() {
+        let script = ScriptBuf::from_bytes(vec![0x01, 0x01]);
+        assert!(check_bip34(1, script.as_script()).is_err());
+    }
+
+    #[test]
+    fn data_push_prefix_after_small_integer_range_passes() {
+        let script = Builder::new().push_int(17).into_script();
+        assert_eq!(script.as_bytes(), &[0x01, 0x11]);
+        assert_eq!(check_bip34(17, script.as_script()), Ok(()));
     }
 
     #[test]
