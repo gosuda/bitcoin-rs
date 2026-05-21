@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project goal
+
+Build a robust, correct Bitcoin node. **Minimal-first:** ship the smallest change that satisfies the
+requirement and passes the gates; reach for the simplest design that is still correct under adversarial
+input. Prefer deleting and reusing over adding; justify every new abstraction by a named invariant it
+protects. Robustness is not added later — handle all valid inputs and failure paths in the first cut.
+
 ## Build, test, lint
 
 Cargo workspace, Rust 2024 edition, toolchain pinned to 1.95.0 via `rust-toolchain.toml`. The binary's
