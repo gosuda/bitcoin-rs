@@ -58,6 +58,73 @@ fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Resu
     Ok(())
 }
 
+#[test]
+fn bitcoin_conf_zmq_keys_map_into_config_in_order() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let conf_path = temp.path().join("bitcoin.conf");
+    fs::write(
+        &conf_path,
+        r"
+-zmqpubhashblock=tcp://127.0.0.1:28332
+-zmqpubhashblock=tcp://127.0.0.1:28333
+-zmqpubhashblockhwm=5
+[regtest]
+-zmqpubrawtx=tcp://127.0.0.1:28334
+-zmqpubrawtxhwm=6
+",
+    )?;
+
+    let mut config = Config::default_for_network(bitcoin_rs_node::Network::Regtest);
+    bitcoin_conf_compat::apply_file(&mut config, &conf_path)?;
+
+    assert_eq!(
+        config.zmqpubhashblock,
+        vec![
+            "tcp://127.0.0.1:28332".to_owned(),
+            "tcp://127.0.0.1:28333".to_owned(),
+        ]
+    );
+    assert_eq!(config.zmqpubhashblockhwm, Some(5));
+    assert_eq!(config.zmqpubrawtx, vec!["tcp://127.0.0.1:28334".to_owned()]);
+    assert_eq!(config.zmqpubrawtxhwm, Some(6));
+    Ok(())
+}
+
+#[test]
+fn bitcoin_conf_zmq_keys_in_non_selected_network_sections_are_ignored() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let conf_path = temp.path().join("bitcoin.conf");
+    fs::write(
+        &conf_path,
+        r"
+-zmqpubhashblock=tcp://127.0.0.1:28332
+[main]
+-zmqpubhashblock=tcp://127.0.0.1:18332
+-zmqpubrawtx=tcp://127.0.0.1:18333
+-zmqpubrawtxhwm=99
+[regtest]
+-zmqpubrawblock=tcp://127.0.0.1:28334
+-zmqpubrawblockhwm=6
+",
+    )?;
+
+    let mut config = Config::default_for_network(bitcoin_rs_node::Network::Regtest);
+    bitcoin_conf_compat::apply_file(&mut config, &conf_path)?;
+
+    assert_eq!(
+        config.zmqpubhashblock,
+        vec!["tcp://127.0.0.1:28332".to_owned()]
+    );
+    assert!(config.zmqpubrawtx.is_empty());
+    assert_eq!(config.zmqpubrawtxhwm, None);
+    assert_eq!(
+        config.zmqpubrawblock,
+        vec!["tcp://127.0.0.1:28334".to_owned()]
+    );
+    assert_eq!(config.zmqpubrawblockhwm, Some(6));
+    Ok(())
+}
+
 fn assert_auth(auth: &Auth, expected_user: &str, expected_password: &str) {
     match auth {
         Auth::Basic { user, password } => {

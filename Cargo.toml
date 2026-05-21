@@ -230,6 +230,7 @@ rustls-pki-types = { version = ">=1.14, <2", default-features = false, features 
 # --- Errors -------------------------------------------------------------------
 thiserror = { version = ">=2, <3",        default-features = false, features = ["std"] }
 anyhow    = { version = ">=1.0.100, <2",  default-features = false, features = ["std"] }
+zmq       = { version = ">=0.10, <0.11", default-features = false }
 
 # --- Atomics ------------------------------------------------------------------
 portable-atomic = { version = ">=1.13, <2", default-features = false, features = ["std", "fallback"] }

@@ -228,6 +228,7 @@ pub fn run(mut config: Config) -> Result<()> {
     if let Some(prune_service) = state.prune_service() {
         rpc_context = rpc_context.with_prune_service(prune_service);
     }
+    rpc_context = rpc_context.with_zmq_notifications(state.active_zmq_notifications());
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
         state.config().rpc_bind,

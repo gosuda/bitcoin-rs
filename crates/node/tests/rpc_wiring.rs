@@ -21,6 +21,8 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let dir = tempdir()?;
     let mut config = Config::default();
     config.data_dir = dir.path().join("node");
+    config.zmqpubhashblock = vec!["inproc://rpc-wiring-zmq-pubhashblock".to_owned()];
+    config.zmqpubhashblockhwm = Some(21);
     let state = NodeState::open(config)?;
 
     let chain_tip = state.chain_tip();
@@ -60,7 +62,8 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::clone(&banned),
         Arc::clone(&added_nodes),
         Some(Arc::clone(&tx_index)),
-    );
+    )
+    .with_zmq_notifications(state.active_zmq_notifications());
 
     assert!(
         Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
@@ -122,6 +125,10 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::ptr_eq(&ctx.banned, &banned),
         "banned must share identity"
     );
+    let notifications = ctx.zmq_notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].notification_type.as_str(), "pubhashblock");
+    assert_eq!(notifications[0].hwm, 21);
 
     Ok(())
 }

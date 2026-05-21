@@ -95,6 +95,77 @@ fn cli_can_override_socket_and_vector_fields() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn zmq_layers_parse_precedence_and_publication_order() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let toml_path = temp.path().join("node.toml");
+    let bitcoin_conf_path = temp.path().join("bitcoin.conf");
+
+    fs::write(
+        &toml_path,
+        r#"
+zmqpubhashblock = ["tcp://127.0.0.1:28332", "tcp://127.0.0.1:28333"]
+zmqpubhashblockhwm = 9
+"#,
+    )?;
+    fs::write(
+        &bitcoin_conf_path,
+        r"
+-zmqpubhashblock=tcp://127.0.0.1:18332
+-zmqpubhashblockhwm=3
+",
+    )?;
+
+    let env: [EnvPair; 2] = [
+        (
+            "BITCOIN_RS_ZMQPUBRAWTX",
+            "tcp://127.0.0.1:28334,tcp://127.0.0.1:28335",
+        ),
+        ("BITCOIN_RS_ZMQPUBRAWTXHWM", "11"),
+    ];
+    let config = Config::from_layered_sources(
+        Some(&toml_path),
+        Some(&bitcoin_conf_path),
+        env,
+        [
+            "bitcoin-rs-node",
+            "--zmqpubhashtx",
+            "tcp://127.0.0.1:28336",
+            "--zmqpubrawtx",
+            "tcp://127.0.0.1:28337",
+            "--zmqpubrawtxhwm",
+            "12",
+        ],
+    )?;
+
+    let publications = config.zmq_publications();
+    let topics: Vec<_> = publications
+        .iter()
+        .map(|publication| publication.topic.as_str())
+        .collect();
+    let endpoints: Vec<_> = publications
+        .iter()
+        .map(|publication| publication.endpoint.as_str())
+        .collect();
+    let hwms: Vec<_> = publications
+        .iter()
+        .map(|publication| publication.hwm)
+        .collect();
+
+    assert_eq!(topics, ["hashblock", "hashblock", "hashtx", "rawtx"]);
+    assert_eq!(
+        endpoints,
+        [
+            "tcp://127.0.0.1:28332",
+            "tcp://127.0.0.1:28333",
+            "tcp://127.0.0.1:28336",
+            "tcp://127.0.0.1:28337",
+        ]
+    );
+    assert_eq!(hwms, [9, 9, 1_000, 12]);
+    Ok(())
+}
+
 fn assert_auth_user(auth: &Auth, expected: &str) {
     match auth {
         Auth::Basic { user, .. } => assert_eq!(user, expected),

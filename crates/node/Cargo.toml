@@ -119,6 +119,7 @@ metrics-exporter-prometheus.workspace = true
 quanta.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+zmq.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -100,6 +100,33 @@ pub struct PruneResult {
     pub bytes_freed: u64,
 }
 
+/// One active ZMQ notification reported by `getzmqnotifications`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZmqNotification {
+    /// Core notifier type (`pubhashblock`, `pubhashtx`, `pubrawblock`, `pubrawtx`).
+    pub notification_type: CompactString,
+    /// Bound ZMQ endpoint address.
+    pub address: String,
+    /// PUB socket high-water mark.
+    pub hwm: u32,
+}
+
+impl ZmqNotification {
+    /// Builds immutable RPC metadata for an active ZMQ publisher.
+    #[must_use]
+    pub fn new(
+        notification_type: impl Into<CompactString>,
+        address: impl Into<String>,
+        hwm: u32,
+    ) -> Self {
+        Self {
+            notification_type: notification_type.into(),
+            address: address.into(),
+            hwm,
+        }
+    }
+}
+
 /// Error returned by the node-owned pruning implementation.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PruneServiceError {
@@ -204,6 +231,8 @@ pub struct Context {
     pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
     pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
+    /// Active ZMQ PUB notifications.
+    pub zmq_notifications: Arc<[ZmqNotification]>,
     mining_sender: Sender<()>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
@@ -262,6 +291,7 @@ impl Context {
             p2p_outbound_sender: None,
             banned: Arc::new(parking_lot::RwLock::new(Vec::new())),
             added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
             mining_sender,
         }
     }
@@ -315,6 +345,7 @@ impl Context {
             banned,
             added_nodes,
             prune_service: None,
+            zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
             mining_sender,
         }
     }
@@ -324,6 +355,19 @@ impl Context {
     pub fn with_prune_service(mut self, prune_service: Arc<dyn PruneService>) -> Self {
         self.prune_service = Some(prune_service);
         self
+    }
+
+    /// Attaches active ZMQ notification metadata reported by `getzmqnotifications`.
+    #[must_use]
+    pub fn with_zmq_notifications(mut self, notifications: Vec<ZmqNotification>) -> Self {
+        self.zmq_notifications = Arc::from(notifications);
+        self
+    }
+
+    /// Returns active ZMQ notification metadata.
+    #[must_use]
+    pub fn zmq_notifications(&self) -> &[ZmqNotification] {
+        self.zmq_notifications.as_ref()
     }
 
     /// Returns the pruning state reported by `getblockchaininfo`.

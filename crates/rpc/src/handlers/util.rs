@@ -108,11 +108,20 @@ fn read_linux_rss_bytes() -> Option<u64> {
     None
 }
 
-pub(crate) fn getzmqnotifications(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
-    // bitcoin-rs does not yet support ZMQ pub/sub. Future strand may wire a real
-    // notification publisher; meanwhile expose the canonical empty-array shape.
-    Ok(json!(Vec::<sonic_rs::Value>::new()))
+    let notifications: Vec<_> = ctx
+        .zmq_notifications()
+        .iter()
+        .map(|notification| {
+            json!({
+                "type": notification.notification_type.as_str(),
+                "address": notification.address.as_str(),
+                "hwm": notification.hwm
+            })
+        })
+        .collect();
+    Ok(json!(notifications))
 }
 
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -275,6 +284,30 @@ mod tests {
             panic!("expected array, got {result:?}");
         };
         assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn getzmqnotifications_returns_active_metadata() {
+        use alloc::sync::Arc;
+
+        let ctx = Arc::new(Context::new().with_zmq_notifications(vec![
+            crate::context::ZmqNotification::new("pubhashblock", "tcp://127.0.0.1:28332", 7),
+        ]));
+        let result = getzmqnotifications(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getzmqnotifications failed: {err}"));
+        let Some(arr) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0].get("type").and_then(JsonValueTrait::as_str),
+            Some("pubhashblock")
+        );
+        assert_eq!(
+            arr[0].get("address").and_then(JsonValueTrait::as_str),
+            Some("tcp://127.0.0.1:28332")
+        );
+        assert_eq!(arr[0].get("hwm").and_then(JsonValueTrait::as_u64), Some(7));
     }
 }
 

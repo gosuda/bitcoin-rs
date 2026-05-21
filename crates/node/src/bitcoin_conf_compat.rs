@@ -17,7 +17,7 @@ pub fn apply_file(config: &mut Config, path: &Path) -> Result<()> {
 fn parse_for_network(text: &str, network: Network) -> ConfigLayer {
     let mut global = ConfigLayer::default();
     let mut selected = ConfigLayer::default();
-    let mut applies_to_selected = true;
+    let mut current_section_selected = None;
 
     for raw_line in text.lines() {
         let line = strip_inline_comment(raw_line).trim();
@@ -25,7 +25,7 @@ fn parse_for_network(text: &str, network: Network) -> ConfigLayer {
             continue;
         }
         if let Some(section) = parse_section(line) {
-            applies_to_selected = section_matches_network(section, network);
+            current_section_selected = Some(section_matches_network(section, network));
             continue;
         }
         let Some((raw_key, raw_value)) = line.split_once('=') else {
@@ -33,10 +33,10 @@ fn parse_for_network(text: &str, network: Network) -> ConfigLayer {
         };
         let key = raw_key.trim().trim_start_matches('-');
         let value = raw_value.trim();
-        if applies_to_selected {
-            apply_key(&mut selected, key, value);
-        } else {
-            apply_key(&mut global, key, value);
+        match current_section_selected {
+            None => apply_key(&mut global, key, value),
+            Some(true) => apply_key(&mut selected, key, value),
+            Some(false) => {}
         }
     }
 
@@ -64,6 +64,14 @@ fn apply_key(layer: &mut ConfigLayer, key: &str, value: &str) {
                 layer.dbcache_mb = Some(dbcache_mb);
             }
         }
+        "zmqpubhashblock" => push_endpoint(&mut layer.zmqpubhashblock, value),
+        "zmqpubhashtx" => push_endpoint(&mut layer.zmqpubhashtx, value),
+        "zmqpubrawblock" => push_endpoint(&mut layer.zmqpubrawblock, value),
+        "zmqpubrawtx" => push_endpoint(&mut layer.zmqpubrawtx, value),
+        "zmqpubhashblockhwm" => layer.zmqpubhashblockhwm = value.parse().ok(),
+        "zmqpubhashtxhwm" => layer.zmqpubhashtxhwm = value.parse().ok(),
+        "zmqpubrawblockhwm" => layer.zmqpubrawblockhwm = value.parse().ok(),
+        "zmqpubrawtxhwm" => layer.zmqpubrawtxhwm = value.parse().ok(),
         _ => {}
     }
     if layer.rpc_user.is_some() || layer.rpc_password.is_some() {
@@ -82,6 +90,10 @@ fn parse_core_bool(value: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+fn push_endpoint(slot: &mut Option<Vec<String>>, value: &str) {
+    slot.get_or_insert_with(Vec::new).push(value.to_owned());
 }
 
 fn parse_section(line: &str) -> Option<&str> {
@@ -171,6 +183,30 @@ impl ConfigLayerMerge for ConfigLayer {
         }
         if other.metrics_bind.is_some() {
             self.metrics_bind = other.metrics_bind;
+        }
+        if other.zmqpubhashblock.is_some() {
+            self.zmqpubhashblock.clone_from(&other.zmqpubhashblock);
+        }
+        if other.zmqpubhashtx.is_some() {
+            self.zmqpubhashtx.clone_from(&other.zmqpubhashtx);
+        }
+        if other.zmqpubrawblock.is_some() {
+            self.zmqpubrawblock.clone_from(&other.zmqpubrawblock);
+        }
+        if other.zmqpubrawtx.is_some() {
+            self.zmqpubrawtx.clone_from(&other.zmqpubrawtx);
+        }
+        if other.zmqpubhashblockhwm.is_some() {
+            self.zmqpubhashblockhwm = other.zmqpubhashblockhwm;
+        }
+        if other.zmqpubhashtxhwm.is_some() {
+            self.zmqpubhashtxhwm = other.zmqpubhashtxhwm;
+        }
+        if other.zmqpubrawblockhwm.is_some() {
+            self.zmqpubrawblockhwm = other.zmqpubrawblockhwm;
+        }
+        if other.zmqpubrawtxhwm.is_some() {
+            self.zmqpubrawtxhwm = other.zmqpubrawtxhwm;
         }
     }
 }

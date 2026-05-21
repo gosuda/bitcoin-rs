@@ -15,6 +15,7 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_RPC_USER: &str = "bitcoin-rs";
 const DEFAULT_RPC_PASSWORD: &str = "bitcoin-rs";
 const DEFAULT_DBCACHE_MB: u64 = 450;
+const DEFAULT_ZMQ_HWM: u32 = 1_000;
 
 /// RPC authentication configuration before it is converted into the RPC crate's runtime policy.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
@@ -68,6 +69,17 @@ impl Default for Auth {
     }
 }
 
+/// One configured ZMQ PUB notification endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZmqPublication {
+    /// Notification topic name.
+    pub topic: crate::zmq_publisher::ZmqTopic,
+    /// ZMQ endpoint to bind.
+    pub endpoint: String,
+    /// PUB socket high-water mark.
+    pub hwm: u32,
+}
+
 /// Fully resolved node configuration.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -106,6 +118,22 @@ pub struct Config {
     pub log_level: String,
     /// Optional Prometheus metrics bind address.
     pub metrics_bind: Option<SocketAddr>,
+    /// ZMQ `hashblock` PUB bind endpoints.
+    pub zmqpubhashblock: Vec<String>,
+    /// ZMQ `hashtx` PUB bind endpoints.
+    pub zmqpubhashtx: Vec<String>,
+    /// ZMQ `rawblock` PUB bind endpoints.
+    pub zmqpubrawblock: Vec<String>,
+    /// ZMQ `rawtx` PUB bind endpoints.
+    pub zmqpubrawtx: Vec<String>,
+    /// Optional `hashblock` PUB socket high-water mark.
+    pub zmqpubhashblockhwm: Option<u32>,
+    /// Optional `hashtx` PUB socket high-water mark.
+    pub zmqpubhashtxhwm: Option<u32>,
+    /// Optional `rawblock` PUB socket high-water mark.
+    pub zmqpubrawblockhwm: Option<u32>,
+    /// Optional `rawtx` PUB socket high-water mark.
+    pub zmqpubrawtxhwm: Option<u32>,
     #[serde(skip)]
     pub(crate) shutdown_signal: Option<Receiver<()>>,
 }
@@ -129,6 +157,14 @@ impl fmt::Debug for Config {
             .field("dbcache_mb", &self.dbcache_mb)
             .field("log_level", &self.log_level)
             .field("metrics_bind", &self.metrics_bind)
+            .field("zmqpubhashblock", &self.zmqpubhashblock)
+            .field("zmqpubhashtx", &self.zmqpubhashtx)
+            .field("zmqpubrawblock", &self.zmqpubrawblock)
+            .field("zmqpubrawtx", &self.zmqpubrawtx)
+            .field("zmqpubhashblockhwm", &self.zmqpubhashblockhwm)
+            .field("zmqpubhashtxhwm", &self.zmqpubhashtxhwm)
+            .field("zmqpubrawblockhwm", &self.zmqpubrawblockhwm)
+            .field("zmqpubrawtxhwm", &self.zmqpubrawtxhwm)
             .finish_non_exhaustive()
     }
 }
@@ -160,6 +196,14 @@ impl Config {
             dbcache_mb: DEFAULT_DBCACHE_MB,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             metrics_bind: None,
+            zmqpubhashblock: Vec::new(),
+            zmqpubhashtx: Vec::new(),
+            zmqpubrawblock: Vec::new(),
+            zmqpubrawtx: Vec::new(),
+            zmqpubhashblockhwm: None,
+            zmqpubhashtxhwm: None,
+            zmqpubrawblockhwm: None,
+            zmqpubrawtxhwm: None,
             shutdown_signal: None,
         }
     }
@@ -220,7 +264,48 @@ impl Config {
         if self.electrum_tls_cert.is_some() && self.electrum_bind.is_none() {
             bail!("electrum_tls_cert requires electrum_bind");
         }
+        for (name, hwm) in [
+            ("zmqpubhashblockhwm", self.zmqpubhashblockhwm),
+            ("zmqpubhashtxhwm", self.zmqpubhashtxhwm),
+            ("zmqpubrawblockhwm", self.zmqpubrawblockhwm),
+            ("zmqpubrawtxhwm", self.zmqpubrawtxhwm),
+        ] {
+            if hwm.is_some_and(|value| value > 2_147_483_647) {
+                bail!("{name} exceeds libzmq SNDHWM range");
+            }
+        }
         Ok(())
+    }
+
+    /// Returns active ZMQ publications in Core notification order.
+    #[must_use]
+    pub fn zmq_publications(&self) -> Vec<ZmqPublication> {
+        let mut publications = Vec::new();
+        push_zmq_publications(
+            &mut publications,
+            crate::zmq_publisher::ZmqTopic::HashBlock,
+            &self.zmqpubhashblock,
+            self.zmqpubhashblockhwm,
+        );
+        push_zmq_publications(
+            &mut publications,
+            crate::zmq_publisher::ZmqTopic::HashTx,
+            &self.zmqpubhashtx,
+            self.zmqpubhashtxhwm,
+        );
+        push_zmq_publications(
+            &mut publications,
+            crate::zmq_publisher::ZmqTopic::RawBlock,
+            &self.zmqpubrawblock,
+            self.zmqpubrawblockhwm,
+        );
+        push_zmq_publications(
+            &mut publications,
+            crate::zmq_publisher::ZmqTopic::RawTx,
+            &self.zmqpubrawtx,
+            self.zmqpubrawtxhwm,
+        );
+        publications
     }
 
     fn from_layers<E, K, V>(
@@ -318,6 +403,30 @@ impl Config {
         if layer.clear_metrics_bind {
             self.metrics_bind = None;
         }
+        if let Some(endpoints) = &layer.zmqpubhashblock {
+            self.zmqpubhashblock.clone_from(endpoints);
+        }
+        if let Some(endpoints) = &layer.zmqpubhashtx {
+            self.zmqpubhashtx.clone_from(endpoints);
+        }
+        if let Some(endpoints) = &layer.zmqpubrawblock {
+            self.zmqpubrawblock.clone_from(endpoints);
+        }
+        if let Some(endpoints) = &layer.zmqpubrawtx {
+            self.zmqpubrawtx.clone_from(endpoints);
+        }
+        if let Some(hwm) = layer.zmqpubhashblockhwm {
+            self.zmqpubhashblockhwm = Some(hwm);
+        }
+        if let Some(hwm) = layer.zmqpubhashtxhwm {
+            self.zmqpubhashtxhwm = Some(hwm);
+        }
+        if let Some(hwm) = layer.zmqpubrawblockhwm {
+            self.zmqpubrawblockhwm = Some(hwm);
+        }
+        if let Some(hwm) = layer.zmqpubrawtxhwm {
+            self.zmqpubrawtxhwm = Some(hwm);
+        }
     }
 }
 
@@ -372,6 +481,22 @@ pub(crate) struct ConfigLayer {
     pub(crate) metrics_bind: Option<SocketAddr>,
     #[arg(skip)]
     pub(crate) clear_metrics_bind: bool,
+    #[arg(long = "zmqpubhashblock", value_delimiter = ',')]
+    pub(crate) zmqpubhashblock: Option<Vec<String>>,
+    #[arg(long = "zmqpubhashtx", value_delimiter = ',')]
+    pub(crate) zmqpubhashtx: Option<Vec<String>>,
+    #[arg(long = "zmqpubrawblock", value_delimiter = ',')]
+    pub(crate) zmqpubrawblock: Option<Vec<String>>,
+    #[arg(long = "zmqpubrawtx", value_delimiter = ',')]
+    pub(crate) zmqpubrawtx: Option<Vec<String>>,
+    #[arg(long = "zmqpubhashblockhwm")]
+    pub(crate) zmqpubhashblockhwm: Option<u32>,
+    #[arg(long = "zmqpubhashtxhwm")]
+    pub(crate) zmqpubhashtxhwm: Option<u32>,
+    #[arg(long = "zmqpubrawblockhwm")]
+    pub(crate) zmqpubrawblockhwm: Option<u32>,
+    #[arg(long = "zmqpubrawtxhwm")]
+    pub(crate) zmqpubrawtxhwm: Option<u32>,
 }
 
 impl ConfigLayer {
@@ -412,6 +537,30 @@ impl ConfigLayer {
                 "BITCOIN_RS_DBCACHE_MB" => layer.dbcache_mb = Some(value.parse()?),
                 "BITCOIN_RS_LOG_LEVEL" => layer.log_level = Some(value.to_owned()),
                 "BITCOIN_RS_METRICS_BIND" => layer.metrics_bind = Some(value.parse()?),
+                "BITCOIN_RS_ZMQPUBHASHBLOCK" => {
+                    layer.zmqpubhashblock = Some(parse_string_list(value));
+                }
+                "BITCOIN_RS_ZMQPUBHASHTX" => {
+                    layer.zmqpubhashtx = Some(parse_string_list(value));
+                }
+                "BITCOIN_RS_ZMQPUBRAWBLOCK" => {
+                    layer.zmqpubrawblock = Some(parse_string_list(value));
+                }
+                "BITCOIN_RS_ZMQPUBRAWTX" => {
+                    layer.zmqpubrawtx = Some(parse_string_list(value));
+                }
+                "BITCOIN_RS_ZMQPUBHASHBLOCKHWM" => {
+                    layer.zmqpubhashblockhwm = Some(value.parse()?);
+                }
+                "BITCOIN_RS_ZMQPUBHASHTXHWM" => {
+                    layer.zmqpubhashtxhwm = Some(value.parse()?);
+                }
+                "BITCOIN_RS_ZMQPUBRAWBLOCKHWM" => {
+                    layer.zmqpubrawblockhwm = Some(value.parse()?);
+                }
+                "BITCOIN_RS_ZMQPUBRAWTXHWM" => {
+                    layer.zmqpubrawtxhwm = Some(value.parse()?);
+                }
                 _ => {}
             }
         }
@@ -440,6 +589,29 @@ fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
         .filter(|part| !part.trim().is_empty())
         .map(|part| Ok(part.trim().parse()?))
         .collect()
+}
+
+fn parse_string_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn push_zmq_publications(
+    publications: &mut Vec<ZmqPublication>,
+    topic: crate::zmq_publisher::ZmqTopic,
+    endpoints: &[String],
+    hwm: Option<u32>,
+) {
+    let hwm = hwm.unwrap_or(DEFAULT_ZMQ_HWM);
+    publications.extend(endpoints.iter().cloned().map(|endpoint| ZmqPublication {
+        topic,
+        endpoint,
+        hwm,
+    }));
 }
 
 fn parse_bool(value: &str) -> Result<bool> {

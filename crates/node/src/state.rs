@@ -12,6 +12,7 @@ use bitcoin::{Transaction, Txid, block::Header};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_rpc::{
     BlockRecord, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
+    ZmqNotification,
 };
 use compact_str::CompactString;
 use core::fmt;
@@ -603,6 +604,7 @@ pub struct NodeState {
     filter_index: FilterIndexHandle,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
+    active_zmq_notifications: Vec<ZmqNotification>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -633,6 +635,7 @@ impl NodeState {
     /// Opens (or creates) the node's data directory and configured storage
     /// backend.
     #[allow(clippy::arc_with_non_send_sync)]
+    #[allow(clippy::too_many_lines)]
     pub fn open(config: Config) -> Result<Self> {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
@@ -640,7 +643,22 @@ impl NodeState {
         let (tx_index, tx_index_storage) = open_tx_index(&config)?;
         let tx_index_storage = Arc::new(tx_index_storage);
         let filter_index = open_filter_index(&config)?;
-        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(crate::NoOpZmqPublisher);
+        let zmq_publications = config.zmq_publications();
+        let active_zmq_notifications: Vec<_> = zmq_publications
+            .iter()
+            .map(|publication| {
+                ZmqNotification::new(
+                    publication.topic.notifier_type(),
+                    publication.endpoint.clone(),
+                    publication.hwm,
+                )
+            })
+            .collect();
+        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_publications.is_empty() {
+            Arc::new(crate::NoOpZmqPublisher)
+        } else {
+            Arc::new(crate::SocketZmqPublisher::bind(&zmq_publications)?)
+        };
         let mut utxo_set = bitcoin_rs_utxo::UtxoSet::new();
         let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
             bitcoin_rs_coinstats::CoinStats::default(),
@@ -710,6 +728,7 @@ impl NodeState {
             filter_index,
             prune_service,
             zmq_publisher,
+            active_zmq_notifications,
             mempool,
             chain_tip,
             applied_tip,
@@ -804,6 +823,12 @@ impl NodeState {
     #[must_use]
     pub fn zmq_publisher(&self) -> Arc<dyn crate::ZmqPublisher> {
         Arc::clone(&self.zmq_publisher)
+    }
+
+    /// Returns active ZMQ notification metadata for RPC reporting.
+    #[must_use]
+    pub fn active_zmq_notifications(&self) -> Vec<ZmqNotification> {
+        self.active_zmq_notifications.clone()
     }
 
     /// Returns the shared mempool handle.
@@ -1182,6 +1207,39 @@ mod tests {
         let publisher = state.zmq_publisher();
         // No-op publisher accepts publish calls silently.
         publisher.publish_hashblock(bitcoin_rs_primitives::Hash256::default());
+        Ok(())
+    }
+
+    #[test]
+    fn zmq_publisher_handle_reports_active_metadata() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.zmqpubhashblock = vec!["inproc://state-zmq-pubhashblock".to_owned()];
+        config.zmqpubhashtx = vec!["inproc://state-zmq-pubhashtx".to_owned()];
+        config.zmqpubrawblock = vec!["inproc://state-zmq-pubrawblock".to_owned()];
+        config.zmqpubrawtx = vec!["inproc://state-zmq-pubrawtx".to_owned()];
+        config.zmqpubhashblockhwm = Some(17);
+        config.zmqpubhashtxhwm = Some(18);
+        config.zmqpubrawblockhwm = Some(19);
+        config.zmqpubrawtxhwm = Some(20);
+        let state = NodeState::open(config)?;
+
+        let notifications = state.active_zmq_notifications();
+        let notification_types: Vec<_> = notifications
+            .iter()
+            .map(|notification| notification.notification_type.as_str())
+            .collect();
+        let hwms: Vec<_> = notifications
+            .iter()
+            .map(|notification| notification.hwm)
+            .collect();
+        assert_eq!(
+            notification_types,
+            ["pubhashblock", "pubhashtx", "pubrawblock", "pubrawtx"]
+        );
+        assert_eq!(hwms, [17, 18, 19, 20]);
         Ok(())
     }
 
