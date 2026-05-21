@@ -146,6 +146,54 @@ fn tick_applies_inbound_blocks_before_sync_selection() -> Result<(), Box<dyn std
     Ok(())
 }
 
+#[test]
+fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn std::error::Error>>
+{
+    let genesis = regtest_genesis_block()?;
+    let block_one = child_coinbase_block(&genesis, 1)?;
+    let block_two = child_coinbase_block(&block_one, 2)?;
+
+    let block_tree = Arc::new(RwLock::new(BlockTree::new()));
+    let chain_tip = block_tree.read().tip_handle();
+    let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(RwLock::new(Vec::new()));
+    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+    let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<bitcoin::block::Header>>();
+    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let handles = apply_handles(
+        Network::Regtest,
+        Arc::clone(&chain_tip),
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+    );
+    let sync = BlockSync::new(
+        handles,
+        Arc::clone(&peers),
+        Arc::clone(&peer_outbound),
+        inbound_headers_rx,
+        inbound_blocks_rx,
+    );
+
+    inbound_headers_tx.send(vec![genesis.header, block_one.header, block_two.header])?;
+    inbound_blocks_tx.send(block_two.clone())?;
+    inbound_blocks_tx.send(block_one)?;
+
+    sync.tick();
+
+    let applied = applied_tip
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+    assert_eq!(applied.height, 2);
+    assert_eq!(
+        applied.hash,
+        bitcoin_rs_primitives::Hash256::from_le_bytes(block_two.block_hash().as_byte_array())
+    );
+    assert_eq!(block_tree.read().len(), 3);
+    Ok(())
+}
+
 #[allow(clippy::arc_with_non_send_sync)]
 fn apply_handles(
     network: Network,
@@ -223,6 +271,34 @@ fn regtest_genesis_block() -> Result<bitcoin::Block, Box<dyn std::error::Error>>
     let bytes = hex_decode(REGTEST_GENESIS_HEX)?;
     let mut cursor = std::io::Cursor::new(bytes.as_slice());
     Ok(bitcoin::Block::consensus_decode(&mut cursor)?)
+}
+
+fn child_coinbase_block(
+    parent: &bitcoin::Block,
+    height: u8,
+) -> Result<bitcoin::Block, Box<dyn std::error::Error>> {
+    let mut block = parent.clone();
+    block.header.prev_blockhash = parent.block_hash();
+    block.header.time = parent.header.time.saturating_add(1);
+    block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, height]);
+    block.header.merkle_root = block
+        .compute_merkle_root()
+        .ok_or_else(|| std::io::Error::other("child block should have merkle root"))?;
+    mine_block_to_declared_target(&mut block)?;
+    Ok(block)
+}
+
+fn mine_block_to_declared_target(
+    block: &mut bitcoin::Block,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while block.header.validate_pow(block.header.target()).is_err() {
+        block.header.nonce = block
+            .header
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("exhausted nonce while mining test block"))?;
+    }
+    Ok(())
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

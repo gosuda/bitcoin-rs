@@ -31,6 +31,15 @@ const GETDATA_BATCH_SIZE: usize = 16;
 const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 const PENDING_BUDGET: usize = 128;
+/// Time after which a received out-of-order block is discarded.
+const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
+/// Maximum number of received blocks waiting for their predecessor.
+const RECEIVED_BLOCK_BUDGET: usize = 128;
+
+struct ReceivedBlock {
+    block: bitcoin::Block,
+    received_at: Instant,
+}
 
 /// Block download orchestrator.
 pub struct BlockSync {
@@ -40,6 +49,7 @@ pub struct BlockSync {
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
     pending_blocks: Arc<Mutex<HashMap<Hash256, Instant>>>,
+    received_blocks: Arc<Mutex<HashMap<Hash256, ReceivedBlock>>>,
 }
 
 impl BlockSync {
@@ -59,6 +69,7 @@ impl BlockSync {
             inbound_headers_rx,
             inbound_blocks_rx,
             pending_blocks: Arc::new(Mutex::new(HashMap::new())),
+            received_blocks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -114,31 +125,87 @@ impl BlockSync {
 
     fn drain_inbound_blocks(&self) {
         let receiver = self.inbound_blocks_rx.lock();
+        let mut received = 0_usize;
+        while let Ok(block) = receiver.try_recv() {
+            received = received.saturating_add(1);
+            self.buffer_received_block(block);
+        }
+        drop(receiver);
+
+        let (applied, failed) = self.apply_buffered_blocks();
+        if received > 0 || applied > 0 || failed > 0 {
+            tracing::debug!(
+                received,
+                applied,
+                failed,
+                "block sync: drained inbound blocks"
+            );
+        }
+    }
+
+    fn buffer_received_block(&self, block: bitcoin::Block) {
+        let now = Instant::now();
+        let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let mut received = self.received_blocks.lock();
+        prune_received_blocks(&mut received, now);
+        if received.len() >= RECEIVED_BLOCK_BUDGET && !received.contains_key(&hash) {
+            evict_oldest_received_block(&mut received);
+        }
+        if received.len() >= RECEIVED_BLOCK_BUDGET && !received.contains_key(&hash) {
+            tracing::warn!(%hash, "block sync: received block buffer full; dropping block");
+            return;
+        }
+        received.insert(
+            hash,
+            ReceivedBlock {
+                block,
+                received_at: now,
+            },
+        );
+    }
+
+    fn apply_buffered_blocks(&self) -> (usize, usize) {
         let mut applied = 0_usize;
         let mut failed = 0_usize;
-        while let Ok(block) = receiver.try_recv() {
-            match crate::apply::apply_block(&self.handles, &block) {
+        while let Some(expected_hash) = self.next_expected_block_hash() {
+            let Some(received) = self.received_blocks.lock().remove(&expected_hash) else {
+                break;
+            };
+            match crate::apply::apply_block(&self.handles, &received.block) {
                 Ok(tip) => {
-                    applied += 1;
+                    applied = applied.saturating_add(1);
                     tracing::debug!(
                         height = tip.height,
                         %tip.hash,
-                        "block sync: applied inbound block"
+                        "block sync: applied buffered block"
                     );
                     self.pending_blocks.lock().remove(&tip.hash);
                 }
                 Err(error) => {
-                    failed += 1;
+                    failed = failed.saturating_add(1);
+                    self.pending_blocks.lock().remove(&expected_hash);
                     tracing::warn!(
+                        %expected_hash,
                         %error,
-                        "block sync: failed to apply inbound block"
+                        "block sync: failed to apply buffered block"
                     );
+                    break;
                 }
             }
         }
-        if applied > 0 || failed > 0 {
-            tracing::debug!(applied, failed, "block sync: drained inbound blocks");
+        (applied, failed)
+    }
+
+    fn next_expected_block_hash(&self) -> Option<Hash256> {
+        let chain_tip = self.handles.chain_tip.load_full()?;
+        let applied_tip = self.handles.applied_tip.load_full()?;
+        let height = applied_tip.height.checked_add(1)?;
+        if height > chain_tip.height {
+            return None;
         }
+        let tree = self.handles.block_tree.read();
+        let node_id = tree.node_at_height_from(chain_tip.tip_id, height)?;
+        Some(tree.node(node_id).ok()?.hash)
     }
 
     fn pick_sync_peer(&self, our_height: u32) -> Option<PeerInfo> {
@@ -319,6 +386,21 @@ fn bitcoin_network(network: bitcoin_rs_primitives::Network) -> bitcoin::Network 
         bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
         bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
     }
+}
+
+fn prune_received_blocks(received: &mut HashMap<Hash256, ReceivedBlock>, now: Instant) {
+    received.retain(|_hash, entry| now.duration_since(entry.received_at) < RECEIVED_BLOCK_TIMEOUT);
+}
+
+fn evict_oldest_received_block(received: &mut HashMap<Hash256, ReceivedBlock>) {
+    let Some(oldest_hash) = received
+        .iter()
+        .min_by_key(|(_hash, entry)| entry.received_at)
+        .map(|(hash, _entry)| *hash)
+    else {
+        return;
+    };
+    received.remove(&oldest_hash);
 }
 
 #[cfg(test)]
