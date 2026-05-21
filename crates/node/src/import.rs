@@ -102,6 +102,7 @@ mod tests {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
         let mut block = Block::consensus_decode(&mut cursor)?;
+        block.header.prev_blockhash = block.block_hash();
         block.header.bits = bitcoin::CompactTarget::from_consensus(0x0010_0001);
 
         let mut block_bytes = Vec::new();
@@ -112,6 +113,7 @@ mod tests {
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         let state = NodeState::open(config)?;
+        let _genesis = import_block(&state, &genesis_bytes)?;
 
         let Err(error) = import_block(&state, &block_bytes) else {
             anyhow::bail!("block whose hash exceeds declared target should be rejected");
@@ -127,8 +129,13 @@ mod tests {
             "error chain should contain ProofOfWork rejection: {error:?}"
         );
 
-        assert!(
-            state.chain_tip().load().is_none(),
+        assert_eq!(
+            state
+                .chain_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("genesis tip should remain published"))?
+                .height,
+            0,
             "rejected block must not advance chain tip"
         );
         Ok(())
@@ -136,16 +143,27 @@ mod tests {
 
     #[test]
     fn import_rejects_block_with_target_above_network_limit() -> Result<()> {
-        let bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let genesis_block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin);
+        let genesis_bytes = encode_block(&genesis_block)?;
+        let mut block = genesis_block.clone();
+        block.header.prev_blockhash = genesis_block.block_hash();
+        block.header.bits = bitcoin::CompactTarget::from_consensus(0x207f_ffff);
+        block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
+        mine_block_to_declared_target(&mut block)?;
+        let block_bytes = encode_block(&block)?;
 
         let dir = tempdir()?;
         let mut config = crate::Config::default_for_network(crate::Network::Mainnet);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         let state = NodeState::open(config)?;
+        let _genesis = import_block(&state, &genesis_bytes)?;
 
-        let Err(error) = import_block(&state, &bytes) else {
-            anyhow::bail!("regtest genesis target exceeds mainnet PoW limit");
+        let Err(error) = import_block(&state, &block_bytes) else {
+            anyhow::bail!("child block target exceeds mainnet PoW limit");
         };
 
         assert!(
@@ -157,8 +175,13 @@ mod tests {
             }),
             "error chain should contain TargetAboveLimit rejection: {error:?}"
         );
-        assert!(
-            state.chain_tip().load().is_none(),
+        assert_eq!(
+            state
+                .chain_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("genesis tip should remain published"))?
+                .height,
+            0,
             "rejected block must not advance chain tip"
         );
         Ok(())
@@ -351,6 +374,7 @@ mod tests {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
         let mut block = Block::consensus_decode(&mut cursor)?;
+        block.header.prev_blockhash = block.block_hash();
         block.txdata[0].input[0].previous_output = bitcoin::OutPoint {
             txid: bitcoin::Txid::from_byte_array([1_u8; 32]),
             vout: 0,
@@ -369,6 +393,7 @@ mod tests {
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         let state = NodeState::open(config)?;
+        let _genesis = import_block(&state, &genesis_bytes)?;
 
         let Err(error) = import_block(&state, &block_bytes) else {
             anyhow::bail!("block without coinbase should be rejected");
@@ -381,8 +406,13 @@ mod tests {
             ),
             "error chain should contain MissingCoinbase: {error:?}"
         );
-        assert!(
-            state.chain_tip().load().is_none(),
+        assert_eq!(
+            state
+                .chain_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("genesis tip should remain published"))?
+                .height,
+            0,
             "rejected block must not advance chain tip"
         );
         Ok(())
@@ -393,10 +423,16 @@ mod tests {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
         let mut block = Block::consensus_decode(&mut cursor)?;
-        let synthetic_tip_hash = Hash256::from_le_bytes(&[2_u8; 32]);
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let synthetic_tip = seed_synthetic_header_tip(&state, 499)?;
 
         block.header.prev_blockhash =
-            bitcoin::BlockHash::from_byte_array(synthetic_tip_hash.to_le_bytes());
+            bitcoin::BlockHash::from_byte_array(synthetic_tip.hash.to_le_bytes());
         block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::new();
         block.header.merkle_root = block
             .compute_merkle_root()
@@ -405,20 +441,6 @@ mod tests {
 
         let mut block_bytes = Vec::new();
         block.consensus_encode(&mut block_bytes)?;
-
-        let dir = tempdir()?;
-        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        let state = NodeState::open(config)?;
-        state
-            .chain_tip()
-            .store(Some(std::sync::Arc::new(bitcoin_rs_chain::TipSnapshot {
-                tip_id: bitcoin_rs_chain::node::NodeId::new(499),
-                height: 499,
-                chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
-                hash: synthetic_tip_hash,
-            })));
 
         let Err(error) = import_block(&state, &block_bytes) else {
             anyhow::bail!("post-BIP34 block without height should be rejected");
@@ -437,8 +459,73 @@ mod tests {
                 .load_full()
                 .ok_or_else(|| anyhow::anyhow!("synthetic tip should remain published"))?
                 .height,
-            499
+            synthetic_tip.height
         );
+        Ok(())
+    }
+
+    fn encode_block(block: &Block) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        block.consensus_encode(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn seed_synthetic_header_tip(
+        state: &NodeState,
+        height: u32,
+    ) -> Result<bitcoin_rs_chain::TipSnapshot> {
+        let block_tree = state.block_tree();
+        let mut tree = block_tree.write();
+        let bits = bitcoin::CompactTarget::from_consensus(0x207f_ffff);
+        let mut parent = None;
+        let mut prev_blockhash = bitcoin::BlockHash::all_zeros();
+        let mut tip = None;
+
+        for current_height in 0..=height {
+            let mut merkle = [0_u8; 32];
+            merkle[..4].copy_from_slice(&current_height.to_le_bytes());
+            let mut header = bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash,
+                merkle_root: bitcoin::TxMerkleNode::from_byte_array(merkle),
+                time: current_height,
+                bits,
+                nonce: 0,
+            };
+            mine_header_to_declared_target(&mut header)?;
+            let node_id =
+                tree.insert_node(parent, header, bitcoin_rs_chain::NodeStatus::HeaderValid)?;
+            let node = tree.node(node_id)?;
+            let snapshot = bitcoin_rs_chain::TipSnapshot {
+                tip_id: node_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            };
+            prev_blockhash = header.block_hash();
+            parent = Some(node_id);
+            tip = Some(snapshot);
+        }
+
+        let tip =
+            tip.ok_or_else(|| anyhow::anyhow!("synthetic header chain should not be empty"))?;
+        drop(tree);
+        state
+            .chain_tip()
+            .store(Some(std::sync::Arc::new(tip.clone())));
+        state
+            .applied_tip()
+            .store(Some(std::sync::Arc::new(tip.clone())));
+        Ok(tip)
+    }
+
+    fn mine_header_to_declared_target(header: &mut bitcoin::block::Header) -> Result<()> {
+        while header.validate_pow(header.target()).is_err() {
+            header.nonce = header
+                .nonce
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("exhausted nonce while mining test header"))?;
+        }
         Ok(())
     }
 

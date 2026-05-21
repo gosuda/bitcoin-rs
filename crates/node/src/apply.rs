@@ -139,21 +139,7 @@ pub fn apply_block(
         bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
     let prev_hash =
         bitcoin_rs_primitives::Hash256::from_le_bytes(block.header.prev_blockhash.as_byte_array());
-    let prior = handles.chain_tip.load_full();
-    let height = match prior.as_deref() {
-        Some(tip) => {
-            if tip.hash != prev_hash {
-                return Err(ApplyError::PrevHashMismatch {
-                    tip: tip.hash,
-                    prev: prev_hash,
-                });
-            }
-            tip.height
-                .checked_add(1)
-                .ok_or(ApplyError::HeightOverflow(tip.height))?
-        }
-        None => 0_u32,
-    };
+    let (prior, height) = applied_predecessor(handles, block_hash, prev_hash)?;
 
     // Self-consistency PoW: the block header's hash must satisfy its
     // declared target. This is the cheapest consensus gate; do it before
@@ -288,28 +274,15 @@ pub fn apply_block(
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
 
-    // Persist the header into the in-memory block tree after validation and
-    // UTXO commit have succeeded. `BlockTree` publishes the canonical
-    // best-tip snapshot as part of `insert_header`.
+    // Resolve the applied header after validation and UTXO commit have
+    // succeeded. Header-first sync may already have inserted this header.
     let block_tree_insert_started = quanta::Instant::now();
-    let block_tree_insert_result = insert_active_header(handles, block);
+    let block_tree_insert_result = applied_header_tip(handles, block_hash, block, height);
     let block_tree_insert_dur = block_tree_insert_started.elapsed();
     metrics::histogram!("node.apply_block.block_tree_insert_seconds")
         .record(block_tree_insert_dur.as_secs_f64());
-    block_tree_insert_result?;
+    let tip = block_tree_insert_result?;
 
-    let tip = handles
-        .chain_tip
-        .load_full()
-        .map(|arc| (*arc).clone())
-        .ok_or_else(|| {
-            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip {
-                bip: "INTERNAL",
-                reason: format!(
-                    "chain tip not published by BlockTree after insert_header for block {block_hash}"
-                ),
-            })
-        })?;
     handles
         .blocks
         .write()
@@ -424,15 +397,62 @@ pub fn apply_block(
     Ok(tip)
 }
 
-fn insert_active_header(
+fn applied_predecessor(
     handles: &ApplyHandles,
+    block_hash: bitcoin_rs_primitives::Hash256,
+    prev_hash: bitcoin_rs_primitives::Hash256,
+) -> core::result::Result<(Option<Arc<TipSnapshot>>, u32), ApplyError> {
+    let prior = handles.applied_tip.load_full();
+    let height = if let Some(tip) = prior.as_deref() {
+        if tip.hash != prev_hash {
+            return Err(ApplyError::PrevHashMismatch {
+                tip: tip.hash,
+                prev: prev_hash,
+            });
+        }
+        tip.height
+            .checked_add(1)
+            .ok_or(ApplyError::HeightOverflow(tip.height))?
+    } else {
+        if block_hash != handles.network.genesis_block_hash() {
+            return Err(ApplyError::Chain(
+                bitcoin_rs_chain::ChainError::MissingParent { prev_hash },
+            ));
+        }
+        0_u32
+    };
+    Ok((prior, height))
+}
+
+fn applied_header_tip(
+    handles: &ApplyHandles,
+    block_hash: bitcoin_rs_primitives::Hash256,
     block: &bitcoin::Block,
-) -> core::result::Result<(), ApplyError> {
-    handles
-        .block_tree
-        .write()
-        .insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?;
-    Ok(())
+    height: u32,
+) -> core::result::Result<TipSnapshot, ApplyError> {
+    let mut tree = handles.block_tree.write();
+    let node_id = match tree.lookup(block_hash) {
+        Some(node_id) => node_id,
+        None => tree.insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?,
+    };
+    let node = tree.node(node_id)?;
+    if node.height != height {
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "INTERNAL",
+                reason: format!(
+                    "block-tree height {} does not match applied height {height} for block {block_hash}",
+                    node.height
+                ),
+            },
+        ));
+    }
+    Ok(TipSnapshot {
+        tip_id: node_id,
+        height: node.height,
+        chainwork: node.chainwork,
+        hash: node.hash,
+    })
 }
 
 fn compute_basic_filter(block: &bitcoin::Block, handles: &ApplyHandles) -> Option<Vec<u8>> {
@@ -852,6 +872,84 @@ mod consensus_rule_tests {
     const MAINNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
     const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
     const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
+
+    #[test]
+    fn block_apply_predecessor_uses_applied_tip_when_header_tip_is_ahead()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles_for_network(Network::Regtest);
+        let mut tree = handles.block_tree.write();
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let genesis_node = tree.node(genesis_id)?;
+        let genesis_tip = TipSnapshot {
+            tip_id: genesis_id,
+            height: genesis_node.height,
+            chainwork: genesis_node.chainwork,
+            hash: genesis_node.hash,
+        };
+        let mut tip_id = genesis_id;
+        for height in 1..=3 {
+            let parent_hash =
+                bitcoin::BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
+            let header = pow_header(
+                parent_hash,
+                CompactTarget::from_consensus(0x207f_ffff),
+                height,
+                height,
+            );
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+        }
+        handles.chain_tip.store(tree.tip());
+        drop(tree);
+        handles
+            .applied_tip
+            .store(Some(Arc::new(genesis_tip.clone())));
+
+        let (prior, height) = applied_predecessor(
+            &handles,
+            Hash256::from_le_bytes(&[0x42; 32]),
+            genesis_tip.hash,
+        )?;
+
+        let prior = prior.ok_or_else(|| std::io::Error::other("missing predecessor"))?;
+        assert_eq!(prior.tip_id, genesis_id);
+        assert_eq!(height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn block_apply_predecessor_rejects_non_genesis_without_applied_tip() {
+        let handles = empty_apply_handles_for_network(Network::Regtest);
+        let prev_hash = Hash256::from_le_bytes(&[0x11; 32]);
+        let error =
+            match applied_predecessor(&handles, Hash256::from_le_bytes(&[0x22; 32]), prev_hash) {
+                Ok(_) => panic!("non-genesis block must not start the applied chain"),
+                Err(error) => error,
+            };
+
+        assert!(matches!(
+            error,
+            ApplyError::Chain(bitcoin_rs_chain::ChainError::MissingParent { prev_hash: got }) if got == prev_hash
+        ));
+    }
+
+    #[test]
+    fn applied_header_tip_reuses_preaccepted_header() -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles_for_network(Network::Regtest);
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let header_id = handles
+            .block_tree
+            .write()
+            .insert_header(block.header, NodeStatus::HeaderValid)?;
+
+        let tip = applied_header_tip(&handles, block_hash, &block, 0)?;
+
+        assert_eq!(tip.tip_id, header_id);
+        assert_eq!(tip.height, 0);
+        assert_eq!(tip.hash, block_hash);
+        Ok(())
+    }
 
     #[test]
     fn bip68_height_lock_enforces_boundary_when_csv_active()
