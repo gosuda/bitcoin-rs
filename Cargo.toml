@@ -57,7 +57,7 @@ bitcoin-rs-wallet     = { path = "crates/wallet",     version = "0.1.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.1.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.1.0" }
 bitcoin-rs-electrum   = { path = "crates/electrum",   version = "0.1.0" }
-bitcoin-rs-node       = { path = "crates/node",       version = "0.1.0" }
+bitcoin-rs-node       = { path = "crates/node",       version = "0.1.0", default-features = false }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }

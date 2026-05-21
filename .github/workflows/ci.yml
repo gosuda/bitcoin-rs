@@ -69,7 +69,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: --workspace --no-default-features --features "rocksdb,fjall,redb,mdbx"
+          rust-version: "1.95.0"
+          arguments: --workspace --no-default-features --features "${{ env.PORTABLE_FEATURES }}"
 
   # Heavy sys-crate gate:
   # - libboost-dev for libbitcoinkernel-sys

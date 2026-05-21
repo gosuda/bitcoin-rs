@@ -9,7 +9,6 @@ mod enabled {
     use crate::rust_path::{BlockState, TipState, UtxoView};
 
     /// Context for Core's bitcoinkernel consensus engine.
-    #[derive(Debug)]
     pub struct KernelContext {
         ctx: bitcoinkernel::Context,
     }
