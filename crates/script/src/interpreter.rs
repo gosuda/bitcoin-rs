@@ -201,6 +201,14 @@ pub enum ScriptError {
     /// Taproot key-path verification requires all prevouts for multi-input transactions.
     #[error("taproot key-path verification requires all prevouts for multi-input transactions")]
     TaprootPrevoutsUnavailable,
+    /// This portable path only validates one-element Taproot key-path witnesses.
+    #[error(
+        "taproot witness stack with {elements} elements requires unsupported annex or script-path validation"
+    )]
+    TaprootUnsupportedWitness {
+        /// Number of witness elements supplied for the P2TR spend.
+        elements: usize,
+    },
 }
 
 /// Thin public wrapper around the canonical `bitcoin` script verification entry point.
@@ -262,13 +270,9 @@ fn verify_taproot_keypath(
     if spending.input.len() != 1 || input_idx != 0 {
         return Err(ScriptError::TaprootPrevoutsUnavailable);
     }
-    let Some(signature_bytes) = witness.first() else {
-        return Err(ScriptError::Verification(
-            "missing taproot key-path signature".to_owned(),
-        ));
-    };
+    let signature_bytes = taproot_keypath_signature(witness)?;
     let (signature_bytes, sighash_type) = match signature_bytes.len() {
-        64 => (signature_bytes.as_slice(), TapSighashType::Default),
+        64 => (signature_bytes, TapSighashType::Default),
         65 => {
             let sighash_type = TapSighashType::from_consensus_u8(signature_bytes[64])
                 .map_err(|error| ScriptError::Verification(error.to_string()))?;
@@ -294,4 +298,16 @@ fn verify_taproot_keypath(
     secp.verify_schnorr(&signature, &message, &public_key)
         .map(|()| true)
         .map_err(|error| ScriptError::Verification(error.to_string()))
+}
+
+fn taproot_keypath_signature(witness: &[Vec<u8>]) -> Result<&[u8], ScriptError> {
+    match witness {
+        [signature] => Ok(signature),
+        [] => Err(ScriptError::Verification(
+            "missing taproot key-path signature".to_owned(),
+        )),
+        _ => Err(ScriptError::TaprootUnsupportedWitness {
+            elements: witness.len(),
+        }),
+    }
 }

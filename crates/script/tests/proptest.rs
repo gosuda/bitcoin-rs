@@ -9,7 +9,7 @@ use bitcoin::{
     absolute, transaction,
 };
 use bitcoin_rs_primitives::Tx;
-use bitcoin_rs_script::{Interpreter, VerifyFlags};
+use bitcoin_rs_script::{Interpreter, ScriptError, VerifyFlags};
 use proptest::prelude::*;
 
 proptest! {
@@ -67,6 +67,35 @@ proptest! {
             0,
         );
         prop_assert_eq!(ok, Ok(true));
+    }
+
+    #[test]
+    fn random_p2tr_keypath_spends_with_extra_witness_items_fail(
+        byte in 1u8..=127,
+        extra in prop::collection::vec(any::<u8>(), 0..=80),
+    ) {
+        let Some(fixture) = signed_p2tr(byte) else {
+            return Ok(());
+        };
+        let mut witness = fixture.tx.0.input[0].witness.to_vec();
+        witness.push(extra);
+        let interpreter = Interpreter;
+        let ok = interpreter.execute(
+            fixture.prevout.script_pubkey.as_bytes(),
+            fixture.tx.0.input[0].script_sig.as_bytes(),
+            &witness,
+            VerifyFlags::MANDATORY,
+            &fixture.prevout,
+            &fixture.tx.0,
+            0,
+        );
+        prop_assert!(
+            matches!(
+                ok,
+                Err(ScriptError::TaprootUnsupportedWitness { elements: 2 })
+            ),
+            "expected TaprootUnsupportedWitness with elements=2"
+        );
     }
 
     #[test]
