@@ -132,8 +132,6 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     }
 
     let mut seen = BTreeSet::new();
-    let mut input_value = 0u64;
-    let interpreter = Interpreter;
     for (input_index, input) in tx.input.iter().enumerate() {
         if input.previous_output.is_null() {
             return Err(ConsensusError::NullPrevout { input_index });
@@ -141,6 +139,11 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         if !seen.insert(input.previous_output) {
             return Err(ConsensusError::DuplicateInput { input_index });
         }
+    }
+
+    let mut input_value = 0u64;
+    let interpreter = Interpreter;
+    for (input_index, input) in tx.input.iter().enumerate() {
         let prevout = prevouts
             .lookup(&input.previous_output)
             .ok_or(ConsensusError::MissingPrevout { input_index })?;
