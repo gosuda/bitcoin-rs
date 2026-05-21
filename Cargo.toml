@@ -41,8 +41,8 @@ authors      = ["bitcoin-rs contributors"]
 
 # Internal crates
 bitcoin-rs-primitives = { path = "crates/primitives", version = "0.1.0" }
-bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.1.0" }
-bitcoin-rs-script     = { path = "crates/script",     version = "0.1.0" }
+bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.1.0", default-features = false }
+bitcoin-rs-script     = { path = "crates/script",     version = "0.1.0", default-features = false }
 bitcoin-rs-storage    = { path = "crates/storage",    version = "0.1.0", default-features = false }
 bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.1.0" }
 bitcoin-rs-utreexo    = { path = "crates/utreexo",    version = "0.1.0" }
@@ -64,8 +64,11 @@ mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
 
 # --- Bitcoin ecosystem --------------------------------------------------------
 # bitcoin 0.32 line; 0.33 is still beta. `default = [std, secp-recovery]`.
+# Keep `bitcoinconsensus-std` out of the workspace-wide dependency: the
+# kernel CI links bitcoinkernel, and both native Core archives export
+# overlapping symbols. Script validation opts into bitcoinconsensus explicitly.
 bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
-    "std", "secp-recovery", "serde", "rand-std", "bitcoinconsensus-std",
+    "std", "secp-recovery", "serde", "rand-std",
 ] }
 
 # bitcoinkernel: latest stable is 0.2.0 (corrected from plan claim of 0.1).

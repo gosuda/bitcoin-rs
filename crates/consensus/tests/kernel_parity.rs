@@ -1,4 +1,12 @@
-//! Kernel parity smoke tests; full execution runs only in the kernel CI job.
+//! Kernel smoke tests; ignored locally and executed by the kernel CI job.
+
+#[cfg(feature = "kernel")]
+#[test]
+#[ignore = "kernel parity requires libboost-dev and the kernel CI job"]
+fn kernel_context_builds_for_mainnet() {
+    bitcoin_rs_consensus::kernel::KernelContext::new(bitcoin::Network::Bitcoin)
+        .unwrap_or_else(|error| panic!("kernel context should build: {error}"));
+}
 
 #[cfg(feature = "kernel")]
 #[test]

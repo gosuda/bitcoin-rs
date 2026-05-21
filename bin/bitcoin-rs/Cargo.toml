@@ -21,11 +21,12 @@ anyhow.workspace = true
 bitcoin-rs-node.workspace = true
 
 [features]
-default = ["rocksdb", "fjall", "redb", "mdbx"]
+default = ["rocksdb", "fjall", "redb", "mdbx", "bitcoinconsensus"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]
 fjall = ["bitcoin-rs-node/fjall"]
 redb = ["bitcoin-rs-node/redb"]
 mdbx = ["bitcoin-rs-node/mdbx"]
+bitcoinconsensus = ["bitcoin-rs-node/bitcoinconsensus"]
 kernel = ["bitcoin-rs-node/kernel"]
 utreexo = ["bitcoin-rs-node/utreexo"]
 

@@ -1,6 +1,8 @@
+#[cfg(feature = "bitcoinconsensus")]
+use bitcoin::consensus::encode;
 use bitcoin::hashes::Hash as _;
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
-use bitcoin::{Script, ScriptBuf, Witness, consensus::encode};
+use bitcoin::{Script, ScriptBuf, Witness};
 use bitcoin_rs_primitives::TxOut;
 use thiserror::Error;
 
@@ -211,7 +213,8 @@ pub enum ScriptError {
     },
 }
 
-/// Thin public wrapper around the canonical `bitcoin` script verification entry point.
+/// Public script verifier. Legacy and segwit-v0 spends use bitcoinconsensus when
+/// that backend is enabled; taproot key-path spends use the local BIP341 path.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Interpreter;
 
@@ -219,7 +222,7 @@ impl Interpreter {
     /// Number of taproot inputs at which block validation uses the batch Schnorr path.
     pub const BATCH_SCHNORR_THRESHOLD: usize = 16;
 
-    /// Executes a script spend by delegating to `bitcoin::Script::verify_with_flags`.
+    /// Executes a script spend through the enabled script backend.
     pub fn execute(
         &self,
         script_pubkey: &[u8],
@@ -247,17 +250,41 @@ impl Interpreter {
             return verify_taproot_keypath(&spending, input_idx, prevout, script, witness);
         }
 
-        let serialized = encode::serialize(&spending);
-        script
-            .verify_with_flags(
-                input_idx,
-                prevout.value,
-                serialized.as_slice(),
-                flags.consensus_bits(),
-            )
-            .map(|()| true)
-            .map_err(|error| ScriptError::Verification(error.to_string()))
+        verify_with_bitcoinconsensus(input_idx, prevout, &spending, script, flags)
     }
+}
+
+#[cfg(feature = "bitcoinconsensus")]
+fn verify_with_bitcoinconsensus(
+    input_idx: usize,
+    prevout: &TxOut,
+    spending: &bitcoin::Transaction,
+    script: &Script,
+    flags: VerifyFlags,
+) -> Result<bool, ScriptError> {
+    let serialized = encode::serialize(spending);
+    script
+        .verify_with_flags(
+            input_idx,
+            prevout.value,
+            serialized.as_slice(),
+            flags.consensus_bits(),
+        )
+        .map(|()| true)
+        .map_err(|error| ScriptError::Verification(error.to_string()))
+}
+
+#[cfg(not(feature = "bitcoinconsensus"))]
+fn verify_with_bitcoinconsensus(
+    _input_idx: usize,
+    _prevout: &TxOut,
+    _spending: &bitcoin::Transaction,
+    _script: &Script,
+    _flags: VerifyFlags,
+) -> Result<bool, ScriptError> {
+    Err(ScriptError::Verification(
+        "bitcoinconsensus backend is disabled".to_owned(),
+    ))
 }
 
 fn verify_taproot_keypath(

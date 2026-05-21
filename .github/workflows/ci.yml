@@ -11,7 +11,7 @@ env:
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
   # Default storage features compatible with MSRV 1.95 + a standard Linux host.
-  PORTABLE_FEATURES: "rocksdb,fjall,redb,mdbx"
+  PORTABLE_FEATURES: "rocksdb,fjall,redb,mdbx,bitcoinconsensus"
 
 jobs:
   wallet-no-seckey:
@@ -74,7 +74,9 @@ jobs:
 
   # Heavy sys-crate gate:
   # - libboost-dev for libbitcoinkernel-sys
-  # Runs the G3 kernel-parity gate on top of the default 4-backend storage matrix.
+  # Builds and smoke-tests the bitcoinkernel-backed consensus package without
+  # libbitcoinconsensus; both native Core archives export overlapping symbols and
+  # cannot share a single Rust test binary.
   kernel-only:
     runs-on: ubuntu-latest
     steps:
@@ -83,5 +85,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: |
-          cargo test --workspace --no-fail-fast \
-            --no-default-features --features "kernel,${PORTABLE_FEATURES}"
+          cargo test -p bitcoin-rs-consensus --no-fail-fast \
+            --no-default-features --features kernel -- --include-ignored

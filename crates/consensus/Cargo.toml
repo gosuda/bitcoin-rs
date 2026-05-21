@@ -12,7 +12,8 @@ description = "bitcoin-rs :: consensus"
 workspace = true
 
 [features]
-default = []
+default = ["bitcoinconsensus"]
+bitcoinconsensus = ["bitcoin-rs-script/bitcoinconsensus"]
 kernel = ["dep:bitcoinkernel"]
 rocksdb = []
 fjall = []

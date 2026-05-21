@@ -77,6 +77,10 @@ mdbx = [
     "bitcoin-rs-utxo/mdbx",
     "bitcoin-rs-wallet/mdbx",
 ]
+bitcoinconsensus = [
+    "bitcoin-rs-consensus/bitcoinconsensus",
+    "bitcoin-rs-script/bitcoinconsensus",
+]
 kernel = ["bitcoin-rs-consensus/kernel"]
 utreexo = ["dep:bitcoin-rs-utreexo"]
 prometheus-http = ["metrics-exporter-prometheus/http-listener"]

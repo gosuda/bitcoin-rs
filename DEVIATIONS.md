@@ -71,18 +71,19 @@ One workspace dependency still needs host packages beyond a clean Rust toolchain
 ### MDBX un-gated after MSRV 1.92
 
 `signet-libmdbx` 0.8.3 previously required `signet-mdbx-sys@0.1.0`, whose
-MSRV is 1.92. The workspace MSRV is now 1.92.0, so MDBX no longer needs an
-elevated-toolchain CI lane.
+minimum supported Rust version is 1.92. The workspace toolchain is now 1.95.0,
+so MDBX no longer needs an elevated-toolchain CI lane.
 
 ### Resulting feature flags
 
 - `crates/consensus`: `kernel` feature → enables `bitcoinkernel` dep + the dual-path validator. **Default off.**
 - `crates/storage`: `rocksdb`, `fjall`, `redb`, `mdbx` features. Default: `rocksdb`.
-- Workspace CI: `clippy`/`test` jobs build with `--no-default-features --features rocksdb,fjall,redb,mdbx` under MSRV 1.92.0. The `kernel-only` job installs `libboost-dev` and adds `kernel` on top of that portable feature set.
+- Current CI uses Rust 1.95.0 after the workspace MSRV bump; the 2026-05-19 dependency audit above records the older PLAN.md 1.85.0 snapshot.
+- Workspace CI: `clippy`/`test` jobs build with `--no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus` under Rust 1.95.0. The `kernel-only` job installs `libboost-dev` and builds `bitcoin-rs-consensus` with `--no-default-features --features kernel -- --include-ignored`, because `bitcoinkernel` and `bitcoinconsensus` cannot be linked into the same Rust test binary.
 
 ### What this means for PLAN.md gates
 
-- **G3 (kernel parity)** still runs in CI, but only on the `kernel-only` job — the gate is gated on the kernel feature, not on every PR.
+- **G3 (kernel parity)** has a CI build/smoke gate on the `kernel-only` job; the 100k-block parity loop remains the documented gate target until real mainnet fixture plumbing lands.
 - **G7 (4-backend equivalence)** now runs in the default portable CI matrix: rocksdb ↔ fjall ↔ redb ↔ mdbx.
 - All other gates (G1, G2, G4, G5, G6, G8 – G14) are unaffected.
 

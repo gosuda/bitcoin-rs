@@ -14,6 +14,7 @@ use proptest::prelude::*;
 
 proptest! {
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn random_valid_p2pkh_spends_execute(byte in 1u8..=127) {
         let Some(fixture) = signed_p2pkh(byte) else {
             return Ok(());
@@ -32,6 +33,7 @@ proptest! {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn random_valid_p2wpkh_spends_execute(byte in 1u8..=127) {
         let Some(fixture) = signed_p2wpkh(byte) else {
             return Ok(());
@@ -99,6 +101,7 @@ proptest! {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn random_invalid_empty_witness_fails_for_p2wpkh(byte in 1u8..=127) {
         let Some(mut fixture) = signed_p2wpkh(byte) else {
             return Ok(());
