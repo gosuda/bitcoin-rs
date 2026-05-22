@@ -77,6 +77,7 @@ pub struct ApplyHandles {
     /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
     pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
+    pub(crate) g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
 }
 
 impl ApplyHandles {
@@ -111,6 +112,7 @@ impl ApplyHandles {
             transactions,
             zmq_publisher,
             block_body_store: None,
+            g2_muhash_sampler: None,
         }
     }
 
@@ -394,6 +396,17 @@ pub fn apply_block(
         handles.zmq_publisher.publish_rawtx(&rawtx_bytes);
     }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
+    if let Some(sampler) = &handles.g2_muhash_sampler {
+        let snapshot = handles.coin_stats.snapshot();
+        if let Err(error) = sampler.record(&snapshot) {
+            metrics::counter!("node.apply_block.g2_muhash_sample_errors").increment(1);
+            tracing::warn!(
+                height,
+                %error,
+                "G2 MuHash sample emission failed after tip publication; evidence file incomplete"
+            );
+        }
+    }
     Ok(tip)
 }
 

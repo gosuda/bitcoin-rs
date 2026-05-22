@@ -619,6 +619,7 @@ pub struct NodeState {
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
+    g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -651,6 +652,14 @@ impl NodeState {
     #[allow(clippy::arc_with_non_send_sync)]
     #[allow(clippy::too_many_lines)]
     pub fn open(config: Config) -> Result<Self> {
+        config.validate()?;
+        let g2_muhash_sampler = config
+            .g2_muhash_samples
+            .clone()
+            .map(|path| crate::g2_muhash::G2MuhashSampler::open(path, config.g2_muhash_tip_height))
+            .transpose()
+            .context("open G2 MuHash sample writer")?
+            .map(Arc::new);
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let storage = NodeStorage::open(&config)?;
@@ -715,6 +724,7 @@ impl NodeState {
                 transactions: Arc::clone(&transactions),
                 zmq_publisher: Arc::clone(&zmq_publisher),
                 block_body_store: (config.prune_target_mb > 0).then(|| storage.block_body_store()),
+                g2_muhash_sampler: g2_muhash_sampler.clone(),
             },
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
@@ -744,6 +754,7 @@ impl NodeState {
             prune_service,
             zmq_publisher,
             active_zmq_notifications,
+            g2_muhash_sampler,
             mempool,
             chain_tip,
             applied_tip,
@@ -1022,6 +1033,7 @@ impl NodeState {
                 .prune_service
                 .is_some()
                 .then(|| self.storage.block_body_store()),
+            g2_muhash_sampler: self.g2_muhash_sampler.clone(),
         }
     }
 

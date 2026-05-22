@@ -14,7 +14,7 @@ use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_node::{BlockSync, Network, apply::ApplyHandles};
+use bitcoin_rs_node::{BlockSync, Config, Network, apply::ApplyHandles, state::NodeState};
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::{Hash256, OutPoint};
 use bitcoin_rs_utxo::UtxoSet;
@@ -148,6 +148,52 @@ fn tick_applies_inbound_blocks_before_sync_selection() -> Result<(), Box<dyn std
     assert_eq!(applied.height, 0);
     assert_eq!(applied.hash, Network::Regtest.genesis_block_hash());
     assert_eq!(block_tree.read().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn tick_writes_g2_muhash_sample_for_applied_genesis() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let samples_path = temp.path().join("g2.samples");
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.data_dir = temp.path().join("node");
+    config.storage_backend = "redb".to_owned();
+    config.p2p_listen.clear();
+    config.g2_muhash_samples = Some(samples_path.clone());
+    config.g2_muhash_tip_height = Some(1);
+    let state = NodeState::open(config)?;
+
+    state.sync().tick();
+
+    let hash = state
+        .coin_stats()
+        .snapshot()
+        .muhash
+        .finalize_hash()
+        .to_string_be();
+    assert_eq!(std::fs::read_to_string(&samples_path)?, format!("0:{hash}"));
+    Ok(())
+}
+
+#[test]
+fn node_state_open_rejects_g2_tip_height_without_sample_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.data_dir = temp.path().join("node");
+    config.storage_backend = "redb".to_owned();
+    config.p2p_listen.clear();
+    config.g2_muhash_tip_height = Some(10_000);
+
+    let Err(error) = NodeState::open(config) else {
+        panic!("G2 tip height without sample path must fail");
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("g2_muhash_tip_height requires g2_muhash_samples")
+    );
     Ok(())
 }
 
