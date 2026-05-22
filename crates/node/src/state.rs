@@ -653,6 +653,8 @@ impl NodeState {
     #[allow(clippy::too_many_lines)]
     pub fn open(config: Config) -> Result<Self> {
         config.validate()?;
+        std::fs::create_dir_all(&config.data_dir)
+            .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let g2_muhash_sampler = config
             .g2_muhash_samples
             .clone()
@@ -660,8 +662,6 @@ impl NodeState {
             .transpose()
             .context("open G2 MuHash sample writer")?
             .map(Arc::new);
-        std::fs::create_dir_all(&config.data_dir)
-            .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let storage = NodeStorage::open(&config)?;
         let (tx_index, tx_index_storage) = open_tx_index(&config)?;
         let tx_index_storage = Arc::new(tx_index_storage);
