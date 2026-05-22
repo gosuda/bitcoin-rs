@@ -10,7 +10,7 @@ use crate::wire::{Message, PeerError};
 /// Maximum headers returned by one `headers` response.
 pub const MAX_HEADERS_RESPONSE: usize = 2_000;
 /// Maximum block locator hashes accepted in one locator-based request.
-pub const MAX_LOCATOR_HASHES: usize = 101;
+pub use crate::wire::MAX_LOCATOR_HASHES;
 
 /// Blocks and missing inventory resolved for one `getdata` request.
 #[derive(Debug, Default)]

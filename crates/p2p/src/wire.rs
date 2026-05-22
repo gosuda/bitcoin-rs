@@ -22,6 +22,8 @@ pub const PROTOCOL_VERSION: u32 = 70_016;
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
 /// Maximum number of headers accepted in one `headers` message.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
+/// Maximum block locator hashes accepted in one locator-based request.
+pub const MAX_LOCATOR_HASHES: usize = 101;
 const HEADER_LEN: usize = 24;
 const COMMAND_LEN: usize = 12;
 
@@ -138,8 +140,8 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
         "inv" => Message::Inv(decode_inventory(payload)?),
         "getdata" => Message::GetData(decode_inventory(payload)?),
         "notfound" => Message::NotFound(decode_inventory(payload)?),
-        "getblocks" => Message::GetBlocks(encode::deserialize::<GetBlocksMessage>(payload)?),
-        "getheaders" => Message::GetHeaders(encode::deserialize::<GetHeadersMessage>(payload)?),
+        "getblocks" => Message::GetBlocks(decode_getblocks(payload)?),
+        "getheaders" => Message::GetHeaders(decode_getheaders(payload)?),
         "mempool" => empty_payload(payload, Message::MemPool)?,
         "tx" => Message::Tx(encode::deserialize::<bitcoin::Transaction>(payload)?),
         "block" => Message::Block(encode::deserialize::<bitcoin::Block>(payload)?),
@@ -195,6 +197,56 @@ fn decode_inventory(payload: &[u8]) -> Result<Vec<Inventory>, PeerError> {
         ));
     }
     Ok(inventory)
+}
+
+fn decode_getblocks(payload: &[u8]) -> Result<GetBlocksMessage, PeerError> {
+    let (version, locator_hashes, stop_hash) = decode_locator_payload(payload, "getblocks")?;
+    Ok(GetBlocksMessage {
+        version,
+        locator_hashes,
+        stop_hash,
+    })
+}
+
+fn decode_getheaders(payload: &[u8]) -> Result<GetHeadersMessage, PeerError> {
+    let (version, locator_hashes, stop_hash) = decode_locator_payload(payload, "getheaders")?;
+    Ok(GetHeadersMessage {
+        version,
+        locator_hashes,
+        stop_hash,
+    })
+}
+
+fn decode_locator_payload(
+    payload: &[u8],
+    command: &'static str,
+) -> Result<(u32, Vec<bitcoin::BlockHash>, bitcoin::BlockHash), PeerError> {
+    let mut reader = payload;
+    let version = u32::consensus_decode(&mut reader)?;
+    let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    if capacity > MAX_LOCATOR_HASHES {
+        return Err(PeerError::Protocol(match command {
+            "getblocks" => "getblocks locator too large",
+            "getheaders" => "getheaders locator too large",
+            _ => "locator too large",
+        }));
+    }
+
+    let mut locator_hashes = Vec::with_capacity(capacity);
+    for _ in 0..count {
+        locator_hashes.push(bitcoin::BlockHash::consensus_decode(&mut reader)?);
+    }
+    let stop_hash = bitcoin::BlockHash::consensus_decode(&mut reader)?;
+    if !reader.is_empty() {
+        return Err(PeerError::Protocol(match command {
+            "getblocks" => "trailing bytes after getblocks payload",
+            "getheaders" => "trailing bytes after getheaders payload",
+            _ => "trailing bytes after locator payload",
+        }));
+    }
+
+    Ok((version, locator_hashes, stop_hash))
 }
 
 fn decode_headers(payload: &[u8]) -> Result<Vec<bitcoin::block::Header>, PeerError> {

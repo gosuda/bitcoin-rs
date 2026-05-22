@@ -18,7 +18,7 @@ use bitcoin::pow::CompactTarget;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_p2p::handshake::version_message;
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
-use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
+use bitcoin_rs_p2p::wire::{MAX_LOCATOR_HASHES, PeerError, read_message, write_message};
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -139,6 +139,66 @@ fn accepts_notfound_message_with_max_vectors() -> Result<(), PeerError> {
 }
 
 #[test]
+fn rejects_getheaders_message_with_more_than_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("getheaders locator hash count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("getheaders locator too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn rejects_getblocks_message_with_more_than_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("getblocks locator hash count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("getblocks locator too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepts_getheaders_message_with_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::GetHeaders(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
+    );
+    Ok(())
+}
+
+#[test]
+fn accepts_getblocks_message_with_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::GetBlocks(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
+    );
+    Ok(())
+}
+
+#[test]
 fn rejects_headers_message_with_more_than_2000_headers() -> Result<(), PeerError> {
     let frame = headers_frame(2_001)?;
     let mut cursor = Cursor::new(frame);
@@ -227,6 +287,28 @@ fn inventory_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
             .consensus_encode(&mut payload)
             .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
     }
+
+    message_frame(command, &payload)
+}
+
+fn locator_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    bitcoin::p2p::PROTOCOL_VERSION
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let locator = BlockHash::from_byte_array([8u8; 32]);
+    for _ in 0..count {
+        locator
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
 
     message_frame(command, &payload)
 }
