@@ -1,5 +1,6 @@
 //! Wire codec message round trips.
 use std::io::Cursor;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use bitcoin::TxMerkleNode;
 use bitcoin::Txid;
@@ -11,6 +12,8 @@ use bitcoin::block::{Header, Version};
 use bitcoin::consensus::encode::{Encodable, VarInt};
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
+use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
@@ -18,7 +21,9 @@ use bitcoin::pow::CompactTarget;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_p2p::handshake::version_message;
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
-use bitcoin_rs_p2p::wire::{MAX_LOCATOR_HASHES, PeerError, read_message, write_message};
+use bitcoin_rs_p2p::wire::{
+    MAX_ADDR_MESSAGE_COUNT, MAX_LOCATOR_HASHES, PeerError, read_message, write_message,
+};
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -134,6 +139,63 @@ fn accepts_notfound_message_with_max_vectors() -> Result<(), PeerError> {
 
     assert!(
         matches!(decoded, NetworkMessage::NotFound(inventory) if inventory.len() == MAX_INV_PER_MSG)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_addr_message_with_more_than_max_addresses() -> Result<(), PeerError> {
+    let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("addr count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, PeerError::Protocol("addr count too large")));
+    Ok(())
+}
+
+#[test]
+fn accepts_addr_message_with_max_addresses() -> Result<(), PeerError> {
+    let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::Addr(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_addrv2_message_with_more_than_max_addresses() -> Result<(), PeerError> {
+    let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("addrv2 count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("addrv2 count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepts_addrv2_message_with_max_addresses() -> Result<(), PeerError> {
+    let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::AddrV2(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
     );
     Ok(())
 }
@@ -289,6 +351,44 @@ fn inventory_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
     }
 
     message_frame(command, &payload)
+}
+
+fn addr_frame(count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let socket = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8333));
+    let address = (0_u32, Address::new(&socket, ServiceFlags::NETWORK));
+    for _ in 0..count {
+        address
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+
+    message_frame(b"addr", &payload)
+}
+
+fn addrv2_frame(count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let address = AddrV2Message {
+        time: 0,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Ipv4(Ipv4Addr::LOCALHOST),
+        port: 8333,
+    };
+    for _ in 0..count {
+        address
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+
+    message_frame(b"addrv2", &payload)
 }
 
 fn locator_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
