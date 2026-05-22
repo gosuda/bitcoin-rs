@@ -74,16 +74,8 @@ redb = [
     "bitcoin-rs-wallet/redb",
 ]
 mdbx = [
-    "bitcoin-rs-coinstats/mdbx",
-    "bitcoin-rs-electrum/mdbx",
     "bitcoin-rs-filters/mdbx",
     "bitcoin-rs-index/mdbx",
-    "bitcoin-rs-mining/mdbx",
-    "bitcoin-rs-pruning/mdbx",
-    "bitcoin-rs-rpc/mdbx",
-    "bitcoin-rs-storage/mdbx",
-    "bitcoin-rs-utxo/mdbx",
-    "bitcoin-rs-wallet/mdbx",
 ]
 bitcoinconsensus = [
     "bitcoin-rs-consensus/bitcoinconsensus",
