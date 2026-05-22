@@ -128,6 +128,9 @@ pub enum ConsensusError {
         /// Transaction index.
         tx_index: usize,
     },
+    /// Block merkle tree has a duplicate subtree mutation.
+    #[error("block merkle tree contains a duplicate transaction mutation")]
+    MerkleMutation,
     /// Block merkle root does not match transaction ids.
     #[error("block merkle root mismatch")]
     MerkleRoot,
