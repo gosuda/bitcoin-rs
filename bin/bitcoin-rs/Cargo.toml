@@ -20,6 +20,9 @@ mimalloc.workspace = true
 anyhow.workspace = true
 bitcoin-rs-node.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = ["rocksdb", "fjall", "redb", "mdbx", "bitcoinconsensus"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]

@@ -33,7 +33,8 @@ struct G2Evidence {
 /// `cargo test -p bitcoin-rs --test g02_ibd_muhash_parity -- --ignored --nocapture`
 /// with externally collected mainnet IBD `MuHash` samples from bitcoin-rs and
 /// `bitcoin-cli gettxoutsetinfo "muhash"` at height 0, every 10 000 blocks,
-/// and the IBD tip height.
+/// and the IBD tip height. Core-side samples can be normalized with
+/// `scripts/collect-g2-bitcoind-muhash-samples.sh`.
 #[test]
 #[ignore = "requires externally collected full IBD + bitcoind gettxoutsetinfo evidence"]
 fn full_ibd_utxo_root_parity_muhash() {

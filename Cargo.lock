@@ -255,6 +255,7 @@ dependencies = [
  "anyhow",
  "bitcoin-rs-node",
  "mimalloc",
+ "tempfile",
 ]
 
 [[package]]
