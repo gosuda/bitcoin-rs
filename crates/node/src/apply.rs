@@ -495,12 +495,14 @@ fn verify_block_transactions(
     flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     // Consensus connects transactions in block order. A later transaction may
-    // spend a non-coinbase output created earlier in the same block; a frozen
-    // pre-block view rejects real mainnet blocks such as height 546.
+    // spend an output created earlier in the same block. Coinbase outputs enter
+    // this view too, so maturity failures stay in the maturity pass instead of
+    // degrading into bogus missing-prevout script checks.
     let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
     for tx in &block.txdata {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+            view.add_outputs(tx, height)?;
             continue;
         }
         bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
@@ -1163,6 +1165,33 @@ mod consensus_rule_tests {
         let block = block_with_transactions(vec![coinbase, spend]);
         let handles = empty_apply_handles();
 
+        let error = match check_coinbase_maturity(&handles, &block, 1) {
+            Ok(()) => panic!("same-block coinbase spend must fail maturity"),
+            Err(error) => error,
+        };
+        assert_bip_error(&error, "COINBASE_MATURITY");
+    }
+
+    #[test]
+    fn verify_block_transactions_defers_same_block_coinbase_spend_to_maturity() {
+        let mut coinbase = coinbase_transaction(0x65);
+        coinbase.output[0].script_pubkey = op_true_script();
+        let coinbase_outpoint = bitcoin::OutPoint {
+            txid: coinbase.compute_txid(),
+            vout: 0,
+        };
+        let spend = spending_transaction_to_script(
+            coinbase_outpoint,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let block = block_with_transactions(vec![coinbase, spend]);
+        let handles = empty_apply_handles();
+
+        assert!(
+            verify_block_transactions(&handles, &block, 1, 0, bitcoin_rs_script::VerifyFlags::NONE)
+                .is_ok()
+        );
         let error = match check_coinbase_maturity(&handles, &block, 1) {
             Ok(()) => panic!("same-block coinbase spend must fail maturity"),
             Err(error) => error,
