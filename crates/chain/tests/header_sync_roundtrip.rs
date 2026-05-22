@@ -5,6 +5,7 @@ use bitcoin::{
     hashes::Hash as _,
     pow::CompactTarget,
 };
+use bitcoin_rs_chain::header_sync::validate_header_nbits;
 use bitcoin_rs_chain::{BlockTree, ChainError, Network, NodeStatus, accept_headers};
 use bitcoin_rs_primitives::Hash256;
 
@@ -86,6 +87,48 @@ fn rejects_non_retarget_header_that_does_not_inherit_parent_bits_before_insertio
     Ok(())
 }
 
+#[test]
+fn rejects_retarget_header_that_keeps_parent_bits_when_timespan_clamps()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let bits = CompactTarget::from_consensus(0x1d00_ffff);
+    let interval = Network::Mainnet.retarget_interval();
+    let mut prev_hash = BlockHash::all_zeros();
+    let mut parent = None;
+    let mut parent_id = None;
+
+    for height in 0..interval {
+        let header = raw_header_with(prev_hash, height, height, bits);
+        let id = tree.insert_node(parent, header, NodeStatus::HeaderValid)?;
+        prev_hash = header.block_hash();
+        parent = Some(id);
+        parent_id = Some(id);
+    }
+
+    let parent_id = parent_id.ok_or("missing retarget parent")?;
+    let child = raw_header_with(prev_hash, interval, interval, bits);
+    let err = match validate_header_nbits(&tree, parent_id, &child, Network::Mainnet) {
+        Ok(()) => panic!("retarget header must use computed nBits, not parent nBits"),
+        Err(error) => error,
+    };
+
+    let ChainError::NbitsMismatch {
+        actual,
+        expected,
+        height,
+    } = err
+    else {
+        panic!("expected nBits mismatch, got {err:?}");
+    };
+    assert_eq!(actual, bits.to_consensus());
+    assert_eq!(height, interval);
+    assert_ne!(
+        expected, actual,
+        "clamped retarget calculation must differ from parent nBits"
+    );
+    Ok(())
+}
+
 fn mine_headers(count: u32) -> Vec<BlockHeader> {
     let mut headers = Vec::new();
     let genesis = genesis_header();
@@ -132,4 +175,22 @@ fn mine_header_with(
         header.nonce = header.nonce.wrapping_add(1);
     }
     header
+}
+
+fn raw_header_with(
+    prev_blockhash: BlockHash,
+    height: u32,
+    time: u32,
+    bits: CompactTarget,
+) -> BlockHeader {
+    let mut merkle = [0_u8; 32];
+    merkle[..4].copy_from_slice(&height.to_le_bytes());
+    BlockHeader {
+        version: Version::ONE,
+        prev_blockhash,
+        merkle_root: TxMerkleNode::from_byte_array(merkle),
+        time,
+        bits,
+        nonce: 0,
+    }
 }

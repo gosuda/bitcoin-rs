@@ -188,6 +188,56 @@ mod tests {
     }
 
     #[test]
+    fn import_rejects_non_retarget_child_with_changed_nbits() -> Result<()> {
+        let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
+        let mut block = Block::consensus_decode(&mut cursor)?;
+        block.header.prev_blockhash = block.block_hash();
+        block.header.bits = bitcoin::CompactTarget::from_consensus(0x207e_ffff);
+        block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
+        mine_block_to_declared_target(&mut block)?;
+        let block_bytes = encode_block(&block)?;
+
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let _genesis = import_block(&state, &genesis_bytes)?;
+
+        let Err(error) = import_block(&state, &block_bytes) else {
+            anyhow::bail!("non-retarget child with changed nBits should be rejected");
+        };
+
+        assert!(
+            error.chain().any(|cause| {
+                matches!(
+                    cause.downcast_ref::<crate::state::ApplyError>(),
+                    Some(crate::state::ApplyError::NbitsNonRetargetMismatch {
+                        actual: 0x207e_ffff,
+                        expected: 0x207f_ffff,
+                        height: 1,
+                    })
+                )
+            }),
+            "error chain should contain nBits mismatch rejection: {error:?}"
+        );
+        assert_eq!(
+            state
+                .chain_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("genesis tip should remain published"))?
+                .height,
+            0,
+            "rejected nBits mismatch must not advance chain tip"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn import_two_blocks_in_sequence_advances_height_to_one() -> Result<()> {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
