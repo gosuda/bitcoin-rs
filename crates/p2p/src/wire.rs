@@ -18,6 +18,8 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: u32 = 70_016;
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
+/// Maximum number of headers accepted in one `headers` message.
+pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 const HEADER_LEN: usize = 24;
 const COMMAND_LEN: usize = 12;
 
@@ -178,7 +180,10 @@ fn decode_headers(payload: &[u8]) -> Result<Vec<bitcoin::block::Header>, PeerErr
     let mut reader = payload;
     let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
     let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
-    let mut headers = Vec::with_capacity(capacity.min(2_000));
+    if capacity > MAX_HEADERS_MESSAGE_COUNT {
+        return Err(PeerError::Protocol("headers count too large"));
+    }
+    let mut headers = Vec::with_capacity(capacity);
     for _ in 0..count {
         headers.push(bitcoin::block::Header::consensus_decode(&mut reader)?);
         let tx_count = u8::consensus_decode(&mut reader)?;
