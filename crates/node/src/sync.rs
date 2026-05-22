@@ -271,12 +271,9 @@ impl BlockSync {
         }
 
         let count = hashes.len();
-        for hash in &hashes {
-            pending.insert(*hash, now);
-        }
         drop(pending);
         let inventory: Vec<Inventory> = hashes
-            .into_iter()
+            .iter()
             .map(|hash| Inventory::WitnessBlock(BlockHash::from_byte_array(hash.to_le_bytes())))
             .collect();
         let msg = NetworkMessage::GetData(inventory);
@@ -298,6 +295,10 @@ impl BlockSync {
                 "block sync: outbound channel disconnected (getdata)"
             );
             return;
+        }
+        let mut pending = self.pending_blocks.lock();
+        for hash in &hashes {
+            pending.insert(*hash, now);
         }
         tracing::debug!(
             peer_addr = %sync_peer_addr,
@@ -631,6 +632,149 @@ mod tests {
                 Err(std::io::Error::other("outbound channel disconnected").into())
             }
         }
+    }
+
+    #[test]
+    fn missing_outbound_channel_does_not_mark_blocks_pending_and_retries_when_channel_appears()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(3)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.pending_blocks.lock().is_empty());
+
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        let first = rx.try_recv()?;
+        let NetworkMessage::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected retry getdata").into());
+        };
+        let requested = witness_block_inventory(inventory)?;
+        assert_eq!(requested, expected);
+        assert_eq!(sync.pending_blocks.lock().len(), expected.len());
+        Ok(())
+    }
+
+    #[test]
+    fn disconnected_outbound_channel_does_not_mark_blocks_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, _expected) =
+            sync_with_header_chain(3)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        drop(rx);
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.pending_blocks.lock().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn successful_getdata_send_marks_requested_blocks_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(3)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let first = rx.try_recv()?;
+        let NetworkMessage::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected);
+
+        let pending = sync.pending_blocks.lock();
+        assert_eq!(pending.len(), expected.len());
+        for hash in expected {
+            let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&hash.to_byte_array());
+            assert!(pending.contains_key(&hash));
+        }
+        Ok(())
+    }
+
+    type SyncFixture = (
+        BlockSync,
+        Arc<RwLock<Vec<PeerInfo>>>,
+        Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
+        Arc<RwLock<BlockTree>>,
+        Arc<ArcSwapOption<TipSnapshot>>,
+        Vec<BlockHash>,
+    );
+
+    fn sync_with_header_chain(height: u32) -> Result<SyncFixture, Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        let mut expected = Vec::new();
+
+        for height in 1_u32..=height {
+            let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            expected.push(BlockHash::from_byte_array(
+                tree.node(tip_id)?.hash.to_le_bytes(),
+            ));
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+
+        Ok((
+            sync,
+            peers,
+            peer_outbound,
+            block_tree,
+            applied_tip,
+            expected,
+        ))
+    }
+
+    fn witness_block_inventory(
+        inventory: Vec<Inventory>,
+    ) -> Result<Vec<BlockHash>, Box<dyn std::error::Error>> {
+        inventory
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(hash),
+                _ => Err(std::io::Error::other("expected witness block inventory").into()),
+            })
+            .collect()
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
