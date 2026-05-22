@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -32,6 +33,23 @@ pub struct PeerCapabilities {
     pub addr_v2: bool,
 }
 
+/// Remote BIP152 compact-block negotiation preference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactBlockNegotiation {
+    /// Whether the peer requested compact-block announcements.
+    pub remote_send_compact: Option<bool>,
+    /// Compact-block protocol version requested by the peer.
+    pub remote_version: Option<u64>,
+}
+
+impl CompactBlockNegotiation {
+    /// Record the latest remote `sendcmpct` preference.
+    pub const fn record_remote_preference(&mut self, preference: &SendCmpct) {
+        self.remote_send_compact = Some(preference.send_compact);
+        self.remote_version = Some(preference.version);
+    }
+}
+
 /// One peer connection and its negotiated protocol state.
 #[derive(Debug)]
 pub struct Peer<S> {
@@ -51,6 +69,8 @@ pub struct Peer<S> {
     pub received_verack: bool,
     /// Local view of negotiated feature flags.
     pub capabilities: PeerCapabilities,
+    /// BIP152 compact-block negotiation state for the peer.
+    pub compact_blocks: CompactBlockNegotiation,
     /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
 }
@@ -68,6 +88,7 @@ impl<S> Peer<S> {
             remote_version: None,
             received_verack: false,
             capabilities: PeerCapabilities::default(),
+            compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
         }
     }
@@ -84,6 +105,7 @@ impl<S> Peer<S> {
             remote_version: None,
             received_verack: false,
             capabilities: PeerCapabilities::default(),
+            compact_blocks: CompactBlockNegotiation::default(),
             wtxid_relay: WtxidRelayState::default(),
         }
     }
