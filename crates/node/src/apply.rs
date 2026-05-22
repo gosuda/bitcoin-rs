@@ -254,12 +254,7 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
-    let filter_bytes = compute_basic_filter(block, handles).unwrap_or_else(|| {
-        tracing::trace!(
-            "BIP158 filter generation unavailable; storing empty filter as placeholder"
-        );
-        Vec::new()
-    });
+    let filter_bytes = compute_basic_filter(block, handles, block_hash, height)?;
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
@@ -339,25 +334,27 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.tx_index_ingest_seconds")
         .record(tx_index_ingest_dur.as_secs_f64());
     let filter_started = quanta::Instant::now();
-    let prev_filter_header = handles
-        .applied_tip
-        .load_full()
-        .and_then(|tip| handles.filter_index.filter_header(tip.hash).ok().flatten())
-        .unwrap_or_default();
-    match handles
-        .filter_index
-        .put_filter(block_hash, prev_filter_header, &filter_bytes)
-    {
-        Ok(filter_header) => {
-            tracing::debug!(
-                height,
-                %filter_header,
-                bytes = filter_bytes.len(),
-                "filter_index stored block filter"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(height, %error, "filter_index failed to store block filter");
+    if let Some(filter_bytes) = filter_bytes {
+        let prev_filter_header = handles
+            .applied_tip
+            .load_full()
+            .and_then(|tip| handles.filter_index.filter_header(tip.hash).ok().flatten())
+            .unwrap_or_default();
+        match handles
+            .filter_index
+            .put_filter(block_hash, prev_filter_header, &filter_bytes)
+        {
+            Ok(filter_header) => {
+                tracing::debug!(
+                    height,
+                    %filter_header,
+                    bytes = filter_bytes.len(),
+                    "filter_index stored block filter"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(height, %error, "filter_index failed to store block filter");
+            }
         }
     }
     let filter_dur = filter_started.elapsed();
@@ -469,22 +466,52 @@ fn applied_header_tip(
     })
 }
 
-fn compute_basic_filter(block: &bitcoin::Block, handles: &ApplyHandles) -> Option<Vec<u8>> {
+fn compute_basic_filter(
+    block: &bitcoin::Block,
+    handles: &ApplyHandles,
+    block_hash: bitcoin_rs_primitives::Hash256,
+    height: u32,
+) -> core::result::Result<Option<Vec<u8>>, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
-    let filter = bitcoin::bip158::BlockFilter::new_script_filter(block, |outpoint| {
+    let mut same_block_outputs = HashMap::new();
+    for tx in &block.txdata {
+        let txid = tx.compute_txid();
+        let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
+        for (vout, txout) in tx.output.iter().enumerate() {
+            same_block_outputs.insert(
+                OutPoint::new(
+                    txid,
+                    u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?,
+                ),
+                txout.script_pubkey.clone(),
+            );
+        }
+    }
+
+    let filter = match bitcoin::bip158::BlockFilter::new_script_filter(block, |outpoint| {
         let prev_outpoint = OutPoint::new(
             bitcoin_rs_primitives::Hash256::from_le_bytes(outpoint.txid.as_byte_array()),
             outpoint.vout,
         );
-        handles
-            .utxo
+        same_block_outputs
             .get(&prev_outpoint)
-            .map(|txout| txout.script_pubkey)
+            .cloned()
+            .or_else(|| {
+                handles
+                    .utxo
+                    .get(&prev_outpoint)
+                    .map(|txout| txout.script_pubkey)
+            })
             .ok_or(bitcoin::bip158::Error::UtxoMissing(*outpoint))
-    })
-    .ok()?;
-    Some(filter.content)
+    }) {
+        Ok(filter) => filter,
+        Err(error) => {
+            tracing::warn!(height, %block_hash, %error, "BIP158 filter generation failed; skipping best-effort filter index row");
+            return Ok(None);
+        }
+    };
+    Ok(Some(filter.content))
 }
 
 fn verify_block_transactions(
@@ -1823,6 +1850,85 @@ mod consensus_rule_tests {
         Ok(())
     }
 
+    #[test]
+    fn apply_block_persists_non_empty_filter_for_valid_same_block_spend()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+
+        let external_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x91; 32]),
+            vout: 0,
+        };
+        let filter_index = Arc::new(RecordingFilterIndex::default());
+        let handles = apply_handles_with_filter_index(
+            Network::Regtest,
+            utxo_with_output(external_prevout, 1)?,
+            &filter_index,
+        );
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let funding_tx = spending_transaction_to_script(
+            external_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let funding_outpoint = bitcoin::OutPoint {
+            txid: funding_tx.compute_txid(),
+            vout: 0,
+        };
+        let same_block_spend = spending_transaction_to_script(
+            funding_outpoint,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1), funding_tx, same_block_spend],
+        )?;
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+
+        apply_block(&handles, &block)?;
+
+        let stored_filter = filter_index
+            .filter(block_hash)?
+            .ok_or_else(|| std::io::Error::other("filter row missing"))?;
+        assert!(!stored_filter.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn compute_basic_filter_skips_missing_prevout_without_persisting_empty_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let filter_index = Arc::new(RecordingFilterIndex::default());
+        let handles =
+            apply_handles_with_filter_index(Network::Regtest, empty_utxo(), &filter_index);
+        let missing_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x92; 32]),
+            vout: 0,
+        };
+        let block = block_with_transactions(vec![
+            coinbase_transaction(0x92),
+            spending_transaction_to_script(
+                missing_prevout,
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+        ]);
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+
+        let filter = compute_basic_filter(&block, &handles, block_hash, 1)?;
+
+        assert!(filter.is_none());
+        assert!(filter_index.rows.lock().is_empty());
+        Ok(())
+    }
+
     fn transaction(seed: u8) -> Transaction {
         Transaction {
             version: bitcoin::transaction::Version::TWO,
@@ -1906,6 +2012,45 @@ mod consensus_rule_tests {
                 nonce: 0,
             },
             txdata,
+        }
+    }
+
+    fn block_with_prev_hash_and_transactions(
+        prev_blockhash: bitcoin::BlockHash,
+        txdata: Vec<Transaction>,
+    ) -> bitcoin::Block {
+        let mut block = bitcoin::Block {
+            header: bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash,
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: 1,
+                bits: bitcoin::pow::CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            },
+            txdata,
+        };
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .unwrap_or_else(bitcoin::TxMerkleNode::all_zeros);
+        block
+    }
+
+    fn mined_block_with_prev_hash_and_transactions(
+        prev_blockhash: bitcoin::BlockHash,
+        txdata: Vec<Transaction>,
+    ) -> Result<bitcoin::Block, Box<dyn std::error::Error>> {
+        let mut block = block_with_prev_hash_and_transactions(prev_blockhash, txdata);
+        let target = block.header.target();
+        loop {
+            if block.header.validate_pow(target).is_ok() {
+                return Ok(block);
+            }
+            block.header.nonce = block
+                .header
+                .nonce
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("test block nonce exhausted"))?;
         }
     }
 
@@ -2191,6 +2336,33 @@ mod consensus_rule_tests {
         apply_handles_for_network(Network::Mainnet, utxo)
     }
 
+    fn apply_handles_with_filter_index(
+        network: Network,
+        utxo: Arc<UtxoSet>,
+        filter_index: &RecordingFilterIndex,
+    ) -> ApplyHandles {
+        let filter_index: Arc<Box<dyn FilterIndexLike>> =
+            Arc::new(Box::new(RecordingFilterIndex {
+                rows: Arc::clone(&filter_index.rows),
+            }));
+        ApplyHandles::new(
+            network,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(RwLock::new(BlockTree::new())),
+            utxo,
+            Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+                bitcoin_rs_coinstats::CoinStats::default(),
+            )),
+            noop_tx_index(),
+            filter_index,
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),
+            Arc::new(crate::NoOpZmqPublisher),
+        )
+    }
+
     fn apply_handles_for_network(network: Network, utxo: Arc<UtxoSet>) -> ApplyHandles {
         ApplyHandles::new(
             network,
@@ -2235,6 +2407,31 @@ mod consensus_rule_tests {
         Arc::new(Mutex::new(indexer))
     }
 
+    #[derive(Default)]
+    struct RecordingFilterIndex {
+        rows: Arc<Mutex<HashMap<Hash256, Vec<u8>>>>,
+    }
+
+    impl FilterIndexLike for RecordingFilterIndex {
+        fn put_filter(
+            &self,
+            block_hash: Hash256,
+            _prev_header: Hash256,
+            filter_bytes: &[u8],
+        ) -> Result<Hash256, FilterIndexError> {
+            self.rows.lock().insert(block_hash, filter_bytes.to_vec());
+            Ok(Hash256::default())
+        }
+
+        fn filter_header(&self, _block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
+            Ok(None)
+        }
+
+        fn filter(&self, block_hash: Hash256) -> Result<Option<Vec<u8>>, FilterIndexError> {
+            Ok(self.rows.lock().get(&block_hash).cloned())
+        }
+    }
+
     struct NoopFilterIndex;
 
     impl FilterIndexLike for NoopFilterIndex {
@@ -2250,11 +2447,20 @@ mod consensus_rule_tests {
         fn filter_header(&self, _block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
             Ok(None)
         }
+
+        fn filter(&self, _block_hash: Hash256) -> Result<Option<Vec<u8>>, FilterIndexError> {
+            Ok(None)
+        }
     }
 
     fn noop_filter_index() -> Arc<Box<dyn FilterIndexLike>> {
         let filter_index: Box<dyn FilterIndexLike> = Box::new(NoopFilterIndex);
         Arc::new(filter_index)
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn empty_utxo() -> Arc<UtxoSet> {
+        Arc::new(UtxoSet::new())
     }
 }
 
