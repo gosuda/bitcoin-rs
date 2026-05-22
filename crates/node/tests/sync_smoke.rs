@@ -7,11 +7,13 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::{BlockHash, Transaction, Txid};
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{BlockSync, Network, apply::ApplyHandles};
 use bitcoin_rs_p2p::{Message, PeerInfo};
+use bitcoin_rs_primitives::{Hash256, OutPoint};
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
@@ -162,7 +164,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
     let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let (handles, coin_stats) = apply_handles_with_coin_stats(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
@@ -178,7 +180,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
 
     inbound_headers_tx.send(vec![genesis.header, block_one.header, block_two.header])?;
     inbound_blocks_tx.send(block_two.clone())?;
-    inbound_blocks_tx.send(block_one)?;
+    inbound_blocks_tx.send(block_one.clone())?;
 
     sync.tick();
 
@@ -190,8 +192,30 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         applied.hash,
         bitcoin_rs_primitives::Hash256::from_le_bytes(block_two.block_hash().as_byte_array())
     );
+    assert_eq!(
+        coin_stats.snapshot(),
+        expected_coin_stats(&[&genesis, &block_one, &block_two])?
+    );
     assert_eq!(block_tree.read().len(), 3);
     Ok(())
+}
+
+fn expected_coin_stats(
+    blocks: &[&bitcoin::Block],
+) -> Result<CoinStats, Box<dyn std::error::Error>> {
+    let mut stats = CoinStats::default();
+    for (height, block) in blocks.iter().enumerate() {
+        let height = u32::try_from(height)?;
+        for tx in &block.txdata {
+            let txid = Hash256::from_le_bytes(tx.compute_txid().as_byte_array());
+            for (vout, txout) in tx.output.iter().enumerate() {
+                let outpoint = OutPoint::new(txid, u32::try_from(vout)?);
+                stats.insert_utxo(&outpoint, txout, height, tx.is_coinbase());
+            }
+        }
+        stats.finish_block(height, u64::try_from(block.txdata.len())?);
+    }
+    Ok(stats)
 }
 
 #[allow(clippy::arc_with_non_send_sync)]
@@ -201,22 +225,34 @@ fn apply_handles(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
 ) -> ApplyHandles {
-    ApplyHandles::new(
+    apply_handles_with_coin_stats(network, chain_tip, applied_tip, block_tree).0
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+fn apply_handles_with_coin_stats(
+    network: Network,
+    chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    block_tree: Arc<RwLock<BlockTree>>,
+) -> (ApplyHandles, Arc<CoinStatsListener>) {
+    let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+    let mut utxo = UtxoSet::new();
+    utxo.set_listener(Box::new((*coin_stats).clone()));
+    let handles = ApplyHandles::new(
         network,
         chain_tip,
         applied_tip,
         block_tree,
-        Arc::new(UtxoSet::new()),
-        Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
-            bitcoin_rs_coinstats::CoinStats::default(),
-        )),
+        Arc::new(utxo),
+        Arc::clone(&coin_stats),
         noop_tx_index(),
         noop_filter_index(),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Arc::new(RwLock::new(Vec::new())),
         Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
         Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
-    )
+    );
+    (handles, coin_stats)
 }
 
 struct NoopIndexer;
