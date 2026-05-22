@@ -14,6 +14,8 @@ use bitcoin::p2p::message_network::{Reject, VersionMessage};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::inv::MAX_INV_PER_MSG;
+
 /// Latest protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 70_016;
 /// Maximum accepted payload length for one v1 network message.
@@ -133,9 +135,9 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
         "addr" => Message::Addr(encode::deserialize::<Vec<(u32, bitcoin::p2p::Address)>>(
             payload,
         )?),
-        "inv" => Message::Inv(encode::deserialize::<Vec<Inventory>>(payload)?),
-        "getdata" => Message::GetData(encode::deserialize::<Vec<Inventory>>(payload)?),
-        "notfound" => Message::NotFound(encode::deserialize::<Vec<Inventory>>(payload)?),
+        "inv" => Message::Inv(decode_inventory(payload)?),
+        "getdata" => Message::GetData(decode_inventory(payload)?),
+        "notfound" => Message::NotFound(decode_inventory(payload)?),
         "getblocks" => Message::GetBlocks(encode::deserialize::<GetBlocksMessage>(payload)?),
         "getheaders" => Message::GetHeaders(encode::deserialize::<GetHeadersMessage>(payload)?),
         "mempool" => empty_payload(payload, Message::MemPool)?,
@@ -174,6 +176,25 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
         },
     };
     Ok(message)
+}
+
+fn decode_inventory(payload: &[u8]) -> Result<Vec<Inventory>, PeerError> {
+    let mut reader = payload;
+    let count = bitcoin::consensus::encode::VarInt::consensus_decode(&mut reader)?.0;
+    let capacity = usize::try_from(count).map_err(|_| PeerError::PayloadTooLarge(usize::MAX))?;
+    if capacity > MAX_INV_PER_MSG {
+        return Err(PeerError::Protocol("inventory count too large"));
+    }
+    let mut inventory = Vec::with_capacity(capacity);
+    for _ in 0..count {
+        inventory.push(Inventory::consensus_decode(&mut reader)?);
+    }
+    if !reader.is_empty() {
+        return Err(PeerError::Protocol(
+            "trailing bytes after inventory payload",
+        ));
+    }
+    Ok(inventory)
 }
 
 fn decode_headers(payload: &[u8]) -> Result<Vec<bitcoin::block::Header>, PeerError> {

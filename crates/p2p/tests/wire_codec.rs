@@ -17,6 +17,7 @@ use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, Se
 use bitcoin::pow::CompactTarget;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_p2p::handshake::version_message;
+use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
 use sha2::{Digest, Sha256};
 
@@ -44,6 +45,96 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
         assert_eq!(decoded, message);
     }
 
+    Ok(())
+}
+
+#[test]
+fn rejects_inv_message_with_more_than_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"inv", MAX_INV_PER_MSG + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("inv count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("inventory count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn rejects_getdata_message_with_more_than_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("getdata count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("inventory count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn rejects_notfound_message_with_more_than_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("notfound count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("inventory count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepts_inv_message_with_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"inv", MAX_INV_PER_MSG)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::Inv(inventory) if inventory.len() == MAX_INV_PER_MSG)
+    );
+    Ok(())
+}
+
+#[test]
+fn accepts_getdata_message_with_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::GetData(inventory) if inventory.len() == MAX_INV_PER_MSG)
+    );
+    Ok(())
+}
+
+#[test]
+fn accepts_notfound_message_with_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::NotFound(inventory) if inventory.len() == MAX_INV_PER_MSG)
+    );
     Ok(())
 }
 
@@ -124,6 +215,22 @@ fn round_trips_compact_block_messages() -> Result<(), PeerError> {
     Ok(())
 }
 
+fn inventory_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let inventory = Inventory::Transaction(Txid::from_byte_array([9u8; 32]));
+    for _ in 0..count {
+        inventory
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+
+    message_frame(command, &payload)
+}
+
 fn headers_frame(count: u64) -> Result<Vec<u8>, PeerError> {
     let mut payload = Vec::new();
     VarInt(count)
@@ -137,14 +244,19 @@ fn headers_frame(count: u64) -> Result<Vec<u8>, PeerError> {
         payload.push(0);
     }
 
+    message_frame(b"headers", &payload)
+}
+
+fn message_frame(command: &[u8], payload: &[u8]) -> Result<Vec<u8>, PeerError> {
     let mut frame = Vec::new();
     frame.extend_from_slice(&Magic::BITCOIN.to_bytes());
-    frame.extend_from_slice(b"headers\0\0\0\0\0");
+    frame.extend_from_slice(command);
+    frame.resize(16, 0);
     let payload_len =
         u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
     frame.extend_from_slice(&payload_len.to_le_bytes());
-    frame.extend_from_slice(&checksum(&payload));
-    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&checksum(payload));
+    frame.extend_from_slice(payload);
     Ok(frame)
 }
 
