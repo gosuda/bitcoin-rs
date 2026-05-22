@@ -168,6 +168,24 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn gettxoutsetinfo_empty_muhash_matches_core_digest() -> Result<(), Box<dyn std::error::Error>> {
+    const EMPTY_MUHASH_CORE_DIGEST: &str =
+        "dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8";
+
+    let handler = Handler::new(Arc::new(Context::new()));
+    let result = handler.dispatch("gettxoutsetinfo", &json!(["muhash"]))?;
+
+    assert_eq!(result.get("txouts").as_u64(), Some(0));
+    assert_eq!(result.get("transactions").as_u64(), Some(0));
+    assert_eq!(
+        result.get("muhash").as_str(),
+        Some(EMPTY_MUHASH_CORE_DIGEST)
+    );
+    assert!(result.get("hash_serialized_3").is_none());
+    Ok(())
+}
+
+#[test]
 fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let txid = Hash256::from_le_bytes(&[0x42; 32]);
