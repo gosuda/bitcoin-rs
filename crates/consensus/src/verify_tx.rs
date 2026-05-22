@@ -8,6 +8,8 @@ use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, MAX_MONEY};
 
 const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 const SEQUENCE_FINAL: u32 = 0xffff_ffff;
+const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
+const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
 /// Returns `true` iff the transaction is locktime-final at `block_height` and the timestamp cutoff.
 ///
@@ -21,6 +23,17 @@ const SEQUENCE_FINAL: u32 = 0xffff_ffff;
 #[must_use]
 pub fn is_final_tx(tx: &bitcoin::Transaction, block_height: u32, locktime_cutoff: u32) -> bool {
     is_final_tx_with_locktime_cutoff(tx, block_height, locktime_cutoff)
+}
+
+/// Verifies that a coinbase transaction's scriptSig length is within consensus bounds.
+pub fn verify_coinbase_script_sig_size(tx: &bitcoin::Transaction) -> Result<(), ConsensusError> {
+    if let Some(input) = tx.input.first().filter(|_| tx.is_coinbase()) {
+        let len = input.script_sig.len();
+        if !(MIN_COINBASE_SCRIPT_SIG_SIZE..=MAX_COINBASE_SCRIPT_SIG_SIZE).contains(&len) {
+            return Err(ConsensusError::CoinbaseScriptSigSize { len });
+        }
+    }
+    Ok(())
 }
 
 /// Returns `true` iff the transaction is locktime-final at `block_height` and `locktime_cutoff`.
@@ -128,6 +141,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
 
     let output_value = total_output_value_borrowed(tx)?;
     if tx.is_coinbase() {
+        verify_coinbase_script_sig_size(tx)?;
         return Ok(());
     }
 
@@ -213,7 +227,8 @@ mod tests {
     use bitcoin_rs_script::VerifyFlags;
 
     use super::{
-        is_final_tx_with_locktime_cutoff, verify_transaction, verify_transaction_with_mtp,
+        is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size, verify_transaction,
+        verify_transaction_with_mtp,
     };
     use crate::ConsensusError;
 
@@ -238,6 +253,35 @@ mod tests {
             verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
             Ok(())
         );
+    }
+
+    #[test]
+    fn coinbase_script_sig_size_rejects_invalid_lengths() {
+        for len in [0, 1, 101] {
+            let tx = coinbase_transaction_with_script_sig_len(len);
+            let utxos = BTreeMap::new();
+            let expected = Err(ConsensusError::CoinbaseScriptSigSize { len });
+
+            assert_eq!(verify_coinbase_script_sig_size(&tx.0), expected);
+            assert_eq!(
+                verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn coinbase_script_sig_size_accepts_valid_boundaries() {
+        let utxos = BTreeMap::new();
+        for len in [2, 100] {
+            let tx = coinbase_transaction_with_script_sig_len(len);
+
+            assert_eq!(verify_coinbase_script_sig_size(&tx.0), Ok(()));
+            assert_eq!(
+                verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
+                Ok(())
+            );
+        }
     }
 
     #[test]
@@ -323,5 +367,22 @@ mod tests {
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }
+    }
+
+    fn coinbase_transaction_with_script_sig_len(len: usize) -> Tx {
+        Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(vec![1; len]),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        })
     }
 }

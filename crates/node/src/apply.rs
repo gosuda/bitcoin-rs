@@ -500,6 +500,7 @@ fn verify_block_transactions(
     let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
     for tx in &block.txdata {
         if tx.is_coinbase() {
+            bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
             continue;
         }
         bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
@@ -1081,6 +1082,32 @@ mod consensus_rule_tests {
 
         verify_block_transactions(&handles, &block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE)?;
         Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_rejects_bad_coinbase_script_sig() {
+        let mut coinbase = coinbase_transaction(0x63);
+        coinbase.input[0].script_sig = ScriptBuf::from_bytes(vec![0x63]);
+        let block = block_with_transaction(coinbase);
+        let handles = empty_apply_handles();
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            1,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ) {
+            Ok(()) => panic!("bad coinbase scriptSig length must fail transaction verification"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::CoinbaseScriptSigSize { len: 1 }
+            )
+        ));
     }
 
     #[test]
@@ -1793,7 +1820,7 @@ mod consensus_rule_tests {
             lock_time: bitcoin::absolute::LockTime::ZERO,
             input: vec![TxIn {
                 previous_output: bitcoin::OutPoint::null(),
-                script_sig: ScriptBuf::from_bytes(vec![seed]),
+                script_sig: ScriptBuf::from_bytes(vec![seed, seed]),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
