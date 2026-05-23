@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 
 use bitcoin::hex::DisplayHex as _;
+use hashbrown::HashMap;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 
 use crate::context::Context;
@@ -64,22 +65,7 @@ struct ScanScript {
 pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let action = required_str(params, 0, "action is required")?;
     match action {
-        "start" => {
-            if let Some(scanobjects) = scanobjects_param(params)? {
-                return scantxoutset_addr_scan(ctx, scanobjects);
-            }
-
-            let snapshot = ctx.coin_stats.snapshot();
-            let total_amount_btc = bitcoin::Amount::from_sat(snapshot.total_amount).to_btc();
-            Ok(json!({
-                "success": true,
-                "txouts": ctx.utxo.len(),
-                "height": ctx.applied_height(),
-                "bestblock": ctx.applied_hash().to_string_be(),
-                "unspents": [],
-                "total_amount": total_amount_btc
-            }))
-        }
+        "start" => scantxoutset_addr_scan(ctx, scanobjects_param(params)?),
         "abort" => Ok(json!(false)),
         "status" => Ok(Value::new_null()),
         _ => Err(RpcError::InvalidParams(
@@ -88,10 +74,12 @@ pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     }
 }
 
-fn scanobjects_param(params: &Value) -> Result<Option<&sonic_rs::Array>, RpcError> {
+fn scanobjects_param(params: &Value) -> Result<&sonic_rs::Array, RpcError> {
     let array = params_array(params)?;
     let Some(scanobjects) = array.get(1) else {
-        return Ok(None);
+        return Err(RpcError::InvalidParams(
+            "scanobjects are required for scantxoutset start",
+        ));
     };
     let scanobjects = scanobjects
         .as_array()
@@ -99,7 +87,7 @@ fn scanobjects_param(params: &Value) -> Result<Option<&sonic_rs::Array>, RpcErro
     if scanobjects.is_empty() {
         return Err(RpcError::InvalidParams("scanobjects must not be empty"));
     }
-    Ok(Some(scanobjects))
+    Ok(scanobjects)
 }
 
 fn scantxoutset_addr_scan(
@@ -241,13 +229,20 @@ fn scan_unspents(
     scan_scripts: &[ScanScript],
     applied_height: u32,
 ) -> (Vec<Value>, u64) {
+    let descs = scan_scripts
+        .iter()
+        .map(|scan| (scan.script_pubkey.as_bytes(), scan.desc.as_str()))
+        .collect::<HashMap<_, _>>();
     let mut total_amount = 0_u64;
     let unspents = scan
         .unspents
         .iter()
         .map(|utxo| {
             total_amount = total_amount.saturating_add(utxo.txout.value.to_sat());
-            let desc = desc_for_script(scan_scripts, &utxo.txout.script_pubkey);
+            let desc = descs
+                .get(utxo.txout.script_pubkey.as_bytes())
+                .copied()
+                .unwrap_or("");
             let outpoint = utxo.outpoint;
             let txid = outpoint.txid;
             let vout = outpoint.vout;
@@ -264,13 +259,6 @@ fn scan_unspents(
         })
         .collect();
     (unspents, total_amount)
-}
-
-fn desc_for_script<'a>(scan_scripts: &'a [ScanScript], script: &bitcoin::Script) -> &'a str {
-    scan_scripts
-        .iter()
-        .find(|scan| scan.script_pubkey.as_script() == script)
-        .map_or("", |scan| scan.desc.as_str())
 }
 
 fn confirmations(applied_height: u32, output_height: u32) -> u64 {
@@ -639,27 +627,6 @@ mod tests {
     }
 
     #[test]
-    fn scantxoutset_start_returns_real_summary_from_utxoset() {
-        let ctx = Arc::new(Context::new());
-        let result = scantxoutset(&ctx, &json!(["start"]))
-            .unwrap_or_else(|err| panic!("scantxoutset failed: {err}"));
-        let Some(success) = result.get("success").and_then(Value::as_bool) else {
-            panic!("success missing: {result:?}");
-        };
-        assert!(
-            success,
-            "scantxoutset start should report success: {result:?}"
-        );
-        let Some(_height) = result.get("height").and_then(Value::as_u64) else {
-            panic!("height missing: {result:?}");
-        };
-        let Some(txouts) = result.get("txouts").and_then(Value::as_u64) else {
-            panic!("txouts missing: {result:?}");
-        };
-        assert_eq!(txouts, 0, "fresh ctx has empty utxoset");
-    }
-
-    #[test]
     fn scantxoutset_addr_returns_matching_unspents() {
         let ctx = Arc::new(Context::new());
         let address = "1111111111111111111114oLvT2";
@@ -900,6 +867,20 @@ mod tests {
 
         assert!(
             err.to_string().contains("scanobjects must be an array"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_missing_scanobjects() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(&ctx, &json!(["start"])) {
+            Ok(value) => panic!("missing scanobjects succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("scanobjects are required"),
             "wrong error: {err}"
         );
     }
