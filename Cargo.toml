@@ -148,10 +148,9 @@ parking_lot = { version = ">=0.12.5, <0.13", default-features = false, features 
     "arc_lock", "send_guard",
 ] }
 
-# Crossbeam (event-loop + utilities + mempool fallback path).
+# Crossbeam (event-loop + utilities).
 crossbeam-channel  = { version = ">=0.5.15, <0.6", default-features = false, features = ["std"] }
 crossbeam-utils    = { version = ">=0.8.21, <0.9", default-features = false, features = ["std"] }
-crossbeam-skiplist = { version = ">=0.1.3, <0.2",  default-features = false, features = ["std", "alloc"] }
 
 # Rayon — no default features at all on 1.12; nothing to disable/add.
 rayon = { version = ">=1.12, <2" }
