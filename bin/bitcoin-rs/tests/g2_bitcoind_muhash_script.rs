@@ -1,4 +1,5 @@
 //! Smoke tests for the G2 Bitcoin Core `MuHash` collection helper.
+#![cfg(unix)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;

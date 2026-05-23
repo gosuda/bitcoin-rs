@@ -69,7 +69,10 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
             "deriveaddresses",
             json!(["addr(1111111111111111111114oLvT2)"]),
         ),
-        ("scantxoutset", json!(["start", []])),
+        (
+            "scantxoutset",
+            json!(["start", ["addr(1111111111111111111114oLvT2)"]]),
+        ),
         ("walletcreatefundedpsbt", json!([[], []])),
         ("walletprocesspsbt", json!([valid_psbt.as_str()])),
         ("finalizepsbt", json!([valid_psbt.as_str()])),

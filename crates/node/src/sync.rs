@@ -132,6 +132,11 @@ impl BlockSync {
         }
         drop(receiver);
 
+        let now = Instant::now();
+        let mut received_blocks = self.received_blocks.lock();
+        prune_received_blocks(&mut received_blocks, now);
+        drop(received_blocks);
+
         let (applied, failed) = self.apply_buffered_blocks();
         if received > 0 || applied > 0 || failed > 0 {
             tracing::debug!(
@@ -408,6 +413,7 @@ fn evict_oldest_received_block(received: &mut HashMap<Hash256, ReceivedBlock>) {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use arc_swap::ArcSwapOption;
     use bitcoin::hashes::Hash as _;
@@ -705,6 +711,27 @@ mod tests {
             let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&hash.to_byte_array());
             assert!(pending.contains_key(&hash));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _peer_outbound, _block_tree, _applied_tip, _expected) =
+            sync_with_header_chain(1)?;
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let hash =
+            bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let received_at = Instant::now()
+            .checked_sub(super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
+            .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
+        sync.received_blocks
+            .lock()
+            .insert(hash, super::ReceivedBlock { block, received_at });
+
+        sync.drain_inbound_blocks();
+
+        assert!(sync.received_blocks.lock().is_empty());
         Ok(())
     }
 

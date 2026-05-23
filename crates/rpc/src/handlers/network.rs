@@ -272,21 +272,24 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
             }
             drop(banned);
 
+            let persist = command == "add";
+            if persist {
+                let mut list = ctx.added_nodes.write();
+                if !list.contains(&addr) {
+                    list.push(addr);
+                }
+            }
+
             if let Some(sender) = &ctx.p2p_outbound_sender {
                 match sender.try_send(addr) {
                     Ok(()) => {}
+                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => {}
                     Err(TrySendError::Full(_)) => {
                         return Err(RpcError::Internal("p2p outbound queue full".to_owned()));
                     }
                     Err(TrySendError::Disconnected(_)) => {
                         return Err(RpcError::Internal("p2p outbound channel closed".to_owned()));
                     }
-                }
-            }
-            if command == "add" {
-                let mut list = ctx.added_nodes.write();
-                if !list.contains(&addr) {
-                    list.push(addr);
                 }
             }
         }
@@ -525,7 +528,7 @@ mod addnode_validation_tests {
     }
 
     #[test]
-    fn addnode_add_does_not_persist_when_outbound_queue_is_full() {
+    fn addnode_add_persists_when_outbound_queue_is_full() {
         let (tx, _rx) = crossbeam_channel::bounded(1);
         tx.try_send(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
@@ -533,13 +536,15 @@ mod addnode_validation_tests {
         ctx.p2p_outbound_sender = Some(tx);
         let ctx = Arc::new(ctx);
 
-        let result = addnode(&ctx, &json!(["127.0.0.2:8333", "add"]));
+        let result = addnode(&ctx, &json!(["127.0.0.2:8333", "add"]))
+            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
 
-        assert!(matches!(
-            result,
-            Err(RpcError::Internal(message)) if message == "p2p outbound queue full"
-        ));
-        assert!(ctx.added_nodes.read().is_empty());
+        assert!(result.is_null());
+        let added = ctx.added_nodes.read();
+        assert_eq!(
+            added.as_slice(),
+            [std::net::SocketAddr::from(([127, 0, 0, 2], 8333))]
+        );
     }
 
     #[test]

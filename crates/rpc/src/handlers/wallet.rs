@@ -93,10 +93,13 @@ fn scanobjects_param(params: &Value) -> Result<Option<&sonic_rs::Array>, RpcErro
     let Some(scanobjects) = array.get(1) else {
         return Ok(None);
     };
-    scanobjects
+    let scanobjects = scanobjects
         .as_array()
-        .map(Some)
-        .ok_or(RpcError::InvalidType("scanobjects must be an array"))
+        .ok_or(RpcError::InvalidType("scanobjects must be an array"))?;
+    if scanobjects.is_empty() {
+        return Err(RpcError::InvalidParams("scanobjects must not be empty"));
+    }
+    Ok(Some(scanobjects))
 }
 
 fn scantxoutset_addr_scan(
@@ -131,14 +134,58 @@ fn parse_scan_scripts(
     let network = bitcoin_network(chain_network);
     let mut scripts = Vec::with_capacity(scanobjects.len());
     for scanobject in scanobjects {
-        let Some(descriptor) = scanobject.as_str() else {
-            return Err(RpcError::InvalidType(
-                "scan object must be a descriptor string",
-            ));
-        };
+        let descriptor = scanobject_descriptor(scanobject)?;
         scripts.push(parse_addr_scan_script(descriptor, network)?);
     }
     Ok(scripts)
+}
+
+fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
+    if let Some(descriptor) = scanobject.as_str() {
+        return Ok(descriptor);
+    }
+    let Some(descriptor) = scanobject.get("desc") else {
+        return Err(RpcError::InvalidParams("scan object missing desc"));
+    };
+    let descriptor = descriptor
+        .as_str()
+        .ok_or(RpcError::InvalidType("scan object desc must be a string"))?;
+    if let Some(range) = scanobject.get("range") {
+        validate_scanobject_range(range)?;
+    }
+    Ok(descriptor)
+}
+
+fn validate_scanobject_range(range: &Value) -> Result<(), RpcError> {
+    if range.as_u64().is_some() {
+        return Ok(());
+    }
+    let Some(bounds) = range.as_array() else {
+        return Err(RpcError::InvalidType(
+            "scan object range must be an integer or two-integer array",
+        ));
+    };
+    if bounds.len() != 2 {
+        return Err(RpcError::InvalidParams(
+            "scan object range array must contain two entries",
+        ));
+    }
+    let Some(start) = bounds.first().and_then(Value::as_u64) else {
+        return Err(RpcError::InvalidType(
+            "scan object range start must be an integer",
+        ));
+    };
+    let Some(end) = bounds.get(1).and_then(Value::as_u64) else {
+        return Err(RpcError::InvalidType(
+            "scan object range end must be an integer",
+        ));
+    };
+    if start > end {
+        return Err(RpcError::InvalidParams(
+            "scan object range start must not exceed end",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_addr_scan_script(
@@ -148,6 +195,11 @@ fn parse_addr_scan_script(
     use core::str::FromStr as _;
 
     let payload = checked_descriptor_payload(descriptor)?;
+    if payload.contains('*') {
+        return Err(RpcError::InvalidParams(
+            "ranged scantxoutset descriptors are not supported",
+        ));
+    }
     let Some(address_text) = strip_addr_wrapper(payload) else {
         return Err(RpcError::InvalidParams(
             "unsupported scantxoutset descriptor; only addr() is supported",
@@ -670,6 +722,121 @@ mod tests {
             panic!("desc missing: {first:?}");
         };
         assert!(desc.starts_with("addr(1111111111111111111114oLvT2)#"));
+    }
+
+    #[test]
+    fn scantxoutset_accepts_object_form_addr_descriptor() {
+        let ctx = Arc::new(Context::new());
+        let address = "1111111111111111111114oLvT2";
+        let script = bitcoin::Address::from_str(address)
+            .unwrap_or_else(|err| panic!("address parse failed: {err}"))
+            .require_network(bitcoin::Network::Bitcoin)
+            .unwrap_or_else(|err| panic!("network check failed: {err}"))
+            .script_pubkey();
+        let txout = TxOut {
+            value: Amount::from_sat(12_345),
+            script_pubkey: script,
+        };
+        let outpoint = OutPoint::new(test_txid(13), 0);
+        commit_test_utxo(&ctx, outpoint, txout, true, 0);
+
+        let result = scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": format!("addr({address})"), "range": [0, 1]}]]),
+        )
+        .unwrap_or_else(|err| panic!("scantxoutset failed: {err}"));
+        let Some(unspents) = result.get("unspents").and_then(Value::as_array) else {
+            panic!("unspents missing: {result:?}");
+        };
+
+        assert_eq!(result.get("txouts").and_then(Value::as_u64), Some(1));
+        assert_eq!(unspents.len(), 1);
+        let first = &unspents[0];
+        let expected_txid = {
+            let txid = outpoint.txid;
+            txid.to_string_be()
+        };
+        assert_eq!(
+            first.get("txid").and_then(Value::as_str),
+            Some(expected_txid.as_str())
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_empty_scanobjects() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(&ctx, &json!(["start", []])) {
+            Ok(value) => panic!("empty scanobjects succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("scanobjects must not be empty"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_scanobject_without_desc() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(&ctx, &json!(["start", [{"range": 0}]])) {
+            Ok(value) => panic!("scanobject without desc succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("missing desc"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_ranged_scan_descriptor() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": "addr(foo*)", "range": 1}]]),
+        ) {
+            Ok(value) => panic!("ranged descriptor succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("ranged scantxoutset descriptors are not supported"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_malformed_scanobject_range() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(
+            &ctx,
+            &json!(["start", [{"desc": "addr(1111111111111111111114oLvT2)", "range": [2, 1]}]]),
+        ) {
+            Ok(value) => panic!("bad range succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("range start must not exceed end"),
+            "wrong error: {err}"
+        );
+    }
+
+    #[test]
+    fn scantxoutset_rejects_object_form_unsupported_scan_descriptor() {
+        let ctx = Arc::new(Context::new());
+        let err = match scantxoutset(&ctx, &json!(["start", [{"desc": "raw(51)"}]])) {
+            Ok(value) => panic!("unsupported object descriptor succeeded: {value:?}"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("only addr() is supported"),
+            "wrong error: {err}"
+        );
     }
 
     #[test]
