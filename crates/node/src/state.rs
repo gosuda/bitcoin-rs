@@ -88,16 +88,6 @@ pub enum ApplyError {
     BlockBodyPersistence(#[from] bitcoin_rs_storage::StorageError),
 }
 
-#[cfg(not(any(
-    feature = "rocksdb",
-    feature = "fjall",
-    feature = "redb",
-    feature = "mdbx"
-)))]
-compile_error!(
-    "bitcoin-rs-node requires at least one storage backend feature: rocksdb, fjall, redb, or mdbx"
-);
-
 enum NodeStorage {
     #[cfg(feature = "rocksdb")]
     RocksDb(Arc<bitcoin_rs_storage::RocksDbStore>),
