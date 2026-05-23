@@ -76,6 +76,7 @@ redb = [
 mdbx = [
     "bitcoin-rs-filters/mdbx",
     "bitcoin-rs-index/mdbx",
+    "bitcoin-rs-storage/mdbx",
 ]
 bitcoinconsensus = [
     "bitcoin-rs-consensus/bitcoinconsensus",
