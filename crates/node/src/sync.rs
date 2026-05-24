@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(tip.hash, genesis_hash);
         assert_eq!(block_tree.read().height_of_hash(genesis_hash), Some(0));
         assert_eq!(handles.blocks.read().len(), 1);
-        assert_eq!(handles.utxo.len(), 1);
+        assert_eq!(handles.utxo.len(), 0);
         Ok(())
     }
 

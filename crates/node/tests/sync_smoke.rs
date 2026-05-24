@@ -23,6 +23,7 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
+const CORE_EMPTY_MUHASH: &str = "dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8";
 
 #[test]
 fn tick_sends_getheaders_to_best_peer_above_our_height() -> Result<(), Box<dyn std::error::Error>> {
@@ -165,13 +166,20 @@ fn tick_writes_g2_muhash_sample_for_applied_genesis() -> Result<(), Box<dyn std:
 
     state.sync().tick();
 
-    let hash = state
-        .coin_stats()
-        .snapshot()
-        .muhash
-        .finalize_hash()
-        .to_string_be();
-    assert_eq!(std::fs::read_to_string(&samples_path)?, format!("0:{hash}"));
+    assert_eq!(
+        std::fs::read_to_string(&samples_path)?,
+        format!("0:{CORE_EMPTY_MUHASH}")
+    );
+    assert!(state.utxo().is_empty());
+    assert_eq!(
+        state
+            .coin_stats()
+            .snapshot()
+            .muhash
+            .finalize_hash()
+            .to_string_be(),
+        CORE_EMPTY_MUHASH
+    );
     Ok(())
 }
 
@@ -391,6 +399,10 @@ fn expected_coin_stats(
     let mut live_outputs = HashMap::<OutPoint, (TxOut, u32, bool)>::new();
     for (height, block) in blocks.iter().enumerate() {
         let height = u32::try_from(height)?;
+        if height == 0 {
+            stats.finish_block(height, u64::try_from(block.txdata.len())?);
+            continue;
+        }
         for tx in &block.txdata {
             let txid = Hash256::from_le_bytes(tx.compute_txid().as_byte_array());
             for (vout, txout) in tx.output.iter().enumerate() {

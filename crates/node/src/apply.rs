@@ -878,6 +878,12 @@ fn build_utxo_changes(
 ) -> core::result::Result<BlockChanges, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
+    // Bitcoin Core indexes genesis but does not connect its transactions into
+    // CoinsView; its coinbase is unspendable and absent from UTXO/MuHash state.
+    if height == 0 {
+        return Ok(BlockChanges::default());
+    }
+
     let same_block_spent = same_block_spent_outpoints(block, height)?;
     let mut changes = BlockChanges::default();
     for tx in &block.txdata {

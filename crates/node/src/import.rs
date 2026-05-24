@@ -82,8 +82,8 @@ mod tests {
         );
         assert_eq!(
             state.utxo().len(),
-            1,
-            "genesis has one live coinbase output"
+            0,
+            "genesis coinbase is unspendable and absent from live UTXO state"
         );
         assert_eq!(
             state.transactions().read().len(),
@@ -363,7 +363,6 @@ mod tests {
         let genesis_bytes = hex_decode(REGTEST_GENESIS_HEX)?;
         let mut cursor = std::io::Cursor::new(genesis_bytes.as_slice());
         let genesis_block = Block::consensus_decode(&mut cursor)?;
-        let genesis_coinbase_txid = genesis_block.txdata[0].compute_txid();
 
         let dir = tempdir()?;
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
@@ -372,15 +371,26 @@ mod tests {
         let state = NodeState::open(config)?;
         let _genesis = import_block(&state, &genesis_bytes)?;
 
-        let mut block = genesis_block;
+        let mut coinbase_block = genesis_block.clone();
+        coinbase_block.header.prev_blockhash = genesis_block.block_hash();
+        coinbase_block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
+        coinbase_block.header.merkle_root = coinbase_block
+            .compute_merkle_root()
+            .ok_or_else(|| anyhow::anyhow!("height-1 block should have merkle root"))?;
+        mine_block_to_declared_target(&mut coinbase_block)?;
+        let coinbase_bytes = encode_block(&coinbase_block)?;
+        let _coinbase = import_block(&state, &coinbase_bytes)?;
+        let immature_coinbase_txid = coinbase_block.txdata[0].compute_txid();
+
+        let mut block = coinbase_block;
         block.header.prev_blockhash = block.block_hash();
-        block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 1]);
+        block.txdata[0].input[0].script_sig = bitcoin::ScriptBuf::from_bytes(vec![1, 2]);
         block.txdata.push(bitcoin::Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
             input: vec![bitcoin::TxIn {
                 previous_output: bitcoin::OutPoint {
-                    txid: genesis_coinbase_txid,
+                    txid: immature_coinbase_txid,
                     vout: 0,
                 },
                 script_sig: bitcoin::ScriptBuf::new(),
@@ -393,7 +403,7 @@ mod tests {
             }],
         });
 
-        let Err(error) = state.check_coinbase_maturity(&block, 1) else {
+        let Err(error) = state.check_coinbase_maturity(&block, 2) else {
             anyhow::bail!("premature coinbase spend should be rejected");
         };
 
@@ -413,7 +423,7 @@ mod tests {
                 .load_full()
                 .ok_or_else(|| anyhow::anyhow!("genesis tip should remain published"))?
                 .height,
-            0
+            1
         );
 
         Ok(())
