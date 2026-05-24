@@ -6,12 +6,13 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::{
     UtxoError, UtxoKey, UtxoSet, UtxoSetView,
-    record::{OneUtxoOut, OwnedUtxoOut},
+    record::{OneUtxoOut, OwnedUtxoOut, bitmap_vout_bit},
     shard::ShardTable,
 };
 
 const SNAPSHOT_MAGIC: u32 = 0x55_54_58_4f;
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_WRITE_VERSION: u32 = 3;
+const SNAPSHOT_LEGACY_VERSION: u32 = 2;
 const MUHASH_TRAILER_LEN: usize = 384;
 
 #[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -31,6 +32,15 @@ struct SnapshotRecordHeader {
     key_prefix: [u8; 8],
     txid: [u8; 32],
     vout_bitmap: u64,
+    vout_count: u8,
+}
+
+#[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C, packed)]
+struct SnapshotRecordHeaderV3 {
+    shard_idx: u8,
+    key_prefix: [u8; 8],
+    txid: [u8; 32],
     vout_count: u8,
 }
 
@@ -68,7 +78,7 @@ pub fn write_snapshot(
             .map_err(|_| UtxoError::SnapshotRecordCountTooLarge { count: u64::MAX })?;
         let header = SnapshotHeader {
             magic: SNAPSHOT_MAGIC.to_le(),
-            version: SNAPSHOT_VERSION.to_le(),
+            version: SNAPSHOT_WRITE_VERSION.to_le(),
             tip_hash: tip_hash.to_le_bytes(),
             height: height.to_le(),
             record_count: record_count.to_le(),
@@ -83,11 +93,10 @@ pub fn write_snapshot(
                             count: record.output_count(),
                         }
                     })?;
-                    let record_header = SnapshotRecordHeader {
+                    let record_header = SnapshotRecordHeaderV3 {
                         shard_idx,
                         key_prefix: record.key().to_prefix(),
                         txid: record.txid().to_le_bytes(),
-                        vout_bitmap: record.vout_bitmap.to_le(),
                         vout_count,
                     };
                     writer.write_all(record_header.as_bytes())?;
@@ -124,7 +133,7 @@ pub fn read_snapshot(reader: &mut impl Read) -> Result<SnapshotLoad, UtxoError> 
         return Err(UtxoError::InvalidSnapshotMagic { actual: magic });
     }
     let version = read_u32(&header_bytes, 4);
-    if version != SNAPSHOT_VERSION {
+    if version != SNAPSHOT_LEGACY_VERSION && version != SNAPSHOT_WRITE_VERSION {
         return Err(UtxoError::UnsupportedSnapshotVersion { version });
     }
     let mut tip_hash = [0_u8; 32];
@@ -138,46 +147,11 @@ pub fn read_snapshot(reader: &mut impl Read) -> Result<SnapshotLoad, UtxoError> 
 
     let set = UtxoSet::new();
     for _ in 0..record_count_usize {
-        let record_header_bytes =
-            read_array::<{ core::mem::size_of::<SnapshotRecordHeader>() }>(reader)?;
-        let shard_idx = record_header_bytes[0];
-        let mut prefix = [0_u8; 8];
-        prefix.copy_from_slice(&record_header_bytes[1..9]);
-        let mut txid_bytes = [0_u8; 32];
-        txid_bytes.copy_from_slice(&record_header_bytes[9..41]);
-        let txid = Hash256::from_le_bytes(&txid_bytes);
-        let key = UtxoKey::from_prefix(prefix);
-        if UtxoKey::from_txid(&txid) != key {
-            return Err(UtxoError::SnapshotTxidPrefixMismatch);
-        }
-        if key.shard() != shard_idx {
-            return Err(UtxoError::SnapshotShardMismatch {
-                shard: shard_idx,
-                key_shard: key.shard(),
-            });
-        }
-        let vout_bitmap = read_u64(&record_header_bytes, 41);
-        let vout_count = record_header_bytes[49];
-        if vout_bitmap.count_ones() != u32::from(vout_count) {
-            return Err(UtxoError::SnapshotVoutCountMismatch {
-                bitmap: vout_bitmap,
-                vout_count,
-            });
-        }
-
-        let mut outputs = Vec::with_capacity(usize::from(vout_count));
-        for _ in 0..vout_count {
-            let vout_header_bytes =
-                read_array::<{ core::mem::size_of::<SnapshotVoutHeader>() }>(reader)?;
-            let vout = read_u32(&vout_header_bytes, 0);
-            let value = read_u64(&vout_header_bytes, 4);
-            let height = read_u32(&vout_header_bytes, 12);
-            let coinbase = vout_header_bytes[16] != 0;
-            let script_len = read_u16(&vout_header_bytes, 17);
-            let mut script = vec![0_u8; usize::from(script_len)];
-            reader.read_exact(&mut script)?;
-            outputs.push(OwnedUtxoOut::new(vout, value, script, coinbase, height));
-        }
+        let (key, txid, outputs) = match version {
+            SNAPSHOT_LEGACY_VERSION => read_snapshot_record_v2(reader)?,
+            SNAPSHOT_WRITE_VERSION => read_snapshot_record_v3(reader)?,
+            _ => unreachable!("snapshot version was validated"),
+        };
         set.insert_snapshot_record(key, txid, &outputs)?;
     }
 
@@ -194,6 +168,102 @@ pub fn read_snapshot(reader: &mut impl Read) -> Result<SnapshotLoad, UtxoError> 
         height,
         muhash_trailer,
     })
+}
+
+fn read_snapshot_record_v2(
+    reader: &mut impl Read,
+) -> Result<(UtxoKey, Hash256, Vec<OwnedUtxoOut>), UtxoError> {
+    let record_header_bytes =
+        read_array::<{ core::mem::size_of::<SnapshotRecordHeader>() }>(reader)?;
+    let shard_idx = record_header_bytes[0];
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&record_header_bytes[1..9]);
+    let mut txid_bytes = [0_u8; 32];
+    txid_bytes.copy_from_slice(&record_header_bytes[9..41]);
+    let txid = Hash256::from_le_bytes(&txid_bytes);
+    let key = UtxoKey::from_prefix(prefix);
+    validate_snapshot_key(key, txid, shard_idx)?;
+    let vout_bitmap = read_u64(&record_header_bytes, 41);
+    let vout_count = record_header_bytes[49];
+    if vout_bitmap.count_ones() != u32::from(vout_count) {
+        return Err(UtxoError::SnapshotVoutCountMismatch {
+            bitmap: vout_bitmap,
+            vout_count,
+        });
+    }
+
+    let mut outputs = Vec::with_capacity(usize::from(vout_count));
+    for _ in 0..vout_count {
+        let output = read_snapshot_output(reader)?;
+        let Some(bit) = bitmap_vout_bit(output.vout) else {
+            return Err(UtxoError::VoutOutOfRange { vout: output.vout });
+        };
+        if vout_bitmap & bit == 0 {
+            return Err(UtxoError::SnapshotVoutBitmapMismatch {
+                bitmap: vout_bitmap,
+                vout: output.vout,
+            });
+        }
+        reject_duplicate_vout(&outputs, output.vout)?;
+        outputs.push(output);
+    }
+    Ok((key, txid, outputs))
+}
+
+fn read_snapshot_record_v3(
+    reader: &mut impl Read,
+) -> Result<(UtxoKey, Hash256, Vec<OwnedUtxoOut>), UtxoError> {
+    let record_header_bytes =
+        read_array::<{ core::mem::size_of::<SnapshotRecordHeaderV3>() }>(reader)?;
+    let shard_idx = record_header_bytes[0];
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&record_header_bytes[1..9]);
+    let mut txid_bytes = [0_u8; 32];
+    txid_bytes.copy_from_slice(&record_header_bytes[9..41]);
+    let txid = Hash256::from_le_bytes(&txid_bytes);
+    let key = UtxoKey::from_prefix(prefix);
+    validate_snapshot_key(key, txid, shard_idx)?;
+    let vout_count = record_header_bytes[41];
+    let mut outputs = Vec::with_capacity(usize::from(vout_count));
+    for _ in 0..vout_count {
+        let output = read_snapshot_output(reader)?;
+        reject_duplicate_vout(&outputs, output.vout)?;
+        outputs.push(output);
+    }
+    Ok((key, txid, outputs))
+}
+
+fn validate_snapshot_key(key: UtxoKey, txid: Hash256, shard_idx: u8) -> Result<(), UtxoError> {
+    if UtxoKey::from_txid(&txid) != key {
+        return Err(UtxoError::SnapshotTxidPrefixMismatch);
+    }
+    if key.shard() != shard_idx {
+        return Err(UtxoError::SnapshotShardMismatch {
+            shard: shard_idx,
+            key_shard: key.shard(),
+        });
+    }
+    Ok(())
+}
+
+fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoError> {
+    let vout_header_bytes = read_array::<{ core::mem::size_of::<SnapshotVoutHeader>() }>(reader)?;
+    let vout = read_u32(&vout_header_bytes, 0);
+    let value = read_u64(&vout_header_bytes, 4);
+    let height = read_u32(&vout_header_bytes, 12);
+    let coinbase = vout_header_bytes[16] != 0;
+    let script_len = read_u16(&vout_header_bytes, 17);
+    let mut script = vec![0_u8; usize::from(script_len)];
+    reader.read_exact(&mut script)?;
+    Ok(OwnedUtxoOut::new(vout, value, script, coinbase, height))
+}
+
+fn reject_duplicate_vout(outputs: &[OwnedUtxoOut], vout: u32) -> Result<(), UtxoError> {
+    if outputs.iter().any(|output| output.vout == vout) {
+        Err(UtxoError::SnapshotDuplicateVout { vout })
+    } else {
+        Ok(())
+    }
 }
 
 /// Computes Bitcoin Core's `hash_serialized_3` UTXO-set commitment.

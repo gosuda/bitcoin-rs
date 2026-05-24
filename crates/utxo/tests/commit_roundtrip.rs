@@ -171,6 +171,51 @@ fn has_live_outputs_for_txid_tracks_any_remaining_vout() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn vout_64_roundtrips_through_public_utxo_api() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let live_txid = txid(88);
+    let low = OutPoint::new(live_txid, 63);
+    let high = OutPoint::new(live_txid, 64);
+    let low_txout = txout(88);
+    let high_txout = txout(89);
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(low, low_txout.clone(), false, 300));
+    changes.add(UtxoAdd::new(high, high_txout.clone(), true, 301));
+    set.commit_block(&changes, &txid(90))?;
+
+    assert_eq!(set.get(&low), Some(low_txout.clone()));
+    assert_eq!(set.get(&high), Some(high_txout.clone()));
+    let high_entry = set
+        .get_entry(&high)
+        .ok_or("expected vout 64 to remain live")?;
+    assert_eq!(high_entry.txout, high_txout);
+    assert!(high_entry.coinbase);
+    assert_eq!(high_entry.height, 301);
+    assert!(set.has_live_outputs_for_txid(&live_txid));
+
+    let scan = set.scan_script_pubkeys(std::slice::from_ref(&high_txout.script_pubkey))?;
+    assert_eq!(scan.txouts, 2);
+    assert_eq!(scan.unspents.len(), 1);
+    assert_eq!(scan.unspents[0].outpoint, high);
+
+    let mut high_spend = BlockChanges::default();
+    high_spend.remove(high);
+    set.commit_block(&high_spend, &txid(91))?;
+
+    assert_eq!(set.get(&high), None);
+    assert_eq!(set.get(&low), Some(low_txout));
+    assert!(set.has_live_outputs_for_txid(&live_txid));
+
+    let mut low_spend = BlockChanges::default();
+    low_spend.remove(low);
+    set.commit_block(&low_spend, &txid(92))?;
+
+    assert!(!set.has_live_outputs_for_txid(&live_txid));
+    assert!(set.is_empty());
+    Ok(())
+}
+
+#[test]
 fn hash_serialized_3_matches_independent_core_serialization_for_unsorted_utxos()
 -> Result<(), Box<dyn std::error::Error>> {
     let set = UtxoSet::new();

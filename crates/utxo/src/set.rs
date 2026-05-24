@@ -5,17 +5,13 @@ use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use thiserror::Error;
 
-use crate::{
-    UtxoKey,
-    record::{OwnedUtxoOut, validate_bitmap_vout},
-    shard::Shard,
-};
+use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
 /// Errors returned by UTXO mutation and snapshot operations.
 #[derive(Debug, Error)]
 pub enum UtxoError {
-    /// The record bitmap only represents vouts `0..64`.
-    #[error("vout {vout} exceeds the UTXO record bitmap range 0..64")]
+    /// A legacy snapshot v2 bitmap only represents vouts `0..64`.
+    #[error("snapshot v2 vout {vout} exceeds bitmap range 0..64")]
     VoutOutOfRange {
         /// Invalid vout.
         vout: u32,
@@ -69,6 +65,20 @@ pub enum UtxoError {
         bitmap: u64,
         /// Vout count from the record.
         vout_count: u8,
+    },
+    /// Snapshot vout is not present in the legacy record bitmap.
+    #[error("snapshot v2 vout {vout} is not present in bitmap {bitmap:#018x}")]
+    SnapshotVoutBitmapMismatch {
+        /// Vout bitmap from the record.
+        bitmap: u64,
+        /// Output index from the record body.
+        vout: u32,
+    },
+    /// Snapshot record serialized the same vout more than once.
+    #[error("snapshot record duplicates vout {vout}")]
+    SnapshotDuplicateVout {
+        /// Duplicated output index.
+        vout: u32,
     },
     /// Snapshot shard byte does not match the key's first byte.
     #[error("snapshot shard {shard} does not match key shard {key_shard}")]
@@ -424,7 +434,6 @@ impl UtxoSet {
             adds_by_shard[usize::from(key.shard())].push((key, add.outpoint.txid, add.payload()));
         }
         for remove in removes {
-            validate_bitmap_vout(remove.vout)?;
             let key = UtxoKey::from_txid(&remove.txid);
             removes_by_shard[usize::from(key.shard())].push(SpendPayload {
                 op: remove,
@@ -471,7 +480,6 @@ impl Default for UtxoSet {
 }
 
 fn validate_add(add: &UtxoAdd) -> Result<(), UtxoError> {
-    validate_bitmap_vout(add.outpoint.vout)?;
     let script_len = add.txout.script_pubkey.as_bytes().len();
     let _fits =
         u16::try_from(script_len).map_err(|_| UtxoError::ScriptTooLarge { len: script_len })?;

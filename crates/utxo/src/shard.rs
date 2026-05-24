@@ -8,7 +8,7 @@ use self_cell::self_cell;
 
 use crate::{
     UtxoError, UtxoKey,
-    record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord, validate_bitmap_vout},
+    record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
     set::{BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoScan},
 };
 
@@ -96,7 +96,7 @@ impl Shard {
         cell.with_dependent_mut(|arena, table| {
             for chunk in removes.chunks(OPS_AT_ONCE) {
                 for remove in chunk {
-                    apply_remove(arena, table, remove, listener)?;
+                    apply_remove(arena, table, remove, listener);
                 }
             }
             for chunk in adds.chunks(OPS_AT_ONCE) {
@@ -275,7 +275,6 @@ fn apply_add<'arena>(
     payload: &BuildPayload<'_>,
     listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
 ) -> Result<(), UtxoError> {
-    validate_bitmap_vout(payload.vout)?;
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
     let script = payload.txout.script_pubkey.as_bytes();
     let script_len =
@@ -293,7 +292,7 @@ fn apply_add<'arena>(
         script_pubkey_len: script_len,
         coinbase: payload.coinbase,
         height: payload.height,
-    })?;
+    });
     insert_record(arena, table, record);
     if let Some(listener) = listener {
         listener.on_insert(
@@ -311,10 +310,9 @@ fn apply_remove<'arena>(
     table: &mut ShardTable<'arena>,
     remove: &SpendPayload<'_>,
     listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
-) -> Result<(), UtxoError> {
-    validate_bitmap_vout(remove.vout)?;
+) {
     let Some(mut record) = take_record(table, remove.key, remove.txid) else {
-        return Ok(());
+        return;
     };
     let removed_output = record.find_output(remove.vout).and_then(|output| {
         let script = script_slice(table, output)?;
@@ -324,8 +322,8 @@ fn apply_remove<'arena>(
             output.coinbase,
         ))
     });
-    let removed = record.remove_output(remove.vout)?;
-    if removed && !record.is_empty() {
+    let removed = record.remove_output(remove.vout);
+    if !record.is_empty() {
         insert_record(arena, table, record);
     }
     if let (true, Some((txout, height, coinbase)), Some(listener)) =
@@ -333,7 +331,6 @@ fn apply_remove<'arena>(
     {
         listener.on_remove_coin(remove.op, &txout, height, coinbase);
     }
-    Ok(())
 }
 
 fn append_owned_output<'arena>(
@@ -341,7 +338,6 @@ fn append_owned_output<'arena>(
     record: &mut UtxoRecord<'arena>,
     output: &OwnedUtxoOut,
 ) -> Result<(), UtxoError> {
-    validate_bitmap_vout(output.vout)?;
     let script_len =
         u16::try_from(output.script_pubkey.len()).map_err(|_| UtxoError::ScriptTooLarge {
             len: output.script_pubkey.len(),
@@ -359,7 +355,8 @@ fn append_owned_output<'arena>(
         script_pubkey_len: script_len,
         coinbase: output.coinbase,
         height: output.height,
-    })
+    });
+    Ok(())
 }
 
 fn take_record<'arena>(

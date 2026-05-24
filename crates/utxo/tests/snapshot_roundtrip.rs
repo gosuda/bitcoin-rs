@@ -2,9 +2,10 @@
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::{
-    BlockChanges, UtxoAdd, UtxoSet, hash_serialized_3, read_snapshot, write_snapshot,
+    BlockChanges, UtxoAdd, UtxoError, UtxoKey, UtxoSet, hash_serialized_3, read_snapshot,
+    write_snapshot,
 };
-use std::io::Seek;
+use std::io::{Cursor, Read, Seek};
 use tempfile::tempfile;
 
 fn txid(seed: u64) -> Hash256 {
@@ -86,5 +87,76 @@ fn snapshot_roundtrip_preserves_full_outpoints_hash_and_trailer()
         Some(second_collision_txout)
     );
 
+    Ok(())
+}
+
+#[test]
+fn snapshot_roundtrip_preserves_vout_64() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let live_txid = txid(42_000);
+    let low = OutPoint::new(live_txid, 63);
+    let high = OutPoint::new(live_txid, 64);
+    let low_txout = txout(42_001);
+    let high_txout = txout(42_002);
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(low, low_txout.clone(), false, 400));
+    changes.add(UtxoAdd::new(high, high_txout.clone(), true, 401));
+    set.commit_block(&changes, &txid(42_003))?;
+
+    let expected_hash = hash_serialized_3(&set)?;
+    let mut file = tempfile()?;
+    write_snapshot(&set, &txid(42_004), 401, &mut file)?;
+    file.rewind()?;
+
+    let mut header = [0_u8; 8];
+    file.read_exact(&mut header)?;
+    let mut version = [0_u8; 4];
+    version.copy_from_slice(&header[4..8]);
+    assert_eq!(u32::from_le_bytes(version), 3);
+    file.rewind()?;
+
+    let loaded = read_snapshot(&mut file)?;
+
+    assert_eq!(loaded.tip_hash, txid(42_004));
+    assert_eq!(loaded.height, 401);
+    assert_eq!(loaded.set.get(&low), Some(low_txout));
+    assert_eq!(loaded.set.get(&high), Some(high_txout));
+    assert_eq!(hash_serialized_3(&loaded.set)?, expected_hash);
+    Ok(())
+}
+
+#[test]
+fn legacy_v2_snapshot_rejects_vout_64() -> Result<(), Box<dyn std::error::Error>> {
+    let record_txid = txid(64_000);
+    let tip_hash = txid(64_001);
+    let key = UtxoKey::from_txid(&record_txid);
+    let mut bytes = Vec::new();
+
+    bytes.extend_from_slice(&0x55_54_58_4f_u32.to_le_bytes());
+    bytes.extend_from_slice(&2_u32.to_le_bytes());
+    bytes.extend_from_slice(&tip_hash.to_le_bytes());
+    bytes.extend_from_slice(&64_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+
+    bytes.push(key.shard());
+    bytes.extend_from_slice(&key.to_prefix());
+    bytes.extend_from_slice(&record_txid.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.push(1);
+
+    bytes.extend_from_slice(&64_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_000_u64.to_le_bytes());
+    bytes.extend_from_slice(&64_u32.to_le_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.push(0x51);
+
+    let mut reader = Cursor::new(bytes);
+    let error = match read_snapshot(&mut reader) {
+        Err(error) => error,
+        Ok(_) => panic!("v2 bitmap cannot encode vout 64"),
+    };
+
+    assert!(matches!(error, UtxoError::VoutOutOfRange { vout: 64 }));
     Ok(())
 }
