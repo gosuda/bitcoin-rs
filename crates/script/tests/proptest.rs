@@ -1,12 +1,18 @@
 //! Property tests for delegated script execution over signed synthetic spends.
 
+#[cfg(feature = "bitcoinconsensus")]
+use bitcoin::PublicKey;
 use bitcoin::hashes::Hash as _;
-use bitcoin::script::{Builder, PushBytesBuf};
+use bitcoin::script::Builder;
+#[cfg(feature = "bitcoinconsensus")]
+use bitcoin::script::PushBytesBuf;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
+#[cfg(feature = "bitcoinconsensus")]
+use bitcoin::sighash::EcdsaSighashType;
+use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{
-    Amount, OutPoint, PublicKey, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
-    absolute, transaction,
+    Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
+    transaction,
 };
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_script::{Interpreter, ScriptError, VerifyFlags};
@@ -126,6 +132,7 @@ struct SpendFixture {
     tx: Tx,
 }
 
+#[cfg(feature = "bitcoinconsensus")]
 fn signed_p2pkh(byte: u8) -> Option<SpendFixture> {
     let secp = Secp256k1::new();
     let secret = secret_key(byte)?;
@@ -157,6 +164,7 @@ fn signed_p2pkh(byte: u8) -> Option<SpendFixture> {
     })
 }
 
+#[cfg(feature = "bitcoinconsensus")]
 fn signed_p2wpkh(byte: u8) -> Option<SpendFixture> {
     let secp = Secp256k1::new();
     let secret = secret_key(byte)?;
@@ -241,6 +249,7 @@ fn secret_key(byte: u8) -> Option<SecretKey> {
     SecretKey::from_slice(&[byte; 32]).ok()
 }
 
+#[cfg(feature = "bitcoinconsensus")]
 fn push_bytes(bytes: Vec<u8>) -> Option<PushBytesBuf> {
     PushBytesBuf::try_from(bytes).ok()
 }
