@@ -5,6 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
+use crossbeam_channel::TrySendError;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use crate::context::Context;
@@ -271,16 +272,25 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
             }
             drop(banned);
 
-            if command == "add" {
+            let persist = command == "add";
+            if persist {
                 let mut list = ctx.added_nodes.write();
                 if !list.contains(&addr) {
                     list.push(addr);
                 }
             }
-            if let Some(sender) = &ctx.p2p_outbound_sender
-                && sender.send(addr).is_err()
-            {
-                return Err(RpcError::Internal("p2p outbound channel closed".to_owned()));
+
+            if let Some(sender) = &ctx.p2p_outbound_sender {
+                match sender.try_send(addr) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => {}
+                    Err(TrySendError::Full(_)) => {
+                        return Err(RpcError::Internal("p2p outbound queue full".to_owned()));
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        return Err(RpcError::Internal("p2p outbound channel closed".to_owned()));
+                    }
+                }
             }
         }
         "remove" => {
@@ -497,6 +507,44 @@ mod addnode_validation_tests {
             panic!("addnode did not send outbound request");
         };
         assert_eq!(sent, std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+    }
+
+    #[test]
+    fn addnode_returns_error_when_outbound_queue_is_full() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.try_send(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
+            .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
+        let mut ctx = Context::new();
+        ctx.p2p_outbound_sender = Some(tx);
+        let ctx = Arc::new(ctx);
+
+        let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
+
+        assert!(matches!(
+            result,
+            Err(RpcError::Internal(message)) if message == "p2p outbound queue full"
+        ));
+        assert_eq!(rx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn addnode_add_persists_when_outbound_queue_is_full() {
+        let (tx, _rx) = crossbeam_channel::bounded(1);
+        tx.try_send(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
+            .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
+        let mut ctx = Context::new();
+        ctx.p2p_outbound_sender = Some(tx);
+        let ctx = Arc::new(ctx);
+
+        let result = addnode(&ctx, &json!(["127.0.0.2:8333", "add"]))
+            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
+
+        assert!(result.is_null());
+        let added = ctx.added_nodes.read();
+        assert_eq!(
+            added.as_slice(),
+            [std::net::SocketAddr::from(([127, 0, 0, 2], 8333))]
+        );
     }
 
     #[test]

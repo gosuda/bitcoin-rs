@@ -118,6 +118,10 @@ pub struct Config {
     pub log_level: String,
     /// Optional Prometheus metrics bind address.
     pub metrics_bind: Option<SocketAddr>,
+    /// Optional path for applied-block G2 `MuHash` samples.
+    pub g2_muhash_samples: Option<PathBuf>,
+    /// Optional final applied height to include in G2 `MuHash` samples.
+    pub g2_muhash_tip_height: Option<u32>,
     /// ZMQ `hashblock` PUB bind endpoints.
     pub zmqpubhashblock: Vec<String>,
     /// ZMQ `hashtx` PUB bind endpoints.
@@ -157,6 +161,8 @@ impl fmt::Debug for Config {
             .field("dbcache_mb", &self.dbcache_mb)
             .field("log_level", &self.log_level)
             .field("metrics_bind", &self.metrics_bind)
+            .field("g2_muhash_samples", &self.g2_muhash_samples)
+            .field("g2_muhash_tip_height", &self.g2_muhash_tip_height)
             .field("zmqpubhashblock", &self.zmqpubhashblock)
             .field("zmqpubhashtx", &self.zmqpubhashtx)
             .field("zmqpubrawblock", &self.zmqpubrawblock)
@@ -196,6 +202,8 @@ impl Config {
             dbcache_mb: DEFAULT_DBCACHE_MB,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             metrics_bind: None,
+            g2_muhash_samples: None,
+            g2_muhash_tip_height: None,
             zmqpubhashblock: Vec::new(),
             zmqpubhashtx: Vec::new(),
             zmqpubrawblock: Vec::new(),
@@ -263,6 +271,12 @@ impl Config {
         }
         if self.electrum_tls_cert.is_some() && self.electrum_bind.is_none() {
             bail!("electrum_tls_cert requires electrum_bind");
+        }
+        match (&self.g2_muhash_samples, self.g2_muhash_tip_height) {
+            (Some(_), Some(0)) => bail!("g2_muhash_tip_height must be greater than zero"),
+            (Some(_), None) => bail!("g2_muhash_samples requires g2_muhash_tip_height"),
+            (None, Some(_)) => bail!("g2_muhash_tip_height requires g2_muhash_samples"),
+            (None, None) | (Some(_), Some(_)) => {}
         }
         for (name, hwm) in [
             ("zmqpubhashblockhwm", self.zmqpubhashblockhwm),
@@ -403,6 +417,12 @@ impl Config {
         if layer.clear_metrics_bind {
             self.metrics_bind = None;
         }
+        if let Some(path) = &layer.g2_muhash_samples {
+            self.g2_muhash_samples = Some(path.clone());
+        }
+        if let Some(height) = layer.g2_muhash_tip_height {
+            self.g2_muhash_tip_height = Some(height);
+        }
         if let Some(endpoints) = &layer.zmqpubhashblock {
             self.zmqpubhashblock.clone_from(endpoints);
         }
@@ -481,6 +501,10 @@ pub(crate) struct ConfigLayer {
     pub(crate) metrics_bind: Option<SocketAddr>,
     #[arg(skip)]
     pub(crate) clear_metrics_bind: bool,
+    #[arg(long = "g2-muhash-samples")]
+    pub(crate) g2_muhash_samples: Option<PathBuf>,
+    #[arg(long = "g2-muhash-tip-height")]
+    pub(crate) g2_muhash_tip_height: Option<u32>,
     #[arg(long = "zmqpubhashblock", value_delimiter = ',')]
     pub(crate) zmqpubhashblock: Option<Vec<String>>,
     #[arg(long = "zmqpubhashtx", value_delimiter = ',')]
@@ -537,6 +561,12 @@ impl ConfigLayer {
                 "BITCOIN_RS_DBCACHE_MB" => layer.dbcache_mb = Some(value.parse()?),
                 "BITCOIN_RS_LOG_LEVEL" => layer.log_level = Some(value.to_owned()),
                 "BITCOIN_RS_METRICS_BIND" => layer.metrics_bind = Some(value.parse()?),
+                "BITCOIN_RS_G2_MUHASH_SAMPLES" => {
+                    layer.g2_muhash_samples = Some(PathBuf::from(value));
+                }
+                "BITCOIN_RS_G2_MUHASH_TIP_HEIGHT" => {
+                    layer.g2_muhash_tip_height = Some(value.parse()?);
+                }
                 "BITCOIN_RS_ZMQPUBHASHBLOCK" => {
                     layer.zmqpubhashblock = Some(parse_string_list(value));
                 }

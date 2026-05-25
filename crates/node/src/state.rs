@@ -35,6 +35,10 @@ use crate::Config;
 type TxIndexHandle = Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>;
 type FilterIndexHandle = Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>;
 
+// One active generation of outbound requests is enough to keep the drain fed;
+// extra backlog is overload and must fail fast at producers.
+pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
+
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -605,6 +609,7 @@ pub struct NodeState {
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
+    g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -637,8 +642,16 @@ impl NodeState {
     #[allow(clippy::arc_with_non_send_sync)]
     #[allow(clippy::too_many_lines)]
     pub fn open(config: Config) -> Result<Self> {
+        config.validate()?;
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
+        let g2_muhash_sampler = config
+            .g2_muhash_samples
+            .clone()
+            .map(|path| crate::g2_muhash::G2MuhashSampler::open(path, config.g2_muhash_tip_height))
+            .transpose()
+            .context("open G2 MuHash sample writer")?
+            .map(Arc::new);
         let storage = NodeStorage::open(&config)?;
         let (tx_index, tx_index_storage) = open_tx_index(&config)?;
         let tx_index_storage = Arc::new(tx_index_storage);
@@ -676,7 +689,8 @@ impl NodeState {
         let peers = Arc::new(RwLock::new(Vec::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
-        let (p2p_outbound_tx, p2p_outbound_rx_raw) = crossbeam_channel::unbounded();
+        let (p2p_outbound_tx, p2p_outbound_rx_raw) =
+            crossbeam_channel::bounded(P2P_OUTBOUND_QUEUE_LIMIT);
         let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
         let mining_template_id = Arc::new(ArcSwap::from_pointee(CompactString::new("0")));
         let (inbound_headers_tx, inbound_headers_rx_raw) =
@@ -700,6 +714,7 @@ impl NodeState {
                 transactions: Arc::clone(&transactions),
                 zmq_publisher: Arc::clone(&zmq_publisher),
                 block_body_store: (config.prune_target_mb > 0).then(|| storage.block_body_store()),
+                g2_muhash_sampler: g2_muhash_sampler.clone(),
             },
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
@@ -729,6 +744,7 @@ impl NodeState {
             prune_service,
             zmq_publisher,
             active_zmq_notifications,
+            g2_muhash_sampler,
             mempool,
             chain_tip,
             applied_tip,
@@ -1007,6 +1023,7 @@ impl NodeState {
                 .prune_service
                 .is_some()
                 .then(|| self.storage.block_body_store()),
+            g2_muhash_sampler: self.g2_muhash_sampler.clone(),
         }
     }
 

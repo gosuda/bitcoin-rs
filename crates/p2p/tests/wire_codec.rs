@@ -1,5 +1,6 @@
 //! Wire codec message round trips.
 use std::io::Cursor;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use bitcoin::TxMerkleNode;
 use bitcoin::Txid;
@@ -8,15 +9,22 @@ use bitcoin::bip152::{
 };
 use bitcoin::block::BlockHash;
 use bitcoin::block::{Header, Version};
+use bitcoin::consensus::encode::{Encodable, VarInt};
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
+use bitcoin::p2p::address::{AddrV2, AddrV2Message, Address};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
 use bitcoin::pow::CompactTarget;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
 use bitcoin_rs_p2p::handshake::version_message;
-use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
+use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
+use bitcoin_rs_p2p::wire::{
+    MAX_ADDR_MESSAGE_COUNT, MAX_LOCATOR_HASHES, PeerError, read_message, write_message,
+};
+use sha2::{Digest, Sha256};
 
 #[test]
 fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError> {
@@ -42,6 +50,241 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
         assert_eq!(decoded, message);
     }
 
+    Ok(())
+}
+
+#[test]
+fn rejects_inv_message_with_more_than_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"inv", MAX_INV_PER_MSG + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("inv count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("inventory count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn rejects_getdata_message_with_more_than_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("getdata count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("inventory count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn rejects_notfound_message_with_more_than_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("notfound count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("inventory count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepts_inv_message_with_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"inv", MAX_INV_PER_MSG)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::Inv(inventory) if inventory.len() == MAX_INV_PER_MSG)
+    );
+    Ok(())
+}
+
+#[test]
+fn accepts_getdata_message_with_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::GetData(inventory) if inventory.len() == MAX_INV_PER_MSG)
+    );
+    Ok(())
+}
+
+#[test]
+fn accepts_notfound_message_with_max_vectors() -> Result<(), PeerError> {
+    let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::NotFound(inventory) if inventory.len() == MAX_INV_PER_MSG)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_addr_message_with_more_than_max_addresses() -> Result<(), PeerError> {
+    let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("addr count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, PeerError::Protocol("addr count too large")));
+    Ok(())
+}
+
+#[test]
+fn accepts_addr_message_with_max_addresses() -> Result<(), PeerError> {
+    let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::Addr(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_addrv2_message_with_more_than_max_addresses() -> Result<(), PeerError> {
+    let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("addrv2 count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("addrv2 count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepts_addrv2_message_with_max_addresses() -> Result<(), PeerError> {
+    let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::AddrV2(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_getheaders_message_with_more_than_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("getheaders locator hash count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("getheaders locator too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn rejects_getblocks_message_with_more_than_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES + 1)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("getblocks locator hash count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("getblocks locator too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepts_getheaders_message_with_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::GetHeaders(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
+    );
+    Ok(())
+}
+
+#[test]
+fn accepts_getblocks_message_with_max_locator_hashes() -> Result<(), PeerError> {
+    let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(
+        matches!(decoded, NetworkMessage::GetBlocks(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_headers_message_with_more_than_2000_headers() -> Result<(), PeerError> {
+    let frame = headers_frame(2_001)?;
+    let mut cursor = Cursor::new(frame);
+
+    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+        Ok(_) => panic!("headers count must be capped"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        PeerError::Protocol("headers count too large")
+    ));
+    Ok(())
+}
+
+#[test]
+fn accepts_headers_message_with_2000_headers() -> Result<(), PeerError> {
+    let frame = headers_frame(2_000)?;
+    let mut cursor = Cursor::new(frame);
+
+    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+
+    assert!(matches!(decoded, NetworkMessage::Headers(headers) if headers.len() == 2_000));
     Ok(())
 }
 
@@ -92,6 +335,117 @@ fn round_trips_compact_block_messages() -> Result<(), PeerError> {
     }
 
     Ok(())
+}
+
+fn inventory_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let inventory = Inventory::Transaction(Txid::from_byte_array([9u8; 32]));
+    for _ in 0..count {
+        inventory
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+
+    message_frame(command, &payload)
+}
+
+fn addr_frame(count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let socket = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8333));
+    let address = (0_u32, Address::new(&socket, ServiceFlags::NETWORK));
+    for _ in 0..count {
+        address
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+
+    message_frame(b"addr", &payload)
+}
+
+fn addrv2_frame(count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let address = AddrV2Message {
+        time: 0,
+        services: ServiceFlags::NETWORK,
+        addr: AddrV2::Ipv4(Ipv4Addr::LOCALHOST),
+        port: 8333,
+    };
+    for _ in 0..count {
+        address
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+
+    message_frame(b"addrv2", &payload)
+}
+
+fn locator_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
+    let mut payload = Vec::new();
+    bitcoin::p2p::PROTOCOL_VERSION
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    VarInt(count_u64)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let locator = BlockHash::from_byte_array([8u8; 32]);
+    for _ in 0..count {
+        locator
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    }
+    BlockHash::all_zeros()
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+
+    message_frame(command, &payload)
+}
+
+fn headers_frame(count: u64) -> Result<Vec<u8>, PeerError> {
+    let mut payload = Vec::new();
+    VarInt(count)
+        .consensus_encode(&mut payload)
+        .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+    let header = compact_block_header();
+    for _ in 0..count {
+        header
+            .consensus_encode(&mut payload)
+            .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
+        payload.push(0);
+    }
+
+    message_frame(b"headers", &payload)
+}
+
+fn message_frame(command: &[u8], payload: &[u8]) -> Result<Vec<u8>, PeerError> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&Magic::BITCOIN.to_bytes());
+    frame.extend_from_slice(command);
+    frame.resize(16, 0);
+    let payload_len =
+        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
+    frame.extend_from_slice(&payload_len.to_le_bytes());
+    frame.extend_from_slice(&checksum(payload));
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+fn checksum(payload: &[u8]) -> [u8; 4] {
+    let first = Sha256::digest(payload);
+    let second = Sha256::digest(first);
+    [second[0], second[1], second[2], second[3]]
 }
 
 fn compact_block_header() -> Header {

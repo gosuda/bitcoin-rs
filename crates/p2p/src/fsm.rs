@@ -21,6 +21,11 @@ pub fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
             peer.wtxid_relay.mark_peer_supported();
             Ok(())
         }
+        Message::SendCmpct(send_cmpct) => {
+            ensure_negotiating_or_ready(peer)?;
+            peer.compact_blocks.record_remote_preference(send_cmpct);
+            Ok(())
+        }
         _ => {
             if peer.state == PeerState::Ready {
                 Ok(())
@@ -68,5 +73,70 @@ const fn ensure_negotiating_or_ready<S>(peer: &Peer<S>) -> Result<(), PeerError>
         PeerState::Disconnected | PeerState::Disconnecting => {
             Err(PeerError::Protocol("feature negotiation outside handshake"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use bitcoin::p2p::Magic;
+    use bitcoin::p2p::message_compact_blocks::SendCmpct;
+
+    use super::*;
+
+    #[test]
+    fn sendcmpct_while_ready_updates_compact_block_state() -> Result<(), PeerError> {
+        let mut peer = peer_in_state(PeerState::Ready);
+        let message = sendcmpct_message(true, 2);
+
+        step(&mut peer, &message)?;
+
+        assert_eq!(peer.compact_blocks.remote_send_compact, Some(true));
+        assert_eq!(peer.compact_blocks.remote_version, Some(2));
+        assert_eq!(peer.state, PeerState::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn sendcmpct_during_negotiation_updates_compact_block_state() -> Result<(), PeerError> {
+        let mut peer = peer_in_state(PeerState::VersionExchange);
+        let message = sendcmpct_message(false, 1);
+
+        step(&mut peer, &message)?;
+
+        assert_eq!(peer.compact_blocks.remote_send_compact, Some(false));
+        assert_eq!(peer.compact_blocks.remote_version, Some(1));
+        assert_eq!(peer.state, PeerState::VersionExchange);
+        Ok(())
+    }
+
+    #[test]
+    fn sendcmpct_while_disconnected_is_rejected_without_state_mutation() {
+        let mut peer = peer_in_state(PeerState::Disconnected);
+        let before = peer.compact_blocks;
+        let message = sendcmpct_message(true, 2);
+
+        let result = step(&mut peer, &message);
+
+        assert!(matches!(
+            result,
+            Err(PeerError::Protocol("feature negotiation outside handshake"))
+        ));
+        assert_eq!(peer.compact_blocks, before);
+        assert_eq!(peer.state, PeerState::Disconnected);
+    }
+
+    fn peer_in_state(state: PeerState) -> Peer<Cursor<Vec<u8>>> {
+        let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
+        peer.state = state;
+        peer
+    }
+
+    const fn sendcmpct_message(send_compact: bool, version: u64) -> Message {
+        Message::SendCmpct(SendCmpct {
+            send_compact,
+            version,
+        })
     }
 }

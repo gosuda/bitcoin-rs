@@ -11,18 +11,27 @@ protects. Robustness is not added later — handle all valid inputs and failure 
 
 ## Build, test, lint
 
-Cargo workspace, Rust 2024 edition, toolchain pinned to 1.95.0 via `rust-toolchain.toml`. The binary's
-default features are NOT what CI validates. Always use the portable feature set so local results match CI:
+Cargo workspace, Rust 2024 edition, toolchain pinned to 1.95.0 via `rust-toolchain.toml`. This is a
+**virtual workspace** (no root `[package]` section in `Cargo.toml`), so `--workspace --features "..."`
+silently ignores the `--features` flag — it has no root package to apply them to. Always target
+`-p bitcoin-rs` when you need storage-backend features to reach `bitcoin-rs-node`:
 
 ```sh
 FEATURES="rocksdb,fjall,redb,mdbx,bitcoinconsensus"
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --no-default-features --features "$FEATURES" -- -D warnings
-cargo test  --workspace --no-fail-fast   --no-default-features --features "$FEATURES"
+# Clippy: -p bitcoin-rs propagates features through bin/bitcoin-rs's feature table to node
+cargo clippy -p bitcoin-rs --all-targets --no-default-features --features "$FEATURES" -- -D warnings
+# Library unit tests run with each crate's own default features
+cargo test --workspace --no-fail-fast
+# Node/binary tests with the full portable feature set
+cargo test -p bitcoin-rs --no-fail-fast --no-default-features --features "$FEATURES"
 ```
 
-- Plain `cargo test`/`cargo clippy` (without `--no-default-features --features "$FEATURES"`) tests the
-  wrong configuration. Clippy CI runs `-D warnings` — any warning fails the build.
+- `cargo clippy --workspace --all-targets --no-default-features --features "$FEATURES"` appears correct
+  but silently uses **zero** storage features for `bitcoin-rs-node` (virtual workspace + `default-features
+  = false` in the workspace dep declaration).  The CI cache masks this; a cold build would fail. Use
+  `-p bitcoin-rs` as shown above.
+- Clippy CI runs `-D warnings` — any warning fails the build.
 - **`kernel` and `bitcoinconsensus` cannot be enabled in the same binary** (overlapping native Core
   symbols). The kernel path is tested in isolation and needs system `libboost-dev` + `cmake`:
   ```sh

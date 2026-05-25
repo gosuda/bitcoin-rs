@@ -31,6 +31,15 @@ const GETDATA_BATCH_SIZE: usize = 16;
 const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 const PENDING_BUDGET: usize = 128;
+/// Time after which a received out-of-order block is discarded.
+const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
+/// Maximum number of received blocks waiting for their predecessor.
+const RECEIVED_BLOCK_BUDGET: usize = 128;
+
+struct ReceivedBlock {
+    block: bitcoin::Block,
+    received_at: Instant,
+}
 
 /// Block download orchestrator.
 pub struct BlockSync {
@@ -40,6 +49,7 @@ pub struct BlockSync {
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
     pending_blocks: Arc<Mutex<HashMap<Hash256, Instant>>>,
+    received_blocks: Arc<Mutex<HashMap<Hash256, ReceivedBlock>>>,
 }
 
 impl BlockSync {
@@ -59,6 +69,7 @@ impl BlockSync {
             inbound_headers_rx,
             inbound_blocks_rx,
             pending_blocks: Arc::new(Mutex::new(HashMap::new())),
+            received_blocks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -66,6 +77,7 @@ impl BlockSync {
     /// blocks, and asks the peer to extend the header chain.
     pub fn tick(&self) {
         self.drain_inbound_headers();
+        self.ensure_genesis_tip();
         self.drain_inbound_blocks();
 
         let applied_height = self
@@ -113,31 +125,92 @@ impl BlockSync {
 
     fn drain_inbound_blocks(&self) {
         let receiver = self.inbound_blocks_rx.lock();
+        let mut received = 0_usize;
+        while let Ok(block) = receiver.try_recv() {
+            received = received.saturating_add(1);
+            self.buffer_received_block(block);
+        }
+        drop(receiver);
+
+        let now = Instant::now();
+        let mut received_blocks = self.received_blocks.lock();
+        prune_received_blocks(&mut received_blocks, now);
+        drop(received_blocks);
+
+        let (applied, failed) = self.apply_buffered_blocks();
+        if received > 0 || applied > 0 || failed > 0 {
+            tracing::debug!(
+                received,
+                applied,
+                failed,
+                "block sync: drained inbound blocks"
+            );
+        }
+    }
+
+    fn buffer_received_block(&self, block: bitcoin::Block) {
+        let now = Instant::now();
+        let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let mut received = self.received_blocks.lock();
+        prune_received_blocks(&mut received, now);
+        if received.len() >= RECEIVED_BLOCK_BUDGET && !received.contains_key(&hash) {
+            evict_oldest_received_block(&mut received);
+        }
+        if received.len() >= RECEIVED_BLOCK_BUDGET && !received.contains_key(&hash) {
+            tracing::warn!(%hash, "block sync: received block buffer full; dropping block");
+            return;
+        }
+        received.insert(
+            hash,
+            ReceivedBlock {
+                block,
+                received_at: now,
+            },
+        );
+    }
+
+    fn apply_buffered_blocks(&self) -> (usize, usize) {
         let mut applied = 0_usize;
         let mut failed = 0_usize;
-        while let Ok(block) = receiver.try_recv() {
-            match crate::apply::apply_block(&self.handles, &block) {
+        while let Some(expected_hash) = self.next_expected_block_hash() {
+            let Some(received) = self.received_blocks.lock().remove(&expected_hash) else {
+                break;
+            };
+            match crate::apply::apply_block(&self.handles, &received.block) {
                 Ok(tip) => {
-                    applied += 1;
+                    applied = applied.saturating_add(1);
                     tracing::debug!(
                         height = tip.height,
                         %tip.hash,
-                        "block sync: applied inbound block"
+                        "block sync: applied buffered block"
                     );
                     self.pending_blocks.lock().remove(&tip.hash);
                 }
                 Err(error) => {
-                    failed += 1;
+                    failed = failed.saturating_add(1);
+                    self.pending_blocks.lock().remove(&expected_hash);
                     tracing::warn!(
+                        %expected_hash,
                         %error,
-                        "block sync: failed to apply inbound block"
+                        "block sync: failed to apply buffered block"
                     );
+                    break;
                 }
             }
         }
-        if applied > 0 || failed > 0 {
-            tracing::debug!(applied, failed, "block sync: drained inbound blocks");
+        (applied, failed)
+    }
+
+    fn next_expected_block_hash(&self) -> Option<Hash256> {
+        let chain_tip = self.handles.chain_tip.load_full()?;
+        let applied_tip = self.handles.applied_tip.load_full()?;
+        let height = applied_tip.height.checked_add(1)?;
+        if height > chain_tip.height {
+            return None;
         }
+        let tree = self.handles.block_tree.read();
+        let node_id = tree.node_at_height_from(chain_tip.tip_id, height)?;
+        Some(tree.node(node_id).ok()?.hash)
     }
 
     fn pick_sync_peer(&self, our_height: u32) -> Option<PeerInfo> {
@@ -157,11 +230,10 @@ impl BlockSync {
         let Some(chain_tip) = self.handles.chain_tip.load_full() else {
             return;
         };
-        let applied_height = self
-            .handles
-            .applied_tip
-            .load_full()
-            .map_or(0, |tip| tip.height);
+        let Some(applied_tip) = self.handles.applied_tip.load_full() else {
+            return;
+        };
+        let applied_height = applied_tip.height;
         if chain_tip.height <= applied_height {
             return;
         }
@@ -182,21 +254,20 @@ impl BlockSync {
 
         let mut hashes: Vec<Hash256> = Vec::with_capacity(batch_cap);
         let tree = self.handles.block_tree.read();
-        let mut cursor = chain_tip.tip_id;
-        while hashes.len() < batch_cap {
-            let Ok(node) = tree.node(cursor) else {
+        let Some(mut height) = applied_height.checked_add(1) else {
+            return;
+        };
+        while hashes.len() < batch_cap && height <= chain_tip.height {
+            let Some(node_id) = tree.node_at_height_from(chain_tip.tip_id, height) else {
                 break;
             };
-            if node.height <= applied_height {
+            let Ok(node) = tree.node(node_id) else {
                 break;
-            }
+            };
             if !pending.contains_key(&node.hash) {
                 hashes.push(node.hash);
             }
-            let Some(parent) = node.parent else {
-                break;
-            };
-            cursor = parent;
+            height = height.saturating_add(1);
         }
         drop(tree);
 
@@ -204,14 +275,10 @@ impl BlockSync {
             return;
         }
 
-        hashes.reverse();
         let count = hashes.len();
-        for hash in &hashes {
-            pending.insert(*hash, now);
-        }
         drop(pending);
         let inventory: Vec<Inventory> = hashes
-            .into_iter()
+            .iter()
             .map(|hash| Inventory::WitnessBlock(BlockHash::from_byte_array(hash.to_le_bytes())))
             .collect();
         let msg = NetworkMessage::GetData(inventory);
@@ -233,6 +300,10 @@ impl BlockSync {
                 "block sync: outbound channel disconnected (getdata)"
             );
             return;
+        }
+        let mut pending = self.pending_blocks.lock();
+        for hash in &hashes {
+            pending.insert(*hash, now);
         }
         tracing::debug!(
             peer_addr = %sync_peer_addr,
@@ -281,6 +352,7 @@ impl BlockSync {
     }
 
     fn build_locator(&self) -> Vec<Hash256> {
+        self.ensure_genesis_tip();
         if let Some(tip) = self.handles.chain_tip.load_full() {
             return self
                 .handles
@@ -290,12 +362,58 @@ impl BlockSync {
         }
         alloc::vec![self.handles.network.genesis_block_hash()]
     }
+
+    fn ensure_genesis_tip(&self) {
+        if self.handles.applied_tip.load_full().is_some() {
+            return;
+        }
+
+        let had_chain_tip = self.handles.chain_tip.load_full().is_some();
+        let genesis =
+            bitcoin::blockdata::constants::genesis_block(bitcoin_network(self.handles.network));
+        match crate::apply::apply_block(&self.handles, &genesis) {
+            Ok(tip) => {
+                if !had_chain_tip {
+                    self.handles.chain_tip.store(Some(Arc::new(tip)));
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "block sync: failed to bootstrap genesis");
+            }
+        }
+    }
+}
+
+fn bitcoin_network(network: bitcoin_rs_primitives::Network) -> bitcoin::Network {
+    match network {
+        bitcoin_rs_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
+        bitcoin_rs_primitives::Network::Testnet3 => bitcoin::Network::Testnet,
+        bitcoin_rs_primitives::Network::Testnet4 => bitcoin::Network::Testnet4,
+        bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
+        bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
+    }
+}
+
+fn prune_received_blocks(received: &mut HashMap<Hash256, ReceivedBlock>, now: Instant) {
+    received.retain(|_hash, entry| now.duration_since(entry.received_at) < RECEIVED_BLOCK_TIMEOUT);
+}
+
+fn evict_oldest_received_block(received: &mut HashMap<Hash256, ReceivedBlock>) {
+    let Some(oldest_hash) = received
+        .iter()
+        .min_by_key(|(_hash, entry)| entry.received_at)
+        .map(|(hash, _entry)| *hash)
+    else {
+        return;
+    };
+    received.remove(&oldest_hash);
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use arc_swap::ArcSwapOption;
     use bitcoin::hashes::Hash as _;
@@ -304,7 +422,7 @@ mod tests {
         block::{Header as BlockHeader, Version},
         pow::CompactTarget,
     };
-    use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus, TipSnapshot};
+    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
     use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
     use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
@@ -321,9 +439,8 @@ mod tests {
     fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std::error::Error>>
     {
         let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis = genesis_header();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
         let mut tip_id = genesis_id;
         let mut expected = Vec::new();
 
@@ -338,12 +455,7 @@ mod tests {
 
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
-        let applied_tip = Arc::new(ArcSwapOption::from_pointee(TipSnapshot {
-            tip_id: genesis_id,
-            height: 0,
-            chainwork: ChainWork::ZERO,
-            hash: genesis_hash,
-        }));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
         let peers = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
@@ -369,6 +481,7 @@ mod tests {
 
         sync.tick();
 
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
         let first = rx.try_recv()?;
         let NetworkMessage::GetData(inventory) = first else {
             return Err(std::io::Error::other("expected getdata").into());
@@ -391,28 +504,29 @@ mod tests {
     }
 
     #[test]
-    fn second_tick_does_not_re_request_already_pending_blocks()
+    fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis = genesis_header();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
         let mut tip_id = genesis_id;
+        let mut expected = Vec::new();
+        let batch_size = u32::try_from(super::GETDATA_BATCH_SIZE)?;
 
-        for height in 1_u32..=3 {
+        for height in 1_u32..=batch_size + 4 {
             let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
             let header = test_header(parent_hash, height);
             tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            if height <= batch_size {
+                expected.push(BlockHash::from_byte_array(
+                    tree.node(tip_id)?.hash.to_le_bytes(),
+                ));
+            }
         }
 
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
-        let applied_tip = Arc::new(ArcSwapOption::from_pointee(TipSnapshot {
-            tip_id: genesis_id,
-            height: 0,
-            chainwork: ChainWork::ZERO,
-            hash: genesis_hash,
-        }));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
         let peers = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
@@ -438,6 +552,65 @@ mod tests {
 
         sync.tick();
 
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let first = rx.try_recv()?;
+        let NetworkMessage::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        let requested = inventory
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(hash),
+                _ => Err(std::io::Error::other("expected witness block inventory")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(requested, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn second_tick_does_not_re_request_already_pending_blocks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+
+        for height in 1_u32..=3 {
+            let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
         let first = rx.try_recv()?;
         if !matches!(first, NetworkMessage::GetData(_)) {
             return Err(std::io::Error::other("expected first tick getdata").into());
@@ -465,6 +638,170 @@ mod tests {
                 Err(std::io::Error::other("outbound channel disconnected").into())
             }
         }
+    }
+
+    #[test]
+    fn missing_outbound_channel_does_not_mark_blocks_pending_and_retries_when_channel_appears()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(3)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.pending_blocks.lock().is_empty());
+
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        let first = rx.try_recv()?;
+        let NetworkMessage::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected retry getdata").into());
+        };
+        let requested = witness_block_inventory(inventory)?;
+        assert_eq!(requested, expected);
+        assert_eq!(sync.pending_blocks.lock().len(), expected.len());
+        Ok(())
+    }
+
+    #[test]
+    fn disconnected_outbound_channel_does_not_mark_blocks_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, _expected) =
+            sync_with_header_chain(3)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        drop(rx);
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.pending_blocks.lock().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn successful_getdata_send_marks_requested_blocks_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(3)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let first = rx.try_recv()?;
+        let NetworkMessage::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected);
+
+        let pending = sync.pending_blocks.lock();
+        assert_eq!(pending.len(), expected.len());
+        for hash in expected {
+            let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&hash.to_byte_array());
+            assert!(pending.contains_key(&hash));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _peer_outbound, _block_tree, _applied_tip, _expected) =
+            sync_with_header_chain(1)?;
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let hash =
+            bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let received_at = Instant::now()
+            .checked_sub(super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
+            .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
+        sync.received_blocks
+            .lock()
+            .insert(hash, super::ReceivedBlock { block, received_at });
+
+        sync.drain_inbound_blocks();
+
+        assert!(sync.received_blocks.lock().is_empty());
+        Ok(())
+    }
+
+    type SyncFixture = (
+        BlockSync,
+        Arc<RwLock<Vec<PeerInfo>>>,
+        Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
+        Arc<RwLock<BlockTree>>,
+        Arc<ArcSwapOption<TipSnapshot>>,
+        Vec<BlockHash>,
+    );
+
+    fn sync_with_header_chain(height: u32) -> Result<SyncFixture, Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        let mut expected = Vec::new();
+
+        for height in 1_u32..=height {
+            let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            expected.push(BlockHash::from_byte_array(
+                tree.node(tip_id)?.hash.to_le_bytes(),
+            ));
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+
+        Ok((
+            sync,
+            peers,
+            peer_outbound,
+            block_tree,
+            applied_tip,
+            expected,
+        ))
+    }
+
+    fn witness_block_inventory(
+        inventory: Vec<Inventory>,
+    ) -> Result<Vec<BlockHash>, Box<dyn std::error::Error>> {
+        inventory
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(hash),
+                _ => Err(std::io::Error::other("expected witness block inventory").into()),
+            })
+            .collect()
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
@@ -552,6 +889,27 @@ mod tests {
             bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: height,
         }
+    }
+
+    fn genesis_header() -> BlockHeader {
+        bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest).header
+    }
+
+    fn assert_applied_genesis(
+        applied_tip: &Arc<ArcSwapOption<TipSnapshot>>,
+        block_tree: &Arc<RwLock<BlockTree>>,
+        handles: &ApplyHandles,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let genesis_hash = Network::Regtest.genesis_block_hash();
+        let tip = applied_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing applied genesis tip"))?;
+        assert_eq!(tip.height, 0);
+        assert_eq!(tip.hash, genesis_hash);
+        assert_eq!(block_tree.read().height_of_hash(genesis_hash), Some(0));
+        assert_eq!(handles.blocks.read().len(), 1);
+        assert_eq!(handles.utxo.len(), 0);
+        Ok(())
     }
 
     fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {

@@ -656,12 +656,12 @@ pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value
         .filter_index
         .filter(hash)
         .map_err(|error| RpcError::Internal(error.to_string()))?
-        .unwrap_or_default();
+        .ok_or(RpcError::NotFound("block filter not found"))?;
     let header = ctx
         .filter_index
         .filter_header(hash)
         .map_err(|error| RpcError::Internal(error.to_string()))?
-        .unwrap_or_default();
+        .ok_or(RpcError::NotFound("block filter header not found"))?;
     Ok(json!({
         "filter": filter_bytes.to_lower_hex_string(),
         "header": header.to_string_be()

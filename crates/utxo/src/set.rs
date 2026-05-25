@@ -1,20 +1,17 @@
 use std::io;
 
+use bitcoin::ScriptBuf;
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use thiserror::Error;
 
-use crate::{
-    UtxoKey,
-    record::{OwnedUtxoOut, validate_bitmap_vout},
-    shard::Shard,
-};
+use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
 /// Errors returned by UTXO mutation and snapshot operations.
 #[derive(Debug, Error)]
 pub enum UtxoError {
-    /// The record bitmap only represents vouts `0..64`.
-    #[error("vout {vout} exceeds the UTXO record bitmap range 0..64")]
+    /// A legacy snapshot v2 bitmap only represents vouts `0..64`.
+    #[error("snapshot v2 vout {vout} exceeds bitmap range 0..64")]
     VoutOutOfRange {
         /// Invalid vout.
         vout: u32,
@@ -68,6 +65,20 @@ pub enum UtxoError {
         bitmap: u64,
         /// Vout count from the record.
         vout_count: u8,
+    },
+    /// Snapshot vout is not present in the legacy record bitmap.
+    #[error("snapshot v2 vout {vout} is not present in bitmap {bitmap:#018x}")]
+    SnapshotVoutBitmapMismatch {
+        /// Vout bitmap from the record.
+        bitmap: u64,
+        /// Output index from the record body.
+        vout: u32,
+    },
+    /// Snapshot record serialized the same vout more than once.
+    #[error("snapshot record duplicates vout {vout}")]
+    SnapshotDuplicateVout {
+        /// Duplicated output index.
+        vout: u32,
     },
     /// Snapshot shard byte does not match the key's first byte.
     #[error("snapshot shard {shard} does not match key shard {key_shard}")]
@@ -136,6 +147,28 @@ impl UtxoAdd {
             height: self.height,
         }
     }
+}
+
+/// One live output found by a UTXO script scan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScannedUtxo {
+    /// Outpoint that identifies the live output.
+    pub outpoint: OutPoint,
+    /// Output payload stored in the UTXO set.
+    pub txout: TxOut,
+    /// Whether the creating transaction was coinbase.
+    pub coinbase: bool,
+    /// Creating block height.
+    pub height: u32,
+}
+
+/// Result of scanning a stable UTXO-set view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UtxoScan {
+    /// Number of live outputs visited during the scan.
+    pub txouts: usize,
+    /// Live outputs whose script matched the scan set.
+    pub unspents: Vec<ScannedUtxo>,
 }
 
 /// UTXO mutations produced by one connected block.
@@ -261,6 +294,15 @@ impl UtxoSetView<'_> {
         crate::snapshot::hash_serialized_3_stable(self)
     }
 
+    /// Scans every live output for exact scriptPubKey matches.
+    pub fn scan_script_pubkeys(&self, scripts: &[ScriptBuf]) -> Result<UtxoScan, UtxoError> {
+        let mut scan = UtxoScan::default();
+        for shard in &self.set.shards {
+            shard.scan_script_pubkeys(scripts, &mut scan)?;
+        }
+        Ok(scan)
+    }
+
     pub(crate) const fn shard(&self, idx: usize) -> &Shard {
         &self.set.shards[idx]
     }
@@ -325,6 +367,11 @@ impl UtxoSet {
         self.shards[usize::from(key.shard())].get_entry(&key, &op.txid, op.vout)
     }
 
+    /// Scans a stable whole-set view for exact scriptPubKey matches.
+    pub fn scan_script_pubkeys(&self, scripts: &[ScriptBuf]) -> Result<UtxoScan, UtxoError> {
+        self.with_stable_view(|view| view.scan_script_pubkeys(scripts))
+    }
+
     /// Returns true when any output of `txid` is live in the set.
     ///
     /// This is the transaction-level BIP30 predicate: a duplicate txid is
@@ -387,7 +434,6 @@ impl UtxoSet {
             adds_by_shard[usize::from(key.shard())].push((key, add.outpoint.txid, add.payload()));
         }
         for remove in removes {
-            validate_bitmap_vout(remove.vout)?;
             let key = UtxoKey::from_txid(&remove.txid);
             removes_by_shard[usize::from(key.shard())].push(SpendPayload {
                 op: remove,
@@ -434,7 +480,6 @@ impl Default for UtxoSet {
 }
 
 fn validate_add(add: &UtxoAdd) -> Result<(), UtxoError> {
-    validate_bitmap_vout(add.outpoint.vout)?;
     let script_len = add.txout.script_pubkey.as_bytes().len();
     let _fits =
         u16::try_from(script_len).map_err(|_| UtxoError::ScriptTooLarge { len: script_len })?;

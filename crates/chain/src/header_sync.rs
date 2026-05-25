@@ -16,11 +16,26 @@ pub fn accept_headers(
     let mut accepted = Vec::with_capacity(headers.len());
     for header in headers {
         validate_pow(header, network)?;
+        validate_empty_tree_root(tree, header, network)?;
         validate_candidate_nbits(tree, header, network)?;
         let id = tree.insert_header(*header, NodeStatus::HeaderValid)?;
         accepted.push(id);
     }
     Ok(accepted)
+}
+
+fn validate_empty_tree_root(
+    tree: &BlockTree,
+    header: &BlockHeader,
+    network: Network,
+) -> Result<(), ChainError> {
+    if !tree.is_empty() || hash_from_header(header) == network.genesis_block_hash() {
+        return Ok(());
+    }
+
+    Err(ChainError::MissingParent {
+        prev_hash: prev_hash_from_header(header),
+    })
 }
 
 /// Validates a candidate header's compact target against the contextual network difficulty rules.

@@ -50,7 +50,7 @@ pub use verify_block::{
     verify_block_rules_borrowed_contextual, verify_block_rules_contextual,
 };
 pub use verify_tx::{
-    is_final_tx, verify_transaction, verify_transaction_borrowed,
+    is_final_tx, verify_coinbase_script_sig_size, verify_transaction, verify_transaction_borrowed,
     verify_transaction_borrowed_with_mtp, verify_transaction_with_mtp,
 };
 
@@ -65,6 +65,12 @@ pub enum ConsensusError {
     /// A transaction has no outputs.
     #[error("transaction has no outputs")]
     EmptyOutputs,
+    /// Coinbase scriptSig length is outside the consensus-allowed 2..=100 byte range.
+    #[error("coinbase scriptSig length {len} outside allowed range 2..=100 bytes")]
+    CoinbaseScriptSigSize {
+        /// Observed coinbase scriptSig length in bytes.
+        len: usize,
+    },
     /// A non-coinbase transaction contains a null previous output.
     #[error("non-coinbase transaction input {input_index} spends a null outpoint")]
     NullPrevout {
@@ -122,6 +128,9 @@ pub enum ConsensusError {
         /// Transaction index.
         tx_index: usize,
     },
+    /// Block merkle tree has a duplicate subtree mutation.
+    #[error("block merkle tree contains a duplicate transaction mutation")]
+    MerkleMutation,
     /// Block merkle root does not match transaction ids.
     #[error("block merkle root mismatch")]
     MerkleRoot,

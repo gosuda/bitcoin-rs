@@ -9,8 +9,8 @@ use crate::wire::{Message, PeerError};
 
 /// Maximum headers returned by one `headers` response.
 pub const MAX_HEADERS_RESPONSE: usize = 2_000;
-/// Maximum block locator hashes accepted in one `getheaders` request.
-pub const MAX_LOCATOR_HASHES: usize = 101;
+/// Maximum block locator hashes accepted in one locator-based request.
+pub use crate::wire::MAX_LOCATOR_HASHES;
 
 /// Blocks and missing inventory resolved for one `getdata` request.
 #[derive(Debug, Default)]
@@ -68,9 +68,19 @@ pub fn dispatch_inbound_with_chain<S>(
             }
         }
         Message::GetHeaders(request) => {
-            ensure_headers_request_within_bounds(request)?;
+            ensure_block_locator_within_bounds(
+                &request.locator_hashes,
+                "getheaders locator too large",
+            )?;
             step(peer, message)?;
             responses.push(headers_response(chain, request));
+        }
+        Message::GetBlocks(request) => {
+            ensure_block_locator_within_bounds(
+                &request.locator_hashes,
+                "getblocks locator too large",
+            )?;
+            step(peer, message)?;
         }
         Message::GetData(items) => {
             ensure_inventory_request_within_bounds(items)?;
@@ -119,9 +129,12 @@ fn data_responses(chain: Option<&dyn ChainQuery>, items: &[Inventory]) -> Vec<Me
     messages
 }
 
-fn ensure_headers_request_within_bounds(request: &GetHeadersMessage) -> Result<(), PeerError> {
-    if request.locator_hashes.len() > MAX_LOCATOR_HASHES {
-        return Err(PeerError::Protocol("getheaders locator too large"));
+fn ensure_block_locator_within_bounds(
+    locator_hashes: &[BlockHash],
+    error: &'static str,
+) -> Result<(), PeerError> {
+    if locator_hashes.len() > MAX_LOCATOR_HASHES {
+        return Err(PeerError::Protocol(error));
     }
     Ok(())
 }
@@ -140,7 +153,7 @@ mod tests {
     use bitcoin::block::{Header, Version};
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
-    use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
+    use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
     use bitcoin::pow::CompactTarget;
     use bitcoin::{Block, TxMerkleNode};
 
@@ -270,6 +283,41 @@ mod tests {
             Err(PeerError::Protocol("getheaders locator too large"))
         ));
         assert_eq!(peer_snapshot(&peer), before);
+    }
+
+    #[test]
+    fn oversized_getblocks_locator_is_protocol_error() {
+        let locator = vec![bitcoin::BlockHash::all_zeros(); MAX_LOCATOR_HASHES + 1];
+        let message = Message::GetBlocks(GetBlocksMessage::new(
+            locator,
+            bitcoin::BlockHash::all_zeros(),
+        ));
+        let mut peer = ready_peer();
+        let before = peer_snapshot(&peer);
+
+        let result = dispatch_inbound(&mut peer, &message);
+
+        assert!(matches!(
+            result,
+            Err(PeerError::Protocol("getblocks locator too large"))
+        ));
+        assert_eq!(peer_snapshot(&peer), before);
+    }
+
+    #[test]
+    fn getblocks_locator_at_cap_is_accepted() -> Result<(), PeerError> {
+        let locator = vec![bitcoin::BlockHash::all_zeros(); MAX_LOCATOR_HASHES];
+        let message = Message::GetBlocks(GetBlocksMessage::new(
+            locator,
+            bitcoin::BlockHash::all_zeros(),
+        ));
+        let mut peer = ready_peer();
+
+        let responses = dispatch_inbound(&mut peer, &message)?;
+
+        assert!(responses.is_empty());
+        assert_eq!(peer.state, PeerState::Ready);
+        Ok(())
     }
 
     #[test]

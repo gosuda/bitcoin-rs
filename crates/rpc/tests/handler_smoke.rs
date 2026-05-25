@@ -69,7 +69,10 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
             "deriveaddresses",
             json!(["addr(1111111111111111111114oLvT2)"]),
         ),
-        ("scantxoutset", json!(["start", []])),
+        (
+            "scantxoutset",
+            json!(["start", ["addr(1111111111111111111114oLvT2)"]]),
+        ),
         ("walletcreatefundedpsbt", json!([[], []])),
         ("walletprocesspsbt", json!([valid_psbt.as_str()])),
         ("finalizepsbt", json!([valid_psbt.as_str()])),
@@ -168,6 +171,24 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn gettxoutsetinfo_empty_muhash_matches_core_digest() -> Result<(), Box<dyn std::error::Error>> {
+    const EMPTY_MUHASH_CORE_DIGEST: &str =
+        "dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8";
+
+    let handler = Handler::new(Arc::new(Context::new()));
+    let result = handler.dispatch("gettxoutsetinfo", &json!(["muhash"]))?;
+
+    assert_eq!(result.get("txouts").as_u64(), Some(0));
+    assert_eq!(result.get("transactions").as_u64(), Some(0));
+    assert_eq!(
+        result.get("muhash").as_str(),
+        Some(EMPTY_MUHASH_CORE_DIGEST)
+    );
+    assert!(result.get("hash_serialized_3").is_none());
+    Ok(())
+}
+
+#[test]
 fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let txid = Hash256::from_le_bytes(&[0x42; 32]);
@@ -250,6 +271,32 @@ fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>>
         result.get("header").as_str(),
         Some(header.to_string_be().as_str())
     );
+    Ok(())
+}
+
+#[test]
+fn getblockfilter_returns_not_found_for_missing_filter_row()
+-> Result<(), Box<dyn std::error::Error>> {
+    let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
+    let header = Hash256::from_le_bytes(&[8_u8; 32]);
+    let mut ctx = Context::new();
+    let filter_index: Box<dyn FilterIndexLike> = Box::new(StaticFilterIndex {
+        block_hash,
+        filter: vec![0xab, 0xcd],
+        header,
+    });
+    ctx.filter_index = Arc::new(filter_index);
+    let handler = Handler::new(Arc::new(ctx));
+    let missing_hash = Hash256::from_le_bytes(&[7_u8; 32]);
+    let missing_hash_hex = missing_hash.to_string_be();
+
+    let error = handler
+        .dispatch("getblockfilter", &json!([missing_hash_hex.as_str()]))
+        .err()
+        .ok_or("missing filter unexpectedly succeeded")?;
+
+    assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
+    assert_eq!(error.to_string(), "not found: block filter not found");
     Ok(())
 }
 
@@ -594,7 +641,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let ctx = Arc::new(Context::new());
+        let mut ctx = Context::new();
         let tx = tx(1, ScriptBuf::from_bytes(vec![0x51]));
         let block = bitcoin::Block {
             header: bitcoin::block::Header {
@@ -615,6 +662,11 @@ impl Fixture {
         };
         let block_hash_bytes = block.block_hash();
         let block_hash = Hash256::from_le_bytes(block_hash_bytes.as_byte_array());
+        ctx.filter_index = Arc::new(Box::new(StaticFilterIndex {
+            block_hash,
+            filter: vec![0x00],
+            header: Hash256::from_le_bytes(&[0x08; 32]),
+        }));
         ctx.set_chain_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 7,
@@ -632,7 +684,7 @@ impl Fixture {
         let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7);
         ctx.mempool.write().insert_entry(entry)?;
         Ok(Self {
-            ctx,
+            ctx: Arc::new(ctx),
             tx,
             txid,
             block_hash,
