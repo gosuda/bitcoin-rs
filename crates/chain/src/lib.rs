@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// Fixed-point adaptive difficulty adjustment primitives.
+pub mod adaptive_difficulty;
 /// BIP9 deployment-state memoization cache.
 pub mod bip9_cache;
 /// Header acceptance and proof-of-work validation.

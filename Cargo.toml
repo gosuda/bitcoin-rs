@@ -20,6 +20,7 @@ members = [
     "crates/electrum",
     "crates/node",
     "bin/bitcoin-rs",
+    "tools/perf/adaptive-difficulty-harness",
 ]
 
 [workspace.package]
