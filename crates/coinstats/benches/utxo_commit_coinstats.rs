@@ -9,6 +9,7 @@ use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoChangeListener, UtxoSet};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use parking_lot::RwLock;
 
 const PRELOAD_HEIGHT: u32 = 1;
 const ADD_HEIGHT: u32 = 2;
@@ -20,6 +21,7 @@ const COMMIT_BLOCK_SEED: u64 = 0x0012_3456;
 enum ListenerKind {
     None,
     Noop,
+    Accounting,
     CoinStats,
 }
 
@@ -29,6 +31,50 @@ impl UtxoChangeListener for NoopListener {
     fn on_insert(&self, _op: &OutPoint, _txout: &TxOut, _height: u32, _coinbase: bool) {}
 
     fn on_remove(&self, _op: &OutPoint, _txout: &TxOut, _height: u32) {}
+}
+
+#[derive(Default)]
+struct AccountingStats {
+    total_amount: u64,
+    bogo_size: u64,
+    utxo_count: u64,
+}
+
+struct AccountingListener {
+    stats: RwLock<AccountingStats>,
+}
+
+impl AccountingListener {
+    fn new() -> Self {
+        Self {
+            stats: RwLock::new(AccountingStats::default()),
+        }
+    }
+}
+
+impl UtxoChangeListener for AccountingListener {
+    fn on_insert(&self, _op: &OutPoint, txout: &TxOut, _height: u32, _coinbase: bool) {
+        let mut stats = self.stats.write();
+        stats.total_amount = stats.total_amount.saturating_add(txout.value.to_sat());
+        stats.bogo_size = stats.bogo_size.saturating_add(simple_bogo_size(txout));
+        stats.utxo_count = stats.utxo_count.saturating_add(1);
+    }
+
+    fn on_remove(&self, _op: &OutPoint, txout: &TxOut, _height: u32) {
+        let mut stats = self.stats.write();
+        stats.total_amount = stats.total_amount.saturating_sub(txout.value.to_sat());
+        stats.bogo_size = stats.bogo_size.saturating_sub(simple_bogo_size(txout));
+        stats.utxo_count = stats.utxo_count.saturating_sub(1);
+    }
+}
+
+fn simple_bogo_size(txout: &TxOut) -> u64 {
+    let script_len = u64::try_from(txout.script_pubkey.len()).unwrap_or(u64::MAX);
+    36_u64
+        .saturating_add(4)
+        .saturating_add(8)
+        .saturating_add(2)
+        .saturating_add(script_len)
 }
 
 const fn next_u64(state: &mut u64) -> u64 {
@@ -62,6 +108,7 @@ fn synthetic_case(seed: u64, listener_kind: ListenerKind) -> (UtxoSet, BlockChan
     match listener_kind {
         ListenerKind::None => {}
         ListenerKind::Noop => set.set_listener(Box::new(NoopListener)),
+        ListenerKind::Accounting => set.set_listener(Box::new(AccountingListener::new())),
         ListenerKind::CoinStats => {
             set.set_listener(Box::new(CoinStatsListener::new(CoinStats::new())));
         }
@@ -115,6 +162,18 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
     group.bench_function("noop_listener", |b| {
         b.iter_batched(
             || synthetic_case(CASE_SEED, ListenerKind::Noop),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
+                    panic!("synthetic commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("accounting_listener", |b| {
+        b.iter_batched(
+            || synthetic_case(CASE_SEED, ListenerKind::Accounting),
             |(set, changes)| {
                 if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
                     panic!("synthetic commit failed: {error}");
