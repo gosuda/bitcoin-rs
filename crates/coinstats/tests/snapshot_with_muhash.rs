@@ -77,6 +77,37 @@ fn snapshot_trailer_tracks_listener_after_removal() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[test]
+fn listener_tracks_duplicate_txid_overwrite() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+
+    let outpoint = OutPoint::new(txid(30), 0);
+    let original = txout(30);
+    let replacement = txout(31);
+
+    let mut first = BlockChanges::default();
+    first.add(UtxoAdd::new(outpoint, original.clone(), true, 91_722));
+    set.commit_block(&first, &txid(100))?;
+
+    let mut overwrite = BlockChanges::default();
+    overwrite.add(UtxoAdd::new(outpoint, replacement.clone(), true, 91_842));
+    set.commit_block(&overwrite, &txid(101))?;
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&outpoint, &original, 91_722, true);
+    expected.remove_utxo(&outpoint, &original, 91_722, true);
+    expected.insert_utxo(&outpoint, &replacement, 91_842, true);
+
+    let after_overwrite = listener.snapshot();
+    assert_eq!(set.get(&outpoint), Some(replacement.clone()));
+    assert_eq!(after_overwrite, expected);
+    assert_eq!(after_overwrite.utxo_count, 1);
+    assert_eq!(after_overwrite.total_amount, replacement.value.to_sat());
+    Ok(())
+}
+
 fn txout(index: u32) -> TxOut {
     TxOut {
         value: Amount::from_sat(50_000 + u64::from(index)),

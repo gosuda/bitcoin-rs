@@ -275,6 +275,7 @@ fn apply_add<'arena>(
     payload: &BuildPayload<'_>,
     listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
 ) -> Result<(), UtxoError> {
+    let overwritten = existing_output(table, key, txid, payload.vout)?;
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
     let script = payload.txout.script_pubkey.as_bytes();
     let script_len =
@@ -295,6 +296,9 @@ fn apply_add<'arena>(
     });
     insert_record(arena, table, record);
     if let Some(listener) = listener {
+        if let Some((txout, height, coinbase)) = overwritten {
+            listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
+        }
         listener.on_insert(
             payload.outpoint,
             payload.txout,
@@ -303,6 +307,28 @@ fn apply_add<'arena>(
         );
     }
     Ok(())
+}
+
+fn existing_output(
+    table: &ShardTable<'_>,
+    key: UtxoKey,
+    txid: Hash256,
+    vout: u32,
+) -> Result<Option<(TxOut, u32, bool)>, UtxoError> {
+    let Some(record) = table.table.find(key.hash(), |record| {
+        record.key() == key && record.txid() == txid
+    }) else {
+        return Ok(None);
+    };
+    let Some(output) = record.find_output(vout) else {
+        return Ok(None);
+    };
+    let script = script_slice(table, output).ok_or(UtxoError::CorruptArena)?;
+    Ok(Some((
+        txout_from_parts(output.value, script),
+        output.height,
+        output.coinbase,
+    )))
 }
 
 fn apply_remove<'arena>(
