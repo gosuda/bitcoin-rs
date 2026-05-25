@@ -1,6 +1,6 @@
 //! Block-apply pipeline over shared node handles.
 
-use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use arc_swap::ArcSwapOption;
 use bitcoin::{Transaction, Txid};
@@ -227,15 +227,23 @@ pub fn apply_block(
 
     let script_verify_started = quanta::Instant::now();
     let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
-    let script_verify_result =
-        verify_block_transactions(handles, block, height, locktime_cutoff, verify_flags);
+    let prevout_cache = Rc::new(BlockPrevoutCache::default());
+    let script_verify_result = verify_block_transactions(
+        handles,
+        block,
+        height,
+        locktime_cutoff,
+        verify_flags,
+        Rc::clone(&prevout_cache),
+    );
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
         .record(script_verify_dur.as_secs_f64());
     script_verify_result?;
 
     let coinbase_maturity_started = quanta::Instant::now();
-    let coinbase_maturity_result = check_coinbase_maturity(handles, block, height);
+    let coinbase_maturity_result =
+        check_coinbase_maturity_with_cache(handles, block, height, Rc::clone(&prevout_cache));
     let coinbase_maturity_dur = coinbase_maturity_started.elapsed();
     metrics::histogram!("node.apply_block.coinbase_maturity_seconds")
         .record(coinbase_maturity_dur.as_secs_f64());
@@ -249,12 +257,13 @@ pub fn apply_block(
         prev_tip_state.median_time_past,
         softfork_state,
         previous_tip_id,
+        Rc::clone(&prevout_cache),
     );
     let bip68_dur = bip68_started.elapsed();
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
-    let filter_bytes = compute_basic_filter(block, handles, block_hash, height)?;
+    let filter_bytes = compute_basic_filter(block, handles, block_hash, height, &prevout_cache)?;
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
@@ -471,6 +480,7 @@ fn compute_basic_filter(
     handles: &ApplyHandles,
     block_hash: bitcoin_rs_primitives::Hash256,
     height: u32,
+    prevout_cache: &BlockPrevoutCache,
 ) -> core::result::Result<Option<Vec<u8>>, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
@@ -498,10 +508,13 @@ fn compute_basic_filter(
             .get(&prev_outpoint)
             .cloned()
             .or_else(|| {
-                handles
-                    .utxo
-                    .get(&prev_outpoint)
-                    .map(|txout| txout.script_pubkey)
+                let bitcoin_outpoint = bitcoin::OutPoint {
+                    txid: outpoint.txid,
+                    vout: outpoint.vout,
+                };
+                prevout_cache
+                    .lookup(&handles.utxo, bitcoin_outpoint)
+                    .map(|entry| entry.txout.script_pubkey)
             })
             .ok_or(bitcoin::bip158::Error::UtxoMissing(*outpoint))
     }) {
@@ -520,12 +533,13 @@ fn verify_block_transactions(
     height: u32,
     locktime_cutoff: u32,
     flags: bitcoin_rs_script::VerifyFlags,
+    prevout_cache: Rc<BlockPrevoutCache>,
 ) -> core::result::Result<(), ApplyError> {
     // Consensus connects transactions in block order. A later transaction may
     // spend an output created earlier in the same block. Coinbase outputs enter
     // this view too, so maturity failures stay in the maturity pass instead of
     // degrading into bogus missing-prevout script checks.
-    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
+    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo), prevout_cache);
     for tx in &block.txdata {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
@@ -547,13 +561,15 @@ fn verify_block_transactions(
 
 struct BlockLocalUtxoView {
     base: Arc<UtxoSet>,
+    base_cache: Rc<BlockPrevoutCache>,
     overlay: HashMap<bitcoin::OutPoint, Option<LiveOutput>>,
 }
 
 impl BlockLocalUtxoView {
-    fn new(set: Arc<UtxoSet>) -> Self {
+    fn new(set: Arc<UtxoSet>, base_cache: Rc<BlockPrevoutCache>) -> Self {
         Self {
             base: set,
+            base_cache,
             overlay: HashMap::new(),
         }
     }
@@ -562,7 +578,7 @@ impl BlockLocalUtxoView {
         if let Some(entry) = self.overlay.get(outpoint) {
             return entry.clone();
         }
-        self.base.get_entry(&internal_outpoint(outpoint))
+        self.base_cache.lookup(&self.base, *outpoint)
     }
 
     fn spend_inputs(&mut self, tx: &bitcoin::Transaction) {
@@ -589,6 +605,22 @@ impl BlockLocalUtxoView {
             );
         }
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct BlockPrevoutCache {
+    entries: RefCell<HashMap<bitcoin::OutPoint, Option<LiveOutput>>>,
+}
+
+impl BlockPrevoutCache {
+    fn lookup(&self, set: &UtxoSet, outpoint: bitcoin::OutPoint) -> Option<LiveOutput> {
+        if let Some(entry) = self.entries.borrow().get(&outpoint) {
+            return entry.clone();
+        }
+        let entry = set.get_entry(&internal_outpoint(&outpoint));
+        self.entries.borrow_mut().insert(outpoint, entry.clone());
+        entry
     }
 }
 
@@ -624,13 +656,28 @@ fn check_bip113_finality(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn check_coinbase_maturity(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
+    check_coinbase_maturity_with_cache(
+        handles,
+        block,
+        height,
+        Rc::new(BlockPrevoutCache::default()),
+    )
+}
+
+fn check_coinbase_maturity_with_cache(
+    handles: &ApplyHandles,
+    block: &bitcoin::Block,
+    height: u32,
+    prevout_cache: Rc<BlockPrevoutCache>,
+) -> core::result::Result<(), ApplyError> {
     // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
-    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
+    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo), prevout_cache);
     for tx in &block.txdata {
         if tx.is_coinbase() {
             view.add_outputs(tx, height)?;
@@ -666,12 +713,13 @@ fn check_bip68_sequence_locks(
     mtp: u32,
     softfork_state: crate::bip9_context::ContextualSoftforkState,
     previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
+    prevout_cache: Rc<BlockPrevoutCache>,
 ) -> core::result::Result<(), ApplyError> {
     if !softfork_state.csv_active {
         return Ok(());
     }
 
-    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
+    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo), prevout_cache);
     for tx in &block.txdata {
         if tx.is_coinbase() {
             continue;
@@ -987,7 +1035,7 @@ fn compute_verify_flags(
 
 #[cfg(test)]
 mod consensus_rule_tests {
-    use std::sync::Arc;
+    use std::{rc::Rc, sync::Arc};
 
     use arc_swap::ArcSwapOption;
     use bitcoin::hashes::Hash as _;
@@ -1009,6 +1057,10 @@ mod consensus_rule_tests {
     const BIP68_TEST_PREVOUT_HEIGHT: u32 = 100;
     const BIP68_TEST_PREVOUT_MTP: u32 = 1_000_000;
     const MAINNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
+
+    fn block_prevout_cache() -> Rc<BlockPrevoutCache> {
+        Rc::new(BlockPrevoutCache::default())
+    }
     const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
     const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
 
@@ -1115,7 +1167,14 @@ mod consensus_rule_tests {
         );
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
 
-        verify_block_transactions(&handles, &block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE)?;
+        verify_block_transactions(
+            &handles,
+            &block,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::NONE,
+            block_prevout_cache(),
+        )?;
         Ok(())
     }
 
@@ -1132,6 +1191,7 @@ mod consensus_rule_tests {
             1,
             0,
             bitcoin_rs_script::VerifyFlags::MANDATORY,
+            block_prevout_cache(),
         ) {
             Ok(()) => panic!("bad coinbase scriptSig length must fail transaction verification"),
             Err(error) => error,
@@ -1198,10 +1258,11 @@ mod consensus_rule_tests {
         let block = block_with_transactions(vec![coinbase, spend]);
         let handles = empty_apply_handles();
 
-        let error = match check_coinbase_maturity(&handles, &block, 1) {
-            Ok(()) => panic!("same-block coinbase spend must fail maturity"),
-            Err(error) => error,
-        };
+        let error =
+            match check_coinbase_maturity_with_cache(&handles, &block, 1, block_prevout_cache()) {
+                Ok(()) => panic!("same-block coinbase spend must fail maturity"),
+                Err(error) => error,
+            };
         assert_bip_error(&error, "COINBASE_MATURITY");
     }
 
@@ -1222,13 +1283,21 @@ mod consensus_rule_tests {
         let handles = empty_apply_handles();
 
         assert!(
-            verify_block_transactions(&handles, &block, 1, 0, bitcoin_rs_script::VerifyFlags::NONE)
-                .is_ok()
+            verify_block_transactions(
+                &handles,
+                &block,
+                1,
+                0,
+                bitcoin_rs_script::VerifyFlags::NONE,
+                block_prevout_cache()
+            )
+            .is_ok()
         );
-        let error = match check_coinbase_maturity(&handles, &block, 1) {
-            Ok(()) => panic!("same-block coinbase spend must fail maturity"),
-            Err(error) => error,
-        };
+        let error =
+            match check_coinbase_maturity_with_cache(&handles, &block, 1, block_prevout_cache()) {
+                Ok(()) => panic!("same-block coinbase spend must fail maturity"),
+                Err(error) => error,
+            };
         assert_bip_error(&error, "COINBASE_MATURITY");
     }
 
@@ -1248,12 +1317,31 @@ mod consensus_rule_tests {
         ));
         let active = softfork_state(true);
 
-        let error = match check_bip68_sequence_locks(&handles, &block, 101, 0, active, None) {
+        let error = match check_bip68_sequence_locks(
+            &handles,
+            &block,
+            101,
+            0,
+            active,
+            None,
+            block_prevout_cache(),
+        ) {
             Ok(()) => panic!("BIP68 height lock must reject one block before maturity"),
             Err(error) => error,
         };
         assert_bip_error(&error, "BIP68");
-        assert!(check_bip68_sequence_locks(&handles, &block, 102, 0, active, None).is_ok());
+        assert!(
+            check_bip68_sequence_locks(
+                &handles,
+                &block,
+                102,
+                0,
+                active,
+                None,
+                block_prevout_cache()
+            )
+            .is_ok()
+        );
         Ok(())
     }
 
@@ -1283,6 +1371,7 @@ mod consensus_rule_tests {
             required_mtp - 1,
             active,
             Some(previous_tip_id),
+            block_prevout_cache(),
         ) {
             Ok(()) => panic!("BIP68 time lock must reject one second before maturity"),
             Err(error) => error,
@@ -1295,7 +1384,8 @@ mod consensus_rule_tests {
                 0,
                 required_mtp,
                 active,
-                Some(previous_tip_id)
+                Some(previous_tip_id),
+                block_prevout_cache()
             )
             .is_ok()
         );
@@ -1326,6 +1416,7 @@ mod consensus_rule_tests {
                 200,
                 softfork_state(true),
                 Some(previous_tip_id),
+                block_prevout_cache(),
             )
             .is_ok()
         );
@@ -1354,6 +1445,7 @@ mod consensus_rule_tests {
                 BIP68_TEST_PREVOUT_MTP,
                 softfork_state(true),
                 Some(previous_tip_id),
+                block_prevout_cache(),
             )
             .is_ok()
         );
@@ -1381,6 +1473,7 @@ mod consensus_rule_tests {
             BIP68_TEST_PREVOUT_MTP,
             softfork_state(true),
             Some(previous_tip_id),
+            block_prevout_cache(),
         ) {
             Ok(()) => {
                 panic!("same-block time-based relative lock must not mature in the same block")
@@ -1415,6 +1508,7 @@ mod consensus_rule_tests {
             BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
             active,
             None,
+            block_prevout_cache(),
         ) {
             Ok(()) => panic!("BIP68 time lock must reject missing previous tip context"),
             Err(error) => error,
@@ -1448,6 +1542,7 @@ mod consensus_rule_tests {
             BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
             active,
             Some(previous_tip_id),
+            block_prevout_cache(),
         ) {
             Ok(()) => panic!("BIP68 time lock must reject missing prevout ancestry"),
             Err(error) => error,
@@ -1471,8 +1566,16 @@ mod consensus_rule_tests {
         ));
 
         assert!(
-            check_bip68_sequence_locks(&handles, &block, 101, 0, softfork_state(false), None)
-                .is_ok()
+            check_bip68_sequence_locks(
+                &handles,
+                &block,
+                101,
+                0,
+                softfork_state(false),
+                None,
+                block_prevout_cache()
+            )
+            .is_ok()
         );
         Ok(())
     }
@@ -1494,7 +1597,16 @@ mod consensus_rule_tests {
             bitcoin::transaction::Version::ONE,
         ));
         assert!(
-            check_bip68_sequence_locks(&handles, &version_one_block, 101, 0, active, None).is_ok()
+            check_bip68_sequence_locks(
+                &handles,
+                &version_one_block,
+                101,
+                0,
+                active,
+                None,
+                block_prevout_cache()
+            )
+            .is_ok()
         );
 
         let disabled_block = block_with_transaction(spending_transaction_to_script(
@@ -1503,7 +1615,16 @@ mod consensus_rule_tests {
             op_true_script(),
         ));
         assert!(
-            check_bip68_sequence_locks(&handles, &disabled_block, 101, 0, active, None).is_ok()
+            check_bip68_sequence_locks(
+                &handles,
+                &disabled_block,
+                101,
+                0,
+                active,
+                None,
+                block_prevout_cache()
+            )
+            .is_ok()
         );
         Ok(())
     }
@@ -1928,7 +2049,7 @@ mod consensus_rule_tests {
         ]);
         let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
 
-        let filter = compute_basic_filter(&block, &handles, block_hash, 1)?;
+        let filter = compute_basic_filter(&block, &handles, block_hash, 1, &block_prevout_cache())?;
 
         assert!(filter.is_none());
         assert!(filter_index.rows.lock().is_empty());
