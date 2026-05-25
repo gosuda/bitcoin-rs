@@ -334,6 +334,37 @@ fn bounded_apply_profile_replay() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[test]
+#[ignore = "bounded local coinstats listener cost harness; run explicitly with RUST_LOG=bitcoin_rs_node::apply=info"]
+fn bounded_apply_profile_replay_coinstats_listener_cost() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _subscriber_already_set = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()
+        .is_err();
+    let fixture = non_coinbase_spend_chain()?;
+
+    for coin_stats_listener in [
+        CoinStatsListenerMode::Attached,
+        CoinStatsListenerMode::Detached,
+    ] {
+        let outcome = replay_non_coinbase_spend_chain_with_coin_stats_listener(
+            &fixture,
+            false,
+            coin_stats_listener,
+        )?;
+        println!(
+            "bounded_apply_profile_replay_coinstats_listener_cost coin_stats_listener={} elapsed_ms={} applied_height={} blocks={}",
+            coin_stats_listener.label(),
+            elapsed_ms(outcome.elapsed),
+            outcome.applied_height,
+            fixture.blocks.len(),
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(feature = "redb")]
 #[test]
 #[ignore = "bounded local storage-backed optional-index cost harness; run explicitly"]
@@ -413,9 +444,36 @@ struct ReplayOutcome {
     utxo: Arc<UtxoSet>,
 }
 
+#[derive(Clone, Copy)]
+enum CoinStatsListenerMode {
+    Attached,
+    Detached,
+}
+
+impl CoinStatsListenerMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Attached => "attached",
+            Self::Detached => "detached",
+        }
+    }
+}
+
 fn replay_non_coinbase_spend_chain(
     fixture: &SpendChainFixture,
     use_noop_index_hooks: bool,
+) -> Result<ReplayOutcome, Box<dyn std::error::Error>> {
+    replay_non_coinbase_spend_chain_with_coin_stats_listener(
+        fixture,
+        use_noop_index_hooks,
+        CoinStatsListenerMode::Attached,
+    )
+}
+
+fn replay_non_coinbase_spend_chain_with_coin_stats_listener(
+    fixture: &SpendChainFixture,
+    use_noop_index_hooks: bool,
+    coin_stats_listener: CoinStatsListenerMode,
 ) -> Result<ReplayOutcome, Box<dyn std::error::Error>> {
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let chain_tip = block_tree.read().tip_handle();
@@ -431,6 +489,7 @@ fn replay_non_coinbase_spend_chain(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
+        coin_stats_listener,
     );
     if !use_noop_index_hooks {
         handles.tx_index = None;
@@ -618,8 +677,13 @@ fn apply_handles_with_coin_stats(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
 ) -> (ApplyHandles, Arc<CoinStatsListener>) {
-    let (handles, coin_stats, _utxo) =
-        apply_handles_with_coin_stats_and_utxo(network, chain_tip, applied_tip, block_tree);
+    let (handles, coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
+        network,
+        chain_tip,
+        applied_tip,
+        block_tree,
+        CoinStatsListenerMode::Attached,
+    );
     (handles, coin_stats)
 }
 
@@ -629,10 +693,13 @@ fn apply_handles_with_coin_stats_and_utxo(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
+    coin_stats_listener: CoinStatsListenerMode,
 ) -> (ApplyHandles, Arc<CoinStatsListener>, Arc<UtxoSet>) {
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let mut utxo = UtxoSet::new();
-    utxo.set_listener(Box::new((*coin_stats).clone()));
+    if matches!(coin_stats_listener, CoinStatsListenerMode::Attached) {
+        utxo.set_listener(Box::new((*coin_stats).clone()));
+    }
     let utxo = Arc::new(utxo);
     let handles = ApplyHandles::new(
         network,
