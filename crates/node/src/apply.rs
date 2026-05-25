@@ -1094,6 +1094,7 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn verify_block_transactions_accepts_same_block_spend() -> Result<(), Box<dyn std::error::Error>>
     {
         let base_prevout = bitcoin::OutPoint {
@@ -1209,6 +1210,7 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn verify_block_transactions_defers_same_block_coinbase_spend_to_maturity() {
         let mut coinbase = coinbase_transaction(0x65);
         coinbase.output[0].script_pubkey = op_true_script();
@@ -1860,6 +1862,7 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn apply_block_persists_non_empty_filter_for_valid_same_block_spend()
     -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
