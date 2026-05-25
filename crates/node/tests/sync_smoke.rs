@@ -1,6 +1,7 @@
 //! Block sync smoke tests.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash as _;
@@ -261,7 +262,90 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
 fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = non_coinbase_spend_chain()?;
+    let outcome = replay_non_coinbase_spend_chain(&fixture, true)?;
 
+    assert_eq!(outcome.applied_height, 102);
+    assert_eq!(
+        outcome.applied_hash,
+        bitcoin_rs_primitives::Hash256::from_le_bytes(
+            fixture
+                .blocks
+                .last()
+                .ok_or_else(|| std::io::Error::other("missing final block"))?
+                .block_hash()
+                .as_byte_array(),
+        )
+    );
+    assert!(
+        outcome
+            .utxo
+            .get(&primitive_outpoint(fixture.mature_coinbase_outpoint))
+            .is_none(),
+        "mature coinbase prevout must be removed by the height-101 spend",
+    );
+    assert!(
+        outcome
+            .utxo
+            .get(&primitive_outpoint(fixture.funding_outpoint))
+            .is_none(),
+        "funding prevout must be removed by the height-102 spend",
+    );
+    assert!(
+        outcome
+            .utxo
+            .get(&primitive_outpoint(fixture.spend_outpoint))
+            .is_some(),
+        "height-102 spend output must remain live",
+    );
+
+    let block_refs: Vec<&bitcoin::Block> = fixture.blocks.iter().collect();
+    assert_eq!(
+        outcome.coin_stats.snapshot(),
+        expected_coin_stats(&block_refs)?
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "bounded local profiling harness; run explicitly with RUST_LOG=bitcoin_rs_node::apply=info"]
+fn bounded_apply_profile_replay() -> Result<(), Box<dyn std::error::Error>> {
+    let _subscriber_already_set = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()
+        .is_err();
+    let fixture = non_coinbase_spend_chain()?;
+
+    // This profiles apply path branch overhead, not storage-backed index cost.
+    for use_noop_index_hooks in [false, true] {
+        let label = if use_noop_index_hooks {
+            "index_hooks=noop"
+        } else {
+            "index_hooks=disabled"
+        };
+        let outcome = replay_non_coinbase_spend_chain(&fixture, use_noop_index_hooks)?;
+        println!(
+            "bounded_apply_profile_replay {label} elapsed_ms={} applied_height={} blocks={}",
+            elapsed_ms(outcome.elapsed),
+            outcome.applied_height,
+            fixture.blocks.len(),
+        );
+    }
+
+    Ok(())
+}
+
+struct ReplayOutcome {
+    elapsed: Duration,
+    applied_height: u32,
+    applied_hash: Hash256,
+    coin_stats: Arc<CoinStatsListener>,
+    utxo: Arc<UtxoSet>,
+}
+
+fn replay_non_coinbase_spend_chain(
+    fixture: &SpendChainFixture,
+    use_noop_index_hooks: bool,
+) -> Result<ReplayOutcome, Box<dyn std::error::Error>> {
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let chain_tip = block_tree.read().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
@@ -271,12 +355,16 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
     let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (mut handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
+    if !use_noop_index_hooks {
+        handles.tx_index = None;
+        handles.filter_index = None;
+    }
     let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
@@ -290,42 +378,46 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         inbound_blocks_tx.send(block.clone())?;
     }
 
+    let started = Instant::now();
     sync.tick();
+    let elapsed = started.elapsed();
 
     let applied = applied_tip
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
-    assert_eq!(applied.height, 102);
-    assert_eq!(
-        applied.hash,
-        bitcoin_rs_primitives::Hash256::from_le_bytes(
-            fixture
-                .blocks
-                .last()
-                .ok_or_else(|| std::io::Error::other("missing final block"))?
-                .block_hash()
-                .as_byte_array(),
-        )
+    let expected_height = u32::try_from(
+        fixture
+            .blocks
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| std::io::Error::other("empty replay fixture"))?,
+    )?;
+    let expected_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(
+        fixture
+            .blocks
+            .last()
+            .ok_or_else(|| std::io::Error::other("missing final block"))?
+            .block_hash()
+            .as_byte_array(),
     );
-    assert!(
-        utxo.get(&primitive_outpoint(fixture.mature_coinbase_outpoint))
-            .is_none(),
-        "mature coinbase prevout must be removed by the height-101 spend",
-    );
-    assert!(
-        utxo.get(&primitive_outpoint(fixture.funding_outpoint))
-            .is_none(),
-        "funding prevout must be removed by the height-102 spend",
-    );
-    assert!(
-        utxo.get(&primitive_outpoint(fixture.spend_outpoint))
-            .is_some(),
-        "height-102 spend output must remain live",
-    );
+    if applied.height != expected_height || applied.hash != expected_hash {
+        return Err(std::io::Error::other(format!(
+            "replay stopped before final block: applied height/hash {}/{:?}, expected {}/{:?}",
+            applied.height, applied.hash, expected_height, expected_hash,
+        ))
+        .into());
+    }
+    Ok(ReplayOutcome {
+        elapsed,
+        applied_height: applied.height,
+        applied_hash: applied.hash,
+        coin_stats,
+        utxo,
+    })
+}
 
-    let block_refs: Vec<&bitcoin::Block> = fixture.blocks.iter().collect();
-    assert_eq!(coin_stats.snapshot(), expected_coin_stats(&block_refs)?);
-    Ok(())
+fn elapsed_ms(duration: Duration) -> u128 {
+    duration.as_millis()
 }
 
 struct SpendChainFixture {
