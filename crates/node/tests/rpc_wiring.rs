@@ -21,6 +21,8 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let dir = tempdir()?;
     let mut config = Config::default();
     config.data_dir = dir.path().join("node");
+    config.txindex = true;
+    config.blockfilterindex = true;
     config.zmqpubhashblock = vec!["inproc://rpc-wiring-zmq-pubhashblock".to_owned()];
     config.zmqpubhashblockhwm = Some(21);
     let state = NodeState::open(config)?;
@@ -51,7 +53,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::clone(&transactions),
         Arc::clone(&utxo),
         Arc::clone(&coin_stats),
-        Arc::clone(&filter_index),
+        filter_index.clone(),
         Arc::clone(&network),
         Arc::clone(&mining_template_id),
         Arc::clone(&peers),
@@ -61,7 +63,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         p2p_outbound,
         Arc::clone(&banned),
         Arc::clone(&added_nodes),
-        Some(Arc::clone(&tx_index)),
+        tx_index.clone(),
     )
     .with_zmq_notifications(state.active_zmq_notifications());
 
@@ -91,10 +93,24 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         "coin_stats must share identity"
     );
     assert!(
-        Arc::ptr_eq(&ctx.filter_index, &filter_index),
+        Arc::ptr_eq(
+            ctx.filter_index
+                .as_ref()
+                .expect("filter index must be wired"),
+            filter_index
+                .as_ref()
+                .expect("node filter index must be wired")
+        ),
         "filter_index must share identity"
     );
-    assert!(ctx.indexer.is_some(), "indexer handle must be wired");
+    let ctx_indexer = ctx.indexer.as_ref().expect("indexer handle must be wired");
+    assert!(
+        Arc::ptr_eq(
+            ctx_indexer,
+            tx_index.as_ref().expect("node txindex must be wired")
+        ),
+        "indexer handle must share identity"
+    );
     assert!(
         Arc::ptr_eq(&ctx.network, &network),
         "network must share identity"

@@ -67,9 +67,10 @@ fn spawn_electrum_listener(
         bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
         bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
     };
+    let history_reader = state.electrum_history_reader()?;
     let index = state
-        .electrum_index_handle()
-        .with_history_reader(state.electrum_history_reader())
+        .electrum_index_handle()?
+        .with_history_reader(history_reader)
         .with_network(network);
     let mempool = bitcoin_rs_electrum::MempoolHandle::from_arc(state.mempool());
     let cfg = bitcoin_rs_electrum::ServerConfig::default();
@@ -378,7 +379,7 @@ pub fn run(mut config: Config) -> Result<()> {
         Some(state.p2p_outbound_sender()),
         Arc::clone(&banned),
         Arc::new(parking_lot::RwLock::new(Vec::new())),
-        Some(state.tx_index()),
+        state.tx_index(),
     );
     if let Some(prune_service) = state.prune_service() {
         rpc_context = rpc_context.with_prune_service(prune_service);

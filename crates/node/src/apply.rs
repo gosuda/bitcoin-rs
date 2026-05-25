@@ -65,10 +65,10 @@ pub struct ApplyHandles {
     pub utxo: Arc<UtxoSet>,
     /// Shared coinstats listener.
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    /// Shared best-effort confirmed transaction indexer.
-    pub tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
-    /// Shared best-effort compact-filter indexer.
-    pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+    /// Shared best-effort confirmed transaction indexer when txindex is enabled.
+    pub tx_index: Option<Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
+    /// Shared best-effort compact-filter indexer when blockfilterindex is enabled.
+    pub filter_index: Option<Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>>,
     /// Shared mempool.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Shared block records exposed to RPC handlers.
@@ -92,8 +92,8 @@ impl ApplyHandles {
         block_tree: Arc<RwLock<BlockTree>>,
         utxo: Arc<UtxoSet>,
         coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-        tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
-        filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+        tx_index: Option<Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
+        filter_index: Option<Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>>,
         mempool: Arc<RwLock<Mempool>>,
         blocks: Arc<RwLock<Vec<BlockRecord>>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
@@ -254,7 +254,11 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
-    let filter_bytes = compute_basic_filter(block, handles, block_hash, height)?;
+    let filter_bytes = if handles.filter_index.is_some() {
+        compute_basic_filter(block, handles, block_hash, height)?
+    } else {
+        None
+    };
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
@@ -310,40 +314,39 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
         .record(coin_stats_dur.as_secs_f64());
     let tx_index_ingest_started = quanta::Instant::now();
-    let tx_index_ingest_result = handles.tx_index.lock().ingest_block(&block_bytes, height);
-    match tx_index_ingest_result {
-        Ok(counts) => {
-            tracing::debug!(
-                height,
-                txids = counts.txids,
-                funding = counts.funding,
-                spending = counts.spending,
-                headers = counts.headers,
-                "tx_index ingested block"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                height,
-                %error,
-                "tx_index failed to ingest block; best-effort path continues"
-            );
+    if let Some(tx_index) = &handles.tx_index {
+        let tx_index_ingest_result = tx_index.lock().ingest_block(&block_bytes, height);
+        match tx_index_ingest_result {
+            Ok(counts) => {
+                tracing::debug!(
+                    height,
+                    txids = counts.txids,
+                    funding = counts.funding,
+                    spending = counts.spending,
+                    headers = counts.headers,
+                    "tx_index ingested block"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    height,
+                    %error,
+                    "tx_index failed to ingest block; best-effort path continues"
+                );
+            }
         }
     }
     let tx_index_ingest_dur = tx_index_ingest_started.elapsed();
     metrics::histogram!("node.apply_block.tx_index_ingest_seconds")
         .record(tx_index_ingest_dur.as_secs_f64());
     let filter_started = quanta::Instant::now();
-    if let Some(filter_bytes) = filter_bytes {
+    if let (Some(filter_index), Some(filter_bytes)) = (&handles.filter_index, filter_bytes) {
         let prev_filter_header = handles
             .applied_tip
             .load_full()
-            .and_then(|tip| handles.filter_index.filter_header(tip.hash).ok().flatten())
+            .and_then(|tip| filter_index.filter_header(tip.hash).ok().flatten())
             .unwrap_or_default();
-        match handles
-            .filter_index
-            .put_filter(block_hash, prev_filter_header, &filter_bytes)
-        {
+        match filter_index.put_filter(block_hash, prev_filter_header, &filter_bytes) {
             Ok(filter_header) => {
                 tracing::debug!(
                     height,
@@ -2360,8 +2363,8 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            noop_tx_index(),
-            filter_index,
+            Some(noop_tx_index()),
+            Some(filter_index),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),
@@ -2379,8 +2382,8 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            noop_tx_index(),
-            noop_filter_index(),
+            Some(noop_tx_index()),
+            Some(noop_filter_index()),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),

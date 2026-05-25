@@ -151,39 +151,6 @@ pub trait PruneService: Send + Sync {
     /// Reports whether pruning is enabled and the highest completed prune height.
     fn status(&self) -> PruneStatus;
 }
-#[derive(Debug, Default)]
-struct NoopFilterIndex;
-
-impl bitcoin_rs_filters::FilterIndexLike for NoopFilterIndex {
-    fn put_filter(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-        _prev_header: bitcoin_rs_primitives::Hash256,
-        _filter_bytes: &[u8],
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_filters::FilterIndexError> {
-        Ok(bitcoin_rs_primitives::Hash256::default())
-    }
-
-    fn filter_header(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<bitcoin_rs_primitives::Hash256>, bitcoin_rs_filters::FilterIndexError> {
-        Ok(None)
-    }
-
-    fn filter(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_filters::FilterIndexError> {
-        Ok(None)
-    }
-}
-
-fn noop_filter_index() -> Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>> {
-    let filter_index: Box<dyn bitcoin_rs_filters::FilterIndexLike> = Box::new(NoopFilterIndex);
-    Arc::new(filter_index)
-}
-
 /// Shared state consumed by JSON-RPC handlers.
 pub struct Context {
     /// Best-chain tip snapshot published by chain validation.
@@ -200,8 +167,8 @@ pub struct Context {
     pub utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
     /// Incremental UTXO-set statistics.
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    /// BIP157/158 compact-filter index used by filter RPCs.
-    pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+    /// BIP157/158 compact-filter index used by filter RPCs when enabled.
+    pub filter_index: Option<Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>>,
     /// Optional storage pruning mutator.
     pub prune_service: Option<Arc<dyn PruneService>>,
     /// Optional shared confirmed-block indexer used to resolve prevout values for fee statistics.
@@ -278,7 +245,7 @@ impl Context {
             transactions: Arc::new(RwLock::new(HashMap::new())),
             utxo: Arc::new(utxo),
             coin_stats,
-            filter_index: noop_filter_index(),
+            filter_index: None,
             indexer: None,
             prune_service: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
@@ -311,7 +278,7 @@ impl Context {
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
         utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
         coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-        filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+        filter_index: Option<Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>>,
         network: Arc<RwLock<NetworkState>>,
         mining_template_id: Arc<ArcSwap<CompactString>>,
         peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
@@ -585,6 +552,31 @@ fn target_to_f64(target: bitcoin::pow::Target) -> f64 {
 mod tests {
     use super::*;
 
+    struct NoopFilterIndex;
+
+    impl bitcoin_rs_filters::FilterIndexLike for NoopFilterIndex {
+        fn put_filter(
+            &self,
+            _block_hash: bitcoin_rs_primitives::Hash256,
+            prev_header: bitcoin_rs_primitives::Hash256,
+            _filter_bytes: &[u8],
+        ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_filters::FilterIndexError> {
+            Ok(prev_header)
+        }
+
+        fn filter_header(
+            &self,
+            _block_hash: bitcoin_rs_primitives::Hash256,
+        ) -> Result<Option<bitcoin_rs_primitives::Hash256>, bitcoin_rs_filters::FilterIndexError>
+        {
+            Ok(None)
+        }
+    }
+
+    fn noop_filter_index() -> Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>> {
+        Arc::new(Box::new(NoopFilterIndex))
+    }
+
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn from_handles_shares_tip_handles_with_caller() {
@@ -608,7 +600,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&utxo),
             Arc::clone(&coin_stats),
-            Arc::clone(&filter_index),
+            Some(Arc::clone(&filter_index)),
             Arc::new(RwLock::new(NetworkState::default())),
             Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             Arc::new(RwLock::new(Vec::new())),
@@ -637,7 +629,12 @@ mod tests {
             "coin_stats must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.filter_index, &filter_index),
+            Arc::ptr_eq(
+                ctx.filter_index
+                    .as_ref()
+                    .expect("filter_index must be wired"),
+                &filter_index
+            ),
             "filter_index must be shared with caller"
         );
         assert!(

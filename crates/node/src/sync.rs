@@ -819,8 +819,8 @@ mod tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            noop_tx_index(),
-            noop_filter_index(),
+            Some(noop_tx_index()),
+            Some(noop_filter_index()),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
