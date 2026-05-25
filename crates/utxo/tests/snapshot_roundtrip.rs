@@ -126,7 +126,7 @@ fn snapshot_roundtrip_preserves_vout_64() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn legacy_v2_snapshot_rejects_vout_64() -> Result<(), Box<dyn std::error::Error>> {
+fn legacy_v2_snapshot_rejects_vout_64() {
     let record_txid = txid(64_000);
     let tip_hash = txid(64_001);
     let key = UtxoKey::from_txid(&record_txid);
@@ -158,5 +158,4 @@ fn legacy_v2_snapshot_rejects_vout_64() -> Result<(), Box<dyn std::error::Error>
     };
 
     assert!(matches!(error, UtxoError::VoutOutOfRange { vout: 64 }));
-    Ok(())
 }
