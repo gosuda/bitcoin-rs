@@ -334,6 +334,77 @@ fn bounded_apply_profile_replay() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(feature = "redb")]
+#[test]
+#[ignore = "bounded local storage-backed optional-index cost harness; run explicitly"]
+fn optional_index_redb_direct_cost() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let tx_store = bitcoin_rs_storage::RedbStore::open(temp.path().join("txindex"))?;
+    let filter_store = bitcoin_rs_storage::RedbStore::open(temp.path().join("filters"))?;
+    let mut tx_index = bitcoin_rs_index::Indexer::new(Arc::new(tx_store));
+    let filter_index = bitcoin_rs_filters::FilterIndex::new(filter_store);
+    let fixture = non_coinbase_spend_chain()?;
+
+    let mut txids = 0_usize;
+    let mut funding = 0_usize;
+    let mut spending = 0_usize;
+    let mut filter_bytes_len = 0_usize;
+    let mut txindex_us = 0_u128;
+    let mut filterindex_us = 0_u128;
+    let mut prev_header = Hash256::default();
+    let mut final_block_hash = None;
+
+    for (height, block) in fixture.blocks.iter().enumerate() {
+        let height = u32::try_from(height)?;
+        let block_bytes = bitcoin::consensus::serialize(block);
+
+        let started = Instant::now();
+        let counts = tx_index.ingest_block(&block_bytes, height)?;
+        txindex_us = txindex_us.saturating_add(started.elapsed().as_micros());
+        txids = txids.saturating_add(counts.txids);
+        funding = funding.saturating_add(counts.funding);
+        spending = spending.saturating_add(counts.spending);
+
+        let filter_bytes = deterministic_filter_bytes(block);
+        filter_bytes_len = filter_bytes_len.saturating_add(filter_bytes.len());
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let started = Instant::now();
+        prev_header = filter_index.put_filter(block_hash, prev_header, &filter_bytes)?;
+        filterindex_us = filterindex_us.saturating_add(started.elapsed().as_micros());
+        final_block_hash = Some(block_hash);
+    }
+
+    if txids == 0 || funding == 0 || spending == 0 || filter_bytes_len == 0 {
+        return Err(std::io::Error::other(format!(
+            "optional index direct cost no-op: txids={txids} funding={funding} spending={spending} filter_bytes={filter_bytes_len}",
+        ))
+        .into());
+    }
+    let final_block_hash = final_block_hash
+        .ok_or_else(|| std::io::Error::other("missing final block hash after direct indexing"))?;
+    let final_header = filter_index
+        .filter_header(final_block_hash)?
+        .ok_or_else(|| {
+            std::io::Error::other("missing final filter header after direct indexing")
+        })?;
+    assert_eq!(final_header, prev_header);
+
+    let total_us = txindex_us.saturating_add(filterindex_us);
+    println!(
+        "optional_index_redb_direct_cost blocks={} txids={} funding={} spending={} filter_bytes={} txindex_us={} filterindex_us={} total_us={}",
+        fixture.blocks.len(),
+        txids,
+        funding,
+        spending,
+        filter_bytes_len,
+        txindex_us,
+        filterindex_us,
+        total_us,
+    );
+
+    Ok(())
+}
+
 struct ReplayOutcome {
     elapsed: Duration,
     applied_height: u32,
@@ -418,6 +489,15 @@ fn replay_non_coinbase_spend_chain(
 
 fn elapsed_ms(duration: Duration) -> u128 {
     duration.as_millis()
+}
+
+#[cfg(feature = "redb")]
+fn deterministic_filter_bytes(block: &bitcoin::Block) -> Vec<u8> {
+    let mut filter_bytes = Vec::with_capacity(block.txdata.len().saturating_mul(32));
+    for tx in &block.txdata {
+        filter_bytes.extend_from_slice(tx.compute_txid().as_byte_array());
+    }
+    filter_bytes
 }
 
 struct SpendChainFixture {
