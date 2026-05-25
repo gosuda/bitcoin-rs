@@ -44,6 +44,12 @@ struct AccountingListener {
     stats: RwLock<AccountingStats>,
 }
 
+struct DirectCase {
+    stats: CoinStats,
+    spends: Vec<UtxoAdd>,
+    adds: Vec<UtxoAdd>,
+}
+
 impl AccountingListener {
     fn new() -> Self {
         Self {
@@ -143,6 +149,33 @@ fn synthetic_case(seed: u64, listener_kind: ListenerKind) -> (UtxoSet, BlockChan
     (set, changes)
 }
 
+fn synthetic_direct_case(seed: u64) -> DirectCase {
+    let mut stats = CoinStats::new();
+    let mut spends = Vec::with_capacity(usize::try_from(OP_COUNT).unwrap_or(usize::MAX));
+    let mut adds = Vec::with_capacity(usize::try_from(OP_COUNT).unwrap_or(usize::MAX));
+    let mut rng = seed;
+
+    for _ in 0_u64..OP_COUNT {
+        let spend_seed = next_u64(&mut rng);
+        let outpoint = OutPoint::new(txid(spend_seed), 0);
+        let spend = UtxoAdd::new(outpoint, txout(spend_seed), false, PRELOAD_HEIGHT);
+        stats.insert_utxo(&spend.outpoint, &spend.txout, spend.height, spend.coinbase);
+        spends.push(spend);
+    }
+
+    for i in 0_u64..OP_COUNT {
+        let add_seed = next_u64(&mut rng).wrapping_add(i);
+        let outpoint = OutPoint::new(txid(add_seed), 0);
+        adds.push(UtxoAdd::new(outpoint, txout(add_seed), false, ADD_HEIGHT));
+    }
+
+    DirectCase {
+        stats,
+        spends,
+        adds,
+    }
+}
+
 fn utxo_commit_coinstats(c: &mut Criterion) {
     let mut group = c.benchmark_group("utxo_commit_coinstats");
     let block_hash = txid(COMMIT_BLOCK_SEED);
@@ -190,6 +223,27 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
                 if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
                     panic!("synthetic commit failed: {error}");
                 }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("direct_coinstats_insert_remove", |b| {
+        b.iter_batched(
+            || synthetic_direct_case(CASE_SEED),
+            |case| {
+                let DirectCase {
+                    mut stats,
+                    spends,
+                    adds,
+                } = case;
+                for spend in &spends {
+                    stats.remove_utxo(&spend.outpoint, &spend.txout, spend.height, spend.coinbase);
+                }
+                for add in &adds {
+                    stats.insert_utxo(&add.outpoint, &add.txout, add.height, add.coinbase);
+                }
+                black_box(stats);
             },
             BatchSize::SmallInput,
         );
