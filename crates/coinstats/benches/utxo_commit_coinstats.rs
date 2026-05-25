@@ -7,7 +7,7 @@ use std::hint::black_box;
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
-use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
+use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoChangeListener, UtxoSet};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 const PRELOAD_HEIGHT: u32 = 1;
@@ -15,6 +15,21 @@ const ADD_HEIGHT: u32 = 2;
 const OP_COUNT: u64 = 10_000;
 const CASE_SEED: u64 = 0x00ab_cdef;
 const COMMIT_BLOCK_SEED: u64 = 0x0012_3456;
+
+#[derive(Clone, Copy)]
+enum ListenerKind {
+    None,
+    Noop,
+    CoinStats,
+}
+
+struct NoopListener;
+
+impl UtxoChangeListener for NoopListener {
+    fn on_insert(&self, _op: &OutPoint, _txout: &TxOut, _height: u32, _coinbase: bool) {}
+
+    fn on_remove(&self, _op: &OutPoint, _txout: &TxOut, _height: u32) {}
+}
 
 const fn next_u64(state: &mut u64) -> u64 {
     *state = state
@@ -42,10 +57,14 @@ fn txout(seed: u64) -> TxOut {
     }
 }
 
-fn synthetic_case(seed: u64, with_listener: bool) -> (UtxoSet, BlockChanges) {
+fn synthetic_case(seed: u64, listener_kind: ListenerKind) -> (UtxoSet, BlockChanges) {
     let mut set = UtxoSet::new();
-    if with_listener {
-        set.set_listener(Box::new(CoinStatsListener::new(CoinStats::new())));
+    match listener_kind {
+        ListenerKind::None => {}
+        ListenerKind::Noop => set.set_listener(Box::new(NoopListener)),
+        ListenerKind::CoinStats => {
+            set.set_listener(Box::new(CoinStatsListener::new(CoinStats::new())));
+        }
     }
 
     let mut preload = BlockChanges::default();
@@ -83,7 +102,19 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
 
     group.bench_function("no_listener", |b| {
         b.iter_batched(
-            || synthetic_case(CASE_SEED, false),
+            || synthetic_case(CASE_SEED, ListenerKind::None),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
+                    panic!("synthetic commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("noop_listener", |b| {
+        b.iter_batched(
+            || synthetic_case(CASE_SEED, ListenerKind::Noop),
             |(set, changes)| {
                 if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
                     panic!("synthetic commit failed: {error}");
@@ -95,7 +126,7 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
 
     group.bench_function("coinstats_listener", |b| {
         b.iter_batched(
-            || synthetic_case(CASE_SEED, true),
+            || synthetic_case(CASE_SEED, ListenerKind::CoinStats),
             |(set, changes)| {
                 if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
                     panic!("synthetic commit failed: {error}");
