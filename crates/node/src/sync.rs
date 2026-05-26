@@ -25,8 +25,6 @@ use parking_lot::{Mutex, RwLock};
 const LOCATOR_MAX_ENTRIES: usize = 32;
 /// Wire protocol version we advertise on outbound `getheaders`.
 const PROTOCOL_VERSION: u32 = 70_016;
-/// Maximum number of block inventory entries we request per tick.
-const GETDATA_BATCH_SIZE: usize = 16;
 /// Time after which a pending getdata is considered stuck and re-requestable.
 const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
@@ -250,14 +248,13 @@ impl BlockSync {
             );
             return;
         }
-        let batch_cap = remaining_budget.min(GETDATA_BATCH_SIZE);
 
-        let mut hashes: Vec<Hash256> = Vec::with_capacity(batch_cap);
+        let mut hashes: Vec<Hash256> = Vec::with_capacity(remaining_budget);
         let tree = self.handles.block_tree.read();
         let Some(mut height) = applied_height.checked_add(1) else {
             return;
         };
-        while hashes.len() < batch_cap && height <= chain_tip.height {
+        while hashes.len() < remaining_budget && height <= chain_tip.height {
             let Some(node_id) = tree.node_at_height_from(chain_tip.tip_id, height) else {
                 break;
             };
@@ -504,20 +501,20 @@ mod tests {
     }
 
     #[test]
-    fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch()
+    fn tick_fills_pending_budget_from_next_applied_height_when_gap_exceeds_budget()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let genesis = genesis_header();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
         let mut tip_id = genesis_id;
         let mut expected = Vec::new();
-        let batch_size = u32::try_from(super::GETDATA_BATCH_SIZE)?;
+        let pending_budget = u32::try_from(super::PENDING_BUDGET)?;
 
-        for height in 1_u32..=batch_size + 4 {
+        for height in 1_u32..=pending_budget + 4 {
             let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
             let header = test_header(parent_hash, height);
             tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            if height <= batch_size {
+            if height <= pending_budget {
                 expected.push(BlockHash::from_byte_array(
                     tree.node(tip_id)?.hash.to_le_bytes(),
                 ));
@@ -565,7 +562,30 @@ mod tests {
             })
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(requested, expected);
-        Ok(())
+
+        let second = rx.try_recv()?;
+        if !matches!(second, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first tick getheaders").into());
+        }
+
+        sync.tick();
+
+        let third = rx.try_recv()?;
+        if !matches!(third, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected second tick getheaders only").into());
+        }
+        match rx.try_recv() {
+            Ok(NetworkMessage::GetData(_)) => {
+                Err(std::io::Error::other("second tick requested beyond pending budget").into())
+            }
+            Ok(_) => {
+                Err(std::io::Error::other("unexpected extra message after second tick").into())
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(()),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(std::io::Error::other("outbound channel disconnected").into())
+            }
+        }
     }
 
     #[test]
