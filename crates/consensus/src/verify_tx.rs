@@ -1,5 +1,10 @@
 use std::collections::BTreeSet;
 
+#[cfg(feature = "bitcoinconsensus")]
+use bitcoin::Script;
+#[cfg(feature = "bitcoinconsensus")]
+use bitcoin::consensus::encode;
+
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
 
@@ -174,24 +179,21 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         });
     }
 
-    let interpreter = Interpreter;
-    for (input_index, (input, prevout)) in tx.input.iter().zip(input_prevouts.iter()).enumerate() {
-        let witness = input.witness.to_vec();
+    #[cfg(feature = "bitcoinconsensus")]
+    let serialized_tx = encode::serialize(tx);
 
-        interpreter
-            .execute(
-                prevout.script_pubkey.as_bytes(),
-                input.script_sig.as_bytes(),
-                &witness,
-                flags,
-                prevout,
-                tx,
-                input_index,
-            )
-            .map_err(|error| ConsensusError::Script {
-                input_index,
-                reason: error.to_string(),
-            })?;
+    for (input_index, (input, prevout)) in tx.input.iter().zip(input_prevouts.iter()).enumerate() {
+        #[cfg(feature = "bitcoinconsensus")]
+        verify_input_script(
+            input_index,
+            input,
+            prevout,
+            tx,
+            serialized_tx.as_slice(),
+            flags,
+        )?;
+        #[cfg(not(feature = "bitcoinconsensus"))]
+        verify_input_script(input_index, input, prevout, tx, flags)?;
     }
 
     let sigop_cost_result = tx.total_sigop_cost(|outpoint| prevouts.lookup(outpoint));
@@ -204,6 +206,70 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     }
 
     Ok(())
+}
+
+#[cfg(feature = "bitcoinconsensus")]
+fn verify_input_script(
+    input_index: usize,
+    input: &bitcoin::TxIn,
+    prevout: &bitcoin::TxOut,
+    tx: &bitcoin::Transaction,
+    serialized_tx: &[u8],
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    let script = Script::from_bytes(prevout.script_pubkey.as_bytes());
+    if script.is_p2tr() && flags.contains(VerifyFlags::TAPROOT) {
+        return verify_input_script_with_interpreter(input_index, input, prevout, tx, flags);
+    }
+
+    script
+        .verify_with_flags(
+            input_index,
+            prevout.value,
+            serialized_tx,
+            flags.consensus_bits(),
+        )
+        .map_err(|error| ConsensusError::Script {
+            input_index,
+            reason: format!("script verification failed: {error}"),
+        })
+}
+
+#[cfg(not(feature = "bitcoinconsensus"))]
+fn verify_input_script(
+    input_index: usize,
+    input: &bitcoin::TxIn,
+    prevout: &bitcoin::TxOut,
+    tx: &bitcoin::Transaction,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    verify_input_script_with_interpreter(input_index, input, prevout, tx, flags)
+}
+
+fn verify_input_script_with_interpreter(
+    input_index: usize,
+    input: &bitcoin::TxIn,
+    prevout: &bitcoin::TxOut,
+    tx: &bitcoin::Transaction,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+    let witness = input.witness.to_vec();
+
+    Interpreter
+        .execute(
+            prevout.script_pubkey.as_bytes(),
+            input.script_sig.as_bytes(),
+            &witness,
+            flags,
+            prevout,
+            tx,
+            input_index,
+        )
+        .map(|_| ())
+        .map_err(|error| ConsensusError::Script {
+            input_index,
+            reason: error.to_string(),
+        })
 }
 
 fn total_output_value_borrowed(tx: &bitcoin::Transaction) -> Result<u64, ConsensusError> {
@@ -317,6 +383,68 @@ mod tests {
             verify_transaction(&tx, &utxos, 0, VerifyFlags::NONE),
             Err(ConsensusError::DuplicateInput { input_index: 1 })
         );
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    #[test]
+    fn non_coinbase_true_script_passes() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([3; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![spending_input(outpoint)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            },
+        );
+
+        assert_eq!(
+            verify_transaction(&tx, &utxos, 0, VerifyFlags::NONE),
+            Ok(())
+        );
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    #[test]
+    fn non_coinbase_false_script_reports_script_error() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([5; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![spending_input(outpoint)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_int(0).into_script(),
+            },
+        );
+
+        assert!(matches!(
+            verify_transaction(&tx, &utxos, 0, VerifyFlags::NONE),
+            Err(ConsensusError::Script { input_index: 0, .. })
+        ));
     }
 
     #[test]
