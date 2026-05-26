@@ -4,12 +4,15 @@
 
 use std::hint::black_box;
 
-use bitcoin::{Amount, ScriptBuf};
-use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
+use bitcoin::{Amount, ScriptBuf, consensus::Encodable};
+use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener, MuHash3072};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoChangeListener, UtxoSet};
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{
+    BatchSize, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
+};
 use parking_lot::RwLock;
+use zerocopy::IntoBytes;
 
 const PRELOAD_HEIGHT: u32 = 1;
 const ADD_HEIGHT: u32 = 2;
@@ -50,6 +53,11 @@ struct DirectCase {
     adds: Vec<UtxoAdd>,
 }
 
+struct PreEncodedCase {
+    spend_bytes: Vec<Vec<u8>>,
+    add_bytes: Vec<Vec<u8>>,
+}
+
 impl AccountingListener {
     fn new() -> Self {
         Self {
@@ -81,6 +89,17 @@ fn simple_bogo_size(txout: &TxOut) -> u64 {
         .saturating_add(8)
         .saturating_add(2)
         .saturating_add(script_len)
+}
+
+fn bench_coin_hash_bytes(op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(36 + 4 + txout.script_pubkey.len() + 16);
+    out.extend_from_slice(op.as_bytes());
+    let coinbase_bit = u32::from(coinbase);
+    out.extend_from_slice(&((height << 1) | coinbase_bit).to_le_bytes());
+    if txout.consensus_encode(&mut out).is_err() {
+        unreachable!("vec-backed consensus encoder is infallible");
+    }
+    out
 }
 
 const fn next_u64(state: &mut u64) -> u64 {
@@ -176,58 +195,47 @@ fn synthetic_direct_case(seed: u64) -> DirectCase {
     }
 }
 
-fn utxo_commit_coinstats(c: &mut Criterion) {
-    let mut group = c.benchmark_group("utxo_commit_coinstats");
-    let block_hash = txid(COMMIT_BLOCK_SEED);
+fn synthetic_preencoded_case(seed: u64) -> PreEncodedCase {
+    let direct = synthetic_direct_case(seed);
+    let spend_bytes = direct
+        .spends
+        .iter()
+        .map(|spend| {
+            bench_coin_hash_bytes(&spend.outpoint, &spend.txout, spend.height, spend.coinbase)
+        })
+        .collect();
+    let add_bytes = direct
+        .adds
+        .iter()
+        .map(|add| bench_coin_hash_bytes(&add.outpoint, &add.txout, add.height, add.coinbase))
+        .collect();
 
-    group.bench_function("no_listener", |b| {
+    PreEncodedCase {
+        spend_bytes,
+        add_bytes,
+    }
+}
+
+fn bench_commit_case(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    name: &'static str,
+    listener_kind: ListenerKind,
+    block_hash: &Hash256,
+) {
+    group.bench_function(name, |b| {
         b.iter_batched(
-            || synthetic_case(CASE_SEED, ListenerKind::None),
+            || synthetic_case(CASE_SEED, listener_kind),
             |(set, changes)| {
-                if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
+                if let Err(error) = set.commit_block(black_box(&changes), black_box(block_hash)) {
                     panic!("synthetic commit failed: {error}");
                 }
             },
             BatchSize::SmallInput,
         );
     });
+}
 
-    group.bench_function("noop_listener", |b| {
-        b.iter_batched(
-            || synthetic_case(CASE_SEED, ListenerKind::Noop),
-            |(set, changes)| {
-                if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
-                    panic!("synthetic commit failed: {error}");
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.bench_function("accounting_listener", |b| {
-        b.iter_batched(
-            || synthetic_case(CASE_SEED, ListenerKind::Accounting),
-            |(set, changes)| {
-                if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
-                    panic!("synthetic commit failed: {error}");
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    group.bench_function("coinstats_listener", |b| {
-        b.iter_batched(
-            || synthetic_case(CASE_SEED, ListenerKind::CoinStats),
-            |(set, changes)| {
-                if let Err(error) = set.commit_block(black_box(&changes), black_box(&block_hash)) {
-                    panic!("synthetic commit failed: {error}");
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
+fn bench_direct_coinstats(group: &mut BenchmarkGroup<'_, WallTime>) {
     group.bench_function("direct_coinstats_insert_remove", |b| {
         b.iter_batched(
             || synthetic_direct_case(CASE_SEED),
@@ -248,6 +256,78 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+}
+
+fn bench_direct_encode_only(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("direct_coinstats_encode_only", |b| {
+        b.iter_batched(
+            || synthetic_direct_case(CASE_SEED),
+            |case| {
+                let DirectCase { spends, adds, .. } = case;
+                let mut encoded = Vec::with_capacity(spends.len().saturating_add(adds.len()));
+                for spend in &spends {
+                    encoded.push(bench_coin_hash_bytes(
+                        &spend.outpoint,
+                        &spend.txout,
+                        spend.height,
+                        spend.coinbase,
+                    ));
+                }
+                for add in &adds {
+                    encoded.push(bench_coin_hash_bytes(
+                        &add.outpoint,
+                        &add.txout,
+                        add.height,
+                        add.coinbase,
+                    ));
+                }
+                black_box(encoded);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn bench_direct_muhash_preencoded(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("direct_coinstats_muhash_preencoded", |b| {
+        b.iter_batched(
+            || synthetic_preencoded_case(CASE_SEED),
+            |case| {
+                let mut muhash = MuHash3072::new();
+                for bytes in &case.spend_bytes {
+                    muhash.remove(bytes);
+                }
+                for bytes in &case.add_bytes {
+                    muhash.insert(bytes);
+                }
+                black_box(muhash);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn utxo_commit_coinstats(c: &mut Criterion) {
+    let mut group = c.benchmark_group("utxo_commit_coinstats");
+    let block_hash = txid(COMMIT_BLOCK_SEED);
+
+    bench_commit_case(&mut group, "no_listener", ListenerKind::None, &block_hash);
+    bench_commit_case(&mut group, "noop_listener", ListenerKind::Noop, &block_hash);
+    bench_commit_case(
+        &mut group,
+        "accounting_listener",
+        ListenerKind::Accounting,
+        &block_hash,
+    );
+    bench_commit_case(
+        &mut group,
+        "coinstats_listener",
+        ListenerKind::CoinStats,
+        &block_hash,
+    );
+    bench_direct_coinstats(&mut group);
+    bench_direct_encode_only(&mut group);
+    bench_direct_muhash_preencoded(&mut group);
 
     group.finish();
 }
