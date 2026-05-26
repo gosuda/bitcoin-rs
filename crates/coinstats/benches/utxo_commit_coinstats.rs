@@ -25,6 +25,9 @@ enum ListenerKind {
     None,
     Noop,
     Accounting,
+    ShardedCounters,
+    ShardedEncodeOnly,
+    ShardedMuhashOnly,
     ShardedCoinStats,
     CoinStats,
 }
@@ -48,6 +51,24 @@ struct AccountingListener {
     stats: RwLock<AccountingStats>,
 }
 
+#[derive(Default)]
+struct EncodeOnlyStats {
+    total_bytes: u64,
+    operations: u64,
+}
+
+struct ShardedCountersListener {
+    shards: Vec<RwLock<AccountingStats>>,
+}
+
+struct ShardedEncodeOnlyListener {
+    shards: Vec<RwLock<EncodeOnlyStats>>,
+}
+
+struct ShardedMuhashOnlyListener {
+    shards: Vec<RwLock<MuHash3072>>,
+}
+
 struct ShardedCoinStatsListener {
     shards: Vec<RwLock<CoinStats>>,
 }
@@ -68,6 +89,58 @@ impl AccountingListener {
         Self {
             stats: RwLock::new(AccountingStats::default()),
         }
+    }
+}
+
+impl ShardedCountersListener {
+    fn new() -> Self {
+        let shards = (0..UtxoKey::SHARD_COUNT)
+            .map(|_| RwLock::new(AccountingStats::default()))
+            .collect();
+        Self { shards }
+    }
+
+    fn shard(&self, op: &OutPoint) -> &RwLock<AccountingStats> {
+        let index = usize::from(UtxoKey::from_txid(&op.txid).shard());
+        &self.shards[index]
+    }
+}
+
+impl ShardedEncodeOnlyListener {
+    fn new() -> Self {
+        let shards = (0..UtxoKey::SHARD_COUNT)
+            .map(|_| RwLock::new(EncodeOnlyStats::default()))
+            .collect();
+        Self { shards }
+    }
+
+    fn shard(&self, op: &OutPoint) -> &RwLock<EncodeOnlyStats> {
+        let index = usize::from(UtxoKey::from_txid(&op.txid).shard());
+        &self.shards[index]
+    }
+
+    fn encode(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        let bytes = bench_coin_hash_bytes(op, txout, height, coinbase);
+        let byte_count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        black_box(bytes.as_slice());
+
+        let mut stats = self.shard(op).write();
+        stats.total_bytes = stats.total_bytes.saturating_add(byte_count);
+        stats.operations = stats.operations.saturating_add(1);
+    }
+}
+
+impl ShardedMuhashOnlyListener {
+    fn new() -> Self {
+        let shards = (0..UtxoKey::SHARD_COUNT)
+            .map(|_| RwLock::new(MuHash3072::new()))
+            .collect();
+        Self { shards }
+    }
+
+    fn shard(&self, op: &OutPoint) -> &RwLock<MuHash3072> {
+        let index = usize::from(UtxoKey::from_txid(&op.txid).shard());
+        &self.shards[index]
     }
 }
 
@@ -98,6 +171,52 @@ impl UtxoChangeListener for AccountingListener {
         stats.total_amount = stats.total_amount.saturating_sub(txout.value.to_sat());
         stats.bogo_size = stats.bogo_size.saturating_sub(simple_bogo_size(txout));
         stats.utxo_count = stats.utxo_count.saturating_sub(1);
+    }
+}
+
+impl UtxoChangeListener for ShardedCountersListener {
+    fn on_insert(&self, op: &OutPoint, txout: &TxOut, _height: u32, _coinbase: bool) {
+        let mut stats = self.shard(op).write();
+        stats.total_amount = stats.total_amount.saturating_add(txout.value.to_sat());
+        stats.bogo_size = stats.bogo_size.saturating_add(simple_bogo_size(txout));
+        stats.utxo_count = stats.utxo_count.saturating_add(1);
+    }
+
+    fn on_remove(&self, op: &OutPoint, txout: &TxOut, _height: u32) {
+        let mut stats = self.shard(op).write();
+        stats.total_amount = stats.total_amount.saturating_sub(txout.value.to_sat());
+        stats.bogo_size = stats.bogo_size.saturating_sub(simple_bogo_size(txout));
+        stats.utxo_count = stats.utxo_count.saturating_sub(1);
+    }
+}
+
+impl UtxoChangeListener for ShardedEncodeOnlyListener {
+    fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.encode(op, txout, height, coinbase);
+    }
+
+    fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
+        self.encode(op, txout, height, false);
+    }
+
+    fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.encode(op, txout, height, coinbase);
+    }
+}
+
+impl UtxoChangeListener for ShardedMuhashOnlyListener {
+    fn on_insert(&self, op: &OutPoint, _txout: &TxOut, _height: u32, _coinbase: bool) {
+        self.shard(op).write().insert(op.as_bytes());
+    }
+
+    fn on_remove(&self, op: &OutPoint, _txout: &TxOut, _height: u32) {
+        self.shard(op).write().remove(op.as_bytes());
+    }
+
+    fn on_remove_coin(&self, op: &OutPoint, _txout: &TxOut, _height: u32, _coinbase: bool) {
+        // This isolates MuHash arithmetic in the commit callback shape; it is not
+        // measuring CoinStats' exact coin encoding semantics.
+        self.shard(op).write().remove(op.as_bytes());
     }
 }
 
@@ -171,6 +290,15 @@ fn synthetic_case(seed: u64, listener_kind: ListenerKind) -> (UtxoSet, BlockChan
         ListenerKind::None => {}
         ListenerKind::Noop => set.set_listener(Box::new(NoopListener)),
         ListenerKind::Accounting => set.set_listener(Box::new(AccountingListener::new())),
+        ListenerKind::ShardedCounters => {
+            set.set_listener(Box::new(ShardedCountersListener::new()));
+        }
+        ListenerKind::ShardedEncodeOnly => {
+            set.set_listener(Box::new(ShardedEncodeOnlyListener::new()));
+        }
+        ListenerKind::ShardedMuhashOnly => {
+            set.set_listener(Box::new(ShardedMuhashOnlyListener::new()));
+        }
         ListenerKind::ShardedCoinStats => {
             set.set_listener(Box::new(ShardedCoinStatsListener::new()));
         }
@@ -357,6 +485,24 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
         &mut group,
         "accounting_listener",
         ListenerKind::Accounting,
+        &block_hash,
+    );
+    bench_commit_case(
+        &mut group,
+        "sharded_counter_listener",
+        ListenerKind::ShardedCounters,
+        &block_hash,
+    );
+    bench_commit_case(
+        &mut group,
+        "sharded_encode_only_listener",
+        ListenerKind::ShardedEncodeOnly,
+        &block_hash,
+    );
+    bench_commit_case(
+        &mut group,
+        "sharded_muhash_only_listener",
+        ListenerKind::ShardedMuhashOnly,
         &block_hash,
     );
     bench_commit_case(
