@@ -32,5 +32,11 @@ bytemuck.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 serde_json.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "interpreter_execute_profile"
+harness = false
+required-features = ["bitcoinconsensus"]
