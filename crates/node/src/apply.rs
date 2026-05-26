@@ -25,6 +25,7 @@ const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
 const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
 const SCRIPT_VERIFY_OUTLIER_BLOCK_US: u128 = 100_000;
+const SCRIPT_VERIFY_PROFILE_TOP_N: usize = 5;
 
 pub(crate) trait PruneBodyStore: Send + Sync {
     fn persist_block_body(
@@ -253,6 +254,21 @@ pub fn apply_block(
             tx_nonverify_us = script_verify_profile.nonverify_us(verify_block_transactions_us),
             "apply_block: script verify attribution"
         );
+        for (rank_index, tx_profile) in script_verify_profile.slow_txs.iter().enumerate() {
+            tracing::info!(
+                height,
+                %block_hash,
+                tx_rank = rank_index.saturating_add(1),
+                tx_index = tx_profile.tx_index,
+                txid = %tx_profile.txid,
+                input_count = tx_profile.input_count,
+                output_count = tx_profile.output_count,
+                tx_verify_us = tx_profile.tx_verify_us,
+                block_tx_verify_call_us = script_verify_profile.tx_verify_call_us,
+                block_script_verify_us = script_verify_dur.as_micros(),
+                "apply_block: script verify transaction attribution"
+            );
+        }
     }
 
     let coinbase_maturity_started = quanta::Instant::now();
@@ -551,7 +567,7 @@ fn verify_block_transactions(
     // degrading into bogus missing-prevout script checks.
     let mut profile = ScriptVerifyProfile::default();
     let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
-    for tx in &block.txdata {
+    for (tx_index, tx) in block.txdata.iter().enumerate() {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
             view.add_outputs(tx, height)?;
@@ -568,8 +584,10 @@ fn verify_block_transactions(
                 flags,
             );
         let tx_verify_dur = tx_verify_started.elapsed();
-        profile.add_tx_verify_call_us(tx_verify_dur.as_micros());
+        let tx_verify_us = tx_verify_dur.as_micros();
+        profile.add_tx_verify_call_us(tx_verify_us);
         tx_verify_result?;
+        profile.observe_slow_tx(tx_index, tx, tx_verify_us);
         view.spend_inputs(tx);
         view.add_outputs(tx, height)?;
     }
@@ -581,12 +599,44 @@ struct ScriptVerifyProfile {
     non_coinbase_tx_count: usize,
     total_input_count: usize,
     tx_verify_call_us: u128,
+    slow_txs: Vec<SlowScriptVerifyTxProfile>,
+}
+
+struct SlowScriptVerifyTxProfile {
+    tx_index: usize,
+    txid: Txid,
+    input_count: usize,
+    output_count: usize,
+    tx_verify_us: u128,
 }
 
 impl ScriptVerifyProfile {
     fn observe_non_coinbase(&mut self, tx: &bitcoin::Transaction) {
         self.non_coinbase_tx_count = self.non_coinbase_tx_count.saturating_add(1);
         self.total_input_count = self.total_input_count.saturating_add(tx.input.len());
+    }
+
+    fn observe_slow_tx(&mut self, tx_index: usize, tx: &bitcoin::Transaction, tx_verify_us: u128) {
+        let insert_index = self
+            .slow_txs
+            .iter()
+            .position(|candidate| candidate.tx_verify_us < tx_verify_us)
+            .unwrap_or(self.slow_txs.len());
+        if insert_index >= SCRIPT_VERIFY_PROFILE_TOP_N {
+            return;
+        }
+
+        self.slow_txs.insert(
+            insert_index,
+            SlowScriptVerifyTxProfile {
+                tx_index,
+                txid: tx.compute_txid(),
+                input_count: tx.input.len(),
+                output_count: tx.output.len(),
+                tx_verify_us,
+            },
+        );
+        self.slow_txs.truncate(SCRIPT_VERIFY_PROFILE_TOP_N);
     }
 
     fn add_tx_verify_call_us(&mut self, elapsed_us: u128) {
@@ -1178,7 +1228,90 @@ mod consensus_rule_tests {
         )?;
         assert_eq!(profile.non_coinbase_tx_count, 2);
         assert_eq!(profile.total_input_count, 2);
+        assert!(profile.slow_txs.len() <= SCRIPT_VERIFY_PROFILE_TOP_N);
+        assert_eq!(profile.slow_txs.len(), 2);
+        assert!(
+            profile
+                .slow_txs
+                .iter()
+                .any(|tx_profile| tx_profile.tx_index == 0)
+        );
+        assert!(
+            profile
+                .slow_txs
+                .iter()
+                .any(|tx_profile| tx_profile.tx_index == 1)
+        );
         Ok(())
+    }
+
+    #[test]
+    fn script_verify_profile_keeps_bounded_slowest_transactions() {
+        let mut profile = ScriptVerifyProfile::default();
+        let transactions = [
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x71; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x72; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x73; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x74; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x75; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x76; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+        ];
+
+        let mut tx_verify_us = 0_u128;
+        for (tx_index, tx) in transactions.iter().enumerate() {
+            profile.observe_slow_tx(tx_index, tx, tx_verify_us);
+            tx_verify_us = tx_verify_us.saturating_add(1);
+        }
+
+        assert_eq!(profile.slow_txs.len(), SCRIPT_VERIFY_PROFILE_TOP_N);
+        let indexes: Vec<usize> = profile
+            .slow_txs
+            .iter()
+            .map(|tx_profile| tx_profile.tx_index)
+            .collect();
+        assert_eq!(indexes, vec![5, 4, 3, 2, 1]);
     }
 
     #[test]
