@@ -291,6 +291,8 @@ mod tests {
 
     use bitcoin::hashes::Hash as _;
     use bitcoin::script::Builder;
+    #[cfg(feature = "bitcoinconsensus")]
+    use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
     use bitcoin::{
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
         transaction,
@@ -447,6 +449,93 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "bitcoinconsensus")]
+    #[test]
+    fn non_taproot_input_uses_supplied_serialized_tx() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([6; 32]),
+            vout: 0,
+        };
+        let tx = Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![spending_input(outpoint)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let prevout = TxOut {
+            value: Amount::from_sat(100),
+            script_pubkey: Builder::new().push_int(1).into_script(),
+        };
+
+        assert!(matches!(
+            super::verify_input_script(0, &tx.input[0], &prevout, &tx, &[], VerifyFlags::NONE),
+            Err(ConsensusError::Script { input_index: 0, .. })
+        ));
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    #[test]
+    fn p2tr_taproot_input_ignores_supplied_serialized_tx_for_local_fallback() {
+        let Some(fixture) = p2tr_extra_witness_spend(7) else {
+            panic!("test secret key must produce a taproot spend fixture");
+        };
+
+        assert!(VerifyFlags::MANDATORY.contains(VerifyFlags::TAPROOT));
+        match super::verify_input_script(
+            0,
+            &fixture.tx.0.input[0],
+            &fixture.prevout,
+            &fixture.tx.0,
+            &[],
+            VerifyFlags::MANDATORY,
+        ) {
+            Err(ConsensusError::Script {
+                input_index: 0,
+                reason,
+            }) => assert!(
+                reason.contains("taproot witness stack with 2 elements"),
+                "unexpected taproot fallback error: {reason}"
+            ),
+            other => panic!("expected taproot fallback script error, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(feature = "bitcoinconsensus"))]
+    #[test]
+    fn non_taproot_input_reaches_interpreter_disabled_backend() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([6; 32]),
+            vout: 0,
+        };
+        let tx = Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![spending_input(outpoint)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let prevout = TxOut {
+            value: Amount::from_sat(100),
+            script_pubkey: Builder::new().push_int(1).into_script(),
+        };
+
+        match super::verify_input_script(0, &tx.input[0], &prevout, &tx, VerifyFlags::NONE) {
+            Err(ConsensusError::Script {
+                input_index: 0,
+                reason,
+            }) => assert!(
+                reason.contains("bitcoinconsensus backend is disabled"),
+                "unexpected disabled-backend error: {reason}"
+            ),
+            other => panic!("expected disabled-backend script error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn underfunded_transaction_fails_before_script_execution() {
         let outpoint = OutPoint {
@@ -551,5 +640,56 @@ mod tests {
                 script_pubkey: ScriptBuf::new(),
             }],
         })
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    struct SpendFixture {
+        prevout: TxOut,
+        tx: Tx,
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    fn p2tr_extra_witness_spend(byte: u8) -> Option<SpendFixture> {
+        let secp = Secp256k1::new();
+        let secret = secret_key(byte)?;
+        let keypair = Keypair::from_secret_key(&secp, &secret);
+        let tweaked = bitcoin::key::TapTweak::tap_tweak(keypair, &secp, None);
+        let (output_key, _) = tweaked.public_parts();
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::new_p2tr_tweaked(output_key),
+        };
+        let mut tx = unsigned_spend(byte);
+        tx.input[0].witness = Witness::from_slice(&[vec![0; 64], vec![0xaa]]);
+        Some(SpendFixture {
+            prevout,
+            tx: Tx(tx),
+        })
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    fn unsigned_spend(byte: u8) -> Transaction {
+        Transaction {
+            version: transaction::Version(2),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([byte; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            }],
+        }
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    fn secret_key(byte: u8) -> Option<SecretKey> {
+        SecretKey::from_slice(&[byte; 32]).ok()
     }
 }
