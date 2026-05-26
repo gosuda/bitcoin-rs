@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
@@ -10,6 +11,39 @@ const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 const SEQUENCE_FINAL: u32 = 0xffff_ffff;
 const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
 const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
+
+/// Coarse timing profile for borrowed transaction verification.
+///
+/// Buckets are accumulated microsecond totals for selected verifier-internal
+/// operations. They are intended for node-owned attribution logs only and do
+/// not affect consensus validation behavior.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransactionVerifyProfile {
+    /// Total time spent looking up input prevouts.
+    pub prevout_lookup_us: u128,
+    /// Total time spent adding input values.
+    pub input_value_us: u128,
+    /// Total time spent allocating witness vectors for interpreter calls.
+    pub witness_to_vec_us: u128,
+    /// Total time spent executing input scripts.
+    pub interpreter_execute_us: u128,
+    /// Total time spent computing transaction sigop cost.
+    pub sigop_cost_us: u128,
+    /// Number of transaction inputs observed by the verifier.
+    pub input_count: usize,
+}
+
+impl TransactionVerifyProfile {
+    /// Returns the saturating sum of all timed verifier-internal buckets.
+    #[must_use]
+    pub fn bucket_sum_us(&self) -> u128 {
+        self.prevout_lookup_us
+            .saturating_add(self.input_value_us)
+            .saturating_add(self.witness_to_vec_us)
+            .saturating_add(self.interpreter_execute_us)
+            .saturating_add(self.sigop_cost_us)
+    }
+}
 
 /// Returns `true` iff the transaction is locktime-final at `block_height` and the timestamp cutoff.
 ///
@@ -111,6 +145,21 @@ pub fn verify_transaction_borrowed_with_mtp(
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
     verify_transaction_borrowed_with_locktime_cutoff(tx, prevouts, height, locktime_cutoff, flags)
+        .map(|_profile| ())
+}
+
+/// Verifies non-contextual and input-script transaction rules for a borrowed transaction and returns a coarse timing profile.
+///
+/// The historical `_with_mtp` suffix is retained for source compatibility. Callers pass block
+/// header time before BIP113 activation and previous-tip MTP after activation.
+pub fn verify_transaction_borrowed_with_mtp_profiled(
+    tx: &bitcoin::Transaction,
+    prevouts: &impl UtxoView,
+    height: u32,
+    locktime_cutoff: u32,
+    flags: VerifyFlags,
+) -> Result<TransactionVerifyProfile, ConsensusError> {
+    verify_transaction_borrowed_with_locktime_cutoff(tx, prevouts, height, locktime_cutoff, flags)
 }
 
 /// Verifies non-contextual and input-script transaction rules for a borrowed transaction.
@@ -120,7 +169,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     height: u32,
     locktime_cutoff: u32,
     flags: VerifyFlags,
-) -> Result<(), ConsensusError> {
+) -> Result<TransactionVerifyProfile, ConsensusError> {
     if !is_final_tx_with_locktime_cutoff(tx, height, locktime_cutoff) {
         return Err(ConsensusError::Bip {
             bip: "BIP113",
@@ -132,6 +181,11 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         });
     }
 
+    let mut profile = TransactionVerifyProfile {
+        input_count: tx.input.len(),
+        ..TransactionVerifyProfile::default()
+    };
+
     if tx.input.is_empty() {
         return Err(ConsensusError::EmptyInputs);
     }
@@ -142,7 +196,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     let output_value = total_output_value_borrowed(tx)?;
     if tx.is_coinbase() {
         verify_coinbase_script_sig_size(tx)?;
-        return Ok(());
+        return Ok(profile);
     }
 
     let mut seen = BTreeSet::new();
@@ -158,27 +212,45 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     let mut input_value = 0u64;
     let interpreter = Interpreter;
     for (input_index, input) in tx.input.iter().enumerate() {
-        let prevout = prevouts
-            .lookup(&input.previous_output)
-            .ok_or(ConsensusError::MissingPrevout { input_index })?;
-        input_value = input_value
+        let prevout_lookup_started = Instant::now();
+        let prevout_result = prevouts.lookup(&input.previous_output);
+        profile.prevout_lookup_us = profile
+            .prevout_lookup_us
+            .saturating_add(prevout_lookup_started.elapsed().as_micros());
+        let prevout = prevout_result.ok_or(ConsensusError::MissingPrevout { input_index })?;
+
+        let input_value_started = Instant::now();
+        let next_input_value = input_value
             .checked_add(prevout.value.to_sat())
-            .ok_or(ConsensusError::OutputValueOverflow)?;
+            .ok_or(ConsensusError::OutputValueOverflow);
+        profile.input_value_us = profile
+            .input_value_us
+            .saturating_add(input_value_started.elapsed().as_micros());
+        input_value = next_input_value?;
+
+        let witness_to_vec_started = Instant::now();
         let witness = input.witness.to_vec();
-        interpreter
-            .execute(
-                prevout.script_pubkey.as_bytes(),
-                input.script_sig.as_bytes(),
-                &witness,
-                flags,
-                &prevout,
-                tx,
-                input_index,
-            )
-            .map_err(|error| ConsensusError::Script {
-                input_index,
-                reason: error.to_string(),
-            })?;
+        profile.witness_to_vec_us = profile
+            .witness_to_vec_us
+            .saturating_add(witness_to_vec_started.elapsed().as_micros());
+
+        let interpreter_execute_started = Instant::now();
+        let interpreter_result = interpreter.execute(
+            prevout.script_pubkey.as_bytes(),
+            input.script_sig.as_bytes(),
+            &witness,
+            flags,
+            &prevout,
+            tx,
+            input_index,
+        );
+        profile.interpreter_execute_us = profile
+            .interpreter_execute_us
+            .saturating_add(interpreter_execute_started.elapsed().as_micros());
+        interpreter_result.map_err(|error| ConsensusError::Script {
+            input_index,
+            reason: error.to_string(),
+        })?;
     }
 
     if input_value < output_value {
@@ -188,8 +260,12 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         });
     }
 
-    let sigop_cost = u32::try_from(tx.total_sigop_cost(|outpoint| prevouts.lookup(outpoint)))
-        .unwrap_or(u32::MAX);
+    let sigop_cost_started = Instant::now();
+    let sigop_cost_result = tx.total_sigop_cost(|outpoint| prevouts.lookup(outpoint));
+    profile.sigop_cost_us = profile
+        .sigop_cost_us
+        .saturating_add(sigop_cost_started.elapsed().as_micros());
+    let sigop_cost = u32::try_from(sigop_cost_result).unwrap_or(u32::MAX);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -197,7 +273,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         });
     }
 
-    Ok(())
+    Ok(profile)
 }
 
 fn total_output_value_borrowed(tx: &bitcoin::Transaction) -> Result<u64, ConsensusError> {
@@ -228,6 +304,7 @@ mod tests {
 
     use super::{
         is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size, verify_transaction,
+        verify_transaction_borrowed_with_mtp, verify_transaction_borrowed_with_mtp_profiled,
         verify_transaction_with_mtp,
     };
     use crate::ConsensusError;
@@ -282,6 +359,76 @@ mod tests {
                 Ok(())
             );
         }
+    }
+
+    #[test]
+    fn profiled_borrowed_verifier_preserves_success_and_input_count() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([2; 32]),
+            vout: 0,
+        };
+        let tx = Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![spending_input(outpoint)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            },
+        );
+
+        assert_eq!(
+            verify_transaction_borrowed_with_mtp(&tx, &utxos, 0, 0, VerifyFlags::NONE),
+            Ok(())
+        );
+        let profile = match verify_transaction_borrowed_with_mtp_profiled(
+            &tx,
+            &utxos,
+            0,
+            0,
+            VerifyFlags::NONE,
+        ) {
+            Ok(profile) => profile,
+            Err(error) => {
+                panic!("profiled verifier should preserve successful validation: {error:?}")
+            }
+        };
+
+        assert_eq!(profile.input_count, 1);
+    }
+
+    #[test]
+    fn profiled_borrowed_verifier_preserves_error_behavior() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([3; 32]),
+            vout: 0,
+        };
+        let tx = Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![spending_input(outpoint)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let utxos = BTreeMap::new();
+        assert_eq!(
+            verify_transaction_borrowed_with_mtp(&tx, &utxos, 0, 0, VerifyFlags::NONE),
+            Err(ConsensusError::MissingPrevout { input_index: 0 })
+        );
+        assert_eq!(
+            verify_transaction_borrowed_with_mtp_profiled(&tx, &utxos, 0, 0, VerifyFlags::NONE),
+            Err(ConsensusError::MissingPrevout { input_index: 0 })
+        );
     }
 
     #[test]
