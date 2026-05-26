@@ -634,6 +634,8 @@ pub struct NodeState {
     sync: Arc<crate::BlockSync>,
     mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
+    prevout_cache: Arc<crate::apply::BlockPrevoutCache>,
+    local_overlay: Arc<crate::apply::BlockLocalOverlay>,
 }
 
 impl NodeState {
@@ -689,6 +691,8 @@ impl NodeState {
         let peers = Arc::new(RwLock::new(Vec::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let prevout_cache = Arc::new(crate::apply::BlockPrevoutCache::default());
+        let local_overlay = Arc::new(crate::apply::BlockLocalOverlay::default());
         let (p2p_outbound_tx, p2p_outbound_rx_raw) =
             crossbeam_channel::bounded(P2P_OUTBOUND_QUEUE_LIMIT);
         let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
@@ -715,6 +719,8 @@ impl NodeState {
                 zmq_publisher: Arc::clone(&zmq_publisher),
                 block_body_store: (config.prune_target_mb > 0).then(|| storage.block_body_store()),
                 g2_muhash_sampler: g2_muhash_sampler.clone(),
+                prevout_cache: Arc::clone(&prevout_cache),
+                local_overlay: Arc::clone(&local_overlay),
             },
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
@@ -764,6 +770,8 @@ impl NodeState {
             mining_template_id,
             sync,
             replayed: Mutex::new(Vec::new()),
+            prevout_cache,
+            local_overlay,
         })
     }
 
@@ -1024,6 +1032,8 @@ impl NodeState {
                 .is_some()
                 .then(|| self.storage.block_body_store()),
             g2_muhash_sampler: self.g2_muhash_sampler.clone(),
+            prevout_cache: Arc::clone(&self.prevout_cache),
+            local_overlay: Arc::clone(&self.local_overlay),
         }
     }
 

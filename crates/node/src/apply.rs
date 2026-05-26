@@ -1,6 +1,6 @@
 //! Block-apply pipeline over shared node handles.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin::{Transaction, Txid};
@@ -79,6 +79,8 @@ pub struct ApplyHandles {
     pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
+    pub(crate) prevout_cache: Arc<BlockPrevoutCache>,
+    pub(crate) local_overlay: Arc<BlockLocalOverlay>,
 }
 
 impl ApplyHandles {
@@ -114,6 +116,8 @@ impl ApplyHandles {
             zmq_publisher,
             block_body_store: None,
             g2_muhash_sampler: None,
+            prevout_cache: Arc::new(BlockPrevoutCache::default()),
+            local_overlay: Arc::new(BlockLocalOverlay::default()),
         }
     }
 
@@ -227,16 +231,16 @@ pub fn apply_block(
 
     let script_verify_started = quanta::Instant::now();
     let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
-    let prevout_cache = Rc::new(BlockPrevoutCache::default());
-    let local_overlay = Rc::new(BlockLocalOverlay::default());
+    handles.prevout_cache.reset();
+    handles.local_overlay.reset();
     let script_verify_result = verify_block_transactions(
         handles,
         block,
         height,
         locktime_cutoff,
         verify_flags,
-        Rc::clone(&prevout_cache),
-        Rc::clone(&local_overlay),
+        Arc::clone(&handles.prevout_cache),
+        Arc::clone(&handles.local_overlay),
     );
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
@@ -248,8 +252,8 @@ pub fn apply_block(
         handles,
         block,
         height,
-        Rc::clone(&prevout_cache),
-        Rc::clone(&local_overlay),
+        Arc::clone(&handles.prevout_cache),
+        Arc::clone(&handles.local_overlay),
     );
     let coinbase_maturity_dur = coinbase_maturity_started.elapsed();
     metrics::histogram!("node.apply_block.coinbase_maturity_seconds")
@@ -264,14 +268,14 @@ pub fn apply_block(
         prev_tip_state.median_time_past,
         softfork_state,
         previous_tip_id,
-        Rc::clone(&prevout_cache),
-        Rc::clone(&local_overlay),
+        Arc::clone(&handles.prevout_cache),
+        Arc::clone(&handles.local_overlay),
     );
     let bip68_dur = bip68_started.elapsed();
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
-    let filter_bytes = compute_basic_filter(block, handles, block_hash, height, &prevout_cache)?;
+    let filter_bytes = compute_basic_filter(block, handles, block_hash, height, &handles.prevout_cache)?;
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
@@ -541,8 +545,8 @@ fn verify_block_transactions(
     height: u32,
     locktime_cutoff: u32,
     flags: bitcoin_rs_script::VerifyFlags,
-    prevout_cache: Rc<BlockPrevoutCache>,
-    local_overlay: Rc<BlockLocalOverlay>,
+    prevout_cache: Arc<BlockPrevoutCache>,
+    local_overlay: Arc<BlockLocalOverlay>,
 ) -> core::result::Result<(), ApplyError> {
     // Consensus connects transactions in block order. A later transaction may
     // spend an output created earlier in the same block. Coinbase outputs enter
@@ -570,15 +574,15 @@ fn verify_block_transactions(
 
 struct BlockLocalUtxoView {
     base: Arc<UtxoSet>,
-    base_cache: Rc<BlockPrevoutCache>,
-    overlay: Rc<BlockLocalOverlay>,
+    base_cache: Arc<BlockPrevoutCache>,
+    overlay: Arc<BlockLocalOverlay>,
 }
 
 impl BlockLocalUtxoView {
     fn new(
         set: Arc<UtxoSet>,
-        base_cache: Rc<BlockPrevoutCache>,
-        overlay: Rc<BlockLocalOverlay>,
+        base_cache: Arc<BlockPrevoutCache>,
+        overlay: Arc<BlockLocalOverlay>,
     ) -> Self {
         overlay.reset();
         Self {
@@ -623,8 +627,8 @@ impl BlockLocalUtxoView {
 }
 
 #[derive(Default)]
-struct BlockLocalOverlay {
-    entries: RefCell<HashMap<bitcoin::OutPoint, Option<LiveOutput>>>,
+pub(crate) struct BlockLocalOverlay {
+    entries: parking_lot::Mutex<HashMap<bitcoin::OutPoint, Option<LiveOutput>>>,
 }
 
 enum OverlayLookup {
@@ -634,38 +638,42 @@ enum OverlayLookup {
 
 impl BlockLocalOverlay {
     fn reset(&self) {
-        self.entries.borrow_mut().clear();
+        self.entries.lock().clear();
     }
 
     fn lookup(&self, outpoint: &bitcoin::OutPoint) -> OverlayLookup {
         self.entries
-            .borrow()
+            .lock()
             .get(outpoint)
             .cloned()
             .map_or(OverlayLookup::Miss, OverlayLookup::Hit)
     }
 
     fn spend(&self, outpoint: bitcoin::OutPoint) {
-        self.entries.borrow_mut().insert(outpoint, None);
+        self.entries.lock().insert(outpoint, None);
     }
 
     fn add(&self, outpoint: bitcoin::OutPoint, entry: Option<LiveOutput>) {
-        self.entries.borrow_mut().insert(outpoint, entry);
+        self.entries.lock().insert(outpoint, entry);
     }
 }
 
 #[derive(Default)]
-struct BlockPrevoutCache {
-    entries: RefCell<HashMap<bitcoin::OutPoint, Option<LiveOutput>>>,
+pub(crate) struct BlockPrevoutCache {
+    entries: parking_lot::Mutex<HashMap<bitcoin::OutPoint, Option<LiveOutput>>>,
 }
 
 impl BlockPrevoutCache {
+    fn reset(&self) {
+        self.entries.lock().clear();
+    }
+
     fn lookup(&self, set: &UtxoSet, outpoint: bitcoin::OutPoint) -> Option<LiveOutput> {
-        if let Some(entry) = self.entries.borrow().get(&outpoint) {
+        if let Some(entry) = self.entries.lock().get(&outpoint) {
             return entry.clone();
         }
         let entry = set.get_entry(&internal_outpoint(&outpoint));
-        self.entries.borrow_mut().insert(outpoint, entry.clone());
+        self.entries.lock().insert(outpoint, entry.clone());
         entry
     }
 }
@@ -712,8 +720,8 @@ pub(crate) fn check_coinbase_maturity(
         handles,
         block,
         height,
-        Rc::new(BlockPrevoutCache::default()),
-        Rc::new(BlockLocalOverlay::default()),
+        Arc::new(BlockPrevoutCache::default()),
+        Arc::new(BlockLocalOverlay::default()),
     )
 }
 
@@ -721,8 +729,8 @@ fn check_coinbase_maturity_with_cache(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
     height: u32,
-    prevout_cache: Rc<BlockPrevoutCache>,
-    local_overlay: Rc<BlockLocalOverlay>,
+    prevout_cache: Arc<BlockPrevoutCache>,
+    local_overlay: Arc<BlockLocalOverlay>,
 ) -> core::result::Result<(), ApplyError> {
     // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
     let view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo), prevout_cache, local_overlay);
@@ -761,8 +769,8 @@ fn check_bip68_sequence_locks(
     mtp: u32,
     softfork_state: crate::bip9_context::ContextualSoftforkState,
     previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
-    prevout_cache: Rc<BlockPrevoutCache>,
-    local_overlay: Rc<BlockLocalOverlay>,
+    prevout_cache: Arc<BlockPrevoutCache>,
+    local_overlay: Arc<BlockLocalOverlay>,
 ) -> core::result::Result<(), ApplyError> {
     if !softfork_state.csv_active {
         return Ok(());
@@ -1084,7 +1092,7 @@ fn compute_verify_flags(
 
 #[cfg(test)]
 mod consensus_rule_tests {
-    use std::{rc::Rc, sync::Arc};
+    use std::sync::Arc;
 
     use arc_swap::ArcSwapOption;
     use bitcoin::hashes::Hash as _;
@@ -1107,12 +1115,12 @@ mod consensus_rule_tests {
     const BIP68_TEST_PREVOUT_MTP: u32 = 1_000_000;
     const MAINNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
 
-    fn block_prevout_cache() -> Rc<BlockPrevoutCache> {
-        Rc::new(BlockPrevoutCache::default())
+    fn block_prevout_cache() -> Arc<BlockPrevoutCache> {
+        Arc::new(BlockPrevoutCache::default())
     }
 
-    fn block_local_overlay() -> Rc<BlockLocalOverlay> {
-        Rc::new(BlockLocalOverlay::default())
+    fn block_local_overlay() -> Arc<BlockLocalOverlay> {
+        Arc::new(BlockLocalOverlay::default())
     }
     const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
     const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
