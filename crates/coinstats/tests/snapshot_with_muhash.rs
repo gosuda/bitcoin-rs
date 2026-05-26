@@ -234,6 +234,46 @@ fn failed_block_prevalidation_leaves_listener_clean_for_retry()
 }
 
 #[test]
+fn empty_block_commit_preserves_listener_and_set() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+
+    let first_outpoint = OutPoint::new(txid(72), 0);
+    let second_outpoint = OutPoint::new(txid(73), 0);
+    let first_txout = txout(72);
+    let second_txout = txout(73);
+
+    let mut first = BlockChanges::default();
+    first.add(UtxoAdd::new(first_outpoint, first_txout.clone(), true, 32));
+    set.commit_block(&first, &txid(502))?;
+    listener.finish_block(32, 1);
+
+    let mut second = BlockChanges::default();
+    second.add(UtxoAdd::new(
+        second_outpoint,
+        second_txout.clone(),
+        false,
+        33,
+    ));
+    set.commit_block(&second, &txid(503))?;
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&first_outpoint, &first_txout, 32, true);
+    expected.finish_block(32, 1);
+    expected.insert_utxo(&second_outpoint, &second_txout, 33, false);
+    assert_eq!(listener.snapshot(), expected);
+
+    set.commit_block(&BlockChanges::default(), &txid(504))?;
+
+    assert_eq!(set.len(), 2);
+    assert_eq!(set.get(&first_outpoint), Some(first_txout));
+    assert_eq!(set.get(&second_outpoint), Some(second_txout));
+    assert_eq!(listener.snapshot(), expected);
+    Ok(())
+}
+
+#[test]
 fn undo_block_reverses_unfinished_listener_deltas() -> Result<(), Box<dyn std::error::Error>> {
     let listener = CoinStatsListener::new(CoinStats::new());
     let mut set = UtxoSet::new();
