@@ -456,6 +456,26 @@ fn bench_direct_encode_only(group: &mut BenchmarkGroup<'_, WallTime>) {
     });
 }
 
+fn direct_muhash_outpoint_bytes(group: &mut BenchmarkGroup<'_, WallTime>) {
+    group.bench_function("direct_muhash_outpoint_bytes", |b| {
+        b.iter_batched(
+            || synthetic_direct_case(CASE_SEED),
+            |case| {
+                let DirectCase { spends, adds, .. } = case;
+                let mut muhash = MuHash3072::new();
+                for spend in &spends {
+                    muhash.remove(spend.outpoint.as_bytes());
+                }
+                for add in &adds {
+                    muhash.insert(add.outpoint.as_bytes());
+                }
+                black_box(muhash);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn bench_direct_muhash_preencoded(group: &mut BenchmarkGroup<'_, WallTime>) {
     group.bench_function("direct_coinstats_muhash_preencoded", |b| {
         b.iter_batched(
@@ -519,6 +539,7 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
     );
     bench_direct_coinstats(&mut group);
     bench_direct_encode_only(&mut group);
+    direct_muhash_outpoint_bytes(&mut group);
     bench_direct_muhash_preencoded(&mut group);
 
     group.finish();
