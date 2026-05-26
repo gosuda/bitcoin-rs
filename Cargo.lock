@@ -307,6 +307,7 @@ dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bitcoinkernel",
+ "criterion",
  "secp256k1 0.31.1",
  "serde",
  "serde_json",
