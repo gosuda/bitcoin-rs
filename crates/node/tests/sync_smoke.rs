@@ -1,6 +1,9 @@
 //! Block sync smoke tests.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
@@ -18,7 +21,7 @@ use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{BlockSync, Config, Network, apply::ApplyHandles, state::NodeState};
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::{Hash256, OutPoint};
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::{UtxoChangeListener, UtxoSet};
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
@@ -353,12 +356,17 @@ fn bounded_apply_profile_replay_coinstats_listener_cost() -> Result<(), Box<dyn 
             false,
             coin_stats_listener,
         )?;
+        let listener_calls = outcome.listener_calls;
         println!(
-            "bounded_apply_profile_replay_coinstats_listener_cost coin_stats_listener={} elapsed_ms={} applied_height={} blocks={}",
+            "bounded_apply_profile_replay_coinstats_listener_cost coin_stats_listener={} elapsed_ms={} applied_height={} blocks={} listener_insert_calls={} listener_remove_calls={} listener_remove_coin_calls={} listener_total_calls={}",
             coin_stats_listener.label(),
             elapsed_ms(outcome.elapsed),
             outcome.applied_height,
             fixture.blocks.len(),
+            listener_calls.insert_calls,
+            listener_calls.remove_calls,
+            listener_calls.remove_coin_calls,
+            listener_calls.total_calls(),
         );
     }
 
@@ -441,7 +449,68 @@ struct ReplayOutcome {
     applied_height: u32,
     applied_hash: Hash256,
     coin_stats: Arc<CoinStatsListener>,
+    listener_calls: ListenerCallCountSnapshot,
     utxo: Arc<UtxoSet>,
+}
+
+#[derive(Default)]
+struct ListenerCallCounters {
+    insert_calls: AtomicU64,
+    remove_calls: AtomicU64,
+    remove_coin_calls: AtomicU64,
+}
+
+impl ListenerCallCounters {
+    fn snapshot(&self) -> ListenerCallCountSnapshot {
+        ListenerCallCountSnapshot {
+            insert_calls: self.insert_calls.load(Ordering::Relaxed),
+            remove_calls: self.remove_calls.load(Ordering::Relaxed),
+            remove_coin_calls: self.remove_coin_calls.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ListenerCallCountSnapshot {
+    insert_calls: u64,
+    remove_calls: u64,
+    remove_coin_calls: u64,
+}
+
+impl ListenerCallCountSnapshot {
+    const fn total_calls(self) -> u64 {
+        self.insert_calls
+            .saturating_add(self.remove_calls)
+            .saturating_add(self.remove_coin_calls)
+    }
+}
+
+struct CountingCoinStatsListener {
+    inner: CoinStatsListener,
+    counters: Arc<ListenerCallCounters>,
+}
+
+impl UtxoChangeListener for CountingCoinStatsListener {
+    fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.counters.insert_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.on_insert(op, txout, height, coinbase);
+    }
+
+    fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
+        self.counters.remove_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.on_remove(op, txout, height);
+    }
+
+    fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.counters
+            .remove_coin_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.on_remove_coin(op, txout, height, coinbase);
+    }
+
+    fn muhash3072(&self) -> Option<[u8; 384]> {
+        self.inner.muhash3072()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -484,7 +553,7 @@ fn replay_non_coinbase_spend_chain_with_coin_stats_listener(
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
     let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let (mut handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (mut handles, coin_stats, listener_calls, utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
@@ -542,6 +611,7 @@ fn replay_non_coinbase_spend_chain_with_coin_stats_listener(
         applied_height: applied.height,
         applied_hash: applied.hash,
         coin_stats,
+        listener_calls: listener_calls.snapshot(),
         utxo,
     })
 }
@@ -677,7 +747,7 @@ fn apply_handles_with_coin_stats(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
 ) -> (ApplyHandles, Arc<CoinStatsListener>) {
-    let (handles, coin_stats, _utxo) = apply_handles_with_coin_stats_and_utxo(
+    let (handles, coin_stats, _listener_calls, _utxo) = apply_handles_with_coin_stats_and_utxo(
         network,
         chain_tip,
         applied_tip,
@@ -694,11 +764,20 @@ fn apply_handles_with_coin_stats_and_utxo(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
     coin_stats_listener: CoinStatsListenerMode,
-) -> (ApplyHandles, Arc<CoinStatsListener>, Arc<UtxoSet>) {
+) -> (
+    ApplyHandles,
+    Arc<CoinStatsListener>,
+    Arc<ListenerCallCounters>,
+    Arc<UtxoSet>,
+) {
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+    let listener_calls = Arc::new(ListenerCallCounters::default());
     let mut utxo = UtxoSet::new();
     if matches!(coin_stats_listener, CoinStatsListenerMode::Attached) {
-        utxo.set_listener(Box::new((*coin_stats).clone()));
+        utxo.set_listener(Box::new(CountingCoinStatsListener {
+            inner: (*coin_stats).clone(),
+            counters: Arc::clone(&listener_calls),
+        }));
     }
     let utxo = Arc::new(utxo);
     let handles = ApplyHandles::new(
@@ -715,7 +794,7 @@ fn apply_handles_with_coin_stats_and_utxo(
         Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
         Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
     );
-    (handles, coin_stats, utxo)
+    (handles, coin_stats, listener_calls, utxo)
 }
 
 struct NoopIndexer;
