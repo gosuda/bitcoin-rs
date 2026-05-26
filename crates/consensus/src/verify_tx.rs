@@ -234,7 +234,7 @@ mod tests {
 
     use super::{
         is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size, verify_transaction,
-        verify_transaction_borrowed_with_mtp, verify_transaction_with_mtp,
+        verify_transaction_with_mtp,
     };
     use crate::ConsensusError;
 
