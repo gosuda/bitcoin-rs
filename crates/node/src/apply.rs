@@ -264,12 +264,6 @@ pub fn apply_block(
                 input_count = tx_profile.input_count,
                 output_count = tx_profile.output_count,
                 tx_verify_us = tx_profile.tx_verify_us,
-                prevout_lookup_us = tx_profile.verify_profile.prevout_lookup_us,
-                input_value_us = tx_profile.verify_profile.input_value_us,
-                witness_to_vec_us = tx_profile.verify_profile.witness_to_vec_us,
-                interpreter_execute_us = tx_profile.verify_profile.interpreter_execute_us,
-                sigop_cost_us = tx_profile.verify_profile.sigop_cost_us,
-                tx_verify_residual_us = tx_profile.tx_verify_residual_us(),
                 block_tx_verify_call_us = script_verify_profile.tx_verify_call_us,
                 block_script_verify_us = script_verify_dur.as_micros(),
                 "apply_block: script verify transaction attribution"
@@ -582,7 +576,7 @@ fn verify_block_transactions(
         profile.observe_non_coinbase(tx);
         let tx_verify_started = quanta::Instant::now();
         let tx_verify_result =
-            bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp_profiled(
+            bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
                 tx,
                 &view,
                 height,
@@ -592,8 +586,8 @@ fn verify_block_transactions(
         let tx_verify_dur = tx_verify_started.elapsed();
         let tx_verify_us = tx_verify_dur.as_micros();
         profile.add_tx_verify_call_us(tx_verify_us);
-        let verify_profile = tx_verify_result?;
-        profile.observe_slow_tx(tx_index, tx, tx_verify_us, verify_profile);
+        tx_verify_result?;
+        profile.observe_slow_tx(tx_index, tx, tx_verify_us);
         view.spend_inputs(tx);
         view.add_outputs(tx, height)?;
     }
@@ -614,14 +608,6 @@ struct SlowScriptVerifyTxProfile {
     input_count: usize,
     output_count: usize,
     tx_verify_us: u128,
-    verify_profile: bitcoin_rs_consensus::verify_tx::TransactionVerifyProfile,
-}
-
-impl SlowScriptVerifyTxProfile {
-    fn tx_verify_residual_us(&self) -> u128 {
-        self.tx_verify_us
-            .saturating_sub(self.verify_profile.bucket_sum_us())
-    }
 }
 
 impl ScriptVerifyProfile {
@@ -630,13 +616,7 @@ impl ScriptVerifyProfile {
         self.total_input_count = self.total_input_count.saturating_add(tx.input.len());
     }
 
-    fn observe_slow_tx(
-        &mut self,
-        tx_index: usize,
-        tx: &bitcoin::Transaction,
-        tx_verify_us: u128,
-        verify_profile: bitcoin_rs_consensus::verify_tx::TransactionVerifyProfile,
-    ) {
+    fn observe_slow_tx(&mut self, tx_index: usize, tx: &bitcoin::Transaction, tx_verify_us: u128) {
         let insert_index = self
             .slow_txs
             .iter()
@@ -654,7 +634,6 @@ impl ScriptVerifyProfile {
                 input_count: tx.input.len(),
                 output_count: tx.output.len(),
                 tx_verify_us,
-                verify_profile,
             },
         );
         self.slow_txs.truncate(SCRIPT_VERIFY_PROFILE_TOP_N);
@@ -1322,12 +1301,7 @@ mod consensus_rule_tests {
 
         let mut tx_verify_us = 0_u128;
         for (tx_index, tx) in transactions.iter().enumerate() {
-            profile.observe_slow_tx(
-                tx_index,
-                tx,
-                tx_verify_us,
-                bitcoin_rs_consensus::verify_tx::TransactionVerifyProfile::default(),
-            );
+            profile.observe_slow_tx(tx_index, tx, tx_verify_us);
             tx_verify_us = tx_verify_us.saturating_add(1);
         }
 
