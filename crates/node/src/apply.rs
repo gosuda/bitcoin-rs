@@ -24,6 +24,7 @@ const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
 const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
 const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
+const SCRIPT_VERIFY_OUTLIER_BLOCK_US: u128 = 100_000;
 
 pub(crate) trait PruneBodyStore: Send + Sync {
     fn persist_block_body(
@@ -226,13 +227,33 @@ pub fn apply_block(
     bip113_result?;
 
     let script_verify_started = quanta::Instant::now();
+    let verify_flags_started = quanta::Instant::now();
     let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
+    let verify_flags_dur = verify_flags_started.elapsed();
+    let block_transactions_started = quanta::Instant::now();
     let script_verify_result =
         verify_block_transactions(handles, block, height, locktime_cutoff, verify_flags);
+    let block_transactions_dur = block_transactions_started.elapsed();
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
         .record(script_verify_dur.as_secs_f64());
-    script_verify_result?;
+    let script_verify_profile = script_verify_result?;
+    if script_verify_dur.as_micros() >= SCRIPT_VERIFY_OUTLIER_BLOCK_US {
+        let verify_block_transactions_us = block_transactions_dur.as_micros();
+        tracing::info!(
+            height,
+            %block_hash,
+            tx_count = block.txdata.len(),
+            non_coinbase_tx_count = script_verify_profile.non_coinbase_tx_count,
+            total_input_count = script_verify_profile.total_input_count,
+            script_verify_us = script_verify_dur.as_micros(),
+            compute_verify_flags_us = verify_flags_dur.as_micros(),
+            verify_block_transactions_us,
+            tx_verify_call_us = script_verify_profile.tx_verify_call_us,
+            tx_nonverify_us = script_verify_profile.nonverify_us(verify_block_transactions_us),
+            "apply_block: script verify attribution"
+        );
+    }
 
     let coinbase_maturity_started = quanta::Instant::now();
     let coinbase_maturity_result = check_coinbase_maturity(handles, block, height);
@@ -523,11 +544,12 @@ fn verify_block_transactions(
     height: u32,
     locktime_cutoff: u32,
     flags: bitcoin_rs_script::VerifyFlags,
-) -> core::result::Result<(), ApplyError> {
+) -> core::result::Result<ScriptVerifyProfile, ApplyError> {
     // Consensus connects transactions in block order. A later transaction may
     // spend an output created earlier in the same block. Coinbase outputs enter
     // this view too, so maturity failures stay in the maturity pass instead of
     // degrading into bogus missing-prevout script checks.
+    let mut profile = ScriptVerifyProfile::default();
     let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
     for tx in &block.txdata {
         if tx.is_coinbase() {
@@ -535,17 +557,45 @@ fn verify_block_transactions(
             view.add_outputs(tx, height)?;
             continue;
         }
-        bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
-            tx,
-            &view,
-            height,
-            locktime_cutoff,
-            flags,
-        )?;
+        profile.observe_non_coinbase(tx);
+        let tx_verify_started = quanta::Instant::now();
+        let tx_verify_result =
+            bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
+                tx,
+                &view,
+                height,
+                locktime_cutoff,
+                flags,
+            );
+        let tx_verify_dur = tx_verify_started.elapsed();
+        profile.add_tx_verify_call_us(tx_verify_dur.as_micros());
+        tx_verify_result?;
         view.spend_inputs(tx);
         view.add_outputs(tx, height)?;
     }
-    Ok(())
+    Ok(profile)
+}
+
+#[derive(Default)]
+struct ScriptVerifyProfile {
+    non_coinbase_tx_count: usize,
+    total_input_count: usize,
+    tx_verify_call_us: u128,
+}
+
+impl ScriptVerifyProfile {
+    fn observe_non_coinbase(&mut self, tx: &bitcoin::Transaction) {
+        self.non_coinbase_tx_count = self.non_coinbase_tx_count.saturating_add(1);
+        self.total_input_count = self.total_input_count.saturating_add(tx.input.len());
+    }
+
+    fn add_tx_verify_call_us(&mut self, elapsed_us: u128) {
+        self.tx_verify_call_us = self.tx_verify_call_us.saturating_add(elapsed_us);
+    }
+
+    fn nonverify_us(&self, verify_block_transactions_us: u128) -> u128 {
+        verify_block_transactions_us.saturating_sub(self.tx_verify_call_us)
+    }
 }
 
 struct BlockLocalUtxoView {
@@ -1119,7 +1169,15 @@ mod consensus_rule_tests {
         );
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
 
-        verify_block_transactions(&handles, &block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE)?;
+        let profile = verify_block_transactions(
+            &handles,
+            &block,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::NONE,
+        )?;
+        assert_eq!(profile.non_coinbase_tx_count, 2);
+        assert_eq!(profile.total_input_count, 2);
         Ok(())
     }
 
@@ -1137,7 +1195,9 @@ mod consensus_rule_tests {
             0,
             bitcoin_rs_script::VerifyFlags::MANDATORY,
         ) {
-            Ok(()) => panic!("bad coinbase scriptSig length must fail transaction verification"),
+            Ok(_profile) => {
+                panic!("bad coinbase scriptSig length must fail transaction verification")
+            }
             Err(error) => error,
         };
 
