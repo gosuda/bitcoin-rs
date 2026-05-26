@@ -1,0 +1,11 @@
+[package]
+name = "adaptive-difficulty-harness"
+version.workspace = true
+edition.workspace = true
+publish = false
+license.workspace = true
+
+[dependencies]
+bitcoin-rs-chain = { workspace = true }
+
+
