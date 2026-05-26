@@ -11,7 +11,8 @@ use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::{
-    BlockChanges, UtxoAdd, UtxoChangeListener, UtxoKey, UtxoSet, write_snapshot,
+    BlockChanges, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoError, UtxoKey, UtxoSet,
+    write_snapshot,
 };
 
 #[test]
@@ -84,6 +85,203 @@ fn snapshot_trailer_tracks_listener_after_removal() -> Result<(), Box<dyn std::e
 
     assert_eq!(trailer, expected_trailer);
     assert_eq!(&snapshot[snapshot.len() - 384..], expected_trailer);
+    Ok(())
+}
+
+#[test]
+fn listener_removes_from_non_zero_base_before_finish_block()
+-> Result<(), Box<dyn std::error::Error>> {
+    let outpoint = OutPoint::new(txid(20), 0);
+    let txout = txout(20);
+    let height = 17;
+    let mut set = UtxoSet::new();
+    let mut preload = BlockChanges::default();
+    preload.add(UtxoAdd::new(outpoint, txout.clone(), false, height));
+    set.commit_block(&preload, &txid(200))?;
+
+    let mut base = CoinStats::new();
+    base.insert_utxo(&outpoint, &txout, height, false);
+    let listener = CoinStatsListener::new(base.clone());
+    set.set_listener(Box::new(listener.clone()));
+
+    let mut removes = BlockChanges::default();
+    removes.remove(outpoint);
+    set.commit_block(&removes, &txid(201))?;
+
+    let mut expected = base;
+    expected.remove_utxo(&outpoint, &txout, height, false);
+    let snapshot = listener.snapshot();
+    assert_eq!(snapshot, expected);
+    assert_eq!(snapshot.height, 0);
+    assert_eq!(snapshot.tx_count, 0);
+    Ok(())
+}
+
+#[test]
+fn finish_block_folds_deltas_once_before_next_block() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+
+    let first_outpoint = OutPoint::new(txid(40), 0);
+    let second_outpoint = OutPoint::new(txid(41), 0);
+    let first_txout = txout(40);
+    let second_txout = txout(41);
+
+    let mut first = BlockChanges::default();
+    first.add(UtxoAdd::new(first_outpoint, first_txout.clone(), false, 11));
+    set.commit_block(&first, &txid(300))?;
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&first_outpoint, &first_txout, 11, false);
+    assert_eq!(listener.snapshot(), expected);
+
+    listener.finish_block(11, 1);
+    expected.finish_block(11, 1);
+    assert_eq!(listener.snapshot(), expected);
+    assert_eq!(listener.snapshot(), expected);
+
+    let mut second = BlockChanges::default();
+    second.add(UtxoAdd::new(
+        second_outpoint,
+        second_txout.clone(),
+        true,
+        12,
+    ));
+    set.commit_block(&second, &txid(301))?;
+
+    expected.insert_utxo(&second_outpoint, &second_txout, 12, true);
+    assert_eq!(listener.snapshot(), expected);
+
+    listener.finish_block(12, 1);
+    expected.finish_block(12, 1);
+    assert_eq!(listener.snapshot(), expected);
+    Ok(())
+}
+
+#[test]
+fn listener_muhash_matches_snapshot_after_remove_and_readd()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+
+    let outpoint = OutPoint::new(txid(60), 0);
+    let original = txout(60);
+    let replacement = txout(61);
+
+    let mut add = BlockChanges::default();
+    add.add(UtxoAdd::new(outpoint, original.clone(), false, 21));
+    set.commit_block(&add, &txid(400))?;
+
+    let mut remove = BlockChanges::default();
+    remove.remove(outpoint);
+    set.commit_block(&remove, &txid(401))?;
+
+    let mut readd = BlockChanges::default();
+    readd.add(UtxoAdd::new(outpoint, replacement.clone(), true, 22));
+    set.commit_block(&readd, &txid(402))?;
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&outpoint, &original, 21, false);
+    expected.remove_utxo(&outpoint, &original, 21, false);
+    expected.insert_utxo(&outpoint, &replacement, 22, true);
+
+    let snapshot = listener.snapshot();
+    let trailer = UtxoChangeListener::muhash3072(&listener).unwrap_or([0_u8; 384]);
+    assert_eq!(snapshot, expected);
+    assert_eq!(trailer, snapshot.muhash.finalize());
+    assert_ne!(trailer, [0_u8; 384]);
+    Ok(())
+}
+
+#[test]
+fn failed_block_prevalidation_leaves_listener_clean_for_retry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+
+    let valid_outpoint = OutPoint::new(txid(70), 0);
+    let valid_txout = txout(70);
+    let invalid_outpoint = OutPoint::new(txid(71), 0);
+    let invalid_txout = TxOut {
+        value: Amount::from_sat(71_000),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51; usize::from(u16::MAX) + 1]),
+    };
+
+    let mut failed = BlockChanges::default();
+    failed.add(UtxoAdd::new(valid_outpoint, valid_txout.clone(), false, 31));
+    failed.add(UtxoAdd::new(invalid_outpoint, invalid_txout, false, 31));
+    let error = match set.commit_block(&failed, &txid(500)) {
+        Ok(()) => return Err("oversized script block unexpectedly committed".into()),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, UtxoError::ScriptTooLarge { .. }));
+    assert_eq!(set.get(&valid_outpoint), None);
+    assert_eq!(listener.snapshot(), CoinStats::new());
+
+    let mut retry = BlockChanges::default();
+    retry.add(UtxoAdd::new(valid_outpoint, valid_txout.clone(), false, 31));
+    set.commit_block(&retry, &txid(501))?;
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&valid_outpoint, &valid_txout, 31, false);
+    assert_eq!(set.get(&valid_outpoint), Some(valid_txout));
+    assert_eq!(listener.snapshot(), expected);
+    Ok(())
+}
+
+#[test]
+fn undo_block_reverses_unfinished_listener_deltas() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+
+    let spent_outpoint = OutPoint::new(txid(80), 0);
+    let spent_txout = txout(80);
+    let created_outpoint = OutPoint::new(txid(81), 0);
+    let created_txout = txout(81);
+
+    let mut preload = BlockChanges::default();
+    preload.add(UtxoAdd::new(spent_outpoint, spent_txout.clone(), false, 40));
+    set.commit_block(&preload, &txid(600))?;
+
+    let mut connected = BlockChanges::default();
+    connected.remove(spent_outpoint);
+    connected.add(UtxoAdd::new(
+        created_outpoint,
+        created_txout.clone(),
+        true,
+        41,
+    ));
+    set.commit_block(&connected, &txid(601))?;
+
+    let mut after_connect = CoinStats::new();
+    after_connect.insert_utxo(&spent_outpoint, &spent_txout, 40, false);
+    after_connect.remove_utxo(&spent_outpoint, &spent_txout, 40, false);
+    after_connect.insert_utxo(&created_outpoint, &created_txout, 41, true);
+    assert_eq!(listener.snapshot(), after_connect);
+
+    let mut undo = UndoBatch::default();
+    undo.restore(UtxoAdd::new(spent_outpoint, spent_txout.clone(), false, 40));
+    undo.remove(created_outpoint);
+    set.undo_block(&undo)?;
+
+    let mut expected = CoinStats::new();
+    expected.insert_utxo(&spent_outpoint, &spent_txout, 40, false);
+    expected.remove_utxo(&spent_outpoint, &spent_txout, 40, false);
+    expected.insert_utxo(&created_outpoint, &created_txout, 41, true);
+    expected.insert_utxo(&spent_outpoint, &spent_txout, 40, false);
+    expected.remove_utxo(&created_outpoint, &created_txout, 41, true);
+    let mut canonical = CoinStats::new();
+    canonical.insert_utxo(&spent_outpoint, &spent_txout, 40, false);
+    let snapshot = listener.snapshot();
+    assert_eq!(set.get(&spent_outpoint), Some(spent_txout));
+    assert_eq!(set.get(&created_outpoint), None);
+    assert_eq!(snapshot, expected);
+    assert_eq!(snapshot.muhash.finalize(), canonical.muhash.finalize());
     Ok(())
 }
 
