@@ -728,6 +728,7 @@ impl NodeState {
             Arc::clone(&peer_outbound),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
+            config.headers_only,
         ));
         let prune_service = if config.prune_target_mb > 0 {
             Some(storage.prune_service(Arc::clone(&blocks), Arc::clone(&transactions))?)

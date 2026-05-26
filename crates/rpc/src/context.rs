@@ -433,6 +433,12 @@ impl Context {
     /// Returns the block hash for `height` when known without blocking I/O.
     #[must_use]
     pub fn block_hash_at_height(&self, height: u32) -> Option<Hash256> {
+        let tree = self.block_tree.read();
+        if tree.tip().is_some() {
+            return tree.active_node_at_height(height).map(|node| node.hash);
+        }
+        drop(tree);
+
         self.blocks
             .read()
             .iter()

@@ -52,6 +52,7 @@ fn tick_sends_getheaders_to_best_peer_above_our_height() -> Result<(), Box<dyn s
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     sync.tick();
@@ -104,6 +105,7 @@ fn tick_uses_applied_tip_height_when_selecting_sync_peer() {
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -142,6 +144,7 @@ fn tick_applies_inbound_blocks_before_sync_selection() -> Result<(), Box<dyn std
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     inbound_blocks_tx.send(regtest_genesis_block()?)?;
@@ -237,6 +240,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     inbound_headers_tx.send(vec![genesis.header, block_one.header, block_two.header])?;
@@ -570,6 +574,7 @@ fn replay_non_coinbase_spend_chain_with_coin_stats_listener(
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     inbound_headers_tx.send(fixture.blocks.iter().map(|block| block.header).collect())?;

@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
 use bitcoin_rs_mempool::MempoolEntry;
@@ -247,6 +247,55 @@ fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std
             "hash_type must be one of: hash_serialized_3, muhash, none"
         ))
     ));
+    Ok(())
+}
+
+#[test]
+fn getblockhash_reads_historical_active_header_without_block_record()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = active_regtest_header_context()?;
+    let genesis_hash = bitcoin_rs_primitives::Network::Regtest.genesis_block_hash();
+    assert!(ctx.blocks.read().is_empty());
+    let handler = Handler::new(Arc::new(ctx));
+
+    let result = handler.dispatch("getblockhash", &json!([0]))?;
+
+    assert_eq!(result.as_str(), Some(genesis_hash.to_string_be().as_str()));
+    Ok(())
+}
+
+#[test]
+fn getblockhash_prefers_active_header_over_stale_block_record()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = active_regtest_header_context()?;
+    let genesis_hash = bitcoin_rs_primitives::Network::Regtest.genesis_block_hash();
+    ctx.add_block(BlockRecord::synthetic(
+        0,
+        Hash256::from_le_bytes(&[0x99; 32]),
+    ));
+    let handler = Handler::new(Arc::new(ctx));
+
+    let result = handler.dispatch("getblockhash", &json!([0]))?;
+
+    assert_eq!(result.as_str(), Some(genesis_hash.to_string_be().as_str()));
+    Ok(())
+}
+
+#[test]
+fn getblockhash_rejects_stale_block_record_above_active_tip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = active_regtest_header_context()?;
+    ctx.add_block(BlockRecord::synthetic(
+        2,
+        Hash256::from_le_bytes(&[0x77; 32]),
+    ));
+    let handler = Handler::new(Arc::new(ctx));
+
+    let error = handler
+        .dispatch("getblockhash", &json!([2]))
+        .expect_err("stale block record above active tip unexpectedly resolved");
+
+    assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
     Ok(())
 }
 
@@ -766,6 +815,32 @@ fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
     let mut ctx = Context::new();
     ctx.peers = peers;
     Arc::new(ctx)
+}
+
+fn active_regtest_header_context() -> Result<Context, Box<dyn std::error::Error>> {
+    let ctx = Context::new();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let child_header = bitcoin::block::Header {
+        version: bitcoin::block::Version::ONE,
+        prev_blockhash: genesis.block_hash(),
+        merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+        time: genesis.header.time.saturating_add(1),
+        bits: genesis.header.bits,
+        nonce: genesis.header.nonce.saturating_add(1),
+    };
+    let child_hash = Hash256::from_le_bytes(child_header.block_hash().as_byte_array());
+    let child_id = {
+        let mut tree = ctx.block_tree.write();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        tree.insert_header(child_header, NodeStatus::HeaderValid)?
+    };
+    ctx.set_chain_tip(TipSnapshot {
+        tip_id: child_id,
+        height: 1,
+        chainwork: ChainWork::ZERO,
+        hash: child_hash,
+    });
+    Ok(ctx)
 }
 
 fn tx(label: u8, script_pubkey: ScriptBuf) -> Transaction {

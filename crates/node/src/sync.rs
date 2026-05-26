@@ -4,7 +4,7 @@
 //! and, when a peer reports a longer chain, sends `getheaders` toward
 //! that peer. Inbound `headers` batches are drained into the shared
 //! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
-//! [`crate::apply::apply_block`].
+//! [`crate::apply::apply_block`] unless headers-only mode is enabled.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -48,6 +48,7 @@ pub struct BlockSync {
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
     pending_blocks: Arc<Mutex<HashMap<Hash256, Instant>>>,
     received_blocks: Arc<Mutex<HashMap<Hash256, ReceivedBlock>>>,
+    headers_only: bool,
 }
 
 impl BlockSync {
@@ -59,6 +60,7 @@ impl BlockSync {
         peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
         inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
         inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
+        headers_only: bool,
     ) -> Self {
         Self {
             handles,
@@ -68,6 +70,7 @@ impl BlockSync {
             inbound_blocks_rx,
             pending_blocks: Arc::new(Mutex::new(HashMap::new())),
             received_blocks: Arc::new(Mutex::new(HashMap::new())),
+            headers_only,
         }
     }
 
@@ -78,18 +81,30 @@ impl BlockSync {
         self.ensure_genesis_tip();
         self.drain_inbound_blocks();
 
-        let applied_height = self
-            .handles
-            .applied_tip
-            .load_full()
-            .map_or(0, |tip| tip.height);
-        let Some(target) = self.pick_sync_peer(applied_height) else {
-            tracing::trace!(applied_height, "block sync: no peer above current height");
+        let sync_height = self.sync_height();
+        let Some(target) = self.pick_sync_peer(sync_height) else {
+            tracing::trace!(sync_height, "block sync: no peer above current height");
             return;
         };
 
-        self.send_getdata_for_pending_blocks(target.addr);
-        self.send_getheaders(target.addr, applied_height, target.start_height);
+        if !self.headers_only {
+            self.send_getdata_for_pending_blocks(target.addr);
+        }
+        self.send_getheaders(target.addr, sync_height, target.start_height);
+    }
+
+    fn sync_height(&self) -> u32 {
+        if self.headers_only {
+            return self
+                .handles
+                .chain_tip
+                .load_full()
+                .map_or(0, |tip| tip.height);
+        }
+        self.handles
+            .applied_tip
+            .load_full()
+            .map_or(0, |tip| tip.height)
     }
 
     fn drain_inbound_headers(&self) {
@@ -122,6 +137,17 @@ impl BlockSync {
     }
 
     fn drain_inbound_blocks(&self) {
+        if self.headers_only {
+            let dropped = self.drain_and_drop_inbound_blocks();
+            if dropped > 0 {
+                tracing::debug!(
+                    dropped,
+                    "block sync: dropped inbound blocks in headers-only mode"
+                );
+            }
+            return;
+        }
+
         let receiver = self.inbound_blocks_rx.lock();
         let mut received = 0_usize;
         while let Ok(block) = receiver.try_recv() {
@@ -144,6 +170,16 @@ impl BlockSync {
                 "block sync: drained inbound blocks"
             );
         }
+    }
+
+    fn drain_and_drop_inbound_blocks(&self) -> usize {
+        let receiver = self.inbound_blocks_rx.lock();
+        let mut dropped = 0_usize;
+        while receiver.try_recv().is_ok() {
+            dropped = dropped.saturating_add(1);
+        }
+        self.received_blocks.lock().clear();
+        dropped
     }
 
     fn buffer_received_block(&self, block: bitcoin::Block) {
@@ -361,6 +397,11 @@ impl BlockSync {
     }
 
     fn ensure_genesis_tip(&self) {
+        if self.headers_only {
+            self.ensure_genesis_header();
+            return;
+        }
+
         if self.handles.applied_tip.load_full().is_some() {
             return;
         }
@@ -377,6 +418,24 @@ impl BlockSync {
             Err(error) => {
                 tracing::warn!(%error, "block sync: failed to bootstrap genesis");
             }
+        }
+    }
+
+    fn ensure_genesis_header(&self) {
+        let genesis_hash = self.handles.network.genesis_block_hash();
+        let mut tree = self.handles.block_tree.write();
+        if tree.lookup(genesis_hash).is_some() {
+            return;
+        }
+
+        let genesis =
+            bitcoin::blockdata::constants::genesis_block(bitcoin_network(self.handles.network));
+        match tree.insert_header(
+            genesis.header,
+            bitcoin_rs_chain::node::NodeStatus::HeaderValid,
+        ) {
+            Ok(_id) => tracing::debug!(%genesis_hash, "block sync: bootstrapped genesis header"),
+            Err(error) => tracing::warn!(%error, "block sync: failed to bootstrap genesis header"),
         }
     }
 }
@@ -470,6 +529,7 @@ mod tests {
             Arc::clone(&peer_outbound),
             inbound_headers_rx,
             inbound_blocks_rx,
+            false,
         );
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         peers.write().push(synthetic_peer(addr, 100));
@@ -541,6 +601,7 @@ mod tests {
             Arc::clone(&peer_outbound),
             inbound_headers_rx,
             inbound_blocks_rx,
+            false,
         );
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         peers.write().push(synthetic_peer(addr, 100));
@@ -622,6 +683,7 @@ mod tests {
             Arc::clone(&peer_outbound),
             inbound_headers_rx,
             inbound_blocks_rx,
+            false,
         );
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         peers.write().push(synthetic_peer(addr, 100));
@@ -735,6 +797,107 @@ mod tests {
     }
 
     #[test]
+    fn headers_only_tick_sends_getheaders_without_getdata() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, _expected) =
+            sync_with_header_chain_for_mode(3, true)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_headers_only_no_body_apply(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.pending_blocks.lock().is_empty());
+        let first = rx.try_recv()?;
+        if !matches!(first, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected headers-only getheaders").into());
+        }
+        match rx.try_recv() {
+            Ok(NetworkMessage::GetData(_)) => {
+                Err(std::io::Error::other("headers-only tick sent getdata").into())
+            }
+            Ok(_) => Err(std::io::Error::other("unexpected extra headers-only message").into()),
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(()),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err(std::io::Error::other("outbound channel disconnected").into())
+            }
+        }
+    }
+
+    #[test]
+    fn headers_only_tick_uses_header_tip_height_for_progress()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, _expected) =
+            sync_with_header_chain_for_mode(3, true)?;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 3));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_headers_only_no_body_apply(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.pending_blocks.lock().is_empty());
+        if !matches!(rx.try_recv(), Err(crossbeam_channel::TryRecvError::Empty)) {
+            return Err(
+                std::io::Error::other("headers-only tick requested current header height").into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn headers_only_tick_drains_inbound_blocks_without_buffering()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis_block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(
+            genesis_block.block_hash().as_byte_array(),
+        );
+        let block_tree = Arc::new(RwLock::new(BlockTree::new()));
+        let chain_tip = block_tree.read().tip_handle();
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+            true,
+        );
+        inbound_blocks_tx.send(genesis_block.clone())?;
+        sync.received_blocks.lock().insert(
+            genesis_hash,
+            super::ReceivedBlock {
+                block: genesis_block,
+                received_at: Instant::now(),
+            },
+        );
+
+        sync.tick();
+
+        assert_headers_only_no_body_apply(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.received_blocks.lock().is_empty());
+        assert!(matches!(
+            sync.inbound_blocks_rx.lock().try_recv(),
+            Err(crossbeam_channel::TryRecvError::Empty),
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
     -> Result<(), Box<dyn std::error::Error>> {
         let (sync, _peers, _peer_outbound, _block_tree, _applied_tip, _expected) =
@@ -800,6 +963,59 @@ mod tests {
             Arc::clone(&peer_outbound),
             inbound_headers_rx,
             inbound_blocks_rx,
+            false,
+        );
+
+        Ok((
+            sync,
+            peers,
+            peer_outbound,
+            block_tree,
+            applied_tip,
+            expected,
+        ))
+    }
+
+    fn sync_with_header_chain_for_mode(
+        height: u32,
+        headers_only: bool,
+    ) -> Result<SyncFixture, Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        let mut expected = Vec::new();
+
+        for height in 1_u32..=height {
+            let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            expected.push(BlockHash::from_byte_array(
+                tree.node(tip_id)?.hash.to_le_bytes(),
+            ));
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+            headers_only,
         );
 
         Ok((
@@ -928,6 +1144,21 @@ mod tests {
         assert_eq!(tip.hash, genesis_hash);
         assert_eq!(block_tree.read().height_of_hash(genesis_hash), Some(0));
         assert_eq!(handles.blocks.read().len(), 1);
+        assert_eq!(handles.utxo.len(), 0);
+        Ok(())
+    }
+
+    fn assert_headers_only_no_body_apply(
+        applied_tip: &Arc<ArcSwapOption<TipSnapshot>>,
+        block_tree: &Arc<RwLock<BlockTree>>,
+        handles: &ApplyHandles,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let genesis_hash = Network::Regtest.genesis_block_hash();
+        if applied_tip.load_full().is_some() {
+            return Err(std::io::Error::other("headers-only mode applied a block body").into());
+        }
+        assert_eq!(block_tree.read().height_of_hash(genesis_hash), Some(0));
+        assert!(handles.blocks.read().is_empty());
         assert_eq!(handles.utxo.len(), 0);
         Ok(())
     }
