@@ -7,7 +7,7 @@ use std::hint::black_box;
 use bitcoin::{Amount, ScriptBuf, consensus::Encodable};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener, MuHash3072};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
-use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoChangeListener, UtxoSet};
+use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoChangeListener, UtxoKey, UtxoSet};
 use criterion::{
     BatchSize, BenchmarkGroup, Criterion, criterion_group, criterion_main, measurement::WallTime,
 };
@@ -25,6 +25,7 @@ enum ListenerKind {
     None,
     Noop,
     Accounting,
+    ShardedCoinStats,
     CoinStats,
 }
 
@@ -47,6 +48,10 @@ struct AccountingListener {
     stats: RwLock<AccountingStats>,
 }
 
+struct ShardedCoinStatsListener {
+    shards: Vec<RwLock<CoinStats>>,
+}
+
 struct DirectCase {
     stats: CoinStats,
     spends: Vec<UtxoAdd>,
@@ -66,6 +71,20 @@ impl AccountingListener {
     }
 }
 
+impl ShardedCoinStatsListener {
+    fn new() -> Self {
+        let shards = (0..UtxoKey::SHARD_COUNT)
+            .map(|_| RwLock::new(CoinStats::new()))
+            .collect();
+        Self { shards }
+    }
+
+    fn shard(&self, op: &OutPoint) -> &RwLock<CoinStats> {
+        let index = usize::from(UtxoKey::from_txid(&op.txid).shard());
+        &self.shards[index]
+    }
+}
+
 impl UtxoChangeListener for AccountingListener {
     fn on_insert(&self, _op: &OutPoint, txout: &TxOut, _height: u32, _coinbase: bool) {
         let mut stats = self.stats.write();
@@ -79,6 +98,24 @@ impl UtxoChangeListener for AccountingListener {
         stats.total_amount = stats.total_amount.saturating_sub(txout.value.to_sat());
         stats.bogo_size = stats.bogo_size.saturating_sub(simple_bogo_size(txout));
         stats.utxo_count = stats.utxo_count.saturating_sub(1);
+    }
+}
+
+impl UtxoChangeListener for ShardedCoinStatsListener {
+    fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.shard(op)
+            .write()
+            .insert_utxo(op, txout, height, coinbase);
+    }
+
+    fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
+        self.shard(op).write().remove_utxo(op, txout, height, false);
+    }
+
+    fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.shard(op)
+            .write()
+            .remove_utxo(op, txout, height, coinbase);
     }
 }
 
@@ -134,6 +171,9 @@ fn synthetic_case(seed: u64, listener_kind: ListenerKind) -> (UtxoSet, BlockChan
         ListenerKind::None => {}
         ListenerKind::Noop => set.set_listener(Box::new(NoopListener)),
         ListenerKind::Accounting => set.set_listener(Box::new(AccountingListener::new())),
+        ListenerKind::ShardedCoinStats => {
+            set.set_listener(Box::new(ShardedCoinStatsListener::new()));
+        }
         ListenerKind::CoinStats => {
             set.set_listener(Box::new(CoinStatsListener::new(CoinStats::new())));
         }
@@ -317,6 +357,12 @@ fn utxo_commit_coinstats(c: &mut Criterion) {
         &mut group,
         "accounting_listener",
         ListenerKind::Accounting,
+        &block_hash,
+    );
+    bench_commit_case(
+        &mut group,
+        "sharded_coinstats_listener",
+        ListenerKind::ShardedCoinStats,
         &block_hash,
     );
     bench_commit_case(
