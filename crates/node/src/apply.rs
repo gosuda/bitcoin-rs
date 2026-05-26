@@ -2027,6 +2027,7 @@ mod consensus_rule_tests {
         }
     }
 
+    #[cfg(feature = "bitcoinconsensus")]
     fn block_with_prev_hash_and_transactions(
         prev_blockhash: bitcoin::BlockHash,
         txdata: Vec<Transaction>,
@@ -2048,6 +2049,7 @@ mod consensus_rule_tests {
         block
     }
 
+    #[cfg(feature = "bitcoinconsensus")]
     fn mined_block_with_prev_hash_and_transactions(
         prev_blockhash: bitcoin::BlockHash,
         txdata: Vec<Transaction>,

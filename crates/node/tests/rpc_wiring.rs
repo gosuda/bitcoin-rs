@@ -92,23 +92,26 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::ptr_eq(&ctx.coin_stats, &coin_stats),
         "coin_stats must share identity"
     );
+    let ctx_filter_index = ctx
+        .filter_index
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("filter index must be wired"))?;
+    let node_filter_index = filter_index
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("node filter index must be wired"))?;
     assert!(
-        Arc::ptr_eq(
-            ctx.filter_index
-                .as_ref()
-                .expect("filter index must be wired"),
-            filter_index
-                .as_ref()
-                .expect("node filter index must be wired")
-        ),
+        Arc::ptr_eq(ctx_filter_index, node_filter_index),
         "filter_index must share identity"
     );
-    let ctx_indexer = ctx.indexer.as_ref().expect("indexer handle must be wired");
+    let ctx_indexer = ctx
+        .indexer
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("indexer handle must be wired"))?;
+    let node_tx_index = tx_index
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("node txindex must be wired"))?;
     assert!(
-        Arc::ptr_eq(
-            ctx_indexer,
-            tx_index.as_ref().expect("node txindex must be wired")
-        ),
+        Arc::ptr_eq(ctx_indexer, node_tx_index),
         "indexer handle must share identity"
     );
     assert!(

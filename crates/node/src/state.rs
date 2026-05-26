@@ -1128,8 +1128,12 @@ mod tests {
         config.p2p_listen.clear();
         config.txindex = true;
         let state = NodeState::open(config)?;
-        let a = state.tx_index().expect("txindex enabled");
-        let b = state.tx_index().expect("txindex enabled");
+        let a = state
+            .tx_index()
+            .ok_or_else(|| anyhow::anyhow!("txindex enabled"))?;
+        let b = state
+            .tx_index()
+            .ok_or_else(|| anyhow::anyhow!("txindex enabled"))?;
         assert!(Arc::ptr_eq(&a, &b), "tx_index handle stable across calls");
         Ok(())
     }
@@ -1157,8 +1161,12 @@ mod tests {
         config.p2p_listen.clear();
         config.blockfilterindex = true;
         let state = NodeState::open(config)?;
-        let a = state.filter_index().expect("blockfilterindex enabled");
-        let b = state.filter_index().expect("blockfilterindex enabled");
+        let a = state
+            .filter_index()
+            .ok_or_else(|| anyhow::anyhow!("blockfilterindex enabled"))?;
+        let b = state
+            .filter_index()
+            .ok_or_else(|| anyhow::anyhow!("blockfilterindex enabled"))?;
         assert!(
             Arc::ptr_eq(&a, &b),
             "filter_index handle stable across calls"

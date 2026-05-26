@@ -45,9 +45,10 @@ fn electrum_bind_requires_txindex() -> Result<()> {
     config.electrum_bind = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0));
     config.txindex = false;
 
-    let error = config
-        .validate()
-        .expect_err("electrum without txindex unexpectedly validated");
+    let error = match config.validate() {
+        Ok(()) => anyhow::bail!("electrum without txindex unexpectedly validated"),
+        Err(error) => error,
+    };
 
     assert!(error.to_string().contains("electrum_bind requires txindex"));
     Ok(())
