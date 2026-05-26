@@ -427,15 +427,21 @@ impl UtxoSet {
     ) -> Result<(), UtxoError> {
         let mut adds_by_shard = empty_add_buckets();
         let mut removes_by_shard = empty_remove_buckets();
+        let mut dirty = [false; UtxoKey::SHARD_COUNT];
+        let mut dirty_shards = Vec::new();
 
         for add in adds {
             validate_add(add)?;
             let key = UtxoKey::from_txid(&add.outpoint.txid);
-            adds_by_shard[usize::from(key.shard())].push((key, add.outpoint.txid, add.payload()));
+            let shard_idx = usize::from(key.shard());
+            mark_dirty(&mut dirty, &mut dirty_shards, shard_idx);
+            adds_by_shard[shard_idx].push((key, add.outpoint.txid, add.payload()));
         }
         for remove in removes {
             let key = UtxoKey::from_txid(&remove.txid);
-            removes_by_shard[usize::from(key.shard())].push(SpendPayload {
+            let shard_idx = usize::from(key.shard());
+            mark_dirty(&mut dirty, &mut dirty_shards, shard_idx);
+            removes_by_shard[shard_idx].push(SpendPayload {
                 op: remove,
                 key,
                 vout: remove.vout,
@@ -444,16 +450,21 @@ impl UtxoSet {
         }
 
         let _stable_commit = self.stable_view_lock.write();
+        let listener = self.listener.as_deref();
+
+        if let [shard_idx] = dirty_shards.as_slice() {
+            return self.shards[*shard_idx].commit_batch(
+                &adds_by_shard[*shard_idx],
+                &removes_by_shard[*shard_idx],
+                listener,
+            );
+        }
 
         let errors = Mutex::new(Vec::new());
-        let listener = self.listener.as_deref();
         rayon::scope(|scope| {
-            for shard_idx in 0..UtxoKey::SHARD_COUNT {
+            for shard_idx in dirty_shards.iter().copied() {
                 let shard_adds = &adds_by_shard[shard_idx];
                 let shard_removes = &removes_by_shard[shard_idx];
-                if shard_adds.is_empty() && shard_removes.is_empty() {
-                    continue;
-                }
                 let shard = &self.shards[shard_idx];
                 let errors = &errors;
                 scope.spawn(move |_| {
@@ -486,12 +497,23 @@ fn validate_add(add: &UtxoAdd) -> Result<(), UtxoError> {
     Ok(())
 }
 
-fn empty_add_buckets<'a>() -> Vec<Vec<(UtxoKey, Hash256, BuildPayload<'a>)>> {
-    (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
+fn empty_add_buckets<'a>() -> [Vec<(UtxoKey, Hash256, BuildPayload<'a>)>; UtxoKey::SHARD_COUNT] {
+    core::array::from_fn(|_| Vec::new())
 }
 
-fn empty_remove_buckets<'a>() -> Vec<Vec<SpendPayload<'a>>> {
-    (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
+fn empty_remove_buckets<'a>() -> [Vec<SpendPayload<'a>>; UtxoKey::SHARD_COUNT] {
+    core::array::from_fn(|_| Vec::new())
+}
+
+fn mark_dirty(
+    dirty: &mut [bool; UtxoKey::SHARD_COUNT],
+    dirty_shards: &mut Vec<usize>,
+    shard_idx: usize,
+) {
+    if !dirty[shard_idx] {
+        dirty[shard_idx] = true;
+        dirty_shards.push(shard_idx);
+    }
 }
 fn stable_view_len(view: &UtxoSetView<'_>) -> usize {
     view.len()
