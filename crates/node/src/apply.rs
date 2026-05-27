@@ -227,10 +227,10 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip113_seconds").record(bip113_dur.as_secs_f64());
     bip113_result?;
 
-    let script_verify_started = quanta::Instant::now();
     let verify_flags_started = quanta::Instant::now();
     let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
     let verify_flags_dur = verify_flags_started.elapsed();
+    let script_verify_started = quanta::Instant::now();
     let block_transactions_started = quanta::Instant::now();
     let script_verify_result =
         verify_block_transactions(handles, block, height, locktime_cutoff, verify_flags);
