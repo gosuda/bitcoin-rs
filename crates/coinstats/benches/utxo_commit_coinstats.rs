@@ -265,7 +265,15 @@ const fn next_u64(state: &mut u64) -> u64 {
     *state
 }
 
+fn mix_synthetic_seed(seed: u64) -> u64 {
+    let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
 fn txid(seed: u64) -> Hash256 {
+    let seed = mix_synthetic_seed(seed);
     let mut bytes = [0_u8; 32];
     bytes[..8].copy_from_slice(&seed.to_le_bytes());
     bytes[8..16].copy_from_slice(&seed.rotate_left(11).to_le_bytes());
@@ -334,6 +342,33 @@ fn synthetic_case(seed: u64, listener_kind: ListenerKind) -> (UtxoSet, BlockChan
     }
 
     (set, changes)
+}
+
+fn synthetic_shard_distribution(seed: u64) -> [usize; UtxoKey::SHARD_COUNT] {
+    let mut rng = seed;
+    let mut distribution = [0_usize; UtxoKey::SHARD_COUNT];
+
+    for _ in 0_u64..OP_COUNT {
+        let spend_seed = next_u64(&mut rng);
+        let shard = usize::from(UtxoKey::from_txid(&txid(spend_seed)).shard());
+        distribution[shard] = distribution[shard].saturating_add(1);
+    }
+
+    for i in 0_u64..OP_COUNT {
+        let add_seed = next_u64(&mut rng).wrapping_add(i);
+        let shard = usize::from(UtxoKey::from_txid(&txid(add_seed)).shard());
+        distribution[shard] = distribution[shard].saturating_add(1);
+    }
+
+    distribution
+}
+
+fn assert_synthetic_shard_coverage() {
+    let distribution = synthetic_shard_distribution(CASE_SEED);
+    assert!(
+        distribution.iter().all(|entries| *entries > 0),
+        "synthetic coinstats txids must exercise every UTXO shard"
+    );
 }
 
 fn synthetic_direct_case(seed: u64) -> DirectCase {
@@ -496,6 +531,7 @@ fn bench_direct_muhash_preencoded(group: &mut BenchmarkGroup<'_, WallTime>) {
 }
 
 fn utxo_commit_coinstats(c: &mut Criterion) {
+    assert_synthetic_shard_coverage();
     let mut group = c.benchmark_group("utxo_commit_coinstats");
     let block_hash = txid(COMMIT_BLOCK_SEED);
 
