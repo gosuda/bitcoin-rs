@@ -266,6 +266,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
 }
 
 #[test]
+#[cfg(feature = "bitcoinconsensus")]
 fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = non_coinbase_spend_chain()?;
@@ -314,6 +315,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
 }
 
 #[test]
+#[cfg(feature = "bitcoinconsensus")]
 #[ignore = "bounded local profiling harness; run explicitly with RUST_LOG=bitcoin_rs_node::apply=info"]
 fn bounded_apply_profile_replay() -> Result<(), Box<dyn std::error::Error>> {
     let _subscriber_already_set = tracing_subscriber::fmt()
@@ -342,6 +344,7 @@ fn bounded_apply_profile_replay() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+#[cfg(feature = "bitcoinconsensus")]
 #[ignore = "bounded local coinstats listener cost harness; run explicitly with RUST_LOG=bitcoin_rs_node::apply=info"]
 fn bounded_apply_profile_replay_coinstats_listener_cost() -> Result<(), Box<dyn std::error::Error>>
 {
