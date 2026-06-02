@@ -252,11 +252,14 @@ impl DownloadWindow {
         self.next_request_height = self.next_request_height.max(request.next_request_height);
     }
 
-    pub(super) fn mark_received(&mut self, hash: Hash256, height: u32, bytes: usize) {
-        if let Some(pending) = self.pending.remove(&hash) {
+    pub(super) fn mark_received(&mut self, hash: Hash256, bytes: usize) -> bool {
+        let (height, needs_height_lookup) = if let Some(pending) = self.pending.remove(&hash) {
             self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
             self.release_peer_block(pending.peer_addr);
-        }
+            (pending.height, false)
+        } else {
+            (0, true)
+        };
         let previous = self.received.insert(hash, ReceivedBlock { height, bytes });
         if let Some(previous) = previous {
             self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
@@ -268,6 +271,13 @@ impl DownloadWindow {
             .saturating_add(bytes)
             / 8;
         self.ewma_block_bytes = self.ewma_block_bytes.max(80);
+        needs_height_lookup
+    }
+
+    pub(super) fn update_received_height(&mut self, hash: &Hash256, height: u32) {
+        if let Some(received) = self.received.get_mut(hash) {
+            received.height = height;
+        }
     }
 
     pub(super) fn mark_applied(&mut self, hash: &Hash256) {

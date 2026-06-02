@@ -182,7 +182,6 @@ impl BlockSync {
     fn buffer_received_block(&self, block: bitcoin::Block, next_expected_hash: Option<Hash256>) {
         let now = Instant::now();
         let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
-        let height = self.received_block_height(hash).unwrap_or(0);
         let staged = self
             .block_stager
             .lock()
@@ -190,10 +189,18 @@ impl BlockSync {
         match staged {
             StagedBlock::Memory { bytes, dropped } => {
                 let mut window = self.download_window.lock();
-                window.mark_received(hash, height, bytes);
+                let needs_height_lookup = window.mark_received(hash, bytes);
                 for dropped in dropped {
                     window.drop_received_for_retry(&dropped.hash);
                     metrics::counter!("node.sync.retry_count").increment(1);
+                }
+                drop(window);
+                if needs_height_lookup {
+                    if let Some(height) = self.received_block_height(hash) {
+                        self.download_window
+                            .lock()
+                            .update_received_height(&hash, height);
+                    }
                 }
             }
             StagedBlock::DroppedForRetry { dropped } => {
@@ -782,12 +789,93 @@ mod tests {
         let super::StagedBlock::Memory { bytes, .. } = staged else {
             return Err(std::io::Error::other("test block should stage in memory").into());
         };
-        sync.download_window.lock().mark_received(hash, 0, bytes);
+        sync.download_window.lock().mark_received(hash, bytes);
 
         sync.drain_inbound_blocks();
 
         assert_eq!(sync.block_stager.lock().received_len(), 0);
         assert_eq!(sync.download_window.lock().received_len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn unsolicited_stale_block_retries_from_resolved_header_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block1 =
+            mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
+        let block2 =
+            mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+        let block1_hash = block1.block_hash();
+        let expected_hash = block2.block_hash();
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let block1_id =
+            tree.insert_node(Some(genesis_id), block1.header, NodeStatus::HeaderValid)?;
+        tree.insert_node(Some(block1_id), block2.header, NodeStatus::HeaderValid)?;
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                getdata_batch_limit: 2,
+                received_timeout: Duration::ZERO,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(initial) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected initial getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(initial)?,
+            alloc::vec![block1_hash, expected_hash]
+        );
+        let _headers = rx.try_recv()?;
+        {
+            let mut window = sync.download_window.lock();
+            window.mark_applied(&Hash256::from_le_bytes(block1_hash.as_byte_array()));
+            window.mark_applied(&Hash256::from_le_bytes(expected_hash.as_byte_array()));
+        }
+
+        inbound_blocks_tx.send(block2)?;
+        sync.drain_inbound_blocks();
+
+        assert_eq!(sync.block_stager.lock().received_len(), 0);
+        assert_eq!(sync.download_window.lock().received_len(), 0);
+
+        sync.tick();
+
+        let NetworkMessage::GetData(retry) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected height-2 retry getdata").into());
+        };
+        assert_eq!(witness_block_inventory(retry)?, alloc::vec![expected_hash]);
         Ok(())
     }
 
