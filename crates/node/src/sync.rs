@@ -166,7 +166,8 @@ impl BlockSync {
 
         let now = Instant::now();
         let dropped = self.block_stager.lock().prune_expired(now);
-        if !dropped.is_empty() {
+        let pruned = !dropped.is_empty();
+        if pruned {
             let mut window = self.download_window.lock();
             for dropped in dropped {
                 window.drop_received_for_retry(&dropped.hash);
@@ -181,6 +182,9 @@ impl BlockSync {
                 failed,
                 "block sync: drained inbound blocks"
             );
+        }
+        if received > 0 || pruned || applied > 0 || failed > 0 {
+            self.record_sync_metrics();
         }
     }
 
@@ -214,7 +218,6 @@ impl BlockSync {
                 tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
             }
         }
-        self.record_sync_metrics();
     }
 
     fn apply_buffered_blocks(&self) -> (usize, usize) {
