@@ -425,11 +425,25 @@ impl UtxoSet {
         adds: &[UtxoAdd],
         removes: &[OutPoint],
     ) -> Result<(), UtxoError> {
-        let mut adds_by_shard = empty_add_buckets();
-        let mut removes_by_shard = empty_remove_buckets();
+        let mut add_counts = [0_usize; UtxoKey::SHARD_COUNT];
+        let mut remove_counts = [0_usize; UtxoKey::SHARD_COUNT];
 
         for add in adds {
             validate_add(add)?;
+            let key = UtxoKey::from_txid(&add.outpoint.txid);
+            add_counts[usize::from(key.shard())] =
+                add_counts[usize::from(key.shard())].saturating_add(1);
+        }
+        for remove in removes {
+            let key = UtxoKey::from_txid(&remove.txid);
+            remove_counts[usize::from(key.shard())] =
+                remove_counts[usize::from(key.shard())].saturating_add(1);
+        }
+
+        let mut adds_by_shard = add_buckets(&add_counts);
+        let mut removes_by_shard = remove_buckets(&remove_counts);
+
+        for add in adds {
             let key = UtxoKey::from_txid(&add.outpoint.txid);
             adds_by_shard[usize::from(key.shard())].push((key, add.outpoint.txid, add.payload()));
         }
@@ -486,12 +500,16 @@ fn validate_add(add: &UtxoAdd) -> Result<(), UtxoError> {
     Ok(())
 }
 
-fn empty_add_buckets<'a>() -> Vec<Vec<(UtxoKey, Hash256, BuildPayload<'a>)>> {
-    (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
+fn add_buckets<'a>(
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> [Vec<(UtxoKey, Hash256, BuildPayload<'a>)>; UtxoKey::SHARD_COUNT] {
+    core::array::from_fn(|idx| Vec::with_capacity(counts[idx]))
 }
 
-fn empty_remove_buckets<'a>() -> Vec<Vec<SpendPayload<'a>>> {
-    (0..UtxoKey::SHARD_COUNT).map(|_| Vec::new()).collect()
+fn remove_buckets<'a>(
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> [Vec<SpendPayload<'a>>; UtxoKey::SHARD_COUNT] {
+    core::array::from_fn(|idx| Vec::with_capacity(counts[idx]))
 }
 fn stable_view_len(view: &UtxoSetView<'_>) -> usize {
     view.len()
