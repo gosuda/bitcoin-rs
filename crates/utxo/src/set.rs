@@ -462,15 +462,23 @@ impl UtxoSet {
 
         let errors = Mutex::new(Vec::new());
         let listener = self.listener.as_deref();
+        let target_tasks = rayon::current_num_threads().saturating_mul(2).max(1);
+        let shards_per_task = active_shard_count.div_ceil(target_tasks).max(1);
+        let adds_by_shard = &adds_by_shard;
+        let removes_by_shard = &removes_by_shard;
+        let shards = &self.shards;
         rayon::scope(|scope| {
-            for &shard_idx in &active_shards[..active_shard_count] {
-                let shard_adds = &adds_by_shard[shard_idx];
-                let shard_removes = &removes_by_shard[shard_idx];
-                let shard = &self.shards[shard_idx];
+            for shard_chunk in active_shards[..active_shard_count].chunks(shards_per_task) {
                 let errors = &errors;
                 scope.spawn(move |_| {
-                    if let Err(error) = shard.commit_batch(shard_adds, shard_removes, listener) {
-                        errors.lock().push(error);
+                    for &shard_idx in shard_chunk {
+                        let shard_adds = &adds_by_shard[shard_idx];
+                        let shard_removes = &removes_by_shard[shard_idx];
+                        let shard = &shards[shard_idx];
+                        if let Err(error) = shard.commit_batch(shard_adds, shard_removes, listener)
+                        {
+                            errors.lock().push(error);
+                        }
                     }
                 });
             }
