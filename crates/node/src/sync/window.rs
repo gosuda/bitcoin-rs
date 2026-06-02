@@ -167,6 +167,11 @@ impl DownloadWindow {
             byte_capacity = byte_capacity.saturating_sub(self.ewma_block_bytes);
             entries.push(entry);
         }
+        let mut selected_hashes = (!entries.is_empty()).then(|| {
+            let mut selected_hashes = HashSet::with_capacity(entries.len());
+            selected_hashes.extend(entries.iter().map(|entry| entry.hash));
+            selected_hashes
+        });
 
         let Some(mut height) = applied_tip.height.checked_add(1) else {
             return non_empty_request(peer_addr, entries, self.next_request_height);
@@ -174,25 +179,53 @@ impl DownloadWindow {
         height = height.max(self.next_request_height);
         let mut next_request_height = self.next_request_height;
         let request_tip_height = chain_tip.height.min(peer_best_height);
-        while entries.len() < batch_limit
-            && height <= request_tip_height
-            && byte_capacity >= self.ewma_block_bytes
-        {
-            let Some(node_id) = tree.node_at_height_from(chain_tip.tip_id, height) else {
-                break;
+        let remaining_limit = batch_limit
+            .saturating_sub(entries.len())
+            .min(byte_capacity / self.ewma_block_bytes);
+        if height <= request_tip_height && remaining_limit > 0 {
+            let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, request_tip_height)
+            else {
+                return non_empty_request(peer_addr, entries, next_request_height);
             };
-            let Ok(node) = tree.node(node_id) else {
-                break;
-            };
-            if !self.pending.contains_key(&node.hash) && !self.received.contains_key(&node.hash) {
-                entries.push(PeerRequestEntry {
-                    hash: node.hash,
-                    height,
-                });
-                byte_capacity = byte_capacity.saturating_sub(self.ewma_block_bytes);
+            let mut candidates: Vec<PeerRequestEntry> = Vec::with_capacity(remaining_limit);
+            while let Ok(node) = tree.node(cursor) {
+                if node.height < height {
+                    break;
+                }
+                if !self.pending.contains_key(&node.hash)
+                    && !self.received.contains_key(&node.hash)
+                    && selected_hashes
+                        .as_ref()
+                        .is_none_or(|hashes| !hashes.contains(&node.hash))
+                {
+                    if candidates.len() == remaining_limit {
+                        let removed = candidates.remove(0);
+                        if let Some(selected_hashes) = selected_hashes.as_mut() {
+                            selected_hashes.remove(&removed.hash);
+                        }
+                    }
+                    if let Some(selected_hashes) = selected_hashes.as_mut() {
+                        selected_hashes.insert(node.hash);
+                    }
+                    candidates.push(PeerRequestEntry {
+                        hash: node.hash,
+                        height: node.height,
+                    });
+                }
+                let Some(parent) = node.parent else {
+                    break;
+                };
+                cursor = parent;
             }
-            height = height.saturating_add(1);
-            next_request_height = height;
+            candidates.reverse();
+            let scanned_all_eligible = candidates.len() < remaining_limit;
+            for entry in candidates {
+                next_request_height = next_request_height.max(entry.height.saturating_add(1));
+                entries.push(entry);
+            }
+            if scanned_all_eligible {
+                next_request_height = next_request_height.max(request_tip_height.saturating_add(1));
+            }
         }
         non_empty_request(peer_addr, entries, next_request_height)
     }

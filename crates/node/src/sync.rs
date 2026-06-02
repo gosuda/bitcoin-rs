@@ -1004,6 +1004,50 @@ mod tests {
     }
 
     #[test]
+    fn tick_fills_mixed_retry_and_new_height_batch() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(4)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 3,
+                max_pending_bytes: 3 * 256 * 1024,
+                max_peer_inflight: 3,
+                getdata_batch_limit: 3,
+                pending_timeout: Duration::ZERO,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(first) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected first getdata").into());
+        };
+        assert_eq!(witness_block_inventory(first)?, expected[..3]);
+        let _headers = rx.try_recv()?;
+        sync.download_window
+            .lock()
+            .mark_applied(&Hash256::from_le_bytes(&expected[0].to_byte_array()));
+
+        sync.tick();
+
+        let NetworkMessage::GetData(second) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected mixed retry getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(second)?,
+            vec![expected[1], expected[2], expected[3]]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn tick_applies_contiguous_blocks_before_requesting_more()
     -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
