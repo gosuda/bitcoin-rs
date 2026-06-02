@@ -277,10 +277,9 @@ pub fn apply_block(
     bip68_result?;
 
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
-    let scratch = ApplyScratch::new(block, height, wants_rawtx)?;
-    let filter_bytes = handles
-        .filter_index
-        .wants_filters()
+    let wants_filters = handles.filter_index.wants_filters();
+    let scratch = ApplyScratch::new(block, height, wants_rawtx, wants_filters)?;
+    let filter_bytes = wants_filters
         .then(|| compute_basic_filter(block, handles, block_hash, height, &scratch))
         .flatten();
 
@@ -1168,7 +1167,7 @@ mod consensus_rule_tests {
         };
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
 
-        let scratch = ApplyScratch::new(&block, 2, false)?;
+        let scratch = ApplyScratch::new(&block, 2, false, false)?;
         let changes = build_utxo_changes(&block, 2, &scratch)?;
         utxo.commit_block(&changes, &Hash256::from_le_bytes(&[0x63; 32]))?;
 
@@ -1183,7 +1182,7 @@ mod consensus_rule_tests {
     {
         let block = block_with_transactions(vec![coinbase_transaction(0x71), transaction(0x72)]);
 
-        let scratch = ApplyScratch::new(&block, 2, false)?;
+        let scratch = ApplyScratch::new(&block, 2, false, false)?;
 
         assert_eq!(scratch.txids().len(), block.txdata.len());
         assert!(scratch.raw_txs().is_none());
@@ -1194,7 +1193,7 @@ mod consensus_rule_tests {
     fn apply_scratch_keeps_rawtx_bytes_when_requested() -> Result<(), Box<dyn std::error::Error>> {
         let block = block_with_transactions(vec![coinbase_transaction(0x73), transaction(0x74)]);
 
-        let scratch = ApplyScratch::new(&block, 2, true)?;
+        let scratch = ApplyScratch::new(&block, 2, true, false)?;
         let raw_txs = scratch
             .raw_txs()
             .ok_or_else(|| std::io::Error::other("rawtx bytes missing"))?;
@@ -1235,10 +1234,22 @@ mod consensus_rule_tests {
             vout: 0,
         };
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
-        let scratch = ApplyScratch::new(&block, 2, false)?;
+        let funding_outpoint = internal_outpoint(&funding_outpoint);
+        let scratch_without_scripts = ApplyScratch::new(&block, 2, false, false)?;
+        assert!(
+            scratch_without_scripts
+                .same_block_spent()
+                .contains(&funding_outpoint)
+        );
+        assert!(
+            scratch_without_scripts
+                .same_block_spent_output_script(&funding_outpoint)
+                .is_none()
+        );
+        let scratch = ApplyScratch::new(&block, 2, false, true)?;
 
         assert_eq!(
-            scratch.same_block_spent_output_script(&internal_outpoint(&funding_outpoint)),
+            scratch.same_block_spent_output_script(&funding_outpoint),
             Some(same_block_script)
         );
         assert!(
@@ -2022,7 +2033,7 @@ mod consensus_rule_tests {
             ),
         ]);
         let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
-        let scratch = ApplyScratch::new(&block, 1, false)?;
+        let scratch = ApplyScratch::new(&block, 1, false, true)?;
 
         let filter = compute_basic_filter(&block, &handles, block_hash, 1, &scratch);
 
@@ -2065,7 +2076,7 @@ mod consensus_rule_tests {
             same_block_spend,
         ]);
         let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
-        let scratch = ApplyScratch::new(&block, 2, false)?;
+        let scratch = ApplyScratch::new(&block, 2, false, true)?;
 
         let filter = compute_basic_filter(&block, &handles, block_hash, 2, &scratch)
             .ok_or_else(|| std::io::Error::other("scratch filter missing"))?;
