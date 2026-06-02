@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use bitcoin::consensus::Encodable as _;
+use bitcoin::io::sink;
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
 
@@ -134,5 +136,21 @@ impl BlockStager {
 }
 
 fn block_size(block: &bitcoin::Block) -> usize {
-    bitcoin::consensus::encode::serialize(block).len()
+    block
+        .consensus_encode(&mut sink())
+        .unwrap_or_else(|error| panic!("sink writer failed while sizing block: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::consensus::encode::serialize;
+
+    use super::block_size;
+
+    #[test]
+    fn block_size_matches_consensus_serialized_len() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+
+        assert_eq!(block_size(&block), serialize(&block).len());
+    }
 }
