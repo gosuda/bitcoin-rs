@@ -42,7 +42,7 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         }
         return Err(RpcError::NotFound("transaction not in specified block"));
     }
-    {
+    if ctx.indexer.is_some() {
         let transactions = ctx.transactions.read();
         if let Some(tx) = transactions.get(&txid) {
             if !verbose {

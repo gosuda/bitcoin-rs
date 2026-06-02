@@ -1,9 +1,12 @@
 use alloc::sync::Arc;
-use core::convert::Infallible;
+use core::{
+    convert::Infallible,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use bitcoin::consensus::Encodable;
 use bitcoin_rs_primitives::{OutPoint, TxOut};
-use bitcoin_rs_utxo::UtxoChangeListener;
+use bitcoin_rs_utxo::{UtxoChangeListener, UtxoKey};
 use parking_lot::RwLock;
 use zerocopy::IntoBytes;
 
@@ -126,7 +129,25 @@ pub enum CoinStatsDecodeError {
 /// UTXO listener that maintains [`CoinStats`].
 #[derive(Clone, Debug)]
 pub struct CoinStatsListener {
-    stats: Arc<RwLock<CoinStats>>,
+    inner: Arc<CoinStatsListenerInner>,
+}
+
+#[derive(Debug)]
+struct CoinStatsListenerInner {
+    linearize: RwLock<()>,
+    base: RwLock<CoinStats>,
+    deltas: [RwLock<CoinStatsDelta>; UtxoKey::SHARD_COUNT],
+    // Dirty bits are hints guarded by `linearize`: callbacks set the bit before
+    // dropping the read guard; snapshot/fold read it under the write guard.
+    dirty: [AtomicBool; UtxoKey::SHARD_COUNT],
+}
+
+#[derive(Clone, Debug, Default)]
+struct CoinStatsDelta {
+    muhash: MuHash3072,
+    total_amount: i128,
+    bogo_size: i128,
+    utxo_count: i128,
 }
 
 impl CoinStatsListener {
@@ -134,38 +155,136 @@ impl CoinStatsListener {
     #[must_use]
     pub fn new(stats: CoinStats) -> Self {
         Self {
-            stats: Arc::new(RwLock::new(stats)),
+            inner: Arc::new(CoinStatsListenerInner::new(stats)),
         }
     }
 
     /// Returns a point-in-time copy of the current stats.
     #[must_use]
     pub fn snapshot(&self) -> CoinStats {
-        self.stats.read().clone()
+        let _linearized = self.inner.linearize.write();
+        self.inner.materialize()
     }
 
     /// Applies a per-block delta to the wrapped stats.
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
-        self.stats.write().finish_block(height, tx_delta);
+        let _linearized = self.inner.linearize.write();
+        self.inner.fold_deltas(height, tx_delta);
+    }
+}
+
+impl CoinStatsListenerInner {
+    fn new(base: CoinStats) -> Self {
+        Self {
+            linearize: RwLock::new(()),
+            base: RwLock::new(base),
+            deltas: core::array::from_fn(|_| RwLock::new(CoinStatsDelta::default())),
+            dirty: core::array::from_fn(|_| AtomicBool::new(false)),
+        }
+    }
+
+    fn shard_index(op: &OutPoint) -> usize {
+        usize::from(UtxoKey::from_txid(&op.txid).shard())
+    }
+
+    fn materialize(&self) -> CoinStats {
+        let mut stats = self.base.read().clone();
+        for (delta, dirty) in self.deltas.iter().zip(&self.dirty) {
+            if dirty.load(Ordering::Relaxed) {
+                delta.read().apply_to(&mut stats);
+            }
+        }
+        stats
+    }
+
+    fn fold_deltas(&self, height: u32, tx_delta: u64) {
+        let mut base = self.base.write();
+        for (delta, dirty) in self.deltas.iter().zip(&self.dirty) {
+            if dirty.load(Ordering::Relaxed) {
+                let mut delta = delta.write();
+                dirty.store(false, Ordering::Relaxed);
+                delta.apply_to(&mut base);
+                *delta = CoinStatsDelta::default();
+            }
+        }
+        base.finish_block(height, tx_delta);
+    }
+
+    fn insert_utxo(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        let index = Self::shard_index(op);
+        self.deltas[index]
+            .write()
+            .insert_utxo(op, txout, height, coinbase);
+        self.dirty[index].store(true, Ordering::Relaxed);
+    }
+
+    fn remove_utxo(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        let index = Self::shard_index(op);
+        self.deltas[index]
+            .write()
+            .remove_utxo(op, txout, height, coinbase);
+        self.dirty[index].store(true, Ordering::Relaxed);
+    }
+}
+
+impl CoinStatsDelta {
+    fn insert_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        let encoded = coin_hash_bytes(op, txout, height, coinbase);
+        self.muhash.insert(&encoded);
+        self.total_amount = self
+            .total_amount
+            .saturating_add(i128::from(txout.value.to_sat()));
+        self.bogo_size = self.bogo_size.saturating_add(i128::from(bogo_size(txout)));
+        self.utxo_count = self.utxo_count.saturating_add(1);
+    }
+
+    fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        let encoded = coin_hash_bytes(op, txout, height, coinbase);
+        self.muhash.remove(&encoded);
+        self.total_amount = self
+            .total_amount
+            .saturating_sub(i128::from(txout.value.to_sat()));
+        self.bogo_size = self.bogo_size.saturating_sub(i128::from(bogo_size(txout)));
+        self.utxo_count = self.utxo_count.saturating_sub(1);
+    }
+
+    fn apply_to(&self, stats: &mut CoinStats) {
+        stats.muhash.combine(&self.muhash);
+        apply_signed_delta(&mut stats.total_amount, self.total_amount);
+        apply_signed_delta(&mut stats.bogo_size, self.bogo_size);
+        apply_signed_delta(&mut stats.utxo_count, self.utxo_count);
     }
 }
 
 impl UtxoChangeListener for CoinStatsListener {
     fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        self.stats.write().insert_utxo(op, txout, height, coinbase);
+        let _linearized = self.inner.linearize.read();
+        self.inner.insert_utxo(op, txout, height, coinbase);
     }
 
     fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
-        self.stats.write().remove_utxo(op, txout, height, false);
+        let _linearized = self.inner.linearize.read();
+        self.inner.remove_utxo(op, txout, height, false);
     }
 
     fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        self.stats.write().remove_utxo(op, txout, height, coinbase);
+        let _linearized = self.inner.linearize.read();
+        self.inner.remove_utxo(op, txout, height, coinbase);
     }
 
     fn muhash3072(&self) -> Option<[u8; 384]> {
-        Some(self.stats.read().muhash.finalize())
+        Some(self.snapshot().muhash.finalize())
     }
+}
+
+fn apply_signed_delta(value: &mut u64, delta: i128) {
+    if let Ok(increment) = u64::try_from(delta) {
+        *value = value.saturating_add(increment);
+        return;
+    }
+
+    let decrement = u64::try_from(delta.saturating_neg()).unwrap_or(u64::MAX);
+    *value = value.saturating_sub(decrement);
 }
 
 fn coin_hash_bytes(op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) -> Vec<u8> {

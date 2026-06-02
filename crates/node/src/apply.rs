@@ -24,6 +24,8 @@ const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
 const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
 const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
+const SCRIPT_VERIFY_OUTLIER_BLOCK_US: u128 = 100_000;
+const SCRIPT_VERIFY_PROFILE_TOP_N: usize = 5;
 
 pub(crate) trait PruneBodyStore: Send + Sync {
     fn persist_block_body(
@@ -65,10 +67,10 @@ pub struct ApplyHandles {
     pub utxo: Arc<UtxoSet>,
     /// Shared coinstats listener.
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    /// Shared best-effort confirmed transaction indexer.
-    pub tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
-    /// Shared best-effort compact-filter indexer.
-    pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+    /// Shared best-effort confirmed transaction indexer when txindex is enabled.
+    pub tx_index: Option<Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
+    /// Shared best-effort compact-filter indexer when blockfilterindex is enabled.
+    pub filter_index: Option<Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>>,
     /// Shared mempool.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Shared block records exposed to RPC handlers.
@@ -92,8 +94,8 @@ impl ApplyHandles {
         block_tree: Arc<RwLock<BlockTree>>,
         utxo: Arc<UtxoSet>,
         coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-        tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
-        filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+        tx_index: Option<Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
+        filter_index: Option<Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>>,
         mempool: Arc<RwLock<Mempool>>,
         blocks: Arc<RwLock<Vec<BlockRecord>>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
@@ -225,14 +227,49 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip113_seconds").record(bip113_dur.as_secs_f64());
     bip113_result?;
 
-    let script_verify_started = quanta::Instant::now();
+    let verify_flags_started = quanta::Instant::now();
     let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
+    let verify_flags_dur = verify_flags_started.elapsed();
+    let script_verify_started = quanta::Instant::now();
+    let block_transactions_started = quanta::Instant::now();
     let script_verify_result =
         verify_block_transactions(handles, block, height, locktime_cutoff, verify_flags);
+    let block_transactions_dur = block_transactions_started.elapsed();
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
         .record(script_verify_dur.as_secs_f64());
-    script_verify_result?;
+    let script_verify_profile = script_verify_result?;
+    if script_verify_dur.as_micros() >= SCRIPT_VERIFY_OUTLIER_BLOCK_US {
+        let verify_block_transactions_us = block_transactions_dur.as_micros();
+        tracing::info!(
+            height,
+            %block_hash,
+            tx_count = block.txdata.len(),
+            non_coinbase_tx_count = script_verify_profile.non_coinbase_tx_count,
+            total_input_count = script_verify_profile.total_input_count,
+            script_verify_us = script_verify_dur.as_micros(),
+            compute_verify_flags_us = verify_flags_dur.as_micros(),
+            verify_block_transactions_us,
+            tx_verify_call_us = script_verify_profile.tx_verify_call_us,
+            tx_nonverify_us = script_verify_profile.nonverify_us(verify_block_transactions_us),
+            "apply_block: script verify attribution"
+        );
+        for (rank_index, tx_profile) in script_verify_profile.slow_txs.iter().enumerate() {
+            tracing::info!(
+                height,
+                %block_hash,
+                tx_rank = rank_index.saturating_add(1),
+                tx_index = tx_profile.tx_index,
+                txid = %tx_profile.txid,
+                input_count = tx_profile.input_count,
+                output_count = tx_profile.output_count,
+                tx_verify_us = tx_profile.tx_verify_us,
+                block_tx_verify_call_us = script_verify_profile.tx_verify_call_us,
+                block_script_verify_us = script_verify_dur.as_micros(),
+                "apply_block: script verify transaction attribution"
+            );
+        }
+    }
 
     let coinbase_maturity_started = quanta::Instant::now();
     let coinbase_maturity_result = check_coinbase_maturity(handles, block, height);
@@ -254,7 +291,11 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
-    let filter_bytes = compute_basic_filter(block, handles, block_hash, height)?;
+    let filter_bytes = if handles.filter_index.is_some() {
+        compute_basic_filter(block, handles, block_hash, height)?
+    } else {
+        None
+    };
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
@@ -310,40 +351,39 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
         .record(coin_stats_dur.as_secs_f64());
     let tx_index_ingest_started = quanta::Instant::now();
-    let tx_index_ingest_result = handles.tx_index.lock().ingest_block(&block_bytes, height);
-    match tx_index_ingest_result {
-        Ok(counts) => {
-            tracing::debug!(
-                height,
-                txids = counts.txids,
-                funding = counts.funding,
-                spending = counts.spending,
-                headers = counts.headers,
-                "tx_index ingested block"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                height,
-                %error,
-                "tx_index failed to ingest block; best-effort path continues"
-            );
+    if let Some(tx_index) = &handles.tx_index {
+        let tx_index_ingest_result = tx_index.lock().ingest_block(&block_bytes, height);
+        match tx_index_ingest_result {
+            Ok(counts) => {
+                tracing::debug!(
+                    height,
+                    txids = counts.txids,
+                    funding = counts.funding,
+                    spending = counts.spending,
+                    headers = counts.headers,
+                    "tx_index ingested block"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    height,
+                    %error,
+                    "tx_index failed to ingest block; best-effort path continues"
+                );
+            }
         }
     }
     let tx_index_ingest_dur = tx_index_ingest_started.elapsed();
     metrics::histogram!("node.apply_block.tx_index_ingest_seconds")
         .record(tx_index_ingest_dur.as_secs_f64());
     let filter_started = quanta::Instant::now();
-    if let Some(filter_bytes) = filter_bytes {
+    if let (Some(filter_index), Some(filter_bytes)) = (&handles.filter_index, filter_bytes) {
         let prev_filter_header = handles
             .applied_tip
             .load_full()
-            .and_then(|tip| handles.filter_index.filter_header(tip.hash).ok().flatten())
+            .and_then(|tip| filter_index.filter_header(tip.hash).ok().flatten())
             .unwrap_or_default();
-        match handles
-            .filter_index
-            .put_filter(block_hash, prev_filter_header, &filter_bytes)
-        {
+        match filter_index.put_filter(block_hash, prev_filter_header, &filter_bytes) {
             Ok(filter_header) => {
                 tracing::debug!(
                     height,
@@ -520,29 +560,92 @@ fn verify_block_transactions(
     height: u32,
     locktime_cutoff: u32,
     flags: bitcoin_rs_script::VerifyFlags,
-) -> core::result::Result<(), ApplyError> {
+) -> core::result::Result<ScriptVerifyProfile, ApplyError> {
     // Consensus connects transactions in block order. A later transaction may
     // spend an output created earlier in the same block. Coinbase outputs enter
     // this view too, so maturity failures stay in the maturity pass instead of
     // degrading into bogus missing-prevout script checks.
+    let mut profile = ScriptVerifyProfile::default();
     let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
-    for tx in &block.txdata {
+    for (tx_index, tx) in block.txdata.iter().enumerate() {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
             view.add_outputs(tx, height)?;
             continue;
         }
-        bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
-            tx,
-            &view,
-            height,
-            locktime_cutoff,
-            flags,
-        )?;
+        profile.observe_non_coinbase(tx);
+        let tx_verify_started = quanta::Instant::now();
+        let tx_verify_result =
+            bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
+                tx,
+                &view,
+                height,
+                locktime_cutoff,
+                flags,
+            );
+        let tx_verify_dur = tx_verify_started.elapsed();
+        let tx_verify_us = tx_verify_dur.as_micros();
+        profile.add_tx_verify_call_us(tx_verify_us);
+        tx_verify_result?;
+        profile.observe_slow_tx(tx_index, tx, tx_verify_us);
         view.spend_inputs(tx);
         view.add_outputs(tx, height)?;
     }
-    Ok(())
+    Ok(profile)
+}
+
+#[derive(Default)]
+struct ScriptVerifyProfile {
+    non_coinbase_tx_count: usize,
+    total_input_count: usize,
+    tx_verify_call_us: u128,
+    slow_txs: Vec<SlowScriptVerifyTxProfile>,
+}
+
+struct SlowScriptVerifyTxProfile {
+    tx_index: usize,
+    txid: Txid,
+    input_count: usize,
+    output_count: usize,
+    tx_verify_us: u128,
+}
+
+impl ScriptVerifyProfile {
+    fn observe_non_coinbase(&mut self, tx: &bitcoin::Transaction) {
+        self.non_coinbase_tx_count = self.non_coinbase_tx_count.saturating_add(1);
+        self.total_input_count = self.total_input_count.saturating_add(tx.input.len());
+    }
+
+    fn observe_slow_tx(&mut self, tx_index: usize, tx: &bitcoin::Transaction, tx_verify_us: u128) {
+        let insert_index = self
+            .slow_txs
+            .iter()
+            .position(|candidate| candidate.tx_verify_us < tx_verify_us)
+            .unwrap_or(self.slow_txs.len());
+        if insert_index >= SCRIPT_VERIFY_PROFILE_TOP_N {
+            return;
+        }
+
+        self.slow_txs.insert(
+            insert_index,
+            SlowScriptVerifyTxProfile {
+                tx_index,
+                txid: tx.compute_txid(),
+                input_count: tx.input.len(),
+                output_count: tx.output.len(),
+                tx_verify_us,
+            },
+        );
+        self.slow_txs.truncate(SCRIPT_VERIFY_PROFILE_TOP_N);
+    }
+
+    fn add_tx_verify_call_us(&mut self, elapsed_us: u128) {
+        self.tx_verify_call_us = self.tx_verify_call_us.saturating_add(elapsed_us);
+    }
+
+    fn nonverify_us(&self, verify_block_transactions_us: u128) -> u128 {
+        verify_block_transactions_us.saturating_sub(self.tx_verify_call_us)
+    }
 }
 
 struct BlockLocalUtxoView {
@@ -1091,6 +1194,7 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn verify_block_transactions_accepts_same_block_spend() -> Result<(), Box<dyn std::error::Error>>
     {
         let base_prevout = bitcoin::OutPoint {
@@ -1115,8 +1219,99 @@ mod consensus_rule_tests {
         );
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
 
-        verify_block_transactions(&handles, &block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE)?;
+        let profile = verify_block_transactions(
+            &handles,
+            &block,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::NONE,
+        )?;
+        assert_eq!(profile.non_coinbase_tx_count, 2);
+        assert_eq!(profile.total_input_count, 2);
+        assert!(profile.slow_txs.len() <= SCRIPT_VERIFY_PROFILE_TOP_N);
+        assert_eq!(profile.slow_txs.len(), 2);
+        assert!(
+            profile
+                .slow_txs
+                .iter()
+                .any(|tx_profile| tx_profile.tx_index == 0)
+        );
+        assert!(
+            profile
+                .slow_txs
+                .iter()
+                .any(|tx_profile| tx_profile.tx_index == 1)
+        );
         Ok(())
+    }
+
+    #[test]
+    fn script_verify_profile_keeps_bounded_slowest_transactions() {
+        let mut profile = ScriptVerifyProfile::default();
+        let transactions = [
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x71; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x72; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x73; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x74; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x75; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                bitcoin::OutPoint {
+                    txid: bitcoin::Txid::from_byte_array([0x76; 32]),
+                    vout: 0,
+                },
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+        ];
+
+        let mut tx_verify_us = 0_u128;
+        for (tx_index, tx) in transactions.iter().enumerate() {
+            profile.observe_slow_tx(tx_index, tx, tx_verify_us);
+            tx_verify_us = tx_verify_us.saturating_add(1);
+        }
+
+        assert_eq!(profile.slow_txs.len(), SCRIPT_VERIFY_PROFILE_TOP_N);
+        let indexes: Vec<usize> = profile
+            .slow_txs
+            .iter()
+            .map(|tx_profile| tx_profile.tx_index)
+            .collect();
+        assert_eq!(indexes, vec![5, 4, 3, 2, 1]);
     }
 
     #[test]
@@ -1133,7 +1328,9 @@ mod consensus_rule_tests {
             0,
             bitcoin_rs_script::VerifyFlags::MANDATORY,
         ) {
-            Ok(()) => panic!("bad coinbase scriptSig length must fail transaction verification"),
+            Ok(_profile) => {
+                panic!("bad coinbase scriptSig length must fail transaction verification")
+            }
             Err(error) => error,
         };
 
@@ -1206,6 +1403,7 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn verify_block_transactions_defers_same_block_coinbase_spend_to_maturity() {
         let mut coinbase = coinbase_transaction(0x65);
         coinbase.output[0].script_pubkey = op_true_script();
@@ -1857,6 +2055,7 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    #[cfg(feature = "bitcoinconsensus")]
     fn apply_block_persists_non_empty_filter_for_valid_same_block_spend()
     -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -2021,6 +2220,7 @@ mod consensus_rule_tests {
         }
     }
 
+    #[cfg(feature = "bitcoinconsensus")]
     fn block_with_prev_hash_and_transactions(
         prev_blockhash: bitcoin::BlockHash,
         txdata: Vec<Transaction>,
@@ -2042,6 +2242,7 @@ mod consensus_rule_tests {
         block
     }
 
+    #[cfg(feature = "bitcoinconsensus")]
     fn mined_block_with_prev_hash_and_transactions(
         prev_blockhash: bitcoin::BlockHash,
         txdata: Vec<Transaction>,
@@ -2360,8 +2561,8 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            noop_tx_index(),
-            filter_index,
+            Some(noop_tx_index()),
+            Some(filter_index),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),
@@ -2379,8 +2580,8 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            noop_tx_index(),
-            noop_filter_index(),
+            Some(noop_tx_index()),
+            Some(noop_filter_index()),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
             Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),

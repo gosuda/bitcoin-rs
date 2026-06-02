@@ -19,7 +19,15 @@ const fn next_u64(state: &mut u64) -> u64 {
     *state
 }
 
+fn mix_synthetic_seed(seed: u64) -> u64 {
+    let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
 fn txid(seed: u64) -> Hash256 {
+    let seed = mix_synthetic_seed(seed);
     let mut bytes = [0_u8; 32];
     bytes[..8].copy_from_slice(&seed.to_le_bytes());
     bytes[8..16].copy_from_slice(&seed.rotate_left(11).to_le_bytes());
@@ -79,6 +87,10 @@ const fn percentile(samples: &[Duration], numerator: usize, denominator: usize) 
 fn print_synthetic_summary() {
     let mut samples = Vec::with_capacity(9);
     let (_, _, distribution) = synthetic_case(0x5555_aaaa_ffff_0000);
+    assert!(
+        distribution.iter().all(|entries| *entries > 0),
+        "synthetic txids must exercise every UTXO shard"
+    );
     for seed in 0_u64..9 {
         let (set, changes, _) = synthetic_case(seed + 1);
         let start = Instant::now();

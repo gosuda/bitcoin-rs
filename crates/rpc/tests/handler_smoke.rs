@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::hashes::Hash as _;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
 use bitcoin_rs_mempool::MempoolEntry;
@@ -251,6 +251,55 @@ fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn getblockhash_reads_historical_active_header_without_block_record()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = active_regtest_header_context()?;
+    let genesis_hash = bitcoin_rs_primitives::Network::Regtest.genesis_block_hash();
+    assert!(ctx.blocks.read().is_empty());
+    let handler = Handler::new(Arc::new(ctx));
+
+    let result = handler.dispatch("getblockhash", &json!([0]))?;
+
+    assert_eq!(result.as_str(), Some(genesis_hash.to_string_be().as_str()));
+    Ok(())
+}
+
+#[test]
+fn getblockhash_prefers_active_header_over_stale_block_record()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = active_regtest_header_context()?;
+    let genesis_hash = bitcoin_rs_primitives::Network::Regtest.genesis_block_hash();
+    ctx.add_block(BlockRecord::synthetic(
+        0,
+        Hash256::from_le_bytes(&[0x99; 32]),
+    ));
+    let handler = Handler::new(Arc::new(ctx));
+
+    let result = handler.dispatch("getblockhash", &json!([0]))?;
+
+    assert_eq!(result.as_str(), Some(genesis_hash.to_string_be().as_str()));
+    Ok(())
+}
+
+#[test]
+fn getblockhash_rejects_stale_block_record_above_active_tip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = active_regtest_header_context()?;
+    ctx.add_block(BlockRecord::synthetic(
+        2,
+        Hash256::from_le_bytes(&[0x77; 32]),
+    ));
+    let handler = Handler::new(Arc::new(ctx));
+
+    let error = handler
+        .dispatch("getblockhash", &json!([2]))
+        .expect_err("stale block record above active tip unexpectedly resolved");
+
+    assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
+    Ok(())
+}
+
+#[test]
 fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>> {
     let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
     let header = Hash256::from_le_bytes(&[8_u8; 32]);
@@ -260,7 +309,7 @@ fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>>
         filter: vec![0xab, 0xcd],
         header,
     });
-    ctx.filter_index = Arc::new(filter_index);
+    ctx.filter_index = Some(Arc::new(filter_index));
     let handler = Handler::new(Arc::new(ctx));
     let block_hash_hex = block_hash.to_string_be();
 
@@ -275,6 +324,23 @@ fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn getblockfilter_reports_disabled_basic_filter_index() {
+    let handler = Handler::new(Arc::new(Context::new()));
+    let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
+    let block_hash_hex = block_hash.to_string_be();
+
+    let error = handler
+        .dispatch("getblockfilter", &json!([block_hash_hex.as_str()]))
+        .expect_err("disabled block filter index unexpectedly succeeded");
+
+    assert_eq!(error.code(), -1);
+    assert_eq!(
+        error.to_string(),
+        "Index is not enabled for filtertype basic"
+    );
+}
+
+#[test]
 fn getblockfilter_returns_not_found_for_missing_filter_row()
 -> Result<(), Box<dyn std::error::Error>> {
     let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
@@ -285,7 +351,7 @@ fn getblockfilter_returns_not_found_for_missing_filter_row()
         filter: vec![0xab, 0xcd],
         header,
     });
-    ctx.filter_index = Arc::new(filter_index);
+    ctx.filter_index = Some(Arc::new(filter_index));
     let handler = Handler::new(Arc::new(ctx));
     let missing_hash = Hash256::from_le_bytes(&[7_u8; 32]);
     let missing_hash_hex = missing_hash.to_string_be();
@@ -301,9 +367,27 @@ fn getblockfilter_returns_not_found_for_missing_filter_row()
 }
 
 #[test]
-fn getindexinfo_returns_both_indexes() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Arc::new(Context::new());
-    let handler = Handler::new(Arc::clone(&ctx));
+fn getindexinfo_omits_disabled_indexes() -> Result<(), Box<dyn std::error::Error>> {
+    let handler = Handler::new(Arc::new(Context::new()));
+
+    let result = handler.dispatch("getindexinfo", &json!([]))?;
+
+    assert_eq!(result.as_object().map(sonic_rs::Object::len), Some(0));
+    Ok(())
+}
+
+#[test]
+fn getindexinfo_returns_enabled_core_index_names() -> Result<(), Box<dyn std::error::Error>> {
+    let mut ctx = Context::new();
+    ctx.indexer = Some(Arc::new(Mutex::new(Box::new(FakeIndexer {
+        values: HashMap::new(),
+    }))));
+    ctx.filter_index = Some(Arc::new(Box::new(StaticFilterIndex {
+        block_hash: Hash256::from_le_bytes(&[9_u8; 32]),
+        filter: vec![0xab, 0xcd],
+        header: Hash256::from_le_bytes(&[8_u8; 32]),
+    })));
+    let handler = Handler::new(Arc::new(ctx));
 
     let result = handler.dispatch("getindexinfo", &json!([]))?;
 
@@ -312,14 +396,48 @@ fn getindexinfo_returns_both_indexes() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(txindex.get("synced").as_bool(), Some(false));
     assert_eq!(txindex.get("best_block_height").as_u64(), Some(0));
 
-    let filter_index = result.get("basicblockfilterindex");
+    let filter_index = result.get("basic block filter index");
     assert!(
         filter_index.is_some(),
-        "basicblockfilterindex entry missing: {result:?}"
+        "basic block filter index entry missing: {result:?}"
     );
     assert_eq!(filter_index.get("synced").as_bool(), Some(false));
     assert_eq!(filter_index.get("best_block_height").as_u64(), Some(0));
+    assert!(result.get("basicblockfilterindex").is_none());
 
+    Ok(())
+}
+
+#[test]
+fn getrawtransaction_does_not_use_confirmed_map_when_txindex_disabled()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Context::new();
+    let tx = tx(42, ScriptBuf::from_bytes(vec![0x51]));
+    let txid = ctx.add_transaction(tx);
+    let handler = Handler::new(Arc::new(ctx));
+
+    let error = handler
+        .dispatch("getrawtransaction", &json!([txid.to_string()]))
+        .expect_err("confirmed map lookup unexpectedly succeeded with txindex disabled");
+
+    assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
+    Ok(())
+}
+
+#[test]
+fn getrawtransaction_uses_confirmed_map_when_txindex_enabled()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut ctx = Context::new();
+    ctx.indexer = Some(Arc::new(Mutex::new(Box::new(FakeIndexer {
+        values: HashMap::new(),
+    }))));
+    let tx = tx(43, ScriptBuf::from_bytes(vec![0x51]));
+    let txid = ctx.add_transaction(tx);
+    let handler = Handler::new(Arc::new(ctx));
+
+    let result = handler.dispatch("getrawtransaction", &json!([txid.to_string()]))?;
+
+    assert!(result.as_str().is_some());
     Ok(())
 }
 
@@ -662,11 +780,11 @@ impl Fixture {
         };
         let block_hash_bytes = block.block_hash();
         let block_hash = Hash256::from_le_bytes(block_hash_bytes.as_byte_array());
-        ctx.filter_index = Arc::new(Box::new(StaticFilterIndex {
+        ctx.filter_index = Some(Arc::new(Box::new(StaticFilterIndex {
             block_hash,
             filter: vec![0x00],
             header: Hash256::from_le_bytes(&[0x08; 32]),
-        }));
+        })));
         ctx.set_chain_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 7,
@@ -697,6 +815,32 @@ fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
     let mut ctx = Context::new();
     ctx.peers = peers;
     Arc::new(ctx)
+}
+
+fn active_regtest_header_context() -> Result<Context, Box<dyn std::error::Error>> {
+    let ctx = Context::new();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let child_header = bitcoin::block::Header {
+        version: bitcoin::block::Version::ONE,
+        prev_blockhash: genesis.block_hash(),
+        merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+        time: genesis.header.time.saturating_add(1),
+        bits: genesis.header.bits,
+        nonce: genesis.header.nonce.saturating_add(1),
+    };
+    let child_hash = Hash256::from_le_bytes(child_header.block_hash().as_byte_array());
+    let child_id = {
+        let mut tree = ctx.block_tree.write();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        tree.insert_header(child_header, NodeStatus::HeaderValid)?
+    };
+    ctx.set_chain_tip(TipSnapshot {
+        tip_id: child_id,
+        height: 1,
+        chainwork: ChainWork::ZERO,
+        hash: child_hash,
+    });
+    Ok(ctx)
 }
 
 fn tx(label: u8, script_pubkey: ScriptBuf) -> Transaction {

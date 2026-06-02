@@ -603,9 +603,9 @@ pub struct NodeState {
     storage: NodeStorage,
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    tx_index: TxIndexHandle,
-    tx_index_storage: Arc<TxIndexStorage>,
-    filter_index: FilterIndexHandle,
+    tx_index: Option<TxIndexHandle>,
+    tx_index_storage: Option<Arc<TxIndexStorage>>,
+    filter_index: Option<FilterIndexHandle>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
@@ -653,9 +653,17 @@ impl NodeState {
             .context("open G2 MuHash sample writer")?
             .map(Arc::new);
         let storage = NodeStorage::open(&config)?;
-        let (tx_index, tx_index_storage) = open_tx_index(&config)?;
-        let tx_index_storage = Arc::new(tx_index_storage);
-        let filter_index = open_filter_index(&config)?;
+        let (tx_index, tx_index_storage) = if config.txindex {
+            let (tx_index, tx_index_storage) = open_tx_index(&config)?;
+            (Some(tx_index), Some(Arc::new(tx_index_storage)))
+        } else {
+            (None, None)
+        };
+        let filter_index = if config.blockfilterindex {
+            Some(open_filter_index(&config)?)
+        } else {
+            None
+        };
         let zmq_publications = config.zmq_publications();
         let active_zmq_notifications: Vec<_> = zmq_publications
             .iter()
@@ -707,8 +715,8 @@ impl NodeState {
                 block_tree: Arc::clone(&block_tree),
                 utxo: Arc::clone(&utxo),
                 coin_stats: Arc::clone(&coin_stats),
-                tx_index: Arc::clone(&tx_index),
-                filter_index: Arc::clone(&filter_index),
+                tx_index: tx_index.as_ref().map(Arc::clone),
+                filter_index: filter_index.as_ref().map(Arc::clone),
                 mempool: Arc::clone(&mempool),
                 blocks: Arc::clone(&blocks),
                 transactions: Arc::clone(&transactions),
@@ -720,6 +728,7 @@ impl NodeState {
             Arc::clone(&peer_outbound),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
+            config.headers_only,
         ));
         let prune_service = if config.prune_target_mb > 0 {
             Some(storage.prune_service(Arc::clone(&blocks), Arc::clone(&transactions))?)
@@ -739,7 +748,7 @@ impl NodeState {
             utxo,
             coin_stats,
             tx_index,
-            tx_index_storage: Arc::clone(&tx_index_storage),
+            tx_index_storage,
             filter_index,
             prune_service,
             zmq_publisher,
@@ -799,8 +808,8 @@ impl NodeState {
 
     /// Returns the shared block indexer handle.
     #[must_use]
-    pub fn tx_index(&self) -> Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>> {
-        Arc::clone(&self.tx_index)
+    pub fn tx_index(&self) -> Option<Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>> {
+        self.tx_index.as_ref().map(Arc::clone)
     }
 
     /// Builds an Electrum `IndexHandle` backed by the live txindex store.
@@ -808,25 +817,29 @@ impl NodeState {
     /// The handle observes the same `KvStore` the writer side ingests into via
     /// `apply_block`, so `blockchain.block.headers` returns real data once IBD
     /// is underway.
-    #[must_use]
-    pub fn electrum_index_handle(&self) -> bitcoin_rs_electrum::IndexHandle {
-        self.tx_index_storage.electrum_index_handle()
+    pub fn electrum_index_handle(&self) -> Result<bitcoin_rs_electrum::IndexHandle> {
+        self.tx_index_storage
+            .as_ref()
+            .map(|storage| storage.electrum_index_handle())
+            .context("electrum requires txindex")
     }
 
     /// Builds an Electrum-side history reader wired through the live txindex store
     /// and the in-memory block log. The handle can be attached to `IndexHandle`
     /// via `with_history_reader`.
-    #[must_use]
     pub fn electrum_history_reader(
         &self,
-    ) -> Arc<dyn bitcoin_rs_electrum::methods::ConfirmedHistoryReader> {
-        self.tx_index_storage.electrum_history_reader(self.blocks())
+    ) -> Result<Arc<dyn bitcoin_rs_electrum::methods::ConfirmedHistoryReader>> {
+        self.tx_index_storage
+            .as_ref()
+            .map(|storage| storage.electrum_history_reader(self.blocks()))
+            .context("electrum requires txindex")
     }
 
     /// Returns the shared compact-filter index handle.
     #[must_use]
-    pub fn filter_index(&self) -> FilterIndexHandle {
-        Arc::clone(&self.filter_index)
+    pub fn filter_index(&self) -> Option<FilterIndexHandle> {
+        self.filter_index.as_ref().map(Arc::clone)
     }
 
     /// Returns the manual pruning service when pruning is enabled.
@@ -1013,8 +1026,8 @@ impl NodeState {
             block_tree: Arc::clone(&self.block_tree),
             utxo: Arc::clone(&self.utxo),
             coin_stats: Arc::clone(&self.coin_stats),
-            tx_index: Arc::clone(&self.tx_index),
-            filter_index: Arc::clone(&self.filter_index),
+            tx_index: self.tx_index.as_ref().map(Arc::clone),
+            filter_index: self.filter_index.as_ref().map(Arc::clone),
             mempool: Arc::clone(&self.mempool),
             blocks: Arc::clone(&self.blocks),
             transactions: Arc::clone(&self.transactions),
@@ -1114,9 +1127,14 @@ mod tests {
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
+        config.txindex = true;
         let state = NodeState::open(config)?;
-        let a = state.tx_index();
-        let b = state.tx_index();
+        let a = state
+            .tx_index()
+            .ok_or_else(|| anyhow::anyhow!("txindex enabled"))?;
+        let b = state
+            .tx_index()
+            .ok_or_else(|| anyhow::anyhow!("txindex enabled"))?;
         assert!(Arc::ptr_eq(&a, &b), "tx_index handle stable across calls");
         Ok(())
     }
@@ -1142,9 +1160,14 @@ mod tests {
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
+        config.blockfilterindex = true;
         let state = NodeState::open(config)?;
-        let a = state.filter_index();
-        let b = state.filter_index();
+        let a = state
+            .filter_index()
+            .ok_or_else(|| anyhow::anyhow!("blockfilterindex enabled"))?;
+        let b = state
+            .filter_index()
+            .ok_or_else(|| anyhow::anyhow!("blockfilterindex enabled"))?;
         assert!(
             Arc::ptr_eq(&a, &b),
             "filter_index handle stable across calls"

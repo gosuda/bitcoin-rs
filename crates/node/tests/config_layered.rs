@@ -97,6 +97,41 @@ fn cli_can_override_socket_and_vector_fields() -> Result<()> {
 }
 
 #[test]
+fn headers_only_defaults_false_and_layers_enable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let toml_path = temp.path().join("node.toml");
+    fs::write(&toml_path, "headers_only = true\n")?;
+
+    let default_config = Config::default_for_network(Network::Regtest);
+    assert!(!default_config.headers_only);
+
+    let toml_config = Config::from_layered_sources(
+        Some(&toml_path),
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node"],
+    )?;
+    assert!(toml_config.headers_only);
+
+    let env_config = Config::from_layered_sources(
+        None,
+        None,
+        [("BITCOIN_RS_HEADERS_ONLY", "true")],
+        ["bitcoin-rs-node"],
+    )?;
+    assert!(env_config.headers_only);
+
+    let cli_config = Config::from_layered_sources(
+        None,
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node", "--headers-only"],
+    )?;
+    assert!(cli_config.headers_only);
+    Ok(())
+}
+
+#[test]
 fn zmq_layers_parse_precedence_and_publication_order() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let toml_path = temp.path().join("node.toml");

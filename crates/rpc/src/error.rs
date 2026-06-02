@@ -28,6 +28,9 @@ pub enum RpcError {
     /// A method is intentionally disabled by policy.
     #[error("{0}")]
     MethodDisabled(&'static str),
+    /// A requested optional index is disabled.
+    #[error("{0}")]
+    IndexDisabled(&'static str),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -67,6 +70,7 @@ impl RpcError {
             Self::InvalidParams(_) => Self::INVALID_PARAMS,
             Self::InvalidType(_) => Self::CORE_INVALID_TYPE,
             Self::NotFound(_) => Self::CORE_NOT_FOUND,
+            Self::IndexDisabled(_) => -1,
             Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
         }
     }

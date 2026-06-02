@@ -652,13 +652,14 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = required_str(params, 0, "block hash is required")?;
     let hash = parse_hash(hash)?;
-    let filter_bytes = ctx
-        .filter_index
+    let filter_index = ctx.filter_index.as_ref().ok_or(RpcError::IndexDisabled(
+        "Index is not enabled for filtertype basic",
+    ))?;
+    let filter_bytes = filter_index
         .filter(hash)
         .map_err(|error| RpcError::Internal(error.to_string()))?
         .ok_or(RpcError::NotFound("block filter not found"))?;
-    let header = ctx
-        .filter_index
+    let header = filter_index
         .filter_header(hash)
         .map_err(|error| RpcError::Internal(error.to_string()))?
         .ok_or(RpcError::NotFound("block filter header not found"))?;
@@ -691,13 +692,20 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         })
     };
 
+    let mut indexes = sonic_rs::Object::new();
+    if ctx.indexer.is_some() {
+        let _ = indexes.insert(&"txindex", entry());
+    }
+    if ctx.filter_index.is_some() {
+        let _ = indexes.insert(&"basic block filter index", entry());
+    }
+
     match filter {
-        None => Ok(json!({
-            "txindex": entry(),
-            "basicblockfilterindex": entry(),
-        })),
-        Some("txindex") => Ok(json!({ "txindex": entry() })),
-        Some("basicblockfilterindex") => Ok(json!({ "basicblockfilterindex": entry() })),
+        None => Ok(Value::from(indexes)),
+        Some("txindex") if ctx.indexer.is_some() => Ok(json!({ "txindex": entry() })),
+        Some("basic block filter index") if ctx.filter_index.is_some() => {
+            Ok(json!({ "basic block filter index": entry() }))
+        }
         Some(_) => Ok(json!({})),
     }
 }

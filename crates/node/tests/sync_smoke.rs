@@ -1,6 +1,10 @@
 //! Block sync smoke tests.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash as _;
@@ -17,7 +21,7 @@ use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{BlockSync, Config, Network, apply::ApplyHandles, state::NodeState};
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::{Hash256, OutPoint};
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::{UtxoChangeListener, UtxoSet};
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
@@ -48,6 +52,7 @@ fn tick_sends_getheaders_to_best_peer_above_our_height() -> Result<(), Box<dyn s
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     sync.tick();
@@ -100,6 +105,7 @@ fn tick_uses_applied_tip_height_when_selecting_sync_peer() {
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -138,6 +144,7 @@ fn tick_applies_inbound_blocks_before_sync_selection() -> Result<(), Box<dyn std
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     inbound_blocks_tx.send(regtest_genesis_block()?)?;
@@ -233,6 +240,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         Arc::clone(&peer_outbound),
         inbound_headers_rx,
         inbound_blocks_rx,
+        false,
     );
 
     inbound_headers_tx.send(vec![genesis.header, block_one.header, block_two.header])?;
@@ -258,46 +266,15 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
 }
 
 #[test]
+#[cfg(feature = "bitcoinconsensus")]
 fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = non_coinbase_spend_chain()?;
+    let outcome = replay_non_coinbase_spend_chain(&fixture, true)?;
 
-    let block_tree = Arc::new(RwLock::new(BlockTree::new()));
-    let chain_tip = block_tree.read().tip_handle();
-    let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-    let peers = Arc::new(RwLock::new(Vec::new()));
-    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
-    let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<bitcoin::block::Header>>();
-    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
-    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
-        Network::Regtest,
-        Arc::clone(&chain_tip),
-        Arc::clone(&applied_tip),
-        Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::new(
-        handles,
-        Arc::clone(&peers),
-        Arc::clone(&peer_outbound),
-        inbound_headers_rx,
-        inbound_blocks_rx,
-    );
-
-    inbound_headers_tx.send(fixture.blocks.iter().map(|block| block.header).collect())?;
-    for block in fixture.blocks.iter().skip(1) {
-        inbound_blocks_tx.send(block.clone())?;
-    }
-
-    sync.tick();
-
-    let applied = applied_tip
-        .load_full()
-        .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
-    assert_eq!(applied.height, 102);
+    assert_eq!(outcome.applied_height, 102);
     assert_eq!(
-        applied.hash,
+        outcome.applied_hash,
         bitcoin_rs_primitives::Hash256::from_le_bytes(
             fixture
                 .blocks
@@ -308,24 +285,356 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         )
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.mature_coinbase_outpoint))
+        outcome
+            .utxo
+            .get(&primitive_outpoint(fixture.mature_coinbase_outpoint))
             .is_none(),
         "mature coinbase prevout must be removed by the height-101 spend",
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.funding_outpoint))
+        outcome
+            .utxo
+            .get(&primitive_outpoint(fixture.funding_outpoint))
             .is_none(),
         "funding prevout must be removed by the height-102 spend",
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.spend_outpoint))
+        outcome
+            .utxo
+            .get(&primitive_outpoint(fixture.spend_outpoint))
             .is_some(),
         "height-102 spend output must remain live",
     );
 
     let block_refs: Vec<&bitcoin::Block> = fixture.blocks.iter().collect();
-    assert_eq!(coin_stats.snapshot(), expected_coin_stats(&block_refs)?);
+    assert_eq!(
+        outcome.coin_stats.snapshot(),
+        expected_coin_stats(&block_refs)?
+    );
     Ok(())
+}
+
+#[test]
+#[cfg(feature = "bitcoinconsensus")]
+#[ignore = "bounded local profiling harness; run explicitly with RUST_LOG=bitcoin_rs_node::apply=info"]
+fn bounded_apply_profile_replay() -> Result<(), Box<dyn std::error::Error>> {
+    let _subscriber_already_set = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()
+        .is_err();
+    let fixture = non_coinbase_spend_chain()?;
+
+    // This profiles apply path branch overhead, not storage-backed index cost.
+    for use_noop_index_hooks in [false, true] {
+        let label = if use_noop_index_hooks {
+            "index_hooks=noop"
+        } else {
+            "index_hooks=disabled"
+        };
+        let outcome = replay_non_coinbase_spend_chain(&fixture, use_noop_index_hooks)?;
+        println!(
+            "bounded_apply_profile_replay {label} elapsed_ms={} applied_height={} blocks={}",
+            elapsed_ms(outcome.elapsed),
+            outcome.applied_height,
+            fixture.blocks.len(),
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "bitcoinconsensus")]
+#[ignore = "bounded local coinstats listener cost harness; run explicitly with RUST_LOG=bitcoin_rs_node::apply=info"]
+fn bounded_apply_profile_replay_coinstats_listener_cost() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _subscriber_already_set = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()
+        .is_err();
+    let fixture = non_coinbase_spend_chain()?;
+
+    for coin_stats_listener in [
+        CoinStatsListenerMode::Attached,
+        CoinStatsListenerMode::Detached,
+    ] {
+        let outcome = replay_non_coinbase_spend_chain_with_coin_stats_listener(
+            &fixture,
+            false,
+            coin_stats_listener,
+        )?;
+        let listener_calls = outcome.listener_calls;
+        println!(
+            "bounded_apply_profile_replay_coinstats_listener_cost coin_stats_listener={} elapsed_ms={} applied_height={} blocks={} listener_insert_calls={} listener_remove_calls={} listener_remove_coin_calls={} listener_total_calls={}",
+            coin_stats_listener.label(),
+            elapsed_ms(outcome.elapsed),
+            outcome.applied_height,
+            fixture.blocks.len(),
+            listener_calls.insert_calls,
+            listener_calls.remove_calls,
+            listener_calls.remove_coin_calls,
+            listener_calls.total_calls(),
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "redb")]
+#[test]
+#[ignore = "bounded local storage-backed optional-index cost harness; run explicitly"]
+fn optional_index_redb_direct_cost() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let tx_store = bitcoin_rs_storage::RedbStore::open(temp.path().join("txindex"))?;
+    let filter_store = bitcoin_rs_storage::RedbStore::open(temp.path().join("filters"))?;
+    let mut tx_index = bitcoin_rs_index::Indexer::new(Arc::new(tx_store));
+    let filter_index = bitcoin_rs_filters::FilterIndex::new(filter_store);
+    let fixture = non_coinbase_spend_chain()?;
+
+    let mut txids = 0_usize;
+    let mut funding = 0_usize;
+    let mut spending = 0_usize;
+    let mut filter_bytes_len = 0_usize;
+    let mut txindex_us = 0_u128;
+    let mut filterindex_us = 0_u128;
+    let mut prev_header = Hash256::default();
+    let mut final_block_hash = None;
+
+    for (height, block) in fixture.blocks.iter().enumerate() {
+        let height = u32::try_from(height)?;
+        let block_bytes = bitcoin::consensus::serialize(block);
+
+        let started = Instant::now();
+        let counts = tx_index.ingest_block(&block_bytes, height)?;
+        txindex_us = txindex_us.saturating_add(started.elapsed().as_micros());
+        txids = txids.saturating_add(counts.txids);
+        funding = funding.saturating_add(counts.funding);
+        spending = spending.saturating_add(counts.spending);
+
+        let filter_bytes = deterministic_filter_bytes(block);
+        filter_bytes_len = filter_bytes_len.saturating_add(filter_bytes.len());
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let started = Instant::now();
+        prev_header = filter_index.put_filter(block_hash, prev_header, &filter_bytes)?;
+        filterindex_us = filterindex_us.saturating_add(started.elapsed().as_micros());
+        final_block_hash = Some(block_hash);
+    }
+
+    if txids == 0 || funding == 0 || spending == 0 || filter_bytes_len == 0 {
+        return Err(std::io::Error::other(format!(
+            "optional index direct cost no-op: txids={txids} funding={funding} spending={spending} filter_bytes={filter_bytes_len}",
+        ))
+        .into());
+    }
+    let final_block_hash = final_block_hash
+        .ok_or_else(|| std::io::Error::other("missing final block hash after direct indexing"))?;
+    let final_header = filter_index
+        .filter_header(final_block_hash)?
+        .ok_or_else(|| {
+            std::io::Error::other("missing final filter header after direct indexing")
+        })?;
+    assert_eq!(final_header, prev_header);
+
+    let total_us = txindex_us.saturating_add(filterindex_us);
+    println!(
+        "optional_index_redb_direct_cost blocks={} txids={} funding={} spending={} filter_bytes={} txindex_us={} filterindex_us={} total_us={}",
+        fixture.blocks.len(),
+        txids,
+        funding,
+        spending,
+        filter_bytes_len,
+        txindex_us,
+        filterindex_us,
+        total_us,
+    );
+
+    Ok(())
+}
+
+struct ReplayOutcome {
+    elapsed: Duration,
+    applied_height: u32,
+    applied_hash: Hash256,
+    coin_stats: Arc<CoinStatsListener>,
+    listener_calls: ListenerCallCountSnapshot,
+    utxo: Arc<UtxoSet>,
+}
+
+#[derive(Default)]
+struct ListenerCallCounters {
+    insert_calls: AtomicU64,
+    remove_calls: AtomicU64,
+    remove_coin_calls: AtomicU64,
+}
+
+impl ListenerCallCounters {
+    fn snapshot(&self) -> ListenerCallCountSnapshot {
+        ListenerCallCountSnapshot {
+            insert_calls: self.insert_calls.load(Ordering::Relaxed),
+            remove_calls: self.remove_calls.load(Ordering::Relaxed),
+            remove_coin_calls: self.remove_coin_calls.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ListenerCallCountSnapshot {
+    insert_calls: u64,
+    remove_calls: u64,
+    remove_coin_calls: u64,
+}
+
+impl ListenerCallCountSnapshot {
+    const fn total_calls(self) -> u64 {
+        self.insert_calls
+            .saturating_add(self.remove_calls)
+            .saturating_add(self.remove_coin_calls)
+    }
+}
+
+struct CountingCoinStatsListener {
+    inner: CoinStatsListener,
+    counters: Arc<ListenerCallCounters>,
+}
+
+impl UtxoChangeListener for CountingCoinStatsListener {
+    fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.counters.insert_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.on_insert(op, txout, height, coinbase);
+    }
+
+    fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
+        self.counters.remove_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.on_remove(op, txout, height);
+    }
+
+    fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.counters
+            .remove_coin_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.on_remove_coin(op, txout, height, coinbase);
+    }
+
+    fn muhash3072(&self) -> Option<[u8; 384]> {
+        self.inner.muhash3072()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CoinStatsListenerMode {
+    Attached,
+    Detached,
+}
+
+impl CoinStatsListenerMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Attached => "attached",
+            Self::Detached => "detached",
+        }
+    }
+}
+
+fn replay_non_coinbase_spend_chain(
+    fixture: &SpendChainFixture,
+    use_noop_index_hooks: bool,
+) -> Result<ReplayOutcome, Box<dyn std::error::Error>> {
+    replay_non_coinbase_spend_chain_with_coin_stats_listener(
+        fixture,
+        use_noop_index_hooks,
+        CoinStatsListenerMode::Attached,
+    )
+}
+
+fn replay_non_coinbase_spend_chain_with_coin_stats_listener(
+    fixture: &SpendChainFixture,
+    use_noop_index_hooks: bool,
+    coin_stats_listener: CoinStatsListenerMode,
+) -> Result<ReplayOutcome, Box<dyn std::error::Error>> {
+    let block_tree = Arc::new(RwLock::new(BlockTree::new()));
+    let chain_tip = block_tree.read().tip_handle();
+    let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(RwLock::new(Vec::new()));
+    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+    let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<bitcoin::block::Header>>();
+    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let (mut handles, coin_stats, listener_calls, utxo) = apply_handles_with_coin_stats_and_utxo(
+        Network::Regtest,
+        Arc::clone(&chain_tip),
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+        coin_stats_listener,
+    );
+    if !use_noop_index_hooks {
+        handles.tx_index = None;
+        handles.filter_index = None;
+    }
+    let sync = BlockSync::new(
+        handles,
+        Arc::clone(&peers),
+        Arc::clone(&peer_outbound),
+        inbound_headers_rx,
+        inbound_blocks_rx,
+        false,
+    );
+
+    inbound_headers_tx.send(fixture.blocks.iter().map(|block| block.header).collect())?;
+    for block in fixture.blocks.iter().skip(1) {
+        inbound_blocks_tx.send(block.clone())?;
+    }
+
+    let started = Instant::now();
+    sync.tick();
+    let elapsed = started.elapsed();
+
+    let applied = applied_tip
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+    let expected_height = u32::try_from(
+        fixture
+            .blocks
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| std::io::Error::other("empty replay fixture"))?,
+    )?;
+    let expected_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(
+        fixture
+            .blocks
+            .last()
+            .ok_or_else(|| std::io::Error::other("missing final block"))?
+            .block_hash()
+            .as_byte_array(),
+    );
+    if applied.height != expected_height || applied.hash != expected_hash {
+        return Err(std::io::Error::other(format!(
+            "replay stopped before final block: applied height/hash {}/{:?}, expected {}/{:?}",
+            applied.height, applied.hash, expected_height, expected_hash,
+        ))
+        .into());
+    }
+    Ok(ReplayOutcome {
+        elapsed,
+        applied_height: applied.height,
+        applied_hash: applied.hash,
+        coin_stats,
+        listener_calls: listener_calls.snapshot(),
+        utxo,
+    })
+}
+
+fn elapsed_ms(duration: Duration) -> u128 {
+    duration.as_millis()
+}
+
+#[cfg(feature = "redb")]
+fn deterministic_filter_bytes(block: &bitcoin::Block) -> Vec<u8> {
+    let mut filter_bytes = Vec::with_capacity(block.txdata.len().saturating_mul(32));
+    for tx in &block.txdata {
+        filter_bytes.extend_from_slice(tx.compute_txid().as_byte_array());
+    }
+    filter_bytes
 }
 
 struct SpendChainFixture {
@@ -446,8 +755,13 @@ fn apply_handles_with_coin_stats(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
 ) -> (ApplyHandles, Arc<CoinStatsListener>) {
-    let (handles, coin_stats, _utxo) =
-        apply_handles_with_coin_stats_and_utxo(network, chain_tip, applied_tip, block_tree);
+    let (handles, coin_stats, _listener_calls, _utxo) = apply_handles_with_coin_stats_and_utxo(
+        network,
+        chain_tip,
+        applied_tip,
+        block_tree,
+        CoinStatsListenerMode::Attached,
+    );
     (handles, coin_stats)
 }
 
@@ -457,10 +771,22 @@ fn apply_handles_with_coin_stats_and_utxo(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-) -> (ApplyHandles, Arc<CoinStatsListener>, Arc<UtxoSet>) {
+    coin_stats_listener: CoinStatsListenerMode,
+) -> (
+    ApplyHandles,
+    Arc<CoinStatsListener>,
+    Arc<ListenerCallCounters>,
+    Arc<UtxoSet>,
+) {
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+    let listener_calls = Arc::new(ListenerCallCounters::default());
     let mut utxo = UtxoSet::new();
-    utxo.set_listener(Box::new((*coin_stats).clone()));
+    if matches!(coin_stats_listener, CoinStatsListenerMode::Attached) {
+        utxo.set_listener(Box::new(CountingCoinStatsListener {
+            inner: (*coin_stats).clone(),
+            counters: Arc::clone(&listener_calls),
+        }));
+    }
     let utxo = Arc::new(utxo);
     let handles = ApplyHandles::new(
         network,
@@ -469,14 +795,14 @@ fn apply_handles_with_coin_stats_and_utxo(
         block_tree,
         Arc::clone(&utxo),
         Arc::clone(&coin_stats),
-        noop_tx_index(),
-        noop_filter_index(),
+        Some(noop_tx_index()),
+        Some(noop_filter_index()),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Arc::new(RwLock::new(Vec::new())),
         Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
         Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
     );
-    (handles, coin_stats, utxo)
+    (handles, coin_stats, listener_calls, utxo)
 }
 
 struct NoopIndexer;

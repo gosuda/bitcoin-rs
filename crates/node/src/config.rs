@@ -112,6 +112,8 @@ pub struct Config {
     pub txindex: bool,
     /// Whether the compact block filter index is enabled.
     pub blockfilterindex: bool,
+    /// Whether P2P sync stops at headers and drops block bodies from the sync channel.
+    pub headers_only: bool,
     /// Database cache target in MiB.
     pub dbcache_mb: u64,
     /// Tracing filter level used when `RUST_LOG` is unset.
@@ -158,6 +160,7 @@ impl fmt::Debug for Config {
             .field("utreexo_mode", &self.utreexo_mode)
             .field("txindex", &self.txindex)
             .field("blockfilterindex", &self.blockfilterindex)
+            .field("headers_only", &self.headers_only)
             .field("dbcache_mb", &self.dbcache_mb)
             .field("log_level", &self.log_level)
             .field("metrics_bind", &self.metrics_bind)
@@ -199,6 +202,7 @@ impl Config {
             utreexo_mode: false,
             txindex: false,
             blockfilterindex: false,
+            headers_only: false,
             dbcache_mb: DEFAULT_DBCACHE_MB,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             metrics_bind: None,
@@ -271,6 +275,9 @@ impl Config {
         }
         if self.electrum_tls_cert.is_some() && self.electrum_bind.is_none() {
             bail!("electrum_tls_cert requires electrum_bind");
+        }
+        if self.electrum_bind.is_some() && !self.txindex {
+            bail!("electrum_bind requires txindex");
         }
         match (&self.g2_muhash_samples, self.g2_muhash_tip_height) {
             (Some(_), Some(0)) => bail!("g2_muhash_tip_height must be greater than zero"),
@@ -405,6 +412,9 @@ impl Config {
         if let Some(blockfilterindex) = layer.blockfilterindex {
             self.blockfilterindex = blockfilterindex;
         }
+        if let Some(headers_only) = layer.headers_only {
+            self.headers_only = headers_only;
+        }
         if let Some(dbcache_mb) = layer.dbcache_mb {
             self.dbcache_mb = dbcache_mb;
         }
@@ -493,6 +503,12 @@ pub(crate) struct ConfigLayer {
     pub(crate) txindex: Option<bool>,
     #[arg(long)]
     pub(crate) blockfilterindex: Option<bool>,
+    #[arg(
+        long = "headers-only",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub(crate) headers_only: Option<bool>,
     #[arg(long = "dbcache-mb")]
     pub(crate) dbcache_mb: Option<u64>,
     #[arg(long = "log-level")]
@@ -558,6 +574,7 @@ impl ConfigLayer {
                 "BITCOIN_RS_UTREEXO_MODE" => layer.utreexo_mode = Some(parse_bool(value)?),
                 "BITCOIN_RS_TXINDEX" => layer.txindex = Some(parse_bool(value)?),
                 "BITCOIN_RS_BLOCKFILTERINDEX" => layer.blockfilterindex = Some(parse_bool(value)?),
+                "BITCOIN_RS_HEADERS_ONLY" => layer.headers_only = Some(parse_bool(value)?),
                 "BITCOIN_RS_DBCACHE_MB" => layer.dbcache_mb = Some(value.parse()?),
                 "BITCOIN_RS_LOG_LEVEL" => layer.log_level = Some(value.to_owned()),
                 "BITCOIN_RS_METRICS_BIND" => layer.metrics_bind = Some(value.parse()?),
