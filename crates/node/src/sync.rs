@@ -221,7 +221,10 @@ impl BlockSync {
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let staged_count = self.block_stager.lock().received_len();
-        for expected_hash in self.expected_block_hashes(staged_count) {
+        let expected_hashes = self.expected_block_hashes(staged_count);
+        let mut applied_hashes = Vec::with_capacity(expected_hashes.len());
+        let mut failed_hash = None;
+        for expected_hash in expected_hashes {
             let Some(block) = self.block_stager.lock().take(&expected_hash) else {
                 break;
             };
@@ -233,13 +236,11 @@ impl BlockSync {
                         %tip.hash,
                         "block sync: applied buffered block"
                     );
-                    self.download_window.lock().mark_applied(&tip.hash);
+                    applied_hashes.push(tip.hash);
                 }
                 Err(error) => {
                     failed = failed.saturating_add(1);
-                    self.download_window
-                        .lock()
-                        .drop_received_for_retry(&expected_hash);
+                    failed_hash = Some(expected_hash);
                     tracing::warn!(
                         %expected_hash,
                         %error,
@@ -247,6 +248,15 @@ impl BlockSync {
                     );
                     break;
                 }
+            }
+        }
+        if !applied_hashes.is_empty() || failed_hash.is_some() {
+            let mut window = self.download_window.lock();
+            for hash in applied_hashes {
+                window.mark_applied(&hash);
+            }
+            if let Some(hash) = failed_hash {
+                window.drop_received_for_retry(&hash);
             }
         }
         (applied, failed)
