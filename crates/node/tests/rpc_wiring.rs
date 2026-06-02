@@ -21,6 +21,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let dir = tempdir()?;
     let mut config = Config::default();
     config.data_dir = dir.path().join("node");
+    config.txindex = true;
     config.zmqpubhashblock = vec!["inproc://rpc-wiring-zmq-pubhashblock".to_owned()];
     config.zmqpubhashblockhwm = Some(21);
     let state = NodeState::open(config)?;
@@ -42,7 +43,9 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let p2p_outbound = Some(state.p2p_outbound_sender());
     let banned = state.banned_subnets();
     let added_nodes = Arc::new(parking_lot::RwLock::new(Vec::new()));
-    let tx_index = state.tx_index();
+    let Some(tx_index) = state.tx_index() else {
+        panic!("txindex handle missing when enabled");
+    };
     let ctx = Context::from_handles(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
@@ -61,7 +64,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         p2p_outbound,
         Arc::clone(&banned),
         Arc::clone(&added_nodes),
-        Some(Arc::clone(&tx_index)),
+        Some(tx_index),
     )
     .with_zmq_notifications(state.active_zmq_notifications());
 
@@ -130,5 +133,17 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     assert_eq!(notifications[0].notification_type.as_str(), "pubhashblock");
     assert_eq!(notifications[0].hwm, 21);
 
+    Ok(())
+}
+
+#[test]
+fn rpc_context_omits_indexer_when_node_txindex_is_disabled() -> Result<()> {
+    let dir = tempdir()?;
+    let mut config = Config::default();
+    config.data_dir = dir.path().join("node");
+    config.txindex = false;
+    let state = NodeState::open(config)?;
+
+    assert!(state.tx_index().is_none());
     Ok(())
 }

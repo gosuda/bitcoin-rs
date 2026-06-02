@@ -39,7 +39,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         let blocks = ctx.blocks.read();
         blocks
             .iter()
-            .map(|record| u64::try_from(record.block_hex.len() / 2).unwrap_or(u64::MAX))
+            .map(|record| u64::try_from(record.body_size).unwrap_or(u64::MAX))
             .fold(0_u64, u64::saturating_add)
     };
     let prune_status = ctx.prune_status();
@@ -216,15 +216,15 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         let synthetic_height = ctx.height_for_hash(hash).unwrap_or_else(|| ctx.height());
         let record = BlockRecord::synthetic(synthetic_height, hash);
         if verbosity == 0 {
-            return Ok(json!(record.block_hex));
+            return Ok(json!(ctx.block_body_hex(&record).unwrap_or_default()));
         }
         return Ok(synthetic_block_json(ctx, &record, true));
     };
-    if record.block_hex.is_empty() {
-        return Err(RpcError::NotFound("block data pruned"));
-    }
     if verbosity == 0 {
-        return Ok(json!(record.block_hex));
+        let Some(block_hex) = ctx.block_body_hex(&record) else {
+            return Err(RpcError::NotFound("block data pruned"));
+        };
+        return Ok(json!(block_hex));
     }
     block_json_verbose(ctx, &record, true, verbosity)
 }
@@ -280,7 +280,7 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut tx_sizes: Vec<u64> = Vec::new();
     let mut fee_fields = FeeFields::default();
     if let Some(record) = record.as_ref()
-        && let Some((bytes, block)) = decode_record_block(record)?
+        && let Some((bytes, block)) = decode_record_block(ctx, record)?
     {
         total_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         total_weight = block.weight().to_wu();
@@ -349,16 +349,13 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     }))
 }
 fn decode_record_block(
+    ctx: &Context,
     record: &BlockRecord,
 ) -> Result<Option<(Vec<u8>, bitcoin::Block)>, RpcError> {
     use bitcoin::consensus::encode::deserialize;
-    use bitcoin::hex::FromHex as _;
 
-    if record.block_hex.is_empty() {
+    let Some(bytes) = ctx.block_body_bytes(record) else {
         return Err(RpcError::NotFound("block data pruned"));
-    }
-    let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) else {
-        return Ok(None);
     };
     let Ok(block) = deserialize::<bitcoin::Block>(&bytes) else {
         return Ok(None);
@@ -545,7 +542,6 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 
 pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     use bitcoin::consensus::encode::deserialize;
-    use bitcoin::hex::FromHex as _;
 
     let array = params_array(params)?;
     let checklevel = array.first().and_then(JsonValueTrait::as_u64).unwrap_or(3);
@@ -579,7 +575,7 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         // (header-only / pruned) skip the merkle check.
         if checklevel >= 2 {
             if let Some(record) = ctx.block_by_hash(node.hash) {
-                if let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) {
+                if let Some(bytes) = ctx.block_body_bytes(&record) {
                     if let Ok(block) = deserialize::<bitcoin::Block>(&bytes) {
                         if let Some(computed) = block.compute_merkle_root() {
                             if computed != node.header.merkle_root {
@@ -691,12 +687,19 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         })
     };
 
+    let txindex_entry = ctx.indexer.is_some().then(entry);
     match filter {
-        None => Ok(json!({
-            "txindex": entry(),
-            "basicblockfilterindex": entry(),
-        })),
-        Some("txindex") => Ok(json!({ "txindex": entry() })),
+        None => {
+            let mut indexes = sonic_rs::Object::new();
+            if let Some(entry) = txindex_entry {
+                let _ = indexes.insert(&"txindex", entry);
+            }
+            let _ = indexes.insert(&"basicblockfilterindex", entry());
+            Ok(indexes.into())
+        }
+        Some("txindex") => {
+            Ok(txindex_entry.map_or_else(|| json!({}), |entry| json!({ "txindex": entry })))
+        }
         Some("basicblockfilterindex") => Ok(json!({ "basicblockfilterindex": entry() })),
         Some(_) => Ok(json!({})),
     }
@@ -774,7 +777,7 @@ fn block_json_verbose(
         }));
     }
 
-    let Some(block) = decode_block(record) else {
+    let Some((block_bytes, block)) = decode_block(ctx, record)? else {
         return Ok(synthetic_block_json(ctx, record, true));
     };
     let tx_array: Vec<Value> = if verbosity >= 2 {
@@ -807,8 +810,8 @@ fn block_json_verbose(
         "nTx": record.tx_count,
         "previousblockhash": header.prev_blockhash.to_string(),
         "nextblockhash": next_hash,
-        "strippedsize": record.block_hex.len() / 2,
-        "size": record.block_hex.len() / 2,
+        "strippedsize": block_bytes.len(),
+        "size": block_bytes.len(),
         "weight": block.weight().to_wu(),
         "tx": tx_array
     }))
@@ -839,27 +842,22 @@ fn decode_header(record: &BlockRecord) -> Option<bitcoin::block::Header> {
     }
 }
 
-fn decode_block(record: &BlockRecord) -> Option<bitcoin::Block> {
-    let bytes = match Vec::<u8>::from_hex(&record.block_hex) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(
-                block_hash = %record.hash.to_string_be(),
-                %error,
-                "stored block hex is invalid"
-            );
-            return None;
-        }
+fn decode_block(
+    ctx: &Context,
+    record: &BlockRecord,
+) -> Result<Option<(Vec<u8>, bitcoin::Block)>, RpcError> {
+    let Some(bytes) = ctx.block_body_bytes(record) else {
+        return Err(RpcError::NotFound("block data pruned"));
     };
     match deserialize(&bytes) {
-        Ok(block) => Some(block),
+        Ok(block) => Ok(Some((bytes, block))),
         Err(error) => {
             tracing::warn!(
                 block_hash = %record.hash.to_string_be(),
                 %error,
                 "stored block bytes are invalid"
             );
-            None
+            Ok(None)
         }
     }
 }
@@ -902,7 +900,7 @@ fn synthetic_block_json(ctx: &Context, record: &BlockRecord, include_block_field
         "previousblockhash": null,
         "nextblockhash": null,
         "strippedsize": 0,
-        "size": record.block_hex.len() / 2,
+        "size": record.body_size,
         "weight": 0,
         "tx": []
     })
@@ -911,6 +909,7 @@ fn synthetic_block_json(ctx: &Context, record: &BlockRecord, include_block_field
 #[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use bitcoin::blockdata::constants::genesis_block;
 
@@ -993,7 +992,7 @@ mod tests {
         let genesis = genesis_block(bitcoin::Network::Regtest);
         let record = BlockRecord::from_block(0, &genesis);
         let block_hash_hex = record.hash.to_string_be();
-        let block_size = u64::try_from(record.block_hex.len() / 2)?;
+        let block_size = u64::try_from(record.body_size)?;
         let tx_count = u64::try_from(record.tx_count)?;
         ctx.add_block(record);
 
@@ -1048,6 +1047,56 @@ mod tests {
             Some(expected_txid.as_str())
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn getblock_reads_metadata_only_record_from_body_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct SingleBlockSource {
+            height: u32,
+            hash: Hash256,
+            body: Vec<u8>,
+            calls: AtomicUsize,
+        }
+
+        impl crate::BlockBodySource for SingleBlockSource {
+            fn block_body(&self, height: u32, hash: Hash256) -> Option<Vec<u8>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                (height == self.height && hash == self.hash).then(|| self.body.clone())
+            }
+        }
+
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let body = bitcoin::consensus::encode::serialize(&genesis);
+        let record = BlockRecord::from_block_metadata(0, &genesis);
+        let block_hash_hex = record.hash.to_string_be();
+        let source = Arc::new(SingleBlockSource {
+            height: 0,
+            hash: record.hash,
+            body: body.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&source);
+        let ctx = Arc::new(Context::new().with_block_body_source(source));
+        ctx.add_block(record);
+
+        let expected_hex = body.to_lower_hex_string();
+        assert_eq!(
+            getblock(&ctx, &json!([block_hash_hex.as_str(), 0]))?.as_str(),
+            Some(expected_hex.as_str())
+        );
+        assert_eq!(calls.calls.load(Ordering::Relaxed), 1);
+        let block_json = getblock(&ctx, &json!([block_hash_hex.as_str(), 1]))?;
+        assert_eq!(calls.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            block_json.get("size").as_u64(),
+            Some(u64::try_from(body.len())?)
+        );
+        assert_eq!(
+            block_json.get("hash").as_str(),
+            Some(block_hash_hex.as_str())
+        );
         Ok(())
     }
 
@@ -1188,6 +1237,23 @@ mod tests {
         assert_eq!(
             result.get("size_on_disk").and_then(JsonValueTrait::as_u64),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn getblockchaininfo_size_on_disk_uses_metadata_body_size() {
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let body = bitcoin::consensus::encode::serialize(&genesis);
+        let record = BlockRecord::from_block_metadata(0, &genesis);
+        let ctx = Arc::new(Context::new());
+        ctx.add_block(record);
+
+        let result = getblockchaininfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+
+        assert_eq!(
+            result.get("size_on_disk").and_then(JsonValueTrait::as_u64),
+            Some(u64::try_from(body.len()).unwrap_or(u64::MAX))
         );
     }
 

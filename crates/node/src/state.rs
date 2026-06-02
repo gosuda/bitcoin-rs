@@ -11,8 +11,8 @@ use bitcoin::hex::FromHex as _;
 use bitcoin::{Transaction, Txid, block::Header};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_rpc::{
-    BlockRecord, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
-    ZmqNotification,
+    BlockBodySource, BlockRecord, NetworkState, PruneResult, PruneService, PruneServiceError,
+    PruneStatus, ZmqNotification,
 };
 use compact_str::CompactString;
 use core::fmt;
@@ -272,6 +272,22 @@ impl NodeStorage {
     }
 }
 
+struct StoredBlockBodySource {
+    store: Arc<dyn crate::apply::PruneBodyStore>,
+}
+
+impl StoredBlockBodySource {
+    fn new(store: Arc<dyn crate::apply::PruneBodyStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl BlockBodySource for StoredBlockBodySource {
+    fn block_body(&self, height: u32, hash: bitcoin_rs_primitives::Hash256) -> Option<Vec<u8>> {
+        self.store.load_block_body(height, hash).ok().flatten()
+    }
+}
+
 const PRUNEHEIGHT_METADATA_KEY: &[u8] = b"node:pruneheight";
 
 fn load_pruneheight<S: KvStore>(store: &S) -> Result<Option<u32>> {
@@ -342,15 +358,28 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
             .iter()
             .filter(|record| record.height < updated_pruneheight)
         {
-            if record.block_hex.is_empty() || record.tx_count == 0 {
+            if record.tx_count == 0 {
                 continue;
             }
-            let bytes = Vec::<u8>::from_hex(&record.block_hex).map_err(|error| {
-                PruneServiceError::failed(format!(
-                    "cached block body at height {} is not valid hex: {error}",
-                    record.height
-                ))
-            })?;
+            let bytes = if record.block_hex.is_empty() {
+                <S as crate::apply::PruneBodyStore>::load_block_body(
+                    &*self.store,
+                    record.height,
+                    record.hash,
+                )
+                .map_err(|error| PruneServiceError::failed(error.to_string()))?
+                .unwrap_or_default()
+            } else {
+                Vec::<u8>::from_hex(&record.block_hex).map_err(|error| {
+                    PruneServiceError::failed(format!(
+                        "cached block body at height {} is not valid hex: {error}",
+                        record.height
+                    ))
+                })?
+            };
+            if bytes.is_empty() {
+                continue;
+            }
             let block = deserialize::<bitcoin::Block>(&bytes).map_err(|error| {
                 PruneServiceError::failed(format!(
                     "cached block body at height {} failed decode: {error}",
@@ -454,8 +483,10 @@ impl TxIndexStorage {
     fn electrum_history_reader(
         &self,
         blocks: Arc<RwLock<Vec<bitcoin_rs_rpc::BlockRecord>>>,
+        block_body_source: Arc<dyn BlockBodySource>,
     ) -> Arc<dyn bitcoin_rs_electrum::methods::ConfirmedHistoryReader> {
-        let block_source = crate::NodeBlockSource::new(blocks);
+        let block_source =
+            crate::NodeBlockSource::new(blocks).with_block_body_source(block_body_source);
         match self {
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(store) => {
@@ -521,7 +552,11 @@ impl fmt::Display for CompiledStorageFeatures {
     }
 }
 
-fn open_tx_index(config: &Config) -> Result<(TxIndexHandle, TxIndexStorage)> {
+fn open_tx_index(config: &Config) -> Result<Option<(TxIndexHandle, TxIndexStorage)>> {
+    if !config.txindex {
+        return Ok(None);
+    }
+
     let txindex_dir = config.data_dir.join("txindex");
     std::fs::create_dir_all(&txindex_dir)
         .with_context(|| format!("create txindex_dir {}", txindex_dir.display()))?;
@@ -533,10 +568,10 @@ fn open_tx_index(config: &Config) -> Result<(TxIndexHandle, TxIndexStorage)> {
             );
             let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
                 Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
-            Ok((
+            Ok(Some((
                 Arc::new(Mutex::new(indexer)),
                 TxIndexStorage::RocksDb(store),
-            ))
+            )))
         }
         #[cfg(feature = "fjall")]
         "fjall" => {
@@ -545,7 +580,10 @@ fn open_tx_index(config: &Config) -> Result<(TxIndexHandle, TxIndexStorage)> {
             );
             let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
                 Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
-            Ok((Arc::new(Mutex::new(indexer)), TxIndexStorage::Fjall(store)))
+            Ok(Some((
+                Arc::new(Mutex::new(indexer)),
+                TxIndexStorage::Fjall(store),
+            )))
         }
         #[cfg(feature = "redb")]
         "redb" => {
@@ -554,7 +592,10 @@ fn open_tx_index(config: &Config) -> Result<(TxIndexHandle, TxIndexStorage)> {
             );
             let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
                 Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
-            Ok((Arc::new(Mutex::new(indexer)), TxIndexStorage::Redb(store)))
+            Ok(Some((
+                Arc::new(Mutex::new(indexer)),
+                TxIndexStorage::Redb(store),
+            )))
         }
         #[cfg(feature = "mdbx")]
         "mdbx" => {
@@ -563,7 +604,10 @@ fn open_tx_index(config: &Config) -> Result<(TxIndexHandle, TxIndexStorage)> {
             );
             let indexer: Box<dyn bitcoin_rs_index::IndexerLike> =
                 Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
-            Ok((Arc::new(Mutex::new(indexer)), TxIndexStorage::Mdbx(store)))
+            Ok(Some((
+                Arc::new(Mutex::new(indexer)),
+                TxIndexStorage::Mdbx(store),
+            )))
         }
         other => bail!("unsupported storage backend for txindex: {other}"),
     }
@@ -603,8 +647,8 @@ pub struct NodeState {
     storage: NodeStorage,
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    tx_index: TxIndexHandle,
-    tx_index_storage: Arc<TxIndexStorage>,
+    tx_index: Option<TxIndexHandle>,
+    tx_index_storage: Option<Arc<TxIndexStorage>>,
     filter_index: FilterIndexHandle,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
@@ -653,8 +697,11 @@ impl NodeState {
             .context("open G2 MuHash sample writer")?
             .map(Arc::new);
         let storage = NodeStorage::open(&config)?;
-        let (tx_index, tx_index_storage) = open_tx_index(&config)?;
-        let tx_index_storage = Arc::new(tx_index_storage);
+        let tx_index_pair = open_tx_index(&config)?;
+        let (tx_index, tx_index_storage) = tx_index_pair
+            .map_or((None, None), |(tx_index, tx_index_storage)| {
+                (Some(tx_index), Some(Arc::new(tx_index_storage)))
+            });
         let filter_index = open_filter_index(&config)?;
         let zmq_publications = config.zmq_publications();
         let active_zmq_notifications: Vec<_> = zmq_publications
@@ -707,13 +754,14 @@ impl NodeState {
                 block_tree: Arc::clone(&block_tree),
                 utxo: Arc::clone(&utxo),
                 coin_stats: Arc::clone(&coin_stats),
-                tx_index: Arc::clone(&tx_index),
+                tx_index: tx_index.as_ref().map(Arc::clone),
                 filter_index: Arc::clone(&filter_index),
                 mempool: Arc::clone(&mempool),
                 blocks: Arc::clone(&blocks),
                 transactions: Arc::clone(&transactions),
                 zmq_publisher: Arc::clone(&zmq_publisher),
-                block_body_store: (config.prune_target_mb > 0).then(|| storage.block_body_store()),
+                cache_block_bodies_in_memory: false,
+                block_body_store: Some(storage.block_body_store()),
                 g2_muhash_sampler: g2_muhash_sampler.clone(),
             },
             Arc::clone(&peers),
@@ -739,7 +787,7 @@ impl NodeState {
             utxo,
             coin_stats,
             tx_index,
-            tx_index_storage: Arc::clone(&tx_index_storage),
+            tx_index_storage,
             filter_index,
             prune_service,
             zmq_publisher,
@@ -797,10 +845,10 @@ impl NodeState {
         Arc::clone(&self.coin_stats)
     }
 
-    /// Returns the shared block indexer handle.
+    /// Returns the shared block indexer handle, when txindex is enabled.
     #[must_use]
-    pub fn tx_index(&self) -> Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>> {
-        Arc::clone(&self.tx_index)
+    pub fn tx_index(&self) -> Option<Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>> {
+        self.tx_index.as_ref().map(Arc::clone)
     }
 
     /// Builds an Electrum `IndexHandle` backed by the live txindex store.
@@ -809,8 +857,10 @@ impl NodeState {
     /// `apply_block`, so `blockchain.block.headers` returns real data once IBD
     /// is underway.
     #[must_use]
-    pub fn electrum_index_handle(&self) -> bitcoin_rs_electrum::IndexHandle {
-        self.tx_index_storage.electrum_index_handle()
+    pub fn electrum_index_handle(&self) -> Option<bitcoin_rs_electrum::IndexHandle> {
+        self.tx_index_storage
+            .as_ref()
+            .map(|storage| storage.electrum_index_handle())
     }
 
     /// Builds an Electrum-side history reader wired through the live txindex store
@@ -819,8 +869,10 @@ impl NodeState {
     #[must_use]
     pub fn electrum_history_reader(
         &self,
-    ) -> Arc<dyn bitcoin_rs_electrum::methods::ConfirmedHistoryReader> {
-        self.tx_index_storage.electrum_history_reader(self.blocks())
+    ) -> Option<Arc<dyn bitcoin_rs_electrum::methods::ConfirmedHistoryReader>> {
+        self.tx_index_storage
+            .as_ref()
+            .map(|storage| storage.electrum_history_reader(self.blocks(), self.block_body_source()))
     }
 
     /// Returns the shared compact-filter index handle.
@@ -880,6 +932,12 @@ impl NodeState {
     #[must_use]
     pub fn blocks(&self) -> Arc<RwLock<Vec<BlockRecord>>> {
         Arc::clone(&self.blocks)
+    }
+
+    /// Returns a durable block body reader for metadata-only block records.
+    #[must_use]
+    pub(crate) fn block_body_source(&self) -> Arc<dyn BlockBodySource> {
+        Arc::new(StoredBlockBodySource::new(self.storage.block_body_store()))
     }
 
     /// Returns the shared txid → transaction map exposed to RPC handlers.
@@ -1013,16 +1071,14 @@ impl NodeState {
             block_tree: Arc::clone(&self.block_tree),
             utxo: Arc::clone(&self.utxo),
             coin_stats: Arc::clone(&self.coin_stats),
-            tx_index: Arc::clone(&self.tx_index),
+            tx_index: self.tx_index.as_ref().map(Arc::clone),
             filter_index: Arc::clone(&self.filter_index),
             mempool: Arc::clone(&self.mempool),
             blocks: Arc::clone(&self.blocks),
             transactions: Arc::clone(&self.transactions),
             zmq_publisher: Arc::clone(&self.zmq_publisher),
-            block_body_store: self
-                .prune_service
-                .is_some()
-                .then(|| self.storage.block_body_store()),
+            cache_block_bodies_in_memory: false,
+            block_body_store: Some(self.storage.block_body_store()),
             g2_muhash_sampler: self.g2_muhash_sampler.clone(),
         }
     }
@@ -1109,15 +1165,37 @@ mod tests {
     }
 
     #[test]
-    fn open_constructs_tx_index() -> anyhow::Result<()> {
+    fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         let state = NodeState::open(config)?;
-        let a = state.tx_index();
-        let b = state.tx_index();
+
+        assert!(state.tx_index().is_none(), "txindex disabled by default");
+        assert!(
+            !state.data_dir().join("txindex").exists(),
+            "disabled txindex must not create storage"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_tx_index_when_enabled() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.txindex = true;
+        let state = NodeState::open(config)?;
+        let (Some(a), Some(b)) = (state.tx_index(), state.tx_index()) else {
+            panic!("txindex handle missing when enabled");
+        };
         assert!(Arc::ptr_eq(&a, &b), "tx_index handle stable across calls");
+        assert!(
+            state.data_dir().join("txindex").exists(),
+            "enabled txindex must create storage"
+        );
         Ok(())
     }
 
@@ -1129,8 +1207,11 @@ mod tests {
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
+        config.txindex = true;
         let state = NodeState::open(config)?;
-        let handle = state.electrum_index_handle();
+        let Some(handle) = state.electrum_index_handle() else {
+            panic!("electrum index handle missing when txindex enabled");
+        };
 
         assert!(!format!("{handle:?}").is_empty());
         Ok(())
@@ -1318,6 +1399,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_handles_follow_txindex_availability() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("without-txindex");
+        config.p2p_listen.clear();
+        config.txindex = false;
+        let state = NodeState::open(config)?;
+        assert!(state.apply_handles().tx_index.is_none());
+
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("with-txindex");
+        config.p2p_listen.clear();
+        config.txindex = true;
+        let state = NodeState::open(config)?;
+        assert!(state.apply_handles().tx_index.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn prune_service_is_absent_when_config_disables_pruning() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
@@ -1332,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_block_persists_body_under_pruning_key_when_pruning_enabled() -> anyhow::Result<()> {
+    fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow::Result<()> {
         use bitcoin::blockdata::constants::genesis_block;
         use bitcoin::consensus::encode::serialize;
         use bitcoin::hashes::Hash as _;
@@ -1341,14 +1441,23 @@ mod tests {
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.prune_target_mb = 0;
         let state = NodeState::open(config)?;
         let block = genesis_block(bitcoin::Network::Regtest);
         let hash =
             bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
 
+        assert!(state.prune_service().is_none());
         state.apply_block(&block)?;
 
+        assert_eq!(
+            state
+                .blocks
+                .read()
+                .first()
+                .map(|record| record.block_hex.as_str()),
+            Some("")
+        );
         assert_eq!(
             state.storage.stored_prune_body(0, hash)?.as_deref(),
             Some(serialize(&block).as_slice())
@@ -1380,6 +1489,7 @@ mod tests {
                 hash,
                 height,
                 block_hex: "00".to_owned(),
+                body_size: 1,
                 header_hex: String::new(),
                 tx_count: 0,
                 time: 0,
@@ -1452,7 +1562,7 @@ mod tests {
         state
             .blocks
             .write()
-            .push(BlockRecord::from_block(10, &pruned_block));
+            .push(BlockRecord::from_block_metadata(10, &pruned_block));
 
         let pruned_tx = pruned_block.txdata[0].clone();
         let pruned_txid = pruned_tx.compute_txid();

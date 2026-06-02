@@ -25,11 +25,9 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         let Some(record) = ctx.block_by_hash(hash) else {
             return Err(RpcError::NotFound("block not found"));
         };
-        if record.block_hex.is_empty() {
+        let Some(bytes) = ctx.block_body_bytes(&record) else {
             return Err(RpcError::NotFound("block data pruned"));
-        }
-        let bytes = Vec::<u8>::from_hex(&record.block_hex)
-            .map_err(|_| RpcError::Internal("stored block hex is corrupt".to_owned()))?;
+        };
         let block: bitcoin::Block = deserialize(&bytes)
             .map_err(|_| RpcError::Internal("stored block bytes failed decode".to_owned()))?;
         for tx in &block.txdata {
@@ -153,14 +151,21 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         wanted.insert(parse_txid(txid)?);
     }
 
-    let blocks = ctx.blocks.read();
-    let mut saw_pruned_block = false;
-    for record in blocks.iter() {
-        if record.block_hex.is_empty() {
-            saw_pruned_block = true;
-            continue;
+    let blocks = match array.get(1).and_then(JsonValueTrait::as_str) {
+        Some(hash_str) => {
+            let hash = Hash256::from_str(hash_str)
+                .map_err(|_| RpcError::InvalidParams("blockhash must be 64 hex characters"))?;
+            let Some(record) = ctx.block_by_hash(hash) else {
+                return Err(RpcError::NotFound("block not found"));
+            };
+            vec![record]
         }
-        let Ok(bytes) = Vec::<u8>::from_hex(&record.block_hex) else {
+        None => ctx.blocks.read().clone(),
+    };
+    let mut saw_pruned_block = false;
+    for record in &blocks {
+        let Some(bytes) = ctx.block_body_bytes(record) else {
+            saw_pruned_block = true;
             continue;
         };
         let Ok(block) = deserialize::<bitcoin::Block>(&bytes) else {
@@ -268,6 +273,7 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_mempool::MempoolEntry;
+    use bitcoin_rs_primitives::Hash256;
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
     use super::getrawtransaction;
@@ -408,6 +414,65 @@ mod tests {
             result.as_ref().is_ok_and(|value| value.as_str().is_some()),
             "gettxoutproof should skip pruned blocks before matching retained blocks: {result:?}"
         );
+    }
+
+    #[test]
+    fn gettxoutproof_with_blockhash_skips_unrelated_records() {
+        struct PanicBodySource;
+
+        impl crate::BlockBodySource for PanicBodySource {
+            fn block_body(&self, height: u32, hash: Hash256) -> Option<Vec<u8>> {
+                panic!("specified blockhash proof should not load unrelated body {height}:{hash}");
+            }
+        }
+
+        let ctx = Arc::new(Context::new().with_block_body_source(Arc::new(PanicBodySource)));
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let Some(coinbase) = genesis.txdata.first() else {
+            panic!("genesis has no transactions");
+        };
+        let txid = coinbase.compute_txid();
+        let unrelated_hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        ctx.add_block(BlockRecord::synthetic(0, unrelated_hash));
+        let record = BlockRecord::from_block(1, &genesis);
+        let block_hash = record.hash;
+        ctx.add_block(record);
+        let handler = Handler::new(Arc::clone(&ctx));
+
+        let result = handler.dispatch(
+            "gettxoutproof",
+            &json!([[txid.to_string()], block_hash.to_string_be()]),
+        );
+
+        assert!(
+            result.as_ref().is_ok_and(|value| value.as_str().is_some()),
+            "gettxoutproof should inspect only the specified block: {result:?}"
+        );
+    }
+
+    #[test]
+    fn gettxoutproof_with_blockhash_reports_pruned_block_body() {
+        let ctx = Arc::new(Context::new());
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let Some(coinbase) = genesis.txdata.first() else {
+            panic!("genesis has no transactions");
+        };
+        let txid = coinbase.compute_txid();
+        let mut record = BlockRecord::from_block(0, &genesis);
+        let block_hash = record.hash;
+        record.block_hex.clear();
+        ctx.add_block(record);
+        let handler = Handler::new(Arc::clone(&ctx));
+
+        let result = handler.dispatch(
+            "gettxoutproof",
+            &json!([[txid.to_string()], block_hash.to_string_be()]),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RpcError::NotFound("block data pruned"))
+        ));
     }
 }
 

@@ -65,6 +65,7 @@ mod tests {
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
+        config.txindex = true;
         let state = NodeState::open(config)?;
         let outcome = import_block(&state, &bytes)?;
 

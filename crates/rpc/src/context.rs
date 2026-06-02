@@ -23,6 +23,8 @@ pub struct BlockRecord {
     pub height: u32,
     /// Serialized block bytes as lowercase hex.
     pub block_hex: String,
+    /// Serialized block byte length.
+    pub body_size: usize,
     /// Serialized block header bytes as lowercase hex.
     pub header_hex: String,
     /// Transaction count in the block.
@@ -31,18 +33,59 @@ pub struct BlockRecord {
     pub time: u32,
 }
 
+/// Storage-backed block body reader used when block records keep only metadata.
+pub trait BlockBodySource: Send + Sync {
+    /// Returns serialized block bytes for `height` and `hash`, if available.
+    fn block_body(&self, height: u32, hash: Hash256) -> Option<Vec<u8>>;
+}
+
 impl BlockRecord {
     /// Builds a record from a decoded Bitcoin block.
     #[must_use]
     pub fn from_block(height: u32, block: &Block) -> Self {
+        let block_bytes = serialize(block);
+        Self::from_block_bytes(height, block, &block_bytes)
+    }
+
+    /// Builds a record from a decoded Bitcoin block and its serialized bytes.
+    ///
+    /// Callers on hot paths can pass bytes already produced for persistence or
+    /// indexes instead of serializing the full block a second time.
+    #[must_use]
+    pub fn from_block_bytes(height: u32, block: &Block, block_bytes: &[u8]) -> Self {
         let block_hash = block.block_hash();
         let hash = Hash256::from_le_bytes(block_hash.as_byte_array());
         let header_hex = serialize(&block.header).to_lower_hex_string();
-        let block_hex = serialize(block).to_lower_hex_string();
+        let block_hex = block_bytes.to_lower_hex_string();
         Self {
             hash,
             height,
             block_hex,
+            body_size: block_bytes.len(),
+            header_hex,
+            tx_count: block.txdata.len(),
+            time: block.header.time,
+        }
+    }
+
+    /// Builds a metadata-only record for nodes that serve block bodies from storage.
+    #[must_use]
+    pub fn from_block_metadata(height: u32, block: &Block) -> Self {
+        let block_bytes = serialize(block);
+        Self::from_block_metadata_bytes(height, block, &block_bytes)
+    }
+
+    /// Builds a metadata-only record from bytes already serialized by the caller.
+    #[must_use]
+    pub fn from_block_metadata_bytes(height: u32, block: &Block, block_bytes: &[u8]) -> Self {
+        let block_hash = block.block_hash();
+        let hash = Hash256::from_le_bytes(block_hash.as_byte_array());
+        let header_hex = serialize(&block.header).to_lower_hex_string();
+        Self {
+            hash,
+            height,
+            block_hex: String::new(),
+            body_size: block_bytes.len(),
             header_hex,
             tx_count: block.txdata.len(),
             time: block.header.time,
@@ -56,6 +99,7 @@ impl BlockRecord {
             hash,
             height,
             block_hex: String::new(),
+            body_size: 0,
             header_hex: String::new(),
             tx_count: 0,
             time: 0,
@@ -216,6 +260,8 @@ pub struct Context {
     pub peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
     /// Shared in-memory block tree.
     pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
+    /// Optional durable block body reader for metadata-only block records.
+    pub block_body_source: Option<Arc<dyn BlockBodySource>>,
     /// Current getblocktemplate long-poll id.
     pub mining_template_id: Arc<ArcSwap<CompactString>>,
     /// Receiver notified when mining template inputs change.
@@ -285,6 +331,7 @@ impl Context {
             chain_network: Network::Mainnet,
             peers: Arc::new(RwLock::new(Vec::new())),
             block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
+            block_body_source: None,
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
             mining_notifications,
             inbound_blocks_sender: None,
@@ -338,6 +385,7 @@ impl Context {
             chain_network,
             peers,
             block_tree,
+            block_body_source: None,
             mining_template_id,
             mining_notifications,
             inbound_blocks_sender,
@@ -348,6 +396,13 @@ impl Context {
             zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
             mining_sender,
         }
+    }
+
+    /// Returns `self` with a durable block body source.
+    #[must_use]
+    pub fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
+        self.block_body_source = Some(source);
+        self
     }
 
     /// Attaches the node-owned pruning mutator used by `pruneblockchain`.
@@ -506,6 +561,26 @@ impl Context {
             .cloned()
     }
 
+    /// Returns serialized block bytes from the record or durable storage.
+    #[must_use]
+    pub fn block_body_bytes(&self, record: &BlockRecord) -> Option<Vec<u8>> {
+        if !record.block_hex.is_empty() {
+            return Vec::<u8>::from_hex(&record.block_hex).ok();
+        }
+        self.block_body_source
+            .as_ref()?
+            .block_body(record.height, record.hash)
+    }
+
+    /// Returns lowercase serialized block hex from the record or durable storage.
+    #[must_use]
+    pub fn block_body_hex(&self, record: &BlockRecord) -> Option<String> {
+        if !record.block_hex.is_empty() {
+            return Some(record.block_hex.clone());
+        }
+        Some(self.block_body_bytes(record)?.to_lower_hex_string())
+    }
+
     /// Returns the median-time-past at the block with `hash`, or `None` if the
     /// block is not in the tree.
     #[must_use]
@@ -550,16 +625,13 @@ impl Context {
 
 impl bitcoin_rs_index::BlockSource for Context {
     fn block_at_height(&self, height: u32) -> Option<bitcoin::Block> {
-        let block_hex = self
+        let record = self
             .blocks
             .read()
             .iter()
             .find(|record| record.height == height)
-            .map(|record| record.block_hex.clone())?;
-        if block_hex.is_empty() {
-            return None;
-        }
-        let bytes = Vec::<u8>::from_hex(&block_hex).ok()?;
+            .cloned()?;
+        let bytes = self.block_body_bytes(&record)?;
         bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes).ok()
     }
 }
@@ -676,6 +748,61 @@ mod tests {
         let snapshot = ctx.coin_stats.snapshot();
         assert_eq!(snapshot.utxo_count, 1);
         assert_eq!(snapshot.total_amount, 125_000);
+    }
+
+    #[test]
+    fn block_record_from_block_bytes_matches_from_block() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_bytes = serialize(&block);
+
+        let from_block = BlockRecord::from_block(0, &block);
+        let from_bytes = BlockRecord::from_block_bytes(0, &block, &block_bytes);
+
+        assert_eq!(from_bytes.hash, from_block.hash);
+        assert_eq!(from_bytes.height, from_block.height);
+        assert_eq!(from_bytes.block_hex, from_block.block_hex);
+        assert_eq!(from_bytes.body_size, from_block.body_size);
+        assert_eq!(from_bytes.header_hex, from_block.header_hex);
+        assert_eq!(from_bytes.tx_count, from_block.tx_count);
+        assert_eq!(from_bytes.time, from_block.time);
+    }
+
+    #[test]
+    fn context_reads_metadata_only_block_record_from_body_source() {
+        struct SingleBlockSource {
+            height: u32,
+            hash: Hash256,
+            body: Vec<u8>,
+        }
+
+        impl BlockBodySource for SingleBlockSource {
+            fn block_body(&self, height: u32, hash: Hash256) -> Option<Vec<u8>> {
+                (height == self.height && hash == self.hash).then(|| self.body.clone())
+            }
+        }
+
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let body = serialize(&block);
+        let record = BlockRecord::from_block_metadata(0, &block);
+        let source = Arc::new(SingleBlockSource {
+            height: 0,
+            hash: record.hash,
+            body: body.clone(),
+        });
+        let ctx = Context::new().with_block_body_source(source);
+        ctx.add_block(record.clone());
+
+        assert!(record.block_hex.is_empty());
+        assert_eq!(record.body_size, body.len());
+        assert_eq!(
+            ctx.block_body_bytes(&record).as_deref(),
+            Some(body.as_slice())
+        );
+        let expected_hex = body.to_lower_hex_string();
+        assert_eq!(
+            ctx.block_body_hex(&record).as_deref(),
+            Some(expected_hex.as_str())
+        );
     }
 
     #[test]

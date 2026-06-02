@@ -301,16 +301,17 @@ fn getblockfilter_returns_not_found_for_missing_filter_row()
 }
 
 #[test]
-fn getindexinfo_returns_both_indexes() -> Result<(), Box<dyn std::error::Error>> {
+fn getindexinfo_returns_available_indexes() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
 
     let result = handler.dispatch("getindexinfo", &json!([]))?;
 
     let txindex = result.get("txindex");
-    assert!(txindex.is_some(), "txindex entry missing: {result:?}");
-    assert_eq!(txindex.get("synced").as_bool(), Some(false));
-    assert_eq!(txindex.get("best_block_height").as_u64(), Some(0));
+    assert!(
+        txindex.is_none(),
+        "txindex entry unexpectedly present: {result:?}"
+    );
 
     let filter_index = result.get("basicblockfilterindex");
     assert!(
@@ -320,6 +321,25 @@ fn getindexinfo_returns_both_indexes() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(filter_index.get("synced").as_bool(), Some(false));
     assert_eq!(filter_index.get("best_block_height").as_u64(), Some(0));
 
+    Ok(())
+}
+
+#[test]
+fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut ctx = Context::new();
+    let indexer: Box<dyn IndexerLike> = Box::new(FakeIndexer {
+        values: HashMap::new(),
+    });
+    ctx.indexer = Some(Arc::new(Mutex::new(indexer)));
+    let handler = Handler::new(Arc::new(ctx));
+
+    let result = handler.dispatch("getindexinfo", &json!(["txindex"]))?;
+    let txindex = result.get("txindex");
+
+    assert!(txindex.is_some(), "txindex entry missing: {result:?}");
+    assert_eq!(txindex.get("synced").as_bool(), Some(false));
+    assert_eq!(txindex.get("best_block_height").as_u64(), Some(0));
     Ok(())
 }
 

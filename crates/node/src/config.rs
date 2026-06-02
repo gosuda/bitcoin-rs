@@ -272,6 +272,9 @@ impl Config {
         if self.electrum_tls_cert.is_some() && self.electrum_bind.is_none() {
             bail!("electrum_tls_cert requires electrum_bind");
         }
+        if self.electrum_bind.is_some() && !self.txindex {
+            bail!("electrum_bind requires txindex");
+        }
         match (&self.g2_muhash_samples, self.g2_muhash_tip_height) {
             (Some(_), Some(0)) => bail!("g2_muhash_tip_height must be greater than zero"),
             (Some(_), None) => bail!("g2_muhash_samples requires g2_muhash_tip_height"),

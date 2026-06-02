@@ -1,9 +1,7 @@
 //! Node-side adapter for server-side P2P active-chain requests.
 //!
-//! This is deliberately an in-memory view: headers come from `BlockTree`, and
-//! block bodies come from the same `BlockRecord` cache used by RPC. Persisted
-//! pruned body reads are not hidden here; absent or pruned bodies are reported
-//! as unavailable to the P2P dispatcher.
+//! Headers come from `BlockTree`; block bodies come from the shared
+//! `BlockRecord` cache or the durable body source when records are metadata-only.
 
 use alloc::sync::Arc;
 
@@ -15,7 +13,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_p2p::{ChainQuery, InventoryResponse};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_rpc::BlockRecord;
+use bitcoin_rs_rpc::{BlockBodySource, BlockRecord};
 use parking_lot::RwLock;
 
 /// Read-only in-memory active-chain view for P2P `getheaders` / `getdata`.
@@ -23,6 +21,7 @@ use parking_lot::RwLock;
 pub struct NodeP2pChainQuery {
     block_tree: Arc<RwLock<BlockTree>>,
     blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    block_body_source: Option<Arc<dyn BlockBodySource>>,
 }
 
 impl NodeP2pChainQuery {
@@ -32,7 +31,18 @@ impl NodeP2pChainQuery {
         block_tree: Arc<RwLock<BlockTree>>,
         blocks: Arc<RwLock<Vec<BlockRecord>>>,
     ) -> Self {
-        Self { block_tree, blocks }
+        Self {
+            block_tree,
+            blocks,
+            block_body_source: None,
+        }
+    }
+
+    /// Returns `self` with a durable body source for metadata-only block records.
+    #[must_use]
+    pub fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
+        self.block_body_source = Some(source);
+        self
     }
 }
 
@@ -120,16 +130,22 @@ impl NodeP2pChainQuery {
         let record = blocks
             .iter()
             .find(|record| record.height == current_height && record.hash == hash256)?;
-        if record.block_hex.is_empty() {
-            return None;
-        }
-        let bytes = Vec::<u8>::from_hex(&record.block_hex).ok()?;
+        let bytes = self.block_body_bytes(record)?;
         let block = deserialize::<bitcoin::Block>(&bytes).ok()?;
         if block.block_hash() != hash {
             return None;
         }
         let tree = self.block_tree.read();
         (active_height(&tree, tree.tip()?.tip_id, hash) == Some(current_height)).then_some(block)
+    }
+
+    fn block_body_bytes(&self, record: &BlockRecord) -> Option<Vec<u8>> {
+        if !record.block_hex.is_empty() {
+            return Vec::<u8>::from_hex(&record.block_hex).ok();
+        }
+        self.block_body_source
+            .as_ref()?
+            .block_body(record.height, record.hash)
     }
 }
 
@@ -178,6 +194,7 @@ fn hash256(hash: BlockHash) -> Hash256 {
 mod tests {
     use super::*;
     use bitcoin::block::Version;
+    use bitcoin::consensus::encode::serialize;
     use bitcoin::pow::CompactTarget;
     use bitcoin::{Block, TxMerkleNode, Txid};
     use bitcoin_rs_chain::NodeStatus;
@@ -309,6 +326,41 @@ mod tests {
 
         assert!(response.blocks.is_empty());
         assert_eq!(response.not_found, vec![Inventory::Block(hash)]);
+        Ok(())
+    }
+
+    #[test]
+    fn getdata_reads_metadata_only_body_from_source() -> Result<(), Box<dyn std::error::Error>> {
+        struct SingleBlockSource {
+            height: u32,
+            hash: Hash256,
+            body: Vec<u8>,
+        }
+
+        impl BlockBodySource for SingleBlockSource {
+            fn block_body(&self, height: u32, hash: Hash256) -> Option<Vec<u8>> {
+                (height == self.height && hash == self.hash).then(|| self.body.clone())
+            }
+        }
+
+        let headers = seed_headers(2);
+        let block = Block {
+            header: headers[1],
+            txdata: Vec::new(),
+        };
+        let record = BlockRecord::from_block_metadata(1, &block);
+        let body_source = Arc::new(SingleBlockSource {
+            height: 1,
+            hash: record.hash,
+            body: serialize(&block),
+        });
+        let query = query_with(headers, vec![record])?.with_block_body_source(body_source);
+
+        let response = query.blocks_for_inventory(&[Inventory::Block(block.block_hash())]);
+
+        assert_eq!(response.blocks.len(), 1);
+        assert_eq!(response.blocks[0].block_hash(), block.block_hash());
+        assert!(response.not_found.is_empty());
         Ok(())
     }
 

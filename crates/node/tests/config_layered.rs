@@ -97,6 +97,19 @@ fn cli_can_override_socket_and_vector_fields() -> Result<()> {
 }
 
 #[test]
+fn electrum_bind_requires_txindex() -> Result<()> {
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.electrum_bind = Some("127.0.0.1:50001".parse()?);
+    config.txindex = false;
+
+    match config.validate() {
+        Ok(()) => panic!("electrum_bind without txindex unexpectedly validated"),
+        Err(error) => assert_eq!(error.to_string(), "electrum_bind requires txindex"),
+    }
+    Ok(())
+}
+
+#[test]
 fn zmq_layers_parse_precedence_and_publication_order() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let toml_path = temp.path().join("node.toml");

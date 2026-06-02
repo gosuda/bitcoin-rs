@@ -1,5 +1,7 @@
 //! Block-apply pipeline over shared node handles.
 
+mod scratch;
+
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -10,11 +12,12 @@ use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_primitives::{Network, OutPoint};
 use bitcoin_rs_rpc::BlockRecord;
 use bitcoin_rs_utxo::{BlockChanges, LiveOutput, UtxoAdd, UtxoSet};
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 use crate::state::ApplyError;
 use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError, WriteBatch as _};
+use scratch::ApplyScratch;
 
 /// Number of blocks after a coinbase that its outputs become spendable.
 /// Consensus rule since Bitcoin v0.3.1; universal across networks.
@@ -32,6 +35,12 @@ pub(crate) trait PruneBodyStore: Send + Sync {
         hash: bitcoin_rs_primitives::Hash256,
         body: &[u8],
     ) -> Result<(), StorageError>;
+
+    fn load_block_body(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<Vec<u8>>, StorageError>;
 }
 
 impl<S: KvStore> PruneBodyStore for S {
@@ -49,6 +58,17 @@ impl<S: KvStore> PruneBodyStore for S {
         );
         self.write(batch)
     }
+
+    fn load_block_body(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.get(
+            ColumnFamily::BlockTree,
+            &bitcoin_rs_pruning::block_body_key(height, hash),
+        )
+    }
 }
 
 /// Owned shared handle set needed by `apply_block` to perform a block apply.
@@ -65,8 +85,8 @@ pub struct ApplyHandles {
     pub utxo: Arc<UtxoSet>,
     /// Shared coinstats listener.
     pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    /// Shared best-effort confirmed transaction indexer.
-    pub tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
+    /// Shared best-effort confirmed transaction indexer, when enabled.
+    pub tx_index: Option<Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
     /// Shared best-effort compact-filter indexer.
     pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
     /// Shared mempool.
@@ -77,6 +97,7 @@ pub struct ApplyHandles {
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
     pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
+    pub(crate) cache_block_bodies_in_memory: bool,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
 }
@@ -92,7 +113,7 @@ impl ApplyHandles {
         block_tree: Arc<RwLock<BlockTree>>,
         utxo: Arc<UtxoSet>,
         coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-        tx_index: Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>,
+        tx_index: Option<Arc<parking_lot::Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>>,
         filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
         mempool: Arc<RwLock<Mempool>>,
         blocks: Arc<RwLock<Vec<BlockRecord>>>,
@@ -112,6 +133,7 @@ impl ApplyHandles {
             blocks,
             transactions,
             zmq_publisher,
+            cache_block_bodies_in_memory: true,
             block_body_store: None,
             g2_muhash_sampler: None,
         }
@@ -254,11 +276,12 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
+    let scratch = ApplyScratch::new(block, height)?;
     let filter_bytes = compute_basic_filter(block, handles, block_hash, height)?;
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
-    let changes = build_utxo_changes(block, height)?;
+    let changes = build_utxo_changes(block, height, &scratch)?;
     if let Some(store) = &handles.block_body_store {
         store
             .persist_block_body(height, block_hash, &block_bytes)
@@ -281,25 +304,26 @@ pub fn apply_block(
         .record(block_tree_insert_dur.as_secs_f64());
     let tip = block_tree_insert_result?;
 
-    handles
-        .blocks
-        .write()
-        .push(bitcoin_rs_rpc::BlockRecord::from_block(height, block));
+    let block_record = if handles.cache_block_bodies_in_memory {
+        bitcoin_rs_rpc::BlockRecord::from_block_bytes(height, block, &block_bytes)
+    } else {
+        bitcoin_rs_rpc::BlockRecord::from_block_metadata_bytes(height, block, &block_bytes)
+    };
+    handles.blocks.write().push(block_record);
     let mempool_evict_started = quanta::Instant::now();
-    for tx in &block.txdata {
-        let txid = tx.compute_txid();
-        let evicted_count = handles.mempool.write().remove_by_txid(&txid).len();
+    for txid in scratch.txids() {
+        let evicted_count = handles.mempool.write().remove_by_txid(txid).len();
         tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
     }
     let mempool_evict_dur = mempool_evict_started.elapsed();
     metrics::histogram!("node.apply_block.mempool_evict_seconds")
         .record(mempool_evict_dur.as_secs_f64());
     let tx_index_started = quanta::Instant::now();
-    for tx in &block.txdata {
-        handles
-            .transactions
-            .write()
-            .insert(tx.compute_txid(), tx.clone());
+    if handles.tx_index.is_some() {
+        let mut transactions = handles.transactions.write();
+        for (txid, tx) in scratch.txids().iter().zip(&block.txdata) {
+            transactions.insert(*txid, tx.clone());
+        }
     }
     let tx_index_dur = tx_index_started.elapsed();
     metrics::histogram!("node.apply_block.tx_index_seconds").record(tx_index_dur.as_secs_f64());
@@ -310,24 +334,26 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
         .record(coin_stats_dur.as_secs_f64());
     let tx_index_ingest_started = quanta::Instant::now();
-    let tx_index_ingest_result = handles.tx_index.lock().ingest_block(&block_bytes, height);
-    match tx_index_ingest_result {
-        Ok(counts) => {
-            tracing::debug!(
-                height,
-                txids = counts.txids,
-                funding = counts.funding,
-                spending = counts.spending,
-                headers = counts.headers,
-                "tx_index ingested block"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                height,
-                %error,
-                "tx_index failed to ingest block; best-effort path continues"
-            );
+    if let Some(tx_index) = &handles.tx_index {
+        let tx_index_ingest_result = tx_index.lock().ingest_block(&block_bytes, height);
+        match tx_index_ingest_result {
+            Ok(counts) => {
+                tracing::debug!(
+                    height,
+                    txids = counts.txids,
+                    funding = counts.funding,
+                    spending = counts.spending,
+                    headers = counts.headers,
+                    "tx_index ingested block"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    height,
+                    %error,
+                    "tx_index failed to ingest block; best-effort path continues"
+                );
+            }
         }
     }
     let tx_index_ingest_dur = tx_index_ingest_started.elapsed();
@@ -388,10 +414,9 @@ pub fn apply_block(
     // ZmqPublisher contract; the trait's methods return `()`.
     handles.zmq_publisher.publish_hashblock(tip.hash);
     handles.zmq_publisher.publish_rawblock(&block_bytes);
-    for tx in &block.txdata {
-        handles.zmq_publisher.publish_hashtx(tx.compute_txid());
-        let rawtx_bytes = bitcoin::consensus::encode::serialize(tx);
-        handles.zmq_publisher.publish_rawtx(&rawtx_bytes);
+    for (txid, rawtx_bytes) in scratch.txids().iter().zip(scratch.raw_txs()) {
+        handles.zmq_publisher.publish_hashtx(*txid);
+        handles.zmq_publisher.publish_rawtx(rawtx_bytes);
     }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
     if let Some(sampler) = &handles.g2_muhash_sampler {
@@ -875,6 +900,7 @@ fn apply_nbits_error(error: bitcoin_rs_chain::ChainError) -> ApplyError {
 fn build_utxo_changes(
     block: &bitcoin::Block,
     height: u32,
+    scratch: &ApplyScratch,
 ) -> core::result::Result<BlockChanges, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
@@ -884,16 +910,14 @@ fn build_utxo_changes(
         return Ok(BlockChanges::default());
     }
 
-    let same_block_spent = same_block_spent_outpoints(block, height)?;
     let mut changes = BlockChanges::default();
-    for tx in &block.txdata {
-        let txid = tx.compute_txid();
+    for (tx, txid) in block.txdata.iter().zip(scratch.txids()) {
         for (vout_idx, txout) in tx.output.iter().enumerate() {
             let outpoint = OutPoint::new(
                 bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
                 u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
             );
-            if same_block_spent.contains(&outpoint) {
+            if scratch.same_block_spent().contains(&outpoint) {
                 continue;
             }
             changes.add(UtxoAdd::new(
@@ -907,7 +931,7 @@ fn build_utxo_changes(
         if !tx.is_coinbase() {
             for tx_input in &tx.input {
                 let previous_output = internal_outpoint(&tx_input.previous_output);
-                if same_block_spent.contains(&previous_output) {
+                if scratch.same_block_spent().contains(&previous_output) {
                     continue;
                 }
                 changes.remove(previous_output);
@@ -915,35 +939,6 @@ fn build_utxo_changes(
         }
     }
     Ok(changes)
-}
-
-fn same_block_spent_outpoints(
-    block: &bitcoin::Block,
-    height: u32,
-) -> core::result::Result<HashSet<OutPoint>, ApplyError> {
-    use bitcoin::hashes::Hash as _;
-
-    let mut created = HashSet::new();
-    let mut spent = HashSet::new();
-    for tx in &block.txdata {
-        if !tx.is_coinbase() {
-            for input in &tx.input {
-                let previous_output = internal_outpoint(&input.previous_output);
-                if created.contains(&previous_output) {
-                    spent.insert(previous_output);
-                }
-            }
-        }
-
-        let txid = tx.compute_txid();
-        for (vout, _txout) in tx.output.iter().enumerate() {
-            created.insert(OutPoint::new(
-                bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
-                u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?,
-            ));
-        }
-    }
-    Ok(spent)
 }
 
 fn internal_outpoint(outpoint: &bitcoin::OutPoint) -> OutPoint {
@@ -1174,7 +1169,8 @@ mod consensus_rule_tests {
         };
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
 
-        let changes = build_utxo_changes(&block, 2)?;
+        let scratch = ApplyScratch::new(&block, 2)?;
+        let changes = build_utxo_changes(&block, 2, &scratch)?;
         utxo.commit_block(&changes, &Hash256::from_le_bytes(&[0x63; 32]))?;
 
         assert!(utxo.get(&internal_outpoint(&base_prevout)).is_none());
@@ -1909,6 +1905,30 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    fn apply_block_skips_confirmed_transaction_cache_when_disabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut handles = empty_apply_handles_for_network(Network::Regtest);
+        handles.tx_index = None;
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+
+        apply_block(&handles, &block)?;
+
+        assert!(handles.transactions.read().is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn compute_basic_filter_skips_missing_prevout_without_persisting_empty_row()
     -> Result<(), Box<dyn std::error::Error>> {
         let filter_index = Arc::new(RecordingFilterIndex::default());
@@ -2360,7 +2380,7 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            noop_tx_index(),
+            Some(noop_tx_index()),
             filter_index,
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
@@ -2379,7 +2399,7 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            noop_tx_index(),
+            Some(noop_tx_index()),
             noop_filter_index(),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),

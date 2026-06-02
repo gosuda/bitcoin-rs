@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use crossbeam_channel::{Receiver, TrySendError, bounded};
 
 use crate::config::Config;
@@ -67,9 +67,14 @@ fn spawn_electrum_listener(
         bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
         bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
     };
-    let index = state
-        .electrum_index_handle()
-        .with_history_reader(state.electrum_history_reader())
+    let Some(index) = state.electrum_index_handle() else {
+        bail!("electrum listener requires txindex");
+    };
+    let Some(history_reader) = state.electrum_history_reader() else {
+        bail!("electrum listener requires txindex history reader");
+    };
+    let index = index
+        .with_history_reader(history_reader)
         .with_network(network);
     let mempool = bitcoin_rs_electrum::MempoolHandle::from_arc(state.mempool());
     let cfg = bitcoin_rs_electrum::ServerConfig::default();
@@ -354,10 +359,11 @@ pub fn run(mut config: Config) -> Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let banned = state.banned_subnets();
-    let p2p_chain_query: P2pChainQuery = Arc::new(crate::NodeP2pChainQuery::new(
-        state.block_tree(),
-        state.blocks(),
-    ));
+    let block_body_source = state.block_body_source();
+    let p2p_chain_query: P2pChainQuery = Arc::new(
+        crate::NodeP2pChainQuery::new(state.block_tree(), state.blocks())
+            .with_block_body_source(Arc::clone(&block_body_source)),
+    );
     let loop_handle = EventLoop::new(shutdown_rx, state.sync());
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
     let mut rpc_context = bitcoin_rs_rpc::Context::from_handles(
@@ -378,8 +384,9 @@ pub fn run(mut config: Config) -> Result<()> {
         Some(state.p2p_outbound_sender()),
         Arc::clone(&banned),
         Arc::new(parking_lot::RwLock::new(Vec::new())),
-        Some(state.tx_index()),
+        state.tx_index(),
     );
+    rpc_context = rpc_context.with_block_body_source(block_body_source);
     if let Some(prune_service) = state.prune_service() {
         rpc_context = rpc_context.with_prune_service(prune_service);
     }
