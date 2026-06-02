@@ -73,6 +73,13 @@ impl KvStore for MdbxStore {
         MdbxWriteBatch::default()
     }
 
+    fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
+        txn.put(self.database(cf)?, key, value, WriteFlags::empty())
+            .map_err(StorageError::backend)?;
+        txn.commit().map_err(StorageError::backend)
+    }
+
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
         for op in batch.ops {

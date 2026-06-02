@@ -61,6 +61,12 @@ impl KvStore for FjallStore {
         FjallWriteBatch::default()
     }
 
+    fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.keyspace(cf)?
+            .insert(key, value)
+            .map_err(StorageError::backend)
+    }
+
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let mut fjall_batch = self.db.batch();
         for op in batch.ops {

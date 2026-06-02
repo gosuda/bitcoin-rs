@@ -24,6 +24,13 @@ pub trait KvStore: Send + Sync + 'static {
     /// Creates a backend-specific write batch.
     fn new_batch(&self) -> Self::WriteBatch;
 
+    /// Inserts or replaces one `key` with `value` in `cf`.
+    fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        let mut batch = self.new_batch();
+        batch.put(cf, key, value);
+        self.write(batch)
+    }
+
     /// Atomically applies `batch`.
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError>;
 

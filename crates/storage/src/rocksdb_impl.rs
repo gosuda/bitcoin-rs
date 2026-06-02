@@ -89,6 +89,12 @@ impl KvStore for RocksDbStore {
         RocksDbWriteBatch::default()
     }
 
+    fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.db
+            .put_cf(self.cf_handle(cf)?, key, value)
+            .map_err(StorageError::backend)
+    }
+
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let mut rocks_batch = RocksWriteBatch::default();
         for op in batch.ops {

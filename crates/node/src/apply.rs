@@ -16,7 +16,7 @@ use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 use crate::state::ApplyError;
-use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError, WriteBatch as _};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError};
 use scratch::ApplyScratch;
 
 /// Number of blocks after a coinbase that its outputs become spendable.
@@ -50,13 +50,11 @@ impl<S: KvStore> PruneBodyStore for S {
         hash: bitcoin_rs_primitives::Hash256,
         body: &[u8],
     ) -> Result<(), StorageError> {
-        let mut batch = self.new_batch();
-        batch.put(
+        self.put(
             ColumnFamily::BlockTree,
             &bitcoin_rs_pruning::block_body_key(height, hash),
             body,
-        );
-        self.write(batch)
+        )
     }
 
     fn load_block_body(

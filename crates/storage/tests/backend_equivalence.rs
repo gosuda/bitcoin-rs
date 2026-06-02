@@ -15,6 +15,8 @@ fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError>
     insert_rows(&store)?;
     verify_rows(&store)?;
     verify_prefix_iteration(&store)?;
+    overwrite_one_row_with_direct_put(&store)?;
+    verify_direct_put_overwrite(&store)?;
     delete_first_rows(&store)?;
     verify_first_rows_deleted(&store)?;
     delete_range_slice(&store)?;
@@ -34,6 +36,27 @@ fn insert_rows(store: &impl KvStore) -> Result<(), StorageError> {
         }
     }
     store.write(batch)
+}
+
+fn overwrite_one_row_with_direct_put(store: &impl KvStore) -> Result<(), StorageError> {
+    for cf in ColumnFamily::ALL.iter().copied() {
+        store.put(
+            cf,
+            &0_u32.to_le_bytes(),
+            format!("{cf:?}-direct").as_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
+fn verify_direct_put_overwrite(store: &impl KvStore) -> Result<(), StorageError> {
+    for cf in ColumnFamily::ALL.iter().copied() {
+        assert_eq!(
+            store.get(cf, &0_u32.to_le_bytes())?,
+            Some(format!("{cf:?}-direct").into_bytes())
+        );
+    }
+    Ok(())
 }
 
 fn verify_rows(store: &impl KvStore) -> Result<(), StorageError> {

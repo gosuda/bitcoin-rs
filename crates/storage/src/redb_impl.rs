@@ -56,6 +56,17 @@ impl KvStore for RedbStore {
         RedbWriteBatch::default()
     }
 
+    fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
+        {
+            let mut table = write_txn
+                .open_table(table_for(cf))
+                .map_err(StorageError::backend)?;
+            table.insert(key, value).map_err(StorageError::backend)?;
+        }
+        write_txn.commit().map_err(StorageError::backend)
+    }
+
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         for op in batch.ops {

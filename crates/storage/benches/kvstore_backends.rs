@@ -12,6 +12,8 @@ const READ_ROWS: u32 = 1_000_000;
 const PREFIX_ROWS: u32 = 100_000;
 const MIXED_THREADS: usize = 16;
 const MIXED_ROWS_PER_THREAD: u32 = 62_500;
+const SINGLE_BLOCK_BODY_PUT_ROWS: u32 = 1_000;
+const BLOCK_BODY_VALUE_BYTES: usize = 16 * 1024;
 
 fn bench_sequential_writes_1m<S, Open>(c: &mut Criterion, backend: &str, open: Open)
 where
@@ -146,6 +148,31 @@ where
     });
 }
 
+fn bench_single_block_body_puts_1k<S, Open>(c: &mut Criterion, backend: &str, open: Open)
+where
+    S: KvStore,
+    Open: Fn(&Path) -> Result<S, StorageError> + Copy,
+{
+    c.bench_function(&format!("{backend}/bench_single_block_body_puts_1k"), |b| {
+        b.iter_batched(
+            || {
+                let temp = must(tempfile::TempDir::new());
+                let store = must(open(temp.path()));
+                let value = vec![0xa5; BLOCK_BODY_VALUE_BYTES];
+                (temp, store, value)
+            },
+            |(_temp, store, value)| {
+                for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
+                    let key = block_body_like_key(counter);
+                    must(store.put(ColumnFamily::BlockTree, &key, &value));
+                }
+                must(store.flush());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn write_rows(store: &impl KvStore, rows: u32) {
     let mut batch = store.new_batch();
     for counter in 0_u32..rows {
@@ -154,6 +181,17 @@ fn write_rows(store: &impl KvStore, rows: u32) {
     }
     must(store.write(batch));
     must(store.flush());
+}
+
+fn block_body_like_key(height: u32) -> [u8; 37] {
+    let mut key = [0_u8; 37];
+    key[0] = b'b';
+    key[1..5].copy_from_slice(&height.to_be_bytes());
+    // Keep this bench crate independent of pruning while preserving the same key shape.
+    for chunk in key[5..].chunks_exact_mut(size_of::<u32>()) {
+        chunk.copy_from_slice(&height.to_le_bytes());
+    }
+    key
 }
 
 fn prefixed_key(counter: u32) -> Vec<u8> {
@@ -190,6 +228,11 @@ fn benches(c: &mut Criterion) {
             "rocksdb",
             |path| bitcoin_rs_storage::RocksDbStore::open(path),
         );
+        bench_single_block_body_puts_1k::<bitcoin_rs_storage::RocksDbStore, _>(
+            c,
+            "rocksdb",
+            |path| bitcoin_rs_storage::RocksDbStore::open(path),
+        );
     }
 
     #[cfg(feature = "fjall")]
@@ -207,6 +250,9 @@ fn benches(c: &mut Criterion) {
             bitcoin_rs_storage::FjallStore::open(path)
         });
         bench_mixed_16thread_workload::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
+            bitcoin_rs_storage::FjallStore::open(path)
+        });
+        bench_single_block_body_puts_1k::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
             bitcoin_rs_storage::FjallStore::open(path)
         });
     }
@@ -228,6 +274,9 @@ fn benches(c: &mut Criterion) {
         bench_mixed_16thread_workload::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
             bitcoin_rs_storage::RedbStore::open(path)
         });
+        bench_single_block_body_puts_1k::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
+            bitcoin_rs_storage::RedbStore::open(path)
+        });
     }
 
     #[cfg(feature = "mdbx")]
@@ -245,6 +294,9 @@ fn benches(c: &mut Criterion) {
             bitcoin_rs_storage::MdbxStore::open(path)
         });
         bench_mixed_16thread_workload::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
+            bitcoin_rs_storage::MdbxStore::open(path)
+        });
+        bench_single_block_body_puts_1k::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
             bitcoin_rs_storage::MdbxStore::open(path)
         });
     }
