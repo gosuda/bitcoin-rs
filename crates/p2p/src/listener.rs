@@ -427,27 +427,29 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     command = ?std::mem::discriminant(&message),
                     "p2p message received",
                 );
-                if let bitcoin::p2p::message::NetworkMessage::Headers(headers) = &message {
-                    let batch = headers.clone();
-                    if let Err(error) = inbound_headers_tx.send(batch) {
-                        tracing::warn!(
-                            peer_addr = %peer_addr,
-                            %error,
-                            "p2p inbound headers channel disconnected",
-                        );
-                    }
-                }
-                if let bitcoin::p2p::message::NetworkMessage::Block(block) = &message {
-                    if let Err(error) = inbound_blocks_tx.send(block.clone()) {
-                        tracing::warn!(
-                            peer_addr = %peer_addr,
-                            %error,
-                            "p2p inbound blocks channel disconnected",
-                        );
-                    }
-                }
                 let responses =
                     crate::dispatch::dispatch_inbound_with_chain(peer, &message, chain_query)?;
+                match message {
+                    bitcoin::p2p::message::NetworkMessage::Headers(headers) => {
+                        if let Err(error) = inbound_headers_tx.send(headers) {
+                            tracing::warn!(
+                                peer_addr = %peer_addr,
+                                %error,
+                                "p2p inbound headers channel disconnected",
+                            );
+                        }
+                    }
+                    bitcoin::p2p::message::NetworkMessage::Block(block) => {
+                        if let Err(error) = inbound_blocks_tx.send(block) {
+                            tracing::warn!(
+                                peer_addr = %peer_addr,
+                                %error,
+                                "p2p inbound blocks channel disconnected",
+                            );
+                        }
+                    }
+                    _ => {}
+                }
                 for response in responses {
                     peer.send(&response)?;
                 }
