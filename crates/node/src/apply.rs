@@ -278,7 +278,7 @@ pub fn apply_block(
 
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
     let scratch = ApplyScratch::new(block, height, wants_rawtx)?;
-    let filter_bytes = compute_basic_filter(block, handles, block_hash, height)?;
+    let filter_bytes = compute_basic_filter(block, handles, block_hash, height, &scratch);
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
@@ -503,32 +503,17 @@ fn compute_basic_filter(
     handles: &ApplyHandles,
     block_hash: bitcoin_rs_primitives::Hash256,
     height: u32,
-) -> core::result::Result<Option<Vec<u8>>, ApplyError> {
+    scratch: &ApplyScratch,
+) -> Option<Vec<u8>> {
     use bitcoin::hashes::Hash as _;
-
-    let mut same_block_outputs = HashMap::new();
-    for tx in &block.txdata {
-        let txid = tx.compute_txid();
-        let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
-        for (vout, txout) in tx.output.iter().enumerate() {
-            same_block_outputs.insert(
-                OutPoint::new(
-                    txid,
-                    u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?,
-                ),
-                txout.script_pubkey.clone(),
-            );
-        }
-    }
 
     let filter = match bitcoin::bip158::BlockFilter::new_script_filter(block, |outpoint| {
         let prev_outpoint = OutPoint::new(
             bitcoin_rs_primitives::Hash256::from_le_bytes(outpoint.txid.as_byte_array()),
             outpoint.vout,
         );
-        same_block_outputs
-            .get(&prev_outpoint)
-            .cloned()
+        scratch
+            .same_block_spent_output_script(&prev_outpoint)
             .or_else(|| {
                 handles
                     .utxo
@@ -540,10 +525,10 @@ fn compute_basic_filter(
         Ok(filter) => filter,
         Err(error) => {
             tracing::warn!(height, %block_hash, %error, "BIP158 filter generation failed; skipping best-effort filter index row");
-            return Ok(None);
+            return None;
         }
     };
-    Ok(Some(filter.content))
+    Some(filter.content)
 }
 
 fn verify_block_transactions(
@@ -1211,6 +1196,53 @@ mod consensus_rule_tests {
         assert_eq!(
             raw_txs[0],
             bitcoin::consensus::encode::serialize(&block.txdata[0])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_scratch_caches_same_block_spent_output_scripts_by_txid_and_vout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x75; 32]),
+            vout: 0,
+        };
+        let same_block_script = ScriptBuf::from_bytes(vec![0x51, 0x75]);
+        let funding_tx = spending_transaction_to_script(
+            base_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            same_block_script.clone(),
+        );
+        let funding_outpoint = bitcoin::OutPoint {
+            txid: funding_tx.compute_txid(),
+            vout: 0,
+        };
+        let final_script = ScriptBuf::from_bytes(vec![0x51, 0x76]);
+        let same_block_spend = spending_transaction_to_script(
+            funding_outpoint,
+            Sequence::MAX.to_consensus_u32(),
+            final_script,
+        );
+        let final_outpoint = bitcoin::OutPoint {
+            txid: same_block_spend.compute_txid(),
+            vout: 0,
+        };
+        let block = block_with_transactions(vec![funding_tx, same_block_spend]);
+        let scratch = ApplyScratch::new(&block, 2, false)?;
+
+        assert_eq!(
+            scratch.same_block_spent_output_script(&internal_outpoint(&funding_outpoint)),
+            Some(same_block_script)
+        );
+        assert!(
+            scratch
+                .same_block_spent_output_script(&internal_outpoint(&base_prevout))
+                .is_none()
+        );
+        assert!(
+            scratch
+                .same_block_spent_output_script(&internal_outpoint(&final_outpoint))
+                .is_none()
         );
         Ok(())
     }
@@ -1983,10 +2015,156 @@ mod consensus_rule_tests {
             ),
         ]);
         let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let scratch = ApplyScratch::new(&block, 1, false)?;
 
-        let filter = compute_basic_filter(&block, &handles, block_hash, 1)?;
+        let filter = compute_basic_filter(&block, &handles, block_hash, 1, &scratch);
 
         assert!(filter.is_none());
+        assert!(filter_index.rows.lock().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn compute_basic_filter_matches_independent_same_block_prevout_resolver()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let external_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x93; 32]),
+            vout: 0,
+        };
+        let filter_index = Arc::new(RecordingFilterIndex::default());
+        let handles = apply_handles_with_filter_index(
+            Network::Regtest,
+            utxo_with_output(external_prevout, 1)?,
+            &filter_index,
+        );
+        let funding_script = ScriptBuf::from_bytes(vec![0x51, 0x93]);
+        let funding_tx = spending_transaction_to_script(
+            external_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            funding_script,
+        );
+        let funding_outpoint = bitcoin::OutPoint {
+            txid: funding_tx.compute_txid(),
+            vout: 0,
+        };
+        let same_block_spend = spending_transaction_to_script(
+            funding_outpoint,
+            Sequence::MAX.to_consensus_u32(),
+            ScriptBuf::from_bytes(vec![0x51, 0x94]),
+        );
+        let block = block_with_transactions(vec![
+            coinbase_transaction(0x93),
+            funding_tx,
+            same_block_spend,
+        ]);
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let scratch = ApplyScratch::new(&block, 2, false)?;
+
+        let filter = compute_basic_filter(&block, &handles, block_hash, 2, &scratch)
+            .ok_or_else(|| std::io::Error::other("scratch filter missing"))?;
+        let expected = reference_basic_filter_content(&block, &handles)?;
+
+        assert_eq!(filter, expected);
+        assert!(filter_index.rows.lock().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_block_rejects_same_block_coinbase_spend_without_persisting_filter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let filter_index = Arc::new(RecordingFilterIndex::default());
+        let handles =
+            apply_handles_with_filter_index(Network::Regtest, empty_utxo(), &filter_index);
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let mut coinbase = coinbase_transaction(0x94);
+        coinbase.output[0].script_pubkey = op_true_script();
+        let coinbase_outpoint = bitcoin::OutPoint {
+            txid: coinbase.compute_txid(),
+            vout: 0,
+        };
+        let spend = spending_transaction_to_script(
+            coinbase_outpoint,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase, spend],
+        )?;
+
+        let error = match apply_block(&handles, &block) {
+            Ok(_) => panic!("same-block coinbase spend must fail before filter persistence"),
+            Err(error) => error,
+        };
+
+        assert_bip_error(&error, "COINBASE_MATURITY");
+        assert!(filter_index.rows.lock().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_block_rejects_future_same_block_prevout_without_utxo_commit_or_filter_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let external_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x95; 32]),
+            vout: 0,
+        };
+        let filter_index = Arc::new(RecordingFilterIndex::default());
+        let handles = apply_handles_with_filter_index(
+            Network::Regtest,
+            utxo_with_output(external_prevout, 1)?,
+            &filter_index,
+        );
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let later_tx = spending_transaction_to_script(
+            external_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let future_prevout = bitcoin::OutPoint {
+            txid: later_tx.compute_txid(),
+            vout: 0,
+        };
+        let premature_spend = spending_transaction_to_script(
+            future_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(0x95), premature_spend, later_tx],
+        )?;
+
+        let error = match apply_block(&handles, &block) {
+            Ok(_) => {
+                panic!("future same-block prevout must fail before scratch-backed side effects")
+            }
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, ApplyError::Consensus(_)));
+        assert!(
+            handles
+                .utxo
+                .get(&internal_outpoint(&future_prevout))
+                .is_none()
+        );
         assert!(filter_index.rows.lock().is_empty());
         Ok(())
     }
@@ -2009,6 +2187,40 @@ mod consensus_rule_tests {
                 script_pubkey: ScriptBuf::new(),
             }],
         }
+    }
+
+    fn reference_basic_filter_content(
+        block: &bitcoin::Block,
+        handles: &ApplyHandles,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut same_block_outputs = HashMap::new();
+        for tx in &block.txdata {
+            let txid = Hash256::from_le_bytes(tx.compute_txid().as_byte_array());
+            for (vout, txout) in tx.output.iter().enumerate() {
+                same_block_outputs.insert(
+                    OutPoint::new(txid, u32::try_from(vout)?),
+                    txout.script_pubkey.clone(),
+                );
+            }
+        }
+
+        let filter = bitcoin::bip158::BlockFilter::new_script_filter(block, |outpoint| {
+            let prev_outpoint = OutPoint::new(
+                Hash256::from_le_bytes(outpoint.txid.as_byte_array()),
+                outpoint.vout,
+            );
+            same_block_outputs
+                .get(&prev_outpoint)
+                .cloned()
+                .or_else(|| {
+                    handles
+                        .utxo
+                        .get(&prev_outpoint)
+                        .map(|txout| txout.script_pubkey)
+                })
+                .ok_or(bitcoin::bip158::Error::UtxoMissing(*outpoint))
+        })?;
+        Ok(filter.content)
     }
 
     fn coinbase_transaction(seed: u8) -> Transaction {
