@@ -316,9 +316,12 @@ pub fn apply_block(
     };
     handles.blocks.write().push(block_record);
     let mempool_evict_started = quanta::Instant::now();
-    for txid in scratch.txids() {
-        let evicted_count = handles.mempool.write().remove_by_txid(txid).len();
-        tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
+    {
+        let mut mempool = handles.mempool.write();
+        for txid in scratch.txids() {
+            let evicted_count = mempool.remove_by_txid(txid).len();
+            tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
+        }
     }
     let mempool_evict_dur = mempool_evict_started.elapsed();
     metrics::histogram!("node.apply_block.mempool_evict_seconds")
