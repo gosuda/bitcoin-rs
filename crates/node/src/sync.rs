@@ -1121,6 +1121,70 @@ mod tests {
     }
 
     #[test]
+    fn clean_fast_path_caps_request_at_peer_height() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(8)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 4,
+                max_peer_inflight: 4,
+                getdata_batch_limit: 4,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 2));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected[..2]);
+        assert!(rx.try_recv().is_err());
+
+        sync.tick();
+
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn received_only_state_uses_scan_path_without_duplicate_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(3)?;
+        let received_hash = Hash256::from_le_bytes(&expected[1].to_byte_array());
+        {
+            let mut window = sync.download_window.lock();
+            let needs_height = window.mark_received(received_hash, 80);
+            assert!(needs_height);
+            window.update_received_height(&received_hash, 2);
+        }
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 3));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            alloc::vec![expected[0], expected[2]]
+        );
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
     fn single_peer_can_fill_default_pending_window() -> Result<(), Box<dyn std::error::Error>> {
         let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;

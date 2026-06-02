@@ -156,17 +156,7 @@ impl DownloadWindow {
             return None;
         }
 
-        let mut entries = Vec::with_capacity(batch_limit);
-        for entry in expired {
-            if entries.len() >= batch_limit || byte_capacity < self.ewma_block_bytes {
-                break;
-            }
-            if self.received.contains_key(&entry.hash) || self.pending.contains_key(&entry.hash) {
-                continue;
-            }
-            byte_capacity = byte_capacity.saturating_sub(self.ewma_block_bytes);
-            entries.push(entry);
-        }
+        let mut entries = self.expired_request_entries(expired, batch_limit, &mut byte_capacity);
         let mut selected_hashes = (!entries.is_empty()).then(|| {
             let mut selected_hashes = HashSet::with_capacity(entries.len());
             selected_hashes.extend(entries.iter().map(|entry| entry.hash));
@@ -183,6 +173,20 @@ impl DownloadWindow {
             .saturating_sub(entries.len())
             .min(byte_capacity / self.ewma_block_bytes);
         if height <= request_tip_height && remaining_limit > 0 {
+            if entries.is_empty() {
+                if let Some(request) = self.clean_contiguous_peer_request(
+                    peer_addr,
+                    chain_tip,
+                    tree,
+                    height,
+                    request_tip_height,
+                    remaining_limit,
+                    next_request_height,
+                ) {
+                    return Some(request);
+                }
+            }
+
             let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, request_tip_height)
             else {
                 return non_empty_request(peer_addr, entries, next_request_height);
@@ -227,6 +231,50 @@ impl DownloadWindow {
                 next_request_height = next_request_height.max(request_tip_height.saturating_add(1));
             }
         }
+        non_empty_request(peer_addr, entries, next_request_height)
+    }
+
+    fn expired_request_entries(
+        &self,
+        expired: Vec<PeerRequestEntry>,
+        batch_limit: usize,
+        byte_capacity: &mut usize,
+    ) -> Vec<PeerRequestEntry> {
+        let mut entries = Vec::with_capacity(batch_limit);
+        for entry in expired {
+            if entries.len() >= batch_limit || *byte_capacity < self.ewma_block_bytes {
+                break;
+            }
+            if self.received.contains_key(&entry.hash) || self.pending.contains_key(&entry.hash) {
+                continue;
+            }
+            *byte_capacity = byte_capacity.saturating_sub(self.ewma_block_bytes);
+            entries.push(entry);
+        }
+        entries
+    }
+
+    fn clean_contiguous_peer_request(
+        &self,
+        peer_addr: SocketAddr,
+        chain_tip: &TipSnapshot,
+        tree: &BlockTree,
+        height: u32,
+        request_tip_height: u32,
+        remaining_limit: usize,
+        next_request_height: u32,
+    ) -> Option<PeerRequest> {
+        if !self.pending.is_empty() || !self.received.is_empty() {
+            return None;
+        }
+        let request_end_height = height
+            .saturating_add(u32::try_from(remaining_limit.saturating_sub(1)).unwrap_or(u32::MAX))
+            .min(request_tip_height);
+        let entries =
+            contiguous_request_entries(tree, chain_tip.tip_id, height, request_end_height)?;
+        let next_request_height = entries.iter().fold(next_request_height, |height, entry| {
+            height.max(entry.height.saturating_add(1))
+        });
         non_empty_request(peer_addr, entries, next_request_height)
     }
 
@@ -353,4 +401,31 @@ fn non_empty_request(
         entries,
         next_request_height,
     })
+}
+
+fn contiguous_request_entries(
+    tree: &BlockTree,
+    tip_id: bitcoin_rs_chain::NodeId,
+    start_height: u32,
+    end_height: u32,
+) -> Option<Vec<PeerRequestEntry>> {
+    let mut cursor = tree.node_at_height_from(tip_id, end_height)?;
+    let capacity =
+        usize::try_from(end_height.saturating_sub(start_height).saturating_add(1)).ok()?;
+    let mut entries = Vec::with_capacity(capacity);
+    while let Ok(node) = tree.node(cursor) {
+        if node.height < start_height {
+            break;
+        }
+        entries.push(PeerRequestEntry {
+            hash: node.hash,
+            height: node.height,
+        });
+        if node.height == start_height {
+            entries.reverse();
+            return Some(entries);
+        }
+        cursor = node.parent?;
+    }
+    None
 }
