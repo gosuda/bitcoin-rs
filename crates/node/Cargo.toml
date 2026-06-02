@@ -134,3 +134,8 @@ zmq.workspace = true
 tempfile = "3"
 proptest.workspace = true
 anyhow.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "sync_pipeline"
+harness = false

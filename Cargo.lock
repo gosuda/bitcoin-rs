@@ -438,6 +438,7 @@ dependencies = [
  "bitcoin-rs-wallet",
  "clap",
  "compact_str",
+ "criterion",
  "crossbeam-channel",
  "crossbeam-utils",
  "hashbrown 0.17.1",
