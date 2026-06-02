@@ -67,10 +67,20 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
 
 fn deterministic_initial_sync_proxy(c: &mut Criterion) {
     c.bench_function(
-        "deterministic_initial_sync_proxy_deep_headers_128_blocks",
+        "deterministic_initial_sync_proxy_deep_headers_pure_128_blocks",
         |b| {
             b.iter_batched(
-                SyncFixture::new,
+                || SyncFixture::new(TxIndexMode::Disabled),
+                |fixture| black_box(fixture.run()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
+    c.bench_function(
+        "deterministic_initial_sync_proxy_deep_headers_indexed_128_blocks",
+        |b| {
+            b.iter_batched(
+                || SyncFixture::new(TxIndexMode::Noop),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -124,8 +134,14 @@ struct SyncFixture {
     blocks: Vec<Block>,
 }
 
+#[derive(Clone, Copy)]
+enum TxIndexMode {
+    Disabled,
+    Noop,
+}
+
 impl SyncFixture {
-    fn new() -> Self {
+    fn new(tx_index_mode: TxIndexMode) -> Self {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let mut tree = BlockTree::new();
         let genesis_id = tree
@@ -169,6 +185,7 @@ impl SyncFixture {
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
+            tx_index_mode,
         );
         let sync = BlockSync::new(
             handles,
@@ -234,7 +251,12 @@ fn apply_handles(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
+    tx_index_mode: TxIndexMode,
 ) -> ApplyHandles {
+    let tx_index = match tx_index_mode {
+        TxIndexMode::Disabled => None,
+        TxIndexMode::Noop => Some(noop_tx_index()),
+    };
     ApplyHandles::new(
         Network::Regtest,
         chain_tip,
@@ -242,7 +264,7 @@ fn apply_handles(
         block_tree,
         Arc::new(UtxoSet::new()),
         Arc::new(CoinStatsListener::new(CoinStats::default())),
-        Some(noop_tx_index()),
+        tx_index,
         noop_filter_index(),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Arc::new(RwLock::new(Vec::new())),
