@@ -278,7 +278,11 @@ pub fn apply_block(
 
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
     let scratch = ApplyScratch::new(block, height, wants_rawtx)?;
-    let filter_bytes = compute_basic_filter(block, handles, block_hash, height, &scratch);
+    let filter_bytes = handles
+        .filter_index
+        .wants_filters()
+        .then(|| compute_basic_filter(block, handles, block_hash, height, &scratch))
+        .flatten();
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
@@ -2709,6 +2713,10 @@ mod consensus_rule_tests {
     struct NoopFilterIndex;
 
     impl FilterIndexLike for NoopFilterIndex {
+        fn wants_filters(&self) -> bool {
+            false
+        }
+
         fn put_filter(
             &self,
             _block_hash: Hash256,

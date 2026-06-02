@@ -503,6 +503,10 @@ fn noop_tx_index() -> Arc<Mutex<Box<dyn IndexerLike>>> {
 struct NoopFilterIndex;
 
 impl FilterIndexLike for NoopFilterIndex {
+    fn wants_filters(&self) -> bool {
+        false
+    }
+
     fn put_filter(
         &self,
         _block_hash: bitcoin_rs_primitives::Hash256,

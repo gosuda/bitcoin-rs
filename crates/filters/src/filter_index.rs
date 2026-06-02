@@ -157,6 +157,11 @@ impl<S: KvStore> FilterIndex<S> {
 
 /// Storage-agnostic compact-filter ingest interface.
 pub trait FilterIndexLike: Send + Sync {
+    /// Returns true when block filters should be built and persisted.
+    fn wants_filters(&self) -> bool {
+        true
+    }
+
     /// Stores a block filter and returns its chained BIP157 filter header.
     fn put_filter(
         &self,

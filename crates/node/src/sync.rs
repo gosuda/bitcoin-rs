@@ -1388,6 +1388,10 @@ mod tests {
     struct NoopFilterIndex;
 
     impl FilterIndexLike for NoopFilterIndex {
+        fn wants_filters(&self) -> bool {
+            false
+        }
+
         fn put_filter(
             &self,
             _block_hash: bitcoin_rs_primitives::Hash256,

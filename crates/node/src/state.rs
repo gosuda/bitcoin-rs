@@ -35,6 +35,34 @@ use crate::Config;
 type TxIndexHandle = Arc<Mutex<Box<dyn bitcoin_rs_index::IndexerLike>>>;
 type FilterIndexHandle = Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>;
 
+struct DisabledFilterIndex;
+
+impl bitcoin_rs_filters::FilterIndexLike for DisabledFilterIndex {
+    fn wants_filters(&self) -> bool {
+        false
+    }
+
+    fn put_filter(
+        &self,
+        _block_hash: bitcoin_rs_primitives::Hash256,
+        _prev_header: bitcoin_rs_primitives::Hash256,
+        _filter_bytes: &[u8],
+    ) -> std::result::Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_filters::FilterIndexError>
+    {
+        Ok(bitcoin_rs_primitives::Hash256::default())
+    }
+
+    fn filter_header(
+        &self,
+        _block_hash: bitcoin_rs_primitives::Hash256,
+    ) -> std::result::Result<
+        Option<bitcoin_rs_primitives::Hash256>,
+        bitcoin_rs_filters::FilterIndexError,
+    > {
+        Ok(None)
+    }
+}
+
 // One active generation of outbound requests is enough to keep the drain fed;
 // extra backlog is overload and must fail fast at producers.
 pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
@@ -614,6 +642,12 @@ fn open_tx_index(config: &Config) -> Result<Option<(TxIndexHandle, TxIndexStorag
 }
 
 fn open_filter_index(config: &Config) -> Result<FilterIndexHandle> {
+    if !config.blockfilterindex {
+        let filter_index: Box<dyn bitcoin_rs_filters::FilterIndexLike> =
+            Box::new(DisabledFilterIndex);
+        return Ok(Arc::new(filter_index));
+    }
+
     let filters_dir = config.data_dir.join("filters");
     std::fs::create_dir_all(&filters_dir)
         .with_context(|| format!("create filters_dir {}", filters_dir.display()))?;
@@ -1218,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn open_constructs_filter_index() -> anyhow::Result<()> {
+    fn open_skips_filter_index_when_disabled() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
@@ -1226,9 +1260,36 @@ mod tests {
         let state = NodeState::open(config)?;
         let a = state.filter_index();
         let b = state.filter_index();
+        assert!(!a.wants_filters(), "blockfilterindex disabled by default");
+        assert!(
+            !state.data_dir().join("filters").exists(),
+            "disabled blockfilterindex must not create storage"
+        );
         assert!(
             Arc::ptr_eq(&a, &b),
             "filter_index handle stable across calls"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_constructs_filter_index_when_enabled() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.blockfilterindex = true;
+        let state = NodeState::open(config)?;
+        let a = state.filter_index();
+        let b = state.filter_index();
+        assert!(a.wants_filters(), "enabled blockfilterindex builds filters");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "filter_index handle stable across calls"
+        );
+        assert!(
+            state.data_dir().join("filters").exists(),
+            "enabled blockfilterindex must create storage"
         );
         Ok(())
     }
