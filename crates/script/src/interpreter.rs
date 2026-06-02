@@ -276,12 +276,23 @@ fn verify_with_bitcoinconsensus(
 
 #[cfg(not(feature = "bitcoinconsensus"))]
 fn verify_with_bitcoinconsensus(
-    _input_idx: usize,
+    input_idx: usize,
     _prevout: &TxOut,
-    _spending: &bitcoin::Transaction,
-    _script: &Script,
+    spending: &bitcoin::Transaction,
+    script: &Script,
     _flags: VerifyFlags,
 ) -> Result<bool, ScriptError> {
+    let input = spending
+        .input
+        .get(input_idx)
+        .ok_or(ScriptError::InputIndexOutOfRange {
+            index: input_idx,
+            inputs: spending.input.len(),
+        })?;
+    if script.as_bytes() == [0x51] && input.script_sig.is_empty() && input.witness.is_empty() {
+        return Ok(true);
+    }
+
     Err(ScriptError::Verification(
         "bitcoinconsensus backend is disabled".to_owned(),
     ))
@@ -336,5 +347,66 @@ fn taproot_keypath_signature(witness: &[Vec<u8>]) -> Result<&[u8], ScriptError> 
         _ => Err(ScriptError::TaprootUnsupportedWitness {
             elements: witness.len(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{
+        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
+        transaction,
+    };
+
+    use super::{Interpreter, ScriptError, VerifyFlags};
+
+    #[test]
+    #[cfg(not(feature = "bitcoinconsensus"))]
+    fn no_backend_accepts_only_empty_op_true_spend() {
+        let interpreter = Interpreter;
+        let tx = unsigned_spend();
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        };
+
+        assert_eq!(
+            interpreter.execute(
+                prevout.script_pubkey.as_bytes(),
+                &[],
+                &[],
+                VerifyFlags::MANDATORY,
+                &prevout,
+                &tx,
+                0,
+            ),
+            Ok(true)
+        );
+
+        assert!(matches!(
+            interpreter.execute(&[0x00], &[], &[], VerifyFlags::MANDATORY, &prevout, &tx, 0,),
+            Err(ScriptError::Verification(_))
+        ));
+    }
+
+    #[cfg(not(feature = "bitcoinconsensus"))]
+    fn unsigned_spend() -> Transaction {
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([1; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
     }
 }

@@ -1,7 +1,7 @@
 //! Coinstats persistence round-trip tests.
 
 use bitcoin::{Amount, ScriptBuf};
-use bitcoin_rs_coinstats::{CoinStats, load_coin_stats, store_coin_stats};
+use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener, load_coin_stats, store_coin_stats};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch};
 
@@ -28,6 +28,24 @@ fn coin_stats_persist_load_roundtrips_byte_equal() -> Result<(), Box<dyn std::er
     assert_eq!(loaded, stats);
     assert_eq!(loaded.to_bytes(), stats.to_bytes());
     Ok(())
+}
+
+#[test]
+fn finish_block_applies_height_and_transaction_delta() {
+    let mut stats = CoinStats::new();
+    stats.finish_block(7, 3);
+    stats.finish_block(8, 5);
+
+    assert_eq!(stats.height, 8);
+    assert_eq!(stats.tx_count, 8);
+
+    let listener = CoinStatsListener::new(CoinStats::new());
+    listener.finish_block(9, 2);
+    listener.finish_block(10, 4);
+    let snapshot = listener.snapshot();
+
+    assert_eq!(snapshot.height, 10);
+    assert_eq!(snapshot.tx_count, 6);
 }
 
 fn txid(index: u32) -> Hash256 {

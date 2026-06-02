@@ -228,6 +228,7 @@ mod tests {
 
     use super::{
         is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size, verify_transaction,
+        verify_transaction_borrowed, verify_transaction_borrowed_with_mtp,
         verify_transaction_with_mtp,
     };
     use crate::ConsensusError;
@@ -358,6 +359,43 @@ mod tests {
 
         assert!(!is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_100));
         assert!(is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_101));
+    }
+
+    #[test]
+    fn borrowed_transaction_paths_share_locktime_and_coinbase_rules() {
+        let coinbase = coinbase_transaction_with_script_sig_len(2);
+        let utxos = BTreeMap::new();
+
+        assert_eq!(
+            verify_transaction_borrowed(&coinbase.0, &utxos, 0, VerifyFlags::MANDATORY),
+            Ok(())
+        );
+
+        let non_final = Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::from_consensus(500_000_100),
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus(0),
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+
+        assert!(matches!(
+            verify_transaction_borrowed_with_mtp(
+                &non_final,
+                &utxos,
+                1,
+                500_000_100,
+                VerifyFlags::MANDATORY
+            ),
+            Err(ConsensusError::Bip { bip: "BIP113", .. })
+        ));
     }
 
     fn spending_input(outpoint: OutPoint) -> TxIn {
