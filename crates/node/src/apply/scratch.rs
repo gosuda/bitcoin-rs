@@ -7,17 +7,23 @@ use crate::state::ApplyError;
 
 pub(super) struct ApplyScratch {
     txids: Vec<Txid>,
-    raw_txs: Vec<Vec<u8>>,
+    raw_txs: Option<Vec<Vec<u8>>>,
     same_block_spent: HashSet<OutPoint>,
 }
 
 impl ApplyScratch {
-    pub(super) fn new(block: &bitcoin::Block, height: u32) -> Result<Self, ApplyError> {
+    pub(super) fn new(
+        block: &bitcoin::Block,
+        height: u32,
+        include_raw_txs: bool,
+    ) -> Result<Self, ApplyError> {
         let mut txids = Vec::with_capacity(block.txdata.len());
-        let mut raw_txs = Vec::with_capacity(block.txdata.len());
+        let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txdata.len()));
         for tx in &block.txdata {
             txids.push(tx.compute_txid());
-            raw_txs.push(bitcoin::consensus::encode::serialize(tx));
+            if let Some(raw_txs) = &mut raw_txs {
+                raw_txs.push(bitcoin::consensus::encode::serialize(tx));
+            }
         }
         let same_block_spent = same_block_spent_outpoints(&block.txdata, &txids, height)?;
         Ok(Self {
@@ -31,8 +37,8 @@ impl ApplyScratch {
         &self.txids
     }
 
-    pub(super) fn raw_txs(&self) -> &[Vec<u8>] {
-        &self.raw_txs
+    pub(super) fn raw_txs(&self) -> Option<&[Vec<u8>]> {
+        self.raw_txs.as_deref()
     }
 
     pub(super) fn same_block_spent(&self) -> &HashSet<OutPoint> {

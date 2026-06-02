@@ -276,7 +276,8 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
 
-    let scratch = ApplyScratch::new(block, height)?;
+    let wants_rawtx = handles.zmq_publisher.wants_rawtx();
+    let scratch = ApplyScratch::new(block, height, wants_rawtx)?;
     let filter_bytes = compute_basic_filter(block, handles, block_hash, height)?;
 
     let block_bytes = bitcoin::consensus::encode::serialize(block);
@@ -414,9 +415,15 @@ pub fn apply_block(
     // ZmqPublisher contract; the trait's methods return `()`.
     handles.zmq_publisher.publish_hashblock(tip.hash);
     handles.zmq_publisher.publish_rawblock(&block_bytes);
-    for (txid, rawtx_bytes) in scratch.txids().iter().zip(scratch.raw_txs()) {
-        handles.zmq_publisher.publish_hashtx(*txid);
-        handles.zmq_publisher.publish_rawtx(rawtx_bytes);
+    if let Some(raw_txs) = scratch.raw_txs() {
+        for (txid, rawtx_bytes) in scratch.txids().iter().zip(raw_txs) {
+            handles.zmq_publisher.publish_hashtx(*txid);
+            handles.zmq_publisher.publish_rawtx(rawtx_bytes);
+        }
+    } else {
+        for txid in scratch.txids() {
+            handles.zmq_publisher.publish_hashtx(*txid);
+        }
     }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
     if let Some(sampler) = &handles.g2_muhash_sampler {
@@ -1169,13 +1176,42 @@ mod consensus_rule_tests {
         };
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
 
-        let scratch = ApplyScratch::new(&block, 2)?;
+        let scratch = ApplyScratch::new(&block, 2, false)?;
         let changes = build_utxo_changes(&block, 2, &scratch)?;
         utxo.commit_block(&changes, &Hash256::from_le_bytes(&[0x63; 32]))?;
 
         assert!(utxo.get(&internal_outpoint(&base_prevout)).is_none());
         assert!(utxo.get(&internal_outpoint(&funding_outpoint)).is_none());
         assert!(utxo.get(&internal_outpoint(&final_outpoint)).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_scratch_omits_rawtx_bytes_when_not_requested() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let block = block_with_transactions(vec![coinbase_transaction(0x71), transaction(0x72)]);
+
+        let scratch = ApplyScratch::new(&block, 2, false)?;
+
+        assert_eq!(scratch.txids().len(), block.txdata.len());
+        assert!(scratch.raw_txs().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_scratch_keeps_rawtx_bytes_when_requested() -> Result<(), Box<dyn std::error::Error>> {
+        let block = block_with_transactions(vec![coinbase_transaction(0x73), transaction(0x74)]);
+
+        let scratch = ApplyScratch::new(&block, 2, true)?;
+        let raw_txs = scratch
+            .raw_txs()
+            .ok_or_else(|| std::io::Error::other("rawtx bytes missing"))?;
+
+        assert_eq!(raw_txs.len(), block.txdata.len());
+        assert_eq!(
+            raw_txs[0],
+            bitcoin::consensus::encode::serialize(&block.txdata[0])
+        );
         Ok(())
     }
 
