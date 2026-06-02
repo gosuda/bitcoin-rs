@@ -315,9 +315,11 @@ pub fn apply_block(
     let mempool_evict_started = quanta::Instant::now();
     {
         let mut mempool = handles.mempool.write();
-        for txid in scratch.txids() {
-            let evicted_count = mempool.remove_by_txid(txid).len();
-            tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
+        if !mempool.is_empty() {
+            for txid in scratch.txids() {
+                let evicted_count = mempool.remove_by_txid(txid).len();
+                tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
+            }
         }
     }
     let mempool_evict_dur = mempool_evict_started.elapsed();
