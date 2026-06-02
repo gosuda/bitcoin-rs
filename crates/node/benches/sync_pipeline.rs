@@ -34,9 +34,9 @@ use parking_lot::{Mutex, RwLock};
 use tempfile::TempDir;
 
 const PROXY_BLOCKS: u32 = 32;
-const SYNC_PROXY_BLOCKS: u32 = 16;
-const SYNC_PROXY_BLOCKS_USIZE: usize = 16;
-const SYNC_PROXY_START_HEIGHT: i32 = 16;
+const SYNC_PROXY_BLOCKS: u32 = 128;
+const SYNC_PROXY_BLOCKS_USIZE: usize = 128;
+const SYNC_PROXY_START_HEIGHT: i32 = 128;
 
 fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     let blocks = proxy_blocks(PROXY_BLOCKS);
@@ -65,7 +65,7 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
 }
 
 fn deterministic_initial_sync_proxy(c: &mut Criterion) {
-    c.bench_function("deterministic_initial_sync_proxy_16_blocks", |b| {
+    c.bench_function("deterministic_initial_sync_proxy_128_blocks", |b| {
         b.iter_batched(
             SyncFixture::new,
             |fixture| black_box(fixture.run()),

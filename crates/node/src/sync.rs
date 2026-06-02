@@ -32,7 +32,11 @@ const LOCATOR_MAX_ENTRIES: usize = 32;
 /// Wire protocol version we advertise on outbound `getheaders`.
 const PROTOCOL_VERSION: u32 = 70_016;
 /// Maximum number of block inventory entries we request per tick.
-const GETDATA_BATCH_SIZE: usize = 16;
+///
+/// Keep the private default at the full pending window so a healthy peer can
+/// fill it in one tick; `DownloadWindow` still caps requests by pending bytes,
+/// block budget, and per-peer inflight budget.
+const GETDATA_BATCH_SIZE: usize = PENDING_BUDGET;
 /// Time after which a pending getdata is considered stuck and re-requestable.
 const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
@@ -84,8 +88,8 @@ impl BlockSync {
         }
     }
 
-    /// Runs one orchestrator tick: picks a sync peer, requests pending
-    /// blocks, and asks the peer to extend the header chain.
+    /// Runs one orchestrator tick: requests pending blocks from eligible peers
+    /// and asks them to extend the header chain.
     pub fn tick(&self) {
         self.drain_inbound_headers();
         self.ensure_genesis_tip();
@@ -96,14 +100,20 @@ impl BlockSync {
             .applied_tip
             .load_full()
             .map_or(0, |tip| tip.height);
-        let Some(target) = self.pick_sync_peer(applied_height) else {
+        let sync_peers = self.sync_peers(applied_height);
+        if sync_peers.is_empty() {
             tracing::trace!(applied_height, "block sync: no peer above current height");
             return;
-        };
+        }
 
         self.release_disconnected_peer_budget();
-        self.send_getdata_for_pending_blocks(target.addr);
-        self.send_getheaders(target.addr, applied_height, target.start_height);
+        for (index, peer) in sync_peers.into_iter().enumerate() {
+            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            self.send_getdata_for_pending_blocks(peer.addr, peer_best_height);
+            if index == 0 {
+                self.send_getheaders(peer.addr, applied_height, peer.start_height);
+            }
+        }
     }
 
     fn drain_inbound_headers(&self) {
@@ -243,20 +253,22 @@ impl BlockSync {
         Some(tree.node(node_id).ok()?.hash)
     }
 
-    fn pick_sync_peer(&self, our_height: u32) -> Option<PeerInfo> {
+    fn sync_peers(&self, our_height: u32) -> Vec<PeerInfo> {
         let peers = self.peers.read();
-        peers
+        let mut eligible: Vec<_> = peers
             .iter()
             .filter(|peer| {
                 u32::try_from(peer.start_height)
                     .ok()
                     .is_some_and(|height| height > our_height)
             })
-            .max_by_key(|peer| peer.start_height)
             .cloned()
+            .collect();
+        eligible.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+        eligible
     }
 
-    fn send_getdata_for_pending_blocks(&self, sync_peer_addr: SocketAddr) {
+    fn send_getdata_for_pending_blocks(&self, sync_peer_addr: SocketAddr, peer_best_height: u32) {
         let Some(chain_tip) = self.handles.chain_tip.load_full() else {
             return;
         };
@@ -274,6 +286,7 @@ impl BlockSync {
             sync_peer_addr,
             &chain_tip,
             &applied_tip,
+            peer_best_height,
             &tree,
             now,
         );
@@ -537,7 +550,7 @@ mod tests {
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
         let mut tip_id = genesis_id;
         let mut expected = Vec::new();
-        let batch_size = u32::try_from(super::GETDATA_BATCH_SIZE)?;
+        let batch_size = 16_u32;
 
         for height in 1_u32..=batch_size + 4 {
             let parent_hash = BlockHash::from_byte_array(tree.node(tip_id)?.hash.to_le_bytes());
@@ -570,6 +583,13 @@ mod tests {
             Arc::clone(&peer_outbound),
             inbound_headers_rx,
             inbound_blocks_rx,
+        );
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                getdata_batch_limit: usize::try_from(batch_size)?,
+                ..super::default_sync_budget()
+            },
         );
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         peers.write().push(synthetic_peer(addr, 100));
@@ -830,6 +850,89 @@ mod tests {
     }
 
     #[test]
+    fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(8)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 4,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                ..super::default_sync_budget()
+            },
+        );
+        let first_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let second_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers.write().extend([
+            synthetic_peer(first_addr, 100),
+            synthetic_peer(second_addr, 100),
+        ]);
+        let (first_tx, first_rx) = unbounded::<Message>();
+        let (second_tx, second_rx) = unbounded::<Message>();
+        peer_outbound
+            .write()
+            .extend([(first_addr, first_tx), (second_addr, second_tx)]);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(first_inventory) = first_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected first peer getdata").into());
+        };
+        let first_requested = witness_block_inventory(first_inventory)?;
+        let _first_headers = first_rx.try_recv()?;
+        let NetworkMessage::GetData(second_inventory) = second_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected second peer getdata").into());
+        };
+        let second_requested = witness_block_inventory(second_inventory)?;
+
+        assert_eq!(first_requested, expected[..2]);
+        assert_eq!(second_requested, expected[2..4]);
+        assert!(second_rx.try_recv().is_err());
+        assert_eq!(sync.download_window.lock().pending_len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn tick_does_not_request_above_peer_advertised_height() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(8)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 4,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                ..super::default_sync_budget()
+            },
+        );
+        let high_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let low_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers
+            .write()
+            .extend([synthetic_peer(high_addr, 8), synthetic_peer(low_addr, 2)]);
+        let (high_tx, high_rx) = unbounded::<Message>();
+        let (low_tx, low_rx) = unbounded::<Message>();
+        peer_outbound
+            .write()
+            .extend([(high_addr, high_tx), (low_addr, low_tx)]);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(high_inventory) = high_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected high peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(high_inventory)?, expected[..2]);
+        let _headers = high_rx.try_recv()?;
+        assert!(low_rx.try_recv().is_err());
+        assert_eq!(sync.download_window.lock().pending_len(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn single_peer_can_fill_default_pending_window() -> Result<(), Box<dyn std::error::Error>> {
         let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
@@ -840,6 +943,10 @@ mod tests {
 
         let mut requested = Vec::new();
         let ticks = super::PENDING_BUDGET / super::GETDATA_BATCH_SIZE;
+        assert_eq!(
+            ticks, 1,
+            "default getdata batch should fill the pending window in one tick"
+        );
         for tick in 0..ticks {
             sync.tick();
             if tick == 0 {

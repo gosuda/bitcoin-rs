@@ -127,6 +127,7 @@ impl DownloadWindow {
         peer_addr: SocketAddr,
         chain_tip: &TipSnapshot,
         applied_tip: &TipSnapshot,
+        peer_best_height: u32,
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
@@ -172,8 +173,9 @@ impl DownloadWindow {
         };
         height = height.max(self.next_request_height);
         let mut next_request_height = self.next_request_height;
+        let request_tip_height = chain_tip.height.min(peer_best_height);
         while entries.len() < batch_limit
-            && height <= chain_tip.height
+            && height <= request_tip_height
             && byte_capacity >= self.ewma_block_bytes
         {
             let Some(node_id) = tree.node_at_height_from(chain_tip.tip_id, height) else {
