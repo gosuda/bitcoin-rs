@@ -9,7 +9,7 @@ use std::process::Command;
 #[test]
 fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let bitcoin_cli = fake_bitcoin_cli(temp.path(), false)?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
     let evidence = evidence_json(temp.path(), 0, 10)?;
 
     let output = Command::new("bash")
@@ -38,7 +38,7 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn script_rejects_malformed_bitcoin_core_block_hash() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let bitcoin_cli = fake_bitcoin_cli(temp.path(), true)?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::MalformedHash)?;
     let evidence = evidence_json(temp.path(), 0, 1)?;
 
     let output = Command::new("bash")
@@ -49,6 +49,61 @@ fn script_rejects_malformed_bitcoin_core_block_hash() -> Result<(), Box<dyn std:
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("bitcoin-cli start hash"));
+    Ok(())
+}
+
+#[test]
+fn script_rejects_non_mainnet_bitcoin_core_node() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::WrongChain)?;
+    let evidence = evidence_json(temp.path(), 0, 1)?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("connected to mainnet"));
+    Ok(())
+}
+
+#[test]
+fn script_rejects_bitcoin_core_node_below_stop_block() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::ShortBlocks)?;
+    let evidence = evidence_json(temp.path(), 0, 10)?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("blocks=9 is below ibd_stop_height=10")
+    );
+    Ok(())
+}
+
+#[test]
+fn script_rejects_bitcoin_core_node_below_stop_header() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::ShortHeaders)?;
+    let evidence = evidence_json(temp.path(), 0, 10)?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("headers=9 is below ibd_stop_height=10")
+    );
     Ok(())
 }
 
@@ -85,21 +140,58 @@ fn evidence_json(
     Ok(path)
 }
 
+#[derive(Clone, Copy)]
+enum FakeBitcoinCliMode {
+    Mainnet,
+    MalformedHash,
+    WrongChain,
+    ShortBlocks,
+    ShortHeaders,
+}
+
 fn fake_bitcoin_cli(
     dir: &Path,
-    malformed_hash: bool,
+    mode: FakeBitcoinCliMode,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("bitcoin-cli");
-    let hash_expr = if malformed_hash {
-        r#""not-a-hash""#
-    } else {
-        r#"f"{height:064x}""#
+    let hash_expr = match mode {
+        FakeBitcoinCliMode::MalformedHash => r#""not-a-hash""#,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::ShortHeaders => r#"f"{height:064x}""#,
+    };
+    let chain = match mode {
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::ShortHeaders => "main",
+        FakeBitcoinCliMode::WrongChain => "regtest",
+    };
+    let blocks = match mode {
+        FakeBitcoinCliMode::ShortBlocks => 9,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortHeaders => 10,
+    };
+    let headers = match mode {
+        FakeBitcoinCliMode::ShortHeaders => 9,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortBlocks => 10,
     };
     fs::write(
         &path,
         format!(
             r#"#!/usr/bin/env python3
+import json
 import sys
+
+if len(sys.argv) == 2 and sys.argv[1] == "getblockchaininfo":
+    print(json.dumps({{"chain": "{chain}", "blocks": {blocks}, "headers": {headers}}}))
+    raise SystemExit(0)
 
 if len(sys.argv) != 3 or sys.argv[1] != "getblockhash":
     raise SystemExit(f"unexpected arguments: {{sys.argv[1:]!r}}")

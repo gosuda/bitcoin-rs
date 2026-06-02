@@ -7,7 +7,7 @@ usage() {
     '' \
     'Normalizes externally measured G14 mainnet IBD evidence into shell exports.' \
     'The helper does not start or manage bitcoin-rs, bitcoind, or Electrum.' \
-    'It calls bitcoin-cli getblockhash for the measured start/stop heights.' \
+    'It verifies bitcoin-cli is on mainnet and resolves measured block hashes.' \
     '' \
     'Required JSON keys:' \
     '  ibd_start_height, ibd_stop_height,' \
@@ -78,8 +78,9 @@ PY
 
 start_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$start_height")"
 stop_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$stop_height")"
+chain_info="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockchaininfo)"
 
-G14_START_HASH="$start_hash" G14_STOP_HASH="$stop_hash" python3 - "$evidence_path" <<'PY'
+G14_START_HASH="$start_hash" G14_STOP_HASH="$stop_hash" G14_CHAIN_INFO="$chain_info" python3 - "$evidence_path" <<'PY'
 import hashlib
 import json
 import os
@@ -135,6 +136,17 @@ def require_hex(value: str, length: int, name: str) -> str:
     return value
 
 
+def require_chain_height(data: dict, key: str, stop_height: int) -> None:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        die(f"bitcoin-cli getblockchaininfo {key} must be an integer")
+    if value < stop_height:
+        die(
+            f"bitcoin-cli getblockchaininfo {key}={value} is below "
+            f"ibd_stop_height={stop_height}"
+        )
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -156,6 +168,16 @@ if stop_height < start_height:
 
 start_hash = require_hex(os.environ["G14_START_HASH"].strip(), 64, "bitcoin-cli start hash")
 stop_hash = require_hex(os.environ["G14_STOP_HASH"].strip(), 64, "bitcoin-cli stop hash")
+try:
+    chain_info = json.loads(os.environ["G14_CHAIN_INFO"])
+except json.JSONDecodeError as error:
+    die(f"bitcoin-cli getblockchaininfo must return JSON: {error}")
+if not isinstance(chain_info, dict):
+    die("bitcoin-cli getblockchaininfo must return an object")
+if chain_info.get("chain") != "main":
+    die(f"bitcoin-cli must be connected to mainnet, got chain={chain_info.get('chain')!r}")
+require_chain_height(chain_info, "blocks", stop_height)
+require_chain_height(chain_info, "headers", stop_height)
 core_commit = require_hex(require_text(data, "bitcoin_core_commit"), 40, "bitcoin_core_commit")
 rs_command = require_text(data, "bitcoin_rs_command")
 core_command = require_text(data, "bitcoin_core_command")
