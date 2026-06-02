@@ -187,13 +187,13 @@ impl SyncFixture {
             other => panic!("expected getdata, got {other:?}"),
         };
         assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
-        let NetworkMessage::GetHeaders(_getheaders) = self
-            .outbound_rx
-            .try_recv()
-            .unwrap_or_else(|error| panic!("expected getheaders: {error}"))
-        else {
-            panic!("expected getheaders");
-        };
+        match self.outbound_rx.try_recv() {
+            Ok(other) => panic!("expected no getheaders, got {other:?}"),
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                panic!("outbound channel disconnected")
+            }
+        }
 
         for block in self.blocks[1..].iter().rev() {
             self.inbound_blocks_tx

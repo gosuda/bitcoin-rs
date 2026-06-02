@@ -106,12 +106,17 @@ impl BlockSync {
             return;
         }
 
+        let header_height = self
+            .handles
+            .chain_tip
+            .load_full()
+            .map_or(applied_height, |tip| tip.height);
         self.release_disconnected_peer_budget();
         for (index, peer) in sync_peers.into_iter().enumerate() {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
             self.send_getdata_for_pending_blocks(peer.addr, peer_best_height);
-            if index == 0 {
-                self.send_getheaders(peer.addr, applied_height, peer.start_height);
+            if index == 0 && peer_best_height > header_height {
+                self.send_getheaders(peer.addr, header_height, peer.start_height);
             }
         }
     }
@@ -550,6 +555,46 @@ mod tests {
         if !matches!(second, NetworkMessage::GetHeaders(_)) {
             return Err(std::io::Error::other("expected getheaders").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_skips_getheaders_when_header_tip_matches_peer_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(3)?;
+        let applied_snapshot = {
+            let tree = block_tree.read();
+            let chain_tip = sync
+                .handles
+                .chain_tip
+                .load_full()
+                .ok_or_else(|| std::io::Error::other("missing chain tip"))?;
+            let node_id = tree
+                .node_at_height_from(chain_tip.tip_id, 1)
+                .ok_or_else(|| std::io::Error::other("missing height one node"))?;
+            let node = tree.node(node_id)?;
+            TipSnapshot {
+                tip_id: node_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+        applied_tip.store(Some(Arc::new(applied_snapshot)));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 3));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        let first = rx.try_recv()?;
+        let NetworkMessage::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected[1..]);
+        assert!(rx.try_recv().is_err());
         Ok(())
     }
 
@@ -1018,7 +1063,7 @@ mod tests {
             return Err(std::io::Error::other("expected high peer getdata").into());
         };
         assert_eq!(witness_block_inventory(high_inventory)?, expected[..2]);
-        let _headers = high_rx.try_recv()?;
+        assert!(high_rx.try_recv().is_err());
         assert!(low_rx.try_recv().is_err());
         assert_eq!(sync.download_window.lock().pending_len(), 2);
         Ok(())
