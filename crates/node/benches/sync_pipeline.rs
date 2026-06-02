@@ -13,8 +13,8 @@ use bitcoin::block::Header;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::{
-    Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode,
-    TxOut, Txid, Witness, transaction,
+    Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+    TxMerkleNode, TxOut, Txid, Witness, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
@@ -35,8 +35,9 @@ use tempfile::TempDir;
 
 const PROXY_BLOCKS: u32 = 32;
 const SYNC_PROXY_BLOCKS: u32 = 128;
+const SYNC_PROXY_HEADER_HEIGHT: u32 = 4_096;
 const SYNC_PROXY_BLOCKS_USIZE: usize = 128;
-const SYNC_PROXY_START_HEIGHT: i32 = 128;
+const SYNC_PROXY_START_HEIGHT: i32 = 4_096;
 
 fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     let blocks = proxy_blocks(PROXY_BLOCKS);
@@ -65,13 +66,16 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
 }
 
 fn deterministic_initial_sync_proxy(c: &mut Criterion) {
-    c.bench_function("deterministic_initial_sync_proxy_128_blocks", |b| {
-        b.iter_batched(
-            SyncFixture::new,
-            |fixture| black_box(fixture.run()),
-            BatchSize::SmallInput,
-        );
-    });
+    c.bench_function(
+        "deterministic_initial_sync_proxy_deep_headers_128_blocks",
+        |b| {
+            b.iter_batched(
+                SyncFixture::new,
+                |fixture| black_box(fixture.run()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
 }
 
 fn print_proxy_summary(blocks: &[Block]) {
@@ -129,15 +133,27 @@ impl SyncFixture {
             .unwrap_or_else(|error| panic!("regtest genesis header insert failed: {error}"));
         let mut tip_id = genesis_id;
         let mut parent = genesis;
+        let mut prev_hash = parent.block_hash();
+        let mut header_time = parent.header.time;
         let mut blocks = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
 
-        for height in 1_u32..=SYNC_PROXY_BLOCKS {
-            let block = child_coinbase_block(&parent, height);
+        for height in 1_u32..=SYNC_PROXY_HEADER_HEIGHT {
+            let header = if height <= SYNC_PROXY_BLOCKS {
+                let block = child_coinbase_block(&parent, height);
+                parent = block.clone();
+                prev_hash = block.block_hash();
+                header_time = block.header.time;
+                blocks.push(block.clone());
+                block.header
+            } else {
+                header_time = header_time.saturating_add(1);
+                let header = child_header(prev_hash, header_time);
+                prev_hash = header.block_hash();
+                header
+            };
             tip_id = tree
-                .insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)
+                .insert_node(Some(tip_id), header, NodeStatus::HeaderValid)
                 .unwrap_or_else(|error| panic!("synthetic header insert failed: {error}"));
-            parent = block.clone();
-            blocks.push(block);
         }
 
         let chain_tip = tree.tip_handle();
@@ -326,6 +342,17 @@ fn child_coinbase_block(parent: &Block, height: u32) -> Block {
         .unwrap_or_else(|| panic!("proxy block should have merkle root"));
     mine_block_to_declared_target(&mut block);
     block
+}
+
+fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
+    Header {
+        version: bitcoin::block::Version::ONE,
+        prev_blockhash,
+        merkle_root: TxMerkleNode::all_zeros(),
+        time,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 0,
+    }
 }
 
 fn coinbase_transaction(height: u32) -> Transaction {

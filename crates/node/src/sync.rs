@@ -220,7 +220,8 @@ impl BlockSync {
     fn apply_buffered_blocks(&self) -> (usize, usize) {
         let mut applied = 0_usize;
         let mut failed = 0_usize;
-        while let Some(expected_hash) = self.next_expected_block_hash() {
+        let staged_count = self.block_stager.lock().received_len();
+        for expected_hash in self.expected_block_hashes(staged_count) {
             let Some(block) = self.block_stager.lock().take(&expected_hash) else {
                 break;
             };
@@ -249,6 +250,56 @@ impl BlockSync {
             }
         }
         (applied, failed)
+    }
+
+    fn expected_block_hashes(&self, max_count: usize) -> Vec<Hash256> {
+        if max_count == 0 {
+            return Vec::new();
+        }
+        let Some(chain_tip) = self.handles.chain_tip.load_full() else {
+            return Vec::new();
+        };
+        let Some(applied_tip) = self.handles.applied_tip.load_full() else {
+            return Vec::new();
+        };
+        let Some(start_height) = applied_tip.height.checked_add(1) else {
+            return Vec::new();
+        };
+        if start_height > chain_tip.height {
+            return Vec::new();
+        }
+
+        let max_offset = u32::try_from(max_count.saturating_sub(1)).unwrap_or(u32::MAX);
+        let end_height = start_height
+            .saturating_add(max_offset)
+            .min(chain_tip.height);
+        let capacity = usize::try_from(end_height.saturating_sub(start_height).saturating_add(1))
+            .unwrap_or(max_count);
+        let tree = self.handles.block_tree.read();
+        let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, end_height) else {
+            return Vec::new();
+        };
+        let mut hashes = Vec::with_capacity(capacity);
+        let mut reached_start = false;
+        while let Ok(node) = tree.node(cursor) {
+            if node.height < start_height {
+                break;
+            }
+            hashes.push(node.hash);
+            if node.height == start_height {
+                reached_start = true;
+                break;
+            }
+            let Some(parent) = node.parent else {
+                break;
+            };
+            cursor = parent;
+        }
+        if !reached_start {
+            return Vec::new();
+        }
+        hashes.reverse();
+        hashes
     }
 
     fn received_block_height(&self, hash: Hash256) -> Option<u32> {
@@ -1348,6 +1399,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         const PROXY_BLOCKS: usize = 24;
         const PROXY_TIP_HEIGHT: u32 = 24;
+        const PROXY_HEADER_HEIGHT: u32 = 96;
 
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let mut tree = BlockTree::new();
@@ -1362,6 +1414,11 @@ mod tests {
             tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
             prev_hash = block.block_hash();
             blocks.push(block);
+        }
+        for height in PROXY_TIP_HEIGHT.saturating_add(1)..=PROXY_HEADER_HEIGHT {
+            let header = test_header(prev_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            prev_hash = header.block_hash();
         }
 
         let chain_tip = tree.tip_handle();
