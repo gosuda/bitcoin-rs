@@ -1,6 +1,6 @@
 //! G14 — Performance budgets.
 //! **G14 — Performance budgets.**
-//! - Block validation throughput ≥ 80 % of `gocoin`'s blocks-per-second on identical mainnet IBD (measured via `criterion`).
+//! - Initial block sync throughput is faster than Bitcoin Core's blocks-per-second on identical mainnet IBD (measured via `criterion`).
 //! - UTXO commit p95 ≤ 50 ms per 4 MiB block.
 //! - Electrum `scripthash.get_history` p95 ≤ 30 ms over a 10 000-call random sample at tip.
 //! - RSS ≤ 16 GiB at mainnet tip with rocksdb default + all indexes enabled.
@@ -11,7 +11,7 @@
 
 use std::{env, process::Command};
 
-const MIN_BLOCK_VALIDATION_RATIO: f64 = 0.80;
+const MIN_INITIAL_SYNC_RATIO_VS_BITCOIN_CORE: f64 = 1.0;
 const MAX_UTXO_COMMIT_P95_MS: f64 = 50.0;
 const MAX_ELECTRUM_GET_HISTORY_P95_MS: f64 = 30.0;
 const MAX_RSS_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -20,23 +20,49 @@ const EXPECTED_ELECTRUM_SAMPLE_SIZE: u64 = 10_000;
 
 const EVIDENCE_HELP: &str = "required G14 evidence env: \
 G14_COMMIT_SHA=<current git HEAD as 40 lowercase hex>, \
-G14_MEASUREMENT_TARGET=mainnet-tip, \
+G14_MEASUREMENT_TARGET=mainnet-ibd, \
 G14_STORAGE_BACKEND=rocksdb, \
 G14_INDEXES=all, \
-G14_REFERENCE_IMPL=gocoin, \
+G14_REFERENCE_IMPL=bitcoin-core, \
 G14_BENCH_TOOL=criterion, \
 G14_BLOCK_SIZE_BYTES=4194304, \
 G14_ELECTRUM_SAMPLE_SIZE=10000, \
-G14_BLOCK_VALIDATION_BPS, \
-G14_GOCOIN_BLOCK_VALIDATION_BPS, \
+G14_IBD_START_HEIGHT, \
+G14_IBD_START_HASH=<64 lowercase hex>, \
+G14_IBD_STOP_HEIGHT, \
+G14_IBD_STOP_HASH=<64 lowercase hex>, \
+G14_BITCOIN_RS_IBD_BLOCKS, \
+G14_BITCOIN_CORE_IBD_BLOCKS, \
+G14_BITCOIN_RS_ELAPSED_SECONDS, \
+G14_BITCOIN_CORE_ELAPSED_SECONDS, \
+G14_BITCOIN_CORE_VERSION, \
+G14_BITCOIN_CORE_COMMIT=<40 lowercase hex>, \
+G14_BITCOIN_RS_COMMAND_SHA256=<64 lowercase hex>, \
+G14_BITCOIN_CORE_COMMAND_SHA256=<64 lowercase hex>, \
+G14_BITCOIN_RS_CONFIG_SHA256=<64 lowercase hex>, \
+G14_BITCOIN_CORE_CONFIG_SHA256=<64 lowercase hex>, \
 G14_UTXO_COMMIT_P95_MS, \
 G14_ELECTRUM_GET_HISTORY_P95_MS, \
 G14_RSS_BYTES";
 
 struct G14Evidence {
     commit_sha: String,
-    block_validation_bps: f64,
-    gocoin_block_validation_bps: f64,
+    start_height: u64,
+    start_hash: String,
+    stop_height: u64,
+    stop_hash: String,
+    bitcoin_rs_ibd_blocks: u64,
+    bitcoin_core_ibd_blocks: u64,
+    bitcoin_rs_elapsed_seconds: f64,
+    bitcoin_core_elapsed_seconds: f64,
+    bitcoin_core_version: String,
+    bitcoin_core_commit: String,
+    bitcoin_rs_command_sha256: String,
+    bitcoin_core_command_sha256: String,
+    bitcoin_rs_config_sha256: String,
+    bitcoin_core_config_sha256: String,
+    initial_sync_bps: f64,
+    bitcoin_core_initial_sync_bps: f64,
     utxo_commit_p95_ms: f64,
     electrum_get_history_p95_ms: f64,
     rss_bytes: u64,
@@ -56,18 +82,49 @@ fn performance_budgets() {
 impl G14Evidence {
     fn from_env() -> Self {
         let commit_sha = required_commit_sha();
-        require_literal("G14_MEASUREMENT_TARGET", "mainnet-tip");
+        require_literal("G14_MEASUREMENT_TARGET", "mainnet-ibd");
         require_literal("G14_STORAGE_BACKEND", "rocksdb");
         require_literal("G14_INDEXES", "all");
-        require_literal("G14_REFERENCE_IMPL", "gocoin");
+        require_literal("G14_REFERENCE_IMPL", "bitcoin-core");
         require_literal("G14_BENCH_TOOL", "criterion");
         require_exact_u64("G14_BLOCK_SIZE_BYTES", FOUR_MIB_BYTES);
         require_exact_u64("G14_ELECTRUM_SAMPLE_SIZE", EXPECTED_ELECTRUM_SAMPLE_SIZE);
+        let start_height = positive_or_zero_u64("G14_IBD_START_HEIGHT");
+        let start_hash = required_hex("G14_IBD_START_HASH", 64);
+        let stop_height = positive_or_zero_u64("G14_IBD_STOP_HEIGHT");
+        let stop_hash = required_hex("G14_IBD_STOP_HASH", 64);
+        let bitcoin_rs_ibd_blocks = positive_u64("G14_BITCOIN_RS_IBD_BLOCKS");
+        let bitcoin_core_ibd_blocks = positive_u64("G14_BITCOIN_CORE_IBD_BLOCKS");
+        let bitcoin_rs_elapsed_seconds = positive_f64("G14_BITCOIN_RS_ELAPSED_SECONDS");
+        let bitcoin_core_elapsed_seconds = positive_f64("G14_BITCOIN_CORE_ELAPSED_SECONDS");
+        let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
+        let bitcoin_core_commit = required_hex("G14_BITCOIN_CORE_COMMIT", 40);
+        let bitcoin_rs_command_sha256 = required_hex("G14_BITCOIN_RS_COMMAND_SHA256", 64);
+        let bitcoin_core_command_sha256 = required_hex("G14_BITCOIN_CORE_COMMAND_SHA256", 64);
+        let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
+        let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
+        let initial_sync_bps = measured_bps(bitcoin_rs_ibd_blocks, bitcoin_rs_elapsed_seconds);
+        let bitcoin_core_initial_sync_bps =
+            measured_bps(bitcoin_core_ibd_blocks, bitcoin_core_elapsed_seconds);
 
         Self {
             commit_sha,
-            block_validation_bps: positive_f64("G14_BLOCK_VALIDATION_BPS"),
-            gocoin_block_validation_bps: positive_f64("G14_GOCOIN_BLOCK_VALIDATION_BPS"),
+            start_height,
+            start_hash,
+            stop_height,
+            stop_hash,
+            bitcoin_rs_ibd_blocks,
+            bitcoin_core_ibd_blocks,
+            bitcoin_rs_elapsed_seconds,
+            bitcoin_core_elapsed_seconds,
+            bitcoin_core_version,
+            bitcoin_core_commit,
+            bitcoin_rs_command_sha256,
+            bitcoin_core_command_sha256,
+            bitcoin_rs_config_sha256,
+            bitcoin_core_config_sha256,
+            initial_sync_bps,
+            bitcoin_core_initial_sync_bps,
             utxo_commit_p95_ms: positive_f64("G14_UTXO_COMMIT_P95_MS"),
             electrum_get_history_p95_ms: positive_f64("G14_ELECTRUM_GET_HISTORY_P95_MS"),
             rss_bytes: positive_u64("G14_RSS_BYTES"),
@@ -75,13 +132,32 @@ impl G14Evidence {
     }
 
     fn assert_budgets(&self) {
-        let required_block_bps = self.gocoin_block_validation_bps * MIN_BLOCK_VALIDATION_RATIO;
+        let measured_range = self
+            .stop_height
+            .checked_sub(self.start_height)
+            .and_then(|distance| distance.checked_add(1))
+            .unwrap_or_else(|| {
+                panic!(
+                    "G14 IBD range is invalid: start_height={}, stop_height={}",
+                    self.start_height, self.stop_height
+                )
+            });
+        assert_eq!(
+            self.bitcoin_rs_ibd_blocks, measured_range,
+            "G14 bitcoin-rs block count must match inclusive IBD range"
+        );
+        assert_eq!(
+            self.bitcoin_core_ibd_blocks, measured_range,
+            "G14 Bitcoin Core block count must match inclusive IBD range"
+        );
+        let required_sync_bps =
+            self.bitcoin_core_initial_sync_bps * MIN_INITIAL_SYNC_RATIO_VS_BITCOIN_CORE;
         assert!(
-            self.block_validation_bps >= required_block_bps,
-            "G14 block validation throughput failed: bitcoin-rs {} blocks/s, gocoin {} blocks/s, required at least {} blocks/s (80%)",
-            self.block_validation_bps,
-            self.gocoin_block_validation_bps,
-            required_block_bps,
+            self.initial_sync_bps > required_sync_bps,
+            "G14 initial sync throughput failed: bitcoin-rs {} blocks/s, Bitcoin Core {} blocks/s, required faster than {} blocks/s",
+            self.initial_sync_bps,
+            self.bitcoin_core_initial_sync_bps,
+            required_sync_bps,
         );
         assert!(
             self.utxo_commit_p95_ms <= MAX_UTXO_COMMIT_P95_MS,
@@ -105,14 +181,42 @@ impl G14Evidence {
 
     fn report(&self) {
         let commit_sha = &self.commit_sha;
-        let block_validation_bps = self.block_validation_bps;
-        let gocoin_block_validation_bps = self.gocoin_block_validation_bps;
+        let start_height = self.start_height;
+        let start_hash = &self.start_hash;
+        let stop_height = self.stop_height;
+        let stop_hash = &self.stop_hash;
+        let bitcoin_rs_ibd_blocks = self.bitcoin_rs_ibd_blocks;
+        let bitcoin_core_ibd_blocks = self.bitcoin_core_ibd_blocks;
+        let bitcoin_rs_elapsed_seconds = self.bitcoin_rs_elapsed_seconds;
+        let bitcoin_core_elapsed_seconds = self.bitcoin_core_elapsed_seconds;
+        let bitcoin_core_version = &self.bitcoin_core_version;
+        let bitcoin_core_commit = &self.bitcoin_core_commit;
+        let bitcoin_rs_command_sha256 = &self.bitcoin_rs_command_sha256;
+        let bitcoin_core_command_sha256 = &self.bitcoin_core_command_sha256;
+        let bitcoin_rs_config_sha256 = &self.bitcoin_rs_config_sha256;
+        let bitcoin_core_config_sha256 = &self.bitcoin_core_config_sha256;
+        let initial_sync_bps = self.initial_sync_bps;
+        let bitcoin_core_initial_sync_bps = self.bitcoin_core_initial_sync_bps;
         let utxo_commit_p95_ms = self.utxo_commit_p95_ms;
         let electrum_get_history_p95_ms = self.electrum_get_history_p95_ms;
         let rss_bytes = self.rss_bytes;
         println!("G14 evidence accepted for current git HEAD {commit_sha}");
-        println!("block_validation_bps={block_validation_bps}");
-        println!("gocoin_block_validation_bps={gocoin_block_validation_bps}");
+        println!("ibd_start_height={start_height}");
+        println!("ibd_start_hash={start_hash}");
+        println!("ibd_stop_height={stop_height}");
+        println!("ibd_stop_hash={stop_hash}");
+        println!("bitcoin_rs_ibd_blocks={bitcoin_rs_ibd_blocks}");
+        println!("bitcoin_core_ibd_blocks={bitcoin_core_ibd_blocks}");
+        println!("bitcoin_rs_elapsed_seconds={bitcoin_rs_elapsed_seconds}");
+        println!("bitcoin_core_elapsed_seconds={bitcoin_core_elapsed_seconds}");
+        println!("bitcoin_core_version={bitcoin_core_version}");
+        println!("bitcoin_core_commit={bitcoin_core_commit}");
+        println!("bitcoin_rs_command_sha256={bitcoin_rs_command_sha256}");
+        println!("bitcoin_core_command_sha256={bitcoin_core_command_sha256}");
+        println!("bitcoin_rs_config_sha256={bitcoin_rs_config_sha256}");
+        println!("bitcoin_core_config_sha256={bitcoin_core_config_sha256}");
+        println!("initial_sync_bps={initial_sync_bps}");
+        println!("bitcoin_core_initial_sync_bps={bitcoin_core_initial_sync_bps}");
         println!("utxo_commit_p95_ms={utxo_commit_p95_ms}");
         println!("electrum_get_history_p95_ms={electrum_get_history_p95_ms}");
         println!("rss_bytes={rss_bytes}");
@@ -139,6 +243,7 @@ fn required_commit_sha() -> String {
         value, current_head,
         "G14_COMMIT_SHA must match current git HEAD; evidence {value}, current HEAD {current_head}",
     );
+    require_clean_tracked_tree();
     value
 }
 
@@ -173,11 +278,50 @@ fn current_git_head() -> String {
     head
 }
 
+fn require_clean_tracked_tree() {
+    let output = match Command::new("git")
+        .args([
+            "-C",
+            env!("CARGO_MANIFEST_DIR"),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=no",
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => panic!("failed to run git status for G14 clean-tree binding: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "git status failed while validating G14 clean-tree binding: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "G14 evidence requires a clean tracked working tree for G14_COMMIT_SHA; tracked changes:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+}
+
 fn is_lower_hex_sha(value: &str) -> bool {
-    value.len() == 40
+    is_lower_hex_len(value, 40)
+}
+
+fn is_lower_hex_len(value: &str, len: usize) -> bool {
+    value.len() == len
         && value
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn required_hex(name: &str, len: usize) -> String {
+    let value = required_env(name);
+    assert!(
+        is_lower_hex_len(&value, len),
+        "{name} must be a {len}-character lowercase hex value, got {value:?}",
+    );
+    value
 }
 
 fn require_literal(name: &str, expected: &str) {
@@ -196,6 +340,14 @@ fn require_exact_u64(name: &str, expected: u64) {
     );
 }
 
+fn measured_bps(blocks: u64, elapsed_seconds: f64) -> f64 {
+    let blocks = match u32::try_from(blocks) {
+        Ok(blocks) => blocks,
+        Err(error) => panic!("G14 block count does not fit f64 conversion path: {error}"),
+    };
+    f64::from(blocks) / elapsed_seconds
+}
+
 fn positive_f64(name: &str) -> f64 {
     let raw = required_env(name);
     let value = match raw.parse::<f64>() {
@@ -207,6 +359,14 @@ fn positive_f64(name: &str) -> f64 {
         "{name} must be finite and positive, got {value}",
     );
     value
+}
+
+fn positive_or_zero_u64(name: &str) -> u64 {
+    let raw = required_env(name);
+    match raw.parse::<u64>() {
+        Ok(value) => value,
+        Err(error) => panic!("{name} must be a non-negative integer, got {raw:?}: {error}"),
+    }
 }
 
 fn positive_u64(name: &str) -> u64 {
