@@ -86,6 +86,17 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             );
         },
     );
+    #[cfg(feature = "rocksdb")]
+    c.bench_function(
+        "deterministic_initial_sync_proxy_deep_headers_txindex_rocksdb_128_blocks",
+        |b| {
+            b.iter_batched(
+                || SyncFixture::new(TxIndexMode::RocksDb),
+                |fixture| black_box(fixture.run()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
 }
 
 fn print_proxy_summary(blocks: &[Block]) {
@@ -132,12 +143,15 @@ struct SyncFixture {
     outbound_rx: crossbeam_channel::Receiver<Message>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
+    _tx_index_dir: Option<TempDir>,
 }
 
 #[derive(Clone, Copy)]
 enum TxIndexMode {
     Disabled,
     Noop,
+    #[cfg(feature = "rocksdb")]
+    RocksDb,
 }
 
 impl SyncFixture {
@@ -181,11 +195,12 @@ impl SyncFixture {
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
         let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<Block>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let (tx_index, tx_index_dir) = tx_index_for_mode(tx_index_mode);
         let handles = apply_handles(
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
-            tx_index_mode,
+            tx_index,
         );
         let sync = BlockSync::new(
             handles,
@@ -206,6 +221,7 @@ impl SyncFixture {
             outbound_rx,
             applied_tip,
             blocks,
+            _tx_index_dir: tx_index_dir,
         }
     }
 
@@ -251,12 +267,8 @@ fn apply_handles(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    tx_index_mode: TxIndexMode,
+    tx_index: Option<Arc<Mutex<Box<dyn IndexerLike>>>>,
 ) -> ApplyHandles {
-    let tx_index = match tx_index_mode {
-        TxIndexMode::Disabled => None,
-        TxIndexMode::Noop => Some(noop_tx_index()),
-    };
     ApplyHandles::new(
         Network::Regtest,
         chain_tip,
@@ -271,6 +283,27 @@ fn apply_handles(
         Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
         Arc::new(NoOpZmqPublisher),
     )
+}
+
+fn tx_index_for_mode(
+    mode: TxIndexMode,
+) -> (Option<Arc<Mutex<Box<dyn IndexerLike>>>>, Option<TempDir>) {
+    match mode {
+        TxIndexMode::Disabled => (None, None),
+        TxIndexMode::Noop => (Some(noop_tx_index()), None),
+        #[cfg(feature = "rocksdb")]
+        TxIndexMode::RocksDb => {
+            let dir = tempfile::tempdir()
+                .unwrap_or_else(|error| panic!("txindex tempdir failed: {error}"));
+            let store = Arc::new(
+                bitcoin_rs_storage::RocksDbStore::open(dir.path())
+                    .unwrap_or_else(|error| panic!("txindex rocksdb open failed: {error}")),
+            );
+            let indexer: Box<dyn IndexerLike> =
+                Box::new(bitcoin_rs_index::Indexer::new(Arc::clone(&store)));
+            (Some(Arc::new(Mutex::new(indexer))), Some(dir))
+        }
+    }
 }
 
 struct NoopIndexer;
