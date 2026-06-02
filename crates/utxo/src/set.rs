@@ -431,14 +431,15 @@ impl UtxoSet {
         for add in adds {
             validate_add(add)?;
             let key = UtxoKey::from_txid(&add.outpoint.txid);
-            add_counts[usize::from(key.shard())] =
-                add_counts[usize::from(key.shard())].saturating_add(1);
+            let shard_idx = usize::from(key.shard());
+            add_counts[shard_idx] = add_counts[shard_idx].saturating_add(1);
         }
         for remove in removes {
             let key = UtxoKey::from_txid(&remove.txid);
-            remove_counts[usize::from(key.shard())] =
-                remove_counts[usize::from(key.shard())].saturating_add(1);
+            let shard_idx = usize::from(key.shard());
+            remove_counts[shard_idx] = remove_counts[shard_idx].saturating_add(1);
         }
+        let (active_shards, active_shard_count) = active_shards(&add_counts, &remove_counts);
 
         let mut adds_by_shard = add_buckets(&add_counts);
         let mut removes_by_shard = remove_buckets(&remove_counts);
@@ -462,12 +463,9 @@ impl UtxoSet {
         let errors = Mutex::new(Vec::new());
         let listener = self.listener.as_deref();
         rayon::scope(|scope| {
-            for shard_idx in 0..UtxoKey::SHARD_COUNT {
+            for &shard_idx in &active_shards[..active_shard_count] {
                 let shard_adds = &adds_by_shard[shard_idx];
                 let shard_removes = &removes_by_shard[shard_idx];
-                if shard_adds.is_empty() && shard_removes.is_empty() {
-                    continue;
-                }
                 let shard = &self.shards[shard_idx];
                 let errors = &errors;
                 scope.spawn(move |_| {
@@ -511,6 +509,23 @@ fn remove_buckets<'a>(
 ) -> [Vec<SpendPayload<'a>>; UtxoKey::SHARD_COUNT] {
     core::array::from_fn(|idx| Vec::with_capacity(counts[idx]))
 }
+
+fn active_shards(
+    add_counts: &[usize; UtxoKey::SHARD_COUNT],
+    remove_counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ([usize; UtxoKey::SHARD_COUNT], usize) {
+    let mut active = [0_usize; UtxoKey::SHARD_COUNT];
+    let mut len = 0_usize;
+    for shard_idx in 0..UtxoKey::SHARD_COUNT {
+        if add_counts[shard_idx] == 0 && remove_counts[shard_idx] == 0 {
+            continue;
+        }
+        active[len] = shard_idx;
+        len = len.saturating_add(1);
+    }
+    (active, len)
+}
+
 fn stable_view_len(view: &UtxoSetView<'_>) -> usize {
     view.len()
 }
