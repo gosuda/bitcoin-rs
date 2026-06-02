@@ -148,9 +148,14 @@ impl BlockSync {
     fn drain_inbound_blocks(&self) {
         let receiver = self.inbound_blocks_rx.lock();
         let mut received = 0_usize;
-        while let Ok(block) = receiver.try_recv() {
+        if let Ok(first_block) = receiver.try_recv() {
+            let next_expected_hash = self.next_expected_block_hash();
             received = received.saturating_add(1);
-            self.buffer_received_block(block);
+            self.buffer_received_block(first_block, next_expected_hash);
+            while let Ok(block) = receiver.try_recv() {
+                received = received.saturating_add(1);
+                self.buffer_received_block(block, next_expected_hash);
+            }
         }
         drop(receiver);
 
@@ -174,11 +179,10 @@ impl BlockSync {
         }
     }
 
-    fn buffer_received_block(&self, block: bitcoin::Block) {
+    fn buffer_received_block(&self, block: bitcoin::Block, next_expected_hash: Option<Hash256>) {
         let now = Instant::now();
         let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
         let height = self.received_block_height(hash).unwrap_or(0);
-        let next_expected_hash = self.next_expected_block_hash();
         let staged = self
             .block_stager
             .lock()
