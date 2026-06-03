@@ -76,6 +76,7 @@ pub(super) struct DownloadWindow {
     received_bytes: usize,
     ewma_block_bytes: usize,
     next_request_height: u32,
+    next_pending_deadline: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +96,7 @@ impl DownloadWindow {
             received_bytes: 0,
             ewma_block_bytes: 256 * 1024,
             next_request_height: 1,
+            next_pending_deadline: None,
         }
     }
 
@@ -114,6 +116,30 @@ impl DownloadWindow {
     #[cfg(test)]
     pub(super) fn contains_pending(&self, hash: &Hash256) -> bool {
         self.pending.contains_key(hash)
+    }
+
+    fn pending_deadline(&self, requested_at: Instant) -> Instant {
+        requested_at
+            .checked_add(self.budget.pending_timeout)
+            .unwrap_or(requested_at)
+    }
+
+    fn record_pending_deadline(&mut self, requested_at: Instant) {
+        let deadline = self.pending_deadline(requested_at);
+        if self
+            .next_pending_deadline
+            .is_none_or(|current| deadline < current)
+        {
+            self.next_pending_deadline = Some(deadline);
+        }
+    }
+
+    fn refresh_next_pending_deadline(&mut self) {
+        self.next_pending_deadline = self
+            .pending
+            .values()
+            .map(|pending| self.pending_deadline(pending.requested_at))
+            .min();
     }
 
     pub(super) fn release_disconnected_peers(
@@ -387,6 +413,7 @@ impl DownloadWindow {
     pub(super) fn mark_requested(&mut self, request: &PeerRequest, now: Instant) {
         let estimated_bytes = self.ewma_block_bytes;
         let inflight = self.peer_inflight.entry(request.peer_addr).or_default();
+        let mut recorded_pending = false;
         for entry in &request.entries {
             if self.pending.contains_key(&entry.hash) || self.received.contains_key(&entry.hash) {
                 continue;
@@ -402,6 +429,10 @@ impl DownloadWindow {
             );
             self.pending_bytes = self.pending_bytes.saturating_add(estimated_bytes);
             inflight.blocks = inflight.blocks.saturating_add(1);
+            recorded_pending = true;
+        }
+        if recorded_pending {
+            self.record_pending_deadline(now);
         }
         self.next_request_height = self.next_request_height.max(request.next_request_height);
     }
@@ -458,6 +489,12 @@ impl DownloadWindow {
     }
 
     fn expire_pending(&mut self, now: Instant) -> Vec<PeerRequestEntry> {
+        if self
+            .next_pending_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return Vec::new();
+        }
         let expired: Vec<(Hash256, PendingBlock)> = self
             .pending
             .iter()
@@ -477,6 +514,7 @@ impl DownloadWindow {
                 height: pending.height,
             });
         }
+        self.refresh_next_pending_deadline();
         entries
     }
 
