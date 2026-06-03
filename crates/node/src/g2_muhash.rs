@@ -36,11 +36,15 @@ impl G2MuhashSampler {
     }
 
     pub(crate) fn record(&self, stats: &bitcoin_rs_coinstats::CoinStats) -> Result<()> {
-        if !should_record(stats.height, self.target_tip_height) {
+        if !self.wants_height(stats.height) {
             return Ok(());
         }
         let hash = stats.muhash.finalize_hash().to_string_be();
         self.record_sample(stats.height, hash)
+    }
+
+    pub(crate) fn wants_height(&self, height: u32) -> bool {
+        should_record(height, self.target_tip_height)
     }
 
     fn record_sample(&self, height: u32, hash: String) -> Result<()> {
@@ -276,6 +280,23 @@ mod tests {
             std::fs::read_to_string(&path)?,
             format!("0:{hash},2:{hash}")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn wants_height_matches_sample_contract() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let bounded_path = dir.path().join("bounded.samples");
+        let bounded = G2MuhashSampler::open(&bounded_path, Some(42))?;
+        let unbounded_path = dir.path().join("unbounded.samples");
+        let unbounded = G2MuhashSampler::open(&unbounded_path, None)?;
+
+        assert!(bounded.wants_height(0));
+        assert!(!bounded.wants_height(1));
+        assert!(bounded.wants_height(42));
+        assert!(!bounded.wants_height(SAMPLE_INTERVAL));
+        assert!(!bounded.wants_height(43));
+        assert!(unbounded.wants_height(SAMPLE_INTERVAL));
         Ok(())
     }
 

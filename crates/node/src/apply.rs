@@ -454,7 +454,9 @@ pub fn apply_block(
         }
     }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
-    if let Some(sampler) = &handles.g2_muhash_sampler {
+    if let Some(sampler) = &handles.g2_muhash_sampler
+        && sampler.wants_height(height)
+    {
         let snapshot = handles.coin_stats.snapshot();
         if let Err(error) = sampler.record(&snapshot) {
             metrics::counter!("node.apply_block.g2_muhash_sample_errors").increment(1);
