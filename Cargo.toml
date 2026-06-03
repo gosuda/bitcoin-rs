@@ -84,8 +84,8 @@ secp256k1 = { version = ">=0.31.1, <0.32", default-features = false, features = 
 sha2 = { version = ">=0.11, <0.12", default-features = false }
 
 # bitcoin_hashes 0.14 (aligned with bitcoin 0.32). NOTE: 0.14 has no `asm`
-# feature — bitcoin_hashes 1.0 currently breaks the bitcoin-io 0.3 transitive graph.
-bitcoin_hashes = { version = ">=0.14.1, <0.15", default-features = false, features = [
+# feature — bitcoin_hashes 1.0 breaks the bitcoin-io 0.3 transitive graph.
+bitcoin_hashes = { version = ">=0.14.100, <0.15", default-features = false, features = [
     "std",
 ] }
 
