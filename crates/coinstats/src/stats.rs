@@ -3,7 +3,7 @@ use core::convert::Infallible;
 
 use bitcoin::consensus::Encodable;
 use bitcoin_rs_primitives::{OutPoint, TxOut};
-use bitcoin_rs_utxo::UtxoChangeListener;
+use bitcoin_rs_utxo::{UtxoChangeListener, UtxoRemoved};
 use parking_lot::RwLock;
 use zerocopy::IntoBytes;
 
@@ -161,6 +161,18 @@ impl UtxoChangeListener for CoinStatsListener {
 
     fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         self.stats.write().remove_utxo(op, txout, height, coinbase);
+    }
+
+    fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
+        let mut stats = self.stats.write();
+        for removal in removals {
+            stats.remove_utxo(
+                &removal.op,
+                &removal.txout,
+                removal.height,
+                removal.coinbase,
+            );
+        }
     }
 
     fn muhash3072(&self) -> Option<[u8; 384]> {

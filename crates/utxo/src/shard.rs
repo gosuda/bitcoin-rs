@@ -5,11 +5,12 @@ use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
 use parking_lot::RwLock;
 use self_cell::self_cell;
+use smallvec::SmallVec;
 
 use crate::{
     UtxoError, UtxoKey,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
-    set::{BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoScan},
+    set::{BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoRemoved, UtxoScan},
 };
 
 /// Per-shard hash table and script slab borrowed from the pinned arena owner.
@@ -387,15 +388,17 @@ fn apply_remove_run_with_listener<'arena>(
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
+    let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::new();
     for remove in removes {
         let removed_output = record
             .find_output(remove.vout)
             .and_then(|output| output_details(table, output));
         let removed = record.remove_output(remove.vout);
         if let (true, Some((txout, height, coinbase))) = (removed, removed_output) {
-            listener.on_remove_coin(remove.op, &txout, height, coinbase);
+            removed_coins.push(UtxoRemoved::new(*remove.op, txout, height, coinbase));
         }
     }
+    listener.on_remove_coins(&removed_coins);
     if !record.is_empty() {
         insert_record(arena, table, record);
     }

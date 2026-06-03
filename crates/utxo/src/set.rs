@@ -107,9 +107,47 @@ pub trait UtxoChangeListener {
         self.on_remove(op, txout, height);
     }
 
+    /// Called after a same-transaction run of outputs has been removed.
+    fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
+        for removal in removals {
+            self.on_remove_coin(
+                &removal.op,
+                &removal.txout,
+                removal.height,
+                removal.coinbase,
+            );
+        }
+    }
+
     /// Returns the current `MuHash3072` snapshot trailer, when this listener tracks one.
     fn muhash3072(&self) -> Option<[u8; 384]> {
         None
+    }
+}
+
+/// One removed UTXO event delivered to a change listener.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UtxoRemoved {
+    /// Outpoint that was removed.
+    pub op: OutPoint,
+    /// Removed transaction output.
+    pub txout: TxOut,
+    /// Height at which the removed output was created.
+    pub height: u32,
+    /// Whether the removed output came from a coinbase transaction.
+    pub coinbase: bool,
+}
+
+impl UtxoRemoved {
+    /// Constructs one removed UTXO event.
+    #[must_use]
+    pub const fn new(op: OutPoint, txout: TxOut, height: u32, coinbase: bool) -> Self {
+        Self {
+            op,
+            txout,
+            height,
+            coinbase,
+        }
     }
 }
 
