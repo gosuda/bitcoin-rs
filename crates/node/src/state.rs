@@ -687,7 +687,6 @@ pub struct NodeState {
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
-    g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -709,6 +708,7 @@ pub struct NodeState {
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<Header>>>>,
     inbound_blocks_tx: Sender<bitcoin::Block>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
+    apply_handles: crate::apply::ApplyHandles,
     sync: Arc<crate::BlockSync>,
     mining_template_id: Arc<ArcSwap<CompactString>>,
     replayed: Mutex<Vec<u32>>,
@@ -780,24 +780,25 @@ impl NodeState {
         let (inbound_blocks_tx, inbound_blocks_rx_raw) =
             crossbeam_channel::unbounded::<bitcoin::Block>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let apply_handles = crate::apply::ApplyHandles {
+            network: config.network,
+            chain_tip: Arc::clone(&chain_tip),
+            applied_tip: Arc::clone(&applied_tip),
+            block_tree: Arc::clone(&block_tree),
+            utxo: Arc::clone(&utxo),
+            coin_stats: Arc::clone(&coin_stats),
+            tx_index: tx_index.as_ref().map(Arc::clone),
+            filter_index: Arc::clone(&filter_index),
+            mempool: Arc::clone(&mempool),
+            blocks: Arc::clone(&blocks),
+            transactions: Arc::clone(&transactions),
+            zmq_publisher: Arc::clone(&zmq_publisher),
+            cache_block_bodies_in_memory: false,
+            block_body_store: Some(storage.block_body_store()),
+            g2_muhash_sampler,
+        };
         let sync = Arc::new(crate::BlockSync::new(
-            crate::apply::ApplyHandles {
-                network: config.network,
-                chain_tip: Arc::clone(&chain_tip),
-                applied_tip: Arc::clone(&applied_tip),
-                block_tree: Arc::clone(&block_tree),
-                utxo: Arc::clone(&utxo),
-                coin_stats: Arc::clone(&coin_stats),
-                tx_index: tx_index.as_ref().map(Arc::clone),
-                filter_index: Arc::clone(&filter_index),
-                mempool: Arc::clone(&mempool),
-                blocks: Arc::clone(&blocks),
-                transactions: Arc::clone(&transactions),
-                zmq_publisher: Arc::clone(&zmq_publisher),
-                cache_block_bodies_in_memory: false,
-                block_body_store: Some(storage.block_body_store()),
-                g2_muhash_sampler: g2_muhash_sampler.clone(),
-            },
+            apply_handles.clone(),
             Arc::clone(&peers),
             Arc::clone(&peer_outbound),
             Arc::clone(&inbound_headers_rx),
@@ -826,7 +827,6 @@ impl NodeState {
             prune_service,
             zmq_publisher,
             active_zmq_notifications,
-            g2_muhash_sampler,
             mempool,
             chain_tip,
             applied_tip,
@@ -843,6 +843,7 @@ impl NodeState {
             inbound_headers_rx,
             inbound_blocks_tx,
             inbound_blocks_rx,
+            apply_handles,
             mining_template_id,
             sync,
             replayed: Mutex::new(Vec::new()),
@@ -1098,23 +1099,7 @@ impl NodeState {
     /// Snapshot of the handle set needed by `crate::apply::apply_block`.
     #[must_use]
     pub fn apply_handles(&self) -> crate::apply::ApplyHandles {
-        crate::apply::ApplyHandles {
-            network: self.config.network,
-            chain_tip: Arc::clone(&self.chain_tip),
-            applied_tip: Arc::clone(&self.applied_tip),
-            block_tree: Arc::clone(&self.block_tree),
-            utxo: Arc::clone(&self.utxo),
-            coin_stats: Arc::clone(&self.coin_stats),
-            tx_index: self.tx_index.as_ref().map(Arc::clone),
-            filter_index: Arc::clone(&self.filter_index),
-            mempool: Arc::clone(&self.mempool),
-            blocks: Arc::clone(&self.blocks),
-            transactions: Arc::clone(&self.transactions),
-            zmq_publisher: Arc::clone(&self.zmq_publisher),
-            cache_block_bodies_in_memory: false,
-            block_body_store: Some(self.storage.block_body_store()),
-            g2_muhash_sampler: self.g2_muhash_sampler.clone(),
-        }
+        self.apply_handles.clone()
     }
 
     /// Synthetically applies `block` as the next tip after consensus checks.
@@ -1124,7 +1109,7 @@ impl NodeState {
         &self,
         block: &bitcoin::Block,
     ) -> core::result::Result<TipSnapshot, ApplyError> {
-        crate::apply::apply_block(&self.apply_handles(), block)
+        crate::apply::apply_block(&self.apply_handles, block)
     }
 
     #[cfg(test)]
@@ -1133,7 +1118,7 @@ impl NodeState {
         block: &bitcoin::Block,
         height: u32,
     ) -> core::result::Result<(), ApplyError> {
-        crate::apply::check_coinbase_maturity(&self.apply_handles(), block, height)
+        crate::apply::check_coinbase_maturity(&self.apply_handles, block, height)
     }
 }
 

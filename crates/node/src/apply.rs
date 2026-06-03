@@ -70,6 +70,7 @@ impl<S: KvStore> PruneBodyStore for S {
 }
 
 /// Owned shared handle set needed by `apply_block` to perform a block apply.
+#[derive(Clone)]
 pub struct ApplyHandles {
     /// Network consensus parameters.
     pub network: Network,
