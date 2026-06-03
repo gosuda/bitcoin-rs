@@ -108,10 +108,13 @@ impl DownloadWindow {
         self.pending.contains_key(hash)
     }
 
-    pub(super) fn release_disconnected_peers(&mut self, live_peers: &HashSet<SocketAddr>) {
+    pub(super) fn release_disconnected_peers(
+        &mut self,
+        mut is_live_peer: impl FnMut(&SocketAddr) -> bool,
+    ) {
         let mut retry_height = self.next_request_height;
         self.pending.retain(|_hash, pending| {
-            if live_peers.contains(&pending.peer_addr) {
+            if is_live_peer(&pending.peer_addr) {
                 return true;
             }
             retry_height = retry_height.min(pending.height);
@@ -119,7 +122,7 @@ impl DownloadWindow {
             false
         });
         self.peer_inflight
-            .retain(|peer, _inflight| live_peers.contains(peer));
+            .retain(|peer, _inflight| is_live_peer(peer));
         self.next_request_height = retry_height;
     }
 

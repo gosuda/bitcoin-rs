@@ -21,7 +21,7 @@ use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::{Receiver, Sender};
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
 use self::stage::{BlockStager, StagedBlock};
@@ -503,10 +503,9 @@ impl BlockSync {
 
     fn release_disconnected_peer_budget(&self) {
         let outbound = self.peer_outbound.read();
-        let live_peers: HashSet<SocketAddr> = outbound.keys().copied().collect();
         self.download_window
             .lock()
-            .release_disconnected_peers(&live_peers);
+            .release_disconnected_peers(|peer| outbound.contains_key(peer));
     }
 
     fn record_sync_metrics(&self) {
