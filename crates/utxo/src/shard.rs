@@ -94,17 +94,11 @@ impl Shard {
     ) -> Result<(), UtxoError> {
         let mut cell = self.inner.write();
         cell.with_dependent_mut(|arena, table| {
-            for chunk in removes.chunks(OPS_AT_ONCE) {
-                for remove in chunk {
-                    apply_remove(arena, table, remove, listener);
-                }
+            if listener.is_some() {
+                commit_batch_with_listener(arena, table, adds, removes, listener)
+            } else {
+                commit_batch_coalesced(arena, table, adds, removes)
             }
-            for chunk in adds.chunks(OPS_AT_ONCE) {
-                for (key, txid, payload) in chunk {
-                    apply_add(arena, table, *key, *txid, payload, listener)?;
-                }
-            }
-            Ok::<(), UtxoError>(())
         })
     }
 
@@ -267,6 +261,94 @@ impl Default for Shard {
     }
 }
 
+fn commit_batch_with_listener<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
+    removes: &[SpendPayload<'_>],
+    listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
+) -> Result<(), UtxoError> {
+    for chunk in removes.chunks(OPS_AT_ONCE) {
+        for remove in chunk {
+            apply_remove(arena, table, remove, listener);
+        }
+    }
+    for chunk in adds.chunks(OPS_AT_ONCE) {
+        for (key, txid, payload) in chunk {
+            apply_add(arena, table, *key, *txid, payload, listener)?;
+        }
+    }
+    Ok(())
+}
+
+fn commit_batch_coalesced<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
+    removes: &[SpendPayload<'_>],
+) -> Result<(), UtxoError> {
+    for chunk in removes.chunks(OPS_AT_ONCE) {
+        let mut remaining = chunk;
+        while let Some((first, rest)) = remaining.split_first() {
+            let run_len = rest
+                .iter()
+                .take_while(|remove| remove.key == first.key && remove.txid == first.txid)
+                .count()
+                .saturating_add(1);
+            apply_remove_run(arena, table, &remaining[..run_len]);
+            remaining = &remaining[run_len..];
+        }
+    }
+
+    for chunk in adds.chunks(OPS_AT_ONCE) {
+        let mut remaining = chunk;
+        while let Some(((key, txid, _payload), rest)) = remaining.split_first() {
+            let run_len = rest
+                .iter()
+                .take_while(|(next_key, next_txid, _payload)| next_key == key && next_txid == txid)
+                .count()
+                .saturating_add(1);
+            apply_add_run(arena, table, *key, *txid, &remaining[..run_len])?;
+            remaining = &remaining[run_len..];
+        }
+    }
+    Ok(())
+}
+
+fn apply_remove_run<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    removes: &[SpendPayload<'_>],
+) {
+    let Some(first) = removes.first() else {
+        return;
+    };
+    let Some(mut record) = take_record(table, first.key, first.txid) else {
+        return;
+    };
+    for remove in removes {
+        let _removed = record.remove_output(remove.vout);
+    }
+    if !record.is_empty() {
+        insert_record(arena, table, record);
+    }
+}
+
+fn apply_add_run<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    key: UtxoKey,
+    txid: Hash256,
+    adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
+) -> Result<(), UtxoError> {
+    let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    for (_key, _txid, payload) in adds {
+        append_build_output(table, &mut record, payload)?;
+    }
+    insert_record(arena, table, record);
+    Ok(())
+}
+
 fn apply_add<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
@@ -277,6 +359,27 @@ fn apply_add<'arena>(
 ) -> Result<(), UtxoError> {
     let overwritten = existing_output(table, key, txid, payload.vout)?;
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    append_build_output(table, &mut record, payload)?;
+    insert_record(arena, table, record);
+    if let Some(listener) = listener {
+        if let Some((txout, height, coinbase)) = overwritten {
+            listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
+        }
+        listener.on_insert(
+            payload.outpoint,
+            payload.txout,
+            payload.height,
+            payload.coinbase,
+        );
+    }
+    Ok(())
+}
+
+fn append_build_output<'arena>(
+    table: &mut ShardTable<'arena>,
+    record: &mut UtxoRecord<'arena>,
+    payload: &BuildPayload<'_>,
+) -> Result<(), UtxoError> {
     let script = payload.txout.script_pubkey.as_bytes();
     let script_len =
         u16::try_from(script.len()).map_err(|_| UtxoError::ScriptTooLarge { len: script.len() })?;
@@ -294,18 +397,6 @@ fn apply_add<'arena>(
         coinbase: payload.coinbase,
         height: payload.height,
     });
-    insert_record(arena, table, record);
-    if let Some(listener) = listener {
-        if let Some((txout, height, coinbase)) = overwritten {
-            listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
-        }
-        listener.on_insert(
-            payload.outpoint,
-            payload.txout,
-            payload.height,
-            payload.coinbase,
-        );
-    }
     Ok(())
 }
 

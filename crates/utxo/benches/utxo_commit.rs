@@ -139,6 +139,41 @@ fn block_changes(workload: &SyntheticWorkload) -> BlockChanges {
     changes
 }
 
+fn same_txid_churn_case(seed: u64) -> (UtxoSet, BlockChanges) {
+    let set = UtxoSet::new();
+    let live_txid = txid(seed);
+    let mut preload = BlockChanges::default();
+    let mut changes = BlockChanges::default();
+
+    for vout in 0_u32..256 {
+        let seed = seed.wrapping_add(u64::from(vout));
+        preload.add(UtxoAdd::new(
+            OutPoint::new(live_txid, vout),
+            txout(seed),
+            false,
+            1,
+        ));
+    }
+    if let Err(error) = set.commit_block(&preload, &txid(seed.wrapping_add(1))) {
+        panic!("same-txid preload failed: {error}");
+    }
+
+    for vout in 0_u32..128 {
+        changes.remove(OutPoint::new(live_txid, vout));
+    }
+    for vout in 256_u32..384 {
+        let seed = seed.wrapping_add(u64::from(vout));
+        changes.add(UtxoAdd::new(
+            OutPoint::new(live_txid, vout),
+            txout(seed),
+            false,
+            2,
+        ));
+    }
+
+    (set, changes)
+}
+
 fn utxo_add(entry: &SyntheticEntry) -> UtxoAdd {
     UtxoAdd::new(
         entry.outpoint,
@@ -251,6 +286,18 @@ fn utxo_commit_synthetic_block(c: &mut Criterion) {
                 let changes = block_changes(black_box(&workload));
                 if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0012_3456)) {
                     panic!("synthetic build+commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("utxo_commit/same_txid_churn", |b| {
+        b.iter_batched(
+            || same_txid_churn_case(0x0102_0304),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0112_1314)) {
+                    panic!("same-txid churn commit failed: {error}");
                 }
             },
             BatchSize::SmallInput,

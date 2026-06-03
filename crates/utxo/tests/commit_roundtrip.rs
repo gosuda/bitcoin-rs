@@ -171,6 +171,45 @@ fn has_live_outputs_for_txid_tracks_any_remaining_vout() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn same_txid_churn_preserves_live_outputs_and_record_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let live_txid = txid(700);
+    let first = OutPoint::new(live_txid, 0);
+    let second = OutPoint::new(live_txid, 1);
+    let third = OutPoint::new(live_txid, 2);
+    let fourth = OutPoint::new(live_txid, 3);
+    let first_txout = txout(701);
+    let second_txout = txout(702);
+    let third_txout = txout(703);
+    let fourth_txout = txout(704);
+
+    let mut initial = BlockChanges::default();
+    initial.add(UtxoAdd::new(first, first_txout, false, 400));
+    initial.add(UtxoAdd::new(second, second_txout.clone(), false, 400));
+    initial.add(UtxoAdd::new(third, third_txout, false, 400));
+    set.commit_block(&initial, &txid(705))?;
+
+    assert_eq!(set.record_count(), 1);
+    assert_eq!(set.len(), 3);
+
+    let mut churn = BlockChanges::default();
+    churn.remove(first);
+    churn.remove(third);
+    churn.add(UtxoAdd::new(fourth, fourth_txout.clone(), true, 401));
+    set.commit_block(&churn, &txid(706))?;
+
+    assert_eq!(set.get(&first), None);
+    assert_eq!(set.get(&second), Some(second_txout));
+    assert_eq!(set.get(&third), None);
+    assert_eq!(set.get(&fourth), Some(fourth_txout));
+    assert!(set.has_live_outputs_for_txid(&live_txid));
+    assert_eq!(set.record_count(), 1);
+    assert_eq!(set.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn vout_64_roundtrips_through_public_utxo_api() -> Result<(), Box<dyn std::error::Error>> {
     let set = UtxoSet::new();
     let live_txid = txid(88);
