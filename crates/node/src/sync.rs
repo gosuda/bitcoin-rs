@@ -172,16 +172,23 @@ impl BlockSync {
 
     fn drain_inbound_blocks(&self) {
         let receiver = self.inbound_blocks_rx.lock();
-        let mut received = 0_usize;
-        if let Ok(first_block) = receiver.try_recv() {
+        let received = if let Ok(first_block) = receiver.try_recv() {
             let next_expected_hash = self.next_expected_block_hash();
-            received = received.saturating_add(1);
-            self.buffer_received_block(first_block, next_expected_hash);
-            while let Ok(block) = receiver.try_recv() {
-                received = received.saturating_add(1);
-                self.buffer_received_block(block, next_expected_hash);
+            if let Ok(second_block) = receiver.try_recv() {
+                let mut blocks = Vec::with_capacity(2);
+                blocks.push(first_block);
+                blocks.push(second_block);
+                while let Ok(block) = receiver.try_recv() {
+                    blocks.push(block);
+                }
+                self.buffer_received_blocks(blocks, next_expected_hash)
+            } else {
+                self.buffer_received_block(first_block, next_expected_hash);
+                1
             }
-        }
+        } else {
+            0
+        };
         drop(receiver);
 
         let now = Instant::now();
@@ -208,6 +215,64 @@ impl BlockSync {
         }
     }
 
+    fn buffer_received_blocks(
+        &self,
+        blocks: Vec<bitcoin::Block>,
+        next_expected_hash: Option<Hash256>,
+    ) -> usize {
+        let mut staged_blocks = Vec::with_capacity(blocks.len());
+        {
+            let mut stager = self.block_stager.lock();
+            for block in blocks {
+                let now = Instant::now();
+                let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+                let staged = stager.insert(hash, next_expected_hash, block, now);
+                staged_blocks.push((hash, staged));
+            }
+        }
+
+        let mut height_lookups = Vec::new();
+        {
+            let mut window = self.download_window.lock();
+            for (hash, staged) in &staged_blocks {
+                match staged {
+                    StagedBlock::Memory { bytes, dropped } => {
+                        if window.mark_received(*hash, *bytes) {
+                            height_lookups.push(*hash);
+                        }
+                        for dropped in dropped {
+                            window.drop_received_for_retry(&dropped.hash);
+                            metrics::counter!("node.sync.retry_count").increment(1);
+                        }
+                    }
+                    StagedBlock::DroppedForRetry { dropped } => {
+                        window.drop_for_retry(&dropped.hash);
+                        metrics::counter!("node.sync.retry_count").increment(1);
+                        tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
+                    }
+                }
+            }
+        }
+
+        if !height_lookups.is_empty() {
+            let height_updates: Vec<(Hash256, u32)> = height_lookups
+                .into_iter()
+                .filter_map(|hash| {
+                    self.received_block_height(hash)
+                        .map(|height| (hash, height))
+                })
+                .collect();
+            if !height_updates.is_empty() {
+                let mut window = self.download_window.lock();
+                for (hash, height) in height_updates {
+                    window.update_received_height(&hash, height);
+                }
+            }
+        }
+
+        staged_blocks.len()
+    }
+
     fn buffer_received_block(&self, block: bitcoin::Block, next_expected_hash: Option<Hash256>) {
         let now = Instant::now();
         let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
@@ -224,12 +289,10 @@ impl BlockSync {
                     metrics::counter!("node.sync.retry_count").increment(1);
                 }
                 drop(window);
-                if needs_height_lookup {
-                    if let Some(height) = self.received_block_height(hash) {
-                        self.download_window
-                            .lock()
-                            .update_received_height(&hash, height);
-                    }
+                if needs_height_lookup && let Some(height) = self.received_block_height(hash) {
+                    self.download_window
+                        .lock()
+                        .update_received_height(&hash, height);
                 }
             }
             StagedBlock::DroppedForRetry { dropped } => {
