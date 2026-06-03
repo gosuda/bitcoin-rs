@@ -173,6 +173,36 @@ where
     });
 }
 
+fn bench_single_block_body_batch_puts_1k<S, Open>(c: &mut Criterion, backend: &str, open: Open)
+where
+    S: KvStore,
+    Open: Fn(&Path) -> Result<S, StorageError> + Copy,
+{
+    c.bench_function(
+        &format!("{backend}/bench_single_block_body_batch_puts_1k"),
+        |b| {
+            b.iter_batched(
+                || {
+                    let temp = must(tempfile::TempDir::new());
+                    let store = must(open(temp.path()));
+                    let value = vec![0xa5; BLOCK_BODY_VALUE_BYTES];
+                    (temp, store, value)
+                },
+                |(_temp, store, value)| {
+                    let mut batch = store.new_batch();
+                    for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
+                        let key = block_body_like_key(counter);
+                        batch.put(ColumnFamily::BlockTree, &key, &value);
+                    }
+                    must(store.write(batch));
+                    must(store.flush());
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+}
+
 fn bench_single_block_body_gets_1k<S, Open>(c: &mut Criterion, backend: &str, open: Open)
 where
     S: KvStore,
@@ -243,6 +273,7 @@ where
     bench_prefix_iter_100k::<S, _>(c, backend, open);
     bench_mixed_16thread_workload::<S, _>(c, backend, open);
     bench_single_block_body_puts_1k::<S, _>(c, backend, open);
+    bench_single_block_body_batch_puts_1k::<S, _>(c, backend, open);
     bench_single_block_body_gets_1k::<S, _>(c, backend, open);
 }
 
