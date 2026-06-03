@@ -33,6 +33,9 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use tempfile::TempDir;
 
+type TxIndexHandle = Arc<Mutex<Box<dyn IndexerLike>>>;
+type TxIndexFixture = (Option<TxIndexHandle>, Option<TempDir>);
+
 const PROXY_BLOCKS: u32 = 32;
 const SYNC_PROXY_BLOCKS: u32 = 128;
 const SYNC_PROXY_HEADER_HEIGHT: u32 = 4_096;
@@ -59,6 +62,36 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
                         .unwrap_or_else(|| panic!("proxy apply did not publish a tip"))
                         .height,
                 );
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    #[cfg(feature = "rocksdb")]
+    c.bench_function("sync_pipeline_apply_proxy_pruned_rocksdb", |b| {
+        b.iter_batched(
+            open_pruned_regtest_state,
+            |(_dir, state)| {
+                for block in &blocks {
+                    state
+                        .apply_block(black_box(block))
+                        .unwrap_or_else(|error| panic!("pruned proxy apply failed: {error}"));
+                }
+                let tip = state
+                    .applied_tip()
+                    .load_full()
+                    .unwrap_or_else(|| panic!("pruned proxy apply did not publish a tip"));
+                let record = state
+                    .blocks()
+                    .read()
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| panic!("pruned proxy apply did not publish a record"));
+                assert!(
+                    record.block_hex.is_empty(),
+                    "pruned proxy should publish metadata-only block records"
+                );
+                black_box((tip.height, record.body_size));
             },
             BatchSize::SmallInput,
         );
@@ -134,6 +167,20 @@ fn open_regtest_state() -> (TempDir, NodeState) {
     config.txindex = false;
     let state =
         NodeState::open(config).unwrap_or_else(|error| panic!("open node state failed: {error}"));
+    (dir, state)
+}
+
+#[cfg(feature = "rocksdb")]
+fn open_pruned_regtest_state() -> (TempDir, NodeState) {
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("node");
+    config.p2p_listen.clear();
+    "rocksdb".clone_into(&mut config.storage_backend);
+    config.txindex = false;
+    config.prune_target_mb = 1;
+    let state = NodeState::open(config)
+        .unwrap_or_else(|error| panic!("open pruned node state failed: {error}"));
     (dir, state)
 }
 
@@ -285,9 +332,7 @@ fn apply_handles(
     )
 }
 
-fn tx_index_for_mode(
-    mode: TxIndexMode,
-) -> (Option<Arc<Mutex<Box<dyn IndexerLike>>>>, Option<TempDir>) {
+fn tx_index_for_mode(mode: TxIndexMode) -> TxIndexFixture {
     match mode {
         TxIndexMode::Disabled => (None, None),
         TxIndexMode::Noop => (Some(noop_tx_index()), None),
