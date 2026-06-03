@@ -42,6 +42,7 @@ const SYNC_PROXY_BLOCKS: u32 = 128;
 const SYNC_PROXY_HEADER_HEIGHT: u32 = 4_096;
 const SYNC_PROXY_BLOCKS_USIZE: usize = 128;
 const SYNC_PROXY_START_HEIGHT: i32 = 4_096;
+const SYNC_PROXY_PEERS: usize = 512;
 
 fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     let blocks = proxy_blocks(PROXY_BLOCKS);
@@ -130,6 +131,13 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             );
         },
     );
+    c.bench_function("deterministic_initial_sync_proxy_many_peers_512", |b| {
+        b.iter_batched(
+            || SyncFixture::new_with_peers(TxIndexMode::Disabled, SYNC_PROXY_PEERS),
+            |fixture| black_box(fixture.run_many_peer_tick()),
+            BatchSize::SmallInput,
+        );
+    });
     #[cfg(feature = "rocksdb")]
     c.bench_function(
         "deterministic_initial_sync_proxy_deep_headers_txindex_rocksdb_128_blocks",
@@ -198,7 +206,7 @@ fn open_pruned_regtest_state() -> (TempDir, NodeState) {
 struct SyncFixture {
     sync: BlockSync,
     inbound_blocks_tx: crossbeam_channel::Sender<Block>,
-    outbound_rx: crossbeam_channel::Receiver<Message>,
+    outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
     received_scan_expected: Vec<BlockHash>,
@@ -215,6 +223,10 @@ enum TxIndexMode {
 
 impl SyncFixture {
     fn new(tx_index_mode: TxIndexMode) -> Self {
+        Self::new_with_peers(tx_index_mode, 1)
+    }
+
+    fn new_with_peers(tx_index_mode: TxIndexMode, peer_count: usize) -> Self {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let mut tree = BlockTree::new();
         let genesis_id = tree
@@ -276,15 +288,25 @@ impl SyncFixture {
             inbound_blocks_rx,
         );
 
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-        peers.write().push(synthetic_peer(addr));
-        let (outbound_tx, outbound_rx) = unbounded::<Message>();
-        peer_outbound.write().insert(addr, outbound_tx);
+        let mut outbound_rxs = Vec::with_capacity(peer_count);
+        {
+            let mut peers = peers.write();
+            let mut peer_outbound = peer_outbound.write();
+            for index in 0..peer_count {
+                let port = u16::try_from(8_333_usize.saturating_add(index))
+                    .unwrap_or_else(|error| panic!("invalid synthetic peer port: {error}"));
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+                peers.push(synthetic_peer(addr));
+                let (outbound_tx, outbound_rx) = unbounded::<Message>();
+                peer_outbound.insert(addr, outbound_tx);
+                outbound_rxs.push(outbound_rx);
+            }
+        }
 
         Self {
             sync,
             inbound_blocks_tx,
-            outbound_rx,
+            outbound_rxs,
             applied_tip,
             blocks,
             received_scan_expected,
@@ -295,7 +317,9 @@ impl SyncFixture {
     fn run(self) -> u32 {
         self.sync.tick();
         let getdata_count = match self
-            .outbound_rx
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
             .try_recv()
             .unwrap_or_else(|error| panic!("expected getdata: {error}"))
         {
@@ -303,7 +327,12 @@ impl SyncFixture {
             other => panic!("expected getdata, got {other:?}"),
         };
         assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
-        match self.outbound_rx.try_recv() {
+        match self
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
+            .try_recv()
+        {
             Ok(other) => panic!("expected no getheaders, got {other:?}"),
             Err(crossbeam_channel::TryRecvError::Empty) => {}
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -328,13 +357,29 @@ impl SyncFixture {
             .height
     }
 
+    fn run_many_peer_tick(self) -> usize {
+        self.sync.tick();
+        self.outbound_rxs
+            .iter()
+            .map(|rx| {
+                let mut count = 0_usize;
+                while rx.try_recv().is_ok() {
+                    count = count.saturating_add(1);
+                }
+                count
+            })
+            .sum()
+    }
+
     fn request_after_unsolicited_received(self) -> usize {
         self.inbound_blocks_tx
             .send(self.blocks[1].clone())
             .unwrap_or_else(|error| panic!("send unsolicited staged block failed: {error}"));
         self.sync.tick();
         let requested = match self
-            .outbound_rx
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
             .try_recv()
             .unwrap_or_else(|error| panic!("expected scan-path getdata: {error}"))
         {
