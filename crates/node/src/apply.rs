@@ -570,6 +570,12 @@ fn verify_block_transactions(
     flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     debug_assert_eq!(block.txdata.len(), txids.len());
+    if block_has_only_coinbase_transactions(block) {
+        for tx in &block.txdata {
+            bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+        }
+        return Ok(());
+    }
     // Consensus connects transactions in block order. A later transaction may
     // spend an output created earlier in the same block. Coinbase outputs enter
     // this view too, so maturity failures stay in the maturity pass instead of
@@ -593,6 +599,10 @@ fn verify_block_transactions(
         view.add_outputs(tx, *txid, height)?;
     }
     Ok(())
+}
+
+fn block_has_only_coinbase_transactions(block: &bitcoin::Block) -> bool {
+    block.txdata.iter().all(bitcoin::Transaction::is_coinbase)
 }
 
 struct BlockLocalUtxoView {
@@ -760,6 +770,9 @@ fn check_coinbase_maturity_with_txids(
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
     debug_assert_eq!(block.txdata.len(), txids.len());
+    if block_has_only_coinbase_transactions(block) {
+        return Ok(());
+    }
     // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
     let mut view =
         BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), block_overlay_capacity(block));
@@ -801,6 +814,9 @@ fn check_bip68_sequence_locks(
     previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
 ) -> core::result::Result<(), ApplyError> {
     if !softfork_state.csv_active {
+        return Ok(());
+    }
+    if block_has_only_coinbase_transactions(block) {
         return Ok(());
     }
 
