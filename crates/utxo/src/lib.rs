@@ -26,7 +26,7 @@ pub use set::{
     BlockChanges, ScannedUtxo, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoError, UtxoScan,
     UtxoSet, UtxoSetView,
 };
-pub use shard::LiveOutput;
+pub use shard::{LiveOutput, LiveOutputMeta};
 pub use snapshot::{
     SnapshotLoad, aggregate_hash, hash_serialized_3, read_snapshot, write_snapshot,
 };

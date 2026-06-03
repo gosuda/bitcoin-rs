@@ -367,6 +367,13 @@ impl UtxoSet {
         self.shards[usize::from(key.shard())].get_entry(&key, &op.txid, op.vout)
     }
 
+    /// Returns live-output metadata without materializing script bytes.
+    #[must_use]
+    pub fn get_meta(&self, op: &OutPoint) -> Option<crate::shard::LiveOutputMeta> {
+        let key = UtxoKey::from_txid(&op.txid);
+        self.shards[usize::from(key.shard())].get_meta(&key, &op.txid, op.vout)
+    }
+
     /// Scans a stable whole-set view for exact scriptPubKey matches.
     pub fn scan_script_pubkeys(&self, scripts: &[ScriptBuf]) -> Result<UtxoScan, UtxoError> {
         self.with_stable_view(|view| view.scan_script_pubkeys(scripts))

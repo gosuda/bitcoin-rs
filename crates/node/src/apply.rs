@@ -11,7 +11,7 @@ use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_primitives::{Network, OutPoint};
 use bitcoin_rs_rpc::BlockRecord;
-use bitcoin_rs_utxo::{BlockChanges, LiveOutput, UtxoAdd, UtxoSet};
+use bitcoin_rs_utxo::{BlockChanges, LiveOutput, LiveOutputMeta, UtxoAdd, UtxoSet};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -613,6 +613,50 @@ impl UtxoView for BlockLocalUtxoView {
     }
 }
 
+struct BlockLocalUtxoMetaView {
+    base: Arc<UtxoSet>,
+    overlay: HashMap<bitcoin::OutPoint, Option<LiveOutputMeta>>,
+}
+
+impl BlockLocalUtxoMetaView {
+    fn new(set: Arc<UtxoSet>) -> Self {
+        Self {
+            base: set,
+            overlay: HashMap::new(),
+        }
+    }
+
+    fn lookup_meta(&self, outpoint: &bitcoin::OutPoint) -> Option<LiveOutputMeta> {
+        if let Some(entry) = self.overlay.get(outpoint) {
+            return *entry;
+        }
+        self.base.get_meta(&internal_outpoint(outpoint))
+    }
+
+    fn spend_inputs(&mut self, tx: &bitcoin::Transaction) {
+        for input in &tx.input {
+            self.overlay.insert(input.previous_output, None);
+        }
+    }
+
+    fn add_output_meta(
+        &mut self,
+        tx: &bitcoin::Transaction,
+        height: u32,
+    ) -> core::result::Result<(), ApplyError> {
+        let txid = tx.compute_txid();
+        let coinbase = tx.is_coinbase();
+        for (vout, _txout) in tx.output.iter().enumerate() {
+            let vout = u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?;
+            self.overlay.insert(
+                bitcoin::OutPoint::new(txid, vout),
+                Some(LiveOutputMeta { coinbase, height }),
+            );
+        }
+        Ok(())
+    }
+}
+
 fn check_bip113_finality(
     block: &bitcoin::Block,
     height: u32,
@@ -645,14 +689,14 @@ pub(crate) fn check_coinbase_maturity(
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
     // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
-    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
+    let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo));
     for tx in &block.txdata {
         if tx.is_coinbase() {
-            view.add_outputs(tx, height)?;
+            view.add_output_meta(tx, height)?;
             continue;
         }
         for tx_input in &tx.input {
-            let Some(entry) = view.lookup_live_output(&tx_input.previous_output) else {
+            let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {
                 continue;
             };
             let depth = height.saturating_sub(entry.height);
@@ -669,7 +713,7 @@ pub(crate) fn check_coinbase_maturity(
             }
         }
         view.spend_inputs(tx);
-        view.add_outputs(tx, height)?;
+        view.add_output_meta(tx, height)?;
     }
     Ok(())
 }
@@ -686,14 +730,14 @@ fn check_bip68_sequence_locks(
         return Ok(());
     }
 
-    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
+    let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo));
     for tx in &block.txdata {
         if tx.is_coinbase() {
             continue;
         }
         if tx.version.0 < 2 {
             view.spend_inputs(tx);
-            view.add_outputs(tx, height)?;
+            view.add_output_meta(tx, height)?;
             continue;
         }
         for tx_input in &tx.input {
@@ -704,7 +748,7 @@ fn check_bip68_sequence_locks(
             let is_time_based = sequence & BIP68_TYPE_FLAG != 0;
             if is_time_based {
                 let relative_intervals = sequence & BIP68_MASK;
-                let Some(entry) = view.lookup_live_output(&tx_input.previous_output) else {
+                let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {
                     continue;
                 };
                 let prevout_mtp = if entry.height == height {
@@ -732,7 +776,7 @@ fn check_bip68_sequence_locks(
             }
 
             let relative_blocks = sequence & BIP68_MASK;
-            let Some(entry) = view.lookup_live_output(&tx_input.previous_output) else {
+            let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {
                 continue;
             };
             let earliest_height = entry.height.saturating_add(relative_blocks);
@@ -749,7 +793,7 @@ fn check_bip68_sequence_locks(
             }
         }
         view.spend_inputs(tx);
-        view.add_outputs(tx, height)?;
+        view.add_output_meta(tx, height)?;
     }
 
     Ok(())

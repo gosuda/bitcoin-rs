@@ -55,6 +55,15 @@ pub struct LiveOutput {
     pub height: u32,
 }
 
+/// One live UTXO output's metadata without script or value materialization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveOutputMeta {
+    /// Whether the originating transaction was a coinbase.
+    pub coinbase: bool,
+    /// Block height at which this output was created.
+    pub height: u32,
+}
+
 self_cell! {
     /// Pinned shard arena plus the table that borrows from it.
     pub struct ShardCell {
@@ -129,6 +138,22 @@ impl Shard {
             let script = script_slice(table, output)?;
             Some(LiveOutput {
                 txout: txout_from_parts(output.value, script),
+                coinbase: output.coinbase,
+                height: output.height,
+            })
+        })
+    }
+
+    /// Returns live-output metadata without materializing script bytes.
+    #[must_use]
+    pub fn get_meta(&self, key: &UtxoKey, txid: &Hash256, vout: u32) -> Option<LiveOutputMeta> {
+        let cell = self.inner.read();
+        cell.with_dependent(|_arena, table| {
+            let record = table.table.find(key.hash(), |record| {
+                record.key() == *key && record.txid() == *txid
+            })?;
+            let output = record.find_output(vout)?;
+            Some(LiveOutputMeta {
                 coinbase: output.coinbase,
                 height: output.height,
             })
