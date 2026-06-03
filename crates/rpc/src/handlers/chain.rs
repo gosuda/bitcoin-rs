@@ -35,12 +35,9 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         bitcoin_rs_primitives::Network::Signet => "signet",
         bitcoin_rs_primitives::Network::Regtest => "regtest",
     };
-    let size_on_disk: u64 = {
+    let block_stats = {
         let blocks = ctx.blocks.read();
-        blocks
-            .iter()
-            .map(|record| u64::try_from(record.body_size).unwrap_or(u64::MAX))
-            .fold(0_u64, u64::saturating_add)
+        fold_block_records(&blocks, applied, None)
     };
     let prune_status = ctx.prune_status();
     let bestblockhash = ctx.applied_hash().to_string_be();
@@ -56,7 +53,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let _ = response.insert(&"verificationprogress", json!(verification_progress));
     let _ = response.insert(&"initialblockdownload", applied < headers);
     let _ = response.insert(&"chainwork", chainwork.as_str());
-    let _ = response.insert(&"size_on_disk", size_on_disk);
+    let _ = response.insert(&"size_on_disk", block_stats.size_on_disk);
     let _ = response.insert(&"pruned", prune_status.pruned);
     if let Some(pruneheight) = prune_status.pruneheight {
         let _ = response.insert(&"pruneheight", pruneheight);
@@ -146,30 +143,18 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         .and_then(JsonValueTrait::as_u64)
         .unwrap_or(DEFAULT_WINDOW);
     let applied_height = ctx.applied_height();
-    let blocks_guard = ctx.blocks.read();
-    let total_tx_count: u64 = blocks_guard
-        .iter()
-        .map(|record| u64::try_from(record.tx_count).unwrap_or(0))
-        .sum();
     let window_block_count = nblocks.min(u64::from(applied_height).saturating_add(1));
     let lowest_window_height = u64::from(applied_height)
         .saturating_add(1)
         .saturating_sub(window_block_count);
-    let window_tx_count: u64 = blocks_guard
-        .iter()
-        .filter(|record| u64::from(record.height) >= lowest_window_height)
-        .map(|record| u64::try_from(record.tx_count).unwrap_or(0))
-        .sum();
-    let tip_time = blocks_guard
-        .iter()
-        .find(|record| record.height == applied_height)
-        .map_or(0, |record| record.time);
-    let earliest_window_time = blocks_guard
-        .iter()
-        .filter(|record| u64::from(record.height) >= lowest_window_height)
-        .map(|record| record.time)
-        .min()
-        .unwrap_or(tip_time);
+    let block_stats = {
+        let blocks_guard = ctx.blocks.read();
+        fold_block_records(&blocks_guard, applied_height, Some(lowest_window_height))
+    };
+    let total_tx_count = block_stats.total_tx_count;
+    let window_tx_count = block_stats.window_tx_count;
+    let tip_time = block_stats.tip_time.unwrap_or(0);
+    let earliest_window_time = block_stats.earliest_window_time.unwrap_or(tip_time);
     let window_interval = u64::from(tip_time).saturating_sub(u64::from(earliest_window_time));
     let txrate = if window_interval > 0 {
         let count_small = u32::try_from(window_tx_count).unwrap_or(u32::MAX);
@@ -188,6 +173,48 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         "window_interval": window_interval,
         "txrate": txrate
     }))
+}
+
+#[derive(Default)]
+struct FoldedBlockRecords {
+    size_on_disk: u64,
+    total_tx_count: u64,
+    window_tx_count: u64,
+    tip_time: Option<u32>,
+    earliest_window_time: Option<u32>,
+}
+
+fn fold_block_records(
+    blocks: &[BlockRecord],
+    applied_height: u32,
+    lowest_window_height: Option<u64>,
+) -> FoldedBlockRecords {
+    let mut stats = FoldedBlockRecords::default();
+    for record in blocks {
+        stats.size_on_disk = stats
+            .size_on_disk
+            .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+        if record.height > applied_height {
+            continue;
+        }
+        stats.total_tx_count = stats
+            .total_tx_count
+            .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
+        if record.height == applied_height && stats.tip_time.is_none() {
+            stats.tip_time = Some(record.time);
+        }
+        if lowest_window_height.is_some_and(|lowest| u64::from(record.height) >= lowest) {
+            stats.window_tx_count = stats
+                .window_tx_count
+                .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
+            stats.earliest_window_time = Some(
+                stats
+                    .earliest_window_time
+                    .map_or(record.time, |earliest| earliest.min(record.time)),
+            );
+        }
+    }
+    stats
 }
 
 pub(crate) fn getblockcount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -1308,6 +1335,108 @@ mod tests {
             panic!("time missing: {result:?}");
         };
         assert_eq!(time, u64::from(expected_time));
+    }
+
+    #[test]
+    fn getchaintxstats_two_block_window_uses_one_folded_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = Arc::new(Context::new());
+        let tip_hash = Hash256::from_le_bytes(&[9_u8; 32]);
+        for height in 0_u32..4 {
+            ctx.add_block(BlockRecord {
+                hash: Hash256::from_le_bytes(&[u8::try_from(height)?; 32]),
+                height,
+                block_hex: String::new(),
+                body_size: usize::try_from(100_u32.saturating_add(height))?,
+                header_hex: String::new(),
+                tx_count: usize::try_from(height.saturating_add(1))?,
+                time: 1_000_u32.saturating_add(height.saturating_mul(10)),
+            });
+        }
+        ctx.add_block(BlockRecord {
+            hash: Hash256::from_le_bytes(&[4_u8; 32]),
+            height: 4,
+            block_hex: String::new(),
+            body_size: 104,
+            header_hex: String::new(),
+            tx_count: 100,
+            time: 1,
+        });
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 3,
+            chainwork: ChainWork::ZERO,
+            hash: tip_hash,
+        });
+
+        let result = getchaintxstats(&ctx, &json!([2]))
+            .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
+
+        assert_eq!(
+            result.get("txcount").and_then(JsonValueTrait::as_u64),
+            Some(10)
+        );
+        assert_eq!(
+            result
+                .get("window_block_count")
+                .and_then(JsonValueTrait::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            result
+                .get("window_tx_count")
+                .and_then(JsonValueTrait::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            result
+                .get("window_interval")
+                .and_then(JsonValueTrait::as_u64),
+            Some(10)
+        );
+        assert_eq!(
+            result.get("time").and_then(JsonValueTrait::as_u64),
+            Some(1_030)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn getchaintxstats_tip_time_uses_first_applied_height_record() {
+        let ctx = Arc::new(Context::new());
+        let tip_hash = Hash256::from_le_bytes(&[8_u8; 32]);
+        ctx.add_block(BlockRecord {
+            hash: tip_hash,
+            height: 2,
+            block_hex: String::new(),
+            body_size: 100,
+            header_hex: String::new(),
+            tx_count: 1,
+            time: 200,
+        });
+        ctx.add_block(BlockRecord {
+            hash: Hash256::from_le_bytes(&[7_u8; 32]),
+            height: 2,
+            block_hex: String::new(),
+            body_size: 100,
+            header_hex: String::new(),
+            tx_count: 1,
+            time: 300,
+        });
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 2,
+            chainwork: ChainWork::ZERO,
+            hash: tip_hash,
+        });
+
+        let result = getchaintxstats(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
+
+        assert_eq!(
+            result.get("time").and_then(JsonValueTrait::as_u64),
+            Some(200)
+        );
     }
 }
 #[cfg(test)]
