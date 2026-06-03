@@ -77,7 +77,7 @@ so MDBX no longer needs an elevated-toolchain CI lane.
 ### Resulting feature flags
 
 - `crates/consensus`: `kernel` feature → enables `bitcoinkernel` dep + the dual-path validator. **Default off.**
-- `crates/storage`: `rocksdb`, `fjall`, `redb`, `mdbx` features. Default: `rocksdb`.
+- `crates/storage`: `rocksdb`, `fjall`, `redb`, `mdbx` features. Default: `fjall`.
 - Current CI uses Rust 1.95.0 after the workspace MSRV bump; the 2026-05-19 dependency audit above records the older PLAN.md 1.85.0 snapshot.
 - Workspace CI: `clippy`/`test` jobs build with `--no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus` under Rust 1.95.0. The `kernel-only` job installs `libboost-dev` and builds `bitcoin-rs-consensus` with `--no-default-features --features kernel -- --include-ignored`, because `bitcoinkernel` and `bitcoinconsensus` cannot be linked into the same Rust test binary.
 

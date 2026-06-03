@@ -178,7 +178,7 @@ lz4_flex = { version = ">=0.13, <0.14", default-features = false, features = ["s
 # --- Storage backends ---------------------------------------------------------
 # rust-rocksdb 0.50 line.
 # `default = [snappy, lz4, zstd, zlib, bzip2, bindgen-runtime]` — disable to
-# pick only what we use (rocksdb default).
+# pick only what the explicit rocksdb feature uses.
 rust-rocksdb = { version = ">=0.50, <0.51", default-features = false, features = [
     "mt_static", "snappy", "lz4", "zstd",
 ] }

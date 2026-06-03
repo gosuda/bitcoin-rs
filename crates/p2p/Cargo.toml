@@ -12,7 +12,7 @@ description = "bitcoin-rs :: p2p"
 workspace = true
 
 [features]
-default = ["rocksdb"]
+default = ["fjall"]
 rocksdb = ["bitcoin-rs-storage/rocksdb"]
 fjall = ["bitcoin-rs-storage/fjall"]
 redb = ["bitcoin-rs-storage/redb"]

@@ -15,7 +15,7 @@ gates G1-G14 in `PLAN.md`.
 
 - Consensus parity via vendored Bitcoin Core test vectors and an optional
   `bitcoinkernel` cross-check gate.
-- Four pluggable storage backends: RocksDB (default), MDBX, fjall, redb —
+- Four pluggable storage backends: fjall (default), RocksDB, MDBX, redb —
   selected at runtime via `--storage-backend`. The 4-backend equivalence test
   produces an identical aggregate hash on every IBD.
 - 256-shard arena-backed UTXO set (bumpalo + hashbrown) with snapshot format

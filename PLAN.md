@@ -4,7 +4,7 @@
 
 **Goal:** Ship `bitcoin-rs` — a single-binary ultra-fast Bitcoin full node in Rust 2024. Natively-integrated UTXO (gocoin shape), Electrum-style index (electrs shape), utreexo accumulator (utreexod shape), in-process wallet (PSBT builder; **no private keys, no signing**), in-process mining (getblocktemplate), pruning, BIP157/158 compact filters, coinstats index, four pluggable storage backends (RocksDB / MDBX / fjall / redb), SIMD JSON on the RPC hot path. All production polish (graceful shutdown, ban-score, crash recovery, metrics, structured logging, config) is part of core scope.
 
-**Architecture:** One process. One `crossbeam-channel`-driven event loop (no tokio/async-std). UTXO held as 256 shards of `hashbrown::HashTable<ArenaRef<'arena>>` over `bumpalo::Bump`, arenas pinned via `self_cell!` so the lifetime is sound (not transmuted), each shard guarded by `parking_lot::RwLock` and `CachePadded` against false sharing. Block tree as `slab::Slab<Node>` + `u32 NodeId`; tip published via `arc_swap::ArcSwapOption<TipSnapshot>`; chainwork as `ruint::Uint<256,4>`. Consensus *borrowed* from `bitcoinkernel >=0.1` (default-on, alpha-but-load-bearing) — our Rust validator runs in parallel and is asserted byte-identical to kernel for every accepted block. Wallet is in-process PSBT builder + descriptor watcher with **zero private-key surface**: external signers receive a PSBT, return a signed PSBT, finalize happens inside the daemon. Storage is a `KvStore` trait with **RocksDB as the launch default**; `signet-libmdbx` (MDBX — Reth/Erigon-proven memory-mapped CoW B+tree), `fjall` (pure-Rust LSM), and `redb` (pure-Rust B+tree) live behind cargo features. All four backends are gated by G7 backend-equivalence; MDBX is a credible candidate to replace RocksDB as default once benches land.
+**Architecture:** One process. One `crossbeam-channel`-driven event loop (no tokio/async-std). UTXO held as 256 shards of `hashbrown::HashTable<ArenaRef<'arena>>` over `bumpalo::Bump`, arenas pinned via `self_cell!` so the lifetime is sound (not transmuted), each shard guarded by `parking_lot::RwLock` and `CachePadded` against false sharing. Block tree as `slab::Slab<Node>` + `u32 NodeId`; tip published via `arc_swap::ArcSwapOption<TipSnapshot>`; chainwork as `ruint::Uint<256,4>`. Consensus *borrowed* from `bitcoinkernel >=0.1` (default-on, alpha-but-load-bearing) — our Rust validator runs in parallel and is asserted byte-identical to kernel for every accepted block. Wallet is in-process PSBT builder + descriptor watcher with **zero private-key surface**: external signers receive a PSBT, return a signed PSBT, finalize happens inside the daemon. Storage is a `KvStore` trait with **fjall as the launch default**; RocksDB, `signet-libmdbx` (MDBX — Reth/Erigon-proven memory-mapped CoW B+tree), and `redb` (pure-Rust B+tree) live behind cargo features. All four backends are gated by G7 backend-equivalence.
 
 **Tech stack:** Rust 2024 edition, MSRV 1.85.0, resolver `"3"`. `mimalloc` global allocator (`snmalloc-rs` + `tikv-jemallocator` re-benchmarked in G14 as alternates). See the full Dependency Table below for the vetted floor list; every entry was audited against crates.io / GitHub on 2026-05-19 and pins to the latest stable line. The audit summary lives in the *Ultrareview Log* at the bottom.
 
@@ -47,7 +47,7 @@ bitcoin-rs/
 │   ├── primitives/               # Hash256, OutPoint, Tx, Block, Header, varint, network, sighash types
 │   ├── consensus/                # kernel-authoritative validator + parallel Rust path
 │   ├── script/                   # interpreter (legacy/segwit/taproot/sighash variants/sigops)
-│   ├── storage/                  # KvStore trait + rocksdb default + mdbx + fjall + redb feature impls
+│   ├── storage/                  # KvStore trait + fjall default + rocksdb + mdbx + redb feature impls
 │   ├── utxo/                     # 256-shard HashTable + Bump + self_cell + RwLock; commit/get/undo/defrag/snapshot
 │   ├── utreexo/                  # rustreexo Pollard/Stump/MemForest; proof attach/verify; bridge-node
 │   ├── chain/                    # Slab<BlockTreeNode>+u32 NodeId; ArcSwapOption tip; ruint chainwork; reorg
@@ -103,9 +103,9 @@ Stored once in `bitcoin-rs/Cargo.toml` under `[workspace.dependencies]`. Per-cra
 | `bytemuck` | `>=1.25` | `["derive"]` | `Pod` + `Zeroable` on fixed-layout wire types |
 | `zerocopy` | `>=0.8` | `["derive"]` | 0.8 is a trait-rewrite vs 0.7 — `TryFromBytes`/`IntoBytes`/`FromBytes` + `KnownLayout`/`Immutable`/`Unaligned` markers. Use exclusively for snapshot records + zerocopy on-disk index rows |
 | `lz4_flex` | `>=0.11` | `[]` | pure-Rust LZ4 for snapshot + custom-format compression (rocksdb feature already pulls C zstd) |
-| `rust-rocksdb` | `>=0.49` | `["mt_static", "snappy", "lz4", "zstd"]` | storage **default**; zaidoon1 fork is the active maintained binding (0.49.1 2026-05) |
+| `rust-rocksdb` | `>=0.49` | `["mt_static", "snappy", "lz4", "zstd"]` | storage feature `rocksdb`; zaidoon1 fork is the active maintained binding (0.49.1 2026-05) |
 | `signet-libmdbx` | `>=0.8` | `[]` | storage feature `mdbx` — init4tech/mdbx fork of reth-libmdbx; Reth + Erigon + Silkworm + Akula all use libmdbx in production. Memory-mapped CoW B+tree, wait-free readers, no WAL. **Strong candidate for default after G7 benchmarks**. License MIT/Apache-2.0 ([crates.io/signet-libmdbx](https://crates.io/crates/signet-libmdbx)) |
-| `fjall` | `>=3.1` | `[]` | storage feature `fjall` — pure-Rust LSM with multi-keyspace (column families), `WriteBatch`, optional serializable txns ([fjall-rs/fjall](https://github.com/fjall-rs/fjall)) |
+| `fjall` | `>=3.1` | `[]` | storage **default** — pure-Rust LSM with multi-keyspace (column families), `WriteBatch`, optional serializable txns ([fjall-rs/fjall](https://github.com/fjall-rs/fjall)) |
 | `redb` | `>=4.1` | `[]` | storage feature `redb` — pure-Rust single-file CoW B+tree with typed `TableDefinition`; portable ([cberner/redb](https://github.com/cberner/redb)) |
 | `rustreexo` | `>=0.5` | `[]` | utreexo accumulators (`Stump`, `Pollard`, `MemForest`); 0.5 is current stable line, NOT 0.7 |
 | `bitcoin_slices` | `>=0.11` | `["bitcoin", "sha2"]` | zero-alloc sans-I/O block visitor (the real crate behind the placeholder `bsl::` namespace; electrs uses it). Used by `crates/index` |
@@ -186,7 +186,7 @@ All gates must pass before bitcoin-rs is shippable. Not phased — these are fla
 - Block validation throughput ≥ 80 % of `gocoin`'s blocks-per-second on identical mainnet IBD (measured via `criterion`).
 - UTXO commit p95 ≤ 50 ms per 4 MiB block.
 - Electrum `scripthash.get_history` p95 ≤ 30 ms over a 10 000-call random sample at tip.
-- RSS ≤ 16 GiB at mainnet tip with rocksdb default + all indexes enabled.
+- RSS ≤ 16 GiB at mainnet tip with fjall default + all indexes enabled.
 
 ---
 
@@ -429,7 +429,7 @@ git commit -am "feat(script): interpreter + sigops + taproot + batch schnorr" -m
 
 ---
 
-### Task 4: `crates/storage` — pluggable KvStore (rocksdb default + mdbx + fjall + redb features)
+### Task 4: `crates/storage` — pluggable KvStore (fjall default + rocksdb + mdbx + redb features)
 
 **Files:**
 - Create: `crates/storage/src/{lib,trait_,rocksdb_impl,mdbx_impl,fjall_impl,redb_impl,column_families,write_batch}.rs`
@@ -473,7 +473,7 @@ pub trait WriteBatch {
 - [ ] **Step 9: Commit.**
 
 ```bash
-git commit -am "feat(storage): KvStore trait + rocksdb default + mdbx + fjall + redb features" -m "Op: extend"
+git commit -am "feat(storage): KvStore trait + fjall default + rocksdb + mdbx + redb features" -m "Op: extend"
 ```
 
 ---
@@ -991,9 +991,9 @@ Triggered by user feedback: *"RocksDB is also previous generation. Use better on
 
 | Backend | Floor | Production users | Why added/kept | Source |
 | --- | --- | --- | --- | --- |
-| `rust-rocksdb` | `>=0.49` | Bitcoin Core, electrs, many indexers | Battle-tested default; zaidoon1 fork actively maintained (0.49.1 2026-05-18) | https://github.com/zaidoon1/rust-rocksdb |
-| `signet-libmdbx` | `>=0.8` | **Reth (Paradigm's Rust Ethereum execution client), Erigon, Silkworm, Akula** — all use libmdbx as primary blockchain storage at mainnet scale (∼1.7 TiB) | Memory-mapped CoW B+tree, wait-free readers, no WAL, deterministic crash recovery; **strong candidate to replace RocksDB as default after G7** | https://crates.io/crates/signet-libmdbx · https://github.com/init4tech/mdbx · https://reth.rs/ |
-| `fjall` | `>=3.1` | Growing embedded use (axum/actix services) | Pure-Rust LSM with native column families + `WriteBatch` + serializable txns | https://github.com/fjall-rs/fjall |
+| `rust-rocksdb` | `>=0.49` | Bitcoin Core, electrs, many indexers | Battle-tested explicit backend; zaidoon1 fork actively maintained (0.49.1 2026-05-18) | https://github.com/zaidoon1/rust-rocksdb |
+| `signet-libmdbx` | `>=0.8` | **Reth (Paradigm's Rust Ethereum execution client), Erigon, Silkworm, Akula** — all use libmdbx as primary blockchain storage at mainnet scale (∼1.7 TiB) | Memory-mapped CoW B+tree, wait-free readers, no WAL, deterministic crash recovery | https://crates.io/crates/signet-libmdbx · https://github.com/init4tech/mdbx · https://reth.rs/ |
+| `fjall` | `>=3.1` | Growing embedded use (axum/actix services) | Default backend; pure-Rust LSM with native column families + `WriteBatch` + serializable txns | https://github.com/fjall-rs/fjall |
 | `redb` | `>=4.1` | electrs and other indexers | Pure-Rust single-file CoW B+tree with typed `TableDefinition` | https://github.com/cberner/redb |
 
 **Rejected storage contenders (with primary-source rationale):**

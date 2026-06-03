@@ -3,7 +3,7 @@
 //! - Initial block sync throughput is faster than Bitcoin Core's blocks-per-second on identical mainnet IBD (measured via `criterion`).
 //! - UTXO commit p95 ≤ 50 ms per 4 MiB block.
 //! - Electrum `scripthash.get_history` p95 ≤ 30 ms over a 10 000-call random sample at tip.
-//! - RSS ≤ 16 GiB at mainnet tip with rocksdb default + all indexes enabled.
+//! - RSS ≤ 16 GiB at mainnet tip with fjall default + all indexes enabled.
 //!
 //! This ignored gate does not run the live mainnet benchmarks itself. It verifies
 //! externally collected evidence and fails closed when the evidence contract is
@@ -21,7 +21,7 @@ const EXPECTED_ELECTRUM_SAMPLE_SIZE: u64 = 10_000;
 const EVIDENCE_HELP: &str = "required G14 evidence env: \
 G14_COMMIT_SHA=<current git HEAD as 40 lowercase hex>, \
 G14_MEASUREMENT_TARGET=mainnet-ibd, \
-G14_STORAGE_BACKEND=rocksdb, \
+G14_STORAGE_BACKEND=fjall, \
 G14_INDEXES=all, \
 G14_REFERENCE_IMPL=bitcoin-core, \
 G14_BENCH_TOOL=criterion, \
@@ -85,7 +85,7 @@ impl G14Evidence {
     fn from_env() -> Self {
         let commit_sha = required_commit_sha();
         require_literal("G14_MEASUREMENT_TARGET", "mainnet-ibd");
-        require_literal("G14_STORAGE_BACKEND", "rocksdb");
+        require_literal("G14_STORAGE_BACKEND", "fjall");
         require_literal("G14_INDEXES", "all");
         require_literal("G14_REFERENCE_IMPL", "bitcoin-core");
         require_literal("G14_BENCH_TOOL", "criterion");

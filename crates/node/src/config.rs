@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use bitcoin_rs_primitives::Network;
 
-const DEFAULT_STORAGE_BACKEND: &str = "rocksdb";
+const DEFAULT_STORAGE_BACKEND: &str = "fjall";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_RPC_USER: &str = "bitcoin-rs";
 const DEFAULT_RPC_PASSWORD: &str = "bitcoin-rs";

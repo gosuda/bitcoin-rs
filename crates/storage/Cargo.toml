@@ -12,7 +12,7 @@ description = "bitcoin-rs :: storage"
 workspace = true
 
 [features]
-default = ["rocksdb"]
+default = ["fjall"]
 rocksdb = ["dep:rust-rocksdb"]
 fjall = ["dep:fjall"]
 redb = ["dep:redb"]

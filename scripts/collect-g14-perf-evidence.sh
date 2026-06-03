@@ -242,7 +242,7 @@ if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
 env = {
     "G14_COMMIT_SHA": current_head(),
     "G14_MEASUREMENT_TARGET": "mainnet-ibd",
-    "G14_STORAGE_BACKEND": "rocksdb",
+    "G14_STORAGE_BACKEND": "fjall",
     "G14_INDEXES": "all",
     "G14_REFERENCE_IMPL": "bitcoin-core",
     "G14_BENCH_TOOL": "criterion",

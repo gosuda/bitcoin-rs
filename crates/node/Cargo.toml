@@ -14,15 +14,15 @@ workspace = true
 [features]
 # A node is non-functional without a storage backend, and its `NodeStorage` /
 # `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the
-# `match self` arms are non-exhaustive and the crate fails to compile.  rocksdb
-# is the documented default backend so per-crate `cargo publish` / `cargo check`
+# `match self` arms are non-exhaustive and the crate fails to compile.  fjall
+# is the performance-oriented default backend so per-crate `cargo publish` / `cargo check`
 # works out of the box.  CI and local dev build via `bin/bitcoin-rs` with
 # `--package bitcoin-rs --no-default-features --features "rocksdb,fjall,redb,mdbx,bitcoinconsensus"`,
 # which propagates all four backends through `bin/bitcoin-rs`'s feature table.
 # Note: `--workspace --features "..."` in a virtual workspace (no root [package])
 # does NOT forward CLI features to library crates; always use -p when features
 # must reach a specific crate.
-default = ["rocksdb"]
+default = ["fjall"]
 rocksdb = [
     "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-coinstats/rocksdb",

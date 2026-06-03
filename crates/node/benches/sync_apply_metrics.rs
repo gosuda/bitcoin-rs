@@ -132,7 +132,7 @@ fn storage_backend() -> &'static str {
         Ok(backend) if backend == "mdbx" => "mdbx",
         Ok(backend) if backend == "rocksdb" => "rocksdb",
         Ok(backend) => panic!("unsupported BITCOIN_RS_SYNC_APPLY_BACKEND={backend}"),
-        Err(_) => "rocksdb",
+        Err(_) => "fjall",
     }
 }
 
