@@ -358,19 +358,28 @@ impl BlockSync {
 
     fn sync_peers(&self, our_height: u32) -> Vec<SyncPeer> {
         let peers = self.peers.read();
-        let mut eligible: Vec<_> = peers
-            .iter()
-            .filter(|peer| {
-                u32::try_from(peer.start_height)
-                    .ok()
-                    .is_some_and(|height| height > our_height)
-            })
-            .map(|peer| SyncPeer {
+        let mut eligible = Vec::new();
+        let mut previous_start_height = None;
+        let mut needs_sort = false;
+        for peer in peers.iter() {
+            if u32::try_from(peer.start_height)
+                .ok()
+                .is_none_or(|height| height <= our_height)
+            {
+                continue;
+            }
+            if previous_start_height.is_some_and(|previous| previous < peer.start_height) {
+                needs_sort = true;
+            }
+            previous_start_height = Some(peer.start_height);
+            eligible.push(SyncPeer {
                 addr: peer.addr,
                 start_height: peer.start_height,
-            })
-            .collect();
-        eligible.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+            });
+        }
+        if needs_sort {
+            eligible.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+        }
         eligible
     }
 
@@ -685,6 +694,38 @@ mod tests {
         };
         assert_eq!(witness_block_inventory(inventory)?, expected[1..]);
         assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tick_sorts_out_of_order_peers_before_requesting_blocks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(3)?;
+        let low_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let high_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers
+            .write()
+            .extend([synthetic_peer(low_addr, 2), synthetic_peer(high_addr, 8)]);
+        let (low_tx, low_rx) = unbounded::<Message>();
+        let (high_tx, high_rx) = unbounded::<Message>();
+        peer_outbound
+            .write()
+            .extend([(low_addr, low_tx), (high_addr, high_tx)]);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let first = high_rx.try_recv()?;
+        let NetworkMessage::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected high peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected);
+        let second = high_rx.try_recv()?;
+        if !matches!(second, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected high peer getheaders").into());
+        }
+        assert!(low_rx.try_recv().is_err());
         Ok(())
     }
 
