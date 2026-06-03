@@ -4,7 +4,7 @@ use core::fmt;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin::hex::{DisplayHex, FromHex as _};
 use bitcoin::{Block, Transaction, Txid};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
@@ -13,6 +13,8 @@ use compact_str::CompactString;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
+
+const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
 /// Block data made available to RPC handlers without forcing storage I/O.
 #[derive(Clone, Debug)]
@@ -55,7 +57,7 @@ impl BlockRecord {
     pub fn from_block_bytes(height: u32, block: &Block, block_bytes: &[u8]) -> Self {
         let block_hash = block.block_hash();
         let hash = Hash256::from_le_bytes(block_hash.as_byte_array());
-        let header_hex = serialize(&block.header).to_lower_hex_string();
+        let header_hex = header_hex_from_block_bytes(block, block_bytes);
         let block_hex = block_bytes.to_lower_hex_string();
         Self {
             hash,
@@ -80,7 +82,7 @@ impl BlockRecord {
     pub fn from_block_metadata_bytes(height: u32, block: &Block, block_bytes: &[u8]) -> Self {
         let block_hash = block.block_hash();
         let hash = Hash256::from_le_bytes(block_hash.as_byte_array());
-        let header_hex = serialize(&block.header).to_lower_hex_string();
+        let header_hex = header_hex_from_block_bytes(block, block_bytes);
         Self {
             hash,
             height,
@@ -105,6 +107,13 @@ impl BlockRecord {
             time: 0,
         }
     }
+}
+
+fn header_hex_from_block_bytes(block: &Block, block_bytes: &[u8]) -> String {
+    block_bytes.get(..SERIALIZED_BLOCK_HEADER_LEN).map_or_else(
+        || serialize(&block.header).to_lower_hex_string(),
+        DisplayHex::to_lower_hex_string,
+    )
 }
 
 /// Network counters and peer metadata exposed by network RPCs.
