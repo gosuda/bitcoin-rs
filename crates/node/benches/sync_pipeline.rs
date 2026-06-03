@@ -622,13 +622,17 @@ fn apply_handles(
     block_tree: Arc<RwLock<BlockTree>>,
     tx_index: Option<Arc<Mutex<Box<dyn IndexerLike>>>>,
 ) -> ApplyHandles {
+    let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+    let mut utxo = UtxoSet::new();
+    utxo.set_listener(Box::new((*coin_stats).clone()));
+    let utxo = Arc::new(utxo);
     ApplyHandles::new(
         Network::Regtest,
         chain_tip,
         applied_tip,
         block_tree,
-        Arc::new(UtxoSet::new()),
-        Arc::new(CoinStatsListener::new(CoinStats::default())),
+        utxo,
+        coin_stats,
         tx_index,
         noop_filter_index(),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
