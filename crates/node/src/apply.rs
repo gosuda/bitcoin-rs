@@ -588,13 +588,6 @@ impl BlockLocalUtxoView {
         }
     }
 
-    fn lookup_live_output(&self, outpoint: &bitcoin::OutPoint) -> Option<LiveOutput> {
-        if let Some(entry) = self.overlay.get(outpoint) {
-            return entry.clone();
-        }
-        self.base.get_entry(&internal_outpoint(outpoint))
-    }
-
     fn spend_inputs(&mut self, tx: &bitcoin::Transaction) {
         for input in &tx.input {
             self.overlay.insert(input.previous_output, None);
@@ -624,7 +617,12 @@ impl BlockLocalUtxoView {
 
 impl UtxoView for BlockLocalUtxoView {
     fn lookup(&self, outpoint: &bitcoin::OutPoint) -> Option<bitcoin::TxOut> {
-        self.lookup_live_output(outpoint).map(|entry| entry.txout)
+        if let Some(entry) = self.overlay.get(outpoint) {
+            return entry.as_ref().map(|entry| entry.txout.clone());
+        }
+        self.base
+            .get_entry(&internal_outpoint(outpoint))
+            .map(|entry| entry.txout)
     }
 }
 
