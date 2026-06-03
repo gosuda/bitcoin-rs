@@ -216,6 +216,14 @@ where
         must(store.put(ColumnFamily::BlockBodies, &key, &value));
     }
     must(store.flush());
+    for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
+        let key = block_body_like_key(counter);
+        assert_eq!(
+            must(store.get(ColumnFamily::BlockBodies, &key)).as_deref(),
+            Some(value.as_slice()),
+            "block-body get benchmark must measure persisted body hits",
+        );
+    }
 
     c.bench_function(&format!("{backend}/bench_single_block_body_gets_1k"), |b| {
         b.iter(|| {
