@@ -13,6 +13,7 @@ const OUTPOINT_BYTES: usize = 36;
 const COIN_HEADER_BYTES: u64 = 4;
 const AMOUNT_BYTES: u64 = 8;
 const SCRIPT_LEN_BYTES: u64 = 2;
+const MAX_RETAINED_SCRATCH_CAPACITY: usize = 4096;
 
 /// Incremental UTXO set statistics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,19 +53,6 @@ impl CoinStats {
         self.account_insert(txout);
     }
 
-    fn insert_utxo_with_scratch(
-        &mut self,
-        op: &OutPoint,
-        txout: &TxOut,
-        height: u32,
-        coinbase: bool,
-        scratch: &mut Vec<u8>,
-    ) {
-        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
-        self.muhash.insert(scratch.as_slice());
-        self.account_insert(txout);
-    }
-
     fn account_insert(&mut self, txout: &TxOut) {
         self.total_amount = self.total_amount.saturating_add(txout.value.to_sat());
         self.bogo_size = self.bogo_size.saturating_add(bogo_size(txout));
@@ -75,19 +63,6 @@ impl CoinStats {
     pub fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         let encoded = coin_hash_bytes(op, txout, height, coinbase);
         self.muhash.remove(&encoded);
-        self.account_remove(txout);
-    }
-
-    fn remove_utxo_with_scratch(
-        &mut self,
-        op: &OutPoint,
-        txout: &TxOut,
-        height: u32,
-        coinbase: bool,
-        scratch: &mut Vec<u8>,
-    ) {
-        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
-        self.muhash.remove(scratch.as_slice());
         self.account_remove(txout);
     }
 
@@ -160,7 +135,33 @@ pub enum CoinStatsDecodeError {
 /// UTXO listener that maintains [`CoinStats`].
 #[derive(Clone, Debug)]
 pub struct CoinStatsListener {
-    stats: Arc<RwLock<CoinStats>>,
+    state: Arc<RwLock<CoinStatsListenerState>>,
+}
+
+#[derive(Debug)]
+struct CoinStatsListenerState {
+    stats: CoinStats,
+    scratch: Vec<u8>,
+}
+
+impl CoinStatsListenerState {
+    fn insert_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        coin_hash_bytes_into(&mut self.scratch, op, txout, height, coinbase);
+        self.stats.muhash.insert(self.scratch.as_slice());
+        self.stats.account_insert(txout);
+    }
+
+    fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        coin_hash_bytes_into(&mut self.scratch, op, txout, height, coinbase);
+        self.stats.muhash.remove(self.scratch.as_slice());
+        self.stats.account_remove(txout);
+    }
+
+    fn trim_scratch_capacity(&mut self) {
+        if self.scratch.capacity() > MAX_RETAINED_SCRATCH_CAPACITY {
+            self.scratch = Vec::new();
+        }
+    }
 }
 
 impl CoinStatsListener {
@@ -168,69 +169,72 @@ impl CoinStatsListener {
     #[must_use]
     pub fn new(stats: CoinStats) -> Self {
         Self {
-            stats: Arc::new(RwLock::new(stats)),
+            state: Arc::new(RwLock::new(CoinStatsListenerState {
+                stats,
+                scratch: Vec::new(),
+            })),
         }
     }
 
     /// Returns a point-in-time copy of the current stats.
     #[must_use]
     pub fn snapshot(&self) -> CoinStats {
-        self.stats.read().clone()
+        self.state.read().stats.clone()
     }
 
     /// Applies a per-block delta to the wrapped stats.
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
-        self.stats.write().finish_block(height, tx_delta);
+        self.state.write().stats.finish_block(height, tx_delta);
     }
 }
 
 impl UtxoChangeListener for CoinStatsListener {
     fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        self.stats.write().insert_utxo(op, txout, height, coinbase);
+        let mut state = self.state.write();
+        state.insert_utxo(op, txout, height, coinbase);
+        state.trim_scratch_capacity();
     }
 
     fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
-        let mut scratch = insertions.first().map_or_else(Vec::new, |insertion| {
-            Vec::with_capacity(coin_hash_capacity(insertion.txout))
-        });
-        let mut stats = self.stats.write();
+        let mut state = self.state.write();
         for insertion in insertions {
-            stats.insert_utxo_with_scratch(
+            state.insert_utxo(
                 insertion.op,
                 insertion.txout,
                 insertion.height,
                 insertion.coinbase,
-                &mut scratch,
             );
         }
+        state.trim_scratch_capacity();
     }
 
     fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
-        self.stats.write().remove_utxo(op, txout, height, false);
+        let mut state = self.state.write();
+        state.remove_utxo(op, txout, height, false);
+        state.trim_scratch_capacity();
     }
 
     fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        self.stats.write().remove_utxo(op, txout, height, coinbase);
+        let mut state = self.state.write();
+        state.remove_utxo(op, txout, height, coinbase);
+        state.trim_scratch_capacity();
     }
 
     fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
-        let mut scratch = removals.first().map_or_else(Vec::new, |removal| {
-            Vec::with_capacity(coin_hash_capacity(&removal.txout))
-        });
-        let mut stats = self.stats.write();
+        let mut state = self.state.write();
         for removal in removals {
-            stats.remove_utxo_with_scratch(
+            state.remove_utxo(
                 &removal.op,
                 &removal.txout,
                 removal.height,
                 removal.coinbase,
-                &mut scratch,
             );
         }
+        state.trim_scratch_capacity();
     }
 
     fn muhash3072(&self) -> Option<[u8; 384]> {
-        Some(self.stats.read().muhash.finalize())
+        Some(self.state.read().stats.muhash.finalize())
     }
 }
 

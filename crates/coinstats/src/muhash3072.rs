@@ -152,15 +152,16 @@ fn reduce(value: &U3072) -> U3072 {
 }
 
 fn chacha20_keystream(key: &[u8; 32], out: &mut [u8; BYTE_LEN]) {
+    let key_words = chacha20_key_words(key);
     let mut block_counter = 0_u32;
     for block in out.chunks_exact_mut(64) {
-        chacha20_block(key, block_counter, block);
+        chacha20_block(&key_words, block_counter, block);
         block_counter = block_counter.wrapping_add(1);
     }
 }
 
-fn chacha20_block(key: &[u8; 32], counter: u32, out: &mut [u8]) {
-    let key_words = core::array::from_fn::<_, 8, _>(|idx| {
+fn chacha20_key_words(key: &[u8; 32]) -> [u32; 8] {
+    core::array::from_fn(|idx| {
         let offset = idx * 4;
         u32::from_le_bytes([
             key[offset],
@@ -168,7 +169,10 @@ fn chacha20_block(key: &[u8; 32], counter: u32, out: &mut [u8]) {
             key[offset + 2],
             key[offset + 3],
         ])
-    });
+    })
+}
+
+fn chacha20_block(key_words: &[u32; 8], counter: u32, out: &mut [u8]) {
     let state = [
         0x6170_7865,
         0x3320_646e,
