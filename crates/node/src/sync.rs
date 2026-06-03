@@ -24,6 +24,7 @@ use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::{Receiver, Sender};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
+use smallvec::SmallVec;
 
 use self::stage::{BlockStager, StagedBlock};
 use self::window::{DownloadWindow, SyncBudget};
@@ -56,6 +57,8 @@ const RECEIVED_BLOCK_BYTE_BUDGET: usize = 128 * 256 * 1024;
 /// per-peer cap equal to the global cap so a single healthy peer can fill the
 /// whole window until request scheduling is distributed across peers.
 const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
+
+type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
 pub struct BlockSync {
@@ -285,21 +288,21 @@ impl BlockSync {
         (applied, failed)
     }
 
-    fn expected_block_hashes(&self, max_count: usize) -> Vec<Hash256> {
+    fn expected_block_hashes(&self, max_count: usize) -> ExpectedBlockHashes {
         if max_count == 0 {
-            return Vec::new();
+            return ExpectedBlockHashes::new();
         }
         let Some(chain_tip) = self.handles.chain_tip.load_full() else {
-            return Vec::new();
+            return ExpectedBlockHashes::new();
         };
         let Some(applied_tip) = self.handles.applied_tip.load_full() else {
-            return Vec::new();
+            return ExpectedBlockHashes::new();
         };
         let Some(start_height) = applied_tip.height.checked_add(1) else {
-            return Vec::new();
+            return ExpectedBlockHashes::new();
         };
         if start_height > chain_tip.height {
-            return Vec::new();
+            return ExpectedBlockHashes::new();
         }
 
         let max_offset = u32::try_from(max_count.saturating_sub(1)).unwrap_or(u32::MAX);
@@ -310,9 +313,9 @@ impl BlockSync {
             .unwrap_or(max_count);
         let tree = self.handles.block_tree.read();
         let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, end_height) else {
-            return Vec::new();
+            return ExpectedBlockHashes::new();
         };
-        let mut hashes = Vec::with_capacity(capacity);
+        let mut hashes = ExpectedBlockHashes::with_capacity(capacity);
         let mut reached_start = false;
         while let Ok(node) = tree.node(cursor) {
             if node.height < start_height {
@@ -329,7 +332,7 @@ impl BlockSync {
             cursor = parent;
         }
         if !reached_start {
-            return Vec::new();
+            return ExpectedBlockHashes::new();
         }
         hashes.reverse();
         hashes
