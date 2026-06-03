@@ -28,6 +28,7 @@ use bitcoin_rs_node::{
 };
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_rpc::BlockRecord;
 use bitcoin_rs_utxo::UtxoSet;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossbeam_channel::unbounded;
@@ -180,6 +181,19 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
     );
 }
 
+fn block_source_height_lookup(c: &mut Criterion) {
+    let source = block_source_fixture(SYNC_PROXY_HEADER_HEIGHT);
+    c.bench_function("block_source_height_lookup_tail_4096", |b| {
+        b.iter(|| {
+            black_box(
+                source
+                    .block_at_height(black_box(SYNC_PROXY_HEADER_HEIGHT))
+                    .unwrap_or_else(|| panic!("missing block at tail height")),
+            );
+        });
+    });
+}
+
 fn print_proxy_summary(blocks: &[Block]) {
     let (_dir, state) = open_regtest_state();
     let started = Instant::now();
@@ -232,6 +246,14 @@ fn print_spend_proxy_summary(blocks: &[Block]) {
         "sync_pipeline_apply_spend_heavy_proxy blocks={} txs={transaction_count} elapsed={elapsed:?} recorded_body_bytes={recorded_body_bytes}",
         applied_height.saturating_add(1),
     );
+}
+
+fn block_source_fixture(max_height: u32) -> bitcoin_rs_node::NodeBlockSource {
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let records = (0..=max_height)
+        .map(|height| BlockRecord::from_block(height, &block))
+        .collect();
+    bitcoin_rs_node::NodeBlockSource::new(Arc::new(RwLock::new(records)))
 }
 
 fn open_regtest_state() -> (TempDir, NodeState) {
@@ -753,6 +775,7 @@ fn mine_block_to_declared_target(block: &mut Block) {
 criterion_group!(
     benches,
     sync_pipeline_apply_proxy,
-    deterministic_initial_sync_proxy
+    deterministic_initial_sync_proxy,
+    block_source_height_lookup
 );
 criterion_main!(benches);

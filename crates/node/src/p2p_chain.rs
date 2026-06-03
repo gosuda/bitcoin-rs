@@ -127,9 +127,7 @@ impl NodeP2pChainQuery {
         };
         let hash256 = hash256(hash);
         let blocks = self.blocks.read();
-        let record = blocks
-            .iter()
-            .find(|record| record.height == current_height && record.hash == hash256)?;
+        let record = record_at_height_and_hash(&blocks, current_height, hash256)?;
         let bytes = self.block_body_bytes(record)?;
         let block = deserialize::<bitcoin::Block>(&bytes).ok()?;
         if block.block_hash() != hash {
@@ -147,6 +145,29 @@ impl NodeP2pChainQuery {
             .as_ref()?
             .block_body(record.height, record.hash)
     }
+}
+
+fn record_at_height_and_hash(
+    records: &[BlockRecord],
+    height: u32,
+    hash: Hash256,
+) -> Option<&BlockRecord> {
+    let mut index = records
+        .binary_search_by_key(&height, |record| record.height)
+        .ok()?;
+    while index > 0 && records[index.saturating_sub(1)].height == height {
+        index = index.saturating_sub(1);
+    }
+    while let Some(record) = records.get(index) {
+        if record.height != height {
+            break;
+        }
+        if record.hash == hash {
+            return Some(record);
+        }
+        index = index.saturating_add(1);
+    }
+    None
 }
 
 fn header_for_active_stop(

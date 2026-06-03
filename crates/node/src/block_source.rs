@@ -2,10 +2,8 @@
 //! `BlockSource` trait, enabling resolvers like `Indexer::resolve_script_history`
 //! to recover full transactions from lossy prefix rows.
 //!
-//! The adapter does a linear scan over the blocks Vec for each lookup. This
-//! is acceptable while the block log is short (early IBD) but should be
-//! replaced with a height-indexed view once block-by-height queries become
-//! a hot path.
+//! The adapter uses height-ordered block records, matching the active-chain
+//! append order maintained by block application.
 
 use alloc::sync::Arc;
 
@@ -52,7 +50,7 @@ impl core::fmt::Debug for NodeBlockSource {
 impl BlockSource for NodeBlockSource {
     fn block_at_height(&self, height: u32) -> Option<Block> {
         let guard = self.blocks.read();
-        let record = guard.iter().find(|record| record.height == height)?;
+        let record = record_at_height(&guard, height)?;
         let bytes = self.block_body_bytes(record)?;
         deserialize::<Block>(&bytes).ok()
     }
@@ -67,6 +65,16 @@ impl NodeBlockSource {
             .as_ref()?
             .block_body(record.height, record.hash)
     }
+}
+
+fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRecord> {
+    let mut index = records
+        .binary_search_by_key(&height, |record| record.height)
+        .ok()?;
+    while index > 0 && records[index.saturating_sub(1)].height == height {
+        index = index.saturating_sub(1);
+    }
+    records.get(index)
 }
 
 #[cfg(test)]
