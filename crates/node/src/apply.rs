@@ -5,11 +5,12 @@ mod scratch;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
+use bitcoin::hex::DisplayHex;
 use bitcoin::{Transaction, Txid};
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_mempool::Mempool;
-use bitcoin_rs_primitives::{Network, OutPoint};
+use bitcoin_rs_primitives::{Hash256, Network, OutPoint};
 use bitcoin_rs_rpc::BlockRecord;
 use bitcoin_rs_utxo::{BlockChanges, LiveOutput, LiveOutputMeta, UtxoAdd, UtxoSet};
 use hashbrown::HashMap;
@@ -27,6 +28,7 @@ const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
 const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
 const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
+const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
 pub(crate) trait PruneBodyStore: Send + Sync {
     fn persist_block_body(
@@ -360,11 +362,13 @@ pub fn apply_block(
 
     let block_record_started = quanta::Instant::now();
     {
-        let block_record = if handles.cache_block_bodies_in_memory {
-            bitcoin_rs_rpc::BlockRecord::from_block_bytes(height, block, &block_bytes)
-        } else {
-            bitcoin_rs_rpc::BlockRecord::from_block_metadata_bytes(height, block, &block_bytes)
-        };
+        let block_record = applied_block_record(
+            height,
+            block_hash,
+            block,
+            &block_bytes,
+            handles.cache_block_bodies_in_memory,
+        );
         handles.blocks.write().push(block_record);
     }
     let block_record_dur = block_record_started.elapsed();
@@ -1088,6 +1092,33 @@ fn internal_outpoint(outpoint: &bitcoin::OutPoint) -> OutPoint {
     )
 }
 
+fn applied_block_record(
+    height: u32,
+    block_hash: Hash256,
+    block: &bitcoin::Block,
+    block_bytes: &[u8],
+    include_body: bool,
+) -> BlockRecord {
+    let block_hex = if include_body {
+        block_bytes.to_lower_hex_string()
+    } else {
+        String::new()
+    };
+    let header_hex = block_bytes.get(..SERIALIZED_BLOCK_HEADER_LEN).map_or_else(
+        || bitcoin::consensus::encode::serialize(&block.header).to_lower_hex_string(),
+        DisplayHex::to_lower_hex_string,
+    );
+    BlockRecord {
+        hash: block_hash,
+        height,
+        block_hex,
+        body_size: block_bytes.len(),
+        header_hex,
+        tx_count: block.txdata.len(),
+        time: block.header.time,
+    }
+}
+
 #[must_use]
 fn compute_verify_flags(
     network: Network,
@@ -1151,6 +1182,33 @@ mod consensus_rule_tests {
             .iter()
             .map(bitcoin::Transaction::compute_txid)
             .collect()
+    }
+
+    #[test]
+    fn applied_block_record_matches_rpc_constructors() {
+        let block = block_with_transaction(coinbase_transaction(0x42));
+        let block_bytes = bitcoin::consensus::encode::serialize(&block);
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+
+        let cached = applied_block_record(7, block_hash, &block, &block_bytes, true);
+        let expected_cached = BlockRecord::from_block_bytes(7, &block, &block_bytes);
+        assert_eq!(cached.hash, expected_cached.hash);
+        assert_eq!(cached.height, expected_cached.height);
+        assert_eq!(cached.block_hex, expected_cached.block_hex);
+        assert_eq!(cached.body_size, expected_cached.body_size);
+        assert_eq!(cached.header_hex, expected_cached.header_hex);
+        assert_eq!(cached.tx_count, expected_cached.tx_count);
+        assert_eq!(cached.time, expected_cached.time);
+
+        let metadata = applied_block_record(7, block_hash, &block, &block_bytes, false);
+        let expected_metadata = BlockRecord::from_block_metadata_bytes(7, &block, &block_bytes);
+        assert_eq!(metadata.hash, expected_metadata.hash);
+        assert_eq!(metadata.height, expected_metadata.height);
+        assert_eq!(metadata.block_hex, expected_metadata.block_hex);
+        assert_eq!(metadata.body_size, expected_metadata.body_size);
+        assert_eq!(metadata.header_hex, expected_metadata.header_hex);
+        assert_eq!(metadata.tx_count, expected_metadata.tx_count);
+        assert_eq!(metadata.time, expected_metadata.time);
     }
 
     #[test]
