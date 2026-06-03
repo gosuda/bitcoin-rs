@@ -225,13 +225,15 @@ impl BlockSync {
         let mut failed = 0_usize;
         let staged_count = self.block_stager.lock().received_len();
         let expected_hashes = self.expected_block_hashes(staged_count);
+        let drained = self
+            .block_stager
+            .lock()
+            .drain_expected_prefix(&expected_hashes);
         let mut applied_hashes = Vec::with_capacity(expected_hashes.len());
         let mut failed_hash = None;
-        for expected_hash in expected_hashes {
-            let Some(block) = self.block_stager.lock().take(&expected_hash) else {
-                break;
-            };
-            match crate::apply::apply_block(&self.handles, &block) {
+        let mut drained = drained.into_iter();
+        while let Some(drained_block) = drained.next() {
+            match crate::apply::apply_block(&self.handles, &drained_block.block) {
                 Ok(tip) => {
                     applied = applied.saturating_add(1);
                     tracing::debug!(
@@ -243,12 +245,13 @@ impl BlockSync {
                 }
                 Err(error) => {
                     failed = failed.saturating_add(1);
-                    failed_hash = Some(expected_hash);
+                    failed_hash = Some(drained_block.hash);
                     tracing::warn!(
-                        %expected_hash,
+                        %drained_block.hash,
                         %error,
                         "block sync: failed to apply buffered block"
                     );
+                    self.block_stager.lock().restore_many(drained);
                     break;
                 }
             }
@@ -546,6 +549,7 @@ mod tests {
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
     use bitcoin_rs_p2p::PeerInfo;
     use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_utxo::UtxoSet;
     use crossbeam_channel::unbounded;
     use hashbrown::HashMap;
@@ -1387,7 +1391,7 @@ mod tests {
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].hash, fork_hash);
         assert_eq!(stager.received_len(), 1);
-        assert!(stager.take(&expected_hash).is_some());
+        assert!(stager.contains(&expected_hash));
         Ok(())
     }
 
@@ -1577,6 +1581,96 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn batch_drain_restores_unapplied_tail_after_mid_batch_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block1 =
+            mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
+        let block2 =
+            mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+        let block3 =
+            mined_block_with_prev_hash(block2.block_hash(), 3, vec![coinbase_transaction(3)]);
+        let block1_hash = Hash256::from_le_bytes(block1.block_hash().as_byte_array());
+        let block2_hash = Hash256::from_le_bytes(block2.block_hash().as_byte_array());
+        let block3_hash = Hash256::from_le_bytes(block3.block_hash().as_byte_array());
+
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let block1_id =
+            tree.insert_node(Some(genesis_id), block1.header, NodeStatus::HeaderValid)?;
+        let block2_id =
+            tree.insert_node(Some(block1_id), block2.header, NodeStatus::HeaderValid)?;
+        tree.insert_node(Some(block2_id), block3.header, NodeStatus::HeaderValid)?;
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let mut handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let fail_once_store = Arc::new(FailOnceBodyStore::new(2));
+        handles.block_body_store = Some(fail_once_store.clone());
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+
+        inbound_blocks_tx.send(block3)?;
+        inbound_blocks_tx.send(block2.clone())?;
+        inbound_blocks_tx.send(block1)?;
+        sync.tick();
+
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.height),
+            Some(1),
+            "height 1 should apply before the fail-once height 2 body persistence error"
+        );
+        assert_eq!(sync.block_stager.lock().received_len(), 1);
+        assert_eq!(sync.download_window.lock().received_len(), 1);
+        assert!(
+            !sync.block_stager.lock().contains(&block2_hash),
+            "failed block should be dropped for retry rather than restored"
+        );
+        assert!(
+            sync.block_stager.lock().contains(&block3_hash),
+            "tail block must be restored after the mid-batch failure"
+        );
+
+        inbound_blocks_tx.send(block2)?;
+        sync.tick();
+
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.height),
+            Some(3),
+            "retry should apply the failed block and then the restored tail in order"
+        );
+        assert_eq!(sync.block_stager.lock().received_len(), 0);
+        assert_eq!(sync.download_window.lock().received_len(), 0);
+        assert!(fail_once_store.persisted_height(1));
+        assert!(fail_once_store.persisted_height(2));
+        assert!(fail_once_store.persisted_height(3));
+        assert_eq!(
+            sync.handles.applied_tip.load_full().map(|tip| tip.hash),
+            Some(block3_hash)
+        );
+        assert_eq!(
+            sync.handles.block_tree.read().height_of_hash(block1_hash),
+            Some(1)
+        );
+        Ok(())
+    }
+
     type SyncFixture = (
         BlockSync,
         Arc<RwLock<Vec<PeerInfo>>>,
@@ -1637,6 +1731,51 @@ mod tests {
     fn install_budget(sync: &BlockSync, budget: super::SyncBudget) {
         *sync.download_window.lock() = super::DownloadWindow::new(budget);
         *sync.block_stager.lock() = super::BlockStager::new(budget);
+    }
+
+    struct FailOnceBodyStore {
+        fail_height: u32,
+        failed: Mutex<bool>,
+        persisted: Mutex<HashMap<u32, Vec<u8>>>,
+    }
+
+    impl FailOnceBodyStore {
+        fn new(fail_height: u32) -> Self {
+            Self {
+                fail_height,
+                failed: Mutex::new(false),
+                persisted: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn persisted_height(&self, height: u32) -> bool {
+            self.persisted.lock().contains_key(&height)
+        }
+    }
+
+    impl crate::apply::PruneBodyStore for FailOnceBodyStore {
+        fn persist_block_body(
+            &self,
+            height: u32,
+            _hash: Hash256,
+            body: &[u8],
+        ) -> Result<(), StorageError> {
+            let mut failed = self.failed.lock();
+            if height == self.fail_height && !*failed {
+                *failed = true;
+                return Err(StorageError::backend("fail-once block body store"));
+            }
+            self.persisted.lock().insert(height, body.to_vec());
+            Ok(())
+        }
+
+        fn load_block_body(
+            &self,
+            height: u32,
+            _hash: Hash256,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(self.persisted.lock().get(&height).cloned())
+        }
     }
 
     fn witness_block_inventory(
