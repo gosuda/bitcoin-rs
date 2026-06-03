@@ -18,6 +18,7 @@ const ENTRY_COUNT: u64 = 10_000;
 enum ShardShape {
     Existing,
     Uniform,
+    TwoShard,
     Concentrated,
 }
 
@@ -66,6 +67,11 @@ fn shaped_txid(seed: u64, index: u64, shape: ShardShape) -> Hash256 {
         ShardShape::Uniform => {
             let mut bytes = hash.to_le_bytes();
             bytes[0] = u8::try_from(index % 256).unwrap_or(0);
+            hash = Hash256::from_le_bytes(&bytes);
+        }
+        ShardShape::TwoShard => {
+            let mut bytes = hash.to_le_bytes();
+            bytes[0] = u8::try_from(index % 2).unwrap_or(0);
             hash = Hash256::from_le_bytes(&bytes);
         }
         ShardShape::Concentrated => {
@@ -292,6 +298,20 @@ fn bench_uniform_noop_listener(c: &mut Criterion) {
     });
 }
 
+fn bench_two_shard_noop_listener(c: &mut Criterion) {
+    c.bench_function("utxo_commit/two_shard_noop_listener", |b| {
+        b.iter_batched(
+            || synthetic_listener_case(0x00ab_cdef, ShardShape::TwoShard),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0012_3456)) {
+                    panic!("synthetic two-shard listener commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn utxo_commit_synthetic_block(c: &mut Criterion) {
     print_synthetic_summary("existing", ShardShape::Existing);
     c.bench_function("utxo_commit/existing", |b| {
@@ -347,6 +367,7 @@ fn utxo_commit_synthetic_block(c: &mut Criterion) {
         );
     });
     bench_uniform_noop_listener(c);
+    bench_two_shard_noop_listener(c);
     c.bench_function("utxo_build_commit/uniform", |b| {
         b.iter_batched(
             || {
