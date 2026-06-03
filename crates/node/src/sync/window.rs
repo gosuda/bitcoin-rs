@@ -46,6 +46,14 @@ struct PeerRequestEntry {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct RequestScan {
+    height: u32,
+    request_tip_height: u32,
+    remaining_limit: usize,
+    next_request_height: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct PendingBlock {
     peer_addr: SocketAddr,
     requested_at: Instant,
@@ -178,6 +186,12 @@ impl DownloadWindow {
             .min(byte_capacity / self.ewma_block_bytes);
         if height <= request_tip_height && remaining_limit > 0 {
             if entries.is_empty() {
+                let scan = RequestScan {
+                    height,
+                    request_tip_height,
+                    remaining_limit,
+                    next_request_height,
+                };
                 if let Some(request) = self.clean_contiguous_peer_request(
                     peer_addr,
                     chain_tip,
@@ -189,53 +203,140 @@ impl DownloadWindow {
                 ) {
                     return Some(request);
                 }
+                if let Some(request) =
+                    self.received_filtered_peer_request(peer_addr, chain_tip, tree, scan)
+                {
+                    return Some(request);
+                }
             }
 
-            let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, request_tip_height)
-            else {
-                return non_empty_request(peer_addr, entries, next_request_height);
-            };
-            let mut candidates: VecDeque<PeerRequestEntry> =
-                VecDeque::with_capacity(remaining_limit);
-            while let Ok(node) = tree.node(cursor) {
-                if node.height < height {
-                    break;
-                }
-                if !self.pending.contains_key(&node.hash)
-                    && !self.received.contains_key(&node.hash)
-                    && selected_hashes
-                        .as_ref()
-                        .is_none_or(|hashes| !hashes.contains(&node.hash))
-                {
-                    if candidates.len() == remaining_limit {
-                        if let Some(removed) = candidates.pop_front() {
-                            if let Some(selected_hashes) = selected_hashes.as_mut() {
-                                selected_hashes.remove(&removed.hash);
-                            }
-                        }
-                    }
-                    if let Some(selected_hashes) = selected_hashes.as_mut() {
-                        selected_hashes.insert(node.hash);
-                    }
-                    candidates.push_back(PeerRequestEntry {
-                        hash: node.hash,
-                        height: node.height,
-                    });
-                }
-                let Some(parent) = node.parent else {
-                    break;
-                };
-                cursor = parent;
-            }
-            let scanned_all_eligible = candidates.len() < remaining_limit;
-            for entry in candidates.into_iter().rev() {
-                next_request_height = next_request_height.max(entry.height.saturating_add(1));
-                entries.push(entry);
-            }
-            if scanned_all_eligible {
-                next_request_height = next_request_height.max(request_tip_height.saturating_add(1));
-            }
+            next_request_height = self.extend_request_by_reverse_scan(
+                chain_tip,
+                tree,
+                RequestScan {
+                    height,
+                    request_tip_height,
+                    remaining_limit,
+                    next_request_height,
+                },
+                &mut selected_hashes,
+                &mut entries,
+            );
         }
+        non_empty_request(peer_addr, entries, next_request_height)
+    }
+
+    fn extend_request_by_reverse_scan(
+        &self,
+        chain_tip: &TipSnapshot,
+        tree: &BlockTree,
+        scan: RequestScan,
+        selected_hashes: &mut Option<HashSet<Hash256>>,
+        entries: &mut Vec<PeerRequestEntry>,
+    ) -> u32 {
+        let mut next_request_height = scan.next_request_height;
+        let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, scan.request_tip_height)
+        else {
+            return scan.next_request_height;
+        };
+        let mut candidates: VecDeque<PeerRequestEntry> =
+            VecDeque::with_capacity(scan.remaining_limit);
+        while let Ok(node) = tree.node(cursor) {
+            if node.height < scan.height {
+                break;
+            }
+            if !self.pending.contains_key(&node.hash)
+                && !self.received.contains_key(&node.hash)
+                && selected_hashes
+                    .as_ref()
+                    .is_none_or(|hashes| !hashes.contains(&node.hash))
+            {
+                if candidates.len() == scan.remaining_limit
+                    && let Some(removed) = candidates.pop_front()
+                    && let Some(selected_hashes) = selected_hashes.as_mut()
+                {
+                    selected_hashes.remove(&removed.hash);
+                }
+                if let Some(selected_hashes) = selected_hashes.as_mut() {
+                    selected_hashes.insert(node.hash);
+                }
+                candidates.push_back(PeerRequestEntry {
+                    hash: node.hash,
+                    height: node.height,
+                });
+            }
+            let Some(parent) = node.parent else {
+                break;
+            };
+            cursor = parent;
+        }
+        let scanned_all_eligible = candidates.len() < scan.remaining_limit;
+        for entry in candidates.into_iter().rev() {
+            next_request_height = next_request_height.max(entry.height.saturating_add(1));
+            entries.push(entry);
+        }
+        if scanned_all_eligible {
+            next_request_height =
+                next_request_height.max(scan.request_tip_height.saturating_add(1));
+        }
+        next_request_height
+    }
+
+    fn received_filtered_peer_request(
+        &self,
+        peer_addr: SocketAddr,
+        chain_tip: &TipSnapshot,
+        tree: &BlockTree,
+        scan: RequestScan,
+    ) -> Option<PeerRequest> {
+        if !self.pending.is_empty() || self.received.is_empty() || scan.remaining_limit == 0 {
+            return None;
+        }
+        let scan_limit = scan.remaining_limit.saturating_add(self.received.len());
+        let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
+        let request_end_height = scan
+            .height
+            .saturating_add(scan_span)
+            .min(scan.request_tip_height);
+        let mut cursor = tree.node_at_height_from(chain_tip.tip_id, request_end_height)?;
+        let capacity = usize::try_from(
+            request_end_height
+                .saturating_sub(scan.height)
+                .saturating_add(1),
+        )
+        .ok()?;
+        let mut entries = Vec::with_capacity(capacity.min(scan_limit));
+        while let Ok(node) = tree.node(cursor) {
+            if node.height < scan.height {
+                break;
+            }
+            if !self.received.contains_key(&node.hash) {
+                entries.push(PeerRequestEntry {
+                    hash: node.hash,
+                    height: node.height,
+                });
+            }
+            if node.height == scan.height {
+                break;
+            }
+            let Some(parent) = node.parent else {
+                break;
+            };
+            cursor = parent;
+        }
+        entries.reverse();
+        if entries.len() > scan.remaining_limit {
+            entries.truncate(scan.remaining_limit);
+            let next_request_height = entries
+                .iter()
+                .fold(scan.next_request_height, |height, entry| {
+                    height.max(entry.height.saturating_add(1))
+                });
+            return non_empty_request(peer_addr, entries, next_request_height);
+        }
+        let next_request_height = scan
+            .next_request_height
+            .max(request_end_height.saturating_add(1));
         non_empty_request(peer_addr, entries, next_request_height)
     }
 
