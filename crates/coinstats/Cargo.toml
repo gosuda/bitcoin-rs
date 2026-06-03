@@ -32,6 +32,11 @@ redb = ["bitcoin-rs-storage/redb"]
 mdbx = ["bitcoin-rs-storage/mdbx"]
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 tempfile = "3"
+
+[[bench]]
+name = "coinstats_hotpath"
+harness = false

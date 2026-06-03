@@ -296,6 +296,7 @@ dependencies = [
  "bitcoin-rs-storage",
  "bitcoin-rs-utxo",
  "bytemuck",
+ "criterion",
  "parking_lot",
  "proptest",
  "ruint",
