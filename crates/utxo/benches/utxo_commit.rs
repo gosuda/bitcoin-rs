@@ -9,7 +9,7 @@ use std::{
 
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
-use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
+use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoChangeListener, UtxoSet};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 const ENTRY_COUNT: u64 = 10_000;
@@ -33,6 +33,14 @@ struct SyntheticWorkload {
     spends: Vec<SyntheticEntry>,
     adds: Vec<SyntheticEntry>,
     distribution: [usize; 256],
+}
+
+struct NoopListener;
+
+impl UtxoChangeListener for NoopListener {
+    fn on_insert(&self, _op: &OutPoint, _txout: &TxOut, _height: u32, _coinbase: bool) {}
+
+    fn on_remove(&self, _op: &OutPoint, _txout: &TxOut, _height: u32) {}
 }
 
 const fn next_u64(state: &mut u64) -> u64 {
@@ -190,6 +198,14 @@ fn synthetic_case(seed: u64, shape: ShardShape) -> (UtxoSet, BlockChanges, [usiz
     (set, changes, workload.distribution)
 }
 
+fn synthetic_listener_case(seed: u64, shape: ShardShape) -> (UtxoSet, BlockChanges) {
+    let workload = synthetic_workload(seed, shape);
+    let mut set = preload_set(&workload, seed);
+    set.set_listener(Box::new(NoopListener));
+    let changes = block_changes(&workload);
+    (set, changes)
+}
+
 fn summarize_distribution(distribution: &[usize; 256]) -> (usize, usize, usize) {
     let mut active = 0_usize;
     let mut min_non_zero = usize::MAX;
@@ -262,6 +278,20 @@ fn print_synthetic_summary(name: &str, shape: ShardShape) {
     );
 }
 
+fn bench_uniform_noop_listener(c: &mut Criterion) {
+    c.bench_function("utxo_commit/uniform_noop_listener", |b| {
+        b.iter_batched(
+            || synthetic_listener_case(0x00ab_cdef, ShardShape::Uniform),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0012_3456)) {
+                    panic!("synthetic listener commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn utxo_commit_synthetic_block(c: &mut Criterion) {
     print_synthetic_summary("existing", ShardShape::Existing);
     c.bench_function("utxo_commit/existing", |b| {
@@ -316,6 +346,7 @@ fn utxo_commit_synthetic_block(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    bench_uniform_noop_listener(c);
     c.bench_function("utxo_build_commit/uniform", |b| {
         b.iter_batched(
             || {
