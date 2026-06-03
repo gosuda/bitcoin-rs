@@ -18,6 +18,7 @@ use bitcoin::BlockHash;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
+use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::{Receiver, Sender};
@@ -101,27 +102,29 @@ impl BlockSync {
         self.ensure_genesis_tip();
         self.drain_inbound_blocks();
 
-        let applied_height = self
-            .handles
-            .applied_tip
-            .load_full()
-            .map_or(0, |tip| tip.height);
+        let applied_tip = self.handles.applied_tip.load_full();
+        let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let sync_peers = self.sync_peers(applied_height);
         if sync_peers.is_empty() {
             tracing::trace!(applied_height, "block sync: no peer above current height");
             return;
         }
 
-        let header_height = self
-            .handles
-            .chain_tip
-            .load_full()
-            .map_or(applied_height, |tip| tip.height);
+        let chain_tip = self.handles.chain_tip.load_full();
+        let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         self.release_disconnected_peer_budget();
         let mut sent_getdata = false;
         for (index, peer) in sync_peers.into_iter().enumerate() {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
-            sent_getdata |= self.send_getdata_for_pending_blocks(peer.addr, peer_best_height);
+            sent_getdata |= match (&chain_tip, &applied_tip) {
+                (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
+                    peer.addr,
+                    peer_best_height,
+                    chain_tip,
+                    applied_tip,
+                ),
+                _ => false,
+            };
             if index == 0 && peer_best_height > header_height {
                 self.send_getheaders(peer.addr, header_height, peer.start_height);
             }
@@ -368,13 +371,9 @@ impl BlockSync {
         &self,
         sync_peer_addr: SocketAddr,
         peer_best_height: u32,
+        chain_tip: &TipSnapshot,
+        applied_tip: &TipSnapshot,
     ) -> bool {
-        let Some(chain_tip) = self.handles.chain_tip.load_full() else {
-            return false;
-        };
-        let Some(applied_tip) = self.handles.applied_tip.load_full() else {
-            return false;
-        };
         let applied_height = applied_tip.height;
         if chain_tip.height <= applied_height {
             return false;
@@ -384,8 +383,8 @@ impl BlockSync {
         let tree = self.handles.block_tree.read();
         let request = self.download_window.lock().next_peer_request(
             sync_peer_addr,
-            &chain_tip,
-            &applied_tip,
+            chain_tip,
+            applied_tip,
             peer_best_height,
             &tree,
             now,
