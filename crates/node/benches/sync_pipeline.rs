@@ -12,6 +12,7 @@ use bitcoin::absolute;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::NetworkMessage;
+use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::{
     Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
     TxMerkleNode, TxOut, Txid, Witness, transaction,
@@ -119,6 +120,16 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             );
         },
     );
+    c.bench_function(
+        "deterministic_initial_sync_proxy_deep_headers_received_scan_128_blocks",
+        |b| {
+            b.iter_batched(
+                || SyncFixture::new(TxIndexMode::Disabled),
+                |fixture| black_box(fixture.request_after_unsolicited_received()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     #[cfg(feature = "rocksdb")]
     c.bench_function(
         "deterministic_initial_sync_proxy_deep_headers_txindex_rocksdb_128_blocks",
@@ -190,6 +201,7 @@ struct SyncFixture {
     outbound_rx: crossbeam_channel::Receiver<Message>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
+    received_scan_expected: Vec<BlockHash>,
     _tx_index_dir: Option<TempDir>,
 }
 
@@ -213,6 +225,7 @@ impl SyncFixture {
         let mut prev_hash = parent.block_hash();
         let mut header_time = parent.header.time;
         let mut blocks = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
+        let mut received_scan_expected = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
 
         for height in 1_u32..=SYNC_PROXY_HEADER_HEIGHT {
             let header = if height <= SYNC_PROXY_BLOCKS {
@@ -231,6 +244,12 @@ impl SyncFixture {
             tip_id = tree
                 .insert_node(Some(tip_id), header, NodeStatus::HeaderValid)
                 .unwrap_or_else(|error| panic!("synthetic header insert failed: {error}"));
+            if height == 1 || (3..=SYNC_PROXY_BLOCKS.saturating_add(1)).contains(&height) {
+                let node = tree
+                    .node(tip_id)
+                    .unwrap_or_else(|error| panic!("synthetic header lookup failed: {error}"));
+                received_scan_expected.push(BlockHash::from_byte_array(node.hash.to_le_bytes()));
+            }
         }
 
         let chain_tip = tree.tip_handle();
@@ -268,6 +287,7 @@ impl SyncFixture {
             outbound_rx,
             applied_tip,
             blocks,
+            received_scan_expected,
             _tx_index_dir: tx_index_dir,
         }
     }
@@ -306,6 +326,29 @@ impl SyncFixture {
             .load_full()
             .unwrap_or_else(|| panic!("sync proxy did not publish applied tip"))
             .height
+    }
+
+    fn request_after_unsolicited_received(self) -> usize {
+        self.inbound_blocks_tx
+            .send(self.blocks[1].clone())
+            .unwrap_or_else(|error| panic!("send unsolicited staged block failed: {error}"));
+        self.sync.tick();
+        let requested = match self
+            .outbound_rx
+            .try_recv()
+            .unwrap_or_else(|error| panic!("expected scan-path getdata: {error}"))
+        {
+            NetworkMessage::GetData(inventory) => inventory
+                .into_iter()
+                .map(|item| match item {
+                    Inventory::WitnessBlock(hash) => hash,
+                    other => panic!("expected witness block inventory, got {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected scan-path getdata, got {other:?}"),
+        };
+        assert_eq!(requested, self.received_scan_expected);
+        requested.len()
     }
 }
 
