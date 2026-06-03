@@ -255,6 +255,15 @@ pub struct BlockChanges {
 }
 
 impl BlockChanges {
+    /// Creates an empty change set with storage reserved for known operation counts.
+    #[must_use]
+    pub fn with_capacity(adds: usize, removes: usize) -> Self {
+        Self {
+            adds: Vec::with_capacity(adds),
+            removes: Vec::with_capacity(removes),
+        }
+    }
+
     /// Appends an output creation.
     pub fn add(&mut self, add: UtxoAdd) {
         self.adds.push(add);
