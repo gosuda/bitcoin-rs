@@ -36,6 +36,33 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
+fn script_normalizes_offline_bitcoin_core_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let evidence = offline_evidence_json(temp.path(), 0, 10)?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", temp.path().join("missing-bitcoin-cli"))
+        .output()?;
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout
+            .contains("export G14_IBD_START_HASH=2222222222222222222222222222222222222222222222222222222222222222\n")
+    );
+    assert!(
+        stdout.contains(
+            "export G14_IBD_STOP_HASH=3333333333333333333333333333333333333333333333333333333333333333\n"
+        )
+    );
+    assert!(stdout.contains("export G14_BITCOIN_RS_IBD_BLOCKS=11\n"));
+    assert!(stdout.contains("export G14_BITCOIN_CORE_IBD_BLOCKS=11\n"));
+    Ok(())
+}
+
+#[test]
 fn script_rejects_malformed_bitcoin_core_block_hash() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::MalformedHash)?;
@@ -123,6 +150,38 @@ fn evidence_json(
             r#"{{
   "ibd_start_height": {start_height},
   "ibd_stop_height": {stop_height},
+  "bitcoin_rs_elapsed_seconds": 1.25,
+  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_core_version": "v27.0.0",
+  "bitcoin_core_commit": "1111111111111111111111111111111111111111",
+  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_core_command": "bitcoind -chain=main",
+  "bitcoin_rs_config": "storage_backend=rocksdb\nindexes=all",
+  "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "utxo_commit_p95_ms": 12.5,
+  "electrum_get_history_p95_ms": 20.0,
+  "rss_bytes": 1024
+}}"#,
+        ),
+    )?;
+    Ok(path)
+}
+
+fn offline_evidence_json(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join("g14-offline.json");
+    fs::write(
+        &path,
+        format!(
+            r#"{{
+  "ibd_start_height": {start_height},
+  "ibd_stop_height": {stop_height},
+  "ibd_start_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+  "ibd_stop_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+  "bitcoin_core_chain_info": {{"chain": "main", "blocks": 10, "headers": 10}},
   "bitcoin_rs_elapsed_seconds": 1.25,
   "bitcoin_core_elapsed_seconds": 2.50,
   "bitcoin_core_version": "v27.0.0",

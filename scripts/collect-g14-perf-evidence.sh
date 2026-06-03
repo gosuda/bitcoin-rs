@@ -7,7 +7,7 @@ usage() {
     '' \
     'Normalizes externally measured G14 mainnet IBD evidence into shell exports.' \
     'The helper does not start or manage bitcoin-rs, bitcoind, or Electrum.' \
-    'It verifies bitcoin-cli is on mainnet and resolves measured block hashes.' \
+    'It verifies Bitcoin Core mainnet metadata and resolves measured block hashes.' \
     '' \
     'Required JSON keys:' \
     '  ibd_start_height, ibd_stop_height,' \
@@ -16,6 +16,9 @@ usage() {
     '  bitcoin_rs_command, bitcoin_core_command,' \
     '  bitcoin_rs_config, bitcoin_core_config,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
+    '' \
+    'Optional offline Bitcoin Core metadata keys:' \
+    '  ibd_start_hash, ibd_stop_hash, bitcoin_core_chain_info' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.' \
     '' \
@@ -76,11 +79,48 @@ print(data["ibd_stop_height"])
 PY
 )"
 
-start_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$start_height")"
-stop_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$stop_height")"
-chain_info="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockchaininfo)"
+offline_core_metadata="$(python3 - "$evidence_path" <<'PY'
+import json
+import sys
 
-G14_START_HASH="$start_hash" G14_STOP_HASH="$stop_hash" G14_CHAIN_INFO="$chain_info" python3 - "$evidence_path" <<'PY'
+OFFLINE_KEYS = ("ibd_start_hash", "ibd_stop_hash", "bitcoin_core_chain_info")
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+present = [key for key in OFFLINE_KEYS if key in data]
+if not present:
+    raise SystemExit(0)
+missing = [key for key in OFFLINE_KEYS if key not in data]
+if missing:
+    raise SystemExit(
+        "error: offline Bitcoin Core evidence requires "
+        + ", ".join(OFFLINE_KEYS)
+        + "; missing "
+        + ", ".join(missing)
+    )
+chain_info = data["bitcoin_core_chain_info"]
+if not isinstance(chain_info, dict):
+    raise SystemExit("error: bitcoin_core_chain_info must be an object")
+print(str(data["ibd_start_hash"]))
+print(str(data["ibd_stop_hash"]))
+print(json.dumps(chain_info, separators=(",", ":")))
+PY
+)"
+
+if [[ -n "$offline_core_metadata" ]]; then
+  mapfile -t offline_core_fields <<<"$offline_core_metadata"
+  start_hash="${offline_core_fields[0]}"
+  stop_hash="${offline_core_fields[1]}"
+  chain_info="${offline_core_fields[2]}"
+  chain_info_source="offline Bitcoin Core evidence"
+else
+  start_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$start_height")"
+  stop_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$stop_height")"
+  chain_info="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockchaininfo)"
+  chain_info_source="bitcoin-cli"
+fi
+
+G14_START_HASH="$start_hash" G14_STOP_HASH="$stop_hash" G14_CHAIN_INFO="$chain_info" G14_CHAIN_INFO_SOURCE="$chain_info_source" python3 - "$evidence_path" <<'PY'
 import hashlib
 import json
 import os
@@ -136,13 +176,13 @@ def require_hex(value: str, length: int, name: str) -> str:
     return value
 
 
-def require_chain_height(data: dict, key: str, stop_height: int) -> None:
+def require_chain_height(data: dict, key: str, stop_height: int, source: str) -> None:
     value = data.get(key)
     if not isinstance(value, int) or isinstance(value, bool):
-        die(f"bitcoin-cli getblockchaininfo {key} must be an integer")
+        die(f"{source} {key} must be an integer")
     if value < stop_height:
         die(
-            f"bitcoin-cli getblockchaininfo {key}={value} is below "
+            f"{source} {key}={value} is below "
             f"ibd_stop_height={stop_height}"
         )
 
@@ -168,16 +208,17 @@ if stop_height < start_height:
 
 start_hash = require_hex(os.environ["G14_START_HASH"].strip(), 64, "bitcoin-cli start hash")
 stop_hash = require_hex(os.environ["G14_STOP_HASH"].strip(), 64, "bitcoin-cli stop hash")
+chain_info_source = os.environ.get("G14_CHAIN_INFO_SOURCE", "bitcoin-cli")
 try:
     chain_info = json.loads(os.environ["G14_CHAIN_INFO"])
 except json.JSONDecodeError as error:
-    die(f"bitcoin-cli getblockchaininfo must return JSON: {error}")
+    die(f"{chain_info_source} chain info must be JSON: {error}")
 if not isinstance(chain_info, dict):
-    die("bitcoin-cli getblockchaininfo must return an object")
+    die(f"{chain_info_source} chain info must be an object")
 if chain_info.get("chain") != "main":
-    die(f"bitcoin-cli must be connected to mainnet, got chain={chain_info.get('chain')!r}")
-require_chain_height(chain_info, "blocks", stop_height)
-require_chain_height(chain_info, "headers", stop_height)
+    die(f"{chain_info_source} must be connected to mainnet, got chain={chain_info.get('chain')!r}")
+require_chain_height(chain_info, "blocks", stop_height, chain_info_source)
+require_chain_height(chain_info, "headers", stop_height, chain_info_source)
 core_commit = require_hex(require_text(data, "bitcoin_core_commit"), 40, "bitcoin_core_commit")
 rs_command = require_text(data, "bitcoin_rs_command")
 core_command = require_text(data, "bitcoin_core_command")
