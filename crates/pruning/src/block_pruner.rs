@@ -11,8 +11,8 @@ const HEIGHT_START: usize = 1;
 const HEIGHT_END: usize = 5;
 const KEY_LEN: usize = 37;
 
-/// Column family used for block-body rows until storage gains a dedicated block-file CF.
-pub const BLOCK_DATA_CF: ColumnFamily = ColumnFamily::BlockTree;
+/// Column family used for serialized block-body rows.
+pub const BLOCK_DATA_CF: ColumnFamily = ColumnFamily::BlockBodies;
 
 /// Builds the canonical pruning key for a stored block body.
 #[must_use]
@@ -51,6 +51,7 @@ impl<S: KvStore> BlockPruner<S> {
 
         prune_prefixed_rows(
             &*self.store,
+            BLOCK_DATA_CF,
             BLOCK_BODY_PREFIX_BYTES,
             current_tip_height,
             self.policy,
@@ -60,13 +61,14 @@ impl<S: KvStore> BlockPruner<S> {
 
 pub(crate) fn prune_prefixed_rows<S: KvStore>(
     store: &S,
+    cf: ColumnFamily,
     prefix: &[u8],
     current_tip_height: u32,
     policy: PrunePolicy,
 ) -> Result<PruneOutcome, PruneError> {
     let mut batch = store.new_batch();
     let outcome =
-        prune_prefixed_rows_into_batch(store, &mut batch, prefix, current_tip_height, policy)?;
+        prune_prefixed_rows_into_batch(store, &mut batch, cf, prefix, current_tip_height, policy)?;
 
     if !outcome.is_empty() {
         store.write(batch)?;
@@ -83,6 +85,7 @@ pub(crate) fn prune_prefixed_rows<S: KvStore>(
 pub(crate) fn prune_prefixed_rows_into_batch<S: KvStore>(
     store: &S,
     batch: &mut S::WriteBatch,
+    cf: ColumnFamily,
     prefix: &[u8],
     current_tip_height: u32,
     policy: PrunePolicy,
@@ -92,7 +95,7 @@ pub(crate) fn prune_prefixed_rows_into_batch<S: KvStore>(
     let mut total_bytes = 0_u64;
     let mut candidates = Vec::new();
 
-    for row in store.iter_prefix(BLOCK_DATA_CF, prefix)? {
+    for row in store.iter_prefix(cf, prefix)? {
         let (key, value) = row?;
         let row_bytes = row_len_u64(&value)?;
         total_bytes = total_bytes.saturating_add(row_bytes);
@@ -116,7 +119,7 @@ pub(crate) fn prune_prefixed_rows_into_batch<S: KvStore>(
             break;
         }
 
-        batch.delete(BLOCK_DATA_CF, &key);
+        batch.delete(cf, &key);
         remaining_bytes = remaining_bytes.saturating_sub(row_bytes);
         outcome.record_removed(row_bytes);
     }

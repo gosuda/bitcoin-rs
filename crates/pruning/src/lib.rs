@@ -12,7 +12,7 @@ pub mod undo_pruner;
 /// Utreexo-only block body deletion coordinator.
 pub mod utreexo_only;
 
-pub use block_pruner::{BlockPruner, block_body_key};
+pub use block_pruner::{BLOCK_DATA_CF, BlockPruner, block_body_key};
 pub use policy::PrunePolicy;
 pub use undo_pruner::{UndoPruner, block_undo_key};
 pub use utreexo_only::{BlockProcessed, UtreexoOnlyCoordinator};
@@ -38,6 +38,7 @@ pub fn stage_block_and_undo_prune<S: bitcoin_rs_storage::KvStore>(
     let block_outcome = block_pruner::prune_prefixed_rows_into_batch(
         store,
         batch,
+        block_pruner::BLOCK_DATA_CF,
         block_pruner::BLOCK_BODY_PREFIX_BYTES,
         current_tip_height,
         policy,
@@ -45,6 +46,7 @@ pub fn stage_block_and_undo_prune<S: bitcoin_rs_storage::KvStore>(
     let undo_outcome = block_pruner::prune_prefixed_rows_into_batch(
         store,
         batch,
+        undo_pruner::BLOCK_UNDO_CF,
         undo_pruner::BLOCK_UNDO_PREFIX_BYTES,
         current_tip_height,
         policy,

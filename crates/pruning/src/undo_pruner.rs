@@ -1,12 +1,13 @@
 use alloc::sync::Arc;
 
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_storage::KvStore;
+use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 use crate::block_pruner::prune_prefixed_rows;
 use crate::{PruneError, PruneOutcome, PrunePolicy};
 
 const BLOCK_UNDO_PREFIX: u8 = b'u';
+pub(crate) const BLOCK_UNDO_CF: ColumnFamily = ColumnFamily::BlockTree;
 pub(crate) const BLOCK_UNDO_PREFIX_BYTES: &[u8] = b"u";
 const HEIGHT_START: usize = 1;
 const HEIGHT_END: usize = 5;
@@ -49,6 +50,7 @@ impl<S: KvStore> UndoPruner<S> {
 
         prune_prefixed_rows(
             &*self.store,
+            BLOCK_UNDO_CF,
             BLOCK_UNDO_PREFIX_BYTES,
             current_tip_height,
             self.policy,

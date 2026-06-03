@@ -270,13 +270,13 @@ impl NodeStorage {
         let key = bitcoin_rs_pruning::block_body_key(height, hash);
         match self {
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => Ok(store.get(ColumnFamily::BlockTree, &key)?),
+            Self::RocksDb(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
             #[cfg(feature = "fjall")]
-            Self::Fjall(store) => Ok(store.get(ColumnFamily::BlockTree, &key)?),
+            Self::Fjall(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
             #[cfg(feature = "redb")]
-            Self::Redb(store) => Ok(store.get(ColumnFamily::BlockTree, &key)?),
+            Self::Redb(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
             #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => Ok(store.get(ColumnFamily::BlockTree, &key)?),
+            Self::Mdbx(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
         }
     }
 
@@ -465,7 +465,7 @@ fn seed_prune_rows<S: KvStore>(
 
     let mut batch = store.new_batch();
     batch.put(
-        ColumnFamily::BlockTree,
+        bitcoin_rs_pruning::BLOCK_DATA_CF,
         &bitcoin_rs_pruning::block_body_key(height, hash),
         body,
     );

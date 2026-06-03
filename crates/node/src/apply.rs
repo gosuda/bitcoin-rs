@@ -16,7 +16,7 @@ use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 use crate::state::ApplyError;
-use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError};
+use bitcoin_rs_storage::{KvStore, StorageError};
 use scratch::ApplyScratch;
 
 /// Number of blocks after a coinbase that its outputs become spendable.
@@ -51,7 +51,7 @@ impl<S: KvStore> PruneBodyStore for S {
         body: &[u8],
     ) -> Result<(), StorageError> {
         self.put(
-            ColumnFamily::BlockTree,
+            bitcoin_rs_pruning::BLOCK_DATA_CF,
             &bitcoin_rs_pruning::block_body_key(height, hash),
             body,
         )
@@ -63,7 +63,7 @@ impl<S: KvStore> PruneBodyStore for S {
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.get(
-            ColumnFamily::BlockTree,
+            bitcoin_rs_pruning::BLOCK_DATA_CF,
             &bitcoin_rs_pruning::block_body_key(height, hash),
         )
     }

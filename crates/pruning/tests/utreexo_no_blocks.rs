@@ -5,7 +5,9 @@ use alloc::sync::Arc;
 use std::collections::BTreeMap;
 
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_pruning::{BlockProcessed, PrunePolicy, UtreexoOnlyCoordinator, block_body_key};
+use bitcoin_rs_pruning::{
+    BLOCK_DATA_CF, BlockProcessed, PrunePolicy, UtreexoOnlyCoordinator, block_body_key,
+};
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch};
 use parking_lot::RwLock;
 
@@ -24,7 +26,7 @@ fn utreexo_only_drops_block_bodies_and_retains_headers() -> Result<(), Box<dyn s
             &fake_header(height),
         );
         batch.put(
-            ColumnFamily::BlockTree,
+            BLOCK_DATA_CF,
             &block_body_key(height, hash),
             &fake_body(height),
         );
@@ -37,7 +39,7 @@ fn utreexo_only_drops_block_bodies_and_retains_headers() -> Result<(), Box<dyn s
         })?;
     }
 
-    assert_eq!(store.count_prefix(ColumnFamily::BlockTree, b"b")?, 0);
+    assert_eq!(store.count_prefix(BLOCK_DATA_CF, b"b")?, 0);
     assert_eq!(store.count(ColumnFamily::BlockHeaders), 100);
 
     Ok(())

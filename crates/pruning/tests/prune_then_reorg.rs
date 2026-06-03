@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use std::collections::BTreeMap;
 
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_pruning::{BlockPruner, PrunePolicy, block_body_key};
+use bitcoin_rs_pruning::{BLOCK_DATA_CF, BlockPruner, PrunePolicy, block_body_key};
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch};
 use parking_lot::RwLock;
 
@@ -31,10 +31,7 @@ fn pruning_keeps_core_reorg_floor_and_shallow_reorg_succeeds()
     for height in 1_u32..=211 {
         assert!(
             store
-                .get(
-                    ColumnFamily::BlockTree,
-                    &block_body_key(height, fake_hash(height))
-                )?
+                .get(BLOCK_DATA_CF, &block_body_key(height, fake_hash(height)))?
                 .is_none(),
             "height {height} should be pruned"
         );
@@ -43,10 +40,7 @@ fn pruning_keeps_core_reorg_floor_and_shallow_reorg_succeeds()
     for height in 212_u32..=500 {
         assert!(
             store
-                .get(
-                    ColumnFamily::BlockTree,
-                    &block_body_key(height, fake_hash(height))
-                )?
+                .get(BLOCK_DATA_CF, &block_body_key(height, fake_hash(height)))?
                 .is_some(),
             "height {height} should be retained"
         );
@@ -56,7 +50,7 @@ fn pruning_keeps_core_reorg_floor_and_shallow_reorg_succeeds()
     for height in (fork_point + 1)..=500 {
         let key = block_body_key(height, fake_hash(height));
         assert!(
-            store.get(ColumnFamily::BlockTree, &key)?.is_some(),
+            store.get(BLOCK_DATA_CF, &key)?.is_some(),
             "50-block reorg needs retained body at height {height}"
         );
     }
@@ -69,7 +63,7 @@ fn write_fake_blocks(store: &MemoryStore, count: u32) -> Result<(), StorageError
     for height in 1_u32..=count {
         let hash = fake_hash(height);
         batch.put(
-            ColumnFamily::BlockTree,
+            BLOCK_DATA_CF,
             &block_body_key(height, hash),
             &fake_body(height),
         );

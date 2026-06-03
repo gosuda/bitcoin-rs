@@ -22,6 +22,8 @@ pub enum ColumnFamily {
     BlockTree = 8,
     /// UTXO snapshot metadata rows.
     UtxoMeta = 9,
+    /// Serialized block body rows.
+    BlockBodies = 10,
 }
 
 impl ColumnFamily {
@@ -37,6 +39,7 @@ impl ColumnFamily {
         Self::Coinstats,
         Self::BlockTree,
         Self::UtxoMeta,
+        Self::BlockBodies,
     ];
 
     /// Stable backend column-family/table name.
@@ -52,6 +55,7 @@ impl ColumnFamily {
             Self::Coinstats => "coinstats",
             Self::BlockTree => "block_tree",
             Self::UtxoMeta => "utxo_meta",
+            Self::BlockBodies => "block_bodies",
         }
     }
 
@@ -73,6 +77,7 @@ impl ColumnFamily {
             7 => Some(Self::Coinstats),
             8 => Some(Self::BlockTree),
             9 => Some(Self::UtxoMeta),
+            10 => Some(Self::BlockBodies),
             _ => None,
         }
     }
@@ -90,6 +95,7 @@ impl ColumnFamily {
             Self::Coinstats => 7,
             Self::BlockTree => 8,
             Self::UtxoMeta => 9,
+            Self::BlockBodies => 10,
         }
     }
 }

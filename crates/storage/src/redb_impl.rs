@@ -220,6 +220,7 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
         ColumnFamily::Coinstats => TableDefinition::new("coinstats"),
         ColumnFamily::BlockTree => TableDefinition::new("block_tree"),
         ColumnFamily::UtxoMeta => TableDefinition::new("utxo_meta"),
+        ColumnFamily::BlockBodies => TableDefinition::new("block_bodies"),
     }
 }
 
