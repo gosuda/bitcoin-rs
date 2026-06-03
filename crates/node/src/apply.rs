@@ -572,7 +572,8 @@ fn verify_block_transactions(
     // spend an output created earlier in the same block. Coinbase outputs enter
     // this view too, so maturity failures stay in the maturity pass instead of
     // degrading into bogus missing-prevout script checks.
-    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo));
+    let mut view =
+        BlockLocalUtxoView::new(Arc::clone(&handles.utxo), block_overlay_capacity(block));
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
@@ -597,11 +598,34 @@ struct BlockLocalUtxoView {
     overlay: HashMap<bitcoin::OutPoint, Option<LiveOutput>>,
 }
 
+fn block_overlay_capacity(block: &bitcoin::Block) -> usize {
+    block
+        .txdata
+        .iter()
+        .map(|tx| {
+            if tx.is_coinbase() {
+                tx.output.len()
+            } else {
+                tx.output.len().saturating_add(tx.input.len())
+            }
+        })
+        .sum()
+}
+
+fn block_non_coinbase_input_count(block: &bitcoin::Block) -> usize {
+    block
+        .txdata
+        .iter()
+        .filter(|tx| !tx.is_coinbase())
+        .map(|tx| tx.input.len())
+        .sum()
+}
+
 impl BlockLocalUtxoView {
-    fn new(set: Arc<UtxoSet>) -> Self {
+    fn new(set: Arc<UtxoSet>, overlay_capacity: usize) -> Self {
         Self {
             base: set,
-            overlay: HashMap::new(),
+            overlay: HashMap::with_capacity(overlay_capacity),
         }
     }
 
@@ -649,10 +673,10 @@ struct BlockLocalUtxoMetaView {
 }
 
 impl BlockLocalUtxoMetaView {
-    fn new(set: Arc<UtxoSet>) -> Self {
+    fn new(set: Arc<UtxoSet>, overlay_capacity: usize) -> Self {
         Self {
             base: set,
-            overlay: HashMap::new(),
+            overlay: HashMap::with_capacity(overlay_capacity),
         }
     }
 
@@ -735,7 +759,8 @@ fn check_coinbase_maturity_with_txids(
 ) -> core::result::Result<(), ApplyError> {
     debug_assert_eq!(block.txdata.len(), txids.len());
     // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
-    let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo));
+    let mut view =
+        BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), block_overlay_capacity(block));
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             view.add_output_meta(tx, *txid, height)?;
@@ -778,8 +803,9 @@ fn check_bip68_sequence_locks(
     }
 
     debug_assert_eq!(block.txdata.len(), txids.len());
-    let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo));
-    let mut prevout_mtp_by_height = HashMap::new();
+    let mut view =
+        BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), block_overlay_capacity(block));
+    let mut prevout_mtp_by_height = HashMap::with_capacity(block_non_coinbase_input_count(block));
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             continue;
