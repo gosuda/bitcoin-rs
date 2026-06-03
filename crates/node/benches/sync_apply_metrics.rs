@@ -95,7 +95,8 @@ fn install_diagnostic_metrics() -> MetricsHandle {
 
 fn print_apply_metrics(name: &str, blocks: &[Block], metrics: &MetricsHandle) {
     let before = metrics.snapshot();
-    let (_dir, state) = open_regtest_state();
+    let backend = storage_backend();
+    let (_dir, state) = open_regtest_state(backend);
     let started = Instant::now();
     for block in blocks {
         state
@@ -118,16 +119,28 @@ fn print_apply_metrics(name: &str, blocks: &[Block], metrics: &MetricsHandle) {
         .map(|record| record.body_size)
         .sum();
     println!(
-        "sync_apply_metrics workload={name} blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes} selected_apply_stage_metrics={} {}",
+        "sync_apply_metrics backend={backend} workload={name} blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes} selected_apply_stage_metrics={} {}",
         APPLY_STAGE_METRICS.len(),
         apply_stage_summary(&before, &after),
     );
 }
 
-fn open_regtest_state() -> (TempDir, NodeState) {
+fn storage_backend() -> &'static str {
+    match std::env::var("BITCOIN_RS_SYNC_APPLY_BACKEND") {
+        Ok(backend) if backend == "fjall" => "fjall",
+        Ok(backend) if backend == "redb" => "redb",
+        Ok(backend) if backend == "mdbx" => "mdbx",
+        Ok(backend) if backend == "rocksdb" => "rocksdb",
+        Ok(backend) => panic!("unsupported BITCOIN_RS_SYNC_APPLY_BACKEND={backend}"),
+        Err(_) => "rocksdb",
+    }
+}
+
+fn open_regtest_state(backend: &str) -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let mut config = Config::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
+    backend.clone_into(&mut config.storage_backend);
     config.p2p_listen.clear();
     config.txindex = false;
     let state =
