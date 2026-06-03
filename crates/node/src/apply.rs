@@ -319,7 +319,10 @@ pub fn apply_block(
 
     let tx_index_ingest_started = quanta::Instant::now();
     if let Some(tx_index) = &handles.tx_index {
-        let tx_index_ingest_result = tx_index.lock().ingest_block(&block_bytes, height);
+        let tx_index_ingest_result =
+            tx_index
+                .lock()
+                .ingest_block_with_txids(&block_bytes, height, scratch.txids());
         match tx_index_ingest_result {
             Ok(counts) => {
                 tracing::debug!(

@@ -402,25 +402,32 @@ impl<S: KvStore> Indexer<S> {
         block: &[u8],
         height: u32,
     ) -> Result<IndexRowCounts, IndexError> {
-        let mut rows = PendingRows::default();
-        {
-            let mut visitor = IndexBlockVisitor {
-                rows: &mut rows,
-                height,
-                invalid_header_len: None,
-            };
-            match bsl::Block::visit(block, &mut visitor) {
-                Ok(_) => {}
-                Err(bitcoin_slices::Error::VisitBreak) => {
-                    if let Some(len) = visitor.invalid_header_len {
-                        return Err(IndexError::InvalidHeaderLength { len });
-                    }
-                    return Err(IndexError::BlockParse(bitcoin_slices::Error::VisitBreak));
-                }
-                Err(error) => return Err(IndexError::BlockParse(error)),
-            }
-        }
+        let (rows, _txid_count) = pending_rows_for_block(block, height, None)?;
+        self.write_pending_rows(rows, height)
+    }
 
+    /// Walks one serialized block and reuses caller-supplied transaction IDs when they match.
+    ///
+    /// Falls back to hashing transactions from `block` if `txids` does not have exactly one
+    /// entry per serialized transaction, preserving `ingest_block` semantics for mismatched input.
+    pub fn ingest_block_with_txids(
+        &mut self,
+        block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        let (rows, txid_count) = pending_rows_for_block(block, height, Some(txids))?;
+        if txids.len() != txid_count {
+            return self.ingest_block(block, height);
+        }
+        self.write_pending_rows(rows, height)
+    }
+
+    fn write_pending_rows(
+        &mut self,
+        mut rows: PendingRows,
+        height: u32,
+    ) -> Result<IndexRowCounts, IndexError> {
         rows.sort();
         let counts = rows.counts();
         let mut batch = self.store.new_batch();
@@ -448,6 +455,34 @@ impl<S: KvStore> Indexer<S> {
         );
         Ok(counts)
     }
+}
+
+fn pending_rows_for_block(
+    block: &[u8],
+    height: u32,
+    txids: Option<&[bitcoin::Txid]>,
+) -> Result<(PendingRows, usize), IndexError> {
+    let mut rows = PendingRows::default();
+    let txid_count = {
+        let mut visitor = IndexBlockVisitor {
+            rows: &mut rows,
+            height,
+            txids,
+            txid_count: 0,
+            invalid_header_len: None,
+        };
+        match bsl::Block::visit(block, &mut visitor) {
+            Ok(_) => visitor.txid_count,
+            Err(bitcoin_slices::Error::VisitBreak) => {
+                if let Some(len) = visitor.invalid_header_len {
+                    return Err(IndexError::InvalidHeaderLength { len });
+                }
+                return Err(IndexError::BlockParse(bitcoin_slices::Error::VisitBreak));
+            }
+            Err(error) => return Err(IndexError::BlockParse(error)),
+        }
+    };
+    Ok((rows, txid_count))
 }
 
 #[derive(Default)]
@@ -483,6 +518,8 @@ impl PendingRows {
 struct IndexBlockVisitor<'a> {
     rows: &'a mut PendingRows,
     height: u32,
+    txids: Option<&'a [bitcoin::Txid]>,
+    txid_count: usize,
     invalid_header_len: Option<usize>,
 }
 
@@ -497,10 +534,17 @@ impl Visitor for IndexBlockVisitor<'_> {
     }
 
     fn visit_transaction(&mut self, tx: &bsl::Transaction<'_>) -> ControlFlow<()> {
-        let txid = tx.txid_sha2();
-        self.rows
-            .txid_rows
-            .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+        if let Some(txid) = self.txids.and_then(|txids| txids.get(self.txid_count)) {
+            self.rows
+                .txid_rows
+                .push(TxidRow::row(txid, self.height).to_db_row());
+        } else {
+            let txid = tx.txid_sha2();
+            self.rows
+                .txid_rows
+                .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+        }
+        self.txid_count += 1;
         ControlFlow::Continue(())
     }
 
@@ -558,6 +602,20 @@ pub trait IndexerLike: Send + Sync {
     /// Walks `block` once and writes index rows. See `Indexer::ingest_block`.
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError>;
 
+    /// Walks `block` once and writes index rows, reusing precomputed transaction IDs when supported.
+    ///
+    /// The default implementation preserves existing implementations by ignoring `txids` and
+    /// delegating to [`IndexerLike::ingest_block`].
+    fn ingest_block_with_txids(
+        &mut self,
+        block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        let _ = txids;
+        self.ingest_block(block, height)
+    }
+
     /// Resolves a confirmed transaction by txid via `source`.
     ///
     /// Default implementations may return `Ok(None)` when the concrete indexer
@@ -600,6 +658,15 @@ pub trait BlockSource {
 impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError> {
         Self::ingest_block(self, block, height)
+    }
+
+    fn ingest_block_with_txids(
+        &mut self,
+        block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        Self::ingest_block_with_txids(self, block, height, txids)
     }
 
     fn resolve_transaction(

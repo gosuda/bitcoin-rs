@@ -16,6 +16,14 @@ impl MemoryStore {
         let guard = self.cfs.read();
         guard[cf.index()].len()
     }
+
+    fn rows(&self, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let guard = self.cfs.read();
+        guard[cf.index()]
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
 }
 
 impl KvStore for MemoryStore {
@@ -217,9 +225,53 @@ fn ingest_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
     Ok(())
 }
 
+#[test]
+fn ingest_with_precomputed_txids_matches_standard_ingest() -> Result<(), Box<dyn std::error::Error>>
+{
+    let height = 170_u32;
+    let block_bytes = read_fixture(height)?;
+    let block: bitcoin::Block = bitcoin::consensus::deserialize(&block_bytes)?;
+    let txids = block
+        .txdata
+        .iter()
+        .map(bitcoin::Transaction::compute_txid)
+        .collect::<Vec<_>>();
+
+    assert_precomputed_ingest_matches_standard(&block_bytes, height, &txids)
+}
+
+#[test]
+fn ingest_with_mismatched_precomputed_txids_falls_back_to_standard_ingest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let height = 170_u32;
+    let block_bytes = read_fixture(height)?;
+
+    assert_precomputed_ingest_matches_standard(&block_bytes, height, &[])
+}
+
 fn read_fixture(height: u32) -> Result<Vec<u8>, std::io::Error> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../primitives/tests/testdata")
         .join(format!("{height}.bin"));
     std::fs::read(path)
+}
+
+fn assert_precomputed_ingest_matches_standard(
+    block: &[u8],
+    height: u32,
+    txids: &[bitcoin::Txid],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let standard_store = std::sync::Arc::new(MemoryStore::default());
+    let mut standard_indexer = Indexer::new(std::sync::Arc::clone(&standard_store));
+    let precomputed_store = std::sync::Arc::new(MemoryStore::default());
+    let mut precomputed_indexer = Indexer::new(std::sync::Arc::clone(&precomputed_store));
+
+    let standard_counts = standard_indexer.ingest_block(block, height)?;
+    let precomputed_counts = precomputed_indexer.ingest_block_with_txids(block, height, txids)?;
+
+    assert_eq!(precomputed_counts, standard_counts);
+    for &cf in ColumnFamily::ALL {
+        assert_eq!(precomputed_store.rows(cf), standard_store.rows(cf));
+    }
+    Ok(())
 }
