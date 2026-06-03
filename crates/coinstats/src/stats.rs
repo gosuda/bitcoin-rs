@@ -3,7 +3,7 @@ use core::convert::Infallible;
 
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use bitcoin_rs_utxo::{UtxoChangeListener, UtxoInserted, UtxoRemoved};
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use zerocopy::IntoBytes;
 
 use crate::MuHash3072;
@@ -134,7 +134,7 @@ pub enum CoinStatsDecodeError {
 /// UTXO listener that maintains [`CoinStats`].
 #[derive(Clone, Debug)]
 pub struct CoinStatsListener {
-    state: Arc<RwLock<CoinStatsListenerState>>,
+    state: Arc<Mutex<CoinStatsListenerState>>,
 }
 
 #[derive(Debug)]
@@ -168,7 +168,7 @@ impl CoinStatsListener {
     #[must_use]
     pub fn new(stats: CoinStats) -> Self {
         Self {
-            state: Arc::new(RwLock::new(CoinStatsListenerState {
+            state: Arc::new(Mutex::new(CoinStatsListenerState {
                 stats,
                 scratch: Vec::new(),
             })),
@@ -178,24 +178,24 @@ impl CoinStatsListener {
     /// Returns a point-in-time copy of the current stats.
     #[must_use]
     pub fn snapshot(&self) -> CoinStats {
-        self.state.read().stats.clone()
+        self.state.lock().stats.clone()
     }
 
     /// Applies a per-block delta to the wrapped stats.
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
-        self.state.write().stats.finish_block(height, tx_delta);
+        self.state.lock().stats.finish_block(height, tx_delta);
     }
 }
 
 impl UtxoChangeListener for CoinStatsListener {
     fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        let mut state = self.state.write();
+        let mut state = self.state.lock();
         state.insert_utxo(op, txout, height, coinbase);
         state.trim_scratch_capacity();
     }
 
     fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
-        let mut state = self.state.write();
+        let mut state = self.state.lock();
         for insertion in insertions {
             state.insert_utxo(
                 insertion.op,
@@ -208,19 +208,19 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
-        let mut state = self.state.write();
+        let mut state = self.state.lock();
         state.remove_utxo(op, txout, height, false);
         state.trim_scratch_capacity();
     }
 
     fn on_remove_coin(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
-        let mut state = self.state.write();
+        let mut state = self.state.lock();
         state.remove_utxo(op, txout, height, coinbase);
         state.trim_scratch_capacity();
     }
 
     fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
-        let mut state = self.state.write();
+        let mut state = self.state.lock();
         for removal in removals {
             state.remove_utxo(
                 &removal.op,
@@ -233,7 +233,7 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn muhash3072(&self) -> Option<[u8; 384]> {
-        Some(self.state.read().stats.muhash.finalize())
+        Some(self.state.lock().stats.muhash.finalize())
     }
 }
 
