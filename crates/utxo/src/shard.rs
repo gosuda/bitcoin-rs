@@ -391,7 +391,7 @@ fn apply_remove_run_with_listener<'arena>(
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
-    let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::new();
+    let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::with_capacity(removes.len());
     for remove in removes {
         let removed_output = record
             .find_output(remove.vout)
@@ -431,7 +431,7 @@ fn apply_add_run_with_listener<'arena>(
     listener: &(dyn UtxoChangeListener + Send + Sync),
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
-    let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::new();
+    let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
     for (_key, _txid, payload) in adds {
         let overwritten = match record.find_output(payload.vout) {
             Some(output) => Some(output_details(table, output).ok_or(UtxoError::CorruptArena)?),
