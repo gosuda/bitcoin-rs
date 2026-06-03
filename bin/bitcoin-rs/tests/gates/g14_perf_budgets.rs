@@ -41,6 +41,7 @@ G14_BITCOIN_RS_COMMAND_SHA256=<64 lowercase hex>, \
 G14_BITCOIN_CORE_COMMAND_SHA256=<64 lowercase hex>, \
 G14_BITCOIN_RS_CONFIG_SHA256=<64 lowercase hex>, \
 G14_BITCOIN_CORE_CONFIG_SHA256=<64 lowercase hex>, \
+G14_BENCHMARK_ARTIFACT_SHA256=<64 lowercase hex>, \
 G14_UTXO_COMMIT_P95_MS, \
 G14_ELECTRUM_GET_HISTORY_P95_MS, \
 G14_RSS_BYTES";
@@ -61,6 +62,7 @@ struct G14Evidence {
     bitcoin_core_command_sha256: String,
     bitcoin_rs_config_sha256: String,
     bitcoin_core_config_sha256: String,
+    benchmark_artifact_sha256: String,
     initial_sync_bps: f64,
     bitcoin_core_initial_sync_bps: f64,
     utxo_commit_p95_ms: f64,
@@ -103,6 +105,7 @@ impl G14Evidence {
         let bitcoin_core_command_sha256 = required_hex("G14_BITCOIN_CORE_COMMAND_SHA256", 64);
         let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
         let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
+        let benchmark_artifact_sha256 = required_hex("G14_BENCHMARK_ARTIFACT_SHA256", 64);
         let initial_sync_bps = measured_bps(bitcoin_rs_ibd_blocks, bitcoin_rs_elapsed_seconds);
         let bitcoin_core_initial_sync_bps =
             measured_bps(bitcoin_core_ibd_blocks, bitcoin_core_elapsed_seconds);
@@ -123,6 +126,7 @@ impl G14Evidence {
             bitcoin_core_command_sha256,
             bitcoin_rs_config_sha256,
             bitcoin_core_config_sha256,
+            benchmark_artifact_sha256,
             initial_sync_bps,
             bitcoin_core_initial_sync_bps,
             utxo_commit_p95_ms: positive_f64("G14_UTXO_COMMIT_P95_MS"),
@@ -195,6 +199,7 @@ impl G14Evidence {
         let bitcoin_core_command_sha256 = &self.bitcoin_core_command_sha256;
         let bitcoin_rs_config_sha256 = &self.bitcoin_rs_config_sha256;
         let bitcoin_core_config_sha256 = &self.bitcoin_core_config_sha256;
+        let benchmark_artifact_sha256 = &self.benchmark_artifact_sha256;
         let initial_sync_bps = self.initial_sync_bps;
         let bitcoin_core_initial_sync_bps = self.bitcoin_core_initial_sync_bps;
         let utxo_commit_p95_ms = self.utxo_commit_p95_ms;
@@ -215,6 +220,7 @@ impl G14Evidence {
         println!("bitcoin_core_command_sha256={bitcoin_core_command_sha256}");
         println!("bitcoin_rs_config_sha256={bitcoin_rs_config_sha256}");
         println!("bitcoin_core_config_sha256={bitcoin_core_config_sha256}");
+        println!("benchmark_artifact_sha256={benchmark_artifact_sha256}");
         println!("initial_sync_bps={initial_sync_bps}");
         println!("bitcoin_core_initial_sync_bps={bitcoin_core_initial_sync_bps}");
         println!("utxo_commit_p95_ms={utxo_commit_p95_ms}");

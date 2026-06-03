@@ -15,6 +15,7 @@ usage() {
     '  bitcoin_core_version, bitcoin_core_commit,' \
     '  bitcoin_rs_command, bitcoin_core_command,' \
     '  bitcoin_rs_config, bitcoin_core_config,' \
+    '  benchmark_artifact_sha256,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
     '' \
     'Optional offline Bitcoin Core metadata keys:' \
@@ -224,7 +225,19 @@ rs_command = require_text(data, "bitcoin_rs_command")
 core_command = require_text(data, "bitcoin_core_command")
 rs_config = require_text(data, "bitcoin_rs_config")
 core_config = require_text(data, "bitcoin_core_config")
+benchmark_artifact_sha256 = require_hex(
+    require_text(data, "benchmark_artifact_sha256"),
+    64,
+    "benchmark_artifact_sha256",
+)
 block_count = stop_height - start_height + 1
+bitcoin_rs_elapsed_seconds = require_number(data, "bitcoin_rs_elapsed_seconds")
+bitcoin_core_elapsed_seconds = require_number(data, "bitcoin_core_elapsed_seconds")
+if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
+    die(
+        "bitcoin-rs initial sync evidence must be faster than Bitcoin Core "
+        f"for the same {block_count}-block IBD window"
+    )
 
 env = {
     "G14_COMMIT_SHA": current_head(),
@@ -241,14 +254,15 @@ env = {
     "G14_IBD_STOP_HASH": stop_hash,
     "G14_BITCOIN_RS_IBD_BLOCKS": str(block_count),
     "G14_BITCOIN_CORE_IBD_BLOCKS": str(block_count),
-    "G14_BITCOIN_RS_ELAPSED_SECONDS": require_number(data, "bitcoin_rs_elapsed_seconds"),
-    "G14_BITCOIN_CORE_ELAPSED_SECONDS": require_number(data, "bitcoin_core_elapsed_seconds"),
+    "G14_BITCOIN_RS_ELAPSED_SECONDS": bitcoin_rs_elapsed_seconds,
+    "G14_BITCOIN_CORE_ELAPSED_SECONDS": bitcoin_core_elapsed_seconds,
     "G14_BITCOIN_CORE_VERSION": require_text(data, "bitcoin_core_version"),
     "G14_BITCOIN_CORE_COMMIT": core_commit,
     "G14_BITCOIN_RS_COMMAND_SHA256": sha256_text(rs_command),
     "G14_BITCOIN_CORE_COMMAND_SHA256": sha256_text(core_command),
     "G14_BITCOIN_RS_CONFIG_SHA256": sha256_text(rs_config),
     "G14_BITCOIN_CORE_CONFIG_SHA256": sha256_text(core_config),
+    "G14_BENCHMARK_ARTIFACT_SHA256": benchmark_artifact_sha256,
     "G14_UTXO_COMMIT_P95_MS": require_number(data, "utxo_commit_p95_ms"),
     "G14_ELECTRUM_GET_HISTORY_P95_MS": require_number(data, "electrum_get_history_p95_ms"),
     "G14_RSS_BYTES": str(require_int(data, "rss_bytes", positive=True)),

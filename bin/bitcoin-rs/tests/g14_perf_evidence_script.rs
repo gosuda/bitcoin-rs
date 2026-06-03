@@ -32,6 +32,7 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
     assert_64_hex_export(&stdout, "G14_BITCOIN_CORE_COMMAND_SHA256");
     assert_64_hex_export(&stdout, "G14_BITCOIN_RS_CONFIG_SHA256");
     assert_64_hex_export(&stdout, "G14_BITCOIN_CORE_CONFIG_SHA256");
+    assert_64_hex_export(&stdout, "G14_BENCHMARK_ARTIFACT_SHA256");
     Ok(())
 }
 
@@ -59,6 +60,23 @@ fn script_normalizes_offline_bitcoin_core_metadata() -> Result<(), Box<dyn std::
     );
     assert!(stdout.contains("export G14_BITCOIN_RS_IBD_BLOCKS=11\n"));
     assert!(stdout.contains("export G14_BITCOIN_CORE_IBD_BLOCKS=11\n"));
+    assert_64_hex_export(&stdout, "G14_BENCHMARK_ARTIFACT_SHA256");
+    Ok(())
+}
+
+#[test]
+fn script_rejects_slower_bitcoin_rs_ibd_evidence() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let evidence = offline_evidence_json_with_elapsed(temp.path(), 0, 10, "3.0", "2.0")?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", temp.path().join("missing-bitcoin-cli"))
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("bitcoin-rs initial sync evidence"));
     Ok(())
 }
 
@@ -158,6 +176,7 @@ fn evidence_json(
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=rocksdb\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "benchmark_artifact_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
   "utxo_commit_p95_ms": 12.5,
   "electrum_get_history_p95_ms": 20.0,
   "rss_bytes": 1024
@@ -172,6 +191,16 @@ fn offline_evidence_json(
     start_height: u32,
     stop_height: u32,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    offline_evidence_json_with_elapsed(dir, start_height, stop_height, "1.25", "2.50")
+}
+
+fn offline_evidence_json_with_elapsed(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+    bitcoin_rs_elapsed_seconds: &str,
+    bitcoin_core_elapsed_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("g14-offline.json");
     fs::write(
         &path,
@@ -182,14 +211,15 @@ fn offline_evidence_json(
   "ibd_start_hash": "2222222222222222222222222222222222222222222222222222222222222222",
   "ibd_stop_hash": "3333333333333333333333333333333333333333333333333333333333333333",
   "bitcoin_core_chain_info": {{"chain": "main", "blocks": 10, "headers": 10}},
-  "bitcoin_rs_elapsed_seconds": 1.25,
-  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
+  "bitcoin_core_elapsed_seconds": {bitcoin_core_elapsed_seconds},
   "bitcoin_core_version": "v27.0.0",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
   "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=rocksdb\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "benchmark_artifact_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
   "utxo_commit_p95_ms": 12.5,
   "electrum_get_history_p95_ms": 20.0,
   "rss_bytes": 1024
