@@ -549,8 +549,17 @@ impl UtxoSet {
 
         let _stable_commit = self.stable_view_lock.write();
 
-        let errors = Mutex::new(Vec::new());
         let listener = self.listener.as_deref();
+        if let Some(listener) = listener {
+            for &shard_idx in &active_shards[..active_shard_count] {
+                let shard_adds = &adds_by_shard[shard_idx];
+                let shard_removes = &removes_by_shard[shard_idx];
+                self.shards[shard_idx].commit_batch(shard_adds, shard_removes, Some(listener))?;
+            }
+            return Ok(());
+        }
+
+        let errors = Mutex::new(Vec::new());
         let target_tasks = rayon::current_num_threads().saturating_mul(2).max(1);
         let shards_per_task = active_shard_count.div_ceil(target_tasks).max(1);
         let adds_by_shard = &adds_by_shard;
