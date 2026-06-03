@@ -1,6 +1,7 @@
 //! Roundtrip tests for electrs-shaped index rows over a small in-memory `KvStore`.
 use std::{collections::BTreeMap, path::PathBuf};
 
+use bitcoin::hashes::Hash as _;
 use parking_lot::RwLock;
 
 use bitcoin_rs_index::{IndexRowCounts, Indexer};
@@ -247,6 +248,17 @@ fn ingest_with_mismatched_precomputed_txids_falls_back_to_standard_ingest()
     let block_bytes = read_fixture(height)?;
 
     assert_precomputed_ingest_matches_standard(&block_bytes, height, &[])
+}
+
+#[test]
+fn ingest_with_same_length_wrong_precomputed_txids_falls_back_to_standard_ingest()
+-> Result<(), Box<dyn std::error::Error>> {
+    let height = 170_u32;
+    let block_bytes = read_fixture(height)?;
+    let block: bitcoin::Block = bitcoin::consensus::deserialize(&block_bytes)?;
+    let stale_txids = vec![bitcoin::Txid::from_byte_array([0x42; 32]); block.txdata.len()];
+
+    assert_precomputed_ingest_matches_standard(&block_bytes, height, &stale_txids)
 }
 
 fn read_fixture(height: u32) -> Result<Vec<u8>, std::io::Error> {

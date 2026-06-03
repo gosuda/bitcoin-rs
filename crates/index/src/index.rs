@@ -406,10 +406,10 @@ impl<S: KvStore> Indexer<S> {
         self.write_pending_rows(rows, height)
     }
 
-    /// Walks one serialized block and reuses caller-supplied transaction IDs when they match.
+    /// Walks one serialized block and reuses caller-supplied transaction IDs after validation.
     ///
-    /// Falls back to hashing transactions from `block` if `txids` does not have exactly one
-    /// entry per serialized transaction, preserving `ingest_block` semantics for mismatched input.
+    /// Falls back to hashing transactions from `block` for any missing or mismatched entry,
+    /// preserving `ingest_block` semantics for mismatched input.
     pub fn ingest_block_with_txids(
         &mut self,
         block: &[u8],
@@ -535,9 +535,17 @@ impl Visitor for IndexBlockVisitor<'_> {
 
     fn visit_transaction(&mut self, tx: &bsl::Transaction<'_>) -> ControlFlow<()> {
         if let Some(txid) = self.txids.and_then(|txids| txids.get(self.txid_count)) {
-            self.rows
-                .txid_rows
-                .push(TxidRow::row(txid, self.height).to_db_row());
+            let computed = tx.txid_sha2();
+            let txid_bytes: &[u8] = txid.as_ref();
+            if txid_bytes == computed.as_slice() {
+                self.rows
+                    .txid_rows
+                    .push(TxidRow::row(txid, self.height).to_db_row());
+            } else {
+                self.rows
+                    .txid_rows
+                    .push(TxidRow::row_bytes(computed.as_slice(), self.height).to_db_row());
+            }
         } else {
             let txid = tx.txid_sha2();
             self.rows
