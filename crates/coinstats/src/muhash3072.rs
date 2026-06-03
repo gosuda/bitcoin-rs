@@ -4,10 +4,59 @@ use sha2::{Digest, Sha256};
 
 const BYTE_LEN: usize = 384;
 const LIMBS: usize = 48;
-const PRIME_DIFF: u64 = 1_103_717;
-const PRIME_SUB_FROM_MAX: u64 = PRIME_DIFF - 1;
 
 type U3072 = Uint<3072, LIMBS>;
+
+const MODULUS: U3072 = U3072::from_limbs([
+    18_446_744_073_708_447_899,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+]);
 
 /// Running 3072-bit `MuHash` accumulator.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,9 +94,8 @@ impl MuHash3072 {
     /// Finalizes to the 3072-bit group element, serialized big-endian.
     #[must_use]
     pub fn finalize(&self) -> [u8; BYTE_LEN] {
-        let prime = modulus();
         let denominator = reduce(&self.denominator);
-        let quotient = match denominator.inv_mod(prime) {
+        let quotient = match denominator.inv_mod(MODULUS) {
             Some(inverse) => mul(&reduce(&self.numerator), &inverse),
             None => U3072::ZERO,
         };
@@ -96,15 +144,11 @@ fn element(data: &[u8]) -> U3072 {
 }
 
 fn mul(left: &U3072, right: &U3072) -> U3072 {
-    (*left).mul_mod(*right, modulus())
+    (*left).mul_mod(*right, MODULUS)
 }
 
 fn reduce(value: &U3072) -> U3072 {
-    (*value).reduce_mod(modulus())
-}
-
-fn modulus() -> U3072 {
-    U3072::MAX - U3072::from(PRIME_SUB_FROM_MAX)
+    (*value).reduce_mod(MODULUS)
 }
 
 fn chacha20_keystream(key: &[u8; 32], out: &mut [u8; BYTE_LEN]) {
