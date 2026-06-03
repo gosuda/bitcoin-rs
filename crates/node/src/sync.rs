@@ -304,6 +304,7 @@ impl BlockSync {
     }
 
     fn apply_buffered_blocks(&self) -> (usize, usize) {
+        let started = Instant::now();
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let staged_count = self.block_stager.lock().received_len();
@@ -347,6 +348,8 @@ impl BlockSync {
             if let Some(hash) = failed_hash {
                 window.drop_received_for_retry(&hash);
             }
+            metrics::histogram!("node.sync.apply_buffered_blocks_seconds")
+                .record(started.elapsed().as_secs_f64());
         }
         (applied, failed)
     }
@@ -647,6 +650,10 @@ mod tests {
     use bitcoin_rs_utxo::UtxoSet;
     use crossbeam_channel::unbounded;
     use hashbrown::HashMap;
+    use metrics::{
+        Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata,
+        Recorder, SharedString, Unit,
+    };
     use parking_lot::{Mutex, RwLock};
 
     use super::{BlockHash, BlockSync, Inventory, Message, NetworkMessage};
@@ -1604,107 +1611,117 @@ mod tests {
     #[test]
     fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
     -> Result<(), Box<dyn std::error::Error>> {
-        const PROXY_BLOCKS: usize = 24;
-        const PROXY_TIP_HEIGHT: u32 = 24;
-        const PROXY_HEADER_HEIGHT: u32 = 96;
+        let recorder = TestRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            const PROXY_BLOCKS: usize = 24;
+            const PROXY_TIP_HEIGHT: u32 = 24;
+            const PROXY_HEADER_HEIGHT: u32 = 96;
 
-        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        let mut tree = BlockTree::new();
-        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
-        let mut tip_id = genesis_id;
-        let mut prev_hash = genesis.block_hash();
-        let mut blocks = Vec::with_capacity(PROXY_BLOCKS);
+            let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+            let mut tree = BlockTree::new();
+            let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+            let mut tip_id = genesis_id;
+            let mut prev_hash = genesis.block_hash();
+            let mut blocks = Vec::with_capacity(PROXY_BLOCKS);
 
-        for height in 1_u32..=PROXY_TIP_HEIGHT {
-            let block =
-                mined_block_with_prev_hash(prev_hash, height, vec![coinbase_transaction(height)]);
-            tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
-            prev_hash = block.block_hash();
-            blocks.push(block);
-        }
-        for height in PROXY_TIP_HEIGHT.saturating_add(1)..=PROXY_HEADER_HEIGHT {
-            let header = test_header(prev_hash, height);
-            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            prev_hash = header.block_hash();
-        }
+            for height in 1_u32..=PROXY_TIP_HEIGHT {
+                let block = mined_block_with_prev_hash(
+                    prev_hash,
+                    height,
+                    vec![coinbase_transaction(height)],
+                );
+                tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
+                prev_hash = block.block_hash();
+                blocks.push(block);
+            }
+            for height in PROXY_TIP_HEIGHT.saturating_add(1)..=PROXY_HEADER_HEIGHT {
+                let header = test_header(prev_hash, height);
+                tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+                prev_hash = header.block_hash();
+            }
 
-        let chain_tip = tree.tip_handle();
-        let block_tree = Arc::new(RwLock::new(tree));
-        let applied_tip = Arc::new(ArcSwapOption::empty());
-        let peers = Arc::new(RwLock::new(Vec::new()));
-        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
-        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
-        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
-        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-        let handles = apply_handles(
-            Arc::clone(&chain_tip),
-            Arc::clone(&applied_tip),
-            Arc::clone(&block_tree),
-        );
-        let sync = BlockSync::new(
-            handles,
-            Arc::clone(&peers),
-            Arc::clone(&peer_outbound),
-            inbound_headers_rx,
-            inbound_blocks_rx,
-        );
-        install_budget(
-            &sync,
-            super::SyncBudget {
-                max_pending_blocks: PROXY_BLOCKS,
-                max_pending_bytes: usize::MAX,
-                max_received_blocks: PROXY_BLOCKS,
-                max_received_bytes: usize::MAX,
-                max_peer_inflight: PROXY_BLOCKS,
-                getdata_batch_limit: PROXY_BLOCKS,
-                ..super::default_sync_budget()
-            },
-        );
+            let chain_tip = tree.tip_handle();
+            let block_tree = Arc::new(RwLock::new(tree));
+            let applied_tip = Arc::new(ArcSwapOption::empty());
+            let peers = Arc::new(RwLock::new(Vec::new()));
+            let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+            let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+            let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+            let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+            let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+            let handles = apply_handles(
+                Arc::clone(&chain_tip),
+                Arc::clone(&applied_tip),
+                Arc::clone(&block_tree),
+            );
+            let sync = BlockSync::new(
+                handles,
+                Arc::clone(&peers),
+                Arc::clone(&peer_outbound),
+                inbound_headers_rx,
+                inbound_blocks_rx,
+            );
+            install_budget(
+                &sync,
+                super::SyncBudget {
+                    max_pending_blocks: PROXY_BLOCKS,
+                    max_pending_bytes: usize::MAX,
+                    max_received_blocks: PROXY_BLOCKS,
+                    max_received_bytes: usize::MAX,
+                    max_peer_inflight: PROXY_BLOCKS,
+                    getdata_batch_limit: PROXY_BLOCKS,
+                    ..super::default_sync_budget()
+                },
+            );
 
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-        peers.write().push(synthetic_peer(addr, 100));
-        let (tx, rx) = unbounded::<Message>();
-        peer_outbound.write().insert(addr, tx);
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+            peers.write().push(synthetic_peer(addr, 100));
+            let (tx, rx) = unbounded::<Message>();
+            peer_outbound.write().insert(addr, tx);
 
-        sync.tick();
+            sync.tick();
 
-        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
-            return Err(std::io::Error::other("expected proxy getdata").into());
-        };
-        let pending_count = inventory.len();
-        assert_eq!(pending_count, PROXY_BLOCKS);
-        let _headers = rx.try_recv()?;
+            assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+            let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+                return Err(std::io::Error::other("expected proxy getdata").into());
+            };
+            let pending_count = inventory.len();
+            assert_eq!(pending_count, PROXY_BLOCKS);
+            assert_gauge(&recorder, "node.sync.pending_blocks", pending_count);
+            let _headers = rx.try_recv()?;
 
-        for block in blocks[1..].iter().rev() {
-            inbound_blocks_tx.send(block.clone())?;
-        }
-        sync.drain_inbound_blocks();
-        let (received_count, peak_staged_bytes) = {
-            let stager = sync.block_stager.lock();
-            (stager.received_len(), stager.received_bytes())
-        };
-        assert_eq!(received_count, PROXY_BLOCKS.saturating_sub(1));
-        assert!(peak_staged_bytes > 0);
+            for block in blocks[1..].iter().rev() {
+                inbound_blocks_tx.send(block.clone())?;
+            }
+            sync.drain_inbound_blocks();
+            let (received_count, peak_staged_bytes) = {
+                let stager = sync.block_stager.lock();
+                (stager.received_len(), stager.received_bytes())
+            };
+            assert_eq!(received_count, PROXY_BLOCKS.saturating_sub(1));
+            assert!(peak_staged_bytes > 0);
+            assert_gauge(&recorder, "node.sync.received_blocks", received_count);
+            assert_gauge(&recorder, "node.sync.received_bytes", peak_staged_bytes);
 
-        inbound_blocks_tx.send(blocks[0].clone())?;
-        let apply_started = quanta::Instant::now();
-        sync.drain_inbound_blocks();
-        let apply_elapsed = apply_started.elapsed();
-        let applied_height = applied_tip
-            .load_full()
-            .ok_or_else(|| std::io::Error::other("proxy apply did not publish tip"))?
-            .height;
-        assert_eq!(applied_height, PROXY_TIP_HEIGHT);
-        assert_eq!(sync.block_stager.lock().received_len(), 0);
-        assert_eq!(sync.download_window.lock().pending_len(), 0);
+            inbound_blocks_tx.send(blocks[0].clone())?;
+            let apply_started = quanta::Instant::now();
+            sync.drain_inbound_blocks();
+            let apply_elapsed = apply_started.elapsed();
+            let applied_height = applied_tip
+                .load_full()
+                .ok_or_else(|| std::io::Error::other("proxy apply did not publish tip"))?
+                .height;
+            assert_eq!(applied_height, PROXY_TIP_HEIGHT);
+            assert_eq!(sync.block_stager.lock().received_len(), 0);
+            assert_eq!(sync.download_window.lock().pending_len(), 0);
+            assert_histogram(&recorder, "node.sync.apply_buffered_blocks_seconds");
 
-        println!(
-            "deterministic_sync_apply_proxy peak_staged_bytes={peak_staged_bytes} pending_count={pending_count} received_count={received_count} contiguous_apply_latency_us={}",
-            apply_elapsed.as_micros(),
-        );
-        Ok(())
+            println!(
+                "deterministic_sync_apply_proxy peak_staged_bytes={peak_staged_bytes} pending_count={pending_count} received_count={received_count} contiguous_apply_latency_us={}",
+                apply_elapsed.as_micros(),
+            );
+            Ok(())
+        })
     }
 
     #[test]
@@ -1857,6 +1874,162 @@ mod tests {
     fn install_budget(sync: &BlockSync, budget: super::SyncBudget) {
         *sync.download_window.lock() = super::DownloadWindow::new(budget);
         *sync.block_stager.lock() = super::BlockStager::new(budget);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum TestMetric {
+        Counter(u64),
+        Gauge(f64),
+        Histogram { count: u64, sum: f64 },
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct TestRecorder {
+        values: Arc<Mutex<HashMap<String, TestMetric>>>,
+    }
+
+    impl TestRecorder {
+        fn metric_key(key: &Key) -> String {
+            key.name().to_owned()
+        }
+
+        fn snapshot(&self) -> HashMap<String, TestMetric> {
+            self.values.lock().clone()
+        }
+    }
+
+    impl Recorder for TestRecorder {
+        fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {
+        }
+
+        fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+
+        fn describe_histogram(
+            &self,
+            _key: KeyName,
+            _unit: Option<Unit>,
+            _description: SharedString,
+        ) {
+        }
+
+        fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
+            Counter::from_arc(Arc::new(TestCounter {
+                key: Self::metric_key(key),
+                recorder: self.clone(),
+            }))
+        }
+
+        fn register_gauge(&self, key: &Key, _metadata: &Metadata<'_>) -> Gauge {
+            Gauge::from_arc(Arc::new(TestGauge {
+                key: Self::metric_key(key),
+                recorder: self.clone(),
+            }))
+        }
+
+        fn register_histogram(&self, key: &Key, _metadata: &Metadata<'_>) -> Histogram {
+            Histogram::from_arc(Arc::new(TestHistogram {
+                key: Self::metric_key(key),
+                recorder: self.clone(),
+            }))
+        }
+    }
+
+    struct TestCounter {
+        key: String,
+        recorder: TestRecorder,
+    }
+
+    impl CounterFn for TestCounter {
+        fn increment(&self, value: u64) {
+            let mut values = self.recorder.values.lock();
+            let entry = values
+                .entry(self.key.clone())
+                .or_insert(TestMetric::Counter(0));
+            if let TestMetric::Counter(current) = entry {
+                *current = current.saturating_add(value);
+            }
+        }
+
+        fn absolute(&self, value: u64) {
+            self.recorder
+                .values
+                .lock()
+                .insert(self.key.clone(), TestMetric::Counter(value));
+        }
+    }
+
+    struct TestGauge {
+        key: String,
+        recorder: TestRecorder,
+    }
+
+    impl GaugeFn for TestGauge {
+        fn increment(&self, value: f64) {
+            let mut values = self.recorder.values.lock();
+            let entry = values
+                .entry(self.key.clone())
+                .or_insert(TestMetric::Gauge(0.0));
+            if let TestMetric::Gauge(current) = entry {
+                *current += value;
+            }
+        }
+
+        fn decrement(&self, value: f64) {
+            let mut values = self.recorder.values.lock();
+            let entry = values
+                .entry(self.key.clone())
+                .or_insert(TestMetric::Gauge(0.0));
+            if let TestMetric::Gauge(current) = entry {
+                *current -= value;
+            }
+        }
+
+        fn set(&self, value: f64) {
+            self.recorder
+                .values
+                .lock()
+                .insert(self.key.clone(), TestMetric::Gauge(value));
+        }
+    }
+
+    struct TestHistogram {
+        key: String,
+        recorder: TestRecorder,
+    }
+
+    impl HistogramFn for TestHistogram {
+        fn record(&self, value: f64) {
+            let mut values = self.recorder.values.lock();
+            let entry = values
+                .entry(self.key.clone())
+                .or_insert(TestMetric::Histogram { count: 0, sum: 0.0 });
+            if let TestMetric::Histogram { count, sum } = entry {
+                *count = count.saturating_add(1);
+                *sum += value;
+            }
+        }
+    }
+
+    fn assert_gauge(recorder: &TestRecorder, name: &str, expected: usize) {
+        let expected = super::metric_count(expected);
+        assert_eq!(
+            recorder.snapshot().get(name),
+            Some(&TestMetric::Gauge(expected)),
+            "{name} gauge must match deterministic sync pipeline state",
+        );
+    }
+
+    fn assert_histogram(recorder: &TestRecorder, name: &str) {
+        match recorder.snapshot().get(name) {
+            Some(TestMetric::Histogram { count, sum }) => {
+                assert_ne!(
+                    *count, 0,
+                    "{name} histogram must record at least one sample"
+                );
+                assert!(sum.is_finite(), "{name} histogram sum must be finite");
+            }
+            value => panic!("{name} histogram missing or wrong type: {value:?}"),
+        }
     }
 
     struct FailOnceBodyStore {
