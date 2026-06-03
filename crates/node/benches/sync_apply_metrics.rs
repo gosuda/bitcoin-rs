@@ -48,6 +48,7 @@ const APPLY_STAGE_METRICS: &[(&str, &str)] = &[
         "node.apply_block.coinbase_maturity_seconds",
     ),
     ("bip68", "node.apply_block.bip68_seconds"),
+    ("utxo_changes", "node.apply_block.utxo_changes_seconds"),
     (
         "block_body_persist",
         "node.apply_block.block_body_persist_seconds",
