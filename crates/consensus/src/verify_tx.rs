@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+#[cfg(feature = "bitcoinconsensus")]
+use bitcoin::{Script, consensus::encode};
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
 
@@ -156,6 +158,8 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     }
 
     let mut input_value = 0u64;
+    #[cfg(feature = "bitcoinconsensus")]
+    let mut serialized_tx = None;
     let interpreter = Interpreter;
     for (input_index, input) in tx.input.iter().enumerate() {
         let prevout = prevouts
@@ -164,6 +168,18 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         input_value = input_value
             .checked_add(prevout.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
+
+        #[cfg(feature = "bitcoinconsensus")]
+        if verify_non_taproot_with_bitcoinconsensus(
+            input_index,
+            &prevout,
+            tx,
+            flags,
+            &mut serialized_tx,
+        )? {
+            continue;
+        }
+
         let witness = input.witness.to_vec();
         interpreter
             .execute(
@@ -200,6 +216,34 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     Ok(())
 }
 
+#[cfg(feature = "bitcoinconsensus")]
+fn verify_non_taproot_with_bitcoinconsensus(
+    input_index: usize,
+    prevout: &bitcoin::TxOut,
+    tx: &bitcoin::Transaction,
+    flags: VerifyFlags,
+    serialized_tx: &mut Option<Vec<u8>>,
+) -> Result<bool, ConsensusError> {
+    let script = Script::from_bytes(prevout.script_pubkey.as_bytes());
+    if script.is_p2tr() && flags.contains(VerifyFlags::TAPROOT) {
+        return Ok(false);
+    }
+
+    let bytes = serialized_tx.get_or_insert_with(|| encode::serialize(tx));
+    script
+        .verify_with_flags(
+            input_index,
+            prevout.value,
+            bytes.as_slice(),
+            flags.consensus_bits(),
+        )
+        .map_err(|error| ConsensusError::Script {
+            input_index,
+            reason: format!("script verification failed: {error}"),
+        })?;
+    Ok(true)
+}
+
 fn total_output_value_borrowed(tx: &bitcoin::Transaction) -> Result<u64, ConsensusError> {
     tx.output.iter().try_fold(0u64, |sum, output| {
         let next = sum
@@ -218,6 +262,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use bitcoin::hashes::Hash as _;
+    #[cfg(feature = "bitcoinconsensus")]
+    use bitcoin::opcodes::all::OP_EQUAL;
     use bitcoin::script::Builder;
     use bitcoin::{
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
@@ -315,6 +361,173 @@ mod tests {
     }
 
     #[test]
+    fn verify_transaction_accepts_multi_input_true_scripts() {
+        let first = OutPoint {
+            txid: Txid::from_byte_array([1; 32]),
+            vout: 0,
+        };
+        let second = OutPoint {
+            txid: Txid::from_byte_array([2; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![true_spending_input(first), true_spending_input(second)],
+            output: vec![TxOut {
+                value: Amount::from_sat(75),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            first,
+            TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            },
+        );
+        utxos.insert(
+            second,
+            TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            },
+        );
+
+        assert_eq!(
+            verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
+            Ok(())
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "bitcoinconsensus")]
+    fn verify_transaction_accepts_non_taproot_spend_with_script_sig_data() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([3; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Builder::new().push_int(7).push_int(7).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_opcode(OP_EQUAL).into_script(),
+            },
+        );
+
+        assert_eq!(
+            verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
+            Ok(())
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "bitcoinconsensus")]
+    fn verify_transaction_rejects_non_taproot_spend_with_script_sig_mismatch() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([4; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Builder::new().push_int(7).push_int(8).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_opcode(OP_EQUAL).into_script(),
+            },
+        );
+
+        let result = verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY);
+
+        assert!(matches!(
+            result,
+            Err(ConsensusError::Script {
+                input_index: 0,
+                reason
+            }) if reason.starts_with("script verification failed:")
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "bitcoinconsensus")]
+    fn verify_transaction_routes_taproot_spends_to_interpreter() {
+        let first = OutPoint {
+            txid: Txid::from_byte_array([5; 32]),
+            vout: 0,
+        };
+        let second = OutPoint {
+            txid: Txid::from_byte_array([6; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![true_spending_input(first), true_spending_input(second)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            first,
+            TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: p2tr_script_pubkey(),
+            },
+        );
+        utxos.insert(
+            second,
+            TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            },
+        );
+
+        let result = verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY);
+
+        assert_eq!(
+            result,
+            Err(ConsensusError::Script {
+                input_index: 0,
+                reason:
+                    "taproot key-path verification requires all prevouts for multi-input transactions"
+                        .to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn verify_transaction_rejects_non_final_height_lock() {
         let tx = Tx(Transaction {
             version: transaction::Version(1),
@@ -405,6 +618,24 @@ mod tests {
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }
+    }
+
+    fn true_spending_input(outpoint: OutPoint) -> TxIn {
+        TxIn {
+            previous_output: outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    fn p2tr_script_pubkey() -> ScriptBuf {
+        let mut bytes = Vec::with_capacity(34);
+        bytes.push(0x51);
+        bytes.push(0x20);
+        bytes.extend_from_slice(&[7; 32]);
+        ScriptBuf::from_bytes(bytes)
     }
 
     fn coinbase_transaction_with_script_sig_len(len: usize) -> Tx {
