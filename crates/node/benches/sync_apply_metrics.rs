@@ -15,11 +15,14 @@ use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode,
     TxOut, Txid, Witness, transaction,
 };
+use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_node::{
     Config, Network,
     metrics::{MetricValue, MetricsHandle, install_metrics},
     state::NodeState,
 };
+use bitcoin_rs_primitives::{Hash256, OutPoint as PrimitiveOutPoint};
+use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
 use hashbrown::HashMap;
 use tempfile::TempDir;
 
@@ -74,6 +77,8 @@ const APPLY_STAGE_METRICS: &[(&str, &str)] = &[
 
 fn main() {
     let metrics = install_diagnostic_metrics();
+    print_utxo_fanout_commit_metrics("utxo_fanout_128_no_listener", false);
+    print_utxo_fanout_commit_metrics("utxo_fanout_128_listener", true);
     print_apply_metrics(
         "coinbase_32",
         &proxy_blocks(COINBASE_PROXY_BLOCKS),
@@ -90,6 +95,26 @@ fn main() {
         &metrics,
     );
     print_apply_metrics("spend_heavy_117", &spend_heavy_proxy_blocks(), &metrics);
+}
+
+fn print_utxo_fanout_commit_metrics(name: &str, with_listener: bool) {
+    let mut set = UtxoSet::new();
+    if with_listener {
+        set.set_listener(Box::new(CoinStatsListener::new(CoinStats::new())));
+    }
+    let started = Instant::now();
+    for height in 1..=PRODUCTION_PROXY_BLOCKS {
+        let changes = fanout_utxo_changes(height);
+        set.commit_block(&changes, &height_hash(height))
+            .unwrap_or_else(|error| panic!("{name} commit failed at height {height}: {error}"));
+    }
+    let elapsed = started.elapsed();
+    let commit_count = f64::from(PRODUCTION_PROXY_BLOCKS);
+    let commits_per_second = commit_count / elapsed.as_secs_f64();
+    let avg_commit_ms = (elapsed.as_secs_f64() / commit_count) * 1_000.0;
+    println!(
+        "utxo_commit_metrics workload={name} listener={with_listener} commits={PRODUCTION_PROXY_BLOCKS} elapsed={elapsed:?} commits_per_second={commits_per_second:.2} avg_commit_ms={avg_commit_ms:.4}",
+    );
 }
 
 fn install_diagnostic_metrics() -> MetricsHandle {
@@ -232,6 +257,29 @@ fn fanout_proxy_blocks(count: u32) -> Vec<Block> {
         blocks.push(block);
     }
     blocks
+}
+
+fn fanout_utxo_changes(height: u32) -> BlockChanges {
+    let transaction = fanout_coinbase_transaction(height);
+    let txid = transaction.compute_txid();
+    let mut changes = BlockChanges::default();
+    for (vout, txout) in transaction.output.iter().enumerate() {
+        let vout = u32::try_from(vout).unwrap_or_else(|error| panic!("invalid vout: {error}"));
+        changes.add(UtxoAdd::new(
+            PrimitiveOutPoint::new(Hash256::from_le_bytes(&txid.to_byte_array()), vout),
+            txout.clone(),
+            true,
+            height,
+        ));
+    }
+    changes
+}
+
+fn height_hash(height: u32) -> Hash256 {
+    let mut bytes = [0_u8; 32];
+    bytes[..4].copy_from_slice(&height.to_le_bytes());
+    bytes[4..8].copy_from_slice(&height.rotate_left(13).to_le_bytes());
+    Hash256::from_le_bytes(&bytes)
 }
 
 fn spend_heavy_proxy_blocks() -> Vec<Block> {
