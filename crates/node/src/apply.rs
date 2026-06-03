@@ -764,6 +764,7 @@ fn check_bip68_sequence_locks(
 
     debug_assert_eq!(block.txdata.len(), txids.len());
     let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo));
+    let mut prevout_mtp_by_height = HashMap::new();
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             continue;
@@ -789,8 +790,12 @@ fn check_bip68_sequence_locks(
                     // before the block being connected; the previous tip cannot
                     // contain an ancestor at the current block height yet.
                     mtp
+                } else if let Some(prevout_mtp) = prevout_mtp_by_height.get(&entry.height) {
+                    *prevout_mtp
                 } else {
-                    bip68_prevout_mtp(handles, previous_tip_id, entry.height)?
+                    let prevout_mtp = bip68_prevout_mtp(handles, previous_tip_id, entry.height)?;
+                    prevout_mtp_by_height.insert(entry.height, prevout_mtp);
+                    prevout_mtp
                 };
                 let earliest_time = prevout_mtp.saturating_add(
                     relative_intervals.saturating_mul(BIP68_TIME_GRANULARITY_SECONDS),
@@ -1512,6 +1517,52 @@ mod consensus_rule_tests {
                 &txids(&block),
                 prevout_height + 1,
                 200,
+                softfork_state(true),
+                Some(previous_tip_id),
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bip68_time_lock_accepts_multiple_prevouts_at_same_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let first_previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x66; 32]),
+            vout: 0,
+        };
+        let second_previous_output = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x65; 32]),
+            vout: 0,
+        };
+        let prevout_height = BIP68_TEST_PREVOUT_HEIGHT;
+        let utxo = utxo_with_outputs_at_height(
+            &[first_previous_output, second_previous_output],
+            prevout_height,
+        )?;
+        let handles = apply_handles(utxo);
+        let previous_tip_id = seed_block_tree_for_bip68_time(&handles)?;
+        let block = block_with_transactions(vec![
+            spending_transaction_to_script(
+                first_previous_output,
+                BIP68_TYPE_FLAG,
+                op_true_script(),
+            ),
+            spending_transaction_to_script(
+                second_previous_output,
+                BIP68_TYPE_FLAG,
+                op_true_script(),
+            ),
+        ]);
+
+        assert!(
+            check_bip68_sequence_locks(
+                &handles,
+                &block,
+                &txids(&block),
+                prevout_height + 1,
+                BIP68_TEST_PREVOUT_MTP,
                 softfork_state(true),
                 Some(previous_tip_id),
             )
@@ -2459,18 +2510,28 @@ mod consensus_rule_tests {
         previous_output: bitcoin::OutPoint,
         height: u32,
     ) -> Result<Arc<UtxoSet>, bitcoin_rs_utxo::UtxoError> {
-        let txid = Hash256::from_le_bytes(previous_output.txid.as_byte_array());
+        utxo_with_outputs_at_height(&[previous_output], height)
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn utxo_with_outputs_at_height(
+        previous_outputs: &[bitcoin::OutPoint],
+        height: u32,
+    ) -> Result<Arc<UtxoSet>, bitcoin_rs_utxo::UtxoError> {
         let utxo = Arc::new(UtxoSet::new());
         let mut changes = BlockChanges::default();
-        changes.add(UtxoAdd::new(
-            OutPoint::new(txid, previous_output.vout),
-            TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: op_true_script(),
-            },
-            false,
-            height,
-        ));
+        for previous_output in previous_outputs {
+            let txid = Hash256::from_le_bytes(previous_output.txid.as_byte_array());
+            changes.add(UtxoAdd::new(
+                OutPoint::new(txid, previous_output.vout),
+                TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: op_true_script(),
+                },
+                false,
+                height,
+            ));
+        }
         utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
         Ok(utxo)
     }
