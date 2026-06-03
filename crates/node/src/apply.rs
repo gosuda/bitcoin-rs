@@ -225,9 +225,14 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.block_rules_seconds")
         .record(block_rules_dur.as_secs_f64());
     block_rules_result?;
+    let txids: Vec<_> = block
+        .txdata
+        .iter()
+        .map(bitcoin::Transaction::compute_txid)
+        .collect();
     // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
     let bip30_bip34_started = quanta::Instant::now();
-    let bip30_bip34_result = check_bip30_and_bip34(handles, block, height);
+    let bip30_bip34_result = check_bip30_and_bip34(handles, block, height, &txids);
     let bip30_bip34_dur = bip30_bip34_started.elapsed();
     metrics::histogram!("node.apply_block.bip30_bip34_seconds")
         .record(bip30_bip34_dur.as_secs_f64());
@@ -277,7 +282,7 @@ pub fn apply_block(
 
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
     let wants_filters = handles.filter_index.wants_filters();
-    let scratch = ApplyScratch::new(block, height, wants_rawtx, wants_filters)?;
+    let scratch = ApplyScratch::with_txids(block, height, wants_rawtx, wants_filters, txids)?;
     let filter_bytes = wants_filters
         .then(|| compute_basic_filter(block, handles, block_hash, height, &scratch))
         .flatten();
@@ -839,6 +844,7 @@ fn check_bip30_and_bip34(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
     height: u32,
+    txids: &[bitcoin::Txid],
 ) -> core::result::Result<(), ApplyError> {
     use bitcoin::hashes::Hash as _;
 
@@ -846,8 +852,7 @@ fn check_bip30_and_bip34(
     // any output of the earlier transaction remains unspent, except at the
     // documented historical exception heights handled by `check_bip30`.
     let mut has_duplicate = false;
-    for tx in &block.txdata {
-        let txid = tx.compute_txid();
+    for txid in txids {
         let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
         if handles.utxo.has_live_outputs_for_txid(&txid) {
             has_duplicate = true;
@@ -1659,7 +1664,8 @@ mod consensus_rule_tests {
             txdata: vec![duplicate_tx],
         };
 
-        let error = match check_bip30_and_bip34(&handles, &block, 1) {
+        let txids = [duplicate_txid];
+        let error = match check_bip30_and_bip34(&handles, &block, 1, &txids) {
             Ok(()) => panic!("duplicate txid with live vout 1 must violate BIP30"),
             Err(error) => error,
         };

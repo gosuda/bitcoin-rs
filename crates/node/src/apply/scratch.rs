@@ -17,16 +17,33 @@ pub(super) struct ApplyScratch {
 }
 
 impl ApplyScratch {
+    #[cfg(test)]
     pub(super) fn new(
         block: &bitcoin::Block,
         height: u32,
         include_raw_txs: bool,
         include_same_block_output_scripts: bool,
     ) -> Result<Self, ApplyError> {
-        let mut txids = Vec::with_capacity(block.txdata.len());
+        let txids = block.txdata.iter().map(Transaction::compute_txid).collect();
+        Self::with_txids(
+            block,
+            height,
+            include_raw_txs,
+            include_same_block_output_scripts,
+            txids,
+        )
+    }
+
+    pub(super) fn with_txids(
+        block: &bitcoin::Block,
+        height: u32,
+        include_raw_txs: bool,
+        include_same_block_output_scripts: bool,
+        txids: Vec<Txid>,
+    ) -> Result<Self, ApplyError> {
+        debug_assert_eq!(txids.len(), block.txdata.len());
         let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txdata.len()));
         for tx in &block.txdata {
-            txids.push(tx.compute_txid());
             if let Some(raw_txs) = &mut raw_txs {
                 raw_txs.push(bitcoin::consensus::encode::serialize(tx));
             }
