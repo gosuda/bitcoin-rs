@@ -49,6 +49,23 @@ impl CoinStats {
     pub fn insert_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         let encoded = coin_hash_bytes(op, txout, height, coinbase);
         self.muhash.insert(&encoded);
+        self.account_insert(txout);
+    }
+
+    fn insert_utxo_with_scratch(
+        &mut self,
+        op: &OutPoint,
+        txout: &TxOut,
+        height: u32,
+        coinbase: bool,
+        scratch: &mut Vec<u8>,
+    ) {
+        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
+        self.muhash.insert(scratch.as_slice());
+        self.account_insert(txout);
+    }
+
+    fn account_insert(&mut self, txout: &TxOut) {
         self.total_amount = self.total_amount.saturating_add(txout.value.to_sat());
         self.bogo_size = self.bogo_size.saturating_add(bogo_size(txout));
         self.utxo_count = self.utxo_count.saturating_add(1);
@@ -58,6 +75,23 @@ impl CoinStats {
     pub fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         let encoded = coin_hash_bytes(op, txout, height, coinbase);
         self.muhash.remove(&encoded);
+        self.account_remove(txout);
+    }
+
+    fn remove_utxo_with_scratch(
+        &mut self,
+        op: &OutPoint,
+        txout: &TxOut,
+        height: u32,
+        coinbase: bool,
+        scratch: &mut Vec<u8>,
+    ) {
+        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
+        self.muhash.remove(scratch.as_slice());
+        self.account_remove(txout);
+    }
+
+    fn account_remove(&mut self, txout: &TxOut) {
         self.total_amount = self.total_amount.saturating_sub(txout.value.to_sat());
         self.bogo_size = self.bogo_size.saturating_sub(bogo_size(txout));
         self.utxo_count = self.utxo_count.saturating_sub(1);
@@ -156,13 +190,17 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
+        let mut scratch = insertions.first().map_or_else(Vec::new, |insertion| {
+            Vec::with_capacity(coin_hash_capacity(insertion.txout))
+        });
         let mut stats = self.stats.write();
         for insertion in insertions {
-            stats.insert_utxo(
+            stats.insert_utxo_with_scratch(
                 insertion.op,
                 insertion.txout,
                 insertion.height,
                 insertion.coinbase,
+                &mut scratch,
             );
         }
     }
@@ -176,13 +214,17 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
+        let mut scratch = removals.first().map_or_else(Vec::new, |removal| {
+            Vec::with_capacity(coin_hash_capacity(&removal.txout))
+        });
         let mut stats = self.stats.write();
         for removal in removals {
-            stats.remove_utxo(
+            stats.remove_utxo_with_scratch(
                 &removal.op,
                 &removal.txout,
                 removal.height,
                 removal.coinbase,
+                &mut scratch,
             );
         }
     }
@@ -193,14 +235,29 @@ impl UtxoChangeListener for CoinStatsListener {
 }
 
 fn coin_hash_bytes(op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(OUTPOINT_BYTES + 4 + txout.script_pubkey.len() + 16);
+    let mut out = Vec::with_capacity(coin_hash_capacity(txout));
+    coin_hash_bytes_into(&mut out, op, txout, height, coinbase);
+    out
+}
+
+fn coin_hash_capacity(txout: &TxOut) -> usize {
+    OUTPOINT_BYTES + 4 + txout.script_pubkey.len() + 16
+}
+
+fn coin_hash_bytes_into(
+    out: &mut Vec<u8>,
+    op: &OutPoint,
+    txout: &TxOut,
+    height: u32,
+    coinbase: bool,
+) {
+    out.clear();
     out.extend_from_slice(op.as_bytes());
     let coinbase_bit = u32::from(coinbase);
     out.extend_from_slice(&((height << 1) | coinbase_bit).to_le_bytes());
-    if txout.consensus_encode(&mut out).is_err() {
+    if txout.consensus_encode(out).is_err() {
         unreachable!("vec-backed consensus encoder is infallible");
     }
-    out
 }
 
 fn bogo_size(txout: &TxOut) -> u64 {
