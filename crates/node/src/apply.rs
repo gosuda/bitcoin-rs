@@ -290,6 +290,33 @@ pub fn apply_block(
             .map_err(ApplyError::BlockBodyPersistence)?;
     }
 
+    let tx_index_ingest_started = quanta::Instant::now();
+    if let Some(tx_index) = &handles.tx_index {
+        let tx_index_ingest_result = tx_index.lock().ingest_block(&block_bytes, height);
+        match tx_index_ingest_result {
+            Ok(counts) => {
+                tracing::debug!(
+                    height,
+                    txids = counts.txids,
+                    funding = counts.funding,
+                    spending = counts.spending,
+                    headers = counts.headers,
+                    "tx_index ingested block"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    height,
+                    %error,
+                    "tx_index failed to ingest block; best-effort path continues"
+                );
+            }
+        }
+    }
+    let tx_index_ingest_dur = tx_index_ingest_started.elapsed();
+    metrics::histogram!("node.apply_block.tx_index_ingest_seconds")
+        .record(tx_index_ingest_dur.as_secs_f64());
+
     let utxo_commit_started = quanta::Instant::now();
     let utxo_commit_result = handles.utxo.commit_block(&changes, &block_hash);
     let utxo_commit_dur = utxo_commit_started.elapsed();
@@ -325,47 +352,12 @@ pub fn apply_block(
     let mempool_evict_dur = mempool_evict_started.elapsed();
     metrics::histogram!("node.apply_block.mempool_evict_seconds")
         .record(mempool_evict_dur.as_secs_f64());
-    let tx_index_started = quanta::Instant::now();
-    if handles.tx_index.is_some() {
-        let mut transactions = handles.transactions.write();
-        for (txid, tx) in scratch.txids().iter().zip(&block.txdata) {
-            transactions.insert(*txid, tx.clone());
-        }
-    }
-    let tx_index_dur = tx_index_started.elapsed();
-    metrics::histogram!("node.apply_block.tx_index_seconds").record(tx_index_dur.as_secs_f64());
     let tx_count_delta = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
     let coin_stats_started = quanta::Instant::now();
     handles.coin_stats.finish_block(height, tx_count_delta);
     let coin_stats_dur = coin_stats_started.elapsed();
     metrics::histogram!("node.apply_block.coin_stats_finish_seconds")
         .record(coin_stats_dur.as_secs_f64());
-    let tx_index_ingest_started = quanta::Instant::now();
-    if let Some(tx_index) = &handles.tx_index {
-        let tx_index_ingest_result = tx_index.lock().ingest_block(&block_bytes, height);
-        match tx_index_ingest_result {
-            Ok(counts) => {
-                tracing::debug!(
-                    height,
-                    txids = counts.txids,
-                    funding = counts.funding,
-                    spending = counts.spending,
-                    headers = counts.headers,
-                    "tx_index ingested block"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    height,
-                    %error,
-                    "tx_index failed to ingest block; best-effort path continues"
-                );
-            }
-        }
-    }
-    let tx_index_ingest_dur = tx_index_ingest_started.elapsed();
-    metrics::histogram!("node.apply_block.tx_index_ingest_seconds")
-        .record(tx_index_ingest_dur.as_secs_f64());
     let filter_started = quanta::Instant::now();
     if let Some(filter_bytes) = filter_bytes {
         let prev_filter_header = handles
@@ -410,7 +402,6 @@ pub fn apply_block(
         utxo_commit_us = utxo_commit_dur.as_micros(),
         block_tree_insert_us = block_tree_insert_dur.as_micros(),
         mempool_evict_us = mempool_evict_dur.as_micros(),
-        tx_index_us = tx_index_dur.as_micros(),
         tx_index_ingest_us = tx_index_ingest_dur.as_micros(),
         filter_index_us = filter_dur.as_micros(),
         coin_stats_us = coin_stats_dur.as_micros(),
@@ -1991,11 +1982,9 @@ mod consensus_rule_tests {
     }
 
     #[test]
-    fn apply_block_skips_confirmed_transaction_cache_when_disabled()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn apply_block_skips_confirmed_transaction_cache() -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        let mut handles = empty_apply_handles_for_network(Network::Regtest);
-        handles.tx_index = None;
+        let handles = empty_apply_handles_for_network(Network::Regtest);
         let genesis_tip = applied_header_tip(
             &handles,
             Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
@@ -2011,6 +2000,67 @@ mod consensus_rule_tests {
         apply_block(&handles, &block)?;
 
         assert!(handles.transactions.read().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_block_keeps_txindex_failure_best_effort() -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let handles = apply_handles_with_tx_index(
+            Network::Regtest,
+            Arc::new(UtxoSet::new()),
+            failing_tx_index(),
+        );
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let stats_before = handles.coin_stats.snapshot();
+
+        let tip = apply_block(&handles, &block)?;
+
+        assert!(
+            handles.transactions.read().is_empty(),
+            "failed txindex ingest must not populate confirmed tx cache"
+        );
+        assert_eq!(tip.height, 1);
+        assert_eq!(
+            handles.applied_tip.load_full().map(|tip| tip.height),
+            Some(1),
+            "best-effort txindex failure must still publish the new applied tip"
+        );
+        assert!(
+            !handles.blocks.read().is_empty(),
+            "best-effort txindex failure must still publish a block record"
+        );
+        assert_eq!(
+            handles.utxo.len(),
+            1,
+            "best-effort txindex failure must still commit UTXO changes"
+        );
+        assert!(
+            handles.block_tree.read().lookup(block_hash).is_some(),
+            "best-effort txindex failure must still insert the block into the block tree"
+        );
+        assert_eq!(
+            handles.coin_stats.snapshot().height,
+            stats_before.height.saturating_add(1),
+            "best-effort txindex failure must still advance coin stats height"
+        );
+        assert_eq!(
+            handles.coin_stats.snapshot().tx_count,
+            stats_before.tx_count.saturating_add(1),
+            "best-effort txindex failure must still advance coin stats transaction count"
+        );
         Ok(())
     }
 
@@ -2656,6 +2706,14 @@ mod consensus_rule_tests {
     }
 
     fn apply_handles_for_network(network: Network, utxo: Arc<UtxoSet>) -> ApplyHandles {
+        apply_handles_with_tx_index(network, utxo, noop_tx_index())
+    }
+
+    fn apply_handles_with_tx_index(
+        network: Network,
+        utxo: Arc<UtxoSet>,
+        tx_index: Arc<Mutex<Box<dyn IndexerLike>>>,
+    ) -> ApplyHandles {
         ApplyHandles::new(
             network,
             Arc::new(ArcSwapOption::empty()),
@@ -2665,7 +2723,7 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
-            Some(noop_tx_index()),
+            Some(tx_index),
             noop_filter_index(),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(Vec::new())),
@@ -2696,6 +2754,33 @@ mod consensus_rule_tests {
 
     fn noop_tx_index() -> Arc<Mutex<Box<dyn IndexerLike>>> {
         let indexer: Box<dyn IndexerLike> = Box::new(NoopIndexer);
+        Arc::new(Mutex::new(indexer))
+    }
+
+    struct FailingIndexer;
+
+    impl IndexerLike for FailingIndexer {
+        fn ingest_block(
+            &mut self,
+            _block: &[u8],
+            _height: u32,
+        ) -> Result<IndexRowCounts, IndexError> {
+            Err(IndexError::Storage(
+                bitcoin_rs_storage::StorageError::backend("forced txindex failure"),
+            ))
+        }
+
+        fn resolve_outpoint_value(
+            &self,
+            _outpoint: bitcoin::OutPoint,
+            _source: &dyn BlockSource,
+        ) -> Result<Option<u64>, IndexError> {
+            Ok(None)
+        }
+    }
+
+    fn failing_tx_index() -> Arc<Mutex<Box<dyn IndexerLike>>> {
+        let indexer: Box<dyn IndexerLike> = Box::new(FailingIndexer);
         Arc::new(Mutex::new(indexer))
     }
 

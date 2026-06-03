@@ -59,6 +59,18 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
             return super::tx_render::tx_to_value(tx);
         }
     }
+    if let Some(indexer) = &ctx.indexer {
+        let tx = indexer
+            .lock()
+            .resolve_transaction(txid, ctx.as_ref())
+            .map_err(|error| RpcError::Internal(format!("txindex lookup failed: {error}")))?;
+        if let Some(tx) = tx {
+            if !verbose {
+                return Ok(json!(serialize(&tx).to_lower_hex_string()));
+            }
+            return super::tx_render::tx_to_value(&tx);
+        }
+    }
     Err(RpcError::NotFound("transaction not found"))
 }
 
@@ -268,12 +280,15 @@ fn parse_txid(value: &str) -> Result<Txid, RpcError> {
 mod tests {
     use alloc::sync::Arc;
 
+    use bitcoin::Txid;
     use bitcoin::blockdata::constants::genesis_block;
     use bitcoin::consensus::encode::serialize;
     use bitcoin::hashes::Hash as _;
     use bitcoin::hex::DisplayHex as _;
+    use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
     use bitcoin_rs_mempool::MempoolEntry;
     use bitcoin_rs_primitives::Hash256;
+    use parking_lot::Mutex;
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
     use super::getrawtransaction;
@@ -285,6 +300,63 @@ mod tests {
     fn getrawtransaction_falls_back_to_mempool_for_unconfirmed()
     -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let coinbase = genesis
+            .txdata
+            .first()
+            .ok_or_else(|| RpcError::Internal("genesis has no transactions".to_owned()))?
+            .clone();
+        let txid = coinbase.compute_txid();
+        {
+            let mut pool = ctx.mempool.write();
+            let vsize = u32::try_from(coinbase.vsize())?;
+            let entry =
+                MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
+            pool.insert_entry(entry)?;
+        }
+
+        let result = getrawtransaction(&ctx, &json!([txid.to_string()]))?;
+
+        let expected = serialize(&coinbase).to_lower_hex_string();
+        assert_eq!(result.as_str(), Some(expected.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn getrawtransaction_checks_mempool_before_failing_txindex()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct FailingIndexer;
+
+        impl IndexerLike for FailingIndexer {
+            fn ingest_block(
+                &mut self,
+                _block: &[u8],
+                _height: u32,
+            ) -> Result<IndexRowCounts, IndexError> {
+                Ok(IndexRowCounts::default())
+            }
+
+            fn resolve_transaction(
+                &self,
+                _txid: Txid,
+                _source: &dyn BlockSource,
+            ) -> Result<Option<bitcoin::Transaction>, IndexError> {
+                Err(IndexError::InvalidHeaderLength { len: 0 })
+            }
+
+            fn resolve_outpoint_value(
+                &self,
+                _outpoint: bitcoin::OutPoint,
+                _source: &dyn BlockSource,
+            ) -> Result<Option<u64>, IndexError> {
+                Ok(None)
+            }
+        }
+
+        let mut ctx = Context::new();
+        let indexer: Box<dyn IndexerLike> = Box::new(FailingIndexer);
+        ctx.indexer = Some(Arc::new(Mutex::new(indexer)));
+        let ctx = Arc::new(ctx);
         let genesis = genesis_block(bitcoin::Network::Regtest);
         let coinbase = genesis
             .txdata
@@ -326,6 +398,61 @@ mod tests {
             )
             .unwrap_or_else(|err| panic!("getrawtransaction with blockhash: {err}"));
         assert!(result.is_str(), "expected hex string, got {result:?}");
+    }
+
+    #[test]
+    fn getrawtransaction_resolves_confirmed_transaction_from_txindex_without_cache() {
+        struct StaticIndexer {
+            tx: bitcoin::Transaction,
+        }
+
+        impl IndexerLike for StaticIndexer {
+            fn ingest_block(
+                &mut self,
+                _block: &[u8],
+                _height: u32,
+            ) -> Result<IndexRowCounts, IndexError> {
+                Ok(IndexRowCounts::default())
+            }
+
+            fn resolve_transaction(
+                &self,
+                txid: Txid,
+                _source: &dyn BlockSource,
+            ) -> Result<Option<bitcoin::Transaction>, IndexError> {
+                Ok((self.tx.compute_txid() == txid).then(|| self.tx.clone()))
+            }
+
+            fn resolve_outpoint_value(
+                &self,
+                _outpoint: bitcoin::OutPoint,
+                _source: &dyn BlockSource,
+            ) -> Result<Option<u64>, IndexError> {
+                Ok(None)
+            }
+        }
+
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let Some(coinbase) = genesis.txdata.first().cloned() else {
+            panic!("genesis has no transactions");
+        };
+        let txid = coinbase.compute_txid();
+        let mut ctx = Context::new();
+        let indexer: Box<dyn IndexerLike> = Box::new(StaticIndexer {
+            tx: coinbase.clone(),
+        });
+        ctx.indexer = Some(Arc::new(Mutex::new(indexer)));
+        let ctx = Arc::new(ctx);
+
+        assert!(
+            ctx.transactions.read().is_empty(),
+            "confirmed transaction cache must stay empty"
+        );
+        let result = getrawtransaction(&ctx, &json!([txid.to_string()]))
+            .unwrap_or_else(|err| panic!("txindex lookup failed: {err}"));
+
+        let expected = serialize(&coinbase).to_lower_hex_string();
+        assert_eq!(result.as_str(), Some(expected.as_str()));
     }
 
     #[test]

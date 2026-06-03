@@ -558,6 +558,19 @@ pub trait IndexerLike: Send + Sync {
     /// Walks `block` once and writes index rows. See `Indexer::ingest_block`.
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError>;
 
+    /// Resolves a confirmed transaction by txid via `source`.
+    ///
+    /// Default implementations may return `Ok(None)` when the concrete indexer
+    /// does not support transaction lookup.
+    fn resolve_transaction(
+        &self,
+        txid: bitcoin::Txid,
+        source: &dyn BlockSource,
+    ) -> Result<Option<bitcoin::Transaction>, IndexError> {
+        let _ = (txid, source);
+        Ok(None)
+    }
+
     /// Resolves the satoshi value of the transaction output at `outpoint` via
     /// `source`. Returns `Ok(None)` when the transaction is not indexed or the
     /// `vout` is out of range.
@@ -587,6 +600,14 @@ pub trait BlockSource {
 impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError> {
         Self::ingest_block(self, block, height)
+    }
+
+    fn resolve_transaction(
+        &self,
+        txid: bitcoin::Txid,
+        source: &dyn BlockSource,
+    ) -> Result<Option<bitcoin::Transaction>, IndexError> {
+        Self::resolve_transaction(self, txid, source)
     }
 
     fn resolve_outpoint_value(
@@ -800,6 +821,28 @@ mod tests {
         let resolved = indexer.resolve_transaction(txid, &source)?;
 
         assert_eq!(resolved, Some(coinbase));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_transaction_returns_none_when_indexed_height_is_not_visible()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let Some(tx) = block.txdata.first() else {
+            return Err(std::io::Error::other("genesis block has no transactions").into());
+        };
+        let txid = tx.compute_txid();
+        let (_dir, mut indexer) = indexer()?;
+
+        indexer.ingest_block(&serialize(&block), 0)?;
+
+        let source = FakeSource {
+            block,
+            target_height: 1,
+        };
+        let resolved = indexer.resolve_transaction(txid, &source)?;
+
+        assert_eq!(resolved, None);
         Ok(())
     }
 

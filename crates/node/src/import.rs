@@ -86,10 +86,25 @@ mod tests {
             0,
             "genesis coinbase is unspendable and absent from live UTXO state"
         );
+        assert!(
+            state.transactions().read().is_empty(),
+            "confirmed transaction cache must stay empty"
+        );
+        let coinbase = block
+            .txdata
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("genesis block has no transactions"))?;
+        let txid = coinbase.compute_txid();
+        let source = crate::block_source::NodeBlockSource::new(state.blocks())
+            .with_block_body_source(state.block_body_source());
+        let tx_index = state
+            .tx_index()
+            .ok_or_else(|| anyhow::anyhow!("txindex missing after enabled open"))?;
+        let resolved = tx_index.lock().resolve_transaction(txid, &source)?;
         assert_eq!(
-            state.transactions().read().len(),
-            1,
-            "genesis coinbase must be indexed"
+            resolved.as_ref().map(bitcoin::Transaction::compute_txid),
+            Some(txid),
+            "genesis coinbase must resolve through txindex"
         );
         assert!(
             state.mempool().read().is_empty(),
