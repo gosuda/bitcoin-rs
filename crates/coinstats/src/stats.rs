@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 use core::convert::Infallible;
 
-use bitcoin::consensus::Encodable;
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use bitcoin_rs_utxo::{UtxoChangeListener, UtxoInserted, UtxoRemoved};
 use parking_lot::RwLock;
@@ -259,9 +258,36 @@ fn coin_hash_bytes_into(
     out.extend_from_slice(op.as_bytes());
     let coinbase_bit = u32::from(coinbase);
     out.extend_from_slice(&((height << 1) | coinbase_bit).to_le_bytes());
-    if txout.consensus_encode(out).is_err() {
-        unreachable!("vec-backed consensus encoder is infallible");
+    encode_txout_into(out, txout);
+}
+
+fn encode_txout_into(out: &mut Vec<u8>, txout: &TxOut) {
+    out.extend_from_slice(&txout.value.to_sat().to_le_bytes());
+    let script = txout.script_pubkey.as_bytes();
+    encode_compact_size_into(out, script.len());
+    out.extend_from_slice(script);
+}
+
+fn encode_compact_size_into(out: &mut Vec<u8>, len: usize) {
+    if let Ok(byte_len) = u8::try_from(len)
+        && byte_len < 0xfd
+    {
+        out.push(byte_len);
+        return;
     }
+    if let Ok(word_len) = u16::try_from(len) {
+        out.push(0xfd);
+        out.extend_from_slice(&word_len.to_le_bytes());
+        return;
+    }
+    if let Ok(dword_len) = u32::try_from(len) {
+        out.push(0xfe);
+        out.extend_from_slice(&dword_len.to_le_bytes());
+        return;
+    }
+    let qword_len = u64::try_from(len).unwrap_or(u64::MAX);
+    out.push(0xff);
+    out.extend_from_slice(&qword_len.to_le_bytes());
 }
 
 fn bogo_size(txout: &TxOut) -> u64 {
@@ -292,5 +318,26 @@ fn read_array<const N: usize>(
 impl From<Infallible> for CoinStatsDecodeError {
     fn from(value: Infallible) -> Self {
         match value {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::{Amount, ScriptBuf};
+
+    use super::{TxOut, encode_txout_into};
+
+    #[test]
+    fn manual_txout_encoding_matches_consensus_boundaries() {
+        for len in [0_usize, 1, 252, 253, 65_535, 65_536] {
+            let txout = TxOut {
+                value: Amount::from_sat(50_000 + u64::try_from(len).unwrap_or(u64::MAX)),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51; len]),
+            };
+            let mut manual = Vec::new();
+            encode_txout_into(&mut manual, &txout);
+            let consensus = bitcoin::consensus::encode::serialize(&txout);
+            assert_eq!(manual, consensus, "script len {len}");
+        }
     }
 }
