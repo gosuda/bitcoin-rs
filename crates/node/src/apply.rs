@@ -2306,9 +2306,11 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn apply_block_skips_confirmed_transaction_cache() -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        let handles = empty_apply_handles_for_network(Network::Regtest);
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
+        assert!(handles.tx_index.is_none());
         let genesis_tip = applied_header_tip(
             &handles,
             Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
@@ -2324,6 +2326,48 @@ mod consensus_rule_tests {
         apply_block(&handles, &block)?;
 
         assert!(handles.transactions.read().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_block_publishes_rawtx_bytes_in_block_order() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let external_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x96; 32]),
+            vout: 0,
+        };
+        let publisher = Arc::new(RecordingRawTxPublisher::default());
+        let publisher_for_handles: Arc<dyn crate::ZmqPublisher> = publisher.clone();
+        let handles = apply_handles_without_tx_index(
+            Network::Regtest,
+            utxo_with_output(external_prevout, 1)?,
+        )
+        .with_zmq_publisher(publisher_for_handles);
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let txdata = vec![
+            coinbase_transaction(0x96),
+            spending_transaction_to_script(
+                external_prevout,
+                Sequence::MAX.to_consensus_u32(),
+                op_true_script(),
+            ),
+        ];
+        let expected_raw_txs = txdata
+            .iter()
+            .map(bitcoin::consensus::encode::serialize)
+            .collect::<Vec<_>>();
+        let block = mined_block_with_prev_hash_and_transactions(genesis.block_hash(), txdata)?;
+
+        apply_block(&handles, &block)?;
+
+        assert_eq!(*publisher.raw_txs.lock(), expected_raw_txs);
         Ok(())
     }
 
@@ -3043,6 +3087,25 @@ mod consensus_rule_tests {
         apply_handles_with_tx_index(network, utxo, noop_tx_index())
     }
 
+    fn apply_handles_without_tx_index(network: Network, utxo: Arc<UtxoSet>) -> ApplyHandles {
+        ApplyHandles::new(
+            network,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(RwLock::new(BlockTree::new())),
+            utxo,
+            Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
+                bitcoin_rs_coinstats::CoinStats::default(),
+            )),
+            None,
+            noop_filter_index(),
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),
+            Arc::new(crate::NoOpZmqPublisher),
+        )
+    }
+
     fn apply_handles_with_tx_index(
         network: Network,
         utxo: Arc<UtxoSet>,
@@ -3116,6 +3179,27 @@ mod consensus_rule_tests {
     fn failing_tx_index() -> Arc<Mutex<Box<dyn IndexerLike>>> {
         let indexer: Box<dyn IndexerLike> = Box::new(FailingIndexer);
         Arc::new(Mutex::new(indexer))
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingRawTxPublisher {
+        raw_txs: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl crate::ZmqPublisher for RecordingRawTxPublisher {
+        fn wants_rawtx(&self) -> bool {
+            true
+        }
+
+        fn publish_hashblock(&self, _hash: Hash256) {}
+
+        fn publish_hashtx(&self, _txid: bitcoin::Txid) {}
+
+        fn publish_rawblock(&self, _bytes: &[u8]) {}
+
+        fn publish_rawtx(&self, bytes: &[u8]) {
+            self.raw_txs.lock().push(bytes.to_vec());
+        }
     }
 
     #[derive(Default)]
