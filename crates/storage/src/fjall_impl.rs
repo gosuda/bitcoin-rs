@@ -69,16 +69,17 @@ impl KvStore for FjallStore {
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let mut fjall_batch = self.db.batch();
+        let mut keyspaces = vec![None; ColumnFamily::ALL.len()];
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    fjall_batch.insert(self.keyspace(cf)?, key, value);
+                    fjall_batch.insert(cached_keyspace(self, &mut keyspaces, cf)?, key, value);
                 }
                 BatchOp::Delete { cf, key } => {
-                    fjall_batch.remove(self.keyspace(cf)?, key);
+                    fjall_batch.remove(cached_keyspace(self, &mut keyspaces, cf)?, key);
                 }
                 BatchOp::DeleteRange { cf, start, end } => {
-                    let keyspace = self.keyspace(cf)?;
+                    let keyspace = cached_keyspace(self, &mut keyspaces, cf)?;
                     let keys = keyspace
                         .range(start..end)
                         .map(|guard| {
@@ -110,6 +111,20 @@ impl KvStore for FjallStore {
             snapshot: self.db.snapshot(),
         }))
     }
+}
+
+fn cached_keyspace<'store>(
+    store: &'store FjallStore,
+    keyspaces: &mut [Option<&'store Keyspace>],
+    cf: ColumnFamily,
+) -> Result<&'store Keyspace, StorageError> {
+    let slot = keyspaces
+        .get_mut(cf.index())
+        .ok_or(StorageError::UnknownColumnFamily(cf))?;
+    if slot.is_none() {
+        *slot = Some(store.keyspace(cf)?);
+    }
+    slot.ok_or(StorageError::UnknownColumnFamily(cf))
 }
 
 /// Fjall write-batch adapter.

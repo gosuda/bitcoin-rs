@@ -15,6 +15,7 @@ fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError>
     insert_rows(&store)?;
     verify_rows(&store)?;
     verify_prefix_iteration(&store)?;
+    verify_mixed_column_family_batch_ordering(&store)?;
     overwrite_one_row_with_direct_put(&store)?;
     verify_direct_put_overwrite(&store)?;
     delete_first_rows(&store)?;
@@ -24,6 +25,24 @@ fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError>
     let hash = aggregate_hash(&store)?;
     drop(store);
     Ok(hash)
+}
+
+fn verify_mixed_column_family_batch_ordering(store: &impl KvStore) -> Result<(), StorageError> {
+    let key = b"batch-order";
+    let mut batch = store.new_batch();
+    batch.put(ColumnFamily::TxConfirmed, key, b"first-confirmed");
+    batch.put(ColumnFamily::BlockHeaders, key, b"header");
+    batch.delete(ColumnFamily::TxConfirmed, key);
+    batch.put(ColumnFamily::TxConfirmed, key, b"second-confirmed");
+    batch.delete(ColumnFamily::BlockHeaders, key);
+    store.write(batch)?;
+
+    assert_eq!(
+        store.get(ColumnFamily::TxConfirmed, key)?,
+        Some(b"second-confirmed".to_vec())
+    );
+    assert_eq!(store.get(ColumnFamily::BlockHeaders, key)?, None);
+    Ok(())
 }
 
 fn insert_rows(store: &impl KvStore) -> Result<(), StorageError> {

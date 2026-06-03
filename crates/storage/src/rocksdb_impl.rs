@@ -97,16 +97,21 @@ impl KvStore for RocksDbStore {
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let mut rocks_batch = RocksWriteBatch::default();
+        let mut handles = vec![None; ColumnFamily::ALL.len()];
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    rocks_batch.put_cf(self.cf_handle(cf)?, key, value);
+                    rocks_batch.put_cf(cached_cf_handle(self, &mut handles, cf)?, key, value);
                 }
                 BatchOp::Delete { cf, key } => {
-                    rocks_batch.delete_cf(self.cf_handle(cf)?, key);
+                    rocks_batch.delete_cf(cached_cf_handle(self, &mut handles, cf)?, key);
                 }
                 BatchOp::DeleteRange { cf, start, end } => {
-                    rocks_batch.delete_range_cf(self.cf_handle(cf)?, start, end);
+                    rocks_batch.delete_range_cf(
+                        cached_cf_handle(self, &mut handles, cf)?,
+                        start,
+                        end,
+                    );
                 }
             }
         }
@@ -123,6 +128,20 @@ impl KvStore for RocksDbStore {
             snapshot: self.db.snapshot(),
         }))
     }
+}
+
+fn cached_cf_handle<'store>(
+    store: &'store RocksDbStore,
+    handles: &mut [Option<&'store rust_rocksdb::ColumnFamily>],
+    cf: ColumnFamily,
+) -> Result<&'store rust_rocksdb::ColumnFamily, StorageError> {
+    let slot = handles
+        .get_mut(cf.index())
+        .ok_or(StorageError::UnknownColumnFamily(cf))?;
+    if slot.is_none() {
+        *slot = Some(store.cf_handle(cf)?);
+    }
+    slot.ok_or(StorageError::UnknownColumnFamily(cf))
 }
 
 /// `RocksDB` write-batch adapter.

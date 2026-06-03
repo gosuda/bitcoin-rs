@@ -82,18 +82,24 @@ impl KvStore for MdbxStore {
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
+        let mut databases = vec![None; ColumnFamily::ALL.len()];
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    txn.put(self.database(cf)?, key, value, WriteFlags::empty())
-                        .map_err(StorageError::backend)?;
+                    txn.put(
+                        cached_database(self, &mut databases, cf)?,
+                        key,
+                        value,
+                        WriteFlags::empty(),
+                    )
+                    .map_err(StorageError::backend)?;
                 }
                 BatchOp::Delete { cf, key } => {
-                    txn.del(self.database(cf)?, key, None)
+                    txn.del(cached_database(self, &mut databases, cf)?, key, None)
                         .map_err(StorageError::backend)?;
                 }
                 BatchOp::DeleteRange { cf, start, end } => {
-                    let database = self.database(cf)?;
+                    let database = cached_database(self, &mut databases, cf)?;
                     let keys = collect_range_keys(&txn, database, &start, &end)?;
                     for key in keys {
                         txn.del(database, key, None)
@@ -118,6 +124,20 @@ impl KvStore for MdbxStore {
             databases: self.databases.clone(),
         }))
     }
+}
+
+fn cached_database(
+    store: &MdbxStore,
+    databases: &mut [Option<Database>],
+    cf: ColumnFamily,
+) -> Result<Database, StorageError> {
+    let slot = databases
+        .get_mut(cf.index())
+        .ok_or(StorageError::UnknownColumnFamily(cf))?;
+    if slot.is_none() {
+        *slot = Some(store.database(cf)?);
+    }
+    slot.ok_or(StorageError::UnknownColumnFamily(cf))
 }
 
 /// MDBX write-batch adapter.
