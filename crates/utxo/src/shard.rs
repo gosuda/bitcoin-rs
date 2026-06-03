@@ -10,7 +10,10 @@ use smallvec::SmallVec;
 use crate::{
     UtxoError, UtxoKey,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
-    set::{BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoRemoved, UtxoScan},
+    set::{
+        BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoInserted, UtxoRemoved,
+        UtxoScan,
+    },
 };
 
 /// Per-shard hash table and script slab borrowed from the pinned arena owner.
@@ -428,6 +431,7 @@ fn apply_add_run_with_listener<'arena>(
     listener: &(dyn UtxoChangeListener + Send + Sync),
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::new();
     for (_key, _txid, payload) in adds {
         let overwritten = match record.find_output(payload.vout) {
             Some(output) => Some(output_details(table, output).ok_or(UtxoError::CorruptArena)?),
@@ -435,17 +439,29 @@ fn apply_add_run_with_listener<'arena>(
         };
         append_build_output(table, &mut record, payload)?;
         if let Some((txout, height, coinbase)) = overwritten {
+            flush_inserted_coins(listener, &mut inserted_coins);
             listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
         }
-        listener.on_insert(
+        inserted_coins.push(UtxoInserted::new(
             payload.outpoint,
             payload.txout,
             payload.height,
             payload.coinbase,
-        );
+        ));
     }
     insert_record(arena, table, record);
+    flush_inserted_coins(listener, &mut inserted_coins);
     Ok(())
+}
+
+fn flush_inserted_coins(
+    listener: &(dyn UtxoChangeListener + Send + Sync),
+    inserted_coins: &mut SmallVec<[UtxoInserted<'_>; 8]>,
+) {
+    if !inserted_coins.is_empty() {
+        listener.on_insert_coins(inserted_coins);
+        inserted_coins.clear();
+    }
 }
 
 fn append_build_output<'arena>(

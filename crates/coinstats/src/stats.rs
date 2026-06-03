@@ -3,7 +3,7 @@ use core::convert::Infallible;
 
 use bitcoin::consensus::Encodable;
 use bitcoin_rs_primitives::{OutPoint, TxOut};
-use bitcoin_rs_utxo::{UtxoChangeListener, UtxoRemoved};
+use bitcoin_rs_utxo::{UtxoChangeListener, UtxoInserted, UtxoRemoved};
 use parking_lot::RwLock;
 use zerocopy::IntoBytes;
 
@@ -153,6 +153,18 @@ impl CoinStatsListener {
 impl UtxoChangeListener for CoinStatsListener {
     fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         self.stats.write().insert_utxo(op, txout, height, coinbase);
+    }
+
+    fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
+        let mut stats = self.stats.write();
+        for insertion in insertions {
+            stats.insert_utxo(
+                insertion.op,
+                insertion.txout,
+                insertion.height,
+                insertion.coinbase,
+            );
+        }
     }
 
     fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {

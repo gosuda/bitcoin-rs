@@ -1,8 +1,44 @@
 //! Commit/get round-trip coverage for a synthetic UTXO set.
+use std::sync::Arc;
+
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, varint};
-use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet, hash_serialized_3};
+use bitcoin_rs_utxo::{
+    BlockChanges, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoSet, hash_serialized_3,
+};
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ListenerEvent {
+    InsertBatch(Vec<u32>),
+    Insert(u32),
+    Remove(u32),
+}
+
+#[derive(Clone, Debug)]
+struct RecordingListener {
+    events: Arc<Mutex<Vec<ListenerEvent>>>,
+}
+
+impl UtxoChangeListener for RecordingListener {
+    fn on_insert(&self, op: &OutPoint, _txout: &TxOut, _height: u32, _coinbase: bool) {
+        self.events.lock().push(ListenerEvent::Insert(op.vout));
+    }
+
+    fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
+        self.events.lock().push(ListenerEvent::InsertBatch(
+            insertions
+                .iter()
+                .map(|insertion| insertion.op.vout)
+                .collect(),
+        ));
+    }
+
+    fn on_remove(&self, op: &OutPoint, _txout: &TxOut, _height: u32) {
+        self.events.lock().push(ListenerEvent::Remove(op.vout));
+    }
+}
 
 fn txid(seed: u64) -> Hash256 {
     let mut bytes = [0_u8; 32];
@@ -167,6 +203,67 @@ fn has_live_outputs_for_txid_tracks_any_remaining_vout() -> Result<(), Box<dyn s
     set.commit_block(&final_spend, &txid(81))?;
 
     assert!(!set.has_live_outputs_for_txid(&live_txid));
+    Ok(())
+}
+
+#[test]
+fn listener_batches_inserts_without_crossing_overwrite_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(RecordingListener {
+        events: Arc::clone(&events),
+    }));
+    let live_txid = txid(600);
+
+    let mut initial = BlockChanges::default();
+    initial.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 0),
+        txout(600),
+        false,
+        300,
+    ));
+    initial.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 1),
+        txout(601),
+        true,
+        300,
+    ));
+    set.commit_block(&initial, &txid(602))?;
+    events.lock().clear();
+
+    let mut overwrite = BlockChanges::default();
+    overwrite.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 2),
+        txout(603),
+        false,
+        301,
+    ));
+    overwrite.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 1),
+        txout(604),
+        false,
+        301,
+    ));
+    overwrite.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 3),
+        txout(605),
+        true,
+        301,
+    ));
+    set.commit_block(&overwrite, &txid(606))?;
+
+    assert_eq!(
+        events.lock().clone(),
+        vec![
+            ListenerEvent::InsertBatch(vec![2]),
+            ListenerEvent::Remove(1),
+            ListenerEvent::InsertBatch(vec![1, 3]),
+        ]
+    );
+    assert_eq!(set.get(&OutPoint::new(live_txid, 1)), Some(txout(604)));
+    assert_eq!(set.get(&OutPoint::new(live_txid, 2)), Some(txout(603)));
+    assert_eq!(set.get(&OutPoint::new(live_txid, 3)), Some(txout(605)));
     Ok(())
 }
 

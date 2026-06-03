@@ -23,8 +23,8 @@ pub mod snapshot;
 pub use key::{UtxoBuildHasher, UtxoKey};
 pub use record::{OneUtxoOut, UtxoRecord};
 pub use set::{
-    BlockChanges, ScannedUtxo, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoError, UtxoRemoved,
-    UtxoScan, UtxoSet, UtxoSetView,
+    BlockChanges, ScannedUtxo, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoError, UtxoInserted,
+    UtxoRemoved, UtxoScan, UtxoSet, UtxoSetView,
 };
 pub use shard::{LiveOutput, LiveOutputMeta};
 pub use snapshot::{

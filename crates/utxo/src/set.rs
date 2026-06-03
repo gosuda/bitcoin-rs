@@ -98,6 +98,18 @@ pub trait UtxoChangeListener {
     /// Called after an output has been inserted into its shard.
     fn on_insert(&self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool);
 
+    /// Called after a same-transaction run of outputs has been inserted.
+    fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
+        for insertion in insertions {
+            self.on_insert(
+                insertion.op,
+                insertion.txout,
+                insertion.height,
+                insertion.coinbase,
+            );
+        }
+    }
+
     /// Called after an output has been removed from its shard.
     fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32);
 
@@ -122,6 +134,32 @@ pub trait UtxoChangeListener {
     /// Returns the current `MuHash3072` snapshot trailer, when this listener tracks one.
     fn muhash3072(&self) -> Option<[u8; 384]> {
         None
+    }
+}
+
+/// One inserted UTXO event delivered to a change listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UtxoInserted<'a> {
+    /// Outpoint that was inserted.
+    pub op: &'a OutPoint,
+    /// Inserted transaction output.
+    pub txout: &'a TxOut,
+    /// Height at which the inserted output was created.
+    pub height: u32,
+    /// Whether the inserted output came from a coinbase transaction.
+    pub coinbase: bool,
+}
+
+impl<'a> UtxoInserted<'a> {
+    /// Constructs one inserted UTXO event.
+    #[must_use]
+    pub const fn new(op: &'a OutPoint, txout: &'a TxOut, height: u32, coinbase: bool) -> Self {
+        Self {
+            op,
+            txout,
+            height,
+            coinbase,
+        }
     }
 }
 
