@@ -183,7 +183,7 @@ All gates must pass before bitcoin-rs is shippable. Not phased — these are fla
 **G13 — Lints clean.** `cargo +1.85.0 clippy --workspace --all-targets --all-features -- -D warnings` returns 0. `cargo +1.85.0 fmt --check` clean. `cargo deny check` clean.
 
 **G14 — Performance budgets.**
-- Block validation throughput ≥ 80 % of `gocoin`'s blocks-per-second on identical mainnet IBD (measured via `criterion`).
+- Initial block sync throughput is faster than Bitcoin Core's blocks-per-second on identical mainnet IBD (measured via `criterion`).
 - UTXO commit p95 ≤ 50 ms per 4 MiB block.
 - Electrum `scripthash.get_history` p95 ≤ 30 ms over a 10 000-call random sample at tip.
 - RSS ≤ 16 GiB at mainnet tip with fjall default + all indexes enabled.

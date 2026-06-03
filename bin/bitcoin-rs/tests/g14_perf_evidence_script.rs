@@ -37,6 +37,83 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
+fn producer_writes_collectable_same_window_ibd_manifest() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_command = fake_ibd_command(temp.path(), "bitcoin-rs-ibd", "0.01")?;
+    let bitcoin_core_command = fake_ibd_command(temp.path(), "bitcoin-core-ibd", "0.05")?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = write_text(temp.path(), "criterion.json", "{\"ok\":true}\n")?;
+    let manifest = temp.path().join("g14-produced.json");
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            bitcoin_rs_command
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--bitcoin-core-command",
+            bitcoin_core_command
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core command")?,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-get-history-p95-ms",
+            "20.0",
+            "--rss-bytes",
+            "1024",
+        ])
+        .output()?;
+    assert_success(&producer_output);
+
+    let manifest_json = fs::read_to_string(&manifest)?;
+    assert!(manifest_json.contains(r#""ibd_start_height": 0"#));
+    assert!(manifest_json.contains(r#""ibd_stop_height": 10"#));
+    assert!(manifest_json.contains(r#""bitcoin_rs_command":"#));
+    assert!(manifest_json.contains(r#""bitcoin_core_command":"#));
+    assert!(!manifest_json.contains("ibd_start_hash"));
+    assert!(!manifest_json.contains("bitcoin_core_chain_info"));
+
+    let collector_output = Command::new("bash")
+        .arg(script_path())
+        .arg(&manifest)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert_success(&collector_output);
+    let stdout = String::from_utf8(collector_output.stdout)?;
+    assert!(stdout.contains("export G14_MEASUREMENT_TARGET=mainnet-ibd\n"));
+    assert!(stdout.contains("export G14_REFERENCE_IMPL=bitcoin-core\n"));
+    Ok(())
+}
+
+#[test]
 fn script_rejects_offline_core_metadata_without_cli() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let evidence = offline_evidence_json(temp.path(), 0, 10)?;
@@ -143,6 +220,42 @@ fn script_rejects_bitcoin_core_node_below_stop_header() -> Result<(), Box<dyn st
 
 fn script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/collect-g14-perf-evidence.sh")
+}
+
+fn producer_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-ibd-manifest.sh")
+}
+
+fn write_text(
+    dir: &Path,
+    name: &str,
+    contents: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    fs::write(&path, contents)?;
+    Ok(path)
+}
+
+fn fake_ibd_command(
+    dir: &Path,
+    name: &str,
+    sleep_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r"#!/usr/bin/env python3
+import time
+
+time.sleep({sleep_seconds})
+",
+        ),
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
 }
 
 fn evidence_json(

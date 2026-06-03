@@ -246,5 +246,5 @@ serving remains deferred.
 - **No persisted block-body serving path for P2P.** P2P `getdata` can serve bodies still present in the in-memory `BlockRecord` cache, but it does not read persisted pruned-body rows after restart or cache eviction; unavailable inventory is reported with `notfound`.
 - **No index / filter / coinstats updates triggered by tip advance.** Electrum index, BIP158 filter generation, and coinstats remain stale until a follow-up wires the listener side.
 - **G14 empirical validation still deferred.** The `faster than Bitcoin
-  Core` claim requires multi-day live mainnet IBD against `bitcoind`
-  and `gocoin`. Operator responsibility.
+  Core` claim requires multi-day same-window live mainnet IBD against
+  `bitcoin-rs` and `bitcoind`. Operator responsibility.
