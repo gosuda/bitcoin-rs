@@ -69,42 +69,16 @@ impl KvStore for RedbStore {
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-        for op in batch.ops {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    let mut table = write_txn
-                        .open_table(table_for(cf))
-                        .map_err(StorageError::backend)?;
-                    table
-                        .insert(key.as_slice(), value.as_slice())
-                        .map_err(StorageError::backend)?;
-                }
-                BatchOp::Delete { cf, key } => {
-                    let mut table = write_txn
-                        .open_table(table_for(cf))
-                        .map_err(StorageError::backend)?;
-                    table
-                        .remove(key.as_slice())
-                        .map_err(StorageError::backend)?;
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let mut table = write_txn
-                        .open_table(table_for(cf))
-                        .map_err(StorageError::backend)?;
-                    let keys = table
-                        .range(start.as_slice()..end.as_slice())
-                        .map_err(StorageError::backend)?
-                        .map(|item| {
-                            item.map(|(key, _)| key.value().to_vec())
-                                .map_err(StorageError::backend)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for key in keys {
-                        table
-                            .remove(key.as_slice())
-                            .map_err(StorageError::backend)?;
-                    }
-                }
+        let mut ops = batch.ops.into_iter().peekable();
+        while let Some(op) = ops.next() {
+            let cf = op.cf();
+            let mut table = write_txn
+                .open_table(table_for(cf))
+                .map_err(StorageError::backend)?;
+            apply_redb_batch_op(&mut table, op)?;
+            while ops.peek().is_some_and(|next| next.cf() == cf) {
+                let Some(op) = ops.next() else { break };
+                apply_redb_batch_op(&mut table, op)?;
             }
         }
         write_txn.commit().map_err(StorageError::backend)
@@ -168,6 +142,46 @@ enum BatchOp {
         start: Vec<u8>,
         end: Vec<u8>,
     },
+}
+
+impl BatchOp {
+    const fn cf(&self) -> ColumnFamily {
+        match self {
+            Self::Put { cf, .. } | Self::Delete { cf, .. } | Self::DeleteRange { cf, .. } => *cf,
+        }
+    }
+}
+
+fn apply_redb_batch_op(
+    table: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    op: BatchOp,
+) -> Result<(), StorageError> {
+    match op {
+        BatchOp::Put { key, value, .. } => table
+            .insert(key.as_slice(), value.as_slice())
+            .map(|_| ())
+            .map_err(StorageError::backend),
+        BatchOp::Delete { key, .. } => table
+            .remove(key.as_slice())
+            .map(|_| ())
+            .map_err(StorageError::backend),
+        BatchOp::DeleteRange { start, end, .. } => {
+            let keys = table
+                .range(start.as_slice()..end.as_slice())
+                .map_err(StorageError::backend)?
+                .map(|item| {
+                    item.map(|(key, _)| key.value().to_vec())
+                        .map_err(StorageError::backend)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for key in keys {
+                table
+                    .remove(key.as_slice())
+                    .map_err(StorageError::backend)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 struct RedbSnapshot {
