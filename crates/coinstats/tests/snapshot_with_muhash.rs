@@ -149,8 +149,8 @@ fn listener_undo_restores_muhash_and_accounting() -> Result<(), Box<dyn std::err
     let (first_only, first_only_listener) = listener_set();
     first_only.commit_block(&first, &txid(140))?;
 
-    assert_eq!(full.get(&coinbase_outpoint), Some(coinbase_txout.clone()));
-    assert_eq!(full.get(&kept_outpoint), Some(kept_txout.clone()));
+    assert_eq!(full.get(&coinbase_outpoint), Some(coinbase_txout));
+    assert_eq!(full.get(&kept_outpoint), Some(kept_txout));
     assert_eq!(full.get(&replacement_outpoint), None);
     assert_eq!(aggregate_hash(&full)?, aggregate_hash(&first_only)?);
     assert_eq!(full.len(), first_only.len());
