@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bitcoin::consensus::Encodable as _;
 use bitcoin::io::sink;
@@ -12,6 +12,7 @@ pub(super) struct BlockStager {
     budget: SyncBudget,
     received: HashMap<Hash256, ReceivedBlock>,
     received_bytes: usize,
+    next_received_deadline: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -51,6 +52,7 @@ impl BlockStager {
             budget,
             received: HashMap::new(),
             received_bytes: 0,
+            next_received_deadline: None,
         }
     }
 
@@ -88,6 +90,7 @@ impl BlockStager {
             self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
         }
         self.received_bytes = self.received_bytes.saturating_add(bytes);
+        self.track_received_deadline(now);
 
         let mut dropped = Vec::new();
         while self.received.len() > self.budget.max_received_blocks
@@ -135,6 +138,7 @@ impl BlockStager {
                 self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
             }
             self.received_bytes = self.received_bytes.saturating_add(drained.bytes);
+            self.track_received_deadline(drained.received_at);
         }
     }
 
@@ -150,10 +154,28 @@ impl BlockStager {
     }
 
     pub(super) fn prune_expired(&mut self, now: Instant) -> Vec<DroppedBlock> {
+        if self.received.is_empty() {
+            self.next_received_deadline = None;
+            return Vec::new();
+        }
+        if self
+            .next_received_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return Vec::new();
+        }
+
         let mut dropped = Vec::new();
         let mut received_bytes = self.received_bytes;
+        let mut next_received_deadline = None;
+        let timeout = self.budget.received_timeout;
         self.received.retain(|hash, entry| {
-            if now.duration_since(entry.received_at) < self.budget.received_timeout {
+            let deadline = received_deadline(entry.received_at, timeout);
+            if now < deadline {
+                next_received_deadline = Some(
+                    next_received_deadline
+                        .map_or(deadline, |current: Instant| current.min(deadline)),
+                );
                 return true;
             }
             received_bytes = received_bytes.saturating_sub(entry.bytes);
@@ -161,6 +183,7 @@ impl BlockStager {
             false
         });
         self.received_bytes = received_bytes;
+        self.next_received_deadline = next_received_deadline;
         dropped
     }
 
@@ -182,6 +205,18 @@ impl BlockStager {
         self.received_bytes = self.received_bytes.saturating_sub(entry.bytes);
         Some(DroppedBlock { hash: *hash })
     }
+
+    fn track_received_deadline(&mut self, received_at: Instant) {
+        let deadline = received_deadline(received_at, self.budget.received_timeout);
+        self.next_received_deadline = Some(
+            self.next_received_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+    }
+}
+
+fn received_deadline(received_at: Instant, timeout: Duration) -> Instant {
+    received_at + timeout
 }
 
 fn block_size(block: &bitcoin::Block) -> usize {
@@ -192,6 +227,8 @@ fn block_size(block: &bitcoin::Block) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use bitcoin::consensus::encode::serialize;
     use bitcoin_rs_primitives::Hash256;
 
@@ -253,5 +290,43 @@ mod tests {
         assert!(!stager.contains(&first));
         assert!(stager.contains(&second));
         assert!(stager.contains(&third));
+    }
+
+    #[test]
+    fn prune_expired_recomputes_deadline_after_dropping_oldest() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut budget = default_sync_budget();
+        budget.received_timeout = Duration::from_secs(10);
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let old_received_at = now
+            .checked_sub(Duration::from_secs(11))
+            .unwrap_or_else(|| panic!("test instant underflow"));
+        let fresh_received_at = now
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(|| panic!("test instant underflow"));
+        let old = Hash256::from_le_bytes(&[0x41; 32]);
+        let fresh = Hash256::from_le_bytes(&[0x42; 32]);
+
+        stager.insert(old, None, block.clone(), old_received_at);
+        stager.insert(fresh, None, block, fresh_received_at);
+
+        let first_drop = stager.prune_expired(now);
+
+        assert_eq!(first_drop.len(), 1);
+        assert_eq!(first_drop[0].hash, old);
+        assert_eq!(stager.received_len(), 1);
+        assert!(stager.contains(&fresh));
+
+        let second_drop = stager.prune_expired(now + Duration::from_secs(1));
+
+        assert!(second_drop.is_empty());
+        assert!(stager.contains(&fresh));
+
+        let final_drop = stager.prune_expired(now + Duration::from_secs(10));
+
+        assert_eq!(final_drop.len(), 1);
+        assert_eq!(final_drop[0].hash, fresh);
+        assert_eq!(stager.received_len(), 0);
     }
 }
