@@ -221,7 +221,7 @@ where
         b.iter(|| {
             for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
                 let key = block_body_like_key(counter);
-                black_box(must(store.get(ColumnFamily::BlockTree, &key)));
+                black_box(must(store.get(ColumnFamily::BlockBodies, &key)));
             }
         });
     });
