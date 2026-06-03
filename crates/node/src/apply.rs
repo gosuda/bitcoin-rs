@@ -298,11 +298,18 @@ pub fn apply_block(
     let block_bytes = bitcoin::consensus::encode::serialize(block);
 
     let changes = build_utxo_changes(block, height, &scratch)?;
-    if let Some(store) = &handles.block_body_store {
+    let block_body_persist_started = quanta::Instant::now();
+    let block_body_persist_result = if let Some(store) = &handles.block_body_store {
         store
             .persist_block_body(height, block_hash, &block_bytes)
-            .map_err(ApplyError::BlockBodyPersistence)?;
-    }
+            .map_err(ApplyError::BlockBodyPersistence)
+    } else {
+        Ok(())
+    };
+    let block_body_persist_dur = block_body_persist_started.elapsed();
+    metrics::histogram!("node.apply_block.block_body_persist_seconds")
+        .record(block_body_persist_dur.as_secs_f64());
+    block_body_persist_result?;
 
     let tx_index_ingest_started = quanta::Instant::now();
     if let Some(tx_index) = &handles.tx_index {
@@ -347,12 +354,18 @@ pub fn apply_block(
         .record(block_tree_insert_dur.as_secs_f64());
     let tip = block_tree_insert_result?;
 
-    let block_record = if handles.cache_block_bodies_in_memory {
-        bitcoin_rs_rpc::BlockRecord::from_block_bytes(height, block, &block_bytes)
-    } else {
-        bitcoin_rs_rpc::BlockRecord::from_block_metadata_bytes(height, block, &block_bytes)
-    };
-    handles.blocks.write().push(block_record);
+    let block_record_started = quanta::Instant::now();
+    {
+        let block_record = if handles.cache_block_bodies_in_memory {
+            bitcoin_rs_rpc::BlockRecord::from_block_bytes(height, block, &block_bytes)
+        } else {
+            bitcoin_rs_rpc::BlockRecord::from_block_metadata_bytes(height, block, &block_bytes)
+        };
+        handles.blocks.write().push(block_record);
+    }
+    let block_record_dur = block_record_started.elapsed();
+    metrics::histogram!("node.apply_block.block_record_seconds")
+        .record(block_record_dur.as_secs_f64());
     let mempool_evict_started = quanta::Instant::now();
     {
         let mut mempool = handles.mempool.write();
