@@ -1048,13 +1048,7 @@ fn build_utxo_changes(
         return Ok(BlockChanges::default());
     }
 
-    let add_capacity = block.txdata.iter().map(|tx| tx.output.len()).sum();
-    let remove_capacity = block
-        .txdata
-        .iter()
-        .filter(|tx| !tx.is_coinbase())
-        .map(|tx| tx.input.len())
-        .sum();
+    let (add_capacity, remove_capacity) = scratch.utxo_change_capacity();
     let mut changes = BlockChanges::with_capacity(add_capacity, remove_capacity);
     for (tx, txid) in block.txdata.iter().zip(scratch.txids()) {
         for (vout_idx, txout) in tx.output.iter().enumerate() {
