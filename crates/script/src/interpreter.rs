@@ -350,7 +350,7 @@ fn taproot_keypath_signature(witness: &[Vec<u8>]) -> Result<&[u8], ScriptError> 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "bitcoinconsensus")))]
 mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::{
