@@ -37,7 +37,7 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn script_normalizes_offline_bitcoin_core_metadata() -> Result<(), Box<dyn std::error::Error>> {
+fn script_rejects_offline_core_metadata_without_cli() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let evidence = offline_evidence_json(temp.path(), 0, 10)?;
 
@@ -47,32 +47,21 @@ fn script_normalizes_offline_bitcoin_core_metadata() -> Result<(), Box<dyn std::
         .env("BITCOIN_CLI", temp.path().join("missing-bitcoin-cli"))
         .output()?;
 
-    assert_success(&output);
-    let stdout = String::from_utf8(output.stdout)?;
-    assert!(
-        stdout
-            .contains("export G14_IBD_START_HASH=2222222222222222222222222222222222222222222222222222222222222222\n")
-    );
-    assert!(
-        stdout.contains(
-            "export G14_IBD_STOP_HASH=3333333333333333333333333333333333333333333333333333333333333333\n"
-        )
-    );
-    assert!(stdout.contains("export G14_BITCOIN_RS_IBD_BLOCKS=11\n"));
-    assert!(stdout.contains("export G14_BITCOIN_CORE_IBD_BLOCKS=11\n"));
-    assert_64_hex_export(&stdout, "G14_BENCHMARK_ARTIFACT_SHA256");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("offline Bitcoin Core metadata"));
     Ok(())
 }
 
 #[test]
 fn script_rejects_slower_bitcoin_rs_ibd_evidence() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
-    let evidence = offline_evidence_json_with_elapsed(temp.path(), 0, 10, "3.0", "2.0")?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_elapsed(temp.path(), 0, 10, "3.0", "2.0")?;
 
     let output = Command::new("bash")
         .arg(script_path())
         .arg(evidence)
-        .env("BITCOIN_CLI", temp.path().join("missing-bitcoin-cli"))
+        .env("BITCOIN_CLI", bitcoin_cli)
         .output()?;
 
     assert!(!output.status.success());
@@ -161,6 +150,16 @@ fn evidence_json(
     start_height: u32,
     stop_height: u32,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    evidence_json_with_elapsed(dir, start_height, stop_height, "1.25", "2.50")
+}
+
+fn evidence_json_with_elapsed(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+    bitcoin_rs_elapsed_seconds: &str,
+    bitcoin_core_elapsed_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("g14.json");
     fs::write(
         &path,
@@ -168,8 +167,8 @@ fn evidence_json(
             r#"{{
   "ibd_start_height": {start_height},
   "ibd_stop_height": {stop_height},
-  "bitcoin_rs_elapsed_seconds": 1.25,
-  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
+  "bitcoin_core_elapsed_seconds": {bitcoin_core_elapsed_seconds},
   "bitcoin_core_version": "v27.0.0",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
   "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",

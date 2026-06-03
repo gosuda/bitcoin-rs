@@ -18,9 +18,6 @@ usage() {
     '  benchmark_artifact_sha256,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
     '' \
-    'Optional offline Bitcoin Core metadata keys:' \
-    '  ibd_start_hash, ibd_stop_hash, bitcoin_core_chain_info' \
-    '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.' \
     '' \
     'Example:' \
@@ -80,7 +77,7 @@ print(data["ibd_stop_height"])
 PY
 )"
 
-offline_core_metadata="$(python3 - "$evidence_path" <<'PY'
+python3 - "$evidence_path" <<'PY'
 import json
 import sys
 
@@ -89,37 +86,19 @@ OFFLINE_KEYS = ("ibd_start_hash", "ibd_stop_hash", "bitcoin_core_chain_info")
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     data = json.load(handle)
 present = [key for key in OFFLINE_KEYS if key in data]
-if not present:
-    raise SystemExit(0)
-missing = [key for key in OFFLINE_KEYS if key not in data]
-if missing:
+if present:
     raise SystemExit(
-        "error: offline Bitcoin Core evidence requires "
-        + ", ".join(OFFLINE_KEYS)
-        + "; missing "
-        + ", ".join(missing)
+        "error: offline Bitcoin Core metadata is not accepted; "
+        "remove "
+        + ", ".join(present)
+        + " and provide BITCOIN_CLI for live getblockhash/getblockchaininfo queries"
     )
-chain_info = data["bitcoin_core_chain_info"]
-if not isinstance(chain_info, dict):
-    raise SystemExit("error: bitcoin_core_chain_info must be an object")
-print(str(data["ibd_start_hash"]))
-print(str(data["ibd_stop_hash"]))
-print(json.dumps(chain_info, separators=(",", ":")))
 PY
-)"
 
-if [[ -n "$offline_core_metadata" ]]; then
-  mapfile -t offline_core_fields <<<"$offline_core_metadata"
-  start_hash="${offline_core_fields[0]}"
-  stop_hash="${offline_core_fields[1]}"
-  chain_info="${offline_core_fields[2]}"
-  chain_info_source="offline Bitcoin Core evidence"
-else
-  start_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$start_height")"
-  stop_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$stop_height")"
-  chain_info="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockchaininfo)"
-  chain_info_source="bitcoin-cli"
-fi
+start_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$start_height")"
+stop_hash="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockhash "$stop_height")"
+chain_info="$("$bitcoin_cli" "${bitcoin_cli_args[@]}" getblockchaininfo)"
+chain_info_source="bitcoin-cli"
 
 G14_START_HASH="$start_hash" G14_STOP_HASH="$stop_hash" G14_CHAIN_INFO="$chain_info" G14_CHAIN_INFO_SOURCE="$chain_info_source" python3 - "$evidence_path" <<'PY'
 import hashlib
