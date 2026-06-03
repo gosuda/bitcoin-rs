@@ -447,6 +447,12 @@ impl UtxoSet {
             remove_counts[shard_idx] = remove_counts[shard_idx].saturating_add(1);
         }
         let (active_shards, active_shard_count) = active_shards(&add_counts, &remove_counts);
+        if active_shard_count == 0 {
+            return Ok(());
+        }
+        if active_shard_count == 1 {
+            return self.commit_single_shard(adds, removes, active_shards[0]);
+        }
 
         let mut adds_by_shard = add_buckets(&add_counts);
         let mut removes_by_shard = remove_buckets(&remove_counts);
@@ -497,6 +503,33 @@ impl UtxoSet {
         } else {
             Ok(())
         }
+    }
+
+    fn commit_single_shard(
+        &self,
+        adds: &[UtxoAdd],
+        removes: &[OutPoint],
+        shard_idx: usize,
+    ) -> Result<(), UtxoError> {
+        let mut shard_adds = Vec::with_capacity(adds.len());
+        let mut shard_removes = Vec::with_capacity(removes.len());
+
+        for add in adds {
+            let key = UtxoKey::from_txid(&add.outpoint.txid);
+            shard_adds.push((key, add.outpoint.txid, add.payload()));
+        }
+        for remove in removes {
+            let key = UtxoKey::from_txid(&remove.txid);
+            shard_removes.push(SpendPayload {
+                op: remove,
+                key,
+                vout: remove.vout,
+                txid: remove.txid,
+            });
+        }
+
+        let _stable_commit = self.stable_view_lock.write();
+        self.shards[shard_idx].commit_batch(&shard_adds, &shard_removes, self.listener.as_deref())
     }
 }
 
