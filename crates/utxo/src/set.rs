@@ -1,4 +1,7 @@
-use std::io;
+use std::{
+    io,
+    mem::{self, MaybeUninit},
+};
 
 use bitcoin::ScriptBuf;
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
@@ -539,30 +542,15 @@ impl UtxoSet {
             return self.commit_single_shard(adds, removes, active_shards[0]);
         }
 
-        let mut adds_by_shard = add_buckets(&add_counts);
-        let mut removes_by_shard = remove_buckets(&remove_counts);
-
-        for add in adds {
-            let key = UtxoKey::from_txid(&add.outpoint.txid);
-            adds_by_shard[usize::from(key.shard())].push((key, add.outpoint.txid, add.payload()));
-        }
-        for remove in removes {
-            let key = UtxoKey::from_txid(&remove.txid);
-            removes_by_shard[usize::from(key.shard())].push(SpendPayload {
-                op: remove,
-                key,
-                vout: remove.vout,
-                txid: remove.txid,
-            });
-        }
+        let buckets = ShardCommitBuckets::new(adds, removes, &add_counts, &remove_counts);
 
         let _stable_commit = self.stable_view_lock.write();
 
         let listener = self.listener.as_deref();
         if let Some(listener) = listener {
             for &shard_idx in &active_shards[..active_shard_count] {
-                let shard_adds = &adds_by_shard[shard_idx];
-                let shard_removes = &removes_by_shard[shard_idx];
+                let shard_adds = buckets.adds(shard_idx);
+                let shard_removes = buckets.removes(shard_idx);
                 self.shards[shard_idx].commit_batch(shard_adds, shard_removes, Some(listener))?;
             }
             return Ok(());
@@ -571,16 +559,15 @@ impl UtxoSet {
         let errors = Mutex::new(Vec::new());
         let target_tasks = rayon::current_num_threads().saturating_mul(2).max(1);
         let shards_per_task = active_shard_count.div_ceil(target_tasks).max(1);
-        let adds_by_shard = &adds_by_shard;
-        let removes_by_shard = &removes_by_shard;
+        let buckets = &buckets;
         let shards = &self.shards;
         rayon::scope(|scope| {
             for shard_chunk in active_shards[..active_shard_count].chunks(shards_per_task) {
                 let errors = &errors;
                 scope.spawn(move |_| {
                     for &shard_idx in shard_chunk {
-                        let shard_adds = &adds_by_shard[shard_idx];
-                        let shard_removes = &removes_by_shard[shard_idx];
+                        let shard_adds = buckets.adds(shard_idx);
+                        let shard_removes = buckets.removes(shard_idx);
                         let shard = &shards[shard_idx];
                         if let Err(error) = shard.commit_batch(shard_adds, shard_removes, listener)
                         {
@@ -640,16 +627,103 @@ fn validate_add(add: &UtxoAdd) -> Result<(), UtxoError> {
     Ok(())
 }
 
-fn add_buckets<'a>(
-    counts: &[usize; UtxoKey::SHARD_COUNT],
-) -> [Vec<(UtxoKey, Hash256, BuildPayload<'a>)>; UtxoKey::SHARD_COUNT] {
-    core::array::from_fn(|idx| Vec::with_capacity(counts[idx]))
+struct ShardCommitBuckets<'a> {
+    adds: Vec<(UtxoKey, Hash256, BuildPayload<'a>)>,
+    add_ranges: [(usize, usize); UtxoKey::SHARD_COUNT],
+    removes: Vec<SpendPayload<'a>>,
+    remove_ranges: [(usize, usize); UtxoKey::SHARD_COUNT],
 }
 
-fn remove_buckets<'a>(
+impl<'a> ShardCommitBuckets<'a> {
+    fn new(
+        adds: &'a [UtxoAdd],
+        removes: &'a [OutPoint],
+        add_counts: &[usize; UtxoKey::SHARD_COUNT],
+        remove_counts: &[usize; UtxoKey::SHARD_COUNT],
+    ) -> Self {
+        let (add_ranges, mut add_cursors) = shard_ranges(add_counts);
+        let (remove_ranges, mut remove_cursors) = shard_ranges(remove_counts);
+        let mut add_slots = uninit_slots(adds.len());
+        let mut remove_slots = uninit_slots(removes.len());
+
+        for add in adds {
+            let key = UtxoKey::from_txid(&add.outpoint.txid);
+            let shard_idx = usize::from(key.shard());
+            let cursor = &mut add_cursors[shard_idx];
+            add_slots[*cursor].write((key, add.outpoint.txid, add.payload()));
+            *cursor = cursor.saturating_add(1);
+        }
+        for remove in removes {
+            let key = UtxoKey::from_txid(&remove.txid);
+            let shard_idx = usize::from(key.shard());
+            let cursor = &mut remove_cursors[shard_idx];
+            remove_slots[*cursor].write(SpendPayload {
+                op: remove,
+                key,
+                vout: remove.vout,
+                txid: remove.txid,
+            });
+            *cursor = cursor.saturating_add(1);
+        }
+        debug_assert_eq!(add_cursors, range_ends(&add_ranges));
+        debug_assert_eq!(remove_cursors, range_ends(&remove_ranges));
+
+        Self {
+            adds: initialized_slots(add_slots),
+            add_ranges,
+            removes: initialized_slots(remove_slots),
+            remove_ranges,
+        }
+    }
+
+    fn adds(&self, shard_idx: usize) -> &[(UtxoKey, Hash256, BuildPayload<'a>)] {
+        let (start, end) = self.add_ranges[shard_idx];
+        &self.adds[start..end]
+    }
+
+    fn removes(&self, shard_idx: usize) -> &[SpendPayload<'a>] {
+        let (start, end) = self.remove_ranges[shard_idx];
+        &self.removes[start..end]
+    }
+}
+
+fn shard_ranges(
     counts: &[usize; UtxoKey::SHARD_COUNT],
-) -> [Vec<SpendPayload<'a>>; UtxoKey::SHARD_COUNT] {
-    core::array::from_fn(|idx| Vec::with_capacity(counts[idx]))
+) -> (
+    [(usize, usize); UtxoKey::SHARD_COUNT],
+    [usize; UtxoKey::SHARD_COUNT],
+) {
+    let mut ranges = [(0_usize, 0_usize); UtxoKey::SHARD_COUNT];
+    let mut start = 0_usize;
+    for shard_idx in 0..UtxoKey::SHARD_COUNT {
+        let end = start.saturating_add(counts[shard_idx]);
+        ranges[shard_idx] = (start, end);
+        start = end;
+    }
+    let cursors = ranges.map(|(start, _end)| start);
+    (ranges, cursors)
+}
+
+fn range_ends(ranges: &[(usize, usize); UtxoKey::SHARD_COUNT]) -> [usize; UtxoKey::SHARD_COUNT] {
+    ranges.map(|(_start, end)| end)
+}
+
+fn uninit_slots<T>(len: usize) -> Vec<MaybeUninit<T>> {
+    let mut slots = Vec::with_capacity(len);
+    slots.resize_with(len, MaybeUninit::uninit);
+    slots
+}
+
+fn initialized_slots<T>(mut slots: Vec<MaybeUninit<T>>) -> Vec<T> {
+    let ptr = slots.as_mut_ptr().cast::<T>();
+    let len = slots.len();
+    let capacity = slots.capacity();
+    mem::forget(slots);
+    // SAFETY: `ShardCommitBuckets::new` writes exactly one initialized value
+    // into each slot before calling this helper. `MaybeUninit<T>` has the same
+    // layout as `T`, and ownership of the original allocation is transferred to
+    // the returned `Vec<T>` with the same length and capacity.
+    unsafe { Vec::from_raw_parts(ptr, len, capacity) }
 }
 
 fn active_shards(
