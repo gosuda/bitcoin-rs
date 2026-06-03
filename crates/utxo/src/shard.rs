@@ -12,8 +12,6 @@ use crate::{
     set::{BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoScan},
 };
 
-const OPS_AT_ONCE: usize = 32;
-
 /// Per-shard hash table and script slab borrowed from the pinned arena owner.
 pub struct ShardTable<'arena> {
     /// Raw hash table of arena-resident UTXO records.
@@ -293,15 +291,37 @@ fn commit_batch_with_listener<'arena>(
     removes: &[SpendPayload<'_>],
     listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
 ) -> Result<(), UtxoError> {
-    for chunk in removes.chunks(OPS_AT_ONCE) {
-        for remove in chunk {
-            apply_remove(arena, table, remove, listener);
-        }
+    let Some(listener) = listener else {
+        return commit_batch_coalesced(arena, table, adds, removes);
+    };
+
+    let mut remaining_removes = removes;
+    while let Some((first, rest)) = remaining_removes.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|remove| remove.key == first.key && remove.txid == first.txid)
+            .count()
+            .saturating_add(1);
+        apply_remove_run_with_listener(arena, table, &remaining_removes[..run_len], listener);
+        remaining_removes = &remaining_removes[run_len..];
     }
-    for chunk in adds.chunks(OPS_AT_ONCE) {
-        for (key, txid, payload) in chunk {
-            apply_add(arena, table, *key, *txid, payload, listener)?;
-        }
+
+    let mut remaining_adds = adds;
+    while let Some(((key, txid, _payload), rest)) = remaining_adds.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|(next_key, next_txid, _payload)| next_key == key && next_txid == txid)
+            .count()
+            .saturating_add(1);
+        apply_add_run_with_listener(
+            arena,
+            table,
+            *key,
+            *txid,
+            &remaining_adds[..run_len],
+            listener,
+        )?;
+        remaining_adds = &remaining_adds[run_len..];
     }
     Ok(())
 }
@@ -355,6 +375,32 @@ fn apply_remove_run<'arena>(
     }
 }
 
+fn apply_remove_run_with_listener<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    removes: &[SpendPayload<'_>],
+    listener: &(dyn UtxoChangeListener + Send + Sync),
+) {
+    let Some(first) = removes.first() else {
+        return;
+    };
+    let Some(mut record) = take_record(table, first.key, first.txid) else {
+        return;
+    };
+    for remove in removes {
+        let removed_output = record
+            .find_output(remove.vout)
+            .and_then(|output| output_details(table, output));
+        let removed = record.remove_output(remove.vout);
+        if let (true, Some((txout, height, coinbase))) = (removed, removed_output) {
+            listener.on_remove_coin(remove.op, &txout, height, coinbase);
+        }
+    }
+    if !record.is_empty() {
+        insert_record(arena, table, record);
+    }
+}
+
 fn apply_add_run<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
@@ -370,19 +416,21 @@ fn apply_add_run<'arena>(
     Ok(())
 }
 
-fn apply_add<'arena>(
+fn apply_add_run_with_listener<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
     key: UtxoKey,
     txid: Hash256,
-    payload: &BuildPayload<'_>,
-    listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
+    adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
+    listener: &(dyn UtxoChangeListener + Send + Sync),
 ) -> Result<(), UtxoError> {
-    let overwritten = existing_output(table, key, txid, payload.vout)?;
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
-    append_build_output(table, &mut record, payload)?;
-    insert_record(arena, table, record);
-    if let Some(listener) = listener {
+    for (_key, _txid, payload) in adds {
+        let overwritten = match record.find_output(payload.vout) {
+            Some(output) => Some(output_details(table, output).ok_or(UtxoError::CorruptArena)?),
+            None => None,
+        };
+        append_build_output(table, &mut record, payload)?;
         if let Some((txout, height, coinbase)) = overwritten {
             listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
         }
@@ -393,6 +441,7 @@ fn apply_add<'arena>(
             payload.coinbase,
         );
     }
+    insert_record(arena, table, record);
     Ok(())
 }
 
@@ -419,56 +468,6 @@ fn append_build_output<'arena>(
         height: payload.height,
     });
     Ok(())
-}
-
-fn existing_output(
-    table: &ShardTable<'_>,
-    key: UtxoKey,
-    txid: Hash256,
-    vout: u32,
-) -> Result<Option<(TxOut, u32, bool)>, UtxoError> {
-    let Some(record) = table.table.find(key.hash(), |record| {
-        record.key() == key && record.txid() == txid
-    }) else {
-        return Ok(None);
-    };
-    let Some(output) = record.find_output(vout) else {
-        return Ok(None);
-    };
-    let script = script_slice(table, output).ok_or(UtxoError::CorruptArena)?;
-    Ok(Some((
-        txout_from_parts(output.value, script),
-        output.height,
-        output.coinbase,
-    )))
-}
-
-fn apply_remove<'arena>(
-    arena: &'arena Bump,
-    table: &mut ShardTable<'arena>,
-    remove: &SpendPayload<'_>,
-    listener: Option<&(dyn UtxoChangeListener + Send + Sync)>,
-) {
-    let Some(mut record) = take_record(table, remove.key, remove.txid) else {
-        return;
-    };
-    let removed_output = record.find_output(remove.vout).and_then(|output| {
-        let script = script_slice(table, output)?;
-        Some((
-            txout_from_parts(output.value, script),
-            output.height,
-            output.coinbase,
-        ))
-    });
-    let removed = record.remove_output(remove.vout);
-    if !record.is_empty() {
-        insert_record(arena, table, record);
-    }
-    if let (true, Some((txout, height, coinbase)), Some(listener)) =
-        (removed, removed_output, listener)
-    {
-        listener.on_remove_coin(remove.op, &txout, height, coinbase);
-    }
 }
 
 fn append_owned_output<'arena>(
@@ -554,6 +553,15 @@ fn script_slice<'table>(
     let len = usize::from(output.script_pubkey_len);
     let end = start.checked_add(len)?;
     table.script_bytes.get(start..end)
+}
+
+fn output_details(table: &ShardTable<'_>, output: &OneUtxoOut) -> Option<(TxOut, u32, bool)> {
+    let script = script_slice(table, output)?;
+    Some((
+        txout_from_parts(output.value, script),
+        output.height,
+        output.coinbase,
+    ))
 }
 
 fn txout_from_parts(value: u64, script: &[u8]) -> TxOut {
