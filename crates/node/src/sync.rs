@@ -67,6 +67,12 @@ pub struct BlockSync {
     block_stager: Arc<Mutex<BlockStager>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SyncPeer {
+    addr: SocketAddr,
+    start_height: i32,
+}
+
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
@@ -112,12 +118,16 @@ impl BlockSync {
             .load_full()
             .map_or(applied_height, |tip| tip.height);
         self.release_disconnected_peer_budget();
+        let mut sent_getdata = false;
         for (index, peer) in sync_peers.into_iter().enumerate() {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
-            self.send_getdata_for_pending_blocks(peer.addr, peer_best_height);
+            sent_getdata |= self.send_getdata_for_pending_blocks(peer.addr, peer_best_height);
             if index == 0 && peer_best_height > header_height {
                 self.send_getheaders(peer.addr, header_height, peer.start_height);
             }
+        }
+        if sent_getdata {
+            self.record_sync_metrics();
         }
     }
 
@@ -336,7 +346,7 @@ impl BlockSync {
         Some(tree.node(node_id).ok()?.hash)
     }
 
-    fn sync_peers(&self, our_height: u32) -> Vec<PeerInfo> {
+    fn sync_peers(&self, our_height: u32) -> Vec<SyncPeer> {
         let peers = self.peers.read();
         let mut eligible: Vec<_> = peers
             .iter()
@@ -345,22 +355,29 @@ impl BlockSync {
                     .ok()
                     .is_some_and(|height| height > our_height)
             })
-            .cloned()
+            .map(|peer| SyncPeer {
+                addr: peer.addr,
+                start_height: peer.start_height,
+            })
             .collect();
         eligible.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
         eligible
     }
 
-    fn send_getdata_for_pending_blocks(&self, sync_peer_addr: SocketAddr, peer_best_height: u32) {
+    fn send_getdata_for_pending_blocks(
+        &self,
+        sync_peer_addr: SocketAddr,
+        peer_best_height: u32,
+    ) -> bool {
         let Some(chain_tip) = self.handles.chain_tip.load_full() else {
-            return;
+            return false;
         };
         let Some(applied_tip) = self.handles.applied_tip.load_full() else {
-            return;
+            return false;
         };
         let applied_height = applied_tip.height;
         if chain_tip.height <= applied_height {
-            return;
+            return false;
         }
 
         let now = Instant::now();
@@ -375,7 +392,7 @@ impl BlockSync {
         );
         drop(tree);
         let Some(request) = request else {
-            return;
+            return false;
         };
 
         let count = request.len();
@@ -394,18 +411,17 @@ impl BlockSync {
                 peer_addr = %request.peer_addr(),
                 "block sync: target peer has no outbound channel (getdata skipped)"
             );
-            return;
+            return false;
         };
         if tx.send(msg).is_err() {
             tracing::warn!(
                 peer_addr = %request.peer_addr(),
                 "block sync: outbound channel disconnected (getdata)"
             );
-            return;
+            return false;
         }
         self.download_window.lock().mark_requested(&request, now);
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
-        self.record_sync_metrics();
         tracing::debug!(
             peer_addr = %request.peer_addr(),
             count,
@@ -413,6 +429,7 @@ impl BlockSync {
             chain_height = chain_tip.height,
             "block sync: sent getdata batch"
         );
+        true
     }
 
     fn send_getheaders(&self, sync_peer_addr: SocketAddr, our_height: u32, target_height: i32) {
