@@ -82,19 +82,39 @@ fn main() {
     print_apply_metrics(
         "coinbase_32",
         &proxy_blocks(COINBASE_PROXY_BLOCKS),
+        false,
         &metrics,
     );
     print_apply_metrics(
         "coinbase_128",
         &proxy_blocks(PRODUCTION_PROXY_BLOCKS),
+        false,
         &metrics,
     );
     print_apply_metrics(
         "fanout_128",
         &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
+        false,
         &metrics,
     );
-    print_apply_metrics("spend_heavy_117", &spend_heavy_proxy_blocks(), &metrics);
+    print_apply_metrics(
+        "fanout_128_txindex",
+        &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
+        true,
+        &metrics,
+    );
+    print_apply_metrics(
+        "spend_heavy_117",
+        &spend_heavy_proxy_blocks(),
+        false,
+        &metrics,
+    );
+    print_apply_metrics(
+        "spend_heavy_117_txindex",
+        &spend_heavy_proxy_blocks(),
+        true,
+        &metrics,
+    );
 }
 
 fn print_utxo_fanout_commit_metrics(name: &str, with_listener: bool) {
@@ -124,10 +144,10 @@ fn install_diagnostic_metrics() -> MetricsHandle {
         .unwrap_or_else(|| panic!("metrics recorder was not installed"))
 }
 
-fn print_apply_metrics(name: &str, blocks: &[Block], metrics: &MetricsHandle) {
+fn print_apply_metrics(name: &str, blocks: &[Block], txindex: bool, metrics: &MetricsHandle) {
     let before = metrics.snapshot();
     let backend = storage_backend();
-    let (_dir, state) = open_regtest_state(backend);
+    let (_dir, state) = open_regtest_state(backend, txindex);
     let started = Instant::now();
     for block in blocks {
         state
@@ -150,7 +170,7 @@ fn print_apply_metrics(name: &str, blocks: &[Block], metrics: &MetricsHandle) {
         .map(|record| record.body_size)
         .sum();
     println!(
-        "sync_apply_metrics backend={backend} workload={name} blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes} selected_apply_stage_metrics={} {}",
+        "sync_apply_metrics backend={backend} workload={name} txindex={txindex} blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes} selected_apply_stage_metrics={} {}",
         APPLY_STAGE_METRICS.len(),
         apply_stage_summary(&before, &after),
     );
@@ -167,13 +187,13 @@ fn storage_backend() -> &'static str {
     }
 }
 
-fn open_regtest_state(backend: &str) -> (TempDir, NodeState) {
+fn open_regtest_state(backend: &str, txindex: bool) -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let mut config = Config::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
     backend.clone_into(&mut config.storage_backend);
     config.p2p_listen.clear();
-    config.txindex = false;
+    config.txindex = txindex;
     let state =
         NodeState::open(config).unwrap_or_else(|error| panic!("open node state failed: {error}"));
     (dir, state)
