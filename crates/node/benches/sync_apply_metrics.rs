@@ -84,6 +84,11 @@ fn main() {
         &proxy_blocks(PRODUCTION_PROXY_BLOCKS),
         &metrics,
     );
+    print_apply_metrics(
+        "fanout_128",
+        &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
+        &metrics,
+    );
     print_apply_metrics("spend_heavy_117", &spend_heavy_proxy_blocks(), &metrics);
 }
 
@@ -208,6 +213,21 @@ fn proxy_blocks(count: u32) -> Vec<Block> {
     let mut parent = genesis;
     for height in 1..count {
         let block = child_coinbase_block(&parent, height);
+        parent = block.clone();
+        blocks.push(block);
+    }
+    blocks
+}
+
+fn fanout_proxy_blocks(count: u32) -> Vec<Block> {
+    let mut blocks = Vec::with_capacity(
+        usize::try_from(count).unwrap_or_else(|error| panic!("invalid fanout count: {error}")),
+    );
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    blocks.push(genesis.clone());
+    let mut parent = genesis;
+    for height in 1..count {
+        let block = child_fanout_coinbase_block(&parent, height);
         parent = block.clone();
         blocks.push(block);
     }
