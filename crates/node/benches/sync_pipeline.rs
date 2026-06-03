@@ -161,6 +161,16 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             );
         },
     );
+    c.bench_function(
+        "deterministic_initial_sync_proxy_production_state_128_blocks",
+        |b| {
+            b.iter_batched(
+                || ProductionStateSyncFixture::new(1),
+                |fixture| black_box(fixture.run()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     c.bench_function("deterministic_initial_sync_proxy_many_peers_512", |b| {
         b.iter_batched(
             || SyncFixture::new_with_peers(TxIndexMode::Disabled, SYNC_PROXY_PEERS),
@@ -305,42 +315,8 @@ impl SyncFixture {
     }
 
     fn new_with_peers(tx_index_mode: TxIndexMode, peer_count: usize) -> Self {
-        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let mut tree = BlockTree::new();
-        let genesis_id = tree
-            .insert_node(None, genesis.header, NodeStatus::HeaderValid)
-            .unwrap_or_else(|error| panic!("regtest genesis header insert failed: {error}"));
-        let mut tip_id = genesis_id;
-        let mut parent = genesis;
-        let mut prev_hash = parent.block_hash();
-        let mut header_time = parent.header.time;
-        let mut blocks = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
-        let mut received_scan_expected = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
-
-        for height in 1_u32..=SYNC_PROXY_HEADER_HEIGHT {
-            let header = if height <= SYNC_PROXY_BLOCKS {
-                let block = child_coinbase_block(&parent, height);
-                parent = block.clone();
-                prev_hash = block.block_hash();
-                header_time = block.header.time;
-                blocks.push(block.clone());
-                block.header
-            } else {
-                header_time = header_time.saturating_add(1);
-                let header = child_header(prev_hash, header_time);
-                prev_hash = header.block_hash();
-                header
-            };
-            tip_id = tree
-                .insert_node(Some(tip_id), header, NodeStatus::HeaderValid)
-                .unwrap_or_else(|error| panic!("synthetic header insert failed: {error}"));
-            if height == 1 || (3..=SYNC_PROXY_BLOCKS.saturating_add(1)).contains(&height) {
-                let node = tree
-                    .node(tip_id)
-                    .unwrap_or_else(|error| panic!("synthetic header lookup failed: {error}"));
-                received_scan_expected.push(BlockHash::from_byte_array(node.hash.to_le_bytes()));
-            }
-        }
+        let (blocks, received_scan_expected) = populate_sync_header_chain(&mut tree);
 
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
@@ -473,6 +449,130 @@ impl SyncFixture {
         assert_eq!(requested, self.received_scan_expected);
         requested.len()
     }
+}
+
+struct ProductionStateSyncFixture {
+    _dir: TempDir,
+    state: NodeState,
+    outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
+    blocks: Vec<Block>,
+}
+
+impl ProductionStateSyncFixture {
+    fn new(peer_count: usize) -> Self {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let mut config = Config::default_for_network(Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.txindex = false;
+        let state = NodeState::open(config)
+            .unwrap_or_else(|error| panic!("open node state failed: {error}"));
+        let blocks = {
+            let block_tree = state.block_tree();
+            let mut tree = block_tree.write();
+            let (blocks, _received_scan_expected) = populate_sync_header_chain(&mut tree);
+            blocks
+        };
+        let outbound_rxs =
+            install_synthetic_peers(&state.peers(), &state.peer_outbound(), peer_count);
+        Self {
+            _dir: dir,
+            state,
+            outbound_rxs,
+            blocks,
+        }
+    }
+
+    fn run(self) -> u32 {
+        let sync = self.state.sync();
+        sync.tick();
+        let getdata_count = match self
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
+            .try_recv()
+            .unwrap_or_else(|error| panic!("expected production getdata: {error}"))
+        {
+            NetworkMessage::GetData(inventory) => inventory.len(),
+            other => panic!("expected production getdata, got {other:?}"),
+        };
+        assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
+        let inbound_blocks_tx = self.state.inbound_blocks_sender();
+        for block in self.blocks[1..].iter().rev() {
+            inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
+        }
+        sync.tick();
+        inbound_blocks_tx
+            .send(self.blocks[0].clone())
+            .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
+        sync.tick();
+        self.state
+            .applied_tip()
+            .load_full()
+            .unwrap_or_else(|| panic!("production sync proxy did not publish applied tip"))
+            .height
+    }
+}
+
+fn populate_sync_header_chain(tree: &mut BlockTree) -> (Vec<Block>, Vec<BlockHash>) {
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_id = tree
+        .insert_node(None, genesis.header, NodeStatus::HeaderValid)
+        .unwrap_or_else(|error| panic!("regtest genesis header insert failed: {error}"));
+    let mut tip_id = genesis_id;
+    let mut parent = genesis;
+    let mut prev_hash = parent.block_hash();
+    let mut header_time = parent.header.time;
+    let mut blocks = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
+    let mut received_scan_expected = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
+
+    for height in 1_u32..=SYNC_PROXY_HEADER_HEIGHT {
+        let header = if height <= SYNC_PROXY_BLOCKS {
+            let block = child_coinbase_block(&parent, height);
+            parent = block.clone();
+            prev_hash = block.block_hash();
+            header_time = block.header.time;
+            blocks.push(block.clone());
+            block.header
+        } else {
+            header_time = header_time.saturating_add(1);
+            let header = child_header(prev_hash, header_time);
+            prev_hash = header.block_hash();
+            header
+        };
+        tip_id = tree
+            .insert_node(Some(tip_id), header, NodeStatus::HeaderValid)
+            .unwrap_or_else(|error| panic!("synthetic header insert failed: {error}"));
+        if height == 1 || (3..=SYNC_PROXY_BLOCKS.saturating_add(1)).contains(&height) {
+            let node = tree
+                .node(tip_id)
+                .unwrap_or_else(|error| panic!("synthetic header lookup failed: {error}"));
+            received_scan_expected.push(BlockHash::from_byte_array(node.hash.to_le_bytes()));
+        }
+    }
+    (blocks, received_scan_expected)
+}
+
+fn install_synthetic_peers(
+    peers: &Arc<RwLock<Vec<PeerInfo>>>,
+    peer_outbound: &Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
+    peer_count: usize,
+) -> Vec<crossbeam_channel::Receiver<Message>> {
+    let mut outbound_rxs = Vec::with_capacity(peer_count);
+    let mut peers = peers.write();
+    let mut peer_outbound = peer_outbound.write();
+    for index in 0..peer_count {
+        let port = u16::try_from(8_333_usize.saturating_add(index))
+            .unwrap_or_else(|error| panic!("invalid synthetic peer port: {error}"));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        peers.push(synthetic_peer(addr));
+        let (outbound_tx, outbound_rx) = unbounded::<Message>();
+        peer_outbound.insert(addr, outbound_tx);
+        outbound_rxs.push(outbound_rx);
+    }
+    outbound_rxs
 }
 
 #[allow(clippy::arc_with_non_send_sync)]
