@@ -1608,87 +1608,44 @@ mod tests {
         Ok(())
     }
 
+    const DETERMINISTIC_PROXY_BLOCKS: usize = 24;
+    const DETERMINISTIC_PROXY_TIP_HEIGHT: u32 = 24;
+    const DETERMINISTIC_PROXY_HEADER_HEIGHT: u32 = 96;
+
+    struct DeterministicProxyFixture {
+        sync: BlockSync,
+        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        block_tree: Arc<RwLock<BlockTree>>,
+        inbound_blocks_tx: crossbeam_channel::Sender<bitcoin::Block>,
+        outbound_rx: crossbeam_channel::Receiver<Message>,
+        blocks: Vec<bitcoin::Block>,
+    }
+
     #[test]
     fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
     -> Result<(), Box<dyn std::error::Error>> {
         let recorder = TestRecorder::default();
         metrics::with_local_recorder(&recorder, || {
-            const PROXY_BLOCKS: usize = 24;
-            const PROXY_TIP_HEIGHT: u32 = 24;
-            const PROXY_HEADER_HEIGHT: u32 = 96;
-
-            let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-            let mut tree = BlockTree::new();
-            let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
-            let mut tip_id = genesis_id;
-            let mut prev_hash = genesis.block_hash();
-            let mut blocks = Vec::with_capacity(PROXY_BLOCKS);
-
-            for height in 1_u32..=PROXY_TIP_HEIGHT {
-                let block = mined_block_with_prev_hash(
-                    prev_hash,
-                    height,
-                    vec![coinbase_transaction(height)],
-                );
-                tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
-                prev_hash = block.block_hash();
-                blocks.push(block);
-            }
-            for height in PROXY_TIP_HEIGHT.saturating_add(1)..=PROXY_HEADER_HEIGHT {
-                let header = test_header(prev_hash, height);
-                tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-                prev_hash = header.block_hash();
-            }
-
-            let chain_tip = tree.tip_handle();
-            let block_tree = Arc::new(RwLock::new(tree));
-            let applied_tip = Arc::new(ArcSwapOption::empty());
-            let peers = Arc::new(RwLock::new(Vec::new()));
-            let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
-            let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
-            let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-            let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
-            let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-            let handles = apply_handles(
-                Arc::clone(&chain_tip),
-                Arc::clone(&applied_tip),
-                Arc::clone(&block_tree),
-            );
-            let sync = BlockSync::new(
-                handles,
-                Arc::clone(&peers),
-                Arc::clone(&peer_outbound),
-                inbound_headers_rx,
-                inbound_blocks_rx,
-            );
-            install_budget(
-                &sync,
-                super::SyncBudget {
-                    max_pending_blocks: PROXY_BLOCKS,
-                    max_pending_bytes: usize::MAX,
-                    max_received_blocks: PROXY_BLOCKS,
-                    max_received_bytes: usize::MAX,
-                    max_peer_inflight: PROXY_BLOCKS,
-                    getdata_batch_limit: PROXY_BLOCKS,
-                    ..super::default_sync_budget()
-                },
-            );
-
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-            peers.write().push(synthetic_peer(addr, 100));
-            let (tx, rx) = unbounded::<Message>();
-            peer_outbound.write().insert(addr, tx);
+            let fixture = deterministic_proxy_fixture()?;
+            let DeterministicProxyFixture {
+                sync,
+                applied_tip,
+                block_tree,
+                inbound_blocks_tx,
+                outbound_rx,
+                blocks,
+            } = fixture;
 
             sync.tick();
 
             assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-            let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+            let NetworkMessage::GetData(inventory) = outbound_rx.try_recv()? else {
                 return Err(std::io::Error::other("expected proxy getdata").into());
             };
             let pending_count = inventory.len();
-            assert_eq!(pending_count, PROXY_BLOCKS);
+            assert_eq!(pending_count, DETERMINISTIC_PROXY_BLOCKS);
             assert_gauge(&recorder, "node.sync.pending_blocks", pending_count);
-            let _headers = rx.try_recv()?;
+            let _headers = outbound_rx.try_recv()?;
 
             for block in blocks[1..].iter().rev() {
                 inbound_blocks_tx.send(block.clone())?;
@@ -1698,7 +1655,7 @@ mod tests {
                 let stager = sync.block_stager.lock();
                 (stager.received_len(), stager.received_bytes())
             };
-            assert_eq!(received_count, PROXY_BLOCKS.saturating_sub(1));
+            assert_eq!(received_count, DETERMINISTIC_PROXY_BLOCKS.saturating_sub(1));
             assert!(peak_staged_bytes > 0);
             assert_gauge(&recorder, "node.sync.received_blocks", received_count);
             assert_gauge(&recorder, "node.sync.received_bytes", peak_staged_bytes);
@@ -1711,7 +1668,7 @@ mod tests {
                 .load_full()
                 .ok_or_else(|| std::io::Error::other("proxy apply did not publish tip"))?
                 .height;
-            assert_eq!(applied_height, PROXY_TIP_HEIGHT);
+            assert_eq!(applied_height, DETERMINISTIC_PROXY_TIP_HEIGHT);
             assert_eq!(sync.block_stager.lock().received_len(), 0);
             assert_eq!(sync.download_window.lock().pending_len(), 0);
             assert_histogram(&recorder, "node.sync.apply_buffered_blocks_seconds");
@@ -1721,6 +1678,79 @@ mod tests {
                 apply_elapsed.as_micros(),
             );
             Ok(())
+        })
+    }
+
+    fn deterministic_proxy_fixture() -> Result<DeterministicProxyFixture, Box<dyn std::error::Error>>
+    {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        let mut prev_hash = genesis.block_hash();
+        let mut blocks = Vec::with_capacity(DETERMINISTIC_PROXY_BLOCKS);
+
+        for height in 1_u32..=DETERMINISTIC_PROXY_TIP_HEIGHT {
+            let block =
+                mined_block_with_prev_hash(prev_hash, height, vec![coinbase_transaction(height)]);
+            tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
+            prev_hash = block.block_hash();
+            blocks.push(block);
+        }
+        for height in
+            DETERMINISTIC_PROXY_TIP_HEIGHT.saturating_add(1)..=DETERMINISTIC_PROXY_HEADER_HEIGHT
+        {
+            let header = test_header(prev_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            prev_hash = header.block_hash();
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: DETERMINISTIC_PROXY_BLOCKS,
+                max_pending_bytes: usize::MAX,
+                max_received_blocks: DETERMINISTIC_PROXY_BLOCKS,
+                max_received_bytes: usize::MAX,
+                max_peer_inflight: DETERMINISTIC_PROXY_BLOCKS,
+                getdata_batch_limit: DETERMINISTIC_PROXY_BLOCKS,
+                ..super::default_sync_budget()
+            },
+        );
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, outbound_rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        Ok(DeterministicProxyFixture {
+            sync,
+            applied_tip,
+            block_tree,
+            inbound_blocks_tx,
+            outbound_rx,
+            blocks,
         })
     }
 
