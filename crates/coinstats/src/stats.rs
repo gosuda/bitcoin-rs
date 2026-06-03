@@ -144,15 +144,23 @@ struct CoinStatsListenerState {
 }
 
 impl CoinStatsListenerState {
-    fn insert_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+    fn insert_utxo_hash(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         coin_hash_bytes_into(&mut self.scratch, op, txout, height, coinbase);
         self.stats.muhash.insert(self.scratch.as_slice());
+    }
+
+    fn insert_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.insert_utxo_hash(op, txout, height, coinbase);
         self.stats.account_insert(txout);
     }
 
-    fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+    fn remove_utxo_hash(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
         coin_hash_bytes_into(&mut self.scratch, op, txout, height, coinbase);
         self.stats.muhash.remove(self.scratch.as_slice());
+    }
+
+    fn remove_utxo(&mut self, op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) {
+        self.remove_utxo_hash(op, txout, height, coinbase);
         self.stats.account_remove(txout);
     }
 
@@ -196,14 +204,23 @@ impl UtxoChangeListener for CoinStatsListener {
 
     fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
         let mut state = self.state.lock();
+        let mut total_amount = 0_u64;
+        let mut total_bogo_size = 0_u64;
+        let mut utxo_count = 0_u64;
         for insertion in insertions {
-            state.insert_utxo(
+            state.insert_utxo_hash(
                 insertion.op,
                 insertion.txout,
                 insertion.height,
                 insertion.coinbase,
             );
+            total_amount = total_amount.saturating_add(insertion.txout.value.to_sat());
+            total_bogo_size = total_bogo_size.saturating_add(bogo_size(insertion.txout));
+            utxo_count = utxo_count.saturating_add(1);
         }
+        state.stats.total_amount = state.stats.total_amount.saturating_add(total_amount);
+        state.stats.bogo_size = state.stats.bogo_size.saturating_add(total_bogo_size);
+        state.stats.utxo_count = state.stats.utxo_count.saturating_add(utxo_count);
         state.trim_scratch_capacity();
     }
 
@@ -221,14 +238,23 @@ impl UtxoChangeListener for CoinStatsListener {
 
     fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
         let mut state = self.state.lock();
+        let mut total_amount = 0_u64;
+        let mut total_bogo_size = 0_u64;
+        let mut utxo_count = 0_u64;
         for removal in removals {
-            state.remove_utxo(
+            state.remove_utxo_hash(
                 &removal.op,
                 &removal.txout,
                 removal.height,
                 removal.coinbase,
             );
+            total_amount = total_amount.saturating_add(removal.txout.value.to_sat());
+            total_bogo_size = total_bogo_size.saturating_add(bogo_size(&removal.txout));
+            utxo_count = utxo_count.saturating_add(1);
         }
+        state.stats.total_amount = state.stats.total_amount.saturating_sub(total_amount);
+        state.stats.bogo_size = state.stats.bogo_size.saturating_sub(total_bogo_size);
+        state.stats.utxo_count = state.stats.utxo_count.saturating_sub(utxo_count);
         state.trim_scratch_capacity();
     }
 
