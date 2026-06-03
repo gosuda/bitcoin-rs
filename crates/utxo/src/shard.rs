@@ -312,30 +312,26 @@ fn commit_batch_coalesced<'arena>(
     adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
     removes: &[SpendPayload<'_>],
 ) -> Result<(), UtxoError> {
-    for chunk in removes.chunks(OPS_AT_ONCE) {
-        let mut remaining = chunk;
-        while let Some((first, rest)) = remaining.split_first() {
-            let run_len = rest
-                .iter()
-                .take_while(|remove| remove.key == first.key && remove.txid == first.txid)
-                .count()
-                .saturating_add(1);
-            apply_remove_run(arena, table, &remaining[..run_len]);
-            remaining = &remaining[run_len..];
-        }
+    let mut remaining_removes = removes;
+    while let Some((first, rest)) = remaining_removes.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|remove| remove.key == first.key && remove.txid == first.txid)
+            .count()
+            .saturating_add(1);
+        apply_remove_run(arena, table, &remaining_removes[..run_len]);
+        remaining_removes = &remaining_removes[run_len..];
     }
 
-    for chunk in adds.chunks(OPS_AT_ONCE) {
-        let mut remaining = chunk;
-        while let Some(((key, txid, _payload), rest)) = remaining.split_first() {
-            let run_len = rest
-                .iter()
-                .take_while(|(next_key, next_txid, _payload)| next_key == key && next_txid == txid)
-                .count()
-                .saturating_add(1);
-            apply_add_run(arena, table, *key, *txid, &remaining[..run_len])?;
-            remaining = &remaining[run_len..];
-        }
+    let mut remaining_adds = adds;
+    while let Some(((key, txid, _payload), rest)) = remaining_adds.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|(next_key, next_txid, _payload)| next_key == key && next_txid == txid)
+            .count()
+            .saturating_add(1);
+        apply_add_run(arena, table, *key, *txid, &remaining_adds[..run_len])?;
+        remaining_adds = &remaining_adds[run_len..];
     }
     Ok(())
 }
