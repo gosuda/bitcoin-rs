@@ -171,6 +171,16 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             );
         },
     );
+    c.bench_function(
+        "deterministic_initial_sync_proxy_production_state_apply_tick_128_blocks",
+        |b| {
+            b.iter_batched(
+                || ProductionStateSyncFixture::new(1).stage_for_contiguous_apply(),
+                |fixture| black_box(fixture.apply_staged()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     c.bench_function("deterministic_initial_sync_proxy_many_peers_512", |b| {
         b.iter_batched(
             || SyncFixture::new_with_peers(TxIndexMode::Disabled, SYNC_PROXY_PEERS),
@@ -486,17 +496,7 @@ impl ProductionStateSyncFixture {
     fn run(self) -> u32 {
         let sync = self.state.sync();
         sync.tick();
-        let getdata_count = match self
-            .outbound_rxs
-            .first()
-            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
-            .try_recv()
-            .unwrap_or_else(|error| panic!("expected production getdata: {error}"))
-        {
-            NetworkMessage::GetData(inventory) => inventory.len(),
-            other => panic!("expected production getdata, got {other:?}"),
-        };
-        assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
+        self.assert_getdata_batch();
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
         for block in self.blocks[1..].iter().rev() {
             inbound_blocks_tx
@@ -513,6 +513,46 @@ impl ProductionStateSyncFixture {
             .load_full()
             .unwrap_or_else(|| panic!("production sync proxy did not publish applied tip"))
             .height
+    }
+
+    fn stage_for_contiguous_apply(self) -> Self {
+        let sync = self.state.sync();
+        sync.tick();
+        self.assert_getdata_batch();
+        let inbound_blocks_tx = self.state.inbound_blocks_sender();
+        for block in self.blocks[1..].iter().rev() {
+            inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
+        }
+        sync.tick();
+        inbound_blocks_tx
+            .send(self.blocks[0].clone())
+            .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
+        self
+    }
+
+    fn apply_staged(self) -> u32 {
+        self.state.sync().tick();
+        self.state
+            .applied_tip()
+            .load_full()
+            .unwrap_or_else(|| panic!("production sync proxy did not publish applied tip"))
+            .height
+    }
+
+    fn assert_getdata_batch(&self) {
+        let getdata_count = match self
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
+            .try_recv()
+            .unwrap_or_else(|error| panic!("expected production getdata: {error}"))
+        {
+            NetworkMessage::GetData(inventory) => inventory.len(),
+            other => panic!("expected production getdata, got {other:?}"),
+        };
+        assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
     }
 }
 
