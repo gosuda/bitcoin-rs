@@ -200,16 +200,23 @@ impl HistogramFn for HistogramHandle {
 /// This recorder keeps v1 metrics in process; wiring the Prometheus endpoint is
 /// left to the follow-up feature that enables the exporter listener.
 pub fn install_metrics(bind: Option<SocketAddr>) -> Result<Option<MetricsHandle>> {
+    install_metrics_with(bind, metrics::set_global_recorder)
+}
+
+fn install_metrics_with(
+    bind: Option<SocketAddr>,
+    install_recorder: impl FnOnce(
+        InMemoryRecorder,
+    ) -> Result<(), metrics::SetRecorderError<InMemoryRecorder>>,
+) -> Result<Option<MetricsHandle>> {
     let Some(bind) = bind else {
         return Ok(None);
     };
 
     let recorder = InMemoryRecorder::default();
-    let handle = MetricsHandle {
-        bind,
-        recorder: recorder.clone(),
-    };
-    let _already_installed = metrics::set_global_recorder(recorder);
+    install_recorder(recorder.clone())?;
+
+    let handle = MetricsHandle { bind, recorder };
 
     metrics::describe_counter!("node.event_loop.mempool_ticks", "mempool maintenance ticks");
     metrics::describe_counter!("node.event_loop.defrag_ticks", "utxo defragmentation ticks");
@@ -224,4 +231,22 @@ pub fn install_metrics(bind: Option<SocketAddr>) -> Result<Option<MetricsHandle>
     );
 
     Ok(Some(handle))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+
+    #[test]
+    fn install_metrics_returns_error_when_global_recorder_install_fails() {
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+        let result = install_metrics_with(Some(bind), |recorder| {
+            Err(metrics::SetRecorderError(recorder))
+        });
+
+        assert!(result.is_err());
+    }
 }
