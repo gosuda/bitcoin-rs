@@ -164,7 +164,7 @@ where
             |(_temp, store, value)| {
                 for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
                     let key = block_body_like_key(counter);
-                    must(store.put(ColumnFamily::BlockTree, &key, &value));
+                    must(store.put(ColumnFamily::BlockBodies, &key, &value));
                 }
                 must(store.flush());
             },
@@ -192,7 +192,7 @@ where
                     let mut batch = store.new_batch();
                     for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
                         let key = block_body_like_key(counter);
-                        batch.put(ColumnFamily::BlockTree, &key, &value);
+                        batch.put(ColumnFamily::BlockBodies, &key, &value);
                     }
                     must(store.write(batch));
                     must(store.flush());
@@ -213,7 +213,7 @@ where
     let value = vec![0xa5; BLOCK_BODY_VALUE_BYTES];
     for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
         let key = block_body_like_key(counter);
-        must(store.put(ColumnFamily::BlockTree, &key, &value));
+        must(store.put(ColumnFamily::BlockBodies, &key, &value));
     }
     must(store.flush());
 
