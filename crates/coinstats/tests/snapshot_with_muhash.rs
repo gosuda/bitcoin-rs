@@ -2,7 +2,7 @@
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
-use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet, write_snapshot};
+use bitcoin_rs_utxo::{BlockChanges, UndoBatch, UtxoAdd, UtxoSet, aggregate_hash, write_snapshot};
 
 #[test]
 fn snapshot_trailer_uses_listener_muhash() -> Result<(), Box<dyn std::error::Error>> {
@@ -106,6 +106,85 @@ fn listener_tracks_duplicate_txid_overwrite() -> Result<(), Box<dyn std::error::
     assert_eq!(after_overwrite.utxo_count, 1);
     assert_eq!(after_overwrite.total_amount, replacement.value.to_sat());
     Ok(())
+}
+
+#[test]
+fn listener_undo_restores_muhash_and_accounting() -> Result<(), Box<dyn std::error::Error>> {
+    let (full, full_listener) = listener_set();
+    let coinbase_outpoint = OutPoint::new(txid(40), 0);
+    let coinbase_txout = txout(40);
+    let kept_outpoint = OutPoint::new(txid(41), 0);
+    let kept_txout = txout(41);
+    let replacement_outpoint = OutPoint::new(txid(42), 0);
+    let replacement_txout = txout(42);
+
+    let first = first_undo_test_block(
+        coinbase_outpoint,
+        coinbase_txout.clone(),
+        kept_outpoint,
+        kept_txout.clone(),
+    );
+    full.commit_block(&first, &txid(140))?;
+
+    let mut second = BlockChanges::default();
+    second.remove(coinbase_outpoint);
+    second.add(UtxoAdd::new(
+        replacement_outpoint,
+        replacement_txout,
+        false,
+        2,
+    ));
+    let mut undo = UndoBatch::default();
+    undo.restore(UtxoAdd::new(
+        coinbase_outpoint,
+        coinbase_txout.clone(),
+        true,
+        1,
+    ));
+    undo.remove(replacement_outpoint);
+
+    full.commit_block(&second, &txid(141))?;
+    full.undo_block(&undo)?;
+
+    let (first_only, first_only_listener) = listener_set();
+    first_only.commit_block(&first, &txid(140))?;
+
+    assert_eq!(full.get(&coinbase_outpoint), Some(coinbase_txout.clone()));
+    assert_eq!(full.get(&kept_outpoint), Some(kept_txout.clone()));
+    assert_eq!(full.get(&replacement_outpoint), None);
+    assert_eq!(aggregate_hash(&full)?, aggregate_hash(&first_only)?);
+    assert_eq!(full.len(), first_only.len());
+    assert_observable_stats_eq(&full_listener.snapshot(), &first_only_listener.snapshot());
+    Ok(())
+}
+
+fn assert_observable_stats_eq(left: &CoinStats, right: &CoinStats) {
+    assert_eq!(left.height, right.height);
+    assert_eq!(left.total_amount, right.total_amount);
+    assert_eq!(left.bogo_size, right.bogo_size);
+    assert_eq!(left.tx_count, right.tx_count);
+    assert_eq!(left.utxo_count, right.utxo_count);
+    assert_eq!(left.muhash.finalize(), right.muhash.finalize());
+    assert_eq!(left.muhash.finalize_hash(), right.muhash.finalize_hash());
+}
+
+fn listener_set() -> (UtxoSet, CoinStatsListener) {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+    (set, listener)
+}
+
+fn first_undo_test_block(
+    coinbase_outpoint: OutPoint,
+    coinbase_txout: TxOut,
+    kept_outpoint: OutPoint,
+    kept_txout: TxOut,
+) -> BlockChanges {
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(coinbase_outpoint, coinbase_txout, true, 1));
+    changes.add(UtxoAdd::new(kept_outpoint, kept_txout, false, 1));
+    changes
 }
 
 fn txout(index: u32) -> TxOut {
