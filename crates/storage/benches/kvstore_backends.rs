@@ -173,6 +173,30 @@ where
     });
 }
 
+fn bench_single_block_body_gets_1k<S, Open>(c: &mut Criterion, backend: &str, open: Open)
+where
+    S: KvStore,
+    Open: Fn(&Path) -> Result<S, StorageError> + Copy,
+{
+    let temp = must(tempfile::TempDir::new());
+    let store = must(open(temp.path()));
+    let value = vec![0xa5; BLOCK_BODY_VALUE_BYTES];
+    for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
+        let key = block_body_like_key(counter);
+        must(store.put(ColumnFamily::BlockTree, &key, &value));
+    }
+    must(store.flush());
+
+    c.bench_function(&format!("{backend}/bench_single_block_body_gets_1k"), |b| {
+        b.iter(|| {
+            for counter in 0_u32..SINGLE_BLOCK_BODY_PUT_ROWS {
+                let key = block_body_like_key(counter);
+                black_box(must(store.get(ColumnFamily::BlockTree, &key)));
+            }
+        });
+    });
+}
+
 fn write_rows(store: &impl KvStore, rows: u32) {
     let mut batch = store.new_batch();
     for counter in 0_u32..rows {
@@ -208,98 +232,40 @@ fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
     }
 }
 
+fn bench_backend<S, Open>(c: &mut Criterion, backend: &str, open: Open)
+where
+    S: KvStore,
+    Open: Fn(&Path) -> Result<S, StorageError> + Copy,
+{
+    bench_sequential_writes_1m::<S, _>(c, backend, open);
+    bench_random_writes_1m::<S, _>(c, backend, open);
+    bench_point_get_1m::<S, _>(c, backend, open);
+    bench_prefix_iter_100k::<S, _>(c, backend, open);
+    bench_mixed_16thread_workload::<S, _>(c, backend, open);
+    bench_single_block_body_puts_1k::<S, _>(c, backend, open);
+    bench_single_block_body_gets_1k::<S, _>(c, backend, open);
+}
+
 fn benches(c: &mut Criterion) {
     #[cfg(feature = "rocksdb")]
-    {
-        bench_sequential_writes_1m::<bitcoin_rs_storage::RocksDbStore, _>(c, "rocksdb", |path| {
-            bitcoin_rs_storage::RocksDbStore::open(path)
-        });
-        bench_random_writes_1m::<bitcoin_rs_storage::RocksDbStore, _>(c, "rocksdb", |path| {
-            bitcoin_rs_storage::RocksDbStore::open(path)
-        });
-        bench_point_get_1m::<bitcoin_rs_storage::RocksDbStore, _>(c, "rocksdb", |path| {
-            bitcoin_rs_storage::RocksDbStore::open(path)
-        });
-        bench_prefix_iter_100k::<bitcoin_rs_storage::RocksDbStore, _>(c, "rocksdb", |path| {
-            bitcoin_rs_storage::RocksDbStore::open(path)
-        });
-        bench_mixed_16thread_workload::<bitcoin_rs_storage::RocksDbStore, _>(
-            c,
-            "rocksdb",
-            |path| bitcoin_rs_storage::RocksDbStore::open(path),
-        );
-        bench_single_block_body_puts_1k::<bitcoin_rs_storage::RocksDbStore, _>(
-            c,
-            "rocksdb",
-            |path| bitcoin_rs_storage::RocksDbStore::open(path),
-        );
-    }
+    bench_backend::<bitcoin_rs_storage::RocksDbStore, _>(c, "rocksdb", |path| {
+        bitcoin_rs_storage::RocksDbStore::open(path)
+    });
 
     #[cfg(feature = "fjall")]
-    {
-        bench_sequential_writes_1m::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
-            bitcoin_rs_storage::FjallStore::open(path)
-        });
-        bench_random_writes_1m::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
-            bitcoin_rs_storage::FjallStore::open(path)
-        });
-        bench_point_get_1m::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
-            bitcoin_rs_storage::FjallStore::open(path)
-        });
-        bench_prefix_iter_100k::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
-            bitcoin_rs_storage::FjallStore::open(path)
-        });
-        bench_mixed_16thread_workload::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
-            bitcoin_rs_storage::FjallStore::open(path)
-        });
-        bench_single_block_body_puts_1k::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
-            bitcoin_rs_storage::FjallStore::open(path)
-        });
-    }
+    bench_backend::<bitcoin_rs_storage::FjallStore, _>(c, "fjall", |path| {
+        bitcoin_rs_storage::FjallStore::open(path)
+    });
 
     #[cfg(feature = "redb")]
-    {
-        bench_sequential_writes_1m::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
-            bitcoin_rs_storage::RedbStore::open(path)
-        });
-        bench_random_writes_1m::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
-            bitcoin_rs_storage::RedbStore::open(path)
-        });
-        bench_point_get_1m::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
-            bitcoin_rs_storage::RedbStore::open(path)
-        });
-        bench_prefix_iter_100k::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
-            bitcoin_rs_storage::RedbStore::open(path)
-        });
-        bench_mixed_16thread_workload::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
-            bitcoin_rs_storage::RedbStore::open(path)
-        });
-        bench_single_block_body_puts_1k::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
-            bitcoin_rs_storage::RedbStore::open(path)
-        });
-    }
+    bench_backend::<bitcoin_rs_storage::RedbStore, _>(c, "redb", |path| {
+        bitcoin_rs_storage::RedbStore::open(path)
+    });
 
     #[cfg(feature = "mdbx")]
-    {
-        bench_sequential_writes_1m::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
-            bitcoin_rs_storage::MdbxStore::open(path)
-        });
-        bench_random_writes_1m::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
-            bitcoin_rs_storage::MdbxStore::open(path)
-        });
-        bench_point_get_1m::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
-            bitcoin_rs_storage::MdbxStore::open(path)
-        });
-        bench_prefix_iter_100k::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
-            bitcoin_rs_storage::MdbxStore::open(path)
-        });
-        bench_mixed_16thread_workload::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
-            bitcoin_rs_storage::MdbxStore::open(path)
-        });
-        bench_single_block_body_puts_1k::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
-            bitcoin_rs_storage::MdbxStore::open(path)
-        });
-    }
+    bench_backend::<bitcoin_rs_storage::MdbxStore, _>(c, "mdbx", |path| {
+        bitcoin_rs_storage::MdbxStore::open(path)
+    });
 }
 
 criterion_group!(kvstore_backends, benches);
