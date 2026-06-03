@@ -116,7 +116,7 @@ impl BlockSync {
         let mut sent_getdata = false;
         for (index, peer) in sync_peers.into_iter().enumerate() {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
-            sent_getdata |= match (&chain_tip, &applied_tip) {
+            let requested_blocks = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
                     peer.addr,
                     peer_best_height,
@@ -125,8 +125,12 @@ impl BlockSync {
                 ),
                 _ => false,
             };
+            sent_getdata |= requested_blocks;
             if index == 0 && peer_best_height > header_height {
                 self.send_getheaders(peer.addr, header_height, peer.start_height);
+            }
+            if requested_blocks && !self.download_window.lock().has_request_capacity() {
+                break;
             }
         }
         if sent_getdata {

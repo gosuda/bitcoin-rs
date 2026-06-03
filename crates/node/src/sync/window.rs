@@ -108,6 +108,12 @@ impl DownloadWindow {
         self.pending_bytes
     }
 
+    pub(super) fn has_request_capacity(&self) -> bool {
+        self.pending.len() < self.budget.max_pending_blocks
+            && self.pending_bytes.saturating_add(self.ewma_block_bytes)
+                <= self.budget.max_pending_bytes
+    }
+
     #[cfg(test)]
     pub(super) fn received_len(&self) -> usize {
         self.received.len()
