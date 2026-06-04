@@ -111,7 +111,7 @@ impl BlockStager {
         &mut self,
         expected_hashes: &[Hash256],
     ) -> Vec<DrainedBlock> {
-        let mut drained = Vec::new();
+        let mut drained = Vec::with_capacity(expected_hashes.len());
         for hash in expected_hashes {
             let Some(block) = self.take_entry(hash) else {
                 break;
