@@ -157,6 +157,7 @@ fn tick_applies_inbound_blocks_before_sync_selection() -> Result<(), Box<dyn std
 }
 
 #[test]
+#[allow(clippy::arc_with_non_send_sync)]
 fn event_loop_sync_wake_applies_inbound_block_without_periodic_tick()
 -> Result<(), Box<dyn std::error::Error>> {
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
