@@ -586,7 +586,7 @@ fn apply_remove_run_with_listener<'arena>(
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
-    let mut removed_coins = Vec::with_capacity(removes.len());
+    let mut removed_coins = SmallVec::<[UtxoRemoved; 2]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
             && let Some((txout, height, coinbase)) = output_details(table, &removed_output)
@@ -612,7 +612,7 @@ fn apply_remove_run_collect_events<'arena>(
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
-    let mut removed_coins = Vec::with_capacity(removes.len());
+    let mut removed_coins = SmallVec::<[UtxoRemoved; 2]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
             && let Some((txout, height, coinbase)) = output_details(table, &removed_output)

@@ -205,7 +205,7 @@ impl UtxoRemoved {
 
 enum UtxoChangeEvent<'a> {
     InsertBatch(SmallVec<[UtxoInserted<'a>; 8]>),
-    RemoveBatch(Vec<UtxoRemoved>),
+    RemoveBatch(SmallVec<[UtxoRemoved; 2]>),
     RemoveCoin(UtxoRemoved),
 }
 
@@ -233,7 +233,7 @@ impl<'a> UtxoChangeEvents<'a> {
         }
     }
 
-    pub(crate) fn push_remove_batch(&mut self, removals: Vec<UtxoRemoved>) {
+    pub(crate) fn push_remove_batch(&mut self, removals: SmallVec<[UtxoRemoved; 2]>) {
         self.events.push(UtxoChangeEvent::RemoveBatch(removals));
     }
 
