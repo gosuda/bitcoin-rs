@@ -100,7 +100,6 @@ impl BlockStager {
         StagedBlock::Memory { bytes, dropped }
     }
 
-    #[cfg(test)]
     pub(super) fn contains(&self, hash: &Hash256) -> bool {
         self.received.contains_key(hash)
     }

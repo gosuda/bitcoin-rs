@@ -69,12 +69,21 @@ pub struct BlockSync {
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
     download_window: Arc<Mutex<DownloadWindow>>,
     block_stager: Arc<Mutex<BlockStager>>,
+    expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct SyncPeer {
     addr: SocketAddr,
     start_height: i32,
+}
+
+#[derive(Clone, Debug)]
+struct ExpectedApplyCache {
+    chain_tip_hash: Hash256,
+    applied_tip_hash: Hash256,
+    applied_tip_height: u32,
+    hashes: ExpectedBlockHashes,
 }
 
 impl BlockSync {
@@ -95,6 +104,7 @@ impl BlockSync {
             inbound_blocks_rx,
             download_window: Arc::new(Mutex::new(DownloadWindow::new(default_sync_budget()))),
             block_stager: Arc::new(Mutex::new(BlockStager::new(default_sync_budget()))),
+            expected_apply_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -172,8 +182,12 @@ impl BlockSync {
 
     fn drain_inbound_blocks(&self) {
         let receiver = self.inbound_blocks_rx.lock();
+        let apply_head_check;
         let received = if let Ok(first_block) = receiver.try_recv() {
             let next_expected_hash = self.next_expected_block_hash();
+            apply_head_check = next_expected_hash.filter(|hash| {
+                *hash != Hash256::from_le_bytes(first_block.block_hash().as_byte_array())
+            });
             if let Ok(second_block) = receiver.try_recv() {
                 let mut blocks = Vec::with_capacity(2);
                 blocks.push(first_block);
@@ -181,15 +195,18 @@ impl BlockSync {
                 while let Ok(block) = receiver.try_recv() {
                     blocks.push(block);
                 }
+                drop(receiver);
                 self.buffer_received_blocks(blocks, next_expected_hash)
             } else {
+                drop(receiver);
                 self.buffer_received_block(first_block, next_expected_hash);
                 1
             }
         } else {
+            apply_head_check = None;
+            drop(receiver);
             0
         };
-        drop(receiver);
 
         let now = Instant::now();
         let dropped = self.block_stager.lock().prune_expired(now);
@@ -201,7 +218,7 @@ impl BlockSync {
             }
         }
 
-        let (applied, failed) = self.apply_buffered_blocks();
+        let (applied, failed) = self.apply_buffered_blocks(apply_head_check);
         if received > 0 || applied > 0 || failed > 0 {
             tracing::debug!(
                 received,
@@ -307,12 +324,22 @@ impl BlockSync {
         }
     }
 
-    fn apply_buffered_blocks(&self) -> (usize, usize) {
+    fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
         let started = Instant::now();
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let staged_count = self.block_stager.lock().received_len();
-        let expected_hashes = self.expected_block_hashes(staged_count);
+        if staged_count == 0 {
+            return (0, 0);
+        }
+        if let Some(next_expected_hash) = next_expected_hash
+            && !self.block_stager.lock().contains(&next_expected_hash)
+        {
+            return (0, 0);
+        }
+        let expected_hashes = self
+            .cached_expected_block_hashes(staged_count)
+            .unwrap_or_else(|| self.expected_block_hashes(staged_count));
         let drained = self
             .block_stager
             .lock()
@@ -406,6 +433,20 @@ impl BlockSync {
         }
         hashes.reverse();
         hashes
+    }
+
+    fn cached_expected_block_hashes(&self, max_count: usize) -> Option<ExpectedBlockHashes> {
+        let chain_tip = self.handles.chain_tip.load_full()?;
+        let applied_tip = self.handles.applied_tip.load_full()?;
+        let cache = self.expected_apply_cache.lock();
+        let cache = cache.as_ref()?;
+        if cache.chain_tip_hash != chain_tip.hash
+            || cache.applied_tip_hash != applied_tip.hash
+            || cache.applied_tip_height != applied_tip.height
+        {
+            return None;
+        }
+        Some(cache.hashes.iter().copied().take(max_count).collect())
     }
 
     fn received_block_height(&self, hash: Hash256) -> Option<u32> {
@@ -504,6 +545,14 @@ impl BlockSync {
                 "block sync: outbound channel disconnected (getdata)"
             );
             return false;
+        }
+        if let Some(hashes) = request.contiguous_hashes_from(applied_tip.height.saturating_add(1)) {
+            *self.expected_apply_cache.lock() = Some(ExpectedApplyCache {
+                chain_tip_hash: chain_tip.hash,
+                applied_tip_hash: applied_tip.hash,
+                applied_tip_height: applied_tip.height,
+                hashes: hashes.into_iter().collect(),
+            });
         }
         self.download_window.lock().mark_requested(&request, now);
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
