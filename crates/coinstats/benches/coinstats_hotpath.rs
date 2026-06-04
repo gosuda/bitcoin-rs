@@ -5,7 +5,9 @@ use std::hint::black_box;
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener, MuHash3072};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
-use bitcoin_rs_utxo::{UtxoChangeListener, UtxoInserted};
+use bitcoin_rs_utxo::{
+    BlockChanges, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoRemoved, UtxoSet,
+};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use zerocopy::IntoBytes;
 
@@ -44,11 +46,29 @@ impl CoinFixture {
             .map(|(outpoint, txout)| UtxoInserted::new(outpoint, txout, 100, true))
             .collect()
     }
+
+    fn removals(&self) -> Vec<UtxoRemoved> {
+        self.outpoints
+            .iter()
+            .zip(&self.txouts)
+            .map(|(outpoint, txout)| UtxoRemoved::new(*outpoint, txout.clone(), 100, true))
+            .collect()
+    }
+
+    fn inserted_stats(&self) -> CoinStats {
+        let mut stats = CoinStats::new();
+        for (outpoint, txout) in self.outpoints.iter().zip(&self.txouts) {
+            stats.insert_utxo(outpoint, txout, 100, true);
+        }
+        stats
+    }
 }
 
 fn coinstats_hotpath(c: &mut Criterion) {
     let fixture = CoinFixture::new();
     let insertions = fixture.insertions();
+    let removals = fixture.removals();
+    let inserted_stats = fixture.inserted_stats();
 
     c.bench_function("coinstats/muhash_insert_preencoded_8192", |b| {
         b.iter(|| {
@@ -80,6 +100,90 @@ fn coinstats_hotpath(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+
+    c.bench_function("coinstats/muhash_remove_preencoded_8192", |b| {
+        b.iter_batched(
+            || {
+                let mut muhash = MuHash3072::new();
+                for bytes in &fixture.encoded {
+                    muhash.insert(bytes);
+                }
+                muhash
+            },
+            |mut muhash| {
+                for bytes in &fixture.encoded {
+                    muhash.remove(black_box(bytes));
+                }
+                black_box(muhash.finalize_hash());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("coinstats/remove_utxo_8192", |b| {
+        b.iter_batched(
+            || inserted_stats.clone(),
+            |mut stats| {
+                for (outpoint, txout) in fixture.outpoints.iter().zip(&fixture.txouts) {
+                    stats.remove_utxo(black_box(outpoint), black_box(txout), 100, true);
+                }
+                black_box(stats.muhash.finalize_hash());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("coinstats/listener_remove_coins_8192", |b| {
+        b.iter_batched(
+            || CoinStatsListener::new(inserted_stats.clone()),
+            |listener| {
+                listener.on_remove_coins(black_box(&removals));
+                black_box(listener.snapshot().muhash.finalize_hash());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("coinstats/utxo_commit_listener_fanout_8192", |b| {
+        b.iter_batched(
+            || coinstats_listener_commit_case(&fixture, &inserted_stats),
+            |(set, changes)| {
+                set.commit_block(black_box(&changes), &txid(0xfeed_cafe))
+                    .unwrap_or_else(|error| panic!("coinstats listener commit failed: {error}"));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn coinstats_listener_commit_case(
+    fixture: &CoinFixture,
+    stats: &CoinStats,
+) -> (UtxoSet, BlockChanges) {
+    let mut set = UtxoSet::new();
+    let mut preload = BlockChanges::with_capacity(ENTRY_COUNT, 0);
+    for (outpoint, txout) in fixture.outpoints.iter().zip(&fixture.txouts) {
+        preload.add(UtxoAdd::new(*outpoint, txout.clone(), true, 100));
+    }
+    set.commit_block(&preload, &txid(0xabcd_1234))
+        .unwrap_or_else(|error| panic!("coinstats listener preload failed: {error}"));
+    set.set_listener(Box::new(CoinStatsListener::new(stats.clone())));
+
+    let mut changes = BlockChanges::with_capacity(ENTRY_COUNT, ENTRY_COUNT);
+    for outpoint in &fixture.outpoints {
+        changes.remove(*outpoint);
+    }
+    for index in 0..ENTRY_COUNT {
+        let add_index = index.saturating_add(ENTRY_COUNT);
+        changes.add(UtxoAdd::new(
+            OutPoint::new(txid(add_index), u32::try_from(add_index % 64).unwrap_or(0)),
+            txout(add_index),
+            false,
+            101,
+        ));
+    }
+
+    (set, changes)
 }
 
 fn preencoded_coin(op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) -> Vec<u8> {
