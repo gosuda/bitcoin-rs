@@ -533,10 +533,26 @@ impl BlockSync {
         };
 
         let count = request.len();
-        let inventory: Vec<Inventory> = request
-            .hashes()
-            .map(|hash| Inventory::WitnessBlock(BlockHash::from_byte_array(hash.to_le_bytes())))
-            .collect();
+        let mut inventory = Vec::with_capacity(count);
+        let mut expected_hashes = ExpectedBlockHashes::with_capacity(count);
+        let mut expected_height = applied_tip.height.saturating_add(1);
+        let mut is_contiguous = true;
+        for (height, hash) in request.entries() {
+            inventory.push(Inventory::WitnessBlock(BlockHash::from_byte_array(
+                hash.to_le_bytes(),
+            )));
+            if is_contiguous && height == expected_height {
+                expected_hashes.push(hash);
+                expected_height = if let Some(next) = expected_height.checked_add(1) {
+                    next
+                } else {
+                    is_contiguous = false;
+                    expected_height
+                };
+            } else {
+                is_contiguous = false;
+            }
+        }
         let msg = NetworkMessage::GetData(inventory);
 
         let tx = {
@@ -557,12 +573,12 @@ impl BlockSync {
             );
             return false;
         }
-        if let Some(hashes) = request.contiguous_hashes_from(applied_tip.height.saturating_add(1)) {
+        if is_contiguous {
             *self.expected_apply_cache.lock() = Some(ExpectedApplyCache {
                 chain_tip_hash: chain_tip.hash,
                 applied_tip_hash: applied_tip.hash,
                 applied_tip_height: applied_tip.height,
-                hashes: hashes.into_iter().collect(),
+                hashes: expected_hashes,
             });
         }
         self.download_window.lock().mark_requested(&request, now);

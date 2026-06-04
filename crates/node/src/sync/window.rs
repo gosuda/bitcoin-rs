@@ -31,25 +31,12 @@ impl PeerRequest {
         self.peer_addr
     }
 
-    pub(super) fn hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
-        self.entries.iter().map(|entry| entry.hash)
+    pub(super) fn entries(&self) -> impl Iterator<Item = (u32, Hash256)> + '_ {
+        self.entries.iter().map(|entry| (entry.height, entry.hash))
     }
 
     pub(super) fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    pub(super) fn contiguous_hashes_from(&self, start_height: u32) -> Option<Vec<Hash256>> {
-        let mut height = start_height;
-        let mut hashes = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
-            if entry.height != height {
-                return None;
-            }
-            hashes.push(entry.hash);
-            height = height.checked_add(1)?;
-        }
-        Some(hashes)
     }
 }
 
