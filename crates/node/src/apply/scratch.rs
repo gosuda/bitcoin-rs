@@ -18,7 +18,7 @@ pub(super) struct ApplyScratch {
     txids: Vec<Txid>,
     raw_txs: Option<Vec<Vec<u8>>>,
     same_block_spent_output_scripts: Option<SameBlockScriptMap>,
-    same_block_spent: SameBlockSpentSet,
+    same_block_spent: Option<SameBlockSpentSet>,
     utxo_add_capacity: usize,
     utxo_remove_capacity: usize,
 }
@@ -91,7 +91,7 @@ impl ApplyScratch {
             .then(|| HashSet::with_capacity(created_capacity));
         let mut created_scripts: Option<SameBlockScriptMap> =
             track_same_block_scripts.then(|| HashMap::with_capacity(created_capacity));
-        let mut same_block_spent = HashSet::with_capacity(spent_capacity);
+        let mut same_block_spent: Option<SameBlockSpentSet> = None;
         let mut same_block_spent_output_scripts: Option<SameBlockScriptMap> =
             track_same_block_scripts.then(|| HashMap::with_capacity(spent_capacity));
         let mut same_block_spent_input_count = 0usize;
@@ -106,7 +106,9 @@ impl ApplyScratch {
                     let previous_output = internal_outpoint(&input.previous_output);
                     if let Some(created_scripts) = &created_scripts {
                         if let Some(script) = created_scripts.get(&previous_output) {
-                            same_block_spent.insert(previous_output);
+                            same_block_spent
+                                .get_or_insert_with(|| HashSet::with_capacity(spent_capacity))
+                                .insert(previous_output);
                             same_block_spent_input_count += 1;
                             if let Some(spent_scripts) = &mut same_block_spent_output_scripts {
                                 spent_scripts.insert(previous_output, script.clone());
@@ -115,7 +117,9 @@ impl ApplyScratch {
                     } else if let Some(created_outpoints) = &created_outpoints
                         && created_outpoints.contains(&previous_output)
                     {
-                        same_block_spent.insert(previous_output);
+                        same_block_spent
+                            .get_or_insert_with(|| HashSet::with_capacity(spent_capacity))
+                            .insert(previous_output);
                         same_block_spent_input_count += 1;
                     }
                 }
@@ -134,7 +138,10 @@ impl ApplyScratch {
                 }
             }
         }
-        let utxo_add_capacity = created_capacity.saturating_sub(same_block_spent.len());
+        let same_block_spent_len = same_block_spent
+            .as_ref()
+            .map_or(0_usize, SameBlockSpentSet::len);
+        let utxo_add_capacity = created_capacity.saturating_sub(same_block_spent_len);
         let utxo_remove_capacity = spent_capacity.saturating_sub(same_block_spent_input_count);
         Ok(Self {
             txids,
@@ -154,8 +161,10 @@ impl ApplyScratch {
         self.raw_txs.as_deref()
     }
 
-    pub(super) fn same_block_spent(&self) -> &SameBlockSpentSet {
-        &self.same_block_spent
+    pub(super) fn contains_same_block_spent(&self, outpoint: &OutPoint) -> bool {
+        self.same_block_spent
+            .as_ref()
+            .is_some_and(|spent| spent.contains(outpoint))
     }
 
     pub(super) fn utxo_change_capacity(&self) -> (usize, usize) {

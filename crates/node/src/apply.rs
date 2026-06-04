@@ -1089,7 +1089,7 @@ fn build_utxo_changes(
                 bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
                 u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
             );
-            if scratch.same_block_spent().contains(&outpoint) {
+            if scratch.contains_same_block_spent(&outpoint) {
                 continue;
             }
             changes.add(UtxoAdd::new(
@@ -1103,7 +1103,7 @@ fn build_utxo_changes(
         if !tx.is_coinbase() {
             for tx_input in &tx.input {
                 let previous_output = internal_outpoint(&tx_input.previous_output);
-                if scratch.same_block_spent().contains(&previous_output) {
+                if scratch.contains_same_block_spent(&previous_output) {
                     continue;
                 }
                 changes.remove(previous_output);
@@ -1454,7 +1454,12 @@ mod consensus_rule_tests {
         let scratch = ApplyScratch::new(&block, 1, false, true)?;
         let changes = build_utxo_changes(&block, 1, &scratch)?;
 
-        assert!(scratch.same_block_spent().is_empty());
+        assert!(
+            !scratch.contains_same_block_spent(&internal_outpoint(&bitcoin::OutPoint {
+                txid: block.txdata[0].compute_txid(),
+                vout: 0,
+            }))
+        );
         assert!(
             scratch
                 .same_block_spent_output_script(&internal_outpoint(&bitcoin::OutPoint {
@@ -1498,11 +1503,7 @@ mod consensus_rule_tests {
         let block = block_with_transactions(vec![funding_tx, same_block_spend]);
         let funding_outpoint = internal_outpoint(&funding_outpoint);
         let scratch_without_scripts = ApplyScratch::new(&block, 2, false, false)?;
-        assert!(
-            scratch_without_scripts
-                .same_block_spent()
-                .contains(&funding_outpoint)
-        );
+        assert!(scratch_without_scripts.contains_same_block_spent(&funding_outpoint));
         assert!(
             scratch_without_scripts
                 .same_block_spent_output_script(&funding_outpoint)
