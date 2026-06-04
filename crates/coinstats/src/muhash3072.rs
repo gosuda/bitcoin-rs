@@ -120,7 +120,7 @@ impl Num3072 {
 
     fn multiply(&mut self, other: &Self) {
         let left = self.limbs;
-        let right = other.limbs;
+        let right = &other.limbs;
         let mut tmp = [0_u64; LIMBS];
         let mut c0 = 0_u64;
         let mut c1 = 0_u64;
