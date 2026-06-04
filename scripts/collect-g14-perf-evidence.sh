@@ -23,6 +23,9 @@ usage() {
     '  Criterion artifact ibd_start_height/hash and ibd_stop_height/hash matching the live Core window,' \
     '  Criterion artifact bitcoin_rs/core command/config sha256 fields matching the evidence JSON,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
+    '  optional Electrum/RSS binding: electrum_rss_measurement_path, electrum_rss_measurement_sha256,' \
+    '  electrum_rss_measurement_schema=g14-electrum-rss-measurement-v1, electrum_rss_measurement_sample_size=10000,' \
+    '  electrum_rss_measurement_tip_height/hash matching the live stop height/hash' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.' \
     '' \
@@ -119,6 +122,9 @@ import sys
 
 EVIDENCE_HELP = "collect-g14-perf-evidence.sh requires the JSON keys listed in --help"
 CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
+ELECTRUM_RSS_MEASUREMENT_SCHEMA = "g14-electrum-rss-measurement-v1"
+ELECTRUM_HISTORY_METHOD = "blockchain.scripthash.get_history"
+ELECTRUM_SAMPLE_SIZE = 10_000
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
 
@@ -154,6 +160,16 @@ def require_number(data: dict, key: str) -> str:
     return str(value)
 
 
+def require_number_value(data: dict, key: str, source: str) -> float:
+    value = data.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        die(f"{source} {key} must be a positive number")
+    numeric = float(value)
+    if not numeric > 0.0 or numeric == float("inf"):
+        die(f"{source} {key} must be finite and positive")
+    return numeric
+
+
 def require_text(data: dict, key: str) -> str:
     value = require_key(data, key)
     if not isinstance(value, str) or not value.strip():
@@ -168,9 +184,25 @@ def require_literal_value(data: dict, key: str, expected: str) -> str:
     return value
 
 
+def require_literal_field(data: dict, key: str, expected: str, source: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str):
+        die(f"{source} {key} must be a string")
+    if value != expected:
+        die(f"{source} {key} must be {expected!r}")
+    return value
+
+
 def require_hex(value: str, length: int, name: str) -> str:
     if not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
         die(f"{name} must be {length} lowercase hex characters")
+    return value
+
+
+def require_hex_field(data: dict, key: str, length: int, source: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
+        die(f"{source} {key} must be {length} lowercase hex characters")
     return value
 
 
@@ -215,6 +247,15 @@ def require_benchmark_run_id(data: dict, key: str, expected: str | None, source:
         die(f"{source} {key} must be a non-empty string")
     if expected is not None and value != expected:
         die(f"{source} {key} must match benchmark_artifact_path benchmark_run_id")
+    return value
+
+
+def require_exact_int(data: dict, key: str, expected: int, source: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        die(f"{source} {key} must be an integer")
+    if value != expected:
+        die(f"{source} {key} must be {expected}")
     return value
 
 
@@ -287,6 +328,101 @@ def read_criterion_artifact(
             die(f"benchmark_artifact_path benchmark {benchmark_id!r} elapsed_seconds must be finite and positive")
         elapsed_by_id[benchmark_id] = elapsed
     return benchmark_run_id, elapsed_by_id
+
+
+def read_json_file(path: Path, source: str):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except UnicodeDecodeError as error:
+        die(f"{source} must point to UTF-8 JSON: {error}")
+    except json.JSONDecodeError as error:
+        die(f"{source} must point to JSON: {error}")
+
+
+def validate_electrum_rss_measurement(
+    evidence: dict,
+    stop_height: int,
+    stop_hash: str,
+) -> None:
+    if "electrum_rss_measurement_path" not in evidence:
+        die("electrum_rss_measurement_path is required for G14 evidence")
+    path = Path(require_text(evidence, "electrum_rss_measurement_path"))
+    expected_sha = require_hex(
+        require_text(evidence, "electrum_rss_measurement_sha256"),
+        64,
+        "electrum_rss_measurement_sha256",
+    )
+    if not path.is_file():
+        die(f"electrum_rss_measurement_path is not a readable file: {path}")
+    if sha256_file(path) != expected_sha:
+        die("electrum_rss_measurement_sha256 must match electrum_rss_measurement_path")
+    data = read_json_file(path, "electrum_rss_measurement_path")
+    if not isinstance(data, dict):
+        die("electrum_rss_measurement_path must point to a JSON object")
+    require_literal_value(evidence, "electrum_rss_measurement_schema", ELECTRUM_RSS_MEASUREMENT_SCHEMA)
+    require_literal_field(data, "schema", ELECTRUM_RSS_MEASUREMENT_SCHEMA, "electrum_rss_measurement_path")
+    require_literal_field(data, "measurement_kind", "evidence", "electrum_rss_measurement_path")
+    require_literal_field(data, "method", ELECTRUM_HISTORY_METHOD, "electrum_rss_measurement_path")
+    require_exact_int(evidence, "electrum_rss_measurement_sample_size", ELECTRUM_SAMPLE_SIZE, "evidence JSON")
+    require_exact_int(data, "electrum_sample_size", ELECTRUM_SAMPLE_SIZE, "electrum_rss_measurement_path")
+    require_exact_int(
+        evidence,
+        "electrum_rss_measurement_non_empty_history_count",
+        ELECTRUM_SAMPLE_SIZE,
+        "evidence JSON",
+    )
+    require_exact_int(
+        data,
+        "electrum_non_empty_history_count",
+        ELECTRUM_SAMPLE_SIZE,
+        "electrum_rss_measurement_path",
+    )
+    require_exact_int(evidence, "electrum_rss_measurement_tip_height", stop_height, "evidence JSON")
+    require_exact_int(data, "electrum_tip_height", stop_height, "electrum_rss_measurement_path")
+    manifest_tip_hash = require_hex_field(
+        evidence,
+        "electrum_rss_measurement_tip_hash",
+        64,
+        "evidence JSON",
+    )
+    artifact_tip_hash = require_hex_field(
+        data,
+        "electrum_tip_hash",
+        64,
+        "electrum_rss_measurement_path",
+    )
+    if manifest_tip_hash != stop_hash or artifact_tip_hash != stop_hash:
+        die("electrum_rss_measurement tip hash must match live bitcoin-cli ibd_stop_hash")
+    corpus_hash = require_hex_field(
+        evidence,
+        "electrum_scripthash_corpus_sha256",
+        64,
+        "evidence JSON",
+    )
+    if require_hex_field(data, "electrum_scripthash_corpus_sha256", 64, "electrum_rss_measurement_path") != corpus_hash:
+        die("electrum_scripthash_corpus_sha256 must match electrum_rss_measurement_path")
+    if require_text(evidence, "electrum_scripthash_corpus") != require_literal_field(
+        data,
+        "electrum_scripthash_corpus",
+        require_text(evidence, "electrum_scripthash_corpus"),
+        "electrum_rss_measurement_path",
+    ):
+        die("electrum_scripthash_corpus must match electrum_rss_measurement_path")
+    if not math.isclose(
+        float(require_number(evidence, "electrum_get_history_p95_ms")),
+        require_number_value(data, "electrum_get_history_p95_ms", "electrum_rss_measurement_path"),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        die("electrum_get_history_p95_ms must match electrum_rss_measurement_path")
+    if require_int(evidence, "rss_bytes", positive=True) != require_exact_int(
+        data,
+        "rss_bytes",
+        require_int(evidence, "rss_bytes", positive=True),
+        "electrum_rss_measurement_path",
+    ):
+        die("rss_bytes must match electrum_rss_measurement_path")
 
 
 def require_artifact_elapsed(
@@ -404,6 +540,7 @@ if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
         "bitcoin-rs initial sync evidence must be faster than Bitcoin Core "
         f"for the same {block_count}-block IBD window"
     )
+validate_electrum_rss_measurement(data, stop_height, stop_hash)
 
 env = {
     "G14_COMMIT_SHA": bitcoin_rs_commit,
@@ -435,6 +572,44 @@ env = {
     "G14_UTXO_COMMIT_P95_MS": require_number(data, "utxo_commit_p95_ms"),
     "G14_ELECTRUM_GET_HISTORY_P95_MS": require_number(data, "electrum_get_history_p95_ms"),
     "G14_RSS_BYTES": str(require_int(data, "rss_bytes", positive=True)),
+    "G14_ELECTRUM_RSS_MEASUREMENT_PATH": require_text(data, "electrum_rss_measurement_path"),
+    "G14_ELECTRUM_RSS_MEASUREMENT_SHA256": require_hex(
+        require_text(data, "electrum_rss_measurement_sha256"),
+        64,
+        "electrum_rss_measurement_sha256",
+    ),
+    "G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA": require_literal_value(
+        data,
+        "electrum_rss_measurement_schema",
+        ELECTRUM_RSS_MEASUREMENT_SCHEMA,
+    ),
+    "G14_ELECTRUM_RSS_MEASUREMENT_SAMPLE_SIZE": str(
+        require_exact_int(data, "electrum_rss_measurement_sample_size", ELECTRUM_SAMPLE_SIZE, "evidence JSON")
+    ),
+    "G14_ELECTRUM_RSS_MEASUREMENT_NON_EMPTY_HISTORY_COUNT": str(
+        require_exact_int(
+            data,
+            "electrum_rss_measurement_non_empty_history_count",
+            ELECTRUM_SAMPLE_SIZE,
+            "evidence JSON",
+        )
+    ),
+    "G14_ELECTRUM_RSS_MEASUREMENT_TIP_HEIGHT": str(
+        require_exact_int(data, "electrum_rss_measurement_tip_height", stop_height, "evidence JSON")
+    ),
+    "G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH": require_hex_field(
+        data,
+        "electrum_rss_measurement_tip_hash",
+        64,
+        "evidence JSON",
+    ),
+    "G14_ELECTRUM_SCRIPTHASH_CORPUS": require_text(data, "electrum_scripthash_corpus"),
+    "G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256": require_hex_field(
+        data,
+        "electrum_scripthash_corpus_sha256",
+        64,
+        "evidence JSON",
+    ),
 }
 
 for key, value in env.items():

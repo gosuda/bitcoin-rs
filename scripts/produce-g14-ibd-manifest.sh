@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>]] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
+    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>]] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> (--electrum-rss-measurement <json> | --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>)' \
     '' \
     'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion benchmark IDs are provided.' \
     'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact with matching IBD window metadata, one shared benchmark_run_id, plus bitcoin-rs/Core command/config SHA-256 bindings.' \
@@ -28,6 +28,9 @@ import sys
 import time
 
 CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
+ELECTRUM_RSS_MEASUREMENT_SCHEMA = "g14-electrum-rss-measurement-v1"
+ELECTRUM_HISTORY_METHOD = "blockchain.scripthash.get_history"
+ELECTRUM_SAMPLE_SIZE = 10_000
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
 
@@ -146,6 +149,36 @@ def require_matching_hash_field(data: dict, key: str, expected: str, source: str
         die(f"{source} {key} must match the provided command/config")
 
 
+def require_literal_field(data: dict, key: str, expected: str, source: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str):
+        die(f"{source} {key} must be a string")
+    if value != expected:
+        die(f"{source} {key} must be {expected!r}")
+    return value
+
+
+def require_int_value(data: dict, key: str, source: str, *, positive: bool = False) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        die(f"{source} {key} must be an integer")
+    if positive and value <= 0:
+        die(f"{source} {key} must be positive")
+    if not positive and value < 0:
+        die(f"{source} {key} must be non-negative")
+    return value
+
+
+def require_number_value(data: dict, key: str, source: str) -> float:
+    value = data.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        die(f"{source} {key} must be a number")
+    value = float(value)
+    if not math.isfinite(value) or value <= 0.0:
+        die(f"{source} {key} must be finite and positive")
+    return value
+
+
 def require_benchmark_run_id(data: dict, key: str, expected: str | None, source: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -223,6 +256,56 @@ def require_optional_elapsed_matches_artifact(
     return supplied_elapsed
 
 
+def read_electrum_rss_measurement(path: Path, stop_height: int) -> dict:
+    data = read_json_file(path, "--electrum-rss-measurement")
+    if not isinstance(data, dict):
+        die("--electrum-rss-measurement must be a JSON object")
+    require_literal_field(data, "schema", ELECTRUM_RSS_MEASUREMENT_SCHEMA, "--electrum-rss-measurement")
+    require_literal_field(data, "measurement_kind", "evidence", "--electrum-rss-measurement")
+    require_literal_field(data, "method", ELECTRUM_HISTORY_METHOD, "--electrum-rss-measurement")
+    sample_size = require_int_value(data, "electrum_sample_size", "--electrum-rss-measurement", positive=True)
+    if sample_size != ELECTRUM_SAMPLE_SIZE:
+        die(f"--electrum-rss-measurement electrum_sample_size must be {ELECTRUM_SAMPLE_SIZE}")
+    non_empty = require_int_value(
+        data,
+        "electrum_non_empty_history_count",
+        "--electrum-rss-measurement",
+        positive=True,
+    )
+    if non_empty != sample_size:
+        die("--electrum-rss-measurement electrum_non_empty_history_count must equal electrum_sample_size")
+    tip_height = require_int_value(data, "electrum_tip_height", "--electrum-rss-measurement")
+    if tip_height != stop_height:
+        die("--electrum-rss-measurement electrum_tip_height must match --ibd-stop-height")
+    tip_hash = require_hex_field(data, "electrum_tip_hash", 64, "--electrum-rss-measurement")
+    corpus_hash = require_hex_field(
+        data,
+        "electrum_scripthash_corpus_sha256",
+        64,
+        "--electrum-rss-measurement",
+    )
+    corpus = data.get("electrum_scripthash_corpus")
+    if not isinstance(corpus, str) or not corpus.strip():
+        die("--electrum-rss-measurement electrum_scripthash_corpus must be a non-empty string")
+    if corpus == "generated-empty-scripthashes-for-smoke-test":
+        die("--electrum-rss-measurement must not be a smoke corpus")
+    return {
+        "electrum_get_history_p95_ms": require_number_value(
+            data,
+            "electrum_get_history_p95_ms",
+            "--electrum-rss-measurement",
+        ),
+        "rss_bytes": require_int_value(data, "rss_bytes", "--electrum-rss-measurement", positive=True),
+        "electrum_rss_measurement_schema": ELECTRUM_RSS_MEASUREMENT_SCHEMA,
+        "electrum_rss_measurement_tip_height": tip_height,
+        "electrum_rss_measurement_tip_hash": tip_hash,
+        "electrum_rss_measurement_sample_size": sample_size,
+        "electrum_rss_measurement_non_empty_history_count": non_empty,
+        "electrum_scripthash_corpus": corpus,
+        "electrum_scripthash_corpus_sha256": corpus_hash,
+    }
+
+
 def run_timed(command: str, name: str) -> float:
     started = time.monotonic()
     result = subprocess.run(command, shell=True, text=True, check=False)
@@ -249,6 +332,7 @@ parser.add_argument("--benchmark-artifact")
 parser.add_argument("--utxo-commit-p95-ms")
 parser.add_argument("--electrum-get-history-p95-ms")
 parser.add_argument("--rss-bytes")
+parser.add_argument("--electrum-rss-measurement")
 parser.add_argument("--criterion-bitcoin-rs-elapsed-seconds")
 parser.add_argument("--criterion-bitcoin-core-elapsed-seconds")
 parser.add_argument("--criterion-bitcoin-rs-benchmark-id")
@@ -267,7 +351,8 @@ if args.help:
         "--bitcoin-rs-config <path> --bitcoin-core-config <path> "
         "--bitcoin-core-version <version> --bitcoin-core-commit <40-hex> "
         "--benchmark-artifact <path> --utxo-commit-p95-ms <ms> "
-        "--electrum-get-history-p95-ms <ms> --rss-bytes <bytes>"
+        "(--electrum-rss-measurement <json> | "
+        "--electrum-get-history-p95-ms <ms> --rss-bytes <bytes>)"
     )
     raise SystemExit(0)
 
@@ -283,8 +368,6 @@ required = {
     "--bitcoin-core-commit": args.bitcoin_core_commit,
     "--benchmark-artifact": args.benchmark_artifact,
     "--utxo-commit-p95-ms": args.utxo_commit_p95_ms,
-    "--electrum-get-history-p95-ms": args.electrum_get_history_p95_ms,
-    "--rss-bytes": args.rss_bytes,
 }
 missing = [name for name, value in required.items() if value is None]
 if missing:
@@ -318,11 +401,33 @@ if not re.fullmatch(r"[0-9a-f]{40}", bitcoin_core_commit):
 benchmark_artifact = require_file(args.benchmark_artifact, "--benchmark-artifact")
 benchmark_artifact_path = str(benchmark_artifact.resolve())
 utxo_commit_p95_ms = positive_float(args.utxo_commit_p95_ms, "--utxo-commit-p95-ms")
-electrum_get_history_p95_ms = positive_float(
-    args.electrum_get_history_p95_ms,
-    "--electrum-get-history-p95-ms",
-)
-rss_bytes = positive_int(args.rss_bytes, "--rss-bytes")
+if args.electrum_rss_measurement is not None:
+    electrum_rss_measurement = require_file(
+        args.electrum_rss_measurement,
+        "--electrum-rss-measurement",
+    )
+    electrum_rss_measurement_path = str(electrum_rss_measurement.resolve())
+    electrum_rss = read_electrum_rss_measurement(electrum_rss_measurement, stop_height)
+    if args.electrum_get_history_p95_ms is not None:
+        supplied = positive_float(args.electrum_get_history_p95_ms, "--electrum-get-history-p95-ms")
+        if not math.isclose(supplied, electrum_rss["electrum_get_history_p95_ms"], rel_tol=0.0, abs_tol=1e-12):
+            die("--electrum-get-history-p95-ms must match --electrum-rss-measurement")
+    if args.rss_bytes is not None:
+        supplied = positive_int(args.rss_bytes, "--rss-bytes")
+        if supplied != electrum_rss["rss_bytes"]:
+            die("--rss-bytes must match --electrum-rss-measurement")
+    electrum_rss["electrum_rss_measurement_path"] = electrum_rss_measurement_path
+    electrum_rss["electrum_rss_measurement_sha256"] = sha256_file(electrum_rss_measurement)
+else:
+    if args.electrum_get_history_p95_ms is None or args.rss_bytes is None:
+        die("--electrum-rss-measurement or both --electrum-get-history-p95-ms and --rss-bytes are required")
+    electrum_rss = {
+        "electrum_get_history_p95_ms": positive_float(
+            args.electrum_get_history_p95_ms,
+            "--electrum-get-history-p95-ms",
+        ),
+        "rss_bytes": positive_int(args.rss_bytes, "--rss-bytes"),
+    }
 
 criterion_elapsed_args = (
     args.criterion_bitcoin_rs_elapsed_seconds,
@@ -394,6 +499,9 @@ else:
     bitcoin_rs_elapsed_seconds = run_timed(bitcoin_rs_command, "--bitcoin-rs-command")
     bitcoin_core_elapsed_seconds = run_timed(bitcoin_core_command, "--bitcoin-core-command")
 
+if bench_tool == "criterion" and args.electrum_rss_measurement is None:
+    die("Criterion G14 manifests require --electrum-rss-measurement")
+
 manifest = {
     "ibd_start_height": start_height,
     "ibd_stop_height": stop_height,
@@ -414,8 +522,7 @@ manifest = {
     "benchmark_artifact_sha256": sha256_file(benchmark_artifact),
     **command_config_hashes,
     "utxo_commit_p95_ms": utxo_commit_p95_ms,
-    "electrum_get_history_p95_ms": electrum_get_history_p95_ms,
-    "rss_bytes": rss_bytes,
+    **electrum_rss,
 }
 if all(criterion_benchmark_ids_supplied):
     manifest["criterion_artifact_schema"] = CRITERION_ARTIFACT_SCHEMA

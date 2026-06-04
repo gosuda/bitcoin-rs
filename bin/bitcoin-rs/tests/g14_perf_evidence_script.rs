@@ -184,6 +184,14 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
     let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let measurement = electrum_rss_measurement_json(
+        temp.path(),
+        "electrum-rss.json",
+        "g14-electrum-rss-measurement-v1",
+        "evidence",
+        10,
+        "000000000000000000000000000000000000000000000000000000000000000a",
+    )?;
     let manifest = temp.path().join("g14-produced-criterion.json");
 
     let producer_output = Command::new("bash")
@@ -219,10 +227,8 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
             artifact.to_str().ok_or("non-UTF-8 artifact")?,
             "--utxo-commit-p95-ms",
             "12.5",
-            "--electrum-get-history-p95-ms",
-            "20.0",
-            "--rss-bytes",
-            "1024",
+            "--electrum-rss-measurement",
+            measurement.to_str().ok_or("non-UTF-8 measurement")?,
         ])
         .output()?;
     assert_success(&producer_output);
@@ -256,6 +262,153 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
 }
 
 #[test]
+fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let measurement = electrum_rss_measurement_json(
+        temp.path(),
+        "electrum-rss.json",
+        "g14-electrum-rss-measurement-v1",
+        "evidence",
+        10,
+        "000000000000000000000000000000000000000000000000000000000000000a",
+    )?;
+    let manifest = temp.path().join("g14-produced-with-electrum-rss.json");
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-benchmark-id",
+            "bitcoin-rs/mainnet-ibd",
+            "--criterion-bitcoin-core-benchmark-id",
+            "bitcoin-core/mainnet-ibd",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-rss-measurement",
+            measurement.to_str().ok_or("non-UTF-8 measurement")?,
+        ])
+        .output()?;
+    assert_success(&producer_output);
+
+    let manifest_json = fs::read_to_string(&manifest)?;
+    assert!(manifest_json.contains(r#""electrum_get_history_p95_ms": 20.0"#));
+    assert!(manifest_json.contains(r#""rss_bytes": 1024"#));
+    assert!(
+        manifest_json
+            .contains(r#""electrum_rss_measurement_schema": "g14-electrum-rss-measurement-v1""#)
+    );
+    assert!(manifest_json.contains(r#""electrum_rss_measurement_sample_size": 10000"#));
+    assert!(manifest_json.contains(r#""electrum_rss_measurement_non_empty_history_count": 10000"#));
+    assert!(manifest_json.contains(r#""electrum_rss_measurement_sha256":"#));
+
+    let collector_output = Command::new("bash")
+        .arg(script_path())
+        .arg(&manifest)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert_success(&collector_output);
+    Ok(())
+}
+
+#[test]
+fn producer_rejects_smoke_electrum_rss_measurement() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let measurement = electrum_rss_measurement_json(
+        temp.path(),
+        "electrum-rss-smoke.json",
+        "g14-electrum-rss-smoke-v1",
+        "smoke",
+        10,
+        "000000000000000000000000000000000000000000000000000000000000000a",
+    )?;
+    let manifest = temp
+        .path()
+        .join("g14-produced-with-smoke-electrum-rss.json");
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-benchmark-id",
+            "bitcoin-rs/mainnet-ibd",
+            "--criterion-bitcoin-core-benchmark-id",
+            "bitcoin-core/mainnet-ibd",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-rss-measurement",
+            measurement.to_str().ok_or("non-UTF-8 measurement")?,
+        ])
+        .output()?;
+
+    assert!(!producer_output.status.success());
+    assert!(String::from_utf8_lossy(&producer_output.stderr).contains("schema"));
+    assert!(!manifest.exists());
+    Ok(())
+}
+
+#[test]
 fn artifact_producer_emits_collectable_same_window_criterion_artifact()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -274,6 +427,14 @@ fn artifact_producer_emits_collectable_same_window_criterion_artifact()
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let measurement = electrum_rss_measurement_json(
+        temp.path(),
+        "electrum-rss-live.json",
+        "g14-electrum-rss-measurement-v1",
+        "evidence",
+        10,
+        "000000000000000000000000000000000000000000000000000000000000000a",
+    )?;
     let artifact = temp.path().join("g14-criterion-artifact.json");
     let manifest = temp.path().join("g14-live-produced.json");
 
@@ -330,10 +491,8 @@ fn artifact_producer_emits_collectable_same_window_criterion_artifact()
             artifact.to_str().ok_or("non-UTF-8 artifact path")?,
             "--utxo-commit-p95-ms",
             "12.5",
-            "--electrum-get-history-p95-ms",
-            "20.0",
-            "--rss-bytes",
-            "1024",
+            "--electrum-rss-measurement",
+            measurement.to_str().ok_or("non-UTF-8 measurement")?,
         ])
         .output()?;
     assert_success(&producer_output);
@@ -1329,6 +1488,48 @@ fn criterion_artifact_json_with_window_and_hashes(
     )
 }
 
+fn electrum_rss_measurement_json(
+    dir: &Path,
+    name: &str,
+    schema: &str,
+    measurement_kind: &str,
+    tip_height: u32,
+    tip_hash: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    write_text(
+        dir,
+        name,
+        &format!(
+            r#"{{
+  "schema": "{schema}",
+  "measurement_kind": "{measurement_kind}",
+  "method": "blockchain.scripthash.get_history",
+  "electrum_host": "127.0.0.1",
+  "electrum_port": 50001,
+  "electrum_tip_height": {tip_height},
+  "electrum_tip_hash": "{tip_hash}",
+  "electrum_sample_size": 10000,
+  "electrum_sample_seed": "g14-test",
+  "electrum_non_empty_history_count": 10000,
+  "electrum_scripthash_corpus": "/tmp/g14-scripthashes.txt",
+  "electrum_scripthash_corpus_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "electrum_get_history_p50_ms": 10.0,
+  "electrum_get_history_p95_ms": 20.0,
+  "electrum_get_history_p99_ms": 25.0,
+  "electrum_get_history_min_ms": 1.0,
+  "electrum_get_history_max_ms": 30.0,
+  "electrum_measurement_elapsed_seconds": 60.0,
+  "rss_bytes": 1024,
+  "rss_final_bytes": 900,
+  "rss_pid": 4242,
+  "rss_pid_argv0_basename": "bitcoin-rs",
+  "rss_pid_exe_basename": "bitcoin-rs",
+  "rss_source": "/proc/4242/status VmRSS"
+}}"#,
+        ),
+    )
+}
+
 fn evidence_json_with_artifact_command_hash(
     dir: &Path,
     start_height: u32,
@@ -1600,14 +1801,25 @@ fn evidence_json_with_binding_fields(
     indexes: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("g14.json");
+    let stop_hash = format!("{stop_height:064x}");
     let artifact = criterion_artifact_json(
         dir,
         "criterion-direct.json",
         bitcoin_rs_elapsed_seconds,
         bitcoin_core_elapsed_seconds,
     )?;
+    let measurement = electrum_rss_measurement_json(
+        dir,
+        "electrum-rss-direct.json",
+        "g14-electrum-rss-measurement-v1",
+        "evidence",
+        stop_height,
+        &stop_hash,
+    )?;
     let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
     let artifact_sha256 = sha256_file(&artifact)?;
+    let measurement_path = measurement.to_str().ok_or("non-UTF-8 measurement path")?;
+    let measurement_sha256 = sha256_file(&measurement)?;
     fs::write(
         &path,
         format!(
@@ -1634,7 +1846,16 @@ fn evidence_json_with_binding_fields(
   "benchmark_artifact_sha256": "{artifact_sha256}",
   "utxo_commit_p95_ms": 12.5,
   "electrum_get_history_p95_ms": 20.0,
-  "rss_bytes": 1024
+  "rss_bytes": 1024,
+  "electrum_rss_measurement_path": "{measurement_path}",
+  "electrum_rss_measurement_sha256": "{measurement_sha256}",
+  "electrum_rss_measurement_schema": "g14-electrum-rss-measurement-v1",
+  "electrum_rss_measurement_tip_height": {stop_height},
+  "electrum_rss_measurement_tip_hash": "{stop_hash}",
+  "electrum_rss_measurement_sample_size": 10000,
+  "electrum_rss_measurement_non_empty_history_count": 10000,
+  "electrum_scripthash_corpus": "/tmp/g14-scripthashes.txt",
+  "electrum_scripthash_corpus_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
 }}"#,
         ),
     )?;

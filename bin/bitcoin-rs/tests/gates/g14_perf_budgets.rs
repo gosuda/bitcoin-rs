@@ -17,6 +17,7 @@ const MAX_ELECTRUM_GET_HISTORY_P95_MS: f64 = 30.0;
 const MAX_RSS_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const FOUR_MIB_BYTES: u64 = 4 * 1024 * 1024;
 const EXPECTED_ELECTRUM_SAMPLE_SIZE: u64 = 10_000;
+const ELECTRUM_RSS_MEASUREMENT_SCHEMA: &str = "g14-electrum-rss-measurement-v1";
 
 const EVIDENCE_HELP: &str = "required G14 evidence env: \
 G14_COMMIT_SHA=<current git HEAD as 40 lowercase hex>, \
@@ -47,7 +48,16 @@ G14_BITCOIN_CORE_CONFIG_SHA256=<64 lowercase hex>, \
 G14_BENCHMARK_ARTIFACT_SHA256=<64 lowercase hex>, \
 G14_UTXO_COMMIT_P95_MS, \
 G14_ELECTRUM_GET_HISTORY_P95_MS, \
-G14_RSS_BYTES";
+G14_RSS_BYTES, \
+G14_ELECTRUM_RSS_MEASUREMENT_PATH, \
+G14_ELECTRUM_RSS_MEASUREMENT_SHA256=<64 lowercase hex>, \
+G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA=g14-electrum-rss-measurement-v1, \
+G14_ELECTRUM_RSS_MEASUREMENT_SAMPLE_SIZE=10000, \
+G14_ELECTRUM_RSS_MEASUREMENT_NON_EMPTY_HISTORY_COUNT=10000, \
+G14_ELECTRUM_RSS_MEASUREMENT_TIP_HEIGHT=G14_IBD_STOP_HEIGHT, \
+G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH=G14_IBD_STOP_HASH, \
+G14_ELECTRUM_SCRIPTHASH_CORPUS, \
+G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256=<64 lowercase hex>";
 
 struct G14Evidence {
     commit_sha: String,
@@ -74,6 +84,10 @@ struct G14Evidence {
     utxo_commit_p95_ms: f64,
     electrum_get_history_p95_ms: f64,
     rss_bytes: u64,
+    electrum_rss_measurement_path: String,
+    electrum_rss_measurement_sha256: String,
+    electrum_scripthash_corpus: String,
+    electrum_scripthash_corpus_sha256: String,
 }
 
 /// Gate G14 manual run instructions: run
@@ -125,6 +139,31 @@ impl G14Evidence {
         let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
         let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
         let benchmark_artifact_sha256 = required_hex("G14_BENCHMARK_ARTIFACT_SHA256", 64);
+        require_literal(
+            "G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA",
+            ELECTRUM_RSS_MEASUREMENT_SCHEMA,
+        );
+        require_exact_u64(
+            "G14_ELECTRUM_RSS_MEASUREMENT_SAMPLE_SIZE",
+            EXPECTED_ELECTRUM_SAMPLE_SIZE,
+        );
+        require_exact_u64(
+            "G14_ELECTRUM_RSS_MEASUREMENT_NON_EMPTY_HISTORY_COUNT",
+            EXPECTED_ELECTRUM_SAMPLE_SIZE,
+        );
+        require_exact_u64("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HEIGHT", stop_height);
+        let electrum_rss_measurement_tip_hash =
+            required_hex("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH", 64);
+        assert_eq!(
+            electrum_rss_measurement_tip_hash, stop_hash,
+            "G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH must match G14_IBD_STOP_HASH"
+        );
+        let electrum_rss_measurement_path = required_env("G14_ELECTRUM_RSS_MEASUREMENT_PATH");
+        let electrum_rss_measurement_sha256 =
+            required_hex("G14_ELECTRUM_RSS_MEASUREMENT_SHA256", 64);
+        let electrum_scripthash_corpus = required_env("G14_ELECTRUM_SCRIPTHASH_CORPUS");
+        let electrum_scripthash_corpus_sha256 =
+            required_hex("G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256", 64);
         let initial_sync_bps = measured_bps(bitcoin_rs_ibd_blocks, bitcoin_rs_elapsed_seconds);
         let bitcoin_core_initial_sync_bps =
             measured_bps(bitcoin_core_ibd_blocks, bitcoin_core_elapsed_seconds);
@@ -154,6 +193,10 @@ impl G14Evidence {
             utxo_commit_p95_ms: positive_f64("G14_UTXO_COMMIT_P95_MS"),
             electrum_get_history_p95_ms: positive_f64("G14_ELECTRUM_GET_HISTORY_P95_MS"),
             rss_bytes: positive_u64("G14_RSS_BYTES"),
+            electrum_rss_measurement_path,
+            electrum_rss_measurement_sha256,
+            electrum_scripthash_corpus,
+            electrum_scripthash_corpus_sha256,
         }
     }
 
@@ -178,11 +221,14 @@ impl G14Evidence {
         );
         let required_sync_bps =
             self.bitcoin_core_initial_sync_bps * MIN_INITIAL_SYNC_RATIO_VS_BITCOIN_CORE;
+        let initial_sync_speedup_vs_bitcoin_core =
+            self.initial_sync_bps / self.bitcoin_core_initial_sync_bps;
         assert!(
             self.initial_sync_bps > required_sync_bps,
-            "G14 initial sync throughput failed: bitcoin-rs {} blocks/s, Bitcoin Core {} blocks/s, required faster than {} blocks/s",
+            "G14 initial sync throughput failed: bitcoin-rs {} blocks/s, Bitcoin Core {} blocks/s, speedup {}x, required faster than {} blocks/s",
             self.initial_sync_bps,
             self.bitcoin_core_initial_sync_bps,
+            initial_sync_speedup_vs_bitcoin_core,
             required_sync_bps,
         );
         assert!(
@@ -227,9 +273,15 @@ impl G14Evidence {
         let benchmark_artifact_sha256 = &self.benchmark_artifact_sha256;
         let initial_sync_bps = self.initial_sync_bps;
         let bitcoin_core_initial_sync_bps = self.bitcoin_core_initial_sync_bps;
+        let initial_sync_speedup_vs_bitcoin_core =
+            self.initial_sync_bps / self.bitcoin_core_initial_sync_bps;
         let utxo_commit_p95_ms = self.utxo_commit_p95_ms;
         let electrum_get_history_p95_ms = self.electrum_get_history_p95_ms;
         let rss_bytes = self.rss_bytes;
+        let electrum_rss_measurement_path = &self.electrum_rss_measurement_path;
+        let electrum_rss_measurement_sha256 = &self.electrum_rss_measurement_sha256;
+        let electrum_scripthash_corpus = &self.electrum_scripthash_corpus;
+        let electrum_scripthash_corpus_sha256 = &self.electrum_scripthash_corpus_sha256;
         println!("G14 evidence accepted for current git HEAD {commit_sha}");
         println!("ibd_start_height={start_height}");
         println!("ibd_start_hash={start_hash}");
@@ -251,9 +303,14 @@ impl G14Evidence {
         println!("benchmark_artifact_sha256={benchmark_artifact_sha256}");
         println!("initial_sync_bps={initial_sync_bps}");
         println!("bitcoin_core_initial_sync_bps={bitcoin_core_initial_sync_bps}");
+        println!("initial_sync_speedup_vs_bitcoin_core={initial_sync_speedup_vs_bitcoin_core}");
         println!("utxo_commit_p95_ms={utxo_commit_p95_ms}");
         println!("electrum_get_history_p95_ms={electrum_get_history_p95_ms}");
         println!("rss_bytes={rss_bytes}");
+        println!("electrum_rss_measurement_path={electrum_rss_measurement_path}");
+        println!("electrum_rss_measurement_sha256={electrum_rss_measurement_sha256}");
+        println!("electrum_scripthash_corpus={electrum_scripthash_corpus}");
+        println!("electrum_scripthash_corpus_sha256={electrum_scripthash_corpus_sha256}");
     }
 }
 
