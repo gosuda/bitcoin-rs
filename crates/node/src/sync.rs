@@ -51,6 +51,8 @@ const RECEIVED_BLOCK_BUDGET: usize = 128;
 const PENDING_BYTE_BUDGET: usize = 128 * 256 * 1024;
 /// Maximum serialized bytes staged in memory while waiting for predecessors.
 const RECEIVED_BLOCK_BYTE_BUDGET: usize = 128 * 256 * 1024;
+/// Maximum decoded inbound blocks held before handing them to `BlockStager`.
+const INBOUND_BLOCK_STAGE_CHUNK: usize = 16;
 /// Maximum block requests one peer may own at once.
 ///
 /// `BlockSync::tick` currently selects one sync peer per tick. Keep the default
@@ -181,30 +183,33 @@ impl BlockSync {
     }
 
     fn drain_inbound_blocks(&self) {
-        let receiver = self.inbound_blocks_rx.lock();
         let apply_head_check;
-        let received = if let Ok(first_block) = receiver.try_recv() {
+        let received = if let Some(first_block) = self.try_recv_inbound_block() {
             let next_expected_hash = self.next_expected_block_hash();
             apply_head_check = next_expected_hash.filter(|hash| {
                 *hash != Hash256::from_le_bytes(first_block.block_hash().as_byte_array())
             });
-            if let Ok(second_block) = receiver.try_recv() {
-                let mut blocks = Vec::with_capacity(2);
-                blocks.push(first_block);
-                blocks.push(second_block);
-                while let Ok(block) = receiver.try_recv() {
+            let mut blocks = Vec::with_capacity(INBOUND_BLOCK_STAGE_CHUNK);
+            blocks.push(first_block);
+            let mut received = 0_usize;
+            let mut receiver_empty = false;
+            while !receiver_empty || !blocks.is_empty() {
+                while blocks.len() < INBOUND_BLOCK_STAGE_CHUNK {
+                    let Some(block) = self.try_recv_inbound_block() else {
+                        receiver_empty = true;
+                        break;
+                    };
                     blocks.push(block);
                 }
-                drop(receiver);
-                self.buffer_received_blocks(blocks, next_expected_hash)
-            } else {
-                drop(receiver);
-                self.buffer_received_block(first_block, next_expected_hash);
-                1
+                if !blocks.is_empty() {
+                    received = received.saturating_add(
+                        self.buffer_received_block_chunk(&mut blocks, next_expected_hash),
+                    );
+                }
             }
+            received
         } else {
             apply_head_check = None;
-            drop(receiver);
             0
         };
 
@@ -232,16 +237,20 @@ impl BlockSync {
         }
     }
 
-    fn buffer_received_blocks(
+    fn try_recv_inbound_block(&self) -> Option<bitcoin::Block> {
+        self.inbound_blocks_rx.lock().try_recv().ok()
+    }
+
+    fn buffer_received_block_chunk(
         &self,
-        blocks: Vec<bitcoin::Block>,
+        blocks: &mut Vec<bitcoin::Block>,
         next_expected_hash: Option<Hash256>,
     ) -> usize {
         let mut staged_blocks = Vec::with_capacity(blocks.len());
         {
             let mut stager = self.block_stager.lock();
             let now = Instant::now();
-            for block in blocks {
+            for block in blocks.drain(..) {
                 let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
                 let staged = stager.insert(hash, next_expected_hash, block, now);
                 staged_blocks.push((hash, staged));
@@ -249,14 +258,15 @@ impl BlockSync {
         }
 
         let mut height_lookups = Vec::new();
+        let staged_count = staged_blocks.len();
         {
             let mut window = self.download_window.lock();
-            for (hash, staged) in &staged_blocks {
+            for (hash, staged) in staged_blocks {
                 match staged {
                     StagedBlock::AlreadyStaged => {}
                     StagedBlock::Memory { bytes, dropped } => {
-                        if window.mark_received(*hash, *bytes) {
-                            height_lookups.push(*hash);
+                        if window.mark_received(hash, bytes) {
+                            height_lookups.push(hash);
                         }
                         for dropped in dropped {
                             window.drop_received_for_retry(&dropped.hash);
@@ -289,39 +299,7 @@ impl BlockSync {
                 }
             }
         }
-
-        staged_blocks.len()
-    }
-
-    fn buffer_received_block(&self, block: bitcoin::Block, next_expected_hash: Option<Hash256>) {
-        let now = Instant::now();
-        let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
-        let staged = self
-            .block_stager
-            .lock()
-            .insert(hash, next_expected_hash, block, now);
-        match staged {
-            StagedBlock::AlreadyStaged => {}
-            StagedBlock::Memory { bytes, dropped } => {
-                let mut window = self.download_window.lock();
-                let needs_height_lookup = window.mark_received(hash, bytes);
-                for dropped in dropped {
-                    window.drop_received_for_retry(&dropped.hash);
-                    metrics::counter!("node.sync.retry_count").increment(1);
-                }
-                drop(window);
-                if needs_height_lookup && let Some(height) = self.received_block_height(hash) {
-                    self.download_window
-                        .lock()
-                        .update_received_height(&hash, height);
-                }
-            }
-            StagedBlock::DroppedForRetry { dropped } => {
-                self.download_window.lock().drop_for_retry(&dropped.hash);
-                metrics::counter!("node.sync.retry_count").increment(1);
-                tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
-            }
-        }
+        staged_count
     }
 
     fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
@@ -447,12 +425,6 @@ impl BlockSync {
             return None;
         }
         Some(cache.hashes.iter().copied().take(max_count).collect())
-    }
-
-    fn received_block_height(&self, hash: Hash256) -> Option<u32> {
-        let tree = self.handles.block_tree.read();
-        let node_id = tree.lookup(hash)?;
-        tree.node(node_id).ok().map(|node| node.height)
     }
 
     fn next_expected_block_hash(&self) -> Option<Hash256> {
@@ -1940,6 +1912,41 @@ mod tests {
         assert_eq!(
             sync.handles.block_tree.read().height_of_hash(block1_hash),
             Some(1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = deterministic_proxy_fixture()?;
+        let max_received_blocks = 2;
+        install_budget(
+            &fixture.sync,
+            super::SyncBudget {
+                max_received_blocks,
+                max_received_bytes: usize::MAX,
+                ..super::default_sync_budget()
+            },
+        );
+
+        for block in fixture.blocks[1..6].iter().rev() {
+            fixture.inbound_blocks_tx.send(block.clone())?;
+        }
+
+        fixture.sync.drain_inbound_blocks();
+
+        assert!(
+            fixture.sync.block_stager.lock().received_len() <= max_received_blocks,
+            "block stager must enforce received block count budget"
+        );
+        assert!(
+            fixture.sync.download_window.lock().received_len() <= max_received_blocks,
+            "download window must mirror received block count budget"
+        );
+        assert!(
+            fixture.applied_tip.load_full().is_none(),
+            "missing next expected block should prevent out-of-order apply"
         );
         Ok(())
     }

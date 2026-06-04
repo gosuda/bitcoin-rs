@@ -45,6 +45,8 @@ const SYNC_PROXY_HEADER_HEIGHT: u32 = 4_096;
 const SYNC_PROXY_BLOCKS_USIZE: usize = 128;
 const SYNC_PROXY_START_HEIGHT: i32 = 4_096;
 const SYNC_PROXY_PEERS: usize = 512;
+const SYNC_OVERSIZED_BURST_BLOCKS: u32 = 1_024;
+const SYNC_OVERSIZED_BURST_BLOCKS_USIZE: usize = 1_024;
 const SPEND_PROXY_COINBASE_MATURITY: u32 = 100;
 const SPEND_PROXY_SPEND_BLOCKS: u32 = 16;
 const SPEND_PROXY_FANOUT: u32 = 64;
@@ -208,6 +210,22 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    c.bench_function(
+        "deterministic_initial_sync_proxy_oversized_inbound_burst_1024_blocks",
+        |b| {
+            b.iter_batched(
+                || {
+                    SyncFixture::new_with_block_count(
+                        TxIndexMode::Disabled,
+                        1,
+                        SYNC_OVERSIZED_BURST_BLOCKS,
+                    )
+                },
+                |fixture| black_box(fixture.run_oversized_inbound_burst()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     #[cfg(feature = "rocksdb")]
     c.bench_function(
         "deterministic_initial_sync_proxy_deep_headers_txindex_rocksdb_128_blocks",
@@ -357,8 +375,16 @@ impl SyncFixture {
     }
 
     fn new_with_peers(tx_index_mode: TxIndexMode, peer_count: usize) -> Self {
+        Self::new_with_block_count(tx_index_mode, peer_count, SYNC_PROXY_BLOCKS)
+    }
+
+    fn new_with_block_count(
+        tx_index_mode: TxIndexMode,
+        peer_count: usize,
+        block_count: u32,
+    ) -> Self {
         let mut tree = BlockTree::new();
-        let (blocks, received_scan_expected) = populate_sync_header_chain(&mut tree);
+        let (blocks, received_scan_expected) = populate_sync_header_chain(&mut tree, block_count);
 
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
@@ -491,6 +517,17 @@ impl SyncFixture {
         assert_eq!(requested, self.received_scan_expected);
         requested.len()
     }
+
+    fn run_oversized_inbound_burst(self) -> usize {
+        self.sync.tick();
+        for block in self.blocks[1..].iter().rev() {
+            self.inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send oversized burst block failed: {error}"));
+        }
+        self.sync.tick();
+        SYNC_OVERSIZED_BURST_BLOCKS_USIZE.saturating_sub(1)
+    }
 }
 
 struct ProductionStateSyncFixture {
@@ -512,7 +549,8 @@ impl ProductionStateSyncFixture {
         let blocks = {
             let block_tree = state.block_tree();
             let mut tree = block_tree.write();
-            let (blocks, _received_scan_expected) = populate_sync_header_chain(&mut tree);
+            let (blocks, _received_scan_expected) =
+                populate_sync_header_chain(&mut tree, SYNC_PROXY_BLOCKS);
             blocks
         };
         let outbound_rxs =
@@ -588,7 +626,10 @@ impl ProductionStateSyncFixture {
     }
 }
 
-fn populate_sync_header_chain(tree: &mut BlockTree) -> (Vec<Block>, Vec<BlockHash>) {
+fn populate_sync_header_chain(
+    tree: &mut BlockTree,
+    body_blocks: u32,
+) -> (Vec<Block>, Vec<BlockHash>) {
     let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
     let genesis_id = tree
         .insert_node(None, genesis.header, NodeStatus::HeaderValid)
@@ -597,11 +638,13 @@ fn populate_sync_header_chain(tree: &mut BlockTree) -> (Vec<Block>, Vec<BlockHas
     let mut parent = genesis;
     let mut prev_hash = parent.block_hash();
     let mut header_time = parent.header.time;
-    let mut blocks = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
+    let block_capacity =
+        usize::try_from(body_blocks).unwrap_or_else(|error| panic!("invalid body count: {error}"));
+    let mut blocks = Vec::with_capacity(block_capacity);
     let mut received_scan_expected = Vec::with_capacity(SYNC_PROXY_BLOCKS_USIZE);
 
     for height in 1_u32..=SYNC_PROXY_HEADER_HEIGHT {
-        let header = if height <= SYNC_PROXY_BLOCKS {
+        let header = if height <= body_blocks {
             let block = child_coinbase_block(&parent, height);
             parent = block.clone();
             prev_hash = block.block_hash();
