@@ -279,6 +279,7 @@ impl BlockSync {
         }
 
         let mut height_lookups = Vec::new();
+        let mut retry_count = 0_u64;
         let staged_count = staged_blocks.len();
         {
             let mut window = self.download_window.lock();
@@ -291,16 +292,19 @@ impl BlockSync {
                         }
                         for dropped in dropped {
                             window.drop_received_for_retry(&dropped.hash);
-                            metrics::counter!("node.sync.retry_count").increment(1);
+                            retry_count = retry_count.saturating_add(1);
                         }
                     }
                     StagedBlock::DroppedForRetry { dropped } => {
                         window.drop_for_retry(&dropped.hash);
-                        metrics::counter!("node.sync.retry_count").increment(1);
+                        retry_count = retry_count.saturating_add(1);
                         tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
                     }
                 }
             }
+        }
+        if retry_count > 0 {
+            metrics::counter!("node.sync.retry_count").increment(retry_count);
         }
 
         if !height_lookups.is_empty() {
