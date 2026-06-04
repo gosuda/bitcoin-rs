@@ -128,6 +128,26 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    c.bench_function("sync_pipeline_apply_spend_heavy_proxy_filter", |b| {
+        b.iter_batched(
+            open_regtest_filter_state,
+            |(_dir, state)| {
+                for block in &spend_blocks {
+                    state.apply_block(black_box(block)).unwrap_or_else(|error| {
+                        panic!("spend-heavy filter proxy apply failed: {error}")
+                    });
+                }
+                black_box(
+                    state
+                        .applied_tip()
+                        .load_full()
+                        .unwrap_or_else(|| panic!("spend-heavy filter proxy did not publish a tip"))
+                        .height,
+                );
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 fn deterministic_initial_sync_proxy(c: &mut Criterion) {
@@ -284,6 +304,18 @@ fn open_regtest_state() -> (TempDir, NodeState) {
     config.txindex = false;
     let state =
         NodeState::open(config).unwrap_or_else(|error| panic!("open node state failed: {error}"));
+    (dir, state)
+}
+
+fn open_regtest_filter_state() -> (TempDir, NodeState) {
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("node");
+    config.p2p_listen.clear();
+    config.txindex = false;
+    config.blockfilterindex = true;
+    let state = NodeState::open(config)
+        .unwrap_or_else(|error| panic!("open filter node state failed: {error}"));
     (dir, state)
 }
 
