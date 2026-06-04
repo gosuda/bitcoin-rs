@@ -792,15 +792,15 @@ impl UtxoSet {
             self.shards[shard_idx].validate_script_capacity(buckets.adds(shard_idx))?;
         }
 
-        let mut errors = Vec::new();
+        let mut error = None;
         let mut shard_events = Vec::with_capacity(active_shard_count);
         for &shard_idx in &active_shards[..active_shard_count] {
             let shard_adds = buckets.adds(shard_idx);
             let shard_removes = buckets.removes(shard_idx);
             let (events, result) =
                 self.shards[shard_idx].commit_batch_collect_events(shard_adds, shard_removes, true);
-            if let Err(error) = result {
-                errors.push(error);
+            if let Err(shard_error) = result {
+                error = Some(shard_error);
             }
             shard_events.push(events);
         }
@@ -810,7 +810,7 @@ impl UtxoSet {
             }
         }
 
-        if let Some(error) = errors.pop() {
+        if let Some(error) = error {
             return Err(error);
         }
         Ok(())
