@@ -19,6 +19,7 @@ usage() {
     '  bitcoin_rs_command, bitcoin_core_command,' \
     '  bitcoin_rs_config, bitcoin_core_config,' \
     '  benchmark_artifact_path, benchmark_artifact_sha256, criterion_artifact_schema=g14-criterion-artifact-v1,' \
+    '  Criterion artifact ibd_start_height/hash and ibd_stop_height/hash matching the live Core window,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.' \
@@ -180,6 +181,22 @@ def require_chain_height(data: dict, key: str, stop_height: int, source: str) ->
         )
 
 
+def require_artifact_height(data: dict, key: str, expected: int) -> None:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        die(f"benchmark_artifact_path {key} must be an integer")
+    if value != expected:
+        die(f"benchmark_artifact_path {key} must match evidence {key}={expected}")
+
+
+def require_artifact_hash(data: dict, key: str, expected: str) -> None:
+    value = data.get(key)
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        die(f"benchmark_artifact_path {key} must be 64 lowercase hex characters")
+    if value != expected:
+        die(f"benchmark_artifact_path {key} must match live bitcoin-cli {key}")
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -192,7 +209,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_criterion_artifact(path: Path) -> dict[str, float]:
+def read_criterion_artifact(
+    path: Path,
+    start_height: int,
+    stop_height: int,
+    start_hash: str,
+    stop_hash: str,
+) -> dict[str, float]:
     try:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -204,6 +227,10 @@ def read_criterion_artifact(path: Path) -> dict[str, float]:
         die("benchmark_artifact_path Criterion evidence must be a JSON object")
     if data.get("schema") != CRITERION_ARTIFACT_SCHEMA:
         die(f"benchmark_artifact_path schema must be {CRITERION_ARTIFACT_SCHEMA!r}")
+    require_artifact_height(data, "ibd_start_height", start_height)
+    require_artifact_height(data, "ibd_stop_height", stop_height)
+    require_artifact_hash(data, "ibd_start_hash", start_hash)
+    require_artifact_hash(data, "ibd_stop_hash", stop_hash)
     benchmarks = data.get("benchmarks")
     if not isinstance(benchmarks, list):
         die("benchmark_artifact_path benchmarks must be an array")
@@ -290,7 +317,13 @@ if not benchmark_artifact_path.is_file():
 if sha256_file(benchmark_artifact_path) != benchmark_artifact_sha256:
     die("benchmark_artifact_sha256 must match benchmark_artifact_path")
 require_literal_value(data, "criterion_artifact_schema", CRITERION_ARTIFACT_SCHEMA)
-artifact_elapsed_by_id = read_criterion_artifact(benchmark_artifact_path)
+artifact_elapsed_by_id = read_criterion_artifact(
+    benchmark_artifact_path,
+    start_height,
+    stop_height,
+    start_hash,
+    stop_hash,
+)
 block_count = stop_height - start_height + 1
 bitcoin_rs_elapsed_seconds = require_number(data, "bitcoin_rs_elapsed_seconds")
 bitcoin_core_elapsed_seconds = require_number(data, "bitcoin_core_elapsed_seconds")

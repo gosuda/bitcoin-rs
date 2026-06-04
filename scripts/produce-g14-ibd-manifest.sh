@@ -6,7 +6,7 @@ usage() {
     'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>]] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
     '' \
     'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion benchmark IDs are provided.' \
-    'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact and command strings are recorded as provenance only.' \
+    'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact with matching IBD window metadata and command strings are recorded as provenance only.' \
     'Writes a wall-clock command-wrapper JSON manifest. collect-g14-perf-evidence.sh intentionally rejects this manifest for G14 unless elapsed seconds are replaced with Criterion-sourced evidence.' \
     'The manifest intentionally excludes Core block hashes and chain metadata; collect-g14-perf-evidence.sh must resolve those with live bitcoin-cli.'
 }
@@ -111,12 +111,38 @@ def read_json_file(path: Path, name: str):
         die(f"{name} must be JSON: {error}")
 
 
-def criterion_artifact_elapsed_seconds(path: Path, rs_id: str, core_id: str) -> tuple[float, float]:
+def require_int_field(data: dict, key: str, expected: int, source: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        die(f"{source} {key} must be an integer")
+    if value != expected:
+        die(f"{source} {key} must match manifest {key}={expected}")
+    return value
+
+
+def require_hex_field(data: dict, key: str, length: int, source: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
+        die(f"{source} {key} must be {length} lowercase hex characters")
+    return value
+
+
+def criterion_artifact_elapsed_seconds(
+    path: Path,
+    rs_id: str,
+    core_id: str,
+    start_height: int,
+    stop_height: int,
+) -> tuple[float, float]:
     data = read_json_file(path, "--benchmark-artifact")
     if not isinstance(data, dict):
         die("--benchmark-artifact Criterion evidence must be a JSON object")
     if data.get("schema") != CRITERION_ARTIFACT_SCHEMA:
         die(f"--benchmark-artifact schema must be {CRITERION_ARTIFACT_SCHEMA!r}")
+    require_int_field(data, "ibd_start_height", start_height, "--benchmark-artifact")
+    require_int_field(data, "ibd_stop_height", stop_height, "--benchmark-artifact")
+    require_hex_field(data, "ibd_start_hash", 64, "--benchmark-artifact")
+    require_hex_field(data, "ibd_stop_hash", 64, "--benchmark-artifact")
     benchmarks = data.get("benchmarks")
     if not isinstance(benchmarks, list):
         die("--benchmark-artifact benchmarks must be an array")
@@ -286,6 +312,8 @@ if all(criterion_benchmark_ids_supplied):
         benchmark_artifact,
         bitcoin_rs_benchmark_id,
         bitcoin_core_benchmark_id,
+        start_height,
+        stop_height,
     )
     bitcoin_rs_elapsed_seconds = require_optional_elapsed_matches_artifact(
         args.criterion_bitcoin_rs_elapsed_seconds,
