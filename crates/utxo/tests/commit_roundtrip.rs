@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, varint};
 use bitcoin_rs_utxo::{
-    BlockChanges, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoSet, hash_serialized_3,
+    BlockChanges, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoKey, UtxoSet, hash_serialized_3,
 };
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -65,6 +65,15 @@ fn txid_with_prefix(prefix: u64, suffix: u64) -> Hash256 {
     bytes[8..16].copy_from_slice(&suffix.to_le_bytes());
     bytes[16..24].copy_from_slice(&suffix.rotate_left(11).to_le_bytes());
     bytes[24..32].copy_from_slice(&suffix.wrapping_mul(17).to_le_bytes());
+    Hash256::from_le_bytes(&bytes)
+}
+
+fn txid_in_shard(shard: u8, suffix: u64) -> Hash256 {
+    let mut bytes = [0_u8; 32];
+    bytes[0] = shard;
+    bytes[1..9].copy_from_slice(&suffix.to_le_bytes());
+    bytes[9..17].copy_from_slice(&suffix.rotate_left(13).to_le_bytes());
+    bytes[17..25].copy_from_slice(&suffix.wrapping_mul(29).to_le_bytes());
     Hash256::from_le_bytes(&bytes)
 }
 
@@ -301,6 +310,60 @@ fn listener_emits_explicit_removes_before_add_batches_in_single_shard_commit()
     assert_eq!(set.get(&first), None);
     assert_eq!(set.get(&second), Some(txout(621)));
     assert_eq!(set.get(&third), Some(txout(623)));
+    Ok(())
+}
+
+#[test]
+fn listener_replays_parallel_multi_shard_events_in_shard_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(RecordingListener {
+        events: Arc::clone(&events),
+    }));
+
+    let mut initial = BlockChanges::default();
+    let mut removes = Vec::new();
+    let mut inserts = Vec::new();
+    for shard in 0_u8..20 {
+        let txid = txid_in_shard(shard, u64::from(shard) + 630);
+        assert_eq!(UtxoKey::from_txid(&txid).shard(), shard);
+        let remove = OutPoint::new(txid, u32::from(shard));
+        let insert = OutPoint::new(txid, u32::from(shard) + 100);
+        removes.push(remove);
+        inserts.push(insert);
+        initial.add(UtxoAdd::new(
+            remove,
+            txout(u64::from(shard) + 630),
+            false,
+            304,
+        ));
+    }
+    set.commit_block(&initial, &txid(632))?;
+    events.lock().clear();
+
+    let mut mixed = BlockChanges::default();
+    for index in (0..removes.len()).rev() {
+        mixed.add(UtxoAdd::new(
+            inserts[index],
+            txout(u64::try_from(index)? + 700),
+            false,
+            305,
+        ));
+        mixed.remove(removes[index]);
+    }
+    set.commit_block(&mixed, &txid(635))?;
+
+    let mut expected = Vec::new();
+    for shard in 0_u32..20 {
+        expected.push(ListenerEvent::Remove(shard));
+        expected.push(ListenerEvent::InsertBatch(vec![shard + 100]));
+    }
+    assert_eq!(events.lock().clone(), expected);
+    for (index, (remove, insert)) in removes.iter().zip(&inserts).enumerate() {
+        assert_eq!(set.get(remove), None);
+        assert_eq!(set.get(insert), Some(txout(u64::try_from(index)? + 700)));
+    }
     Ok(())
 }
 

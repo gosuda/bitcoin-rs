@@ -11,8 +11,8 @@ use crate::{
     UtxoError, UtxoKey,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
     set::{
-        BuildPayload, ScannedUtxo, SpendPayload, UtxoAdd, UtxoChangeListener, UtxoInserted,
-        UtxoRemoved, UtxoScan,
+        BuildPayload, ScannedUtxo, SpendPayload, UtxoAdd, UtxoChangeEvents, UtxoChangeListener,
+        UtxoInserted, UtxoRemoved, UtxoScan,
     },
 };
 
@@ -110,6 +110,17 @@ impl Shard {
             } else {
                 commit_batch_coalesced(arena, table, adds, removes)
             }
+        })
+    }
+
+    pub(crate) fn commit_batch_collect_events<'a>(
+        &self,
+        adds: &'a [(UtxoKey, Hash256, BuildPayload<'a>)],
+        removes: &[SpendPayload<'_>],
+    ) -> (UtxoChangeEvents<'a>, Result<(), UtxoError>) {
+        let mut cell = self.inner.write();
+        cell.with_dependent_mut(|arena, table| {
+            commit_batch_collect_events(arena, table, adds, removes)
         })
     }
 
@@ -245,6 +256,16 @@ impl Shard {
         self.with_table(|table| table.byte_arena_high_water)
     }
 
+    pub(crate) fn validate_script_capacity(
+        &self,
+        adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
+    ) -> Result<(), UtxoError> {
+        let cell = self.inner.read();
+        cell.with_dependent(|_arena, table| {
+            validate_append_script_offsets(table.script_bytes.len(), adds)
+        })
+    }
+
     pub(crate) fn insert_owned_record(
         &self,
         key: UtxoKey,
@@ -353,6 +374,46 @@ fn commit_batch_with_listener<'arena>(
         remaining_adds = &remaining_adds[run_len..];
     }
     Ok(())
+}
+
+fn commit_batch_collect_events<'arena, 'add>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    adds: &'add [(UtxoKey, Hash256, BuildPayload<'add>)],
+    removes: &[SpendPayload<'_>],
+) -> (UtxoChangeEvents<'add>, Result<(), UtxoError>) {
+    let mut events = UtxoChangeEvents::default();
+    let mut remaining_removes = removes;
+    while let Some((first, rest)) = remaining_removes.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|remove| remove.key == first.key && remove.txid == first.txid)
+            .count()
+            .saturating_add(1);
+        apply_remove_run_collect_events(arena, table, &remaining_removes[..run_len], &mut events);
+        remaining_removes = &remaining_removes[run_len..];
+    }
+
+    let mut remaining_adds = adds;
+    while let Some(((key, txid, _payload), rest)) = remaining_adds.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|(next_key, next_txid, _payload)| next_key == key && next_txid == txid)
+            .count()
+            .saturating_add(1);
+        if let Err(error) = apply_add_run_collect_events(
+            arena,
+            table,
+            *key,
+            *txid,
+            &remaining_adds[..run_len],
+            &mut events,
+        ) {
+            return (events, Err(error));
+        }
+        remaining_adds = &remaining_adds[run_len..];
+    }
+    (events, Ok(()))
 }
 
 fn commit_batch_coalesced<'arena>(
@@ -525,7 +586,7 @@ fn apply_remove_run_with_listener<'arena>(
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
-    let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::with_capacity(removes.len());
+    let mut removed_coins = Vec::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
             && let Some((txout, height, coinbase)) = output_details(table, &removed_output)
@@ -534,6 +595,32 @@ fn apply_remove_run_with_listener<'arena>(
         }
     }
     listener.on_remove_coins(&removed_coins);
+    if !record.is_empty() {
+        insert_record(arena, table, record);
+    }
+}
+
+fn apply_remove_run_collect_events<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    removes: &[SpendPayload<'_>],
+    events: &mut UtxoChangeEvents<'_>,
+) {
+    let Some(first) = removes.first() else {
+        return;
+    };
+    let Some(mut record) = take_record(table, first.key, first.txid) else {
+        return;
+    };
+    let mut removed_coins = Vec::with_capacity(removes.len());
+    for remove in removes {
+        if let Some(removed_output) = record.remove_output(remove.vout)
+            && let Some((txout, height, coinbase)) = output_details(table, &removed_output)
+        {
+            removed_coins.push(UtxoRemoved::new(*remove.op, txout, height, coinbase));
+        }
+    }
+    events.push_remove_batch(removed_coins);
     if !record.is_empty() {
         insert_record(arena, table, record);
     }
@@ -685,6 +772,60 @@ fn apply_add_run_with_listener<'arena>(
     Ok(())
 }
 
+fn apply_add_run_collect_events<'arena, 'add>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    key: UtxoKey,
+    txid: Hash256,
+    adds: &'add [(UtxoKey, Hash256, BuildPayload<'add>)],
+    events: &mut UtxoChangeEvents<'add>,
+) -> Result<(), UtxoError> {
+    let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    let add_unique = build_adds_extend_record(
+        &record,
+        adds.iter().map(|(_key, _txid, payload)| payload.vout),
+    );
+    let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
+    for (_key, _txid, payload) in adds {
+        if add_unique {
+            append_unique_build_output(table, &mut record, payload)?;
+        } else {
+            let overwritten = match record.find_output(payload.vout) {
+                Some(output) => Some(output_details(table, output).ok_or(UtxoError::CorruptArena)?),
+                None => None,
+            };
+            append_build_output(table, &mut record, payload)?;
+            if let Some((txout, height, coinbase)) = overwritten {
+                flush_inserted_events(events, &mut inserted_coins);
+                events.push_remove_coin(UtxoRemoved::new(
+                    *payload.outpoint,
+                    txout,
+                    height,
+                    coinbase,
+                ));
+            }
+        }
+        inserted_coins.push(UtxoInserted::new(
+            payload.outpoint,
+            payload.txout,
+            payload.height,
+            payload.coinbase,
+        ));
+    }
+    insert_record(arena, table, record);
+    flush_inserted_events(events, &mut inserted_coins);
+    Ok(())
+}
+
+fn flush_inserted_events<'add>(
+    events: &mut UtxoChangeEvents<'add>,
+    inserted_coins: &mut SmallVec<[UtxoInserted<'add>; 8]>,
+) {
+    if !inserted_coins.is_empty() {
+        events.push_insert_batch(core::mem::take(inserted_coins));
+    }
+}
+
 fn flush_inserted_coins(
     listener: &(dyn UtxoChangeListener + Send + Sync),
     inserted_coins: &mut SmallVec<[UtxoInserted<'_>; 8]>,
@@ -693,6 +834,24 @@ fn flush_inserted_coins(
         listener.on_insert_coins(inserted_coins);
         inserted_coins.clear();
     }
+}
+
+fn validate_append_script_offsets(
+    current_len: usize,
+    adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
+) -> Result<(), UtxoError> {
+    let mut next_offset = current_len;
+    for (_key, _txid, payload) in adds {
+        let script_len = payload.txout.script_pubkey.as_bytes().len();
+        let _fits =
+            u16::try_from(script_len).map_err(|_| UtxoError::ScriptTooLarge { len: script_len })?;
+        let _offset = u32::try_from(next_offset)
+            .map_err(|_| UtxoError::ArenaOffsetOverflow { len: next_offset })?;
+        next_offset = next_offset
+            .checked_add(script_len)
+            .ok_or(UtxoError::ArenaOffsetOverflow { len: next_offset })?;
+    }
+    Ok(())
 }
 
 fn append_build_output<'arena>(

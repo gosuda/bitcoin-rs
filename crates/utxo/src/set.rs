@@ -6,9 +6,12 @@ use std::{
 use bitcoin::ScriptBuf;
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
+
+const PARALLEL_LISTENER_SHARD_THRESHOLD: usize = 16;
 
 /// Errors returned by UTXO mutation and snapshot operations.
 #[derive(Debug, Error)]
@@ -188,6 +191,48 @@ impl UtxoRemoved {
             txout,
             height,
             coinbase,
+        }
+    }
+}
+
+pub(crate) enum UtxoChangeEvent<'a> {
+    InsertBatch(SmallVec<[UtxoInserted<'a>; 8]>),
+    RemoveBatch(Vec<UtxoRemoved>),
+    RemoveCoin(UtxoRemoved),
+}
+
+#[derive(Default)]
+pub(crate) struct UtxoChangeEvents<'a> {
+    events: Vec<UtxoChangeEvent<'a>>,
+}
+
+impl<'a> UtxoChangeEvents<'a> {
+    pub(crate) fn push_insert_batch(&mut self, insertions: SmallVec<[UtxoInserted<'a>; 8]>) {
+        if !insertions.is_empty() {
+            self.events.push(UtxoChangeEvent::InsertBatch(insertions));
+        }
+    }
+
+    pub(crate) fn push_remove_batch(&mut self, removals: Vec<UtxoRemoved>) {
+        self.events.push(UtxoChangeEvent::RemoveBatch(removals));
+    }
+
+    pub(crate) fn push_remove_coin(&mut self, removal: UtxoRemoved) {
+        self.events.push(UtxoChangeEvent::RemoveCoin(removal));
+    }
+
+    fn replay(&self, listener: &(dyn UtxoChangeListener + Send + Sync)) {
+        for event in &self.events {
+            match event {
+                UtxoChangeEvent::InsertBatch(insertions) => listener.on_insert_coins(insertions),
+                UtxoChangeEvent::RemoveBatch(removals) => listener.on_remove_coins(removals),
+                UtxoChangeEvent::RemoveCoin(removal) => listener.on_remove_coin(
+                    &removal.op,
+                    &removal.txout,
+                    removal.height,
+                    removal.coinbase,
+                ),
+            }
         }
     }
 }
@@ -548,12 +593,12 @@ impl UtxoSet {
 
         let listener = self.listener.as_deref();
         if let Some(listener) = listener {
-            for &shard_idx in &active_shards[..active_shard_count] {
-                let shard_adds = buckets.adds(shard_idx);
-                let shard_removes = buckets.removes(shard_idx);
-                self.shards[shard_idx].commit_batch(shard_adds, shard_removes, Some(listener))?;
-            }
-            return Ok(());
+            return self.commit_multi_shard_with_listener(
+                &active_shards,
+                active_shard_count,
+                &buckets,
+                listener,
+            );
         }
 
         let errors = Mutex::new(Vec::new());
@@ -584,6 +629,65 @@ impl UtxoSet {
         } else {
             Ok(())
         }
+    }
+
+    fn commit_multi_shard_with_listener(
+        &self,
+        active_shards: &[usize; UtxoKey::SHARD_COUNT],
+        active_shard_count: usize,
+        buckets: &ShardCommitBuckets<'_>,
+        listener: &(dyn UtxoChangeListener + Send + Sync),
+    ) -> Result<(), UtxoError> {
+        if active_shard_count < PARALLEL_LISTENER_SHARD_THRESHOLD {
+            for &shard_idx in &active_shards[..active_shard_count] {
+                let shard_adds = buckets.adds(shard_idx);
+                let shard_removes = buckets.removes(shard_idx);
+                self.shards[shard_idx].commit_batch(shard_adds, shard_removes, Some(listener))?;
+            }
+            return Ok(());
+        }
+
+        for &shard_idx in &active_shards[..active_shard_count] {
+            self.shards[shard_idx].validate_script_capacity(buckets.adds(shard_idx))?;
+        }
+
+        let events = Mutex::new(Vec::with_capacity(active_shard_count));
+        let errors = Mutex::new(Vec::new());
+        let target_tasks = rayon::current_num_threads().saturating_mul(2).max(1);
+        let shards_per_task = active_shard_count.div_ceil(target_tasks).max(1);
+        let buckets = &buckets;
+        let shards = &self.shards;
+        rayon::scope(|scope| {
+            for shard_chunk in active_shards[..active_shard_count].chunks(shards_per_task) {
+                let errors = &errors;
+                let events = &events;
+                scope.spawn(move |_| {
+                    for &shard_idx in shard_chunk {
+                        let shard_adds = buckets.adds(shard_idx);
+                        let shard_removes = buckets.removes(shard_idx);
+                        let shard = &shards[shard_idx];
+                        let (shard_events, result) =
+                            shard.commit_batch_collect_events(shard_adds, shard_removes);
+                        events.lock().push((shard_idx, shard_events));
+                        if let Err(error) = result {
+                            errors.lock().push(error);
+                        }
+                    }
+                });
+            }
+        });
+
+        let mut events = events.into_inner();
+        events.sort_unstable_by_key(|(shard_idx, _events)| *shard_idx);
+        for (_shard_idx, shard_events) in events {
+            shard_events.replay(listener);
+        }
+
+        let mut errors = errors.into_inner();
+        if let Some(error) = errors.pop() {
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn commit_single_shard(
