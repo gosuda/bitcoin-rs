@@ -249,6 +249,17 @@ fn bench_commit_fanout(c: &mut Criterion, fixture: &CoinFixture, inserted_stats:
             BatchSize::SmallInput,
         );
     });
+
+    c.bench_function("coinstats/utxo_commit_two_shard_8192", |b| {
+        b.iter_batched(
+            coinstats_two_shard_commit_case,
+            |(set, changes)| {
+                set.commit_block(black_box(&changes), &txid(0xfeed_cafe))
+                    .unwrap_or_else(|error| panic!("coinstats two-shard commit failed: {error}"));
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 fn coinstats_listener_commit_case(
@@ -282,6 +293,14 @@ fn coinstats_listener_commit_case(
 }
 
 fn coinstats_listener_two_shard_commit_case() -> (UtxoSet, BlockChanges) {
+    coinstats_two_shard_commit_case_with_listener(true)
+}
+
+fn coinstats_two_shard_commit_case() -> (UtxoSet, BlockChanges) {
+    coinstats_two_shard_commit_case_with_listener(false)
+}
+
+fn coinstats_two_shard_commit_case_with_listener(with_listener: bool) -> (UtxoSet, BlockChanges) {
     let mut set = UtxoSet::new();
     let mut preload = BlockChanges::with_capacity(ENTRY_COUNT, 0);
     let mut stats = CoinStats::new();
@@ -293,7 +312,9 @@ fn coinstats_listener_two_shard_commit_case() -> (UtxoSet, BlockChanges) {
     }
     set.commit_block(&preload, &txid(0xabcd_1234))
         .unwrap_or_else(|error| panic!("coinstats two-shard preload failed: {error}"));
-    set.set_listener(Box::new(CoinStatsListener::new(stats)));
+    if with_listener {
+        set.set_listener(Box::new(CoinStatsListener::new(stats)));
+    }
 
     let mut changes = BlockChanges::with_capacity(ENTRY_COUNT, ENTRY_COUNT);
     for index in 0..ENTRY_COUNT {

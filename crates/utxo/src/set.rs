@@ -226,6 +226,7 @@ pub struct UtxoChangeEvents<'a> {
 
 #[doc(hidden)]
 /// Read-only view over one committed UTXO event.
+#[derive(Clone, Copy)]
 pub enum UtxoCommittedEvent<'batch, 'coin> {
     /// Batch of inserted UTXOs.
     InsertBatch(&'batch [UtxoInserted<'coin>]),
@@ -296,6 +297,45 @@ impl<'a> UtxoChangeEvents<'a> {
                 }
                 UtxoChangeEvent::RemoveBatch(removals) => {
                     visit(UtxoCommittedEvent::RemoveBatch(removals));
+                }
+                UtxoChangeEvent::RemoveCoin(removal) => {
+                    visit(UtxoCommittedEvent::RemoveCoin(removal));
+                }
+            }
+        }
+    }
+
+    /// Returns the number of output-level mutations represented by these events.
+    #[must_use]
+    pub fn operation_count(&self) -> usize {
+        self.events
+            .iter()
+            .map(|event| match event {
+                UtxoChangeEvent::InsertBatch(insertions) => insertions.len(),
+                UtxoChangeEvent::RemoveBatch(removals) => removals.len(),
+                UtxoChangeEvent::RemoveCoin(_removal) => 1,
+            })
+            .sum()
+    }
+
+    /// Visits committed events split into bounded chunks.
+    pub fn for_each_chunk<'batch>(
+        &'batch self,
+        chunk_size: usize,
+        mut visit: impl FnMut(UtxoCommittedEvent<'batch, 'a>),
+    ) {
+        let chunk_size = chunk_size.max(1);
+        for event in &self.events {
+            match event {
+                UtxoChangeEvent::InsertBatch(insertions) => {
+                    for chunk in insertions.chunks(chunk_size) {
+                        visit(UtxoCommittedEvent::InsertBatch(chunk));
+                    }
+                }
+                UtxoChangeEvent::RemoveBatch(removals) => {
+                    for chunk in removals.chunks(chunk_size) {
+                        visit(UtxoCommittedEvent::RemoveBatch(chunk));
+                    }
                 }
                 UtxoChangeEvent::RemoveCoin(removal) => {
                     visit(UtxoCommittedEvent::RemoveCoin(removal));

@@ -215,6 +215,63 @@ fn listener_parallel_shard_delta_matches_serial_stats() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn listener_chunked_two_shard_delta_matches_serial_stats() -> Result<(), Box<dyn std::error::Error>>
+{
+    const ENTRIES: u32 = 2_048;
+
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+    let mut expected = CoinStats::new();
+    let mut initial = BlockChanges::with_capacity(usize::try_from(ENTRIES)?, 0);
+    let mut seeded = Vec::with_capacity(usize::try_from(ENTRIES)?);
+
+    for index in 0_u32..ENTRIES {
+        let shard = u8::try_from(index % 2)?;
+        let outpoint = OutPoint::new(txid_in_shard(shard, 3_000 + u64::from(index)), 0);
+        let txout = txout(3_000 + index);
+        let coinbase = index % 2 == 0;
+        assert_eq!(UtxoKey::from_txid(&outpoint.txid).shard(), shard);
+        expected.insert_utxo(&outpoint, &txout, 200, coinbase);
+        initial.add(UtxoAdd::new(outpoint, txout.clone(), coinbase, 200));
+        seeded.push((outpoint, txout, coinbase));
+    }
+    set.commit_block(&initial, &txid(3_000))?;
+
+    let mut mixed =
+        BlockChanges::with_capacity(usize::try_from(ENTRIES)?, usize::try_from(ENTRIES)?);
+    for (outpoint, txout, coinbase) in &seeded {
+        expected.remove_utxo(outpoint, txout, 200, *coinbase);
+        mixed.remove(*outpoint);
+    }
+    let mut replacements = Vec::with_capacity(usize::try_from(ENTRIES)?);
+    for index in 0_u32..ENTRIES {
+        let shard = u8::try_from(index % 2)?;
+        let replacement = OutPoint::new(txid_in_shard(shard, 6_000 + u64::from(index)), 0);
+        let replacement_txout = txout(6_000 + index);
+        assert_eq!(UtxoKey::from_txid(&replacement.txid).shard(), shard);
+        expected.insert_utxo(&replacement, &replacement_txout, 201, false);
+        mixed.add(UtxoAdd::new(
+            replacement,
+            replacement_txout.clone(),
+            false,
+            201,
+        ));
+        replacements.push((replacement, replacement_txout));
+    }
+    set.commit_block(&mixed, &txid(3_001))?;
+
+    assert_observable_stats_eq(&listener.snapshot(), &expected);
+    for (outpoint, _txout, _coinbase) in seeded {
+        assert_eq!(set.get(&outpoint), None);
+    }
+    for (replacement, txout) in replacements {
+        assert_eq!(set.get(&replacement), Some(txout));
+    }
+    Ok(())
+}
+
+#[test]
 fn listener_undo_restores_muhash_and_accounting() -> Result<(), Box<dyn std::error::Error>> {
     let (full, full_listener) = listener_set();
     let coinbase_outpoint = OutPoint::new(txid(40), 0);

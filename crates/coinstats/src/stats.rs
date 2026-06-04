@@ -17,6 +17,8 @@ const COIN_HEADER_BYTES: u64 = 4;
 const AMOUNT_BYTES: u64 = 8;
 const SCRIPT_LEN_BYTES: u64 = 2;
 const MAX_RETAINED_SCRATCH_CAPACITY: usize = 4096;
+const PARALLEL_EVENT_CHUNK_OP_THRESHOLD: usize = 4096;
+const EVENT_CHUNK_SIZE: usize = 512;
 
 /// Incremental UTXO set statistics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,37 +185,32 @@ impl CoinStatsDelta {
         let mut scratch = Vec::new();
         events.for_each(|event| match event {
             UtxoCommittedEvent::InsertBatch(insertions) => {
-                for insertion in insertions {
-                    delta.insert_utxo(
-                        &mut scratch,
-                        insertion.op,
-                        insertion.txout,
-                        insertion.height,
-                        insertion.coinbase,
-                    );
-                }
+                delta.insert_batch(&mut scratch, insertions);
             }
             UtxoCommittedEvent::RemoveBatch(removals) => {
-                for removal in removals {
-                    delta.remove_utxo(
-                        &mut scratch,
-                        &removal.op,
-                        &removal.txout,
-                        removal.height,
-                        removal.coinbase,
-                    );
-                }
+                delta.remove_batch(&mut scratch, removals);
             }
             UtxoCommittedEvent::RemoveCoin(removal) => {
-                delta.remove_utxo(
-                    &mut scratch,
-                    &removal.op,
-                    &removal.txout,
-                    removal.height,
-                    removal.coinbase,
-                );
+                delta.remove_batch(&mut scratch, core::slice::from_ref(removal));
             }
         });
+        delta
+    }
+
+    fn from_event(event: UtxoCommittedEvent<'_, '_>) -> Self {
+        let mut delta = Self::new();
+        let mut scratch = Vec::new();
+        match event {
+            UtxoCommittedEvent::InsertBatch(insertions) => {
+                delta.insert_batch(&mut scratch, insertions);
+            }
+            UtxoCommittedEvent::RemoveBatch(removals) => {
+                delta.remove_batch(&mut scratch, removals);
+            }
+            UtxoCommittedEvent::RemoveCoin(removal) => {
+                delta.remove_batch(&mut scratch, core::slice::from_ref(removal));
+            }
+        }
         delta
     }
 
@@ -270,6 +267,18 @@ impl CoinStatsDelta {
         self.added_utxos = self.added_utxos.saturating_add(1);
     }
 
+    fn insert_batch(&mut self, scratch: &mut Vec<u8>, insertions: &[UtxoInserted<'_>]) {
+        for insertion in insertions {
+            self.insert_utxo(
+                scratch,
+                insertion.op,
+                insertion.txout,
+                insertion.height,
+                insertion.coinbase,
+            );
+        }
+    }
+
     #[inline]
     fn remove_utxo(
         &mut self,
@@ -284,6 +293,18 @@ impl CoinStatsDelta {
         self.removed_amount = self.removed_amount.saturating_add(txout.value.to_sat());
         self.removed_bogo_size = self.removed_bogo_size.saturating_add(bogo_size(txout));
         self.removed_utxos = self.removed_utxos.saturating_add(1);
+    }
+
+    fn remove_batch(&mut self, scratch: &mut Vec<u8>, removals: &[UtxoRemoved]) {
+        for removal in removals {
+            self.remove_utxo(
+                scratch,
+                &removal.op,
+                &removal.txout,
+                removal.height,
+                removal.coinbase,
+            );
+        }
     }
 }
 
@@ -398,10 +419,26 @@ impl UtxoChangeListener for CoinStatsListener {
             return true;
         }
 
-        let delta = batches
-            .par_iter()
-            .map(CoinStatsDelta::from_events)
-            .reduce(CoinStatsDelta::new, CoinStatsDelta::combine);
+        let operation_count = batches
+            .iter()
+            .map(UtxoChangeEvents::operation_count)
+            .sum::<usize>();
+        let delta = if operation_count >= PARALLEL_EVENT_CHUNK_OP_THRESHOLD {
+            let mut chunks = Vec::with_capacity(operation_count.div_ceil(EVENT_CHUNK_SIZE));
+            for batch in batches {
+                batch.for_each_chunk(EVENT_CHUNK_SIZE, |event| chunks.push(event));
+            }
+            chunks
+                .par_iter()
+                .copied()
+                .map(CoinStatsDelta::from_event)
+                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
+        } else {
+            batches
+                .par_iter()
+                .map(CoinStatsDelta::from_events)
+                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
+        };
         let mut state = self.state.lock();
         delta.apply_to(&mut state.stats);
         true
