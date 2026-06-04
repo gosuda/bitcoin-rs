@@ -6,6 +6,31 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const DIRECT_BITCOIN_RS_COMMAND_SHA256: &str =
+    "e321b331d0f8168adf37d502710c2a26adf2c452c5eb25c0cd72f69cbb041099";
+const DIRECT_BITCOIN_CORE_COMMAND_SHA256: &str =
+    "022e36196e1baa86c9f90b731e17f501823bc65a65603e64876cb970cb7a5193";
+const DIRECT_BITCOIN_RS_CONFIG_SHA256: &str =
+    "83dfe453d078861eaf0d230622275942d382edb597ab52dc7ee3e5edfef7c062";
+const DIRECT_BITCOIN_CORE_CONFIG_SHA256: &str =
+    "71f61114f6dfa4ea4bdb00565e18759a4264f4ad6200d7e951b15076c7e258cc";
+const PRODUCER_FALSE_COMMAND_SHA256: &str =
+    "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa";
+const PRODUCER_BITCOIN_RS_CONFIG_SHA256: &str =
+    "e09d513a25da5fb122b789d9296f1ebc7988b0ad9950eb5b8d33a8f28da15bb2";
+const PRODUCER_BITCOIN_CORE_CONFIG_SHA256: &str =
+    "fa2075ea5013454e21228fa9261aa51a36a3ac196892af528829dc0a3ebac1c1";
+
+#[derive(Clone, Copy)]
+struct CriterionArtifactBinding<'a> {
+    start_hash: &'a str,
+    stop_hash: &'a str,
+    bitcoin_rs_command_sha256: &'a str,
+    bitcoin_core_command_sha256: &'a str,
+    bitcoin_rs_config_sha256: &'a str,
+    bitcoin_core_config_sha256: &'a str,
+}
+
 #[test]
 fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -134,7 +159,7 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let artifact = criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
     let manifest = temp.path().join("g14-produced-criterion.json");
 
     let producer_output = Command::new("bash")
@@ -214,7 +239,7 @@ fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn st
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let artifact = criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
     let manifest = temp.path().join("g14-produced-partial.json");
 
     let producer_output = Command::new("bash")
@@ -271,7 +296,7 @@ fn producer_rejects_criterion_elapsed_seconds_not_bound_to_artifact()
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let artifact = criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
     let manifest = temp.path().join("g14-produced-mismatched-artifact.json");
 
     let producer_output = Command::new("bash")
@@ -337,7 +362,7 @@ fn producer_rejects_criterion_artifact_for_different_ibd_window()
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let artifact = criterion_artifact_json_with_window(
+    let artifact = producer_criterion_artifact_json_with_window(
         temp.path(),
         "criterion-wrong-window.json",
         "1.25",
@@ -390,6 +415,29 @@ fn producer_rejects_criterion_artifact_for_different_ibd_window()
     assert!(!producer_output.status.success());
     assert!(String::from_utf8_lossy(&producer_output.stderr).contains("ibd_start_height"));
     assert!(!manifest.exists());
+    Ok(())
+}
+
+#[test]
+fn script_rejects_criterion_artifact_for_different_command_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_artifact_command_hash(
+        temp.path(),
+        0,
+        10,
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    )?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("bitcoin_rs_command_sha256"));
     Ok(())
 }
 
@@ -647,6 +695,8 @@ fn criterion_artifact_json_with_window(
     start_height: u32,
     stop_height: u32,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
     criterion_artifact_json_with_window_and_hashes(
         dir,
         name,
@@ -654,8 +704,58 @@ fn criterion_artifact_json_with_window(
         bitcoin_core_elapsed_seconds,
         start_height,
         stop_height,
-        &format!("{start_height:064x}"),
-        &format!("{stop_height:064x}"),
+        CriterionArtifactBinding {
+            start_hash: &start_hash,
+            stop_hash: &stop_hash,
+            bitcoin_rs_command_sha256: DIRECT_BITCOIN_RS_COMMAND_SHA256,
+            bitcoin_core_command_sha256: DIRECT_BITCOIN_CORE_COMMAND_SHA256,
+            bitcoin_rs_config_sha256: DIRECT_BITCOIN_RS_CONFIG_SHA256,
+            bitcoin_core_config_sha256: DIRECT_BITCOIN_CORE_CONFIG_SHA256,
+        },
+    )
+}
+
+fn producer_criterion_artifact_json(
+    dir: &Path,
+    name: &str,
+    bitcoin_rs_elapsed_seconds: &str,
+    bitcoin_core_elapsed_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    producer_criterion_artifact_json_with_window(
+        dir,
+        name,
+        bitcoin_rs_elapsed_seconds,
+        bitcoin_core_elapsed_seconds,
+        0,
+        10,
+    )
+}
+
+fn producer_criterion_artifact_json_with_window(
+    dir: &Path,
+    name: &str,
+    bitcoin_rs_elapsed_seconds: &str,
+    bitcoin_core_elapsed_seconds: &str,
+    start_height: u32,
+    stop_height: u32,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
+    criterion_artifact_json_with_window_and_hashes(
+        dir,
+        name,
+        bitcoin_rs_elapsed_seconds,
+        bitcoin_core_elapsed_seconds,
+        start_height,
+        stop_height,
+        CriterionArtifactBinding {
+            start_hash: &start_hash,
+            stop_hash: &stop_hash,
+            bitcoin_rs_command_sha256: PRODUCER_FALSE_COMMAND_SHA256,
+            bitcoin_core_command_sha256: PRODUCER_FALSE_COMMAND_SHA256,
+            bitcoin_rs_config_sha256: PRODUCER_BITCOIN_RS_CONFIG_SHA256,
+            bitcoin_core_config_sha256: PRODUCER_BITCOIN_CORE_CONFIG_SHA256,
+        },
     )
 }
 
@@ -666,8 +766,7 @@ fn criterion_artifact_json_with_window_and_hashes(
     bitcoin_core_elapsed_seconds: &str,
     start_height: u32,
     stop_height: u32,
-    start_hash: &str,
-    stop_hash: &str,
+    binding: CriterionArtifactBinding<'_>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     write_text(
         dir,
@@ -679,14 +778,85 @@ fn criterion_artifact_json_with_window_and_hashes(
   "ibd_start_hash": "{start_hash}",
   "ibd_stop_height": {stop_height},
   "ibd_stop_hash": "{stop_hash}",
+  "bitcoin_rs_command_sha256": "{bitcoin_rs_command_sha256}",
+  "bitcoin_core_command_sha256": "{bitcoin_core_command_sha256}",
+  "bitcoin_rs_config_sha256": "{bitcoin_rs_config_sha256}",
+  "bitcoin_core_config_sha256": "{bitcoin_core_config_sha256}",
   "benchmarks": [
     {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "elapsed_seconds": {bitcoin_rs_elapsed_seconds}}},
     {{"benchmark_id": "bitcoin-core/mainnet-ibd", "elapsed_seconds": {bitcoin_core_elapsed_seconds}}}
   ]
 }}
 "#,
+            start_hash = binding.start_hash,
+            stop_hash = binding.stop_hash,
+            bitcoin_rs_command_sha256 = binding.bitcoin_rs_command_sha256,
+            bitcoin_core_command_sha256 = binding.bitcoin_core_command_sha256,
+            bitcoin_rs_config_sha256 = binding.bitcoin_rs_config_sha256,
+            bitcoin_core_config_sha256 = binding.bitcoin_core_config_sha256,
         ),
     )
+}
+
+fn evidence_json_with_artifact_command_hash(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+    artifact_bitcoin_rs_command_sha256: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join("g14.json");
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
+    let artifact = criterion_artifact_json_with_window_and_hashes(
+        dir,
+        "criterion-wrong-command.json",
+        "1.25",
+        "2.50",
+        start_height,
+        stop_height,
+        CriterionArtifactBinding {
+            start_hash: &start_hash,
+            stop_hash: &stop_hash,
+            bitcoin_rs_command_sha256: artifact_bitcoin_rs_command_sha256,
+            bitcoin_core_command_sha256: DIRECT_BITCOIN_CORE_COMMAND_SHA256,
+            bitcoin_rs_config_sha256: DIRECT_BITCOIN_RS_CONFIG_SHA256,
+            bitcoin_core_config_sha256: DIRECT_BITCOIN_CORE_CONFIG_SHA256,
+        },
+    )?;
+    let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
+    let artifact_sha256 = sha256_file(&artifact)?;
+    fs::write(
+        &path,
+        format!(
+            r#"{{
+  "ibd_start_height": {start_height},
+  "ibd_stop_height": {stop_height},
+  "bench_tool": "criterion",
+  "elapsed_seconds_source": "criterion",
+  "criterion_artifact_schema": "g14-criterion-artifact-v1",
+  "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
+  "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
+  "bitcoin_rs_elapsed_seconds": 1.25,
+  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_core_version": "v27.0.0",
+  "bitcoin_rs_commit": "{}",
+  "storage_backend": "fjall",
+  "indexes": "all",
+  "bitcoin_core_commit": "1111111111111111111111111111111111111111",
+  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_core_command": "bitcoind -chain=main",
+  "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
+  "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "benchmark_artifact_path": "{artifact_path}",
+  "benchmark_artifact_sha256": "{artifact_sha256}",
+  "utxo_commit_p95_ms": 12.5,
+  "electrum_get_history_p95_ms": 20.0,
+  "rss_bytes": 1024
+}}"#,
+            current_head()?,
+        ),
+    )?;
+    Ok(path)
 }
 
 fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -774,8 +944,14 @@ fn evidence_json_with_artifact_window(
         bitcoin_core_elapsed_seconds,
         start_height,
         stop_height,
-        artifact_start_hash,
-        artifact_stop_hash,
+        CriterionArtifactBinding {
+            start_hash: artifact_start_hash,
+            stop_hash: artifact_stop_hash,
+            bitcoin_rs_command_sha256: DIRECT_BITCOIN_RS_COMMAND_SHA256,
+            bitcoin_core_command_sha256: DIRECT_BITCOIN_CORE_COMMAND_SHA256,
+            bitcoin_rs_config_sha256: DIRECT_BITCOIN_RS_CONFIG_SHA256,
+            bitcoin_core_config_sha256: DIRECT_BITCOIN_CORE_CONFIG_SHA256,
+        },
     )?;
     let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
     let artifact_sha256 = sha256_file(&artifact)?;

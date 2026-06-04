@@ -20,6 +20,7 @@ usage() {
     '  bitcoin_rs_config, bitcoin_core_config,' \
     '  benchmark_artifact_path, benchmark_artifact_sha256, criterion_artifact_schema=g14-criterion-artifact-v1,' \
     '  Criterion artifact ibd_start_height/hash and ibd_stop_height/hash matching the live Core window,' \
+    '  Criterion artifact bitcoin_rs/core command/config sha256 fields matching the evidence JSON,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.' \
@@ -197,6 +198,14 @@ def require_artifact_hash(data: dict, key: str, expected: str) -> None:
         die(f"benchmark_artifact_path {key} must match live bitcoin-cli {key}")
 
 
+def require_artifact_binding(data: dict, key: str, expected: str) -> None:
+    value = data.get(key)
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        die(f"benchmark_artifact_path {key} must be 64 lowercase hex characters")
+    if value != expected:
+        die(f"benchmark_artifact_path {key} must match evidence {key}")
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -215,6 +224,7 @@ def read_criterion_artifact(
     stop_height: int,
     start_hash: str,
     stop_hash: str,
+    command_config_hashes: dict[str, str],
 ) -> dict[str, float]:
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -231,6 +241,8 @@ def read_criterion_artifact(
     require_artifact_height(data, "ibd_stop_height", stop_height)
     require_artifact_hash(data, "ibd_start_hash", start_hash)
     require_artifact_hash(data, "ibd_stop_hash", stop_hash)
+    for key, expected in command_config_hashes.items():
+        require_artifact_binding(data, key, expected)
     benchmarks = data.get("benchmarks")
     if not isinstance(benchmarks, list):
         die("benchmark_artifact_path benchmarks must be an array")
@@ -306,6 +318,10 @@ rs_command = require_text(data, "bitcoin_rs_command")
 core_command = require_text(data, "bitcoin_core_command")
 rs_config = require_text(data, "bitcoin_rs_config")
 core_config = require_text(data, "bitcoin_core_config")
+rs_command_sha256 = sha256_text(rs_command)
+core_command_sha256 = sha256_text(core_command)
+rs_config_sha256 = sha256_text(rs_config)
+core_config_sha256 = sha256_text(core_config)
 benchmark_artifact_sha256 = require_hex(
     require_text(data, "benchmark_artifact_sha256"),
     64,
@@ -323,6 +339,12 @@ artifact_elapsed_by_id = read_criterion_artifact(
     stop_height,
     start_hash,
     stop_hash,
+    {
+        "bitcoin_rs_command_sha256": rs_command_sha256,
+        "bitcoin_core_command_sha256": core_command_sha256,
+        "bitcoin_rs_config_sha256": rs_config_sha256,
+        "bitcoin_core_config_sha256": core_config_sha256,
+    },
 )
 block_count = stop_height - start_height + 1
 bitcoin_rs_elapsed_seconds = require_number(data, "bitcoin_rs_elapsed_seconds")
@@ -368,10 +390,10 @@ env = {
     "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID": criterion_bitcoin_core_benchmark_id,
     "G14_BITCOIN_CORE_VERSION": require_text(data, "bitcoin_core_version"),
     "G14_BITCOIN_CORE_COMMIT": core_commit,
-    "G14_BITCOIN_RS_COMMAND_SHA256": sha256_text(rs_command),
-    "G14_BITCOIN_CORE_COMMAND_SHA256": sha256_text(core_command),
-    "G14_BITCOIN_RS_CONFIG_SHA256": sha256_text(rs_config),
-    "G14_BITCOIN_CORE_CONFIG_SHA256": sha256_text(core_config),
+    "G14_BITCOIN_RS_COMMAND_SHA256": rs_command_sha256,
+    "G14_BITCOIN_CORE_COMMAND_SHA256": core_command_sha256,
+    "G14_BITCOIN_RS_CONFIG_SHA256": rs_config_sha256,
+    "G14_BITCOIN_CORE_CONFIG_SHA256": core_config_sha256,
     "G14_BENCHMARK_ARTIFACT_SHA256": benchmark_artifact_sha256,
     "G14_UTXO_COMMIT_P95_MS": require_number(data, "utxo_commit_p95_ms"),
     "G14_ELECTRUM_GET_HISTORY_P95_MS": require_number(data, "electrum_get_history_p95_ms"),

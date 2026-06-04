@@ -6,7 +6,7 @@ usage() {
     'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>]] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
     '' \
     'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion benchmark IDs are provided.' \
-    'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact with matching IBD window metadata and command strings are recorded as provenance only.' \
+    'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact with matching IBD window metadata plus bitcoin-rs/Core command/config SHA-256 bindings.' \
     'Writes a wall-clock command-wrapper JSON manifest. collect-g14-perf-evidence.sh intentionally rejects this manifest for G14 unless elapsed seconds are replaced with Criterion-sourced evidence.' \
     'The manifest intentionally excludes Core block hashes and chain metadata; collect-g14-perf-evidence.sh must resolve those with live bitcoin-cli.'
 }
@@ -85,6 +85,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def current_head() -> str:
     output = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], text=True)
     head = output.strip()
@@ -127,12 +131,19 @@ def require_hex_field(data: dict, key: str, length: int, source: str) -> str:
     return value
 
 
+def require_matching_hash_field(data: dict, key: str, expected: str, source: str) -> None:
+    value = require_hex_field(data, key, 64, source)
+    if value != expected:
+        die(f"{source} {key} must match the provided command/config")
+
+
 def criterion_artifact_elapsed_seconds(
     path: Path,
     rs_id: str,
     core_id: str,
     start_height: int,
     stop_height: int,
+    command_config_hashes: dict[str, str],
 ) -> tuple[float, float]:
     data = read_json_file(path, "--benchmark-artifact")
     if not isinstance(data, dict):
@@ -143,6 +154,8 @@ def criterion_artifact_elapsed_seconds(
     require_int_field(data, "ibd_stop_height", stop_height, "--benchmark-artifact")
     require_hex_field(data, "ibd_start_hash", 64, "--benchmark-artifact")
     require_hex_field(data, "ibd_stop_hash", 64, "--benchmark-artifact")
+    for key, expected in command_config_hashes.items():
+        require_matching_hash_field(data, key, expected, "--benchmark-artifact")
     benchmarks = data.get("benchmarks")
     if not isinstance(benchmarks, list):
         die("--benchmark-artifact benchmarks must be an array")
@@ -262,6 +275,12 @@ bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-comma
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = read_text(require_file(args.bitcoin_rs_config, "--bitcoin-rs-config"), "--bitcoin-rs-config")
 bitcoin_core_config = read_text(require_file(args.bitcoin_core_config, "--bitcoin-core-config"), "--bitcoin-core-config")
+command_config_hashes = {
+    "bitcoin_rs_command_sha256": sha256_text(bitcoin_rs_command),
+    "bitcoin_core_command_sha256": sha256_text(bitcoin_core_command),
+    "bitcoin_rs_config_sha256": sha256_text(bitcoin_rs_config),
+    "bitcoin_core_config_sha256": sha256_text(bitcoin_core_config),
+}
 bitcoin_core_version = non_empty_text(args.bitcoin_core_version, "--bitcoin-core-version")
 bitcoin_core_commit = non_empty_text(args.bitcoin_core_commit, "--bitcoin-core-commit")
 if not re.fullmatch(r"[0-9a-f]{40}", bitcoin_core_commit):
@@ -314,6 +333,7 @@ if all(criterion_benchmark_ids_supplied):
         bitcoin_core_benchmark_id,
         start_height,
         stop_height,
+        command_config_hashes,
     )
     bitcoin_rs_elapsed_seconds = require_optional_elapsed_matches_artifact(
         args.criterion_bitcoin_rs_elapsed_seconds,
@@ -351,6 +371,7 @@ manifest = {
     "bitcoin_core_config": bitcoin_core_config,
     "benchmark_artifact_path": benchmark_artifact_path,
     "benchmark_artifact_sha256": sha256_file(benchmark_artifact),
+    **command_config_hashes,
     "utxo_commit_p95_ms": utxo_commit_p95_ms,
     "electrum_get_history_p95_ms": electrum_get_history_p95_ms,
     "rss_bytes": rss_bytes,
