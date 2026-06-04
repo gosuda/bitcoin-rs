@@ -12,6 +12,7 @@ usage() {
     'Required JSON keys:' \
     '  ibd_start_height, ibd_stop_height,' \
     '  bitcoin_rs_elapsed_seconds, bitcoin_core_elapsed_seconds,' \
+    '  criterion_bitcoin_rs_benchmark_id, criterion_bitcoin_core_benchmark_id,' \
     '  bench_tool=criterion, elapsed_seconds_source=criterion,' \
     '  bitcoin_core_version, bitcoin_core_commit,' \
     '  bitcoin_rs_command, bitcoin_core_command,' \
@@ -222,6 +223,8 @@ benchmark_artifact_sha256 = require_hex(
 block_count = stop_height - start_height + 1
 bitcoin_rs_elapsed_seconds = require_number(data, "bitcoin_rs_elapsed_seconds")
 bitcoin_core_elapsed_seconds = require_number(data, "bitcoin_core_elapsed_seconds")
+criterion_bitcoin_rs_benchmark_id = require_text(data, "criterion_bitcoin_rs_benchmark_id")
+criterion_bitcoin_core_benchmark_id = require_text(data, "criterion_bitcoin_core_benchmark_id")
 if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
     die(
         "bitcoin-rs initial sync evidence must be faster than Bitcoin Core "
@@ -245,6 +248,8 @@ env = {
     "G14_BITCOIN_CORE_IBD_BLOCKS": str(block_count),
     "G14_BITCOIN_RS_ELAPSED_SECONDS": bitcoin_rs_elapsed_seconds,
     "G14_BITCOIN_CORE_ELAPSED_SECONDS": bitcoin_core_elapsed_seconds,
+    "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID": criterion_bitcoin_rs_benchmark_id,
+    "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID": criterion_bitcoin_core_benchmark_id,
     "G14_BITCOIN_CORE_VERSION": require_text(data, "bitcoin_core_version"),
     "G14_BITCOIN_CORE_COMMIT": core_commit,
     "G14_BITCOIN_RS_COMMAND_SHA256": sha256_text(rs_command),

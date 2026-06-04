@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
+    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds> --criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id>] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
     '' \
     'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion elapsed-second arguments are provided.' \
     'If both Criterion elapsed values are supplied, command strings are recorded as provenance and are not run.' \
@@ -119,6 +119,8 @@ parser.add_argument("--electrum-get-history-p95-ms")
 parser.add_argument("--rss-bytes")
 parser.add_argument("--criterion-bitcoin-rs-elapsed-seconds")
 parser.add_argument("--criterion-bitcoin-core-elapsed-seconds")
+parser.add_argument("--criterion-bitcoin-rs-benchmark-id")
+parser.add_argument("--criterion-bitcoin-core-benchmark-id")
 args = parser.parse_args()
 
 if args.help:
@@ -127,7 +129,9 @@ if args.help:
         "--ibd-start-height <height> --ibd-stop-height <height> "
         "--bitcoin-rs-command <command> --bitcoin-core-command <command> "
         "[--criterion-bitcoin-rs-elapsed-seconds <seconds> "
-        "--criterion-bitcoin-core-elapsed-seconds <seconds>] "
+        "--criterion-bitcoin-core-elapsed-seconds <seconds> "
+        "--criterion-bitcoin-rs-benchmark-id <id> "
+        "--criterion-bitcoin-core-benchmark-id <id>] "
         "--bitcoin-rs-config <path> --bitcoin-core-config <path> "
         "--bitcoin-core-version <version> --bitcoin-core-commit <40-hex> "
         "--benchmark-artifact <path> --utxo-commit-p95-ms <ms> "
@@ -194,6 +198,14 @@ if any(criterion_elapsed_supplied) and not all(criterion_elapsed_supplied):
 if all(criterion_elapsed_supplied):
     bench_tool = "criterion"
     elapsed_seconds_source = "criterion"
+    bitcoin_rs_benchmark_id = non_empty_text(
+        args.criterion_bitcoin_rs_benchmark_id or "",
+        "--criterion-bitcoin-rs-benchmark-id",
+    )
+    bitcoin_core_benchmark_id = non_empty_text(
+        args.criterion_bitcoin_core_benchmark_id or "",
+        "--criterion-bitcoin-core-benchmark-id",
+    )
     bitcoin_rs_elapsed_seconds = positive_float(
         args.criterion_bitcoin_rs_elapsed_seconds,
         "--criterion-bitcoin-rs-elapsed-seconds",
@@ -203,8 +215,14 @@ if all(criterion_elapsed_supplied):
         "--criterion-bitcoin-core-elapsed-seconds",
     )
 else:
+    if args.criterion_bitcoin_rs_benchmark_id is not None:
+        die("--criterion-bitcoin-rs-benchmark-id requires Criterion elapsed-second arguments")
+    if args.criterion_bitcoin_core_benchmark_id is not None:
+        die("--criterion-bitcoin-core-benchmark-id requires Criterion elapsed-second arguments")
     bench_tool = "wall-clock-command-wrapper"
     elapsed_seconds_source = "wall-clock-command-wrapper"
+    bitcoin_rs_benchmark_id = None
+    bitcoin_core_benchmark_id = None
     bitcoin_rs_elapsed_seconds = run_timed(bitcoin_rs_command, "--bitcoin-rs-command")
     bitcoin_core_elapsed_seconds = run_timed(bitcoin_core_command, "--bitcoin-core-command")
 
@@ -226,6 +244,9 @@ manifest = {
     "electrum_get_history_p95_ms": electrum_get_history_p95_ms,
     "rss_bytes": rss_bytes,
 }
+if all(criterion_elapsed_supplied):
+    manifest["criterion_bitcoin_rs_benchmark_id"] = bitcoin_rs_benchmark_id
+    manifest["criterion_bitcoin_core_benchmark_id"] = bitcoin_core_benchmark_id
 
 output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(output)

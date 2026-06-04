@@ -35,6 +35,8 @@ G14_BITCOIN_RS_IBD_BLOCKS, \
 G14_BITCOIN_CORE_IBD_BLOCKS, \
 G14_BITCOIN_RS_ELAPSED_SECONDS, \
 G14_BITCOIN_CORE_ELAPSED_SECONDS, \
+G14_BITCOIN_RS_CRITERION_BENCHMARK_ID, \
+G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID, \
 G14_BITCOIN_CORE_VERSION, \
 G14_BITCOIN_CORE_COMMIT=<40 lowercase hex>, \
 G14_BITCOIN_RS_COMMAND_SHA256=<64 lowercase hex>, \
@@ -56,6 +58,8 @@ struct G14Evidence {
     bitcoin_core_ibd_blocks: u64,
     bitcoin_rs_elapsed_seconds: f64,
     bitcoin_core_elapsed_seconds: f64,
+    bitcoin_rs_criterion_benchmark_id: String,
+    bitcoin_core_criterion_benchmark_id: String,
     bitcoin_core_version: String,
     bitcoin_core_commit: String,
     bitcoin_rs_command_sha256: String,
@@ -99,6 +103,10 @@ impl G14Evidence {
         let bitcoin_core_ibd_blocks = positive_u64("G14_BITCOIN_CORE_IBD_BLOCKS");
         let bitcoin_rs_elapsed_seconds = positive_f64("G14_BITCOIN_RS_ELAPSED_SECONDS");
         let bitcoin_core_elapsed_seconds = positive_f64("G14_BITCOIN_CORE_ELAPSED_SECONDS");
+        let bitcoin_rs_criterion_benchmark_id =
+            required_env("G14_BITCOIN_RS_CRITERION_BENCHMARK_ID");
+        let bitcoin_core_criterion_benchmark_id =
+            required_env("G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID");
         let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
         let bitcoin_core_commit = required_hex("G14_BITCOIN_CORE_COMMIT", 40);
         let bitcoin_rs_command_sha256 = required_hex("G14_BITCOIN_RS_COMMAND_SHA256", 64);
@@ -120,6 +128,8 @@ impl G14Evidence {
             bitcoin_core_ibd_blocks,
             bitcoin_rs_elapsed_seconds,
             bitcoin_core_elapsed_seconds,
+            bitcoin_rs_criterion_benchmark_id,
+            bitcoin_core_criterion_benchmark_id,
             bitcoin_core_version,
             bitcoin_core_commit,
             bitcoin_rs_command_sha256,
@@ -193,6 +203,8 @@ impl G14Evidence {
         let bitcoin_core_ibd_blocks = self.bitcoin_core_ibd_blocks;
         let bitcoin_rs_elapsed_seconds = self.bitcoin_rs_elapsed_seconds;
         let bitcoin_core_elapsed_seconds = self.bitcoin_core_elapsed_seconds;
+        let bitcoin_rs_criterion_benchmark_id = &self.bitcoin_rs_criterion_benchmark_id;
+        let bitcoin_core_criterion_benchmark_id = &self.bitcoin_core_criterion_benchmark_id;
         let bitcoin_core_version = &self.bitcoin_core_version;
         let bitcoin_core_commit = &self.bitcoin_core_commit;
         let bitcoin_rs_command_sha256 = &self.bitcoin_rs_command_sha256;
@@ -214,6 +226,8 @@ impl G14Evidence {
         println!("bitcoin_core_ibd_blocks={bitcoin_core_ibd_blocks}");
         println!("bitcoin_rs_elapsed_seconds={bitcoin_rs_elapsed_seconds}");
         println!("bitcoin_core_elapsed_seconds={bitcoin_core_elapsed_seconds}");
+        println!("bitcoin_rs_criterion_benchmark_id={bitcoin_rs_criterion_benchmark_id}");
+        println!("bitcoin_core_criterion_benchmark_id={bitcoin_core_criterion_benchmark_id}");
         println!("bitcoin_core_version={bitcoin_core_version}");
         println!("bitcoin_core_commit={bitcoin_core_commit}");
         println!("bitcoin_rs_command_sha256={bitcoin_rs_command_sha256}");
