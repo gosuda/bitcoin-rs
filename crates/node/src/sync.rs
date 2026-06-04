@@ -428,7 +428,7 @@ impl BlockSync {
 
     fn sync_peers(&self, our_height: u32) -> Vec<SyncPeer> {
         let peers = self.peers.read();
-        let mut eligible = Vec::new();
+        let mut eligible = Vec::with_capacity(peers.len());
         let mut previous_start_height = None;
         let mut needs_sort = false;
         for peer in peers.iter() {
