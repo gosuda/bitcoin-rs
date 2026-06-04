@@ -259,9 +259,17 @@ impl Default for MuHash3072 {
 
 fn element(data: &[u8]) -> Num3072 {
     let key: [u8; 32] = Sha256::digest(data).into();
-    let mut stream = [0_u8; BYTE_LEN];
-    chacha20_keystream(&key, &mut stream);
-    Num3072::from_le_bytes(&stream)
+    let key_words = chacha20_key_words(&key);
+    let mut limbs = [0_u64; LIMBS];
+    let mut block_counter = 0_u32;
+    for limb_block in limbs.chunks_exact_mut(8) {
+        let words = chacha20_block_words(&key_words, block_counter);
+        for (limb, word_pair) in limb_block.iter_mut().zip(words.chunks_exact(2)) {
+            *limb = u64::from(word_pair[0]) | (u64::from(word_pair[1]) << 32);
+        }
+        block_counter = block_counter.wrapping_add(1);
+    }
+    Num3072 { limbs }
 }
 
 fn low_u64(value: u128) -> u64 {
@@ -332,11 +340,13 @@ fn addnextract2(c0: &mut u64, c1: &mut u64, value: u64) -> u64 {
     limb
 }
 
+#[cfg(test)]
 fn chacha20_keystream(key: &[u8; 32], out: &mut [u8; BYTE_LEN]) {
     let key_words = chacha20_key_words(key);
     let mut block_counter = 0_u32;
     for block in out.chunks_exact_mut(64) {
-        chacha20_block(&key_words, block_counter, block);
+        let words = chacha20_block_words(&key_words, block_counter);
+        chacha20_block(&words, block);
         block_counter = block_counter.wrapping_add(1);
     }
 }
@@ -353,7 +363,7 @@ fn chacha20_key_words(key: &[u8; 32]) -> [u32; 8] {
     })
 }
 
-fn chacha20_block(key_words: &[u32; 8], counter: u32, out: &mut [u8]) {
+fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
     let state = [
         0x6170_7865,
         0x3320_646e,
@@ -384,8 +394,16 @@ fn chacha20_block(key_words: &[u32; 8], counter: u32, out: &mut [u8]) {
         quarter_round(&mut working, 3, 4, 9, 14);
     }
 
-    for (chunk, word) in out.chunks_exact_mut(4).zip(working.into_iter().zip(state)) {
-        chunk.copy_from_slice(&word.0.wrapping_add(word.1).to_le_bytes());
+    for (working_word, state_word) in working.iter_mut().zip(state) {
+        *working_word = working_word.wrapping_add(state_word);
+    }
+    working
+}
+
+#[cfg(test)]
+fn chacha20_block(words: &[u32; 16], out: &mut [u8]) {
+    for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
+        chunk.copy_from_slice(&word.to_le_bytes());
     }
 }
 
@@ -498,6 +516,17 @@ mod tests {
             U3072::from_limbs(low_carry_limbs),
             U3072::MAX,
         ]
+    }
+
+    #[test]
+    fn element_limbs_match_chacha20_byte_stream() {
+        for data in [b"".as_slice(), b"alpha", b"coin stats muhash element"] {
+            let key: [u8; 32] = Sha256::digest(data).into();
+            let mut stream = [0_u8; BYTE_LEN];
+            chacha20_keystream(&key, &mut stream);
+
+            assert_eq!(element(data), Num3072::from_le_bytes(&stream));
+        }
     }
 
     #[test]
