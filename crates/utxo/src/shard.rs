@@ -11,7 +11,7 @@ use crate::{
     UtxoError, UtxoKey,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
     set::{
-        BuildPayload, ScannedUtxo, SpendPayload, UtxoAdd, UtxoChangeEvents, UtxoChangeListener,
+        BuildPayload, ScannedUtxo, SpendPayload, UtxoAddView, UtxoChangeEvents, UtxoChangeListener,
         UtxoInserted, UtxoRemoved, UtxoScan,
     },
 };
@@ -125,9 +125,9 @@ impl Shard {
         })
     }
 
-    pub(crate) fn commit_single_shard_batch(
+    pub(crate) fn commit_single_shard_batch<A: UtxoAddView>(
         &self,
-        adds: &[UtxoAdd],
+        adds: &[A],
         removes: &[OutPoint],
         shard_idx: usize,
     ) -> Result<(), UtxoError> {
@@ -137,9 +137,9 @@ impl Shard {
         })
     }
 
-    pub(crate) fn commit_single_shard_batch_with_listener(
+    pub(crate) fn commit_single_shard_batch_with_listener<A: UtxoAddView>(
         &self,
-        adds: &[UtxoAdd],
+        adds: &[A],
         removes: &[OutPoint],
         shard_idx: usize,
         listener: &(dyn UtxoChangeListener + Send + Sync),
@@ -459,10 +459,10 @@ fn commit_batch_coalesced<'arena>(
     Ok(())
 }
 
-fn commit_single_shard_coalesced<'arena>(
+fn commit_single_shard_coalesced<'arena, A: UtxoAddView>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
-    adds: &[UtxoAdd],
+    adds: &[A],
     removes: &[OutPoint],
     shard_idx: usize,
 ) -> Result<(), UtxoError> {
@@ -481,18 +481,18 @@ fn commit_single_shard_coalesced<'arena>(
 
     let mut remaining_adds = adds;
     while let Some((first, rest)) = remaining_adds.split_first() {
-        let key = UtxoKey::from_txid(&first.outpoint.txid);
+        let key = UtxoKey::from_txid(&first.outpoint().txid);
         debug_assert_eq!(usize::from(key.shard()), shard_idx);
         let run_len = rest
             .iter()
-            .take_while(|add| add.outpoint.txid == first.outpoint.txid)
+            .take_while(|add| add.outpoint().txid == first.outpoint().txid)
             .count()
             .saturating_add(1);
         apply_utxo_add_run(
             arena,
             table,
             key,
-            first.outpoint.txid,
+            first.outpoint().txid,
             &remaining_adds[..run_len],
         )?;
         remaining_adds = &remaining_adds[run_len..];
@@ -500,10 +500,10 @@ fn commit_single_shard_coalesced<'arena>(
     Ok(())
 }
 
-fn commit_single_shard_with_listener<'arena>(
+fn commit_single_shard_with_listener<'arena, A: UtxoAddView>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
-    adds: &[UtxoAdd],
+    adds: &[A],
     removes: &[OutPoint],
     shard_idx: usize,
     listener: &(dyn UtxoChangeListener + Send + Sync),
@@ -530,18 +530,18 @@ fn commit_single_shard_with_listener<'arena>(
 
     let mut remaining_adds = adds;
     while let Some((first, rest)) = remaining_adds.split_first() {
-        let key = UtxoKey::from_txid(&first.outpoint.txid);
+        let key = UtxoKey::from_txid(&first.outpoint().txid);
         debug_assert_eq!(usize::from(key.shard()), shard_idx);
         let run_len = rest
             .iter()
-            .take_while(|add| add.outpoint.txid == first.outpoint.txid)
+            .take_while(|add| add.outpoint().txid == first.outpoint().txid)
             .count()
             .saturating_add(1);
         apply_utxo_add_run_with_listener(
             arena,
             table,
             key,
-            first.outpoint.txid,
+            first.outpoint().txid,
             &remaining_adds[..run_len],
             listener,
         )?;
@@ -702,36 +702,37 @@ fn apply_add_run<'arena>(
     Ok(())
 }
 
-fn apply_utxo_add_run<'arena>(
+fn apply_utxo_add_run<'arena, A: UtxoAddView>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
     key: UtxoKey,
     txid: Hash256,
-    adds: &[UtxoAdd],
+    adds: &[A],
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
-    let add_unique = build_adds_extend_record(&record, adds.iter().map(|add| add.outpoint.vout));
+    let add_unique = build_adds_extend_record(&record, adds.iter().map(|add| add.outpoint().vout));
     for add in adds {
+        let payload = add.payload();
         if add_unique {
-            append_unique_build_output(table, &mut record, &add.payload())?;
+            append_unique_build_output(table, &mut record, &payload)?;
         } else {
-            append_build_output(table, &mut record, &add.payload())?;
+            append_build_output(table, &mut record, &payload)?;
         }
     }
     insert_record(arena, table, record);
     Ok(())
 }
 
-fn apply_utxo_add_run_with_listener<'arena>(
+fn apply_utxo_add_run_with_listener<'arena, A: UtxoAddView>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
     key: UtxoKey,
     txid: Hash256,
-    adds: &[UtxoAdd],
+    adds: &[A],
     listener: &(dyn UtxoChangeListener + Send + Sync),
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
-    let add_unique = build_adds_extend_record(&record, adds.iter().map(|add| add.outpoint.vout));
+    let add_unique = build_adds_extend_record(&record, adds.iter().map(|add| add.outpoint().vout));
     let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
     for add in adds {
         let payload = add.payload();

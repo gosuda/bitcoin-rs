@@ -12,7 +12,10 @@ use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_primitives::{Hash256, Network, OutPoint};
 use bitcoin_rs_rpc::BlockRecord;
-use bitcoin_rs_utxo::{BlockChanges, LiveOutput, LiveOutputMeta, UtxoAdd, UtxoSet};
+use bitcoin_rs_utxo::{
+    LiveOutput, LiveOutputMeta, UtxoSet,
+    set::{BorrowedBlockChanges, BorrowedUtxoAdd},
+};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -352,7 +355,7 @@ pub fn apply_block(
         .record(tx_index_ingest_dur.as_secs_f64());
 
     let utxo_commit_started = quanta::Instant::now();
-    let utxo_commit_result = handles.utxo.commit_block(&changes, &block_hash);
+    let utxo_commit_result = handles.utxo.commit_borrowed_block(&changes, &block_hash);
     let utxo_commit_dur = utxo_commit_started.elapsed();
     metrics::histogram!("node.apply_block.utxo_commit_seconds")
         .record(utxo_commit_dur.as_secs_f64());
@@ -1068,21 +1071,21 @@ fn apply_nbits_error(error: bitcoin_rs_chain::ChainError) -> ApplyError {
     }
 }
 
-fn build_utxo_changes(
-    block: &bitcoin::Block,
+fn build_utxo_changes<'a>(
+    block: &'a bitcoin::Block,
     height: u32,
     scratch: &ApplyScratch,
-) -> core::result::Result<BlockChanges, ApplyError> {
+) -> core::result::Result<BorrowedBlockChanges<'a>, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
     // Bitcoin Core indexes genesis but does not connect its transactions into
     // CoinsView; its coinbase is unspendable and absent from UTXO/MuHash state.
     if height == 0 {
-        return Ok(BlockChanges::default());
+        return Ok(BorrowedBlockChanges::default());
     }
 
     let (add_capacity, remove_capacity) = scratch.utxo_change_capacity();
-    let mut changes = BlockChanges::with_capacity(add_capacity, remove_capacity);
+    let mut changes = BorrowedBlockChanges::with_capacity(add_capacity, remove_capacity);
     for (tx, txid) in block.txdata.iter().zip(scratch.txids()) {
         let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
         for (vout_idx, txout) in tx.output.iter().enumerate() {
@@ -1093,9 +1096,9 @@ fn build_utxo_changes(
             if scratch.contains_same_block_spent(&outpoint) {
                 continue;
             }
-            changes.add(UtxoAdd::new(
+            changes.add(BorrowedUtxoAdd::new(
                 outpoint,
-                txout.clone(),
+                txout,
                 tx.is_coinbase(),
                 height,
             ));
@@ -1410,7 +1413,7 @@ mod consensus_rule_tests {
 
         let scratch = ApplyScratch::new(&block, 2, false, false)?;
         let changes = build_utxo_changes(&block, 2, &scratch)?;
-        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[0x63; 32]))?;
+        utxo.commit_borrowed_block(&changes, &Hash256::from_le_bytes(&[0x63; 32]))?;
 
         assert!(utxo.get(&internal_outpoint(&base_prevout)).is_none());
         assert!(utxo.get(&internal_outpoint(&funding_outpoint)).is_none());

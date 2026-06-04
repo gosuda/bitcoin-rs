@@ -6,7 +6,7 @@ use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, varint};
 use bitcoin_rs_utxo::{
     BlockChanges, UtxoAdd, UtxoChangeListener, UtxoError, UtxoInserted, UtxoKey, UtxoSet,
     hash_serialized_3,
-    set::{UtxoChangeEvents, UtxoCommittedEvent},
+    set::{BorrowedBlockChanges, BorrowedUtxoAdd, UtxoChangeEvents, UtxoCommittedEvent},
 };
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -171,6 +171,20 @@ fn expected_hash_serialized_3(
     let second = Sha256::digest(first);
     let bytes: [u8; 32] = second.into();
     Ok(Hash256::from_le_bytes(&bytes))
+}
+
+fn borrowed_changes<'a>(
+    adds: &'a [(OutPoint, TxOut, bool, u32)],
+    removes: &[OutPoint],
+) -> BorrowedBlockChanges<'a> {
+    let mut changes = BorrowedBlockChanges::with_capacity(adds.len(), removes.len());
+    for remove in removes {
+        changes.remove(*remove);
+    }
+    for (outpoint, txout, coinbase, height) in adds {
+        changes.add(BorrowedUtxoAdd::new(*outpoint, txout, *coinbase, *height));
+    }
+    changes
 }
 
 #[test]
@@ -544,6 +558,145 @@ fn same_txid_churn_preserves_live_outputs_and_record_shape()
     assert!(set.has_live_outputs_for_txid(&live_txid));
     assert_eq!(set.record_count(), 1);
     assert_eq!(set.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn borrowed_commit_matches_owned_commit_for_same_txid_churn()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owned_set = UtxoSet::new();
+    let borrowed_set = UtxoSet::new();
+    let live_txid = txid(7_700);
+    let first = OutPoint::new(live_txid, 0);
+    let second = OutPoint::new(live_txid, 1);
+    let third = OutPoint::new(live_txid, 2);
+    let fourth = OutPoint::new(live_txid, 3);
+    let second_txout = txout(7_702);
+    let fourth_txout = txout(7_704);
+    let initial_adds = vec![
+        (first, txout(7_701), false, 400),
+        (second, second_txout.clone(), false, 400),
+        (third, txout(7_703), false, 400),
+    ];
+    let borrowed_initial = borrowed_changes(&initial_adds, &[]);
+    let mut owned_initial = BlockChanges::default();
+    for (outpoint, txout, coinbase, height) in &initial_adds {
+        owned_initial.add(UtxoAdd::new(*outpoint, txout.clone(), *coinbase, *height));
+    }
+    owned_set.commit_block(&owned_initial, &txid(7_705))?;
+    borrowed_set.commit_borrowed_block(&borrowed_initial, &txid(7_705))?;
+
+    let removes = vec![first, third];
+    let churn_adds = vec![(fourth, fourth_txout.clone(), true, 401)];
+    let borrowed_churn = borrowed_changes(&churn_adds, &removes);
+    let mut owned_churn = BlockChanges::default();
+    for remove in &removes {
+        owned_churn.remove(*remove);
+    }
+    for (outpoint, txout, coinbase, height) in &churn_adds {
+        owned_churn.add(UtxoAdd::new(*outpoint, txout.clone(), *coinbase, *height));
+    }
+    owned_set.commit_block(&owned_churn, &txid(7_706))?;
+    borrowed_set.commit_borrowed_block(&borrowed_churn, &txid(7_706))?;
+
+    for set in [&owned_set, &borrowed_set] {
+        assert_eq!(set.get(&first), None);
+        assert_eq!(set.get(&second), Some(second_txout.clone()));
+        assert_eq!(set.get(&third), None);
+        assert_eq!(set.get(&fourth), Some(fourth_txout.clone()));
+        assert!(set.has_live_outputs_for_txid(&live_txid));
+        assert_eq!(set.record_count(), 1);
+        assert_eq!(set.len(), 2);
+    }
+    assert_eq!(
+        hash_serialized_3(&borrowed_set)?,
+        hash_serialized_3(&owned_set)?
+    );
+    Ok(())
+}
+
+#[test]
+fn borrowed_commit_preserves_invalid_add_atomicity() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let retained = OutPoint::new(txid(8_010), 0);
+    let retained_txout = txout(8_010);
+    let mut initial = BlockChanges::default();
+    initial.add(UtxoAdd::new(retained, retained_txout.clone(), false, 1));
+    set.commit_block(&initial, &txid(8_011))?;
+
+    let invalid_outpoint = OutPoint::new(txid(8_012), 0);
+    let invalid_adds = vec![(
+        invalid_outpoint,
+        TxOut {
+            value: Amount::from_sat(8_012),
+            script_pubkey: ScriptBuf::from_bytes(vec![0; usize::from(u16::MAX) + 1]),
+        },
+        false,
+        2,
+    )];
+    let invalid = borrowed_changes(&invalid_adds, &[retained]);
+
+    let error = match set.commit_borrowed_block(&invalid, &txid(8_013)) {
+        Ok(()) => return Err("oversized borrowed script unexpectedly committed".into()),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            UtxoError::ScriptTooLarge { len } if len == usize::from(u16::MAX) + 1
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(set.get(&retained), Some(retained_txout));
+    assert_eq!(set.get(&invalid_outpoint), None);
+    Ok(())
+}
+
+#[test]
+fn borrowed_commit_duplicate_vout_overwrite_matches_owned_listener_events()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(RecordingListener {
+        events: Arc::clone(&events),
+    }));
+    let live_txid = txid(8_600);
+
+    let mut initial = BlockChanges::default();
+    initial.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 0),
+        txout(8_600),
+        false,
+        300,
+    ));
+    initial.add(UtxoAdd::new(
+        OutPoint::new(live_txid, 1),
+        txout(8_601),
+        true,
+        300,
+    ));
+    set.commit_block(&initial, &txid(8_602))?;
+    events.lock().clear();
+
+    let borrowed_adds = vec![
+        (OutPoint::new(live_txid, 2), txout(8_603), false, 301),
+        (OutPoint::new(live_txid, 1), txout(8_604), false, 301),
+        (OutPoint::new(live_txid, 3), txout(8_605), true, 301),
+    ];
+    let borrowed = borrowed_changes(&borrowed_adds, &[]);
+    set.commit_borrowed_block(&borrowed, &txid(8_606))?;
+
+    assert_eq!(
+        events.lock().clone(),
+        vec![
+            ListenerEvent::InsertBatch(vec![2]),
+            ListenerEvent::Remove(1),
+            ListenerEvent::InsertBatch(vec![1, 3]),
+        ]
+    );
+    assert_eq!(set.get(&OutPoint::new(live_txid, 1)), Some(txout(8_604)));
+    assert_eq!(set.get(&OutPoint::new(live_txid, 2)), Some(txout(8_603)));
+    assert_eq!(set.get(&OutPoint::new(live_txid, 3)), Some(txout(8_605)));
     Ok(())
 }
 
