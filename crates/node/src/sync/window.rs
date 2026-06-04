@@ -339,7 +339,7 @@ impl DownloadWindow {
         if !self.pending.is_empty() || self.received.is_empty() || scan.remaining_limit == 0 {
             return None;
         }
-        let scan_limit = scan.remaining_limit.saturating_add(self.received.len());
+        let scan_limit = self.received_filtered_scan_limit(scan);
         let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
         let request_end_height = scan
             .height
@@ -385,6 +385,29 @@ impl DownloadWindow {
             .next_request_height
             .max(request_end_height.saturating_add(1));
         non_empty_request(peer_addr, entries, next_request_height)
+    }
+
+    fn received_filtered_scan_limit(&self, scan: RequestScan) -> usize {
+        let mut scan_limit = scan.remaining_limit;
+        loop {
+            let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
+            let request_end_height = scan
+                .height
+                .saturating_add(scan_span)
+                .min(scan.request_tip_height);
+            let received_in_span = self
+                .received
+                .values()
+                .filter(|received| {
+                    received.height >= scan.height && received.height <= request_end_height
+                })
+                .count();
+            let next_scan_limit = scan.remaining_limit.saturating_add(received_in_span);
+            if next_scan_limit == scan_limit || request_end_height == scan.request_tip_height {
+                return next_scan_limit;
+            }
+            scan_limit = next_scan_limit;
+        }
     }
 
     fn expired_request_entries(
@@ -599,4 +622,54 @@ fn contiguous_request_entries(
         cursor = node.parent?;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bitcoin_rs_primitives::Hash256;
+
+    use super::{DownloadWindow, ReceivedBlock, RequestScan, SyncBudget};
+
+    #[test]
+    fn received_filtered_scan_limit_ignores_far_ahead_received_blocks() {
+        let mut window = DownloadWindow::new(test_budget());
+        for height in [2, 3, 100] {
+            window.received.insert(
+                hash(height),
+                ReceivedBlock {
+                    height: u32::from(height),
+                    bytes: 80,
+                },
+            );
+        }
+
+        assert_eq!(
+            window.received_filtered_scan_limit(RequestScan {
+                height: 1,
+                request_tip_height: 100,
+                remaining_limit: 2,
+                next_request_height: 1,
+            }),
+            4
+        );
+    }
+
+    fn test_budget() -> SyncBudget {
+        SyncBudget {
+            max_pending_blocks: 128,
+            max_pending_bytes: usize::MAX,
+            max_received_blocks: 128,
+            max_received_bytes: usize::MAX,
+            max_peer_inflight: 128,
+            getdata_batch_limit: 16,
+            pending_timeout: Duration::from_secs(30),
+            received_timeout: Duration::from_secs(30),
+        }
+    }
+
+    fn hash(byte: u8) -> Hash256 {
+        Hash256::from_le_bytes(&[byte; 32])
+    }
 }
