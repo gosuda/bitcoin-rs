@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SyncBudget {
@@ -448,20 +449,27 @@ impl DownloadWindow {
     }
 
     fn received_filtered_scan_limit(&self, scan: RequestScan) -> usize {
+        let mut received_heights = SmallVec::<[u32; 128]>::new();
+        for received in self.received.values() {
+            if (scan.height..=scan.request_tip_height).contains(&received.height) {
+                received_heights.push(received.height);
+            }
+        }
+        received_heights.sort_unstable();
+
         let mut scan_limit = scan.remaining_limit;
+        let mut received_in_span = 0_usize;
         loop {
             let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
             let request_end_height = scan
                 .height
                 .saturating_add(scan_span)
                 .min(scan.request_tip_height);
-            let received_in_span = self
-                .received
-                .values()
-                .filter(|received| {
-                    received.height >= scan.height && received.height <= request_end_height
-                })
-                .count();
+            while received_in_span < received_heights.len()
+                && received_heights[received_in_span] <= request_end_height
+            {
+                received_in_span = received_in_span.saturating_add(1);
+            }
             let next_scan_limit = scan.remaining_limit.saturating_add(received_in_span);
             if next_scan_limit == scan_limit || request_end_height == scan.request_tip_height {
                 return next_scan_limit;
