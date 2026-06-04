@@ -464,11 +464,9 @@ fn apply_remove_run_with_listener<'arena>(
     };
     let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::with_capacity(removes.len());
     for remove in removes {
-        let removed_output = record
-            .find_output(remove.vout)
-            .and_then(|output| output_details(table, output));
-        let removed = record.remove_output(remove.vout);
-        if let (true, Some((txout, height, coinbase))) = (removed, removed_output) {
+        if let Some(removed_output) = record.remove_output(remove.vout)
+            && let Some((txout, height, coinbase)) = output_details(table, &removed_output)
+        {
             removed_coins.push(UtxoRemoved::new(*remove.op, txout, height, coinbase));
         }
     }

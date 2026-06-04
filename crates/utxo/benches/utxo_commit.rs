@@ -312,6 +312,38 @@ fn bench_two_shard_noop_listener(c: &mut Criterion) {
     });
 }
 
+fn bench_concentrated_noop_listener(c: &mut Criterion) {
+    c.bench_function("utxo_commit/concentrated_noop_listener", |b| {
+        b.iter_batched(
+            || synthetic_listener_case(0x00ab_cdef, ShardShape::Concentrated),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0012_3456)) {
+                    panic!("synthetic concentrated listener commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn bench_same_txid_churn_noop_listener(c: &mut Criterion) {
+    c.bench_function("utxo_commit/same_txid_churn_noop_listener", |b| {
+        b.iter_batched(
+            || {
+                let (mut set, changes) = same_txid_churn_case(0x0102_0304);
+                set.set_listener(Box::new(NoopListener));
+                (set, changes)
+            },
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0112_1314)) {
+                    panic!("same-txid churn listener commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn utxo_commit_synthetic_block(c: &mut Criterion) {
     print_synthetic_summary("existing", ShardShape::Existing);
     c.bench_function("utxo_commit/existing", |b| {
@@ -353,6 +385,7 @@ fn utxo_commit_synthetic_block(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    bench_same_txid_churn_noop_listener(c);
 
     print_synthetic_summary("uniform", ShardShape::Uniform);
     c.bench_function("utxo_commit/uniform", |b| {
@@ -397,6 +430,7 @@ fn utxo_commit_synthetic_block(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    bench_concentrated_noop_listener(c);
     c.bench_function("utxo_build_commit/concentrated", |b| {
         b.iter_batched(
             || {

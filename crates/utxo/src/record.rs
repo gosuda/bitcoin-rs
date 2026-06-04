@@ -72,18 +72,18 @@ impl UtxoRecord<'_> {
         }
     }
 
-    pub(crate) fn remove_output(&mut self, vout: u32) -> bool {
+    pub(crate) fn remove_output(&mut self, vout: u32) -> Option<OneUtxoOut> {
         let removed = if let Some(index) = self.vouts.iter().position(|output| output.vout == vout)
         {
-            let _removed = self.vouts.swap_remove(index);
-            true
+            Some(self.vouts.swap_remove(index))
         } else if let Some(index) = self.overflow.iter().position(|output| output.vout == vout) {
-            let _removed = self.overflow.swap_remove(index);
-            true
+            Some(self.overflow.swap_remove(index))
         } else {
-            false
+            None
         };
-        if removed && let Some(bit) = bitmap_vout_bit(vout) {
+        if removed.is_some()
+            && let Some(bit) = bitmap_vout_bit(vout)
+        {
             self.vout_bitmap &= !bit;
         }
         removed
