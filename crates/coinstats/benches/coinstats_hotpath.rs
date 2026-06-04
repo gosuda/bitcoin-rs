@@ -238,6 +238,17 @@ fn bench_commit_fanout(c: &mut Criterion, fixture: &CoinFixture, inserted_stats:
             BatchSize::SmallInput,
         );
     });
+
+    c.bench_function("coinstats/utxo_commit_listener_two_shard_8192", |b| {
+        b.iter_batched(
+            coinstats_listener_two_shard_commit_case,
+            |(set, changes)| {
+                set.commit_block(black_box(&changes), &txid(0xfeed_cafe))
+                    .unwrap_or_else(|error| panic!("coinstats two-shard commit failed: {error}"));
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 fn coinstats_listener_commit_case(
@@ -261,6 +272,37 @@ fn coinstats_listener_commit_case(
         let add_index = index.saturating_add(ENTRY_COUNT);
         changes.add(UtxoAdd::new(
             OutPoint::new(txid(add_index), u32::try_from(add_index % 64).unwrap_or(0)),
+            txout(add_index),
+            false,
+            101,
+        ));
+    }
+
+    (set, changes)
+}
+
+fn coinstats_listener_two_shard_commit_case() -> (UtxoSet, BlockChanges) {
+    let mut set = UtxoSet::new();
+    let mut preload = BlockChanges::with_capacity(ENTRY_COUNT, 0);
+    let mut stats = CoinStats::new();
+    for index in 0..ENTRY_COUNT {
+        let outpoint = OutPoint::new(two_shard_txid(index), 0);
+        let txout = txout(index);
+        stats.insert_utxo(&outpoint, &txout, 100, true);
+        preload.add(UtxoAdd::new(outpoint, txout, true, 100));
+    }
+    set.commit_block(&preload, &txid(0xabcd_1234))
+        .unwrap_or_else(|error| panic!("coinstats two-shard preload failed: {error}"));
+    set.set_listener(Box::new(CoinStatsListener::new(stats)));
+
+    let mut changes = BlockChanges::with_capacity(ENTRY_COUNT, ENTRY_COUNT);
+    for index in 0..ENTRY_COUNT {
+        changes.remove(OutPoint::new(two_shard_txid(index), 0));
+    }
+    for index in 0..ENTRY_COUNT {
+        let add_index = index.saturating_add(ENTRY_COUNT);
+        changes.add(UtxoAdd::new(
+            OutPoint::new(two_shard_txid(add_index), 0),
             txout(add_index),
             false,
             101,
@@ -320,6 +362,12 @@ fn txid(index: usize) -> Hash256 {
     bytes[8..16].copy_from_slice(&seed.rotate_left(11).to_le_bytes());
     bytes[16..24].copy_from_slice(&seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_le_bytes());
     bytes[24..32].copy_from_slice(&seed.wrapping_add(0xd1b5_4a32_d192_ed03).to_le_bytes());
+    Hash256::from_le_bytes(&bytes)
+}
+
+fn two_shard_txid(index: usize) -> Hash256 {
+    let mut bytes = txid(index).to_le_bytes();
+    bytes[0] = u8::try_from(index % 2).unwrap_or(0);
     Hash256::from_le_bytes(&bytes)
 }
 

@@ -5,6 +5,7 @@ use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, varint};
 use bitcoin_rs_utxo::{
     BlockChanges, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoKey, UtxoSet, hash_serialized_3,
+    set::{UtxoChangeEvents, UtxoCommittedEvent},
 };
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,12 @@ enum ListenerEvent {
 #[derive(Clone, Debug)]
 struct RecordingListener {
     events: Arc<Mutex<Vec<ListenerEvent>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CoalescingRecordingListener {
+    events: Arc<Mutex<Vec<ListenerEvent>>>,
+    batch_calls: Arc<Mutex<usize>>,
 }
 
 impl UtxoChangeListener for RecordingListener {
@@ -37,6 +44,58 @@ impl UtxoChangeListener for RecordingListener {
 
     fn on_remove(&self, op: &OutPoint, _txout: &TxOut, _height: u32) {
         self.events.lock().push(ListenerEvent::Remove(op.vout));
+    }
+}
+
+impl UtxoChangeListener for CoalescingRecordingListener {
+    fn on_insert(&self, op: &OutPoint, _txout: &TxOut, _height: u32, _coinbase: bool) {
+        self.events.lock().push(ListenerEvent::Insert(op.vout));
+    }
+
+    fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
+        self.events.lock().push(ListenerEvent::InsertBatch(
+            insertions
+                .iter()
+                .map(|insertion| insertion.op.vout)
+                .collect(),
+        ));
+    }
+
+    fn on_remove(&self, op: &OutPoint, _txout: &TxOut, _height: u32) {
+        self.events.lock().push(ListenerEvent::Remove(op.vout));
+    }
+
+    fn on_committed_event_batches(&self, batches: &[UtxoChangeEvents<'_>]) -> bool {
+        let mut batch_calls = self.batch_calls.lock();
+        *batch_calls = batch_calls.saturating_add(1);
+        drop(batch_calls);
+
+        let mut events = self.events.lock();
+        for batch in batches {
+            batch.for_each(|event| match event {
+                UtxoCommittedEvent::InsertBatch(insertions) => {
+                    events.push(ListenerEvent::InsertBatch(
+                        insertions
+                            .iter()
+                            .map(|insertion| insertion.op.vout)
+                            .collect(),
+                    ));
+                }
+                UtxoCommittedEvent::RemoveBatch(removals) => {
+                    for removal in removals {
+                        events.push(ListenerEvent::Remove(removal.op.vout));
+                    }
+                }
+                UtxoCommittedEvent::RemoveCoin(removal) => {
+                    events.push(ListenerEvent::Remove(removal.op.vout));
+                }
+            });
+        }
+        true
+    }
+
+    fn coalesces_committed_events(&self) -> bool {
+        true
     }
 }
 
@@ -364,6 +423,50 @@ fn listener_replays_parallel_multi_shard_events_in_shard_order()
         assert_eq!(set.get(remove), None);
         assert_eq!(set.get(insert), Some(txout(u64::try_from(index)? + 700)));
     }
+    Ok(())
+}
+
+#[test]
+fn coalescing_listener_batches_small_multi_shard_commits() -> Result<(), Box<dyn std::error::Error>>
+{
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let batch_calls = Arc::new(Mutex::new(0_usize));
+    let mut set = UtxoSet::new();
+
+    let mut initial = BlockChanges::default();
+    let first_remove = OutPoint::new(txid_in_shard(0, 650), 0);
+    let second_remove = OutPoint::new(txid_in_shard(1, 651), 1);
+    let first_insert = OutPoint::new(txid_in_shard(0, 652), 100);
+    let second_insert = OutPoint::new(txid_in_shard(1, 653), 101);
+    initial.add(UtxoAdd::new(first_remove, txout(650), false, 306));
+    initial.add(UtxoAdd::new(second_remove, txout(651), false, 306));
+    set.commit_block(&initial, &txid(654))?;
+
+    set.set_listener(Box::new(CoalescingRecordingListener {
+        events: Arc::clone(&events),
+        batch_calls: Arc::clone(&batch_calls),
+    }));
+    let mut mixed = BlockChanges::default();
+    mixed.add(UtxoAdd::new(second_insert, txout(653), false, 307));
+    mixed.remove(second_remove);
+    mixed.add(UtxoAdd::new(first_insert, txout(652), false, 307));
+    mixed.remove(first_remove);
+    set.commit_block(&mixed, &txid(655))?;
+
+    assert_eq!(*batch_calls.lock(), 1);
+    assert_eq!(
+        events.lock().clone(),
+        vec![
+            ListenerEvent::Remove(0),
+            ListenerEvent::InsertBatch(vec![100]),
+            ListenerEvent::Remove(1),
+            ListenerEvent::InsertBatch(vec![101]),
+        ]
+    );
+    assert_eq!(set.get(&first_remove), None);
+    assert_eq!(set.get(&second_remove), None);
+    assert_eq!(set.get(&first_insert), Some(txout(652)));
+    assert_eq!(set.get(&second_insert), Some(txout(653)));
     Ok(())
 }
 

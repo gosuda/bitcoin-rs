@@ -730,7 +730,16 @@ impl UtxoSet {
         buckets: &ShardCommitBuckets<'_>,
         listener: &(dyn UtxoChangeListener + Send + Sync),
     ) -> Result<(), UtxoError> {
+        let coalesce_events = listener.coalesces_committed_events();
         if active_shard_count < PARALLEL_LISTENER_SHARD_THRESHOLD {
+            if coalesce_events {
+                return self.commit_serial_coalesced_event_batches(
+                    active_shards,
+                    active_shard_count,
+                    buckets,
+                    listener,
+                );
+            }
             for &shard_idx in &active_shards[..active_shard_count] {
                 let shard_adds = buckets.adds(shard_idx);
                 let shard_removes = buckets.removes(shard_idx);
@@ -744,7 +753,6 @@ impl UtxoSet {
         }
 
         let errors = Mutex::new(Vec::new());
-        let coalesce_events = listener.coalesces_committed_events();
         let shard_events: Vec<_> = active_shards[..active_shard_count]
             .par_iter()
             .map(|&shard_idx| {
@@ -770,6 +778,41 @@ impl UtxoSet {
             return Err(error);
         }
 
+        Ok(())
+    }
+
+    fn commit_serial_coalesced_event_batches(
+        &self,
+        active_shards: &[usize; UtxoKey::SHARD_COUNT],
+        active_shard_count: usize,
+        buckets: &ShardCommitBuckets<'_>,
+        listener: &(dyn UtxoChangeListener + Send + Sync),
+    ) -> Result<(), UtxoError> {
+        for &shard_idx in &active_shards[..active_shard_count] {
+            self.shards[shard_idx].validate_script_capacity(buckets.adds(shard_idx))?;
+        }
+
+        let mut errors = Vec::new();
+        let mut shard_events = Vec::with_capacity(active_shard_count);
+        for &shard_idx in &active_shards[..active_shard_count] {
+            let shard_adds = buckets.adds(shard_idx);
+            let shard_removes = buckets.removes(shard_idx);
+            let (events, result) =
+                self.shards[shard_idx].commit_batch_collect_events(shard_adds, shard_removes, true);
+            if let Err(error) = result {
+                errors.push(error);
+            }
+            shard_events.push(events);
+        }
+        if !listener.on_committed_event_batches(&shard_events) {
+            for shard_events in &shard_events {
+                shard_events.replay(listener);
+            }
+        }
+
+        if let Some(error) = errors.pop() {
+            return Err(error);
+        }
         Ok(())
     }
 
