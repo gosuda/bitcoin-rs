@@ -6,7 +6,7 @@ usage() {
     'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>]] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
     '' \
     'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion benchmark IDs are provided.' \
-    'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact with matching IBD window metadata plus bitcoin-rs/Core command/config SHA-256 bindings.' \
+    'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact with matching IBD window metadata, one shared benchmark_run_id, plus bitcoin-rs/Core command/config SHA-256 bindings.' \
     'Writes a wall-clock command-wrapper JSON manifest. collect-g14-perf-evidence.sh intentionally rejects this manifest for G14 unless elapsed seconds are replaced with Criterion-sourced evidence.' \
     'The manifest intentionally excludes Core block hashes and chain metadata; collect-g14-perf-evidence.sh must resolve those with live bitcoin-cli.'
 }
@@ -146,6 +146,15 @@ def require_matching_hash_field(data: dict, key: str, expected: str, source: str
         die(f"{source} {key} must match the provided command/config")
 
 
+def require_benchmark_run_id(data: dict, key: str, expected: str | None, source: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        die(f"{source} {key} must be a non-empty string")
+    if expected is not None and value != expected:
+        die(f"{source} {key} must match the artifact benchmark_run_id")
+    return value
+
+
 def criterion_artifact_elapsed_seconds(
     path: Path,
     rs_id: str,
@@ -153,7 +162,7 @@ def criterion_artifact_elapsed_seconds(
     start_height: int,
     stop_height: int,
     command_config_hashes: dict[str, str],
-) -> tuple[float, float]:
+) -> tuple[str, float, float]:
     data = read_json_file(path, "--benchmark-artifact")
     if not isinstance(data, dict):
         die("--benchmark-artifact Criterion evidence must be a JSON object")
@@ -163,6 +172,12 @@ def criterion_artifact_elapsed_seconds(
     require_int_field(data, "ibd_stop_height", stop_height, "--benchmark-artifact")
     require_hex_field(data, "ibd_start_hash", 64, "--benchmark-artifact")
     require_hex_field(data, "ibd_stop_hash", 64, "--benchmark-artifact")
+    benchmark_run_id = require_benchmark_run_id(
+        data,
+        "benchmark_run_id",
+        None,
+        "--benchmark-artifact",
+    )
     for key, expected in command_config_hashes.items():
         require_matching_hash_field(data, key, expected, "--benchmark-artifact")
     benchmarks = data.get("benchmarks")
@@ -175,6 +190,12 @@ def criterion_artifact_elapsed_seconds(
         benchmark_id = entry.get("benchmark_id")
         if not isinstance(benchmark_id, str) or not benchmark_id.strip():
             die(f"--benchmark-artifact benchmarks[{index}].benchmark_id must be a non-empty string")
+        require_benchmark_run_id(
+            entry,
+            "benchmark_run_id",
+            benchmark_run_id,
+            f"--benchmark-artifact benchmarks[{index}]",
+        )
         if benchmark_id in elapsed_by_id:
             die(f"--benchmark-artifact contains duplicate benchmark_id {benchmark_id!r}")
         if "elapsed_seconds" not in entry:
@@ -186,7 +207,7 @@ def criterion_artifact_elapsed_seconds(
     missing = [benchmark_id for benchmark_id in (rs_id, core_id) if benchmark_id not in elapsed_by_id]
     if missing:
         die("--benchmark-artifact is missing benchmark_id " + ", ".join(repr(value) for value in missing))
-    return elapsed_by_id[rs_id], elapsed_by_id[core_id]
+    return benchmark_run_id, elapsed_by_id[rs_id], elapsed_by_id[core_id]
 
 
 def require_optional_elapsed_matches_artifact(
@@ -346,7 +367,7 @@ if all(criterion_benchmark_ids_supplied):
         BITCOIN_CORE_CRITERION_BENCHMARK_ID,
         "--criterion-bitcoin-core-benchmark-id",
     )
-    artifact_rs_elapsed_seconds, artifact_core_elapsed_seconds = criterion_artifact_elapsed_seconds(
+    benchmark_run_id, artifact_rs_elapsed_seconds, artifact_core_elapsed_seconds = criterion_artifact_elapsed_seconds(
         benchmark_artifact,
         bitcoin_rs_benchmark_id,
         bitcoin_core_benchmark_id,
@@ -367,6 +388,7 @@ if all(criterion_benchmark_ids_supplied):
 else:
     bench_tool = "wall-clock-command-wrapper"
     elapsed_seconds_source = "wall-clock-command-wrapper"
+    benchmark_run_id = None
     bitcoin_rs_benchmark_id = None
     bitcoin_core_benchmark_id = None
     bitcoin_rs_elapsed_seconds = run_timed(bitcoin_rs_command, "--bitcoin-rs-command")
@@ -397,6 +419,7 @@ manifest = {
 }
 if all(criterion_benchmark_ids_supplied):
     manifest["criterion_artifact_schema"] = CRITERION_ARTIFACT_SCHEMA
+    manifest["benchmark_run_id"] = benchmark_run_id
     manifest["criterion_bitcoin_rs_benchmark_id"] = bitcoin_rs_benchmark_id
     manifest["criterion_bitcoin_core_benchmark_id"] = bitcoin_core_benchmark_id
 

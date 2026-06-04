@@ -19,6 +19,7 @@ usage() {
     '  bitcoin_rs_command, bitcoin_core_command,' \
     '  bitcoin_rs_config, bitcoin_core_config,' \
     '  benchmark_artifact_path, benchmark_artifact_sha256, criterion_artifact_schema=g14-criterion-artifact-v1,' \
+    '  benchmark_run_id shared by both Criterion benchmark entries,' \
     '  Criterion artifact ibd_start_height/hash and ibd_stop_height/hash matching the live Core window,' \
     '  Criterion artifact bitcoin_rs/core command/config sha256 fields matching the evidence JSON,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
@@ -208,6 +209,15 @@ def require_artifact_binding(data: dict, key: str, expected: str) -> None:
         die(f"benchmark_artifact_path {key} must match evidence {key}")
 
 
+def require_benchmark_run_id(data: dict, key: str, expected: str | None, source: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        die(f"{source} {key} must be a non-empty string")
+    if expected is not None and value != expected:
+        die(f"{source} {key} must match benchmark_artifact_path benchmark_run_id")
+    return value
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -227,7 +237,7 @@ def read_criterion_artifact(
     start_hash: str,
     stop_hash: str,
     command_config_hashes: dict[str, str],
-) -> dict[str, float]:
+) -> tuple[str, dict[str, float]]:
     try:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -239,6 +249,12 @@ def read_criterion_artifact(
         die("benchmark_artifact_path Criterion evidence must be a JSON object")
     if data.get("schema") != CRITERION_ARTIFACT_SCHEMA:
         die(f"benchmark_artifact_path schema must be {CRITERION_ARTIFACT_SCHEMA!r}")
+    benchmark_run_id = require_benchmark_run_id(
+        data,
+        "benchmark_run_id",
+        None,
+        "benchmark_artifact_path",
+    )
     require_artifact_height(data, "ibd_start_height", start_height)
     require_artifact_height(data, "ibd_stop_height", stop_height)
     require_artifact_hash(data, "ibd_start_hash", start_hash)
@@ -255,6 +271,12 @@ def read_criterion_artifact(
         benchmark_id = entry.get("benchmark_id")
         if not isinstance(benchmark_id, str) or not benchmark_id.strip():
             die(f"benchmark_artifact_path benchmarks[{index}].benchmark_id must be a non-empty string")
+        require_benchmark_run_id(
+            entry,
+            "benchmark_run_id",
+            benchmark_run_id,
+            f"benchmark_artifact_path benchmarks[{index}]",
+        )
         if benchmark_id in elapsed_by_id:
             die(f"benchmark_artifact_path contains duplicate benchmark_id {benchmark_id!r}")
         elapsed = entry.get("elapsed_seconds")
@@ -264,7 +286,7 @@ def read_criterion_artifact(
         if not elapsed > 0.0 or elapsed == float("inf"):
             die(f"benchmark_artifact_path benchmark {benchmark_id!r} elapsed_seconds must be finite and positive")
         elapsed_by_id[benchmark_id] = elapsed
-    return elapsed_by_id
+    return benchmark_run_id, elapsed_by_id
 
 
 def require_artifact_elapsed(
@@ -335,7 +357,7 @@ if not benchmark_artifact_path.is_file():
 if sha256_file(benchmark_artifact_path) != benchmark_artifact_sha256:
     die("benchmark_artifact_sha256 must match benchmark_artifact_path")
 require_literal_value(data, "criterion_artifact_schema", CRITERION_ARTIFACT_SCHEMA)
-artifact_elapsed_by_id = read_criterion_artifact(
+artifact_benchmark_run_id, artifact_elapsed_by_id = read_criterion_artifact(
     benchmark_artifact_path,
     start_height,
     stop_height,
@@ -348,6 +370,8 @@ artifact_elapsed_by_id = read_criterion_artifact(
         "bitcoin_core_config_sha256": core_config_sha256,
     },
 )
+if "benchmark_run_id" in data:
+    require_benchmark_run_id(data, "benchmark_run_id", artifact_benchmark_run_id, "evidence JSON")
 block_count = stop_height - start_height + 1
 bitcoin_rs_elapsed_seconds = require_number(data, "bitcoin_rs_elapsed_seconds")
 bitcoin_core_elapsed_seconds = require_number(data, "bitcoin_core_elapsed_seconds")
@@ -400,6 +424,7 @@ env = {
     "G14_BITCOIN_CORE_ELAPSED_SECONDS": bitcoin_core_elapsed_seconds,
     "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID": criterion_bitcoin_rs_benchmark_id,
     "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID": criterion_bitcoin_core_benchmark_id,
+    "G14_BENCHMARK_RUN_ID": artifact_benchmark_run_id,
     "G14_BITCOIN_CORE_VERSION": require_text(data, "bitcoin_core_version"),
     "G14_BITCOIN_CORE_COMMIT": core_commit,
     "G14_BITCOIN_RS_COMMAND_SHA256": rs_command_sha256,

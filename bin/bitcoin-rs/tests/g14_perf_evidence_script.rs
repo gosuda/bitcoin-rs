@@ -61,6 +61,7 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
         stdout
             .contains("export G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID=bitcoin-core/mainnet-ibd\n")
     );
+    assert!(stdout.contains("export G14_BENCHMARK_RUN_ID=g14-mainnet-window-00000000\n"));
     assert!(stdout.contains("export G14_IBD_START_HASH=0000000000000000000000000000000000000000000000000000000000000000\n"));
     assert!(stdout.contains("export G14_IBD_STOP_HASH=000000000000000000000000000000000000000000000000000000000000000a\n"));
     assert_64_hex_export(&stdout, "G14_BITCOIN_RS_COMMAND_SHA256");
@@ -210,6 +211,7 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
     assert!(manifest_json.contains(r#""storage_backend": "fjall""#));
     assert!(manifest_json.contains(r#""indexes": "all""#));
     assert!(manifest_json.contains(r#""criterion_artifact_schema": "g14-criterion-artifact-v1""#));
+    assert!(manifest_json.contains(r#""benchmark_run_id": "g14-mainnet-window-00000000""#));
     assert!(manifest_json.contains(r#""benchmark_artifact_path":"#));
     assert!(
         manifest_json.contains(r#""criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd""#)
@@ -464,6 +466,24 @@ fn script_rejects_criterion_artifact_with_stop_hash_not_matching_live_core()
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ibd_stop_hash"));
+    Ok(())
+}
+
+#[test]
+fn script_rejects_criterion_artifact_with_mixed_benchmark_run_ids()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_mixed_benchmark_run_ids(temp.path())?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("benchmark_run_id"));
     Ok(())
 }
 
@@ -857,6 +877,7 @@ fn criterion_artifact_json_with_window_and_hashes(
         &format!(
             r#"{{
   "schema": "g14-criterion-artifact-v1",
+  "benchmark_run_id": "g14-mainnet-window-00000000",
   "ibd_start_height": {start_height},
   "ibd_start_hash": "{start_hash}",
   "ibd_stop_height": {stop_height},
@@ -866,8 +887,8 @@ fn criterion_artifact_json_with_window_and_hashes(
   "bitcoin_rs_config_sha256": "{bitcoin_rs_config_sha256}",
   "bitcoin_core_config_sha256": "{bitcoin_core_config_sha256}",
   "benchmarks": [
-    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "elapsed_seconds": {bitcoin_rs_elapsed_seconds}}},
-    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "elapsed_seconds": {bitcoin_core_elapsed_seconds}}}
+    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_rs_elapsed_seconds}}},
+    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_core_elapsed_seconds}}}
   ]
 }}
 "#,
@@ -1072,6 +1093,75 @@ fn evidence_json_with_artifact_window(
     Ok(path)
 }
 
+fn evidence_json_with_mixed_benchmark_run_ids(
+    dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join("g14-mixed-run-id.json");
+    let artifact = criterion_artifact_json_with_mixed_benchmark_run_ids(dir)?;
+    let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
+    let artifact_sha256 = sha256_file(&artifact)?;
+    fs::write(
+        &path,
+        format!(
+            r#"{{
+  "ibd_start_height": 0,
+  "ibd_stop_height": 10,
+  "bench_tool": "criterion",
+  "elapsed_seconds_source": "criterion",
+  "criterion_artifact_schema": "g14-criterion-artifact-v1",
+  "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
+  "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
+  "bitcoin_rs_elapsed_seconds": 1.25,
+  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_core_version": "v27.0.0",
+  "bitcoin_rs_commit": "{}",
+  "storage_backend": "fjall",
+  "indexes": "all",
+  "bitcoin_core_commit": "1111111111111111111111111111111111111111",
+  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_core_command": "bitcoind -chain=main",
+  "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
+  "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "benchmark_artifact_path": "{artifact_path}",
+  "benchmark_artifact_sha256": "{artifact_sha256}",
+  "utxo_commit_p95_ms": 12.5,
+  "electrum_get_history_p95_ms": 20.0,
+  "rss_bytes": 1024
+}}"#,
+            current_head()?,
+        ),
+    )?;
+    Ok(path)
+}
+
+fn criterion_artifact_json_with_mixed_benchmark_run_ids(
+    dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    write_text(
+        dir,
+        "criterion-mixed-run-id.json",
+        &format!(
+            r#"{{
+  "schema": "g14-criterion-artifact-v1",
+  "benchmark_run_id": "g14-mainnet-window-00000000",
+  "ibd_start_height": 0,
+  "ibd_start_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "ibd_stop_height": 10,
+  "ibd_stop_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+  "bitcoin_rs_command_sha256": "{DIRECT_BITCOIN_RS_COMMAND_SHA256}",
+  "bitcoin_core_command_sha256": "{DIRECT_BITCOIN_CORE_COMMAND_SHA256}",
+  "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
+  "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
+  "benchmarks": [
+    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25}},
+    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-11111111", "elapsed_seconds": 2.50}}
+  ]
+}}
+"#
+        ),
+    )
+}
+
 fn evidence_json_with_binding_fields(
     dir: &Path,
     start_height: u32,
@@ -1136,6 +1226,7 @@ fn evidence_json_with_benchmark_ids(
         &format!(
             r#"{{
   "schema": "g14-criterion-artifact-v1",
+  "benchmark_run_id": "g14-mainnet-window-00000000",
   "ibd_start_height": 0,
   "ibd_start_hash": "0000000000000000000000000000000000000000000000000000000000000000",
   "ibd_stop_height": 10,
@@ -1145,8 +1236,8 @@ fn evidence_json_with_benchmark_ids(
   "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
   "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
   "benchmarks": [
-    {{"benchmark_id": "{bitcoin_rs_benchmark_id}", "elapsed_seconds": 1.25}},
-    {{"benchmark_id": "{bitcoin_core_benchmark_id}", "elapsed_seconds": 2.50}}
+    {{"benchmark_id": "{bitcoin_rs_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25}},
+    {{"benchmark_id": "{bitcoin_core_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 2.50}}
   ]
 }}
 "#
