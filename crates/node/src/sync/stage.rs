@@ -92,15 +92,7 @@ impl BlockStager {
         self.received_bytes = self.received_bytes.saturating_add(bytes);
         self.track_received_deadline(now);
 
-        let mut dropped = Vec::new();
-        while self.received.len() > self.budget.max_received_blocks
-            || self.received_bytes > self.budget.max_received_bytes
-        {
-            let Some(evicted) = self.evict_oldest_unprotected(next_expected_hash) else {
-                break;
-            };
-            dropped.push(evicted);
-        }
+        let dropped = self.evict_over_budget(next_expected_hash);
 
         StagedBlock::Memory { bytes, dropped }
     }
@@ -187,17 +179,64 @@ impl BlockStager {
         dropped
     }
 
-    fn evict_oldest_unprotected(
-        &mut self,
-        next_expected_hash: Option<Hash256>,
-    ) -> Option<DroppedBlock> {
-        let evict_hash = self
+    fn evict_over_budget(&mut self, next_expected_hash: Option<Hash256>) -> Vec<DroppedBlock> {
+        let mut dropped = Vec::new();
+        if !self.is_over_budget() {
+            return dropped;
+        }
+
+        let Some((oldest_hash, oldest_bytes)) =
+            self.oldest_unprotected_candidate(next_expected_hash)
+        else {
+            return dropped;
+        };
+        let fits_after_oldest = self.fits_after_removing(oldest_bytes);
+        if let Some(evicted) = self.remove(&oldest_hash) {
+            dropped.push(evicted);
+        }
+        if fits_after_oldest || !self.is_over_budget() {
+            return dropped;
+        }
+
+        let mut candidates: Vec<(Instant, usize, Hash256)> = self
             .received
             .iter()
-            .filter(|(hash, _entry)| Some(**hash) != next_expected_hash)
-            .min_by_key(|(_hash, entry)| entry.received_at)
-            .map(|(hash, _entry)| *hash)?;
-        self.remove(&evict_hash)
+            .enumerate()
+            .filter(|(_order, (hash, _entry))| Some(**hash) != next_expected_hash)
+            .map(|(order, (hash, entry))| (entry.received_at, order, *hash))
+            .collect();
+        candidates.sort_unstable();
+        for (_received_at, _order, hash) in candidates {
+            if !self.is_over_budget() {
+                break;
+            }
+            if let Some(evicted) = self.remove(&hash) {
+                dropped.push(evicted);
+            }
+        }
+        dropped
+    }
+
+    fn oldest_unprotected_candidate(
+        &self,
+        next_expected_hash: Option<Hash256>,
+    ) -> Option<(Hash256, usize)> {
+        self.received
+            .iter()
+            .enumerate()
+            .filter(|(_order, (hash, _entry))| Some(**hash) != next_expected_hash)
+            .min_by_key(|(order, (_hash, entry))| (entry.received_at, *order))
+            .map(|(_order, (hash, entry))| (*hash, entry.bytes))
+    }
+
+    fn is_over_budget(&self) -> bool {
+        self.received.len() > self.budget.max_received_blocks
+            || self.received_bytes > self.budget.max_received_bytes
+    }
+
+    fn fits_after_removing(&self, bytes: usize) -> bool {
+        self.received.len().saturating_sub(1) <= self.budget.max_received_blocks
+            && self.received_bytes.saturating_sub(bytes) <= self.budget.max_received_bytes
     }
 
     fn remove(&mut self, hash: &Hash256) -> Option<DroppedBlock> {
@@ -328,5 +367,45 @@ mod tests {
         assert_eq!(final_drop.len(), 1);
         assert_eq!(final_drop[0].hash, fresh);
         assert_eq!(stager.received_len(), 0);
+    }
+
+    #[test]
+    fn insert_eviction_drops_oldest_unprotected_until_budget_fits() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_bytes = block_size(&block);
+        let mut stager = BlockStager::new(default_sync_budget());
+        let now = Instant::now();
+        let protected = Hash256::from_le_bytes(&[0x51; 32]);
+        let first = Hash256::from_le_bytes(&[0x52; 32]);
+        let second = Hash256::from_le_bytes(&[0x53; 32]);
+        let third = Hash256::from_le_bytes(&[0x54; 32]);
+        let incoming = Hash256::from_le_bytes(&[0x55; 32]);
+
+        stager.insert(protected, None, block.clone(), now);
+        stager.insert(first, None, block.clone(), now + Duration::from_secs(1));
+        stager.insert(second, None, block.clone(), now + Duration::from_secs(2));
+        stager.insert(third, None, block.clone(), now + Duration::from_secs(3));
+        stager.budget.max_received_blocks = 2;
+
+        let dropped = match stager.insert(
+            incoming,
+            Some(protected),
+            block,
+            now + Duration::from_secs(4),
+        ) {
+            super::StagedBlock::Memory { dropped, .. } => dropped,
+            super::StagedBlock::DroppedForRetry { .. } => {
+                panic!("incoming block should fit after evicting staged blocks")
+            }
+        };
+
+        assert_eq!(dropped.len(), 3);
+        assert!(dropped.iter().any(|dropped| dropped.hash == first));
+        assert!(dropped.iter().any(|dropped| dropped.hash == second));
+        assert!(dropped.iter().any(|dropped| dropped.hash == third));
+        assert!(stager.contains(&protected));
+        assert!(stager.contains(&incoming));
+        assert_eq!(stager.received_len(), 2);
+        assert_eq!(stager.received_bytes(), block_bytes.saturating_mul(2));
     }
 }

@@ -516,24 +516,23 @@ impl DownloadWindow {
         {
             return Vec::new();
         }
-        let expired: Vec<(Hash256, PendingBlock)> = self
-            .pending
-            .iter()
-            .filter(|(_hash, pending)| {
-                now.duration_since(pending.requested_at) >= self.budget.pending_timeout
-            })
-            .map(|(hash, pending)| (*hash, *pending))
-            .collect();
-        let mut entries = Vec::with_capacity(expired.len());
-        for (hash, pending) in expired {
-            self.pending.remove(&hash);
-            self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-            self.release_peer_block(pending.peer_addr);
-            self.next_request_height = self.next_request_height.min(pending.height);
-            entries.push(PeerRequestEntry {
-                hash,
-                height: pending.height,
-            });
+        let pending_timeout = self.budget.pending_timeout;
+        let mut entries = Vec::new();
+        {
+            let peer_inflight = &mut self.peer_inflight;
+            let pending_bytes = &mut self.pending_bytes;
+            let next_request_height = &mut self.next_request_height;
+            for (hash, pending) in self.pending.extract_if(|_hash, pending| {
+                now.duration_since(pending.requested_at) >= pending_timeout
+            }) {
+                *pending_bytes = pending_bytes.saturating_sub(pending.estimated_bytes);
+                release_peer_block(peer_inflight, pending.peer_addr);
+                *next_request_height = (*next_request_height).min(pending.height);
+                entries.push(PeerRequestEntry {
+                    hash,
+                    height: pending.height,
+                });
+            }
         }
         self.refresh_next_pending_deadline();
         entries
@@ -546,13 +545,20 @@ impl DownloadWindow {
     }
 
     fn release_peer_block(&mut self, peer_addr: SocketAddr) {
-        let Some(inflight) = self.peer_inflight.get_mut(&peer_addr) else {
-            return;
-        };
-        inflight.blocks = inflight.blocks.saturating_sub(1);
-        if inflight.blocks == 0 {
-            self.peer_inflight.remove(&peer_addr);
-        }
+        release_peer_block(&mut self.peer_inflight, peer_addr);
+    }
+}
+
+fn release_peer_block(
+    peer_inflight: &mut HashMap<SocketAddr, PeerInflight>,
+    peer_addr: SocketAddr,
+) {
+    let Some(inflight) = peer_inflight.get_mut(&peer_addr) else {
+        return;
+    };
+    inflight.blocks = inflight.blocks.saturating_sub(1);
+    if inflight.blocks == 0 {
+        peer_inflight.remove(&peer_addr);
     }
 }
 
