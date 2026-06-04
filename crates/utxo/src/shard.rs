@@ -528,16 +528,24 @@ fn apply_add_run_with_listener<'arena>(
     listener: &(dyn UtxoChangeListener + Send + Sync),
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    let add_unique = build_adds_extend_record(
+        &record,
+        adds.iter().map(|(_key, _txid, payload)| payload.vout),
+    );
     let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
     for (_key, _txid, payload) in adds {
-        let overwritten = match record.find_output(payload.vout) {
-            Some(output) => Some(output_details(table, output).ok_or(UtxoError::CorruptArena)?),
-            None => None,
-        };
-        append_build_output(table, &mut record, payload)?;
-        if let Some((txout, height, coinbase)) = overwritten {
-            flush_inserted_coins(listener, &mut inserted_coins);
-            listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
+        if add_unique {
+            append_unique_build_output(table, &mut record, payload)?;
+        } else {
+            let overwritten = match record.find_output(payload.vout) {
+                Some(output) => Some(output_details(table, output).ok_or(UtxoError::CorruptArena)?),
+                None => None,
+            };
+            append_build_output(table, &mut record, payload)?;
+            if let Some((txout, height, coinbase)) = overwritten {
+                flush_inserted_coins(listener, &mut inserted_coins);
+                listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
+            }
         }
         inserted_coins.push(UtxoInserted::new(
             payload.outpoint,
