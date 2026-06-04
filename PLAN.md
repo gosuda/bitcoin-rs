@@ -190,6 +190,40 @@ All gates must pass before bitcoin-rs is shippable. Not phased — these are fla
 
 ---
 
+## Current Performance Campaign Status (2026-06-05)
+
+This section tracks the aggressive sync/UTXO performance campaign that has landed on `origin/main`.
+It is a status addendum to the roadmap below, not a replacement for the all-up shippability gates.
+Do not mark the broad roadmap tasks complete from these slices alone unless the named gate evidence exists.
+
+**Merged into `origin/main`:**
+
+- [x] Node sync request scheduling was compressed with bounded peer selection, FIFO staged-block eviction, collapsed received-block scans, fused getdata cache construction, alternate-peer retries for expired blocks, contiguous received-scan candidates, inbound drain batching, inbound wakeups, and retry-metric coalescing.
+  Evidence commits: `ff2f211`, `74dafc0`, `d868d80`, `90b76b2`, `ec0c5e8`, `46846e1`, `a11b811`, `be99fc4`, `8a5cca6`.
+- [x] Node apply-path hot spots were compressed with UTXO change txid conversion hoisting, cached apply-hash slice drains, and related block-apply scan reductions.
+  Evidence commits: `7a337b3`, `196c63c`.
+- [x] UTXO listener/commit hot paths were compressed with ordered listener event collection, order-independent listener coalescing, coalesced listener event preallocation, small listener shard commit coalescing, serial listener error-vec removal, and fast deletion for fully spent records.
+  Evidence commits: `15bd917`, `87141a3`, `80806a3`, `cfb0c74`, `316738b`, `13ab475`.
+- [x] Coinstats hot helpers were compressed with private MuHash helper inlining, event-delta helper inlining, and ChaCha final-state add unrolling.
+  Evidence commits: `84e8645`, `cdbeb07`, `4ebcfce`.
+- [x] Performance evidence scaffolding was expanded with a mainnet prefix replay measurement example.
+  Evidence commit: `2234ad5`.
+
+**Measured but rejected in this campaign:**
+
+- [x] Rejected `ApplyScratch` same-block script-capture fusion after same-window `sync_apply_metrics` showed slower filter workloads than the clean baseline.
+- [x] Rejected UTXO script-slab bulk reservation after repaired preflight-safe versions produced mixed Criterion results and regressions in same-txid, listener, and concentrated workloads.
+- [x] Rejected the empty-mempool write-lock skip as a commit candidate because `sync_apply_metrics` did not produce a defensible fast-path win at printed metric resolution.
+
+**Still pending:**
+
+- [ ] Prove G14 initial block sync throughput is faster than Bitcoin Core on identical mainnet IBD hardware and configuration.
+- [ ] Prove all G14 budgets, not just proxy workloads: UTXO commit p95 <= 50 ms per 4 MiB block, Electrum history p95 <= 30 ms over the required sample, and RSS <= 16 GiB at mainnet tip with fjall default plus indexes.
+- [ ] Run and preserve full gate evidence for G1-G14 across two consecutive `main` CI runs before declaring bitcoin-rs shippable.
+- [ ] Keep Task 5, Task 18, and Task 20 below pending as broad roadmap tasks until their complete step lists and gate evidence are satisfied.
+
+---
+
 ## Tasks
 
 ### Task 0: Workspace bootstrap
