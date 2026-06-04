@@ -256,13 +256,15 @@ impl BlockSync {
         }
 
         if !height_lookups.is_empty() {
+            let tree = self.handles.block_tree.read();
             let height_updates: Vec<(Hash256, u32)> = height_lookups
                 .into_iter()
                 .filter_map(|hash| {
-                    self.received_block_height(hash)
-                        .map(|height| (hash, height))
+                    let node_id = tree.lookup(hash)?;
+                    tree.node(node_id).ok().map(|node| (hash, node.height))
                 })
                 .collect();
+            drop(tree);
             if !height_updates.is_empty() {
                 let mut window = self.download_window.lock();
                 for (hash, height) in height_updates {
