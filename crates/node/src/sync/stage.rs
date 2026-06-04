@@ -1,7 +1,5 @@
 use std::time::{Duration, Instant};
 
-use bitcoin::consensus::Encodable as _;
-use bitcoin::io::sink;
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
 
@@ -264,9 +262,7 @@ fn received_deadline(received_at: Instant, timeout: Duration) -> Instant {
 }
 
 fn block_size(block: &bitcoin::Block) -> usize {
-    block
-        .consensus_encode(&mut sink())
-        .unwrap_or_else(|error| panic!("sink writer failed while sizing block: {error}"))
+    block.total_size()
 }
 
 #[cfg(test)]
