@@ -208,6 +208,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commits: `84e8645`, `cdbeb07`, `4ebcfce`.
 - [x] Coinstats listener aggregation was compressed for large coalesced UTXO event batches with bounded parallel chunks, plus a no-listener two-shard attribution benchmark.
   Evidence commit: `da9e31c`.
+- [x] Coinstats MuHash insert hot paths were compressed with measured private arithmetic-helper inlining.
+  Evidence commit: `0b39026`.
 - [x] Performance evidence scaffolding was expanded with a mainnet prefix replay measurement example.
   Evidence commit: `2234ad5`.
 
