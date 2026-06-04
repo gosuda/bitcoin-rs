@@ -135,11 +135,13 @@ impl BlockSync {
         let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let mut sent_getdata = false;
-        for peer in sync_peer_selection.request_peers {
+        let request_peer_count = sync_peer_selection.request_peers.len();
+        for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
             let requested_blocks = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
                     peer.addr,
+                    peer_idx + 1 == request_peer_count,
                     peer_best_height,
                     chain_tip,
                     applied_tip,
@@ -517,6 +519,7 @@ impl BlockSync {
     fn send_getdata_for_pending_blocks(
         &self,
         sync_peer_addr: SocketAddr,
+        allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
         chain_tip: &TipSnapshot,
         applied_tip: &TipSnapshot,
@@ -530,6 +533,7 @@ impl BlockSync {
         let tree = self.handles.block_tree.read();
         let request = self.download_window.lock().next_peer_request(
             sync_peer_addr,
+            allow_expired_retry_from_peer,
             chain_tip,
             applied_tip,
             peer_best_height,
@@ -1019,6 +1023,166 @@ mod tests {
             return Err(std::io::Error::other("expected header refresh on first peer").into());
         }
         assert!(first_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(4)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 2,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                pending_timeout: Duration::ZERO,
+                ..super::default_sync_budget()
+            },
+        );
+        let stale_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let healthy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers.write().push(synthetic_peer(stale_addr, 100));
+        let (stale_tx, stale_rx) = unbounded::<Message>();
+        peer_outbound.write().insert(stale_addr, stale_tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(first_inventory) = stale_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected stale peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(first_inventory)?, expected[..2]);
+        let stale_headers = stale_rx.try_recv()?;
+        if !matches!(stale_headers, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected stale peer getheaders").into());
+        }
+
+        peers.write().push(synthetic_peer(healthy_addr, 100));
+        let (healthy_tx, healthy_rx) = unbounded::<Message>();
+        peer_outbound.write().insert(healthy_addr, healthy_tx);
+
+        sync.tick();
+
+        let NetworkMessage::GetData(retry_inventory) = healthy_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected healthy peer retry getdata").into());
+        };
+        assert_eq!(witness_block_inventory(retry_inventory)?, expected[..2]);
+        assert!(healthy_rx.try_recv().is_err());
+        while let Ok(message) = stale_rx.try_recv() {
+            if matches!(message, NetworkMessage::GetData(_)) {
+                return Err(
+                    std::io::Error::other("stale peer should not receive retry getdata").into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(4)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 2,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                pending_timeout: Duration::ZERO,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(first_inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected first getdata").into());
+        };
+        assert_eq!(witness_block_inventory(first_inventory)?, expected[..2]);
+        let headers = rx.try_recv()?;
+        if !matches!(headers, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected getheaders").into());
+        }
+
+        sync.tick();
+
+        let NetworkMessage::GetData(retry_inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected retry getdata").into());
+        };
+        assert_eq!(witness_block_inventory(retry_inventory)?, expected[..2]);
+        Ok(())
+    }
+
+    #[test]
+    fn tick_retries_when_all_selected_peers_have_expired_pending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(6)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 4,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                pending_timeout: Duration::from_millis(100),
+                ..super::default_sync_budget()
+            },
+        );
+        let first_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let second_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers.write().extend([
+            synthetic_peer(first_addr, 100),
+            synthetic_peer(second_addr, 100),
+        ]);
+        let (first_tx, first_rx) = unbounded::<Message>();
+        let (second_tx, second_rx) = unbounded::<Message>();
+        peer_outbound
+            .write()
+            .extend([(first_addr, first_tx), (second_addr, second_tx)]);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(first_inventory) = first_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected first peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(first_inventory)?, expected[..2]);
+        let first_headers = first_rx.try_recv()?;
+        if !matches!(first_headers, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first peer getheaders").into());
+        }
+        let NetworkMessage::GetData(second_inventory) = second_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected second peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(second_inventory)?, expected[2..4]);
+        assert!(second_rx.try_recv().is_err());
+
+        std::thread::sleep(Duration::from_millis(125));
+        sync.tick();
+
+        while let Ok(message) = first_rx.try_recv() {
+            if matches!(message, NetworkMessage::GetData(_)) {
+                return Err(
+                    std::io::Error::other("first peer should not receive retry getdata").into(),
+                );
+            }
+        }
+        let NetworkMessage::GetData(retry_inventory) = second_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected retry getdata").into());
+        };
+        let retry_hashes = witness_block_inventory(retry_inventory)?;
+        assert_eq!(retry_hashes.len(), 2);
+        assert!(retry_hashes.iter().all(|hash| expected[..4].contains(hash)));
+        assert!(second_rx.try_recv().is_err());
+        assert_eq!(sync.download_window.lock().pending_len(), 2);
         Ok(())
     }
 

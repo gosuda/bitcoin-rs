@@ -160,6 +160,19 @@ impl DownloadWindow {
             })
     }
 
+    fn peer_has_expired_pending(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+        if self
+            .next_pending_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+        self.pending.values().any(|pending| {
+            pending.peer_addr == peer_addr
+                && now.duration_since(pending.requested_at) >= self.budget.pending_timeout
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn received_len(&self) -> usize {
         self.received.len()
@@ -215,12 +228,16 @@ impl DownloadWindow {
     pub(super) fn next_peer_request(
         &mut self,
         peer_addr: SocketAddr,
+        allow_expired_retry_from_peer: bool,
         chain_tip: &TipSnapshot,
         applied_tip: &TipSnapshot,
         peer_best_height: u32,
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
+        if !allow_expired_retry_from_peer && self.peer_has_expired_pending(peer_addr, now) {
+            return None;
+        }
         let mut expired = self.expire_pending(now);
         expired.sort_by_key(|entry| entry.height);
 
