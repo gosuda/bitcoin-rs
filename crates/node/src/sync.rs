@@ -1450,6 +1450,53 @@ mod tests {
     }
 
     #[test]
+    fn tick_preserves_partial_window_order_across_pending_gap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(5)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 4,
+                max_pending_bytes: 4 * 256 * 1024,
+                max_peer_inflight: 4,
+                getdata_batch_limit: 4,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(first) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected first getdata").into());
+        };
+        assert_eq!(witness_block_inventory(first)?, expected[..4]);
+        let _headers = rx.try_recv()?;
+        {
+            let mut window = sync.download_window.lock();
+            window.mark_applied(&Hash256::from_le_bytes(&expected[0].to_byte_array()));
+            window.drop_for_retry(&Hash256::from_le_bytes(&expected[1].to_byte_array()));
+        }
+
+        sync.tick();
+
+        let NetworkMessage::GetData(second) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected gap-filling getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(second)?,
+            vec![expected[1], expected[4]]
+        );
+        assert_eq!(sync.download_window.lock().pending_len(), 4);
+        Ok(())
+    }
+
+    #[test]
     fn tick_applies_contiguous_blocks_before_requesting_more()
     -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);

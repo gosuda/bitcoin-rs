@@ -266,8 +266,23 @@ impl DownloadWindow {
         selected_hashes: &mut Option<HashSet<Hash256>>,
         entries: &mut Vec<PeerRequestEntry>,
     ) -> u32 {
+        if scan.remaining_limit == 0 {
+            return scan.next_request_height;
+        }
         let mut next_request_height = scan.next_request_height;
-        let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, scan.request_tip_height)
+        let skipped_hashes = self
+            .pending
+            .len()
+            .saturating_add(self.received.len())
+            .saturating_add(selected_hashes.as_ref().map_or(0, HashSet::len));
+        // Each skipped hash can displace at most one eligible height from the prefix.
+        let scan_limit = scan.remaining_limit.saturating_add(skipped_hashes);
+        let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
+        let request_end_height = scan
+            .height
+            .saturating_add(scan_span)
+            .min(scan.request_tip_height);
+        let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, request_end_height)
         else {
             return scan.next_request_height;
         };
