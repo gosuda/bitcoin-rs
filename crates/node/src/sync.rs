@@ -223,8 +223,8 @@ impl BlockSync {
         let mut staged_blocks = Vec::with_capacity(blocks.len());
         {
             let mut stager = self.block_stager.lock();
+            let now = Instant::now();
             for block in blocks {
-                let now = Instant::now();
                 let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
                 let staged = stager.insert(hash, next_expected_hash, block, now);
                 staged_blocks.push((hash, staged));
