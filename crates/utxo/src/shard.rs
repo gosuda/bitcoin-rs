@@ -384,7 +384,11 @@ fn commit_batch_collect_events<'arena, 'add>(
     removes: &[SpendPayload<'_>],
     coalesce_events: bool,
 ) -> (UtxoChangeEvents<'add>, Result<(), UtxoError>) {
-    let mut events = UtxoChangeEvents::default();
+    let mut events = if coalesce_events {
+        UtxoChangeEvents::with_coalesced_capacity(adds.len(), removes.len())
+    } else {
+        UtxoChangeEvents::default()
+    };
     let mut remaining_removes = removes;
     while let Some((first, rest)) = remaining_removes.split_first() {
         let run_len = rest

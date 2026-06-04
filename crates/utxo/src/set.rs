@@ -220,6 +220,8 @@ enum UtxoChangeEvent<'a> {
 #[doc(hidden)]
 pub struct UtxoChangeEvents<'a> {
     events: Vec<UtxoChangeEvent<'a>>,
+    coalesced_insert_capacity: usize,
+    coalesced_remove_capacity: usize,
 }
 
 #[doc(hidden)]
@@ -234,6 +236,14 @@ pub enum UtxoCommittedEvent<'batch, 'coin> {
 }
 
 impl<'a> UtxoChangeEvents<'a> {
+    pub(crate) fn with_coalesced_capacity(insertions: usize, removals: usize) -> Self {
+        Self {
+            events: Vec::with_capacity(usize::from(insertions > 0) + usize::from(removals > 0)),
+            coalesced_insert_capacity: insertions,
+            coalesced_remove_capacity: removals,
+        }
+    }
+
     pub(crate) fn push_insert_batch(&mut self, insertions: SmallVec<[UtxoInserted<'a>; 8]>) {
         if !insertions.is_empty() {
             self.events.push(UtxoChangeEvent::InsertBatch(insertions));
@@ -250,6 +260,8 @@ impl<'a> UtxoChangeEvents<'a> {
         if let Some(UtxoChangeEvent::InsertBatch(existing)) = self.events.last_mut() {
             existing.extend(insertions);
         } else {
+            let mut insertions = insertions;
+            reserve_smallvec(&mut insertions, self.coalesced_insert_capacity);
             self.events.push(UtxoChangeEvent::InsertBatch(insertions));
         }
     }
@@ -265,6 +277,8 @@ impl<'a> UtxoChangeEvents<'a> {
         if let Some(UtxoChangeEvent::RemoveBatch(existing)) = self.events.last_mut() {
             existing.extend(removals);
         } else {
+            let mut removals = removals;
+            reserve_smallvec(&mut removals, self.coalesced_remove_capacity);
             self.events.push(UtxoChangeEvent::RemoveBatch(removals));
         }
     }
@@ -303,6 +317,15 @@ impl<'a> UtxoChangeEvents<'a> {
                 ),
             }
         }
+    }
+}
+
+fn reserve_smallvec<A>(items: &mut SmallVec<A>, capacity: usize)
+where
+    A: smallvec::Array,
+{
+    if capacity > items.capacity() {
+        items.reserve_exact(capacity - items.len());
     }
 }
 
