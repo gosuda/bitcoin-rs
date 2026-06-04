@@ -188,6 +188,13 @@ def require_benchmark_run_id(data: dict, key: str, expected: str | None, source:
     return value
 
 
+def require_raw_output_sha256(data: dict, source: str) -> str:
+    value = data.get("raw_output_sha256")
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        die(f"{source} raw_output_sha256 must be 64 lowercase hex characters")
+    return value
+
+
 def criterion_artifact_elapsed_seconds(
     path: Path,
     rs_id: str,
@@ -229,6 +236,7 @@ def criterion_artifact_elapsed_seconds(
             benchmark_run_id,
             f"--benchmark-artifact benchmarks[{index}]",
         )
+        require_raw_output_sha256(entry, f"--benchmark-artifact benchmarks[{index}]")
         if benchmark_id in elapsed_by_id:
             die(f"--benchmark-artifact contains duplicate benchmark_id {benchmark_id!r}")
         if "elapsed_seconds" not in entry:

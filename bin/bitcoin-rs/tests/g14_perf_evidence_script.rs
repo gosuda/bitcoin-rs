@@ -43,6 +43,10 @@ const PRODUCER_BITCOIN_RS_CONFIG_SHA256: &str =
     "e09d513a25da5fb122b789d9296f1ebc7988b0ad9950eb5b8d33a8f28da15bb2";
 const PRODUCER_BITCOIN_CORE_CONFIG_SHA256: &str =
     "fa2075ea5013454e21228fa9261aa51a36a3ac196892af528829dc0a3ebac1c1";
+const BITCOIN_RS_RAW_OUTPUT_SHA256: &str =
+    "2222222222222222222222222222222222222222222222222222222222222222";
+const BITCOIN_CORE_RAW_OUTPUT_SHA256: &str =
+    "3333333333333333333333333333333333333333333333333333333333333333";
 
 #[derive(Clone, Copy)]
 struct CriterionArtifactBinding<'a> {
@@ -514,6 +518,17 @@ fn produce_g14_criterion_artifact(
     bitcoin_core_config: &Path,
     bitcoin_cli: &Path,
 ) -> Result<Output, Box<dyn std::error::Error>> {
+    let artifact_dir = artifact.parent().ok_or("artifact path has no parent")?;
+    let bitcoin_rs_raw_output = write_text(
+        artifact_dir,
+        "bitcoin-rs-criterion-raw-output.txt",
+        "bitcoin-rs Criterion raw output\n",
+    )?;
+    let bitcoin_core_raw_output = write_text(
+        artifact_dir,
+        "bitcoin-core-criterion-raw-output.txt",
+        "Bitcoin Core Criterion raw output\n",
+    )?;
     Ok(Command::new("bash")
         .arg(artifact_producer_script_path())
         .args([
@@ -529,6 +544,14 @@ fn produce_g14_criterion_artifact(
             "1.25",
             "--criterion-bitcoin-core-elapsed-seconds",
             "2.50",
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
             bitcoin_rs_command,
             "--bitcoin-core-command",
@@ -556,6 +579,16 @@ fn artifact_producer_rejects_invalid_elapsed_seconds() -> Result<(), Box<dyn std
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let bitcoin_rs_raw_output = write_text(
+        temp.path(),
+        "bitcoin-rs-criterion-raw-output.txt",
+        "bitcoin-rs Criterion raw output\n",
+    )?;
+    let bitcoin_core_raw_output = write_text(
+        temp.path(),
+        "bitcoin-core-criterion-raw-output.txt",
+        "Bitcoin Core Criterion raw output\n",
+    )?;
     let artifact = temp.path().join("g14-failed-artifact.json");
     fs::write(&artifact, "stale artifact\n")?;
 
@@ -575,6 +608,14 @@ fn artifact_producer_rejects_invalid_elapsed_seconds() -> Result<(), Box<dyn std
             "0.0",
             "--criterion-bitcoin-core-elapsed-seconds",
             "2.50",
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
             "target/release/bitcoin-rs --network mainnet",
             "--bitcoin-core-command",
@@ -852,6 +893,24 @@ fn script_rejects_criterion_artifact_with_mixed_benchmark_run_ids()
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("benchmark_run_id"));
+    Ok(())
+}
+
+#[test]
+fn script_rejects_criterion_artifact_missing_raw_output_hash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_missing_raw_output_sha256(temp.path())?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("raw_output_sha256"));
     Ok(())
 }
 
@@ -1473,8 +1532,8 @@ fn criterion_artifact_json_with_window_and_hashes(
   "bitcoin_rs_config_sha256": "{bitcoin_rs_config_sha256}",
   "bitcoin_core_config_sha256": "{bitcoin_core_config_sha256}",
   "benchmarks": [
-    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_rs_elapsed_seconds}}},
-    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_core_elapsed_seconds}}}
+    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_rs_elapsed_seconds}, "raw_output_sha256": "{BITCOIN_RS_RAW_OUTPUT_SHA256}"}},
+    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_core_elapsed_seconds}, "raw_output_sha256": "{BITCOIN_CORE_RAW_OUTPUT_SHA256}"}}
   ]
 }}
 "#,
@@ -1781,13 +1840,76 @@ fn criterion_artifact_json_with_mixed_benchmark_run_ids(
   "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
   "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
   "benchmarks": [
-    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25}},
-    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-11111111", "elapsed_seconds": 2.50}}
+    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25, "raw_output_sha256": "{BITCOIN_RS_RAW_OUTPUT_SHA256}"}},
+    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-11111111", "elapsed_seconds": 2.50, "raw_output_sha256": "{BITCOIN_CORE_RAW_OUTPUT_SHA256}"}}
   ]
 }}
 "#
         ),
     )
+}
+
+fn evidence_json_with_missing_raw_output_sha256(
+    dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join("g14-missing-raw-output-hash.json");
+    let artifact = write_text(
+        dir,
+        "criterion-missing-raw-output-hash.json",
+        &format!(
+            r#"{{
+  "schema": "g14-criterion-artifact-v1",
+  "benchmark_run_id": "g14-mainnet-window-00000000",
+  "ibd_start_height": 0,
+  "ibd_start_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "ibd_stop_height": 10,
+  "ibd_stop_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+  "bitcoin_rs_command_sha256": "{DIRECT_BITCOIN_RS_COMMAND_SHA256}",
+  "bitcoin_core_command_sha256": "{DIRECT_BITCOIN_CORE_COMMAND_SHA256}",
+  "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
+  "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
+  "benchmarks": [
+    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25}},
+    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 2.50, "raw_output_sha256": "{BITCOIN_CORE_RAW_OUTPUT_SHA256}"}}
+  ]
+}}
+"#
+        ),
+    )?;
+    let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
+    let artifact_sha256 = sha256_file(&artifact)?;
+    fs::write(
+        &path,
+        format!(
+            r#"{{
+  "ibd_start_height": 0,
+  "ibd_stop_height": 10,
+  "bench_tool": "criterion",
+  "elapsed_seconds_source": "criterion",
+  "criterion_artifact_schema": "g14-criterion-artifact-v1",
+  "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
+  "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
+  "bitcoin_rs_elapsed_seconds": 1.25,
+  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_core_version": "v27.0.0",
+  "bitcoin_rs_commit": "{}",
+  "storage_backend": "fjall",
+  "indexes": "all",
+  "bitcoin_core_commit": "1111111111111111111111111111111111111111",
+  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_core_command": "bitcoind -chain=main",
+  "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
+  "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "benchmark_artifact_path": "{artifact_path}",
+  "benchmark_artifact_sha256": "{artifact_sha256}",
+  "utxo_commit_p95_ms": 12.5,
+  "electrum_get_history_p95_ms": 20.0,
+  "rss_bytes": 1024
+}}"#,
+            current_head()?,
+        ),
+    )?;
+    Ok(path)
 }
 
 fn evidence_json_with_binding_fields(
@@ -1884,8 +2006,8 @@ fn evidence_json_with_benchmark_ids(
   "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
   "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
   "benchmarks": [
-    {{"benchmark_id": "{bitcoin_rs_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25}},
-    {{"benchmark_id": "{bitcoin_core_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 2.50}}
+    {{"benchmark_id": "{bitcoin_rs_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25, "raw_output_sha256": "{BITCOIN_RS_RAW_OUTPUT_SHA256}"}},
+    {{"benchmark_id": "{bitcoin_core_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 2.50, "raw_output_sha256": "{BITCOIN_CORE_RAW_OUTPUT_SHA256}"}}
   ]
 }}
 "#

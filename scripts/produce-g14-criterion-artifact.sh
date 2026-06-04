@@ -3,11 +3,11 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: produce-g14-criterion-artifact.sh --output <artifact.json> --benchmark-run-id <id> --ibd-start-height <height> --ibd-stop-height <height> --criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds> --bitcoin-rs-command <command> --bitcoin-core-command <command> --bitcoin-rs-config <path> --bitcoin-core-config <path> [--force] [-- <bitcoin-cli-arg>...]' \
+    'usage: produce-g14-criterion-artifact.sh --output <artifact.json> --benchmark-run-id <id> --ibd-start-height <height> --ibd-stop-height <height> --criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds> --criterion-bitcoin-rs-raw-output <path> --criterion-bitcoin-core-raw-output <path> --bitcoin-rs-command <command> --bitcoin-core-command <command> --bitcoin-rs-config <path> --bitcoin-core-config <path> [--force] [-- <bitcoin-cli-arg>...]' \
     '' \
     'Packages externally measured Criterion elapsed seconds for one bitcoin-rs IBD run and one Bitcoin Core IBD run over a live mainnet height window.' \
     'Writes a fail-closed g14-criterion-artifact-v1 JSON artifact consumable by produce-g14-ibd-manifest.sh; this helper does not time commands itself.' \
-    'The artifact binds live bitcoin-cli start/stop hashes, canonical benchmark IDs, one shared benchmark_run_id, and command/config SHA-256 fields.' \
+    'The artifact binds live bitcoin-cli start/stop hashes, canonical benchmark IDs, one shared benchmark_run_id, command/config SHA-256 fields, and raw Criterion output SHA-256 fields.' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.'
 }
@@ -84,6 +84,14 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def run_bitcoin_cli(bitcoin_cli: str, bitcoin_cli_args: list[str], command: str, *args: str) -> str:
     try:
         output = subprocess.check_output(
@@ -138,6 +146,8 @@ parser.add_argument("--ibd-start-height")
 parser.add_argument("--ibd-stop-height")
 parser.add_argument("--criterion-bitcoin-rs-elapsed-seconds")
 parser.add_argument("--criterion-bitcoin-core-elapsed-seconds")
+parser.add_argument("--criterion-bitcoin-rs-raw-output")
+parser.add_argument("--criterion-bitcoin-core-raw-output")
 parser.add_argument("--bitcoin-rs-command")
 parser.add_argument("--bitcoin-core-command")
 parser.add_argument("--bitcoin-rs-config")
@@ -151,8 +161,9 @@ if args.help:
         "usage: produce-g14-criterion-artifact.sh --output <artifact.json> "
         "--benchmark-run-id <id> --ibd-start-height <height> "
         "--ibd-stop-height <height> --criterion-bitcoin-rs-elapsed-seconds <seconds> "
-        "--criterion-bitcoin-core-elapsed-seconds <seconds> --bitcoin-rs-command <command> "
-        "--bitcoin-core-command <command> --bitcoin-rs-config <path> "
+        "--criterion-bitcoin-core-elapsed-seconds <seconds> "
+        "--criterion-bitcoin-rs-raw-output <path> --criterion-bitcoin-core-raw-output <path> "
+        "--bitcoin-rs-command <command> --bitcoin-core-command <command> --bitcoin-rs-config <path> "
         "--bitcoin-core-config <path> [--force] [-- <bitcoin-cli-arg>...]"
     )
     print(usage)
@@ -165,6 +176,8 @@ required = {
     "--ibd-stop-height": args.ibd_stop_height,
     "--criterion-bitcoin-rs-elapsed-seconds": args.criterion_bitcoin_rs_elapsed_seconds,
     "--criterion-bitcoin-core-elapsed-seconds": args.criterion_bitcoin_core_elapsed_seconds,
+    "--criterion-bitcoin-rs-raw-output": args.criterion_bitcoin_rs_raw_output,
+    "--criterion-bitcoin-core-raw-output": args.criterion_bitcoin_core_raw_output,
     "--bitcoin-rs-command": args.bitcoin_rs_command,
     "--bitcoin-core-command": args.bitcoin_core_command,
     "--bitcoin-rs-config": args.bitcoin_rs_config,
@@ -198,6 +211,8 @@ bitcoin_core_elapsed_seconds = positive_float(
     args.criterion_bitcoin_core_elapsed_seconds,
     "--criterion-bitcoin-core-elapsed-seconds",
 )
+bitcoin_rs_raw_output = require_file(args.criterion_bitcoin_rs_raw_output, "--criterion-bitcoin-rs-raw-output")
+bitcoin_core_raw_output = require_file(args.criterion_bitcoin_core_raw_output, "--criterion-bitcoin-core-raw-output")
 bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-command")
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = read_text(require_file(args.bitcoin_rs_config, "--bitcoin-rs-config"), "--bitcoin-rs-config")
@@ -236,11 +251,13 @@ artifact = {
             "benchmark_id": BITCOIN_RS_CRITERION_BENCHMARK_ID,
             "benchmark_run_id": benchmark_run_id,
             "elapsed_seconds": bitcoin_rs_elapsed_seconds,
+            "raw_output_sha256": sha256_file(bitcoin_rs_raw_output),
         },
         {
             "benchmark_id": BITCOIN_CORE_CRITERION_BENCHMARK_ID,
             "benchmark_run_id": benchmark_run_id,
             "elapsed_seconds": bitcoin_core_elapsed_seconds,
+            "raw_output_sha256": sha256_file(bitcoin_core_raw_output),
         },
     ],
 }
