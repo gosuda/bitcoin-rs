@@ -206,6 +206,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commits: `15bd917`, `87141a3`, `80806a3`, `cfb0c74`, `316738b`, `13ab475`.
 - [x] Coinstats hot helpers were compressed with private MuHash helper inlining, event-delta helper inlining, and ChaCha final-state add unrolling.
   Evidence commits: `84e8645`, `cdbeb07`, `4ebcfce`.
+- [x] Coinstats listener aggregation was compressed for large coalesced UTXO event batches with bounded parallel chunks, plus a no-listener two-shard attribution benchmark.
+  Evidence commit: `da9e31c`.
 - [x] Performance evidence scaffolding was expanded with a mainnet prefix replay measurement example.
   Evidence commit: `2234ad5`.
 
