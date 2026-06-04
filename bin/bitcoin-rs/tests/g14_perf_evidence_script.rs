@@ -4,7 +4,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 const DIRECT_BITCOIN_RS_COMMAND_SHA256: &str =
     "e321b331d0f8168adf37d502710c2a26adf2c452c5eb25c0cd72f69cbb041099";
@@ -229,6 +229,192 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
         .env("BITCOIN_CLI", bitcoin_cli)
         .output()?;
     assert_success(&collector_output);
+    Ok(())
+}
+
+#[test]
+fn artifact_producer_emits_collectable_same_window_criterion_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_command = fake_ibd_command(temp.path(), "bitcoin-rs-live-ibd", "0.01")?;
+    let bitcoin_core_command = fake_ibd_command(temp.path(), "bitcoin-core-live-ibd", "0.05")?;
+    let bitcoin_rs_command = bitcoin_rs_command
+        .to_str()
+        .ok_or("non-UTF-8 bitcoin-rs command")?;
+    let bitcoin_core_command = bitcoin_core_command
+        .to_str()
+        .ok_or("non-UTF-8 Bitcoin Core command")?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = temp.path().join("g14-criterion-artifact.json");
+    let manifest = temp.path().join("g14-live-produced.json");
+
+    let artifact_output = produce_g14_criterion_artifact(
+        &artifact,
+        bitcoin_rs_command,
+        bitcoin_core_command,
+        &bitcoin_rs_config,
+        &bitcoin_core_config,
+        &bitcoin_cli,
+    )?;
+    assert_success(&artifact_output);
+
+    let artifact_json = fs::read_to_string(&artifact)?;
+    assert!(artifact_json.contains(r#""schema": "g14-criterion-artifact-v1""#));
+    assert!(artifact_json.contains(r#""benchmark_run_id": "g14-mainnet-window-live""#));
+    assert!(artifact_json.contains(
+        r#""ibd_start_hash": "0000000000000000000000000000000000000000000000000000000000000000""#
+    ));
+    assert!(artifact_json.contains(
+        r#""ibd_stop_hash": "000000000000000000000000000000000000000000000000000000000000000a""#
+    ));
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            bitcoin_rs_command,
+            "--bitcoin-core-command",
+            bitcoin_core_command,
+            "--criterion-bitcoin-rs-benchmark-id",
+            "bitcoin-rs/mainnet-ibd",
+            "--criterion-bitcoin-core-benchmark-id",
+            "bitcoin-core/mainnet-ibd",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-get-history-p95-ms",
+            "20.0",
+            "--rss-bytes",
+            "1024",
+        ])
+        .output()?;
+    assert_success(&producer_output);
+
+    let collector_output = Command::new("bash")
+        .arg(script_path())
+        .arg(&manifest)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert_success(&collector_output);
+    Ok(())
+}
+
+fn produce_g14_criterion_artifact(
+    artifact: &Path,
+    bitcoin_rs_command: &str,
+    bitcoin_core_command: &str,
+    bitcoin_rs_config: &Path,
+    bitcoin_core_config: &Path,
+    bitcoin_cli: &Path,
+) -> Result<Output, Box<dyn std::error::Error>> {
+    Ok(Command::new("bash")
+        .arg(artifact_producer_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-live",
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.25",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--bitcoin-rs-command",
+            bitcoin_rs_command,
+            "--bitcoin-core-command",
+            bitcoin_core_command,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?)
+}
+
+#[test]
+fn artifact_producer_rejects_invalid_elapsed_seconds() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = temp.path().join("g14-failed-artifact.json");
+    fs::write(&artifact, "stale artifact\n")?;
+
+    let artifact_output = Command::new("bash")
+        .arg(artifact_producer_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--force",
+            "--benchmark-run-id",
+            "g14-mainnet-window-failed",
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "0.0",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--bitcoin-rs-command",
+            "target/release/bitcoin-rs --network mainnet",
+            "--bitcoin-core-command",
+            "bitcoind -chain=main",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!artifact_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&artifact_output.stderr)
+            .contains("--criterion-bitcoin-rs-elapsed-seconds")
+    );
+    assert!(!artifact.exists());
     Ok(())
 }
 
@@ -762,6 +948,10 @@ fn script_path() -> PathBuf {
 
 fn producer_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-ibd-manifest.sh")
+}
+
+fn artifact_producer_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-criterion-artifact.sh")
 }
 
 fn write_text(
