@@ -6,6 +6,7 @@ use std::{
 use bitcoin::ScriptBuf;
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use rayon::prelude::*;
 use smallvec::SmallVec;
 use thiserror::Error;
 
@@ -688,38 +689,20 @@ impl UtxoSet {
             self.shards[shard_idx].validate_script_capacity(buckets.adds(shard_idx))?;
         }
 
-        let events = Mutex::new(Vec::with_capacity(active_shard_count));
         let errors = Mutex::new(Vec::new());
-        let target_tasks = rayon::current_num_threads().saturating_mul(2).max(1);
-        let shards_per_task = active_shard_count.div_ceil(target_tasks).max(1);
-        let buckets = &buckets;
-        let shards = &self.shards;
-        rayon::scope(|scope| {
-            for shard_chunk in active_shards[..active_shard_count].chunks(shards_per_task) {
-                let errors = &errors;
-                let events = &events;
-                scope.spawn(move |_| {
-                    for &shard_idx in shard_chunk {
-                        let shard_adds = buckets.adds(shard_idx);
-                        let shard_removes = buckets.removes(shard_idx);
-                        let shard = &shards[shard_idx];
-                        let (shard_events, result) =
-                            shard.commit_batch_collect_events(shard_adds, shard_removes);
-                        events.lock().push((shard_idx, shard_events));
-                        if let Err(error) = result {
-                            errors.lock().push(error);
-                        }
-                    }
-                });
-            }
-        });
-
-        let mut events = events.into_inner();
-        events.sort_unstable_by_key(|(shard_idx, _events)| *shard_idx);
-
-        let shard_events: Vec<_> = events
-            .into_iter()
-            .map(|(_shard_idx, shard_events)| shard_events)
+        let shard_events: Vec<_> = active_shards[..active_shard_count]
+            .par_iter()
+            .map(|&shard_idx| {
+                let shard_adds = buckets.adds(shard_idx);
+                let shard_removes = buckets.removes(shard_idx);
+                let shard = &self.shards[shard_idx];
+                let (shard_events, result) =
+                    shard.commit_batch_collect_events(shard_adds, shard_removes);
+                if let Err(error) = result {
+                    errors.lock().push(error);
+                }
+                shard_events
+            })
             .collect();
         if !listener.on_committed_event_batches(&shard_events) {
             for shard_events in &shard_events {
