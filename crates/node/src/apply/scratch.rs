@@ -86,8 +86,8 @@ impl ApplyScratch {
         let spent_capacity = capacities.spent_inputs;
         let track_same_block_spends = spent_capacity != 0;
         let track_same_block_scripts = include_same_block_output_scripts && track_same_block_spends;
-        let mut created_outpoints: Option<SameBlockSpentSet> =
-            track_same_block_spends.then(|| HashSet::with_capacity(created_capacity));
+        let mut seen_txids: Option<HashSet<Hash256>> =
+            track_same_block_spends.then(|| HashSet::with_capacity(block.txdata.len()));
         let mut same_block_spent: Option<SameBlockSpentSet> = None;
         let mut same_block_spent_input_count = 0usize;
 
@@ -96,29 +96,26 @@ impl ApplyScratch {
                 raw_txs.push(bitcoin::consensus::encode::serialize(tx));
             }
 
+            let txid = Hash256::from_le_bytes(txid.as_byte_array());
             if !tx.is_coinbase() {
                 for input in &tx.input {
-                    let previous_output = internal_outpoint(&input.previous_output);
-                    if let Some(created_outpoints) = &created_outpoints
-                        && created_outpoints.contains(&previous_output)
+                    let previous_txid =
+                        Hash256::from_le_bytes(input.previous_output.txid.as_byte_array());
+                    if let Some(seen_txids) = &seen_txids
+                        && seen_txids.contains(&previous_txid)
                     {
+                        let previous_output = internal_outpoint(&input.previous_output);
                         same_block_spent
                             .get_or_insert_with(|| HashSet::with_capacity(spent_capacity))
                             .insert(previous_output);
-                        same_block_spent_input_count += 1;
+                        same_block_spent_input_count =
+                            same_block_spent_input_count.saturating_add(1);
                     }
                 }
             }
 
-            let txid = Hash256::from_le_bytes(txid.as_byte_array());
-            for (vout, _txout) in tx.output.iter().enumerate() {
-                let outpoint = OutPoint::new(
-                    txid,
-                    u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?,
-                );
-                if let Some(created_outpoints) = &mut created_outpoints {
-                    created_outpoints.insert(outpoint);
-                }
+            if let Some(seen_txids) = &mut seen_txids {
+                seen_txids.insert(txid);
             }
         }
         let same_block_spent_len = same_block_spent
