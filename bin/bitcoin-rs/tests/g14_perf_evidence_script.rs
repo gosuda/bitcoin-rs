@@ -2,9 +2,32 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output};
+use std::thread;
+use std::time::{Duration, Instant};
+
+type FakeElectrumServer = (thread::JoinHandle<std::io::Result<()>>, u16);
+
+struct FakeBitcoinRsProcess {
+    child: Child,
+}
+
+impl FakeBitcoinRsProcess {
+    fn pid(&self) -> String {
+        self.child.id().to_string()
+    }
+}
+
+impl Drop for FakeBitcoinRsProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 const DIRECT_BITCOIN_RS_COMMAND_SHA256: &str =
     "e321b331d0f8168adf37d502710c2a26adf2c452c5eb25c0cd72f69cbb041099";
@@ -942,12 +965,226 @@ fn script_rejects_bitcoin_core_node_below_stop_header() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+fn electrum_rss_measurement_emits_g14_fragment() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (_server, port) = fake_electrum_server(3)?;
+    let output = temp.path().join("electrum-rss.json");
+
+    let command_output = Command::new("bash")
+        .arg(electrum_rss_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output path")?,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--pid",
+            &std::process::id().to_string(),
+            "--tip-height",
+            "10",
+            "--tip-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--sample-size",
+            "3",
+            "--seed",
+            "smoke",
+            "--timeout-seconds",
+            "5",
+            "--generate-empty-scripthashes-for-smoke-test",
+        ])
+        .output()?;
+
+    assert_success(&command_output);
+    let measurement = fs::read_to_string(output)?;
+    let measurement: serde_json::Value = serde_json::from_str(&measurement)?;
+    assert_eq!(measurement["schema"], "g14-electrum-rss-smoke-v1");
+    assert_eq!(measurement["measurement_kind"], "smoke");
+    assert_eq!(measurement["method"], "blockchain.scripthash.get_history");
+    assert_eq!(measurement["electrum_sample_size"], 3);
+    assert_eq!(
+        measurement["electrum_scripthash_corpus"],
+        "generated-empty-scripthashes-for-smoke-test"
+    );
+    assert!(
+        measurement["electrum_get_history_p95_ms"]
+            .as_f64()
+            .is_some_and(|value| value > 0.0)
+    );
+    assert!(
+        measurement["rss_bytes"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn electrum_rss_measurement_rejects_malformed_tip_hash() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("electrum-rss.json");
+
+    let command_output = Command::new("bash")
+        .arg(electrum_rss_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output path")?,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "50001",
+            "--pid",
+            &std::process::id().to_string(),
+            "--tip-height",
+            "10",
+            "--tip-hash",
+            "not-a-hash",
+            "--sample-size",
+            "1",
+        ])
+        .output()?;
+
+    assert!(!command_output.status.success());
+    assert!(String::from_utf8_lossy(&command_output.stderr).contains("--tip-hash"));
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn electrum_rss_measurement_requires_real_scripthash_corpus()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("electrum-rss.json");
+
+    let command_output = Command::new("bash")
+        .arg(electrum_rss_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output path")?,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "50001",
+            "--pid",
+            &std::process::id().to_string(),
+            "--tip-height",
+            "10",
+            "--tip-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--sample-size",
+            "1",
+        ])
+        .output()?;
+
+    assert!(!command_output.status.success());
+    assert!(String::from_utf8_lossy(&command_output.stderr).contains("--scripthashes is required"));
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn electrum_rss_measurement_rejects_empty_history_for_real_corpus()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (_server, port) = fake_electrum_server(1)?;
+    let fake_node = fake_bitcoin_rs_process()?;
+    let output = temp.path().join("electrum-rss.json");
+    let corpus = write_text(
+        temp.path(),
+        "scripthashes.txt",
+        "1111111111111111111111111111111111111111111111111111111111111111\n",
+    )?;
+
+    let command_output = Command::new("bash")
+        .arg(electrum_rss_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output path")?,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--pid",
+            &fake_node.pid(),
+            "--tip-height",
+            "10",
+            "--tip-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--sample-size",
+            "1",
+            "--scripthashes",
+            corpus.to_str().ok_or("non-UTF-8 corpus path")?,
+            "--timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert!(!command_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&command_output.stderr).contains("returned empty history"),
+        "stderr: {}",
+        String::from_utf8_lossy(&command_output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn electrum_rss_measurement_rejects_smoke_flag_with_real_corpus()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("electrum-rss.json");
+    let corpus = write_text(
+        temp.path(),
+        "scripthashes.txt",
+        "1111111111111111111111111111111111111111111111111111111111111111\n",
+    )?;
+
+    let command_output = Command::new("bash")
+        .arg(electrum_rss_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output path")?,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "50001",
+            "--pid",
+            &std::process::id().to_string(),
+            "--tip-height",
+            "10",
+            "--tip-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--sample-size",
+            "1",
+            "--scripthashes",
+            corpus.to_str().ok_or("non-UTF-8 corpus path")?,
+            "--generate-empty-scripthashes-for-smoke-test",
+        ])
+        .output()?;
+
+    assert!(!command_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&command_output.stderr).contains("cannot be combined"),
+        "stderr: {}",
+        String::from_utf8_lossy(&command_output.stderr)
+    );
+    Ok(())
+}
+
 fn script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/collect-g14-perf-evidence.sh")
 }
 
 fn producer_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-ibd-manifest.sh")
+}
+
+fn electrum_rss_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/measure-g14-electrum-rss.sh")
 }
 
 fn artifact_producer_script_path() -> PathBuf {
@@ -1591,6 +1828,49 @@ print({hash_expr})
     permissions.set_mode(0o755);
     fs::set_permissions(&path, permissions)?;
     Ok(path)
+}
+
+fn fake_electrum_server(
+    response_count: usize,
+) -> Result<FakeElectrumServer, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let handle = thread::spawn(move || -> std::io::Result<()> {
+        let (stream, _addr) = listener.accept()?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut writer = stream;
+        let mut line = String::new();
+        for request_id in 1..=response_count {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            writeln!(writer, r#"{{"id":{request_id},"result":[]}}"#)?;
+            writer.flush()?;
+        }
+        Ok(())
+    });
+    Ok((handle, port))
+}
+
+fn fake_bitcoin_rs_process() -> Result<FakeBitcoinRsProcess, Box<dyn std::error::Error>> {
+    let child = Command::new("bash")
+        .args(["-c", "exec -a bitcoin-rs sleep 30"])
+        .spawn()?;
+    let cmdline = PathBuf::from(format!("/proc/{}/cmdline", child.id()));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if fs::read(&cmdline).is_ok_and(|contents| {
+            contents
+                .split(|byte| *byte == 0)
+                .next()
+                .is_some_and(|argv0| argv0 == b"bitcoin-rs")
+        }) {
+            return Ok(FakeBitcoinRsProcess { child });
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(FakeBitcoinRsProcess { child })
 }
 
 fn assert_success(output: &std::process::Output) {

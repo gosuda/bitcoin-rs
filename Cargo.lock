@@ -264,6 +264,7 @@ dependencies = [
  "anyhow",
  "bitcoin-rs-node",
  "mimalloc",
+ "serde_json",
  "tempfile",
 ]
 
