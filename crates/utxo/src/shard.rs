@@ -11,8 +11,8 @@ use crate::{
     UtxoError, UtxoKey,
     record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
     set::{
-        BuildPayload, ScannedUtxo, SpendPayload, UtxoChangeListener, UtxoInserted, UtxoRemoved,
-        UtxoScan,
+        BuildPayload, ScannedUtxo, SpendPayload, UtxoAdd, UtxoChangeListener, UtxoInserted,
+        UtxoRemoved, UtxoScan,
     },
 };
 
@@ -110,6 +110,18 @@ impl Shard {
             } else {
                 commit_batch_coalesced(arena, table, adds, removes)
             }
+        })
+    }
+
+    pub(crate) fn commit_single_shard_batch(
+        &self,
+        adds: &[UtxoAdd],
+        removes: &[OutPoint],
+        shard_idx: usize,
+    ) -> Result<(), UtxoError> {
+        let mut cell = self.inner.write();
+        cell.with_dependent_mut(|arena, table| {
+            commit_single_shard_coalesced(arena, table, adds, removes, shard_idx)
         })
     }
 
@@ -360,6 +372,47 @@ fn commit_batch_coalesced<'arena>(
     Ok(())
 }
 
+fn commit_single_shard_coalesced<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    adds: &[UtxoAdd],
+    removes: &[OutPoint],
+    shard_idx: usize,
+) -> Result<(), UtxoError> {
+    let mut remaining_removes = removes;
+    while let Some((first, rest)) = remaining_removes.split_first() {
+        let key = UtxoKey::from_txid(&first.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        let run_len = rest
+            .iter()
+            .take_while(|remove| remove.txid == first.txid)
+            .count()
+            .saturating_add(1);
+        apply_outpoint_remove_run(arena, table, key, first.txid, &remaining_removes[..run_len]);
+        remaining_removes = &remaining_removes[run_len..];
+    }
+
+    let mut remaining_adds = adds;
+    while let Some((first, rest)) = remaining_adds.split_first() {
+        let key = UtxoKey::from_txid(&first.outpoint.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        let run_len = rest
+            .iter()
+            .take_while(|add| add.outpoint.txid == first.outpoint.txid)
+            .count()
+            .saturating_add(1);
+        apply_utxo_add_run(
+            arena,
+            table,
+            key,
+            first.outpoint.txid,
+            &remaining_adds[..run_len],
+        )?;
+        remaining_adds = &remaining_adds[run_len..];
+    }
+    Ok(())
+}
+
 fn apply_remove_run<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
@@ -369,6 +422,24 @@ fn apply_remove_run<'arena>(
         return;
     };
     let Some(mut record) = take_record(table, first.key, first.txid) else {
+        return;
+    };
+    for remove in removes {
+        let _removed = record.remove_output(remove.vout);
+    }
+    if !record.is_empty() {
+        insert_record(arena, table, record);
+    }
+}
+
+fn apply_outpoint_remove_run<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    key: UtxoKey,
+    txid: Hash256,
+    removes: &[OutPoint],
+) {
+    let Some(mut record) = take_record(table, key, txid) else {
         return;
     };
     for remove in removes {
@@ -417,6 +488,21 @@ fn apply_add_run<'arena>(
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
     for (_key, _txid, payload) in adds {
         append_build_output(table, &mut record, payload)?;
+    }
+    insert_record(arena, table, record);
+    Ok(())
+}
+
+fn apply_utxo_add_run<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    key: UtxoKey,
+    txid: Hash256,
+    adds: &[UtxoAdd],
+) -> Result<(), UtxoError> {
+    let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    for add in adds {
+        append_build_output(table, &mut record, &add.payload())?;
     }
     insert_record(arena, table, record);
     Ok(())

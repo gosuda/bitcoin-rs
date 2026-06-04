@@ -592,25 +592,15 @@ impl UtxoSet {
         removes: &[OutPoint],
         shard_idx: usize,
     ) -> Result<(), UtxoError> {
-        let mut shard_adds = Vec::with_capacity(adds.len());
-        let mut shard_removes = Vec::with_capacity(removes.len());
-
-        for add in adds {
-            let key = UtxoKey::from_txid(&add.outpoint.txid);
-            shard_adds.push((key, add.outpoint.txid, add.payload()));
-        }
-        for remove in removes {
-            let key = UtxoKey::from_txid(&remove.txid);
-            shard_removes.push(SpendPayload {
-                op: remove,
-                key,
-                vout: remove.vout,
-                txid: remove.txid,
-            });
-        }
-
         let _stable_commit = self.stable_view_lock.write();
-        self.shards[shard_idx].commit_batch(&shard_adds, &shard_removes, self.listener.as_deref())
+        let listener = self.listener.as_deref();
+        if listener.is_none() {
+            return self.shards[shard_idx].commit_single_shard_batch(adds, removes, shard_idx);
+        }
+
+        let shard_adds = direct_adds(adds, shard_idx);
+        let shard_removes = direct_removes(removes, shard_idx);
+        self.shards[shard_idx].commit_batch(&shard_adds, &shard_removes, listener)
     }
 }
 
