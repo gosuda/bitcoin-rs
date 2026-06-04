@@ -236,6 +236,7 @@ impl BlockSync {
             let mut window = self.download_window.lock();
             for (hash, staged) in &staged_blocks {
                 match staged {
+                    StagedBlock::AlreadyStaged => {}
                     StagedBlock::Memory { bytes, dropped } => {
                         if window.mark_received(*hash, *bytes) {
                             height_lookups.push(*hash);
@@ -281,6 +282,7 @@ impl BlockSync {
             .lock()
             .insert(hash, next_expected_hash, block, now);
         match staged {
+            StagedBlock::AlreadyStaged => {}
             StagedBlock::Memory { bytes, dropped } => {
                 let mut window = self.download_window.lock();
                 let needs_height_lookup = window.mark_received(hash, bytes);

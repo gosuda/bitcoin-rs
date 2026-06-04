@@ -37,6 +37,7 @@ pub(super) struct DroppedBlock {
 
 #[derive(Clone, Debug)]
 pub(super) enum StagedBlock {
+    AlreadyStaged,
     Memory {
         bytes: usize,
         dropped: Vec<DroppedBlock>,
@@ -71,6 +72,10 @@ impl BlockStager {
         block: bitcoin::Block,
         now: Instant,
     ) -> StagedBlock {
+        if self.received.contains_key(&hash) {
+            return StagedBlock::AlreadyStaged;
+        }
+
         let bytes = block_size(&block);
         if bytes > self.budget.max_received_bytes {
             return StagedBlock::DroppedForRetry {
@@ -370,6 +375,30 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_insert_keeps_original_staged_deadline() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_bytes = block_size(&block);
+        let mut budget = default_sync_budget();
+        budget.received_timeout = Duration::from_secs(10);
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let hash = Hash256::from_le_bytes(&[0x43; 32]);
+
+        stager.insert(hash, None, block.clone(), now);
+        stager.insert(hash, None, block, now + Duration::from_secs(5));
+
+        assert_eq!(stager.received_len(), 1);
+        assert_eq!(stager.received_bytes(), block_bytes);
+
+        let dropped = stager.prune_expired(now + Duration::from_secs(10));
+
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].hash, hash);
+        assert_eq!(stager.received_len(), 0);
+        assert_eq!(stager.received_bytes(), 0);
+    }
+
+    #[test]
     fn insert_eviction_drops_oldest_unprotected_until_budget_fits() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let block_bytes = block_size(&block);
@@ -393,6 +422,9 @@ mod tests {
             block,
             now + Duration::from_secs(4),
         ) {
+            super::StagedBlock::AlreadyStaged => {
+                panic!("incoming block should not already be staged")
+            }
             super::StagedBlock::Memory { dropped, .. } => dropped,
             super::StagedBlock::DroppedForRetry { .. } => {
                 panic!("incoming block should fit after evicting staged blocks")
