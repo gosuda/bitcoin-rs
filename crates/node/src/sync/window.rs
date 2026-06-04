@@ -127,6 +127,53 @@ impl DownloadWindow {
                 <= self.budget.max_pending_bytes
     }
 
+    pub(super) fn request_peer_scan_limit(&self, now: Instant) -> usize {
+        let per_peer = self
+            .budget
+            .getdata_batch_limit
+            .min(self.budget.max_peer_inflight);
+        if per_peer == 0 || self.ewma_block_bytes == 0 {
+            return 0;
+        }
+        let (expired_blocks, expired_bytes) = self.expired_pending_capacity(now);
+        let block_capacity = self
+            .budget
+            .max_pending_blocks
+            .saturating_sub(self.pending.len().saturating_sub(expired_blocks));
+        let byte_capacity = self
+            .budget
+            .max_pending_bytes
+            .saturating_sub(self.pending_bytes.saturating_sub(expired_bytes))
+            / self.ewma_block_bytes;
+        let request_blocks = block_capacity.min(byte_capacity);
+        if request_blocks == 0 {
+            return 0;
+        }
+        request_blocks
+            .div_ceil(per_peer)
+            .saturating_add(self.peer_inflight.len())
+    }
+
+    fn expired_pending_capacity(&self, now: Instant) -> (usize, usize) {
+        if self
+            .next_pending_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return (0, 0);
+        }
+        self.pending
+            .values()
+            .fold((0_usize, 0_usize), |(blocks, bytes), pending| {
+                if now.duration_since(pending.requested_at) < self.budget.pending_timeout {
+                    return (blocks, bytes);
+                }
+                (
+                    blocks.saturating_add(1),
+                    bytes.saturating_add(pending.estimated_bytes),
+                )
+            })
+    }
+
     #[cfg(test)]
     pub(super) fn received_len(&self) -> usize {
         self.received.len()
@@ -637,7 +684,7 @@ fn contiguous_request_entries(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use bitcoin_rs_primitives::Hash256;
 
@@ -665,6 +712,56 @@ mod tests {
             }),
             4
         );
+    }
+
+    #[test]
+    fn request_peer_scan_limit_accounts_for_pending_bytes_and_inflight_peers() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_pending_blocks: 8,
+            max_pending_bytes: 4 * 256 * 1024,
+            max_peer_inflight: 2,
+            getdata_batch_limit: 4,
+            ..test_budget()
+        });
+        window.pending_bytes = 256 * 1024;
+        window.peer_inflight.insert(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            super::PeerInflight { blocks: 2 },
+        );
+
+        assert_eq!(window.request_peer_scan_limit(Instant::now()), 3);
+    }
+
+    #[test]
+    fn request_peer_scan_limit_counts_expired_pending_capacity() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_pending_blocks: 2,
+            max_pending_bytes: 2 * 256 * 1024,
+            max_peer_inflight: 2,
+            getdata_batch_limit: 2,
+            pending_timeout: Duration::ZERO,
+            ..test_budget()
+        });
+        let now = Instant::now();
+        let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        for (byte, height) in [(1, 1_u32), (2, 2)] {
+            window.pending.insert(
+                hash(byte),
+                super::PendingBlock {
+                    peer_addr,
+                    requested_at: now,
+                    height,
+                    estimated_bytes: 256 * 1024,
+                },
+            );
+            window.pending_bytes = window.pending_bytes.saturating_add(256 * 1024);
+        }
+        window.next_pending_deadline = Some(now);
+        window
+            .peer_inflight
+            .insert(peer_addr, super::PeerInflight { blocks: 2 });
+
+        assert_eq!(window.request_peer_scan_limit(now), 2);
     }
 
     fn test_budget() -> SyncBudget {

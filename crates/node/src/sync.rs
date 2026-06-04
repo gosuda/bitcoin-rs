@@ -55,9 +55,8 @@ const RECEIVED_BLOCK_BYTE_BUDGET: usize = 128 * 256 * 1024;
 const INBOUND_BLOCK_STAGE_CHUNK: usize = 16;
 /// Maximum block requests one peer may own at once.
 ///
-/// `BlockSync::tick` currently selects one sync peer per tick. Keep the default
-/// per-peer cap equal to the global cap so a single healthy peer can fill the
-/// whole window until request scheduling is distributed across peers.
+/// Keep the default per-peer cap equal to the global cap so the bounded
+/// scheduler normally needs only one healthy peer to fill the whole window.
 const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
@@ -78,6 +77,12 @@ pub struct BlockSync {
 struct SyncPeer {
     addr: SocketAddr,
     start_height: i32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SyncPeerSelection {
+    header_peer: Option<SyncPeer>,
+    request_peers: Vec<SyncPeer>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,17 +124,18 @@ impl BlockSync {
 
         let applied_tip = self.handles.applied_tip.load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let sync_peers = self.sync_peers(applied_height);
-        if sync_peers.is_empty() {
+        self.release_disconnected_peer_budget();
+        let now = Instant::now();
+        let sync_peer_selection = self.sync_peer_selection(applied_height, now);
+        if sync_peer_selection.header_peer.is_none() {
             tracing::trace!(applied_height, "block sync: no peer above current height");
             return;
         }
 
         let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        self.release_disconnected_peer_budget();
         let mut sent_getdata = false;
-        for (index, peer) in sync_peers.into_iter().enumerate() {
+        for peer in sync_peer_selection.request_peers {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
             let requested_blocks = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
@@ -141,11 +147,14 @@ impl BlockSync {
                 _ => false,
             };
             sent_getdata |= requested_blocks;
-            if index == 0 && peer_best_height > header_height {
-                self.send_getheaders(peer.addr, header_height, peer.start_height);
-            }
             if requested_blocks && !self.download_window.lock().has_request_capacity() {
                 break;
+            }
+        }
+        if let Some(peer) = sync_peer_selection.header_peer {
+            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            if peer_best_height > header_height {
+                self.send_getheaders(peer.addr, header_height, peer.start_height);
             }
         }
         if sent_getdata {
@@ -439,11 +448,13 @@ impl BlockSync {
         Some(tree.node(node_id).ok()?.hash)
     }
 
-    fn sync_peers(&self, our_height: u32) -> Vec<SyncPeer> {
+    fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
+        let request_peer_limit = self.download_window.lock().request_peer_scan_limit(now);
         let peers = self.peers.read();
-        let mut eligible = Vec::with_capacity(peers.len());
-        let mut previous_start_height = None;
-        let mut needs_sort = false;
+        let mut selection = SyncPeerSelection {
+            header_peer: None,
+            request_peers: Vec::with_capacity(request_peer_limit.min(peers.len())),
+        };
         for peer in peers.iter() {
             if u32::try_from(peer.start_height)
                 .ok()
@@ -451,19 +462,19 @@ impl BlockSync {
             {
                 continue;
             }
-            if previous_start_height.is_some_and(|previous| previous < peer.start_height) {
-                needs_sort = true;
-            }
-            previous_start_height = Some(peer.start_height);
-            eligible.push(SyncPeer {
+            let sync_peer = SyncPeer {
                 addr: peer.addr,
                 start_height: peer.start_height,
-            });
+            };
+            if selection
+                .header_peer
+                .is_none_or(|current| current.start_height < sync_peer.start_height)
+            {
+                selection.header_peer = Some(sync_peer);
+            }
+            insert_request_peer(&mut selection.request_peers, request_peer_limit, sync_peer);
         }
-        if needs_sort {
-            eligible.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
-        }
-        eligible
+        selection
     }
 
     fn send_getdata_for_pending_blocks(
@@ -636,6 +647,22 @@ fn bitcoin_network(network: bitcoin_rs_primitives::Network) -> bitcoin::Network 
 
 fn metric_count(value: usize) -> f64 {
     f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+fn insert_request_peer(request_peers: &mut Vec<SyncPeer>, limit: usize, peer: SyncPeer) {
+    if limit == 0 {
+        return;
+    }
+    let insert_at = request_peers
+        .iter()
+        .position(|current| current.start_height < peer.start_height)
+        .unwrap_or(request_peers.len());
+    if request_peers.len() < limit {
+        request_peers.insert(insert_at, peer);
+    } else if insert_at < limit {
+        request_peers.insert(insert_at, peer);
+        request_peers.truncate(limit);
+    }
 }
 
 const fn default_sync_budget() -> SyncBudget {
@@ -821,6 +848,124 @@ mod tests {
             return Err(std::io::Error::other("expected high peer getheaders").into());
         }
         assert!(low_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, _block_tree, _applied_tip, _expected) =
+            sync_with_header_chain(3)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 0,
+                ..super::default_sync_budget()
+            },
+        );
+        let low_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let high_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers
+            .write()
+            .extend([synthetic_peer(low_addr, 4), synthetic_peer(high_addr, 8)]);
+        let (low_tx, low_rx) = unbounded::<Message>();
+        let (high_tx, high_rx) = unbounded::<Message>();
+        peer_outbound
+            .write()
+            .extend([(low_addr, low_tx), (high_addr, high_tx)]);
+
+        sync.tick();
+
+        let headers = high_rx.try_recv()?;
+        if !matches!(headers, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected high peer getheaders").into());
+        }
+        assert!(high_rx.try_recv().is_err());
+        assert!(low_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tick_bounded_request_peer_selection_preserves_equal_height_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+        let first_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let second_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers.write().extend([
+            synthetic_peer(first_addr, 200),
+            synthetic_peer(second_addr, 200),
+        ]);
+        let (first_tx, first_rx) = unbounded::<Message>();
+        let (second_tx, second_rx) = unbounded::<Message>();
+        peer_outbound
+            .write()
+            .extend([(first_addr, first_tx), (second_addr, second_tx)]);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(inventory) = first_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected first peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected);
+        let headers = first_rx.try_recv()?;
+        if !matches!(headers, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first peer getheaders").into());
+        }
+        assert!(first_rx.try_recv().is_err());
+        assert!(second_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(8)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 4,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                ..super::default_sync_budget()
+            },
+        );
+        let first_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(first_addr, 100));
+        let (first_tx, first_rx) = unbounded::<Message>();
+        peer_outbound.write().insert(first_addr, first_tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(first_inventory) = first_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected first peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(first_inventory)?, expected[..2]);
+        let first_headers = first_rx.try_recv()?;
+        if !matches!(first_headers, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first peer getheaders").into());
+        }
+
+        let second_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers.write().push(synthetic_peer(second_addr, 100));
+        let (second_tx, second_rx) = unbounded::<Message>();
+        peer_outbound.write().insert(second_addr, second_tx);
+
+        sync.tick();
+
+        let NetworkMessage::GetData(second_inventory) = second_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected second peer getdata").into());
+        };
+        assert_eq!(witness_block_inventory(second_inventory)?, expected[2..4]);
+        assert!(second_rx.try_recv().is_err());
+        let second_headers = first_rx.try_recv()?;
+        if !matches!(second_headers, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected header refresh on first peer").into());
+        }
+        assert!(first_rx.try_recv().is_err());
         Ok(())
     }
 
