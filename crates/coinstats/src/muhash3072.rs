@@ -198,18 +198,18 @@ impl MuHash3072 {
 
     /// Inserts one byte string into the multiset.
     pub fn insert(&mut self, data: &[u8]) {
-        self.numerator = mul_num(&self.numerator, &element(data));
+        self.numerator.multiply(&element(data));
     }
 
     /// Removes one byte string from the multiset.
     pub fn remove(&mut self, data: &[u8]) {
-        self.denominator = mul_num(&self.denominator, &element(data));
+        self.denominator.multiply(&element(data));
     }
 
     /// Combines another accumulator into this accumulator.
     pub fn combine(&mut self, other: &Self) {
-        self.numerator = mul_num(&self.numerator, &other.numerator);
-        self.denominator = mul_num(&self.denominator, &other.denominator);
+        self.numerator.multiply(&other.numerator);
+        self.denominator.multiply(&other.denominator);
     }
 
     /// Finalizes to the 3072-bit group element, serialized big-endian.
@@ -262,12 +262,6 @@ fn element(data: &[u8]) -> Num3072 {
     let mut stream = [0_u8; BYTE_LEN];
     chacha20_keystream(&key, &mut stream);
     Num3072::from_le_bytes(&stream)
-}
-
-fn mul_num(left: &Num3072, right: &Num3072) -> Num3072 {
-    let mut product = *left;
-    product.multiply(right);
-    product
 }
 
 fn low_u64(value: u128) -> u64 {
