@@ -470,12 +470,10 @@ impl DownloadWindow {
     pub(super) fn mark_requested(&mut self, request: &PeerRequest, now: Instant) {
         let estimated_bytes = self.ewma_block_bytes;
         let inflight = self.peer_inflight.entry(request.peer_addr).or_default();
-        let mut recorded_pending = false;
         for entry in &request.entries {
-            if self.pending.contains_key(&entry.hash) || self.received.contains_key(&entry.hash) {
-                continue;
-            }
-            self.pending.insert(
+            debug_assert!(!self.pending.contains_key(&entry.hash));
+            debug_assert!(!self.received.contains_key(&entry.hash));
+            let previous = self.pending.insert(
                 entry.hash,
                 PendingBlock {
                     peer_addr: request.peer_addr,
@@ -484,11 +482,11 @@ impl DownloadWindow {
                     estimated_bytes,
                 },
             );
+            debug_assert!(previous.is_none());
             self.pending_bytes = self.pending_bytes.saturating_add(estimated_bytes);
             inflight.blocks = inflight.blocks.saturating_add(1);
-            recorded_pending = true;
         }
-        if recorded_pending {
+        if !request.entries.is_empty() {
             self.record_pending_deadline(now);
         }
         self.next_request_height = self.next_request_height.max(request.next_request_height);
