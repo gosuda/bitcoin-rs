@@ -650,6 +650,19 @@ mod tests {
         assert_eq!(window.request_peer_scan_limit(now), 2);
     }
 
+    #[test]
+    fn default_budget_keeps_full_request_window_for_large_blocks() {
+        let mut window = DownloadWindow::new(crate::sync::default_sync_budget());
+        window.ewma_block_bytes = 2 * 1024 * 1024;
+        window.pending_bytes = window
+            .budget
+            .max_pending_blocks
+            .saturating_sub(1)
+            .saturating_mul(window.ewma_block_bytes);
+
+        assert!(window.has_request_capacity());
+    }
+
     fn test_budget() -> SyncBudget {
         SyncBudget {
             max_pending_blocks: 128,

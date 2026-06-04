@@ -47,8 +47,10 @@ const PENDING_BUDGET: usize = 128;
 const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of received blocks waiting for their predecessor.
 const RECEIVED_BLOCK_BUDGET: usize = 128;
+/// Mainnet-oriented block-size estimate for sizing the in-flight request window.
+const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 /// Maximum estimated bytes in the in-flight request window.
-const PENDING_BYTE_BUDGET: usize = 128 * 256 * 1024;
+const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
 /// Maximum serialized bytes staged in memory while waiting for predecessors.
 const RECEIVED_BLOCK_BYTE_BUDGET: usize = 128 * 256 * 1024;
 /// Maximum decoded inbound blocks held before handing them to `BlockStager`.
