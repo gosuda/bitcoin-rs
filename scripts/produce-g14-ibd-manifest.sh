@@ -85,6 +85,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def current_head() -> str:
+    output = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], text=True)
+    head = output.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        die("git HEAD must be 40 lowercase hex characters")
+    return head
+
+
 def read_text(path: Path, name: str) -> str:
     try:
         value = path.read_text(encoding="utf-8")
@@ -305,6 +313,9 @@ manifest = {
     "bitcoin_rs_elapsed_seconds": bitcoin_rs_elapsed_seconds,
     "bitcoin_core_elapsed_seconds": bitcoin_core_elapsed_seconds,
     "bitcoin_core_version": bitcoin_core_version,
+    "bitcoin_rs_commit": current_head(),
+    "storage_backend": "fjall",
+    "indexes": "all",
     "bitcoin_core_commit": bitcoin_core_commit,
     "bitcoin_rs_command": bitcoin_rs_command,
     "bitcoin_core_command": bitcoin_core_command,

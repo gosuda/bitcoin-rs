@@ -21,6 +21,9 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
     assert_success(&output);
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("export G14_MEASUREMENT_TARGET=mainnet-ibd\n"));
+    assert!(stdout.contains(&format!("export G14_COMMIT_SHA={}\n", current_head()?)));
+    assert!(stdout.contains("export G14_STORAGE_BACKEND=fjall\n"));
+    assert!(stdout.contains("export G14_INDEXES=all\n"));
     assert!(stdout.contains("export G14_REFERENCE_IMPL=bitcoin-core\n"));
     assert!(stdout.contains("export G14_IBD_START_HEIGHT=0\n"));
     assert!(stdout.contains("export G14_IBD_STOP_HEIGHT=10\n"));
@@ -178,6 +181,9 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
     let manifest_json = fs::read_to_string(&manifest)?;
     assert!(manifest_json.contains(r#""bench_tool": "criterion""#));
     assert!(manifest_json.contains(r#""elapsed_seconds_source": "criterion""#));
+    assert!(manifest_json.contains(&format!(r#""bitcoin_rs_commit": "{}""#, current_head()?)));
+    assert!(manifest_json.contains(r#""storage_backend": "fjall""#));
+    assert!(manifest_json.contains(r#""indexes": "all""#));
     assert!(manifest_json.contains(r#""criterion_artifact_schema": "g14-criterion-artifact-v1""#));
     assert!(manifest_json.contains(r#""benchmark_artifact_path":"#));
     assert!(
@@ -355,6 +361,87 @@ fn script_rejects_slower_bitcoin_rs_ibd_evidence() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn script_rejects_evidence_from_different_bitcoin_rs_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_binding_fields(
+        temp.path(),
+        0,
+        10,
+        "1.25",
+        "2.50",
+        "2222222222222222222222222222222222222222",
+        "fjall",
+        "all",
+    )?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("bitcoin_rs_commit must match git HEAD")
+    );
+    Ok(())
+}
+
+#[test]
+fn script_rejects_evidence_from_wrong_storage_backend() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_binding_fields(
+        temp.path(),
+        0,
+        10,
+        "1.25",
+        "2.50",
+        &current_head()?,
+        "rocksdb",
+        "all",
+    )?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("storage_backend must be 'fjall'"));
+    Ok(())
+}
+
+#[test]
+fn script_rejects_evidence_from_wrong_index_set() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_binding_fields(
+        temp.path(),
+        0,
+        10,
+        "1.25",
+        "2.50",
+        &current_head()?,
+        "fjall",
+        "txindex",
+    )?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("indexes must be 'all'"));
+    Ok(())
+}
+
+#[test]
 fn script_rejects_malformed_bitcoin_core_block_hash() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::MalformedHash)?;
@@ -477,6 +564,14 @@ fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     Ok(digest.to_owned())
 }
 
+fn current_head() -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()?;
+    assert_success(&output);
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
 fn fake_ibd_command(
     dir: &Path,
     name: &str,
@@ -514,6 +609,28 @@ fn evidence_json_with_elapsed(
     bitcoin_rs_elapsed_seconds: &str,
     bitcoin_core_elapsed_seconds: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    evidence_json_with_binding_fields(
+        dir,
+        start_height,
+        stop_height,
+        bitcoin_rs_elapsed_seconds,
+        bitcoin_core_elapsed_seconds,
+        &current_head()?,
+        "fjall",
+        "all",
+    )
+}
+
+fn evidence_json_with_binding_fields(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+    bitcoin_rs_elapsed_seconds: &str,
+    bitcoin_core_elapsed_seconds: &str,
+    bitcoin_rs_commit: &str,
+    storage_backend: &str,
+    indexes: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("g14.json");
     let artifact = criterion_artifact_json(
         dir,
@@ -537,6 +654,9 @@ fn evidence_json_with_elapsed(
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
   "bitcoin_core_elapsed_seconds": {bitcoin_core_elapsed_seconds},
   "bitcoin_core_version": "v27.0.0",
+  "bitcoin_rs_commit": "{bitcoin_rs_commit}",
+  "storage_backend": "{storage_backend}",
+  "indexes": "{indexes}",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
   "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
   "bitcoin_core_command": "bitcoind -chain=main",

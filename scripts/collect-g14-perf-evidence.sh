@@ -14,6 +14,7 @@ usage() {
     '  bitcoin_rs_elapsed_seconds, bitcoin_core_elapsed_seconds,' \
     '  criterion_bitcoin_rs_benchmark_id, criterion_bitcoin_core_benchmark_id,' \
     '  bench_tool=criterion, elapsed_seconds_source=criterion,' \
+    '  bitcoin_rs_commit, storage_backend=fjall, indexes=all,' \
     '  bitcoin_core_version, bitcoin_core_commit,' \
     '  bitcoin_rs_command, bitcoin_core_command,' \
     '  bitcoin_rs_config, bitcoin_core_config,' \
@@ -265,6 +266,12 @@ if chain_info.get("chain") != "main":
     die(f"{chain_info_source} must be connected to mainnet, got chain={chain_info.get('chain')!r}")
 require_chain_height(chain_info, "blocks", stop_height, chain_info_source)
 require_chain_height(chain_info, "headers", stop_height, chain_info_source)
+bitcoin_rs_commit = require_hex(require_text(data, "bitcoin_rs_commit"), 40, "bitcoin_rs_commit")
+head = current_head()
+if bitcoin_rs_commit != head:
+    die(f"bitcoin_rs_commit must match git HEAD {head}")
+storage_backend = require_literal_value(data, "storage_backend", "fjall")
+indexes = require_literal_value(data, "indexes", "all")
 core_commit = require_hex(require_text(data, "bitcoin_core_commit"), 40, "bitcoin_core_commit")
 bench_tool = require_literal_value(data, "bench_tool", "criterion")
 require_literal_value(data, "elapsed_seconds_source", "criterion")
@@ -308,10 +315,10 @@ if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
     )
 
 env = {
-    "G14_COMMIT_SHA": current_head(),
+    "G14_COMMIT_SHA": bitcoin_rs_commit,
     "G14_MEASUREMENT_TARGET": "mainnet-ibd",
-    "G14_STORAGE_BACKEND": "fjall",
-    "G14_INDEXES": "all",
+    "G14_STORAGE_BACKEND": storage_backend,
+    "G14_INDEXES": indexes,
     "G14_REFERENCE_IMPL": "bitcoin-core",
     "G14_BENCH_TOOL": bench_tool,
     "G14_BLOCK_SIZE_BYTES": "4194304",
