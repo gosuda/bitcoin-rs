@@ -1,3 +1,5 @@
+#![allow(clippy::inline_always)] // PERF: Criterion shows forced inlining improves MuHash insert hot paths.
+
 use bitcoin_rs_primitives::Hash256;
 use ruint::Uint;
 use sha2::{Digest, Sha256};
@@ -118,6 +120,7 @@ impl Num3072 {
         out
     }
 
+    #[inline(always)]
     fn multiply(&mut self, other: &Self) {
         let left = self.limbs;
         let right = &other.limbs;
@@ -163,6 +166,7 @@ impl Num3072 {
         }
     }
 
+    #[inline(always)]
     fn is_overflow(&self) -> bool {
         if self.limbs[0] <= u64::MAX - MAX_PRIME_DIFF {
             return false;
@@ -170,6 +174,7 @@ impl Num3072 {
         self.limbs[1..].iter().all(|limb| *limb == u64::MAX)
     }
 
+    #[inline(always)]
     fn full_reduce(&mut self) {
         let mut c0 = MAX_PRIME_DIFF;
         let mut c1 = 0_u64;
@@ -257,7 +262,7 @@ impl Default for MuHash3072 {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn element(data: &[u8]) -> Num3072 {
     let key: [u8; 32] = Sha256::digest(data).into();
     let key_words = chacha20_key_words(&key);
@@ -273,17 +278,17 @@ fn element(data: &[u8]) -> Num3072 {
     Num3072 { limbs }
 }
 
-#[inline]
+#[inline(always)]
 fn low_u64(value: u128) -> u64 {
     u64::try_from(value & u128::from(u64::MAX)).unwrap_or(u64::MAX)
 }
 
-#[inline]
+#[inline(always)]
 fn high_u64(value: u128) -> u64 {
     u64::try_from(value >> LIMB_BITS).unwrap_or(u64::MAX)
 }
 
-#[inline]
+#[inline(always)]
 fn extract3(c0: &mut u64, c1: &mut u64, c2: &mut u64) -> u64 {
     let limb = *c0;
     *c0 = *c1;
@@ -292,14 +297,14 @@ fn extract3(c0: &mut u64, c1: &mut u64, c2: &mut u64) -> u64 {
     limb
 }
 
-#[inline]
+#[inline(always)]
 fn mul_limb(c0: &mut u64, c1: &mut u64, left: u64, right: u64) {
     let product = u128::from(left) * u128::from(right);
     *c0 = low_u64(product);
     *c1 = high_u64(product);
 }
 
-#[inline]
+#[inline(always)]
 fn mulnadd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, d0: u64, d1: u64, d2: u64, n: u64) {
     let mut product = u128::from(d0) * u128::from(n) + u128::from(*c0);
     *c0 = low_u64(product);
@@ -308,7 +313,7 @@ fn mulnadd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, d0: u64, d1: u64, d2: u64,
     *c2 = low_u64((product >> LIMB_BITS) + u128::from(d2) * u128::from(n));
 }
 
-#[inline]
+#[inline(always)]
 fn muln2(c0: &mut u64, c1: &mut u64, n: u64) {
     let mut product = u128::from(*c0) * u128::from(n);
     *c0 = low_u64(product);
@@ -316,7 +321,7 @@ fn muln2(c0: &mut u64, c1: &mut u64, n: u64) {
     *c1 = low_u64(product);
 }
 
-#[inline]
+#[inline(always)]
 fn muladd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, left: u64, right: u64) {
     let product = u128::from(left) * u128::from(right);
     let low = low_u64(product);
@@ -330,7 +335,7 @@ fn muladd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, left: u64, right: u64) {
     *c2 = c2.wrapping_add(u64::from(carry1));
 }
 
-#[inline]
+#[inline(always)]
 fn addnextract2(c0: &mut u64, c1: &mut u64, value: u64) -> u64 {
     let mut c2 = 0_u64;
     let (new_c0, carry) = c0.overflowing_add(value);
