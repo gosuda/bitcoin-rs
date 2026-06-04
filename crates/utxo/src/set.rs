@@ -627,11 +627,49 @@ fn validate_add(add: &UtxoAdd) -> Result<(), UtxoError> {
     Ok(())
 }
 
+type AddPayload<'a> = (UtxoKey, Hash256, BuildPayload<'a>);
+
 struct ShardCommitBuckets<'a> {
-    adds: Vec<(UtxoKey, Hash256, BuildPayload<'a>)>,
-    add_ranges: [(usize, usize); UtxoKey::SHARD_COUNT],
-    removes: Vec<SpendPayload<'a>>,
-    remove_ranges: [(usize, usize); UtxoKey::SHARD_COUNT],
+    adds: ShardBucketSide<AddPayload<'a>>,
+    removes: ShardBucketSide<SpendPayload<'a>>,
+}
+
+enum BucketShape {
+    Empty,
+    Single(usize),
+    Scattered,
+}
+
+struct ShardBucketSide<T> {
+    payloads: Vec<T>,
+    ranges: [(usize, usize); UtxoKey::SHARD_COUNT],
+    shape: BucketShape,
+}
+
+impl<T> ShardBucketSide<T> {
+    fn empty() -> Self {
+        Self {
+            payloads: Vec::new(),
+            ranges: empty_ranges(),
+            shape: BucketShape::Empty,
+        }
+    }
+
+    fn direct(shard_idx: usize, payloads: Vec<T>) -> Self {
+        Self {
+            payloads,
+            ranges: empty_ranges(),
+            shape: BucketShape::Single(shard_idx),
+        }
+    }
+
+    fn scattered(ranges: &[(usize, usize); UtxoKey::SHARD_COUNT], payloads: Vec<T>) -> Self {
+        Self {
+            payloads,
+            ranges: *ranges,
+            shape: BucketShape::Scattered,
+        }
+    }
 }
 
 impl<'a> ShardCommitBuckets<'a> {
@@ -641,50 +679,153 @@ impl<'a> ShardCommitBuckets<'a> {
         add_counts: &[usize; UtxoKey::SHARD_COUNT],
         remove_counts: &[usize; UtxoKey::SHARD_COUNT],
     ) -> Self {
-        let (add_ranges, mut add_cursors) = shard_ranges(add_counts);
-        let (remove_ranges, mut remove_cursors) = shard_ranges(remove_counts);
-        let mut add_slots = uninit_slots(adds.len());
-        let mut remove_slots = uninit_slots(removes.len());
-
-        for add in adds {
-            let key = UtxoKey::from_txid(&add.outpoint.txid);
-            let shard_idx = usize::from(key.shard());
-            let cursor = &mut add_cursors[shard_idx];
-            add_slots[*cursor].write((key, add.outpoint.txid, add.payload()));
-            *cursor = cursor.saturating_add(1);
-        }
-        for remove in removes {
-            let key = UtxoKey::from_txid(&remove.txid);
-            let shard_idx = usize::from(key.shard());
-            let cursor = &mut remove_cursors[shard_idx];
-            remove_slots[*cursor].write(SpendPayload {
-                op: remove,
-                key,
-                vout: remove.vout,
-                txid: remove.txid,
-            });
-            *cursor = cursor.saturating_add(1);
-        }
-        debug_assert_eq!(add_cursors, range_ends(&add_ranges));
-        debug_assert_eq!(remove_cursors, range_ends(&remove_ranges));
-
         Self {
-            adds: initialized_slots(add_slots),
-            add_ranges,
-            removes: initialized_slots(remove_slots),
-            remove_ranges,
+            adds: build_add_side(adds, add_counts),
+            removes: build_remove_side(removes, remove_counts),
         }
     }
 
     fn adds(&self, shard_idx: usize) -> &[(UtxoKey, Hash256, BuildPayload<'a>)] {
-        let (start, end) = self.add_ranges[shard_idx];
-        &self.adds[start..end]
+        self.adds.get(shard_idx)
     }
 
     fn removes(&self, shard_idx: usize) -> &[SpendPayload<'a>] {
-        let (start, end) = self.remove_ranges[shard_idx];
-        &self.removes[start..end]
+        self.removes.get(shard_idx)
     }
+}
+
+impl<T> ShardBucketSide<T> {
+    fn get(&self, shard_idx: usize) -> &[T] {
+        match self.shape {
+            BucketShape::Empty => &[],
+            BucketShape::Single(active_shard) => {
+                if active_shard == shard_idx {
+                    &self.payloads
+                } else {
+                    &[]
+                }
+            }
+            BucketShape::Scattered => {
+                let (start, end) = self.ranges[shard_idx];
+                &self.payloads[start..end]
+            }
+        }
+    }
+}
+
+fn build_add_side<'a>(
+    adds: &'a [UtxoAdd],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ShardBucketSide<AddPayload<'a>> {
+    match bucket_shape(counts) {
+        BucketShape::Empty => ShardBucketSide::empty(),
+        BucketShape::Single(shard_idx) => {
+            ShardBucketSide::direct(shard_idx, direct_adds(adds, shard_idx))
+        }
+        BucketShape::Scattered => {
+            let (ranges, payloads) = scattered_adds(adds, counts);
+            ShardBucketSide::scattered(&ranges, payloads)
+        }
+    }
+}
+
+fn build_remove_side<'a>(
+    removes: &'a [OutPoint],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ShardBucketSide<SpendPayload<'a>> {
+    match bucket_shape(counts) {
+        BucketShape::Empty => ShardBucketSide::empty(),
+        BucketShape::Single(shard_idx) => {
+            ShardBucketSide::direct(shard_idx, direct_removes(removes, shard_idx))
+        }
+        BucketShape::Scattered => {
+            let (ranges, payloads) = scattered_removes(removes, counts);
+            ShardBucketSide::scattered(&ranges, payloads)
+        }
+    }
+}
+
+fn bucket_shape(counts: &[usize; UtxoKey::SHARD_COUNT]) -> BucketShape {
+    let mut active = None;
+    for (shard_idx, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        if active.replace(shard_idx).is_some() {
+            return BucketShape::Scattered;
+        }
+    }
+    active.map_or(BucketShape::Empty, BucketShape::Single)
+}
+
+fn direct_adds(adds: &[UtxoAdd], shard_idx: usize) -> Vec<AddPayload<'_>> {
+    let mut payloads = Vec::with_capacity(adds.len());
+    for add in adds {
+        let key = UtxoKey::from_txid(&add.outpoint.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        payloads.push((key, add.outpoint.txid, add.payload()));
+    }
+    payloads
+}
+
+fn direct_removes(removes: &[OutPoint], shard_idx: usize) -> Vec<SpendPayload<'_>> {
+    let mut payloads = Vec::with_capacity(removes.len());
+    for remove in removes {
+        let key = UtxoKey::from_txid(&remove.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        payloads.push(spend_payload(remove, key));
+    }
+    payloads
+}
+
+fn scattered_adds<'a>(
+    adds: &'a [UtxoAdd],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> ([(usize, usize); UtxoKey::SHARD_COUNT], Vec<AddPayload<'a>>) {
+    let (ranges, mut cursors) = shard_ranges(counts);
+    let mut slots = uninit_slots(adds.len());
+    for add in adds {
+        let key = UtxoKey::from_txid(&add.outpoint.txid);
+        let shard_idx = usize::from(key.shard());
+        let cursor = &mut cursors[shard_idx];
+        slots[*cursor].write((key, add.outpoint.txid, add.payload()));
+        *cursor = cursor.saturating_add(1);
+    }
+    debug_assert_eq!(cursors, range_ends(&ranges));
+    (ranges, initialized_slots(slots))
+}
+
+fn scattered_removes<'a>(
+    removes: &'a [OutPoint],
+    counts: &[usize; UtxoKey::SHARD_COUNT],
+) -> (
+    [(usize, usize); UtxoKey::SHARD_COUNT],
+    Vec<SpendPayload<'a>>,
+) {
+    let (ranges, mut cursors) = shard_ranges(counts);
+    let mut slots = uninit_slots(removes.len());
+    for remove in removes {
+        let key = UtxoKey::from_txid(&remove.txid);
+        let shard_idx = usize::from(key.shard());
+        let cursor = &mut cursors[shard_idx];
+        slots[*cursor].write(spend_payload(remove, key));
+        *cursor = cursor.saturating_add(1);
+    }
+    debug_assert_eq!(cursors, range_ends(&ranges));
+    (ranges, initialized_slots(slots))
+}
+
+fn spend_payload(remove: &OutPoint, key: UtxoKey) -> SpendPayload<'_> {
+    SpendPayload {
+        op: remove,
+        key,
+        vout: remove.vout,
+        txid: remove.txid,
+    }
+}
+
+const fn empty_ranges() -> [(usize, usize); UtxoKey::SHARD_COUNT] {
+    [(0_usize, 0_usize); UtxoKey::SHARD_COUNT]
 }
 
 fn shard_ranges(
