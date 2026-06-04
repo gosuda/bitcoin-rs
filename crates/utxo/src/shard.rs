@@ -117,10 +117,11 @@ impl Shard {
         &self,
         adds: &'a [(UtxoKey, Hash256, BuildPayload<'a>)],
         removes: &[SpendPayload<'_>],
+        coalesce_events: bool,
     ) -> (UtxoChangeEvents<'a>, Result<(), UtxoError>) {
         let mut cell = self.inner.write();
         cell.with_dependent_mut(|arena, table| {
-            commit_batch_collect_events(arena, table, adds, removes)
+            commit_batch_collect_events(arena, table, adds, removes, coalesce_events)
         })
     }
 
@@ -381,6 +382,7 @@ fn commit_batch_collect_events<'arena, 'add>(
     table: &mut ShardTable<'arena>,
     adds: &'add [(UtxoKey, Hash256, BuildPayload<'add>)],
     removes: &[SpendPayload<'_>],
+    coalesce_events: bool,
 ) -> (UtxoChangeEvents<'add>, Result<(), UtxoError>) {
     let mut events = UtxoChangeEvents::default();
     let mut remaining_removes = removes;
@@ -390,7 +392,13 @@ fn commit_batch_collect_events<'arena, 'add>(
             .take_while(|remove| remove.key == first.key && remove.txid == first.txid)
             .count()
             .saturating_add(1);
-        apply_remove_run_collect_events(arena, table, &remaining_removes[..run_len], &mut events);
+        apply_remove_run_collect_events(
+            arena,
+            table,
+            &remaining_removes[..run_len],
+            &mut events,
+            coalesce_events,
+        );
         remaining_removes = &remaining_removes[run_len..];
     }
 
@@ -408,6 +416,7 @@ fn commit_batch_collect_events<'arena, 'add>(
             *txid,
             &remaining_adds[..run_len],
             &mut events,
+            coalesce_events,
         ) {
             return (events, Err(error));
         }
@@ -605,6 +614,7 @@ fn apply_remove_run_collect_events<'arena>(
     table: &mut ShardTable<'arena>,
     removes: &[SpendPayload<'_>],
     events: &mut UtxoChangeEvents<'_>,
+    coalesce_events: bool,
 ) {
     let Some(first) = removes.first() else {
         return;
@@ -620,7 +630,11 @@ fn apply_remove_run_collect_events<'arena>(
             removed_coins.push(UtxoRemoved::new(*remove.op, txout, height, coinbase));
         }
     }
-    events.push_remove_batch(removed_coins);
+    if coalesce_events {
+        events.push_remove_batch_coalesced(removed_coins);
+    } else {
+        events.push_remove_batch(removed_coins);
+    }
     if !record.is_empty() {
         insert_record(arena, table, record);
     }
@@ -779,6 +793,7 @@ fn apply_add_run_collect_events<'arena, 'add>(
     txid: Hash256,
     adds: &'add [(UtxoKey, Hash256, BuildPayload<'add>)],
     events: &mut UtxoChangeEvents<'add>,
+    coalesce_events: bool,
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
     let add_unique = build_adds_extend_record(
@@ -796,7 +811,7 @@ fn apply_add_run_collect_events<'arena, 'add>(
             };
             append_build_output(table, &mut record, payload)?;
             if let Some((txout, height, coinbase)) = overwritten {
-                flush_inserted_events(events, &mut inserted_coins);
+                flush_inserted_events(events, &mut inserted_coins, coalesce_events);
                 events.push_remove_coin(UtxoRemoved::new(
                     *payload.outpoint,
                     txout,
@@ -813,16 +828,21 @@ fn apply_add_run_collect_events<'arena, 'add>(
         ));
     }
     insert_record(arena, table, record);
-    flush_inserted_events(events, &mut inserted_coins);
+    flush_inserted_events(events, &mut inserted_coins, coalesce_events);
     Ok(())
 }
 
 fn flush_inserted_events<'add>(
     events: &mut UtxoChangeEvents<'add>,
     inserted_coins: &mut SmallVec<[UtxoInserted<'add>; 8]>,
+    coalesce_events: bool,
 ) {
     if !inserted_coins.is_empty() {
-        events.push_insert_batch(core::mem::take(inserted_coins));
+        if coalesce_events {
+            events.push_insert_batch_coalesced(core::mem::take(inserted_coins));
+        } else {
+            events.push_insert_batch(core::mem::take(inserted_coins));
+        }
     }
 }
 

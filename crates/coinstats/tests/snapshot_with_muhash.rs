@@ -111,6 +111,51 @@ fn listener_tracks_duplicate_txid_overwrite() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn listener_coalesced_parallel_path_preserves_overwrite_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+    let mut expected = CoinStats::new();
+    let mut initial = BlockChanges::default();
+    let mut seeded = Vec::new();
+
+    for shard in 0_u8..20 {
+        let index = u32::from(shard);
+        let outpoint = OutPoint::new(txid_in_shard(shard, 1_100 + u64::from(shard)), index);
+        let original = txout(1_100 + index);
+        assert_eq!(UtxoKey::from_txid(&outpoint.txid).shard(), shard);
+        expected.insert_utxo(&outpoint, &original, 110, shard % 2 == 0);
+        initial.add(UtxoAdd::new(
+            outpoint,
+            original.clone(),
+            shard % 2 == 0,
+            110,
+        ));
+        seeded.push((outpoint, original, shard % 2 == 0));
+    }
+    set.commit_block(&initial, &txid(2_100))?;
+
+    let mut overwrite = BlockChanges::default();
+    let mut replacements = Vec::new();
+    for (index, (outpoint, original, coinbase)) in seeded.iter().enumerate().rev() {
+        let index = u32::try_from(index)?;
+        let replacement = txout(1_400 + index);
+        expected.remove_utxo(outpoint, original, 110, *coinbase);
+        expected.insert_utxo(outpoint, &replacement, 111, false);
+        overwrite.add(UtxoAdd::new(*outpoint, replacement.clone(), false, 111));
+        replacements.push((*outpoint, replacement));
+    }
+    set.commit_block(&overwrite, &txid(2_101))?;
+
+    assert_observable_stats_eq(&listener.snapshot(), &expected);
+    for (outpoint, replacement) in replacements {
+        assert_eq!(set.get(&outpoint), Some(replacement));
+    }
+    Ok(())
+}
+
+#[test]
 fn listener_parallel_shard_delta_matches_serial_stats() -> Result<(), Box<dyn std::error::Error>> {
     let listener = CoinStatsListener::new(CoinStats::new());
     let mut set = UtxoSet::new();

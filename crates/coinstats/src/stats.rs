@@ -404,6 +404,10 @@ impl UtxoChangeListener for CoinStatsListener {
         true
     }
 
+    fn coalesces_committed_events(&self) -> bool {
+        true
+    }
+
     fn muhash3072(&self) -> Option<[u8; 384]> {
         Some(self.state.lock().stats.muhash.finalize())
     }

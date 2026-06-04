@@ -146,6 +146,12 @@ pub trait UtxoChangeListener {
         false
     }
 
+    #[doc(hidden)]
+    /// Returns true when this listener accepts coalesced committed event batches.
+    fn coalesces_committed_events(&self) -> bool {
+        false
+    }
+
     /// Returns the current `MuHash3072` snapshot trailer, when this listener tracks one.
     fn muhash3072(&self) -> Option<[u8; 384]> {
         None
@@ -234,8 +240,33 @@ impl<'a> UtxoChangeEvents<'a> {
         }
     }
 
+    pub(crate) fn push_insert_batch_coalesced(
+        &mut self,
+        insertions: SmallVec<[UtxoInserted<'a>; 8]>,
+    ) {
+        if insertions.is_empty() {
+            return;
+        }
+        if let Some(UtxoChangeEvent::InsertBatch(existing)) = self.events.last_mut() {
+            existing.extend(insertions);
+        } else {
+            self.events.push(UtxoChangeEvent::InsertBatch(insertions));
+        }
+    }
+
     pub(crate) fn push_remove_batch(&mut self, removals: SmallVec<[UtxoRemoved; 2]>) {
         self.events.push(UtxoChangeEvent::RemoveBatch(removals));
+    }
+
+    pub(crate) fn push_remove_batch_coalesced(&mut self, removals: SmallVec<[UtxoRemoved; 2]>) {
+        if removals.is_empty() {
+            return;
+        }
+        if let Some(UtxoChangeEvent::RemoveBatch(existing)) = self.events.last_mut() {
+            existing.extend(removals);
+        } else {
+            self.events.push(UtxoChangeEvent::RemoveBatch(removals));
+        }
     }
 
     pub(crate) fn push_remove_coin(&mut self, removal: UtxoRemoved) {
@@ -690,6 +721,7 @@ impl UtxoSet {
         }
 
         let errors = Mutex::new(Vec::new());
+        let coalesce_events = listener.coalesces_committed_events();
         let shard_events: Vec<_> = active_shards[..active_shard_count]
             .par_iter()
             .map(|&shard_idx| {
@@ -697,7 +729,7 @@ impl UtxoSet {
                 let shard_removes = buckets.removes(shard_idx);
                 let shard = &self.shards[shard_idx];
                 let (shard_events, result) =
-                    shard.commit_batch_collect_events(shard_adds, shard_removes);
+                    shard.commit_batch_collect_events(shard_adds, shard_removes, coalesce_events);
                 if let Err(error) = result {
                     errors.lock().push(error);
                 }
