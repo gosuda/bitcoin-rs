@@ -86,14 +86,9 @@ impl ApplyScratch {
         let spent_capacity = capacities.spent_inputs;
         let track_same_block_spends = spent_capacity != 0;
         let track_same_block_scripts = include_same_block_output_scripts && track_same_block_spends;
-        let mut created_outpoints: Option<SameBlockSpentSet> = (track_same_block_spends
-            && !track_same_block_scripts)
-            .then(|| HashSet::with_capacity(created_capacity));
-        let mut created_scripts: Option<SameBlockScriptMap> =
-            track_same_block_scripts.then(|| HashMap::with_capacity(created_capacity));
+        let mut created_outpoints: Option<SameBlockSpentSet> =
+            track_same_block_spends.then(|| HashSet::with_capacity(created_capacity));
         let mut same_block_spent: Option<SameBlockSpentSet> = None;
-        let mut same_block_spent_output_scripts: Option<SameBlockScriptMap> =
-            track_same_block_scripts.then(|| HashMap::with_capacity(spent_capacity));
         let mut same_block_spent_input_count = 0usize;
 
         for (tx, txid) in block.txdata.iter().zip(&txids) {
@@ -104,17 +99,7 @@ impl ApplyScratch {
             if !tx.is_coinbase() {
                 for input in &tx.input {
                     let previous_output = internal_outpoint(&input.previous_output);
-                    if let Some(created_scripts) = &created_scripts {
-                        if let Some(script) = created_scripts.get(&previous_output) {
-                            same_block_spent
-                                .get_or_insert_with(|| HashSet::with_capacity(spent_capacity))
-                                .insert(previous_output);
-                            same_block_spent_input_count += 1;
-                            if let Some(spent_scripts) = &mut same_block_spent_output_scripts {
-                                spent_scripts.insert(previous_output, script.clone());
-                            }
-                        }
-                    } else if let Some(created_outpoints) = &created_outpoints
+                    if let Some(created_outpoints) = &created_outpoints
                         && created_outpoints.contains(&previous_output)
                     {
                         same_block_spent
@@ -126,14 +111,12 @@ impl ApplyScratch {
             }
 
             let txid = Hash256::from_le_bytes(txid.as_byte_array());
-            for (vout, txout) in tx.output.iter().enumerate() {
+            for (vout, _txout) in tx.output.iter().enumerate() {
                 let outpoint = OutPoint::new(
                     txid,
                     u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?,
                 );
-                if let Some(created_scripts) = &mut created_scripts {
-                    created_scripts.insert(outpoint, txout.script_pubkey.clone());
-                } else if let Some(created_outpoints) = &mut created_outpoints {
+                if let Some(created_outpoints) = &mut created_outpoints {
                     created_outpoints.insert(outpoint);
                 }
             }
@@ -141,6 +124,15 @@ impl ApplyScratch {
         let same_block_spent_len = same_block_spent
             .as_ref()
             .map_or(0_usize, SameBlockSpentSet::len);
+        let same_block_spent_output_scripts = if track_same_block_scripts {
+            if let Some(spent) = same_block_spent.as_ref() {
+                Some(same_block_spent_scripts(block, height, &txids, spent)?)
+            } else {
+                Some(HashMap::new())
+            }
+        } else {
+            None
+        };
         let utxo_add_capacity = created_capacity.saturating_sub(same_block_spent_len);
         let utxo_remove_capacity = spent_capacity.saturating_sub(same_block_spent_input_count);
         Ok(Self {
@@ -177,6 +169,28 @@ impl ApplyScratch {
             .get(outpoint)
             .cloned()
     }
+}
+
+fn same_block_spent_scripts(
+    block: &bitcoin::Block,
+    height: u32,
+    txids: &[Txid],
+    same_block_spent: &SameBlockSpentSet,
+) -> Result<SameBlockScriptMap, ApplyError> {
+    let mut scripts = HashMap::with_capacity(same_block_spent.len());
+    for (tx, txid) in block.txdata.iter().zip(txids) {
+        let txid = Hash256::from_le_bytes(txid.as_byte_array());
+        for (vout, txout) in tx.output.iter().enumerate() {
+            let outpoint = OutPoint::new(
+                txid,
+                u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?,
+            );
+            if same_block_spent.contains(&outpoint) {
+                scripts.insert(outpoint, txout.script_pubkey.clone());
+            }
+        }
+    }
+    Ok(scripts)
 }
 
 fn internal_outpoint(outpoint: &bitcoin::OutPoint) -> OutPoint {

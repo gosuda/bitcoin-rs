@@ -1481,14 +1481,22 @@ mod consensus_rule_tests {
             vout: 0,
         };
         let same_block_script = ScriptBuf::from_bytes(vec![0x51, 0x75]);
-        let funding_tx = spending_transaction_to_script(
+        let mut funding_tx = spending_transaction_to_script(
             base_prevout,
             Sequence::MAX.to_consensus_u32(),
             same_block_script.clone(),
         );
+        funding_tx.output.push(TxOut {
+            value: Amount::from_sat(2),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x77]),
+        });
         let funding_outpoint = bitcoin::OutPoint {
             txid: funding_tx.compute_txid(),
             vout: 0,
+        };
+        let unspent_funding_outpoint = bitcoin::OutPoint {
+            txid: funding_tx.compute_txid(),
+            vout: 1,
         };
         let final_script = ScriptBuf::from_bytes(vec![0x51, 0x76]);
         let same_block_spend = spending_transaction_to_script(
@@ -1518,6 +1526,11 @@ mod consensus_rule_tests {
         assert!(
             scratch
                 .same_block_spent_output_script(&internal_outpoint(&base_prevout))
+                .is_none()
+        );
+        assert!(
+            scratch
+                .same_block_spent_output_script(&internal_outpoint(&unspent_funding_outpoint))
                 .is_none()
         );
         assert!(
