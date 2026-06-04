@@ -192,35 +192,25 @@ impl BlockSync {
     }
 
     fn drain_inbound_blocks(&self) {
-        let apply_head_check;
-        let received = if let Some(first_block) = self.try_recv_inbound_block() {
-            let next_expected_hash = self.next_expected_block_hash();
-            apply_head_check = next_expected_hash.filter(|hash| {
-                *hash != Hash256::from_le_bytes(first_block.block_hash().as_byte_array())
-            });
-            let mut blocks = Vec::with_capacity(INBOUND_BLOCK_STAGE_CHUNK);
-            blocks.push(first_block);
-            let mut received = 0_usize;
-            let mut receiver_empty = false;
-            while !receiver_empty || !blocks.is_empty() {
-                while blocks.len() < INBOUND_BLOCK_STAGE_CHUNK {
-                    let Some(block) = self.try_recv_inbound_block() else {
-                        receiver_empty = true;
-                        break;
-                    };
-                    blocks.push(block);
-                }
-                if !blocks.is_empty() {
-                    received = received.saturating_add(
-                        self.buffer_received_block_chunk(&mut blocks, next_expected_hash),
-                    );
-                }
+        let mut apply_head_check = None;
+        let mut next_expected_hash = None;
+        let mut blocks = Vec::with_capacity(INBOUND_BLOCK_STAGE_CHUNK);
+        let mut received = 0_usize;
+        let mut receiver_empty = false;
+        let mut saw_block = false;
+        while !receiver_empty {
+            receiver_empty = self.fill_inbound_block_chunk(
+                &mut blocks,
+                &mut saw_block,
+                &mut next_expected_hash,
+                &mut apply_head_check,
+            );
+            if !blocks.is_empty() {
+                received = received.saturating_add(
+                    self.buffer_received_block_chunk(&mut blocks, next_expected_hash),
+                );
             }
-            received
-        } else {
-            apply_head_check = None;
-            0
-        };
+        }
 
         let now = Instant::now();
         let dropped = self.block_stager.lock().prune_expired(now);
@@ -246,8 +236,28 @@ impl BlockSync {
         }
     }
 
-    fn try_recv_inbound_block(&self) -> Option<bitcoin::Block> {
-        self.inbound_blocks_rx.lock().try_recv().ok()
+    fn fill_inbound_block_chunk(
+        &self,
+        blocks: &mut Vec<bitcoin::Block>,
+        saw_block: &mut bool,
+        next_expected_hash: &mut Option<Hash256>,
+        apply_head_check: &mut Option<Hash256>,
+    ) -> bool {
+        let receiver = self.inbound_blocks_rx.lock();
+        while blocks.len() < INBOUND_BLOCK_STAGE_CHUNK {
+            let Ok(block) = receiver.try_recv() else {
+                return true;
+            };
+            if !*saw_block {
+                *next_expected_hash = self.next_expected_block_hash();
+                *apply_head_check = next_expected_hash.as_ref().copied().filter(|hash| {
+                    *hash != Hash256::from_le_bytes(block.block_hash().as_byte_array())
+                });
+                *saw_block = true;
+            }
+            blocks.push(block);
+        }
+        false
     }
 
     fn buffer_received_block_chunk(
