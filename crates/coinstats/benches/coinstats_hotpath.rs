@@ -16,6 +16,7 @@ const ENTRY_COUNT: usize = 8_192;
 #[derive(Clone)]
 struct CoinFixture {
     outpoints: Vec<OutPoint>,
+    same_txid_outpoints: Vec<OutPoint>,
     txouts: Vec<TxOut>,
     encoded: Vec<Vec<u8>>,
 }
@@ -23,52 +24,84 @@ struct CoinFixture {
 impl CoinFixture {
     fn new() -> Self {
         let mut outpoints = Vec::with_capacity(ENTRY_COUNT);
+        let mut same_txid_outpoints = Vec::with_capacity(ENTRY_COUNT);
         let mut txouts = Vec::with_capacity(ENTRY_COUNT);
         let mut encoded = Vec::with_capacity(ENTRY_COUNT);
+        let shared_txid = txid(ENTRY_COUNT);
         for index in 0..ENTRY_COUNT {
             let outpoint = OutPoint::new(txid(index), u32::try_from(index % 64).unwrap_or(0));
+            let same_txid_outpoint = OutPoint::new(shared_txid, u32::try_from(index).unwrap_or(0));
             let txout = txout(index);
             encoded.push(preencoded_coin(&outpoint, &txout, 100, true));
             outpoints.push(outpoint);
+            same_txid_outpoints.push(same_txid_outpoint);
             txouts.push(txout);
         }
         Self {
             outpoints,
+            same_txid_outpoints,
             txouts,
             encoded,
         }
     }
 
     fn insertions(&self) -> Vec<UtxoInserted<'_>> {
-        self.outpoints
-            .iter()
-            .zip(&self.txouts)
-            .map(|(outpoint, txout)| UtxoInserted::new(outpoint, txout, 100, true))
-            .collect()
+        insertions_for(&self.outpoints, &self.txouts)
+    }
+
+    fn same_txid_insertions(&self) -> Vec<UtxoInserted<'_>> {
+        insertions_for(&self.same_txid_outpoints, &self.txouts)
     }
 
     fn removals(&self) -> Vec<UtxoRemoved> {
-        self.outpoints
-            .iter()
-            .zip(&self.txouts)
-            .map(|(outpoint, txout)| UtxoRemoved::new(*outpoint, txout.clone(), 100, true))
-            .collect()
+        removals_for(&self.outpoints, &self.txouts)
+    }
+
+    fn same_txid_removals(&self) -> Vec<UtxoRemoved> {
+        removals_for(&self.same_txid_outpoints, &self.txouts)
     }
 
     fn inserted_stats(&self) -> CoinStats {
-        let mut stats = CoinStats::new();
-        for (outpoint, txout) in self.outpoints.iter().zip(&self.txouts) {
-            stats.insert_utxo(outpoint, txout, 100, true);
-        }
-        stats
+        inserted_stats_for(&self.outpoints, &self.txouts)
     }
+
+    fn same_txid_inserted_stats(&self) -> CoinStats {
+        inserted_stats_for(&self.same_txid_outpoints, &self.txouts)
+    }
+}
+
+fn insertions_for<'a>(outpoints: &'a [OutPoint], txouts: &'a [TxOut]) -> Vec<UtxoInserted<'a>> {
+    outpoints
+        .iter()
+        .zip(txouts)
+        .map(|(outpoint, txout)| UtxoInserted::new(outpoint, txout, 100, true))
+        .collect()
+}
+
+fn removals_for(outpoints: &[OutPoint], txouts: &[TxOut]) -> Vec<UtxoRemoved> {
+    outpoints
+        .iter()
+        .zip(txouts)
+        .map(|(outpoint, txout)| UtxoRemoved::new(*outpoint, txout.clone(), 100, true))
+        .collect()
+}
+
+fn inserted_stats_for(outpoints: &[OutPoint], txouts: &[TxOut]) -> CoinStats {
+    let mut stats = CoinStats::new();
+    for (outpoint, txout) in outpoints.iter().zip(txouts) {
+        stats.insert_utxo(outpoint, txout, 100, true);
+    }
+    stats
 }
 
 fn coinstats_hotpath(c: &mut Criterion) {
     let fixture = CoinFixture::new();
     let insertions = fixture.insertions();
+    let same_txid_insertions = fixture.same_txid_insertions();
     let removals = fixture.removals();
+    let same_txid_removals = fixture.same_txid_removals();
     let inserted_stats = fixture.inserted_stats();
+    let same_txid_inserted_stats = fixture.same_txid_inserted_stats();
 
     c.bench_function("coinstats/muhash_insert_preencoded_8192", |b| {
         b.iter(|| {
@@ -95,6 +128,17 @@ fn coinstats_hotpath(c: &mut Criterion) {
             || CoinStatsListener::new(CoinStats::new()),
             |listener| {
                 listener.on_insert_coins(black_box(&insertions));
+                black_box(listener.snapshot().muhash.finalize_hash());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("coinstats/listener_insert_same_txid_coins_8192", |b| {
+        b.iter_batched(
+            || CoinStatsListener::new(CoinStats::new()),
+            |listener| {
+                listener.on_insert_coins(black_box(&same_txid_insertions));
                 black_box(listener.snapshot().muhash.finalize_hash());
             },
             BatchSize::SmallInput,
@@ -138,6 +182,17 @@ fn coinstats_hotpath(c: &mut Criterion) {
             || CoinStatsListener::new(inserted_stats.clone()),
             |listener| {
                 listener.on_remove_coins(black_box(&removals));
+                black_box(listener.snapshot().muhash.finalize_hash());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("coinstats/listener_remove_same_txid_coins_8192", |b| {
+        b.iter_batched(
+            || CoinStatsListener::new(same_txid_inserted_stats.clone()),
+            |listener| {
+                listener.on_remove_coins(black_box(&same_txid_removals));
                 black_box(listener.snapshot().muhash.finalize_hash());
             },
             BatchSize::SmallInput,
