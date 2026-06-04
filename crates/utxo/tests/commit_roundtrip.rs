@@ -268,6 +268,43 @@ fn listener_batches_inserts_without_crossing_overwrite_boundary()
 }
 
 #[test]
+fn listener_emits_explicit_removes_before_add_batches_in_single_shard_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(RecordingListener {
+        events: Arc::clone(&events),
+    }));
+    let live_txid = txid(620);
+    let first = OutPoint::new(live_txid, 0);
+    let second = OutPoint::new(live_txid, 1);
+    let third = OutPoint::new(live_txid, 2);
+
+    let mut initial = BlockChanges::default();
+    initial.add(UtxoAdd::new(first, txout(620), false, 302));
+    initial.add(UtxoAdd::new(second, txout(621), false, 302));
+    set.commit_block(&initial, &txid(622))?;
+    events.lock().clear();
+
+    let mut mixed = BlockChanges::default();
+    mixed.remove(first);
+    mixed.add(UtxoAdd::new(third, txout(623), true, 303));
+    set.commit_block(&mixed, &txid(624))?;
+
+    assert_eq!(
+        events.lock().clone(),
+        vec![
+            ListenerEvent::Remove(0),
+            ListenerEvent::InsertBatch(vec![2])
+        ]
+    );
+    assert_eq!(set.get(&first), None);
+    assert_eq!(set.get(&second), Some(txout(621)));
+    assert_eq!(set.get(&third), Some(txout(623)));
+    Ok(())
+}
+
+#[test]
 fn same_txid_churn_preserves_live_outputs_and_record_shape()
 -> Result<(), Box<dyn std::error::Error>> {
     let set = UtxoSet::new();

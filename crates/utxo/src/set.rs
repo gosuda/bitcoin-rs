@@ -593,14 +593,12 @@ impl UtxoSet {
         shard_idx: usize,
     ) -> Result<(), UtxoError> {
         let _stable_commit = self.stable_view_lock.write();
-        let listener = self.listener.as_deref();
-        if listener.is_none() {
+        let Some(listener) = self.listener.as_deref() else {
             return self.shards[shard_idx].commit_single_shard_batch(adds, removes, shard_idx);
-        }
+        };
 
-        let shard_adds = direct_adds(adds, shard_idx);
-        let shard_removes = direct_removes(removes, shard_idx);
-        self.shards[shard_idx].commit_batch(&shard_adds, &shard_removes, listener)
+        self.shards[shard_idx]
+            .commit_single_shard_batch_with_listener(adds, removes, shard_idx, listener)
     }
 }
 

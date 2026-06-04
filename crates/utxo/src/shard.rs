@@ -125,6 +125,19 @@ impl Shard {
         })
     }
 
+    pub(crate) fn commit_single_shard_batch_with_listener(
+        &self,
+        adds: &[UtxoAdd],
+        removes: &[OutPoint],
+        shard_idx: usize,
+        listener: &(dyn UtxoChangeListener + Send + Sync),
+    ) -> Result<(), UtxoError> {
+        let mut cell = self.inner.write();
+        cell.with_dependent_mut(|arena, table| {
+            commit_single_shard_with_listener(arena, table, adds, removes, shard_idx, listener)
+        })
+    }
+
     /// Returns an owned transaction output if `key:vout` is live in this shard.
     #[must_use]
     pub fn get(&self, key: &UtxoKey, txid: &Hash256, vout: u32) -> Option<TxOut> {
@@ -413,6 +426,56 @@ fn commit_single_shard_coalesced<'arena>(
     Ok(())
 }
 
+fn commit_single_shard_with_listener<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    adds: &[UtxoAdd],
+    removes: &[OutPoint],
+    shard_idx: usize,
+    listener: &(dyn UtxoChangeListener + Send + Sync),
+) -> Result<(), UtxoError> {
+    let mut remaining_removes = removes;
+    while let Some((first, rest)) = remaining_removes.split_first() {
+        let key = UtxoKey::from_txid(&first.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        let run_len = rest
+            .iter()
+            .take_while(|remove| remove.txid == first.txid)
+            .count()
+            .saturating_add(1);
+        apply_outpoint_remove_run_with_listener(
+            arena,
+            table,
+            key,
+            first.txid,
+            &remaining_removes[..run_len],
+            listener,
+        );
+        remaining_removes = &remaining_removes[run_len..];
+    }
+
+    let mut remaining_adds = adds;
+    while let Some((first, rest)) = remaining_adds.split_first() {
+        let key = UtxoKey::from_txid(&first.outpoint.txid);
+        debug_assert_eq!(usize::from(key.shard()), shard_idx);
+        let run_len = rest
+            .iter()
+            .take_while(|add| add.outpoint.txid == first.outpoint.txid)
+            .count()
+            .saturating_add(1);
+        apply_utxo_add_run_with_listener(
+            arena,
+            table,
+            key,
+            first.outpoint.txid,
+            &remaining_adds[..run_len],
+            listener,
+        )?;
+        remaining_adds = &remaining_adds[run_len..];
+    }
+    Ok(())
+}
+
 fn apply_remove_run<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
@@ -476,6 +539,31 @@ fn apply_remove_run_with_listener<'arena>(
     }
 }
 
+fn apply_outpoint_remove_run_with_listener<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    key: UtxoKey,
+    txid: Hash256,
+    removes: &[OutPoint],
+    listener: &(dyn UtxoChangeListener + Send + Sync),
+) {
+    let Some(mut record) = take_record(table, key, txid) else {
+        return;
+    };
+    let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::with_capacity(removes.len());
+    for remove in removes {
+        if let Some(removed_output) = record.remove_output(remove.vout)
+            && let Some((txout, height, coinbase)) = output_details(table, &removed_output)
+        {
+            removed_coins.push(UtxoRemoved::new(*remove, txout, height, coinbase));
+        }
+    }
+    listener.on_remove_coins(&removed_coins);
+    if !record.is_empty() {
+        insert_record(arena, table, record);
+    }
+}
+
 fn apply_add_run<'arena>(
     arena: &'arena Bump,
     table: &mut ShardTable<'arena>,
@@ -516,6 +604,44 @@ fn apply_utxo_add_run<'arena>(
         }
     }
     insert_record(arena, table, record);
+    Ok(())
+}
+
+fn apply_utxo_add_run_with_listener<'arena>(
+    arena: &'arena Bump,
+    table: &mut ShardTable<'arena>,
+    key: UtxoKey,
+    txid: Hash256,
+    adds: &[UtxoAdd],
+    listener: &(dyn UtxoChangeListener + Send + Sync),
+) -> Result<(), UtxoError> {
+    let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    let add_unique = build_adds_extend_record(&record, adds.iter().map(|add| add.outpoint.vout));
+    let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
+    for add in adds {
+        let payload = add.payload();
+        if add_unique {
+            append_unique_build_output(table, &mut record, &payload)?;
+        } else {
+            let overwritten = match record.find_output(payload.vout) {
+                Some(output) => Some(output_details(table, output).ok_or(UtxoError::CorruptArena)?),
+                None => None,
+            };
+            append_build_output(table, &mut record, &payload)?;
+            if let Some((txout, height, coinbase)) = overwritten {
+                flush_inserted_coins(listener, &mut inserted_coins);
+                listener.on_remove_coin(payload.outpoint, &txout, height, coinbase);
+            }
+        }
+        inserted_coins.push(UtxoInserted::new(
+            payload.outpoint,
+            payload.txout,
+            payload.height,
+            payload.coinbase,
+        ));
+    }
+    insert_record(arena, table, record);
+    flush_inserted_coins(listener, &mut inserted_coins);
     Ok(())
 }
 
