@@ -26,7 +26,7 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use smallvec::SmallVec;
 
-use self::stage::{BlockStager, StagedBlock};
+use self::stage::{BlockStager, DrainedBlock, StagedBlock};
 use self::window::{DownloadWindow, SyncBudget};
 
 /// Maximum number of locator entries we ever send.
@@ -332,14 +332,18 @@ impl BlockSync {
         else {
             return (0, 0);
         };
-        let expected_hashes = self
-            .cached_expected_block_hashes(staged_count)
-            .unwrap_or_else(|| self.expected_block_hashes(staged_count));
-        let drained = self
-            .block_stager
-            .lock()
-            .drain_expected_prefix(&expected_hashes);
-        let mut applied_hashes = Vec::with_capacity(expected_hashes.len());
+        let (drained, expected_len) = self
+            .drain_cached_expected_blocks(staged_count)
+            .unwrap_or_else(|| {
+                let expected_hashes = self.expected_block_hashes(staged_count);
+                let expected_len = expected_hashes.len();
+                let drained = self
+                    .block_stager
+                    .lock()
+                    .drain_expected_prefix(&expected_hashes);
+                (drained, expected_len)
+            });
+        let mut applied_hashes = Vec::with_capacity(expected_len);
         let mut failed_hash = None;
         let mut drained = drained.into_iter();
         while let Some(drained_block) = drained.next() {
@@ -430,7 +434,7 @@ impl BlockSync {
         hashes
     }
 
-    fn cached_expected_block_hashes(&self, max_count: usize) -> Option<ExpectedBlockHashes> {
+    fn drain_cached_expected_blocks(&self, max_count: usize) -> Option<(Vec<DrainedBlock>, usize)> {
         let chain_tip = self.handles.chain_tip.load_full()?;
         let applied_tip = self.handles.applied_tip.load_full()?;
         let cache = self.expected_apply_cache.lock();
@@ -441,7 +445,12 @@ impl BlockSync {
         {
             return None;
         }
-        Some(cache.hashes.iter().copied().take(max_count).collect())
+        let expected_len = cache.hashes.len().min(max_count);
+        let drained = self
+            .block_stager
+            .lock()
+            .drain_expected_prefix(&cache.hashes[..expected_len]);
+        Some((drained, expected_len))
     }
 
     fn next_expected_block_hash(&self) -> Option<Hash256> {
