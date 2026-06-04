@@ -1,0 +1,223 @@
+#![allow(missing_docs)]
+#![allow(clippy::print_stdout)]
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::Instant;
+
+use anyhow::{Context as _, Result, bail};
+use bitcoin::Block;
+use bitcoin::consensus::Decodable as _;
+use bitcoin::hex::FromHex as _;
+use bitcoin_rs_node::Network;
+use bitcoin_rs_node::config::Config;
+use bitcoin_rs_node::state::NodeState;
+use serde_json::json;
+
+fn main() -> Result<()> {
+    let args = Args::parse(std::env::args_os().skip(1))?;
+    if args.stop_height < args.start_height {
+        bail!("--stop-height must be greater than or equal to --start-height");
+    }
+    if args.start_height != 0 {
+        bail!("mainnet prefix replay currently requires --start-height 0");
+    }
+
+    let mut config = Config::default_for_network(Network::Mainnet);
+    config.data_dir.clone_from(&args.data_dir);
+    config.storage_backend.clone_from(&args.storage_backend);
+    config.p2p_listen.clear();
+    config.dns_seeds_enabled = false;
+    config.txindex = args.txindex;
+    config.blockfilterindex = args.blockfilterindex;
+
+    let state = NodeState::open(config).context("open node state")?;
+    let mut tx_count = 0_usize;
+    let mut block_bytes = 0_usize;
+    let started = Instant::now();
+    let mut start_hash = None;
+    let mut stop_hash = None;
+
+    for height in args.start_height..=args.stop_height {
+        let hash = bitcoin_cli(&args, ["getblockhash".to_owned(), height.to_string()])
+            .with_context(|| format!("get block hash at height {height}"))?;
+        if height == args.start_height {
+            start_hash = Some(hash.clone());
+        }
+        if height == args.stop_height {
+            stop_hash = Some(hash.clone());
+        }
+        let block_hex = bitcoin_cli(&args, ["getblock".to_owned(), hash.clone(), "0".to_owned()])
+            .with_context(|| format!("get block {hash} at height {height}"))?;
+        let bytes = Vec::<u8>::from_hex(block_hex.trim())
+            .with_context(|| format!("decode block hex at height {height}"))?;
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let block = Block::consensus_decode(&mut cursor)
+            .with_context(|| format!("decode block bytes at height {height}"))?;
+        tx_count = tx_count.saturating_add(block.txdata.len());
+        block_bytes = block_bytes.saturating_add(bytes.len());
+        state
+            .apply_block(&block)
+            .with_context(|| format!("apply block at height {height}"))?;
+    }
+
+    let elapsed = started.elapsed();
+    let block_count = args
+        .stop_height
+        .saturating_sub(args.start_height)
+        .saturating_add(1);
+    let artifact = json!({
+        "schema": "mainnet-prefix-replay-v1",
+        "measurement_target": "mainnet-prefix-replay",
+        "git_head": git_head().ok(),
+        "storage_backend": args.storage_backend,
+        "txindex": args.txindex,
+        "blockfilterindex": args.blockfilterindex,
+        "start_height": args.start_height,
+        "start_hash": start_hash,
+        "stop_height": args.stop_height,
+        "stop_hash": stop_hash,
+        "block_count": block_count,
+        "tx_count": tx_count,
+        "block_bytes": block_bytes,
+        "elapsed_seconds": elapsed.as_secs_f64(),
+        "blocks_per_second": f64::from(block_count) / elapsed.as_secs_f64(),
+        "rss_high_water_bytes": rss_high_water_bytes(),
+        "bitcoin_cli": args.bitcoin_cli,
+        "bitcoin_cli_args": args.bitcoin_cli_args,
+        "data_dir": args.data_dir,
+    });
+    let rendered = serde_json::to_string_pretty(&artifact).context("render artifact JSON")?;
+    if let Some(output) = args.output {
+        std::fs::write(&output, rendered + "\n")
+            .with_context(|| format!("write {}", output.display()))?;
+    } else {
+        println!("{rendered}");
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct Args {
+    bitcoin_cli: String,
+    bitcoin_cli_args: Vec<String>,
+    data_dir: PathBuf,
+    output: Option<PathBuf>,
+    start_height: u32,
+    stop_height: u32,
+    storage_backend: String,
+    txindex: bool,
+    blockfilterindex: bool,
+}
+
+impl Args {
+    fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        let mut parsed = Self {
+            bitcoin_cli: "bitcoin-cli".to_owned(),
+            bitcoin_cli_args: Vec::new(),
+            data_dir: PathBuf::from(".bitcoin-rs-mainnet-prefix-replay"),
+            output: None,
+            start_height: 0,
+            stop_height: 0,
+            storage_backend: "fjall".to_owned(),
+            txindex: false,
+            blockfilterindex: false,
+        };
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            let arg = arg
+                .into_string()
+                .map_err(|value| anyhow::anyhow!("argument is not UTF-8: {}", value.display()))?;
+            match arg.as_str() {
+                "-h" | "--help" => {
+                    print_usage();
+                    std::process::exit(0);
+                }
+                "--bitcoin-cli" => parsed.bitcoin_cli = next_arg(&mut args, "--bitcoin-cli")?,
+                "--bitcoin-cli-arg" => {
+                    parsed
+                        .bitcoin_cli_args
+                        .push(next_arg(&mut args, "--bitcoin-cli-arg")?);
+                }
+                "--data-dir" => parsed.data_dir = PathBuf::from(next_arg(&mut args, "--data-dir")?),
+                "--output" => parsed.output = Some(PathBuf::from(next_arg(&mut args, "--output")?)),
+                "--start-height" => {
+                    parsed.start_height = parse_height(&next_arg(&mut args, "--start-height")?)?;
+                }
+                "--stop-height" => {
+                    parsed.stop_height = parse_height(&next_arg(&mut args, "--stop-height")?)?;
+                }
+                "--storage-backend" => {
+                    parsed.storage_backend = next_arg(&mut args, "--storage-backend")?;
+                }
+                "--txindex" => parsed.txindex = true,
+                "--blockfilterindex" => parsed.blockfilterindex = true,
+                other => bail!("unknown argument: {other}"),
+            }
+        }
+        Ok(parsed)
+    }
+}
+
+fn next_arg(args: &mut impl Iterator<Item = OsString>, name: &str) -> Result<String> {
+    args.next()
+        .with_context(|| format!("{name} requires a value"))?
+        .into_string()
+        .map_err(|value| anyhow::anyhow!("{name} value is not UTF-8: {}", value.display()))
+}
+
+fn parse_height(value: &str) -> Result<u32> {
+    value
+        .parse()
+        .with_context(|| format!("parse height {value:?}"))
+}
+
+fn bitcoin_cli(args: &Args, command_args: impl IntoIterator<Item = String>) -> Result<String> {
+    let output = Command::new(&args.bitcoin_cli)
+        .args(&args.bitcoin_cli_args)
+        .args(command_args)
+        .output()
+        .with_context(|| format!("run {}", args.bitcoin_cli))?;
+    if !output.status.success() {
+        bail!(
+            "{} failed with status {}: {}",
+            args.bitcoin_cli,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("bitcoin-cli stdout is not UTF-8")?;
+    Ok(stdout.trim().to_owned())
+}
+
+fn git_head() -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .context("run git rev-parse")?;
+    if !output.status.success() {
+        bail!("git rev-parse failed with status {}", output.status);
+    }
+    Ok(String::from_utf8(output.stdout)
+        .context("git stdout is not UTF-8")?
+        .trim()
+        .to_owned())
+}
+
+fn rss_high_water_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmHWM:") {
+            let kib = value.split_whitespace().next()?.parse::<u64>().ok()?;
+            return kib.checked_mul(1024);
+        }
+    }
+    None
+}
+
+fn print_usage() {
+    println!(
+        "usage: cargo run -p bitcoin-rs-node --example mainnet_prefix_replay --no-default-features --features fjall -- --stop-height <height> [--bitcoin-cli <path>] [--bitcoin-cli-arg <arg>]... [--data-dir <path>] [--output <path>] [--txindex] [--blockfilterindex]"
+    );
+}
