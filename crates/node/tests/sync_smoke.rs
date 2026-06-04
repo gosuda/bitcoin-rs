@@ -1,6 +1,8 @@
 //! Block sync smoke tests.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use bitcoin::hashes::Hash as _;
@@ -14,11 +16,13 @@ use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_index::{BlockSource, IndexError, IndexRowCounts, IndexerLike};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_node::{BlockSync, Config, Network, apply::ApplyHandles, state::NodeState};
+use bitcoin_rs_node::{
+    BlockSync, Config, Network, apply::ApplyHandles, event_loop::EventLoop, state::NodeState,
+};
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::{Hash256, OutPoint};
 use bitcoin_rs_utxo::UtxoSet;
-use crossbeam_channel::unbounded;
+use crossbeam_channel::{bounded, unbounded};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
@@ -152,6 +156,74 @@ fn tick_applies_inbound_blocks_before_sync_selection() -> Result<(), Box<dyn std
     Ok(())
 }
 
+#[test]
+fn event_loop_sync_wake_applies_inbound_block_without_periodic_tick()
+-> Result<(), Box<dyn std::error::Error>> {
+    let block_tree = Arc::new(RwLock::new(BlockTree::new()));
+    let chain_tip = block_tree.read().tip_handle();
+    let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(RwLock::new(Vec::new()));
+    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+    let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<bitcoin::block::Header>>();
+    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let handles = apply_handles(
+        Network::Regtest,
+        Arc::clone(&chain_tip),
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+    );
+    let sync = Arc::new(BlockSync::new(
+        handles,
+        Arc::clone(&peers),
+        Arc::clone(&peer_outbound),
+        inbound_headers_rx,
+        inbound_blocks_rx,
+    ));
+    let (shutdown_tx, shutdown_rx) = bounded(1);
+    let (sync_wake_tx, sync_wake_rx) = bounded(1);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let genesis = regtest_genesis_block()?;
+    let driver_applied_tip = Arc::clone(&applied_tip);
+    let driver = std::thread::spawn(move || {
+        if inbound_blocks_tx.send(genesis).is_err() {
+            return false;
+        }
+        if sync_wake_tx.try_send(()).is_err() {
+            let _ = shutdown_tx.send(());
+            return false;
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let applied_before_periodic_tick = loop {
+            if let Some(applied) = driver_applied_tip.load_full() {
+                assert_eq!(applied.height, 0);
+                assert_eq!(applied.hash, Network::Regtest.genesis_block_hash());
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if shutdown_tx.send(()).is_err() {
+            return false;
+        }
+        applied_before_periodic_tick
+    });
+
+    EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx).spin(&shutdown)?;
+    let applied_before_periodic_tick = match driver.join() {
+        Ok(result) => result,
+        Err(error) => std::panic::resume_unwind(error),
+    };
+    assert!(
+        applied_before_periodic_tick,
+        "sync wake did not apply inbound block before periodic sync tick"
+    );
+    Ok(())
+}
 #[test]
 fn tick_writes_g2_muhash_sample_for_applied_genesis() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossbeam_channel::{Receiver, select, tick};
+use crossbeam_channel::{Receiver, never, select, tick};
 
 use crate::shutdown;
 
@@ -25,6 +25,7 @@ pub struct EventLoop {
     defrag_tick: Receiver<Instant>,
     metrics_scrape: Receiver<Instant>,
     sync_tick: Receiver<Instant>,
+    sync_wake: Receiver<()>,
     sync: Arc<crate::BlockSync>,
 }
 
@@ -32,12 +33,23 @@ impl EventLoop {
     /// Builds an event loop from an already-bridged shutdown signal receiver.
     #[must_use]
     pub fn new(shutdown_signal: Receiver<()>, sync: Arc<crate::BlockSync>) -> Self {
+        Self::with_sync_wake(shutdown_signal, sync, never())
+    }
+
+    /// Builds an event loop that can also wake sync work from inbound P2P data.
+    #[must_use]
+    pub fn with_sync_wake(
+        shutdown_signal: Receiver<()>,
+        sync: Arc<crate::BlockSync>,
+        sync_wake: Receiver<()>,
+    ) -> Self {
         Self {
             shutdown_signal,
             mempool_tick: tick(MEMPOOL_TICK),
             defrag_tick: tick(DEFRAG_TICK),
             metrics_scrape: tick(METRICS_TICK),
             sync_tick: tick(SYNC_TICK),
+            sync_wake,
             sync,
         }
     }
@@ -89,6 +101,13 @@ impl EventLoop {
                 recv(self.sync_tick) -> ticked => {
                     if ticked.is_ok() {
                         sync_ticks += 1;
+                        self.on_sync_tick();
+                    }
+                }
+                recv(self.sync_wake) -> woke => {
+                    if woke.is_ok() {
+                        sync_ticks += 1;
+                        metrics::counter!("node.event_loop.sync_wakes").increment(1);
                         self.on_sync_tick();
                     }
                 }

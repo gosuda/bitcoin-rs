@@ -16,6 +16,40 @@ use crate::peer::Peer;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
+type SyncWakeHandle = Option<Sender<()>>;
+
+#[derive(Clone)]
+struct InboundSyncSinks {
+    headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    blocks_tx: Sender<bitcoin::Block>,
+    wake_tx: SyncWakeHandle,
+}
+
+impl InboundSyncSinks {
+    fn send_headers(&self, peer_addr: SocketAddr, headers: Vec<bitcoin::block::Header>) {
+        if let Err(error) = self.headers_tx.send(headers) {
+            tracing::warn!(
+                peer_addr = %peer_addr,
+                %error,
+                "p2p inbound headers channel disconnected",
+            );
+        } else {
+            wake_sync(self.wake_tx.as_ref());
+        }
+    }
+
+    fn send_block(&self, peer_addr: SocketAddr, block: bitcoin::Block) {
+        if let Err(error) = self.blocks_tx.send(block) {
+            tracing::warn!(
+                peer_addr = %peer_addr,
+                %error,
+                "p2p inbound blocks channel disconnected",
+            );
+        } else {
+            wake_sync(self.wake_tx.as_ref());
+        }
+    }
+}
 
 /// Errors returned by the P2P listener accept loop.
 #[derive(Debug, Error)]
@@ -88,6 +122,39 @@ pub fn serve_with_shutdown_with_chain(
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
 ) -> Result<(), ListenerError> {
+    serve_with_shutdown_with_chain_and_sync_wake(
+        addr,
+        shutdown,
+        magic,
+        peer_registry,
+        peer_outbound,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        banned,
+        chain_query,
+        None,
+    )
+}
+
+/// Binds `addr` and runs an accept loop with active-chain and sync-wake handles.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn serve_with_shutdown_with_chain_and_sync_wake(
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    magic: Magic,
+    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
+    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
+    sync_wake_tx: Option<Sender<()>>,
+) -> Result<(), ListenerError> {
+    let inbound_sync_sinks = InboundSyncSinks {
+        headers_tx: inbound_headers_tx,
+        blocks_tx: inbound_blocks_tx,
+        wake_tx: sync_wake_tx,
+    };
     let listener =
         TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
     listener
@@ -107,8 +174,7 @@ pub fn serve_with_shutdown_with_chain(
                     magic,
                     Arc::clone(&peer_registry),
                     Arc::clone(&peer_outbound),
-                    inbound_headers_tx.clone(),
-                    inbound_blocks_tx.clone(),
+                    inbound_sync_sinks.clone(),
                     chain_query.clone(),
                 );
             }
@@ -160,6 +226,37 @@ pub fn spawn_outbound_connection_with_chain(
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    spawn_outbound_connection_with_chain_and_sync_wake(
+        addr,
+        magic,
+        peer_registry,
+        peer_outbound,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        banned,
+        chain_query,
+        None,
+    )
+}
+
+/// Spawns an outbound connection with active-chain and sync-wake handles.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn spawn_outbound_connection_with_chain_and_sync_wake(
+    addr: SocketAddr,
+    magic: Magic,
+    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
+    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
+    inbound_blocks_tx: Sender<bitcoin::Block>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
+    sync_wake_tx: Option<Sender<()>>,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    let inbound_sync_sinks = InboundSyncSinks {
+        headers_tx: inbound_headers_tx,
+        blocks_tx: inbound_blocks_tx,
+        wake_tx: sync_wake_tx,
+    };
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
@@ -169,8 +266,7 @@ pub fn spawn_outbound_connection_with_chain(
                 magic,
                 &peer_registry,
                 &peer_outbound,
-                &inbound_headers_tx,
-                &inbound_blocks_tx,
+                &inbound_sync_sinks,
                 &banned,
                 &chain_query,
             )
@@ -194,8 +290,7 @@ fn run_outbound_connection(
     magic: Magic,
     peer_registry: &RwLock<Vec<crate::PeerInfo>>,
     peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
-    inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
-    inbound_blocks_tx: &Sender<bitcoin::Block>,
+    inbound_sync_sinks: &InboundSyncSinks,
     banned: &RwLock<Vec<crate::BannedSubnet>>,
     chain_query: &ChainQueryHandle,
 ) -> Result<(), crate::wire::PeerError> {
@@ -243,8 +338,7 @@ fn run_outbound_connection(
             &mut peer,
             addr,
             &outbound_rx,
-            inbound_headers_tx,
-            inbound_blocks_tx,
+            inbound_sync_sinks,
             chain_query.as_deref(),
         )
     })();
@@ -286,8 +380,7 @@ fn spawn_handshake_thread(
     magic: Magic,
     registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
     peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>>,
-    inbound_headers_tx: Sender<Vec<bitcoin::block::Header>>,
-    inbound_blocks_tx: Sender<bitcoin::Block>,
+    inbound_sync_sinks: InboundSyncSinks,
     chain_query: ChainQueryHandle,
 ) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
@@ -300,8 +393,7 @@ fn spawn_handshake_thread(
                 magic,
                 &registry,
                 &peer_outbound,
-                &inbound_headers_tx,
-                &inbound_blocks_tx,
+                &inbound_sync_sinks,
                 &chain_query,
             ) {
                 tracing::warn!(
@@ -329,8 +421,7 @@ fn run_handshake(
     magic: Magic,
     registry: &RwLock<Vec<crate::PeerInfo>>,
     peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
-    inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
-    inbound_blocks_tx: &Sender<bitcoin::Block>,
+    inbound_sync_sinks: &InboundSyncSinks,
     chain_query: &ChainQueryHandle,
 ) -> Result<(), crate::wire::PeerError> {
     stream
@@ -374,8 +465,7 @@ fn run_handshake(
             &mut peer,
             peer_addr,
             &outbound_rx,
-            inbound_headers_tx,
-            inbound_blocks_tx,
+            inbound_sync_sinks,
             chain_query.as_deref(),
         )
     })();
@@ -394,8 +484,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
-    inbound_headers_tx: &Sender<Vec<bitcoin::block::Header>>,
-    inbound_blocks_tx: &Sender<bitcoin::Block>,
+    inbound_sync_sinks: &InboundSyncSinks,
     chain_query: Option<&dyn crate::dispatch::ChainQuery>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
@@ -431,22 +520,10 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     crate::dispatch::dispatch_inbound_with_chain(peer, &message, chain_query)?;
                 match message {
                     bitcoin::p2p::message::NetworkMessage::Headers(headers) => {
-                        if let Err(error) = inbound_headers_tx.send(headers) {
-                            tracing::warn!(
-                                peer_addr = %peer_addr,
-                                %error,
-                                "p2p inbound headers channel disconnected",
-                            );
-                        }
+                        inbound_sync_sinks.send_headers(peer_addr, headers);
                     }
                     bitcoin::p2p::message::NetworkMessage::Block(block) => {
-                        if let Err(error) = inbound_blocks_tx.send(block) {
-                            tracing::warn!(
-                                peer_addr = %peer_addr,
-                                %error,
-                                "p2p inbound blocks channel disconnected",
-                            );
-                        }
+                        inbound_sync_sinks.send_block(peer_addr, block);
                     }
                     _ => {}
                 }
@@ -464,6 +541,12 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+fn wake_sync(sync_wake_tx: Option<&Sender<()>>) {
+    if let Some(tx) = sync_wake_tx {
+        let _ = tx.try_send(());
     }
 }
 
@@ -524,5 +607,25 @@ mod outbound_tests {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sync_wake_tests {
+    use super::wake_sync;
+
+    #[test]
+    fn sync_wake_is_bounded_and_nonblocking() {
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+
+        wake_sync(Some(&wake_tx));
+        wake_sync(Some(&wake_tx));
+
+        assert_eq!(wake_rx.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn missing_sync_wake_is_noop() {
+        wake_sync(None);
     }
 }

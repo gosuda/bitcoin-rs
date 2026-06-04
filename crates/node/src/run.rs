@@ -100,6 +100,7 @@ fn spawn_p2p_listeners(
     banned: BannedSubnets,
     inbound_headers_tx: crossbeam_channel::Sender<Vec<bitcoin::block::Header>>,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin::Block>,
+    sync_wake_tx: crossbeam_channel::Sender<()>,
     chain_query: P2pChainQuery,
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>
 {
@@ -113,11 +114,12 @@ fn spawn_p2p_listeners(
         let listener_banned = Arc::clone(&banned);
         let listener_inbound_headers_tx = inbound_headers_tx.clone();
         let listener_inbound_blocks_tx = inbound_blocks_tx.clone();
+        let listener_sync_wake_tx = sync_wake_tx.clone();
         let listener_chain_query = Arc::clone(&chain_query);
         let handle = std::thread::Builder::new()
             .name(format!("bitcoin-rs-p2p-{listener_addr}"))
             .spawn(move || {
-                bitcoin_rs_p2p::listener::serve_with_shutdown_with_chain(
+                bitcoin_rs_p2p::listener::serve_with_shutdown_with_chain_and_sync_wake(
                     listener_addr,
                     listener_shutdown,
                     magic,
@@ -127,6 +129,7 @@ fn spawn_p2p_listeners(
                     listener_inbound_blocks_tx,
                     listener_banned,
                     Some(listener_chain_query),
+                    Some(listener_sync_wake_tx),
                 )
             })?;
         tracing::info!(addr = %listener_addr, "p2p listener bound");
@@ -181,6 +184,7 @@ fn spawn_p2p_outbound_drain(
     peers: &PeerRegistry,
     peer_outbound: &PeerOutboundMap,
     banned: BannedSubnets,
+    sync_wake_tx: crossbeam_channel::Sender<()>,
     chain_query: P2pChainQuery,
 ) -> anyhow::Result<std::thread::JoinHandle<()>> {
     let outbound_rx = state.p2p_outbound_receiver();
@@ -190,6 +194,7 @@ fn spawn_p2p_outbound_drain(
     let outbound_banned = Arc::clone(&banned);
     let outbound_headers_tx = state.inbound_headers_sender();
     let outbound_blocks_tx = state.inbound_blocks_sender();
+    let outbound_sync_wake_tx = sync_wake_tx;
     let outbound_shutdown = Arc::clone(shutdown);
     let outbound_chain_query = Arc::clone(&chain_query);
 
@@ -220,7 +225,7 @@ fn spawn_p2p_outbound_drain(
                             tracing::debug!(addr = %addr, "p2p outbound request skipped: already active");
                             continue;
                         }
-                        let handle = bitcoin_rs_p2p::listener::spawn_outbound_connection_with_chain(
+                        let handle = bitcoin_rs_p2p::listener::spawn_outbound_connection_with_chain_and_sync_wake(
                             addr,
                             magic,
                             Arc::clone(&outbound_registry),
@@ -229,6 +234,7 @@ fn spawn_p2p_outbound_drain(
                             outbound_blocks_tx.clone(),
                             Arc::clone(&outbound_banned),
                             Some(Arc::clone(&outbound_chain_query)),
+                            Some(outbound_sync_wake_tx.clone()),
                         );
                         active.insert(addr);
                         handles.push((addr, handle));
@@ -364,7 +370,8 @@ pub fn run(mut config: Config) -> Result<()> {
         crate::NodeP2pChainQuery::new(state.block_tree(), state.blocks())
             .with_block_body_source(Arc::clone(&block_body_source)),
     );
-    let loop_handle = EventLoop::new(shutdown_rx, state.sync());
+    let (sync_wake_tx, sync_wake_rx) = bounded(1);
+    let loop_handle = EventLoop::with_sync_wake(shutdown_rx, state.sync(), sync_wake_rx);
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
     let mut rpc_context = bitcoin_rs_rpc::Context::from_handles(
         state.chain_tip(),
@@ -417,6 +424,7 @@ pub fn run(mut config: Config) -> Result<()> {
         Arc::clone(&banned),
         state.inbound_headers_sender(),
         state.inbound_blocks_sender(),
+        sync_wake_tx.clone(),
         Arc::clone(&p2p_chain_query),
     )?;
     let _outbound_worker = spawn_p2p_outbound_drain(
@@ -426,6 +434,7 @@ pub fn run(mut config: Config) -> Result<()> {
         &peers,
         &peer_outbound,
         Arc::clone(&banned),
+        sync_wake_tx,
         Arc::clone(&p2p_chain_query),
     )?;
     let _bootstrap_worker =
