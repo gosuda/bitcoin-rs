@@ -84,13 +84,16 @@ impl ApplyScratch {
         let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txdata.len()));
         let created_capacity = capacities.created_outputs;
         let spent_capacity = capacities.spent_inputs;
-        let mut created_outpoints: Option<SameBlockSpentSet> =
-            (!include_same_block_output_scripts).then(|| HashSet::with_capacity(created_capacity));
+        let track_same_block_spends = spent_capacity != 0;
+        let track_same_block_scripts = include_same_block_output_scripts && track_same_block_spends;
+        let mut created_outpoints: Option<SameBlockSpentSet> = (track_same_block_spends
+            && !track_same_block_scripts)
+            .then(|| HashSet::with_capacity(created_capacity));
         let mut created_scripts: Option<SameBlockScriptMap> =
-            include_same_block_output_scripts.then(|| HashMap::with_capacity(created_capacity));
+            track_same_block_scripts.then(|| HashMap::with_capacity(created_capacity));
         let mut same_block_spent = HashSet::with_capacity(spent_capacity);
         let mut same_block_spent_output_scripts: Option<SameBlockScriptMap> =
-            include_same_block_output_scripts.then(|| HashMap::with_capacity(spent_capacity));
+            track_same_block_scripts.then(|| HashMap::with_capacity(spent_capacity));
         let mut same_block_spent_input_count = 0usize;
 
         for (tx, txid) in block.txdata.iter().zip(&txids) {

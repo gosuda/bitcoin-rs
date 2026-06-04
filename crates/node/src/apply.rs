@@ -1447,6 +1447,28 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    fn apply_scratch_skips_same_block_script_tracking_without_spend_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let block = block_with_transaction(coinbase_transaction(0x70));
+
+        let scratch = ApplyScratch::new(&block, 1, false, true)?;
+        let changes = build_utxo_changes(&block, 1, &scratch)?;
+
+        assert!(scratch.same_block_spent().is_empty());
+        assert!(
+            scratch
+                .same_block_spent_output_script(&internal_outpoint(&bitcoin::OutPoint {
+                    txid: block.txdata[0].compute_txid(),
+                    vout: 0,
+                }))
+                .is_none()
+        );
+        assert_eq!(changes.add_count(), block.txdata[0].output.len());
+        assert_eq!(changes.remove_count(), 0);
+        Ok(())
+    }
+
+    #[test]
     fn apply_scratch_caches_same_block_spent_output_scripts_by_txid_and_vout()
     -> Result<(), Box<dyn std::error::Error>> {
         let base_prevout = bitcoin::OutPoint {
