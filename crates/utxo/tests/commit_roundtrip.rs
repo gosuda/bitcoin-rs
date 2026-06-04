@@ -4,7 +4,8 @@ use std::sync::Arc;
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, varint};
 use bitcoin_rs_utxo::{
-    BlockChanges, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoKey, UtxoSet, hash_serialized_3,
+    BlockChanges, UtxoAdd, UtxoChangeListener, UtxoError, UtxoInserted, UtxoKey, UtxoSet,
+    hash_serialized_3,
     set::{UtxoChangeEvents, UtxoCommittedEvent},
 };
 use parking_lot::Mutex;
@@ -191,6 +192,43 @@ fn commit_roundtrips_ten_thousand_outputs() -> Result<(), Box<dyn std::error::Er
         assert_eq!(set.get(&outpoint), Some(txout));
     }
 
+    Ok(())
+}
+
+#[test]
+fn invalid_add_does_not_apply_removes_in_same_commit() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let retained = OutPoint::new(txid(10), 0);
+    let retained_txout = txout(10);
+    let mut initial = BlockChanges::default();
+    initial.add(UtxoAdd::new(retained, retained_txout.clone(), false, 1));
+    set.commit_block(&initial, &txid(11))?;
+
+    let mut invalid = BlockChanges::default();
+    invalid.remove(retained);
+    invalid.add(UtxoAdd::new(
+        OutPoint::new(txid(12), 0),
+        TxOut {
+            value: Amount::from_sat(12),
+            script_pubkey: ScriptBuf::from_bytes(vec![0; usize::from(u16::MAX) + 1]),
+        },
+        false,
+        2,
+    ));
+
+    let error = match set.commit_block(&invalid, &txid(13)) {
+        Ok(()) => return Err("oversized script unexpectedly committed".into()),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            UtxoError::ScriptTooLarge { len } if len == usize::from(u16::MAX) + 1
+        ),
+        "unexpected error: {error}"
+    );
+    assert_eq!(set.get(&retained), Some(retained_txout));
+    assert_eq!(set.get(&OutPoint::new(txid(12), 0)), None);
     Ok(())
 }
 
