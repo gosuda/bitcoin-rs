@@ -1084,9 +1084,10 @@ fn build_utxo_changes(
     let (add_capacity, remove_capacity) = scratch.utxo_change_capacity();
     let mut changes = BlockChanges::with_capacity(add_capacity, remove_capacity);
     for (tx, txid) in block.txdata.iter().zip(scratch.txids()) {
+        let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
         for (vout_idx, txout) in tx.output.iter().enumerate() {
             let outpoint = OutPoint::new(
-                bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array()),
+                txid,
                 u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
             );
             if scratch.contains_same_block_spent(&outpoint) {
