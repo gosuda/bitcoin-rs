@@ -52,7 +52,7 @@ const PENDING_BYTE_BUDGET: usize = 128 * 256 * 1024;
 /// Maximum serialized bytes staged in memory while waiting for predecessors.
 const RECEIVED_BLOCK_BYTE_BUDGET: usize = 128 * 256 * 1024;
 /// Maximum decoded inbound blocks held before handing them to `BlockStager`.
-const INBOUND_BLOCK_STAGE_CHUNK: usize = 16;
+const INBOUND_BLOCK_STAGE_CHUNK: usize = RECEIVED_BLOCK_BUDGET;
 /// Maximum block requests one peer may own at once.
 ///
 /// Keep the default per-peer cap equal to the global cap so the bounded
