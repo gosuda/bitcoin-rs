@@ -6,7 +6,7 @@ usage() {
     'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
     '' \
     'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window.' \
-    'Writes the JSON shape consumed by collect-g14-perf-evidence.sh.' \
+    'Writes a wall-clock command-wrapper JSON manifest. collect-g14-perf-evidence.sh intentionally rejects this manifest for G14 unless elapsed seconds are replaced with Criterion-sourced evidence.' \
     'The manifest intentionally excludes Core block hashes and chain metadata; collect-g14-perf-evidence.sh must resolve those with live bitcoin-cli.'
 }
 
@@ -182,6 +182,8 @@ bitcoin_core_elapsed_seconds = run_timed(bitcoin_core_command, "--bitcoin-core-c
 manifest = {
     "ibd_start_height": start_height,
     "ibd_stop_height": stop_height,
+    "bench_tool": "wall-clock-command-wrapper",
+    "elapsed_seconds_source": "wall-clock-command-wrapper",
     "bitcoin_rs_elapsed_seconds": bitcoin_rs_elapsed_seconds,
     "bitcoin_core_elapsed_seconds": bitcoin_core_elapsed_seconds,
     "bitcoin_core_version": bitcoin_core_version,

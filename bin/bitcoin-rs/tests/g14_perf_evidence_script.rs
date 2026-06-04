@@ -37,8 +37,8 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn producer_writes_collectable_same_window_ibd_manifest() -> Result<(), Box<dyn std::error::Error>>
-{
+fn producer_marks_command_wrapper_manifest_as_non_criterion()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
     let bitcoin_rs_command = fake_ibd_command(temp.path(), "bitcoin-rs-ibd", "0.01")?;
@@ -96,6 +96,8 @@ fn producer_writes_collectable_same_window_ibd_manifest() -> Result<(), Box<dyn 
     let manifest_json = fs::read_to_string(&manifest)?;
     assert!(manifest_json.contains(r#""ibd_start_height": 0"#));
     assert!(manifest_json.contains(r#""ibd_stop_height": 10"#));
+    assert!(manifest_json.contains(r#""bench_tool": "wall-clock-command-wrapper""#));
+    assert!(manifest_json.contains(r#""elapsed_seconds_source": "wall-clock-command-wrapper""#));
     assert!(manifest_json.contains(r#""bitcoin_rs_command":"#));
     assert!(manifest_json.contains(r#""bitcoin_core_command":"#));
     assert!(!manifest_json.contains("ibd_start_hash"));
@@ -106,10 +108,8 @@ fn producer_writes_collectable_same_window_ibd_manifest() -> Result<(), Box<dyn 
         .arg(&manifest)
         .env("BITCOIN_CLI", bitcoin_cli)
         .output()?;
-    assert_success(&collector_output);
-    let stdout = String::from_utf8(collector_output.stdout)?;
-    assert!(stdout.contains("export G14_MEASUREMENT_TARGET=mainnet-ibd\n"));
-    assert!(stdout.contains("export G14_REFERENCE_IMPL=bitcoin-core\n"));
+    assert!(!collector_output.status.success());
+    assert!(String::from_utf8_lossy(&collector_output.stderr).contains("bench_tool"));
     Ok(())
 }
 
@@ -280,6 +280,8 @@ fn evidence_json_with_elapsed(
             r#"{{
   "ibd_start_height": {start_height},
   "ibd_stop_height": {stop_height},
+  "bench_tool": "criterion",
+  "elapsed_seconds_source": "criterion",
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
   "bitcoin_core_elapsed_seconds": {bitcoin_core_elapsed_seconds},
   "bitcoin_core_version": "v27.0.0",
@@ -323,6 +325,8 @@ fn offline_evidence_json_with_elapsed(
   "ibd_start_hash": "2222222222222222222222222222222222222222222222222222222222222222",
   "ibd_stop_hash": "3333333333333333333333333333333333333333333333333333333333333333",
   "bitcoin_core_chain_info": {{"chain": "main", "blocks": 10, "headers": 10}},
+  "bench_tool": "criterion",
+  "elapsed_seconds_source": "criterion",
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
   "bitcoin_core_elapsed_seconds": {bitcoin_core_elapsed_seconds},
   "bitcoin_core_version": "v27.0.0",

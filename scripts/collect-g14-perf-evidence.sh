@@ -12,6 +12,7 @@ usage() {
     'Required JSON keys:' \
     '  ibd_start_height, ibd_stop_height,' \
     '  bitcoin_rs_elapsed_seconds, bitcoin_core_elapsed_seconds,' \
+    '  bench_tool=criterion, elapsed_seconds_source=criterion,' \
     '  bitcoin_core_version, bitcoin_core_commit,' \
     '  bitcoin_rs_command, bitcoin_core_command,' \
     '  bitcoin_rs_config, bitcoin_core_config,' \
@@ -150,6 +151,13 @@ def require_text(data: dict, key: str) -> str:
     return value
 
 
+def require_literal_value(data: dict, key: str, expected: str) -> str:
+    value = require_text(data, key)
+    if value != expected:
+        die(f"{key} must be {expected!r}, got {value!r}")
+    return value
+
+
 def require_hex(value: str, length: int, name: str) -> str:
     if not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
         die(f"{name} must be {length} lowercase hex characters")
@@ -200,6 +208,8 @@ if chain_info.get("chain") != "main":
 require_chain_height(chain_info, "blocks", stop_height, chain_info_source)
 require_chain_height(chain_info, "headers", stop_height, chain_info_source)
 core_commit = require_hex(require_text(data, "bitcoin_core_commit"), 40, "bitcoin_core_commit")
+bench_tool = require_literal_value(data, "bench_tool", "criterion")
+require_literal_value(data, "elapsed_seconds_source", "criterion")
 rs_command = require_text(data, "bitcoin_rs_command")
 core_command = require_text(data, "bitcoin_core_command")
 rs_config = require_text(data, "bitcoin_rs_config")
@@ -224,7 +234,7 @@ env = {
     "G14_STORAGE_BACKEND": "fjall",
     "G14_INDEXES": "all",
     "G14_REFERENCE_IMPL": "bitcoin-core",
-    "G14_BENCH_TOOL": "criterion",
+    "G14_BENCH_TOOL": bench_tool,
     "G14_BLOCK_SIZE_BYTES": "4194304",
     "G14_ELECTRUM_SAMPLE_SIZE": "10000",
     "G14_IBD_START_HEIGHT": str(start_height),
