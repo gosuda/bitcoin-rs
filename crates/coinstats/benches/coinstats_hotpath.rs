@@ -103,6 +103,24 @@ fn coinstats_hotpath(c: &mut Criterion) {
     let inserted_stats = fixture.inserted_stats();
     let same_txid_inserted_stats = fixture.same_txid_inserted_stats();
 
+    bench_insert_paths(c, &fixture, &insertions, &same_txid_insertions);
+    bench_remove_paths(
+        c,
+        &fixture,
+        &removals,
+        &same_txid_removals,
+        &inserted_stats,
+        &same_txid_inserted_stats,
+    );
+    bench_commit_fanout(c, &fixture, &inserted_stats);
+}
+
+fn bench_insert_paths(
+    c: &mut Criterion,
+    fixture: &CoinFixture,
+    insertions: &[UtxoInserted<'_>],
+    same_txid_insertions: &[UtxoInserted<'_>],
+) {
     c.bench_function("coinstats/muhash_insert_preencoded_8192", |b| {
         b.iter(|| {
             let mut muhash = MuHash3072::new();
@@ -127,7 +145,7 @@ fn coinstats_hotpath(c: &mut Criterion) {
         b.iter_batched(
             || CoinStatsListener::new(CoinStats::new()),
             |listener| {
-                listener.on_insert_coins(black_box(&insertions));
+                listener.on_insert_coins(black_box(insertions));
                 black_box(listener.snapshot().muhash.finalize_hash());
             },
             BatchSize::SmallInput,
@@ -138,13 +156,22 @@ fn coinstats_hotpath(c: &mut Criterion) {
         b.iter_batched(
             || CoinStatsListener::new(CoinStats::new()),
             |listener| {
-                listener.on_insert_coins(black_box(&same_txid_insertions));
+                listener.on_insert_coins(black_box(same_txid_insertions));
                 black_box(listener.snapshot().muhash.finalize_hash());
             },
             BatchSize::SmallInput,
         );
     });
+}
 
+fn bench_remove_paths(
+    c: &mut Criterion,
+    fixture: &CoinFixture,
+    removals: &[UtxoRemoved],
+    same_txid_removals: &[UtxoRemoved],
+    inserted_stats: &CoinStats,
+    same_txid_inserted_stats: &CoinStats,
+) {
     c.bench_function("coinstats/muhash_remove_preencoded_8192", |b| {
         b.iter_batched(
             || {
@@ -181,7 +208,7 @@ fn coinstats_hotpath(c: &mut Criterion) {
         b.iter_batched(
             || CoinStatsListener::new(inserted_stats.clone()),
             |listener| {
-                listener.on_remove_coins(black_box(&removals));
+                listener.on_remove_coins(black_box(removals));
                 black_box(listener.snapshot().muhash.finalize_hash());
             },
             BatchSize::SmallInput,
@@ -192,16 +219,18 @@ fn coinstats_hotpath(c: &mut Criterion) {
         b.iter_batched(
             || CoinStatsListener::new(same_txid_inserted_stats.clone()),
             |listener| {
-                listener.on_remove_coins(black_box(&same_txid_removals));
+                listener.on_remove_coins(black_box(same_txid_removals));
                 black_box(listener.snapshot().muhash.finalize_hash());
             },
             BatchSize::SmallInput,
         );
     });
+}
 
+fn bench_commit_fanout(c: &mut Criterion, fixture: &CoinFixture, inserted_stats: &CoinStats) {
     c.bench_function("coinstats/utxo_commit_listener_fanout_8192", |b| {
         b.iter_batched(
-            || coinstats_listener_commit_case(&fixture, &inserted_stats),
+            || coinstats_listener_commit_case(fixture, inserted_stats),
             |(set, changes)| {
                 set.commit_block(black_box(&changes), &txid(0xfeed_cafe))
                     .unwrap_or_else(|error| panic!("coinstats listener commit failed: {error}"));
