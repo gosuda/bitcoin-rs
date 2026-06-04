@@ -64,6 +64,15 @@ impl UtxoRecord<'_> {
 
     pub(crate) fn add_output(&mut self, output: OneUtxoOut) {
         let _removed = self.remove_output(output.vout);
+        self.push_output(output);
+    }
+
+    pub(crate) fn add_unique_output(&mut self, output: OneUtxoOut) {
+        debug_assert!(self.find_output(output.vout).is_none());
+        self.push_output(output);
+    }
+
+    fn push_output(&mut self, output: OneUtxoOut) {
         if let Some(bit) = bitmap_vout_bit(output.vout) {
             self.vout_bitmap |= bit;
         }
@@ -99,6 +108,10 @@ impl UtxoRecord<'_> {
 
     pub(crate) fn output_count(&self) -> usize {
         self.vouts.len() + self.overflow.len()
+    }
+
+    pub(crate) fn max_vout(&self) -> Option<u32> {
+        self.iter_outputs().map(|output| output.vout).max()
     }
 
     pub(crate) fn iter_outputs(&self) -> impl Iterator<Item = &OneUtxoOut> {

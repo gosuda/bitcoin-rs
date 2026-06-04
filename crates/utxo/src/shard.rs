@@ -484,8 +484,16 @@ fn apply_add_run<'arena>(
     adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    let add_unique = build_adds_extend_record(
+        &record,
+        adds.iter().map(|(_key, _txid, payload)| payload.vout),
+    );
     for (_key, _txid, payload) in adds {
-        append_build_output(table, &mut record, payload)?;
+        if add_unique {
+            append_unique_build_output(table, &mut record, payload)?;
+        } else {
+            append_build_output(table, &mut record, payload)?;
+        }
     }
     insert_record(arena, table, record);
     Ok(())
@@ -499,8 +507,13 @@ fn apply_utxo_add_run<'arena>(
     adds: &[UtxoAdd],
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
+    let add_unique = build_adds_extend_record(&record, adds.iter().map(|add| add.outpoint.vout));
     for add in adds {
-        append_build_output(table, &mut record, &add.payload())?;
+        if add_unique {
+            append_unique_build_output(table, &mut record, &add.payload())?;
+        } else {
+            append_build_output(table, &mut record, &add.payload())?;
+        }
     }
     insert_record(arena, table, record);
     Ok(())
@@ -553,6 +566,23 @@ fn append_build_output<'arena>(
     record: &mut UtxoRecord<'arena>,
     payload: &BuildPayload<'_>,
 ) -> Result<(), UtxoError> {
+    append_record_output(table, record, payload, UtxoRecord::add_output)
+}
+
+fn append_unique_build_output<'arena>(
+    table: &mut ShardTable<'arena>,
+    record: &mut UtxoRecord<'arena>,
+    payload: &BuildPayload<'_>,
+) -> Result<(), UtxoError> {
+    append_record_output(table, record, payload, UtxoRecord::add_unique_output)
+}
+
+fn append_record_output<'arena>(
+    table: &mut ShardTable<'arena>,
+    record: &mut UtxoRecord<'arena>,
+    payload: &BuildPayload<'_>,
+    add_output: fn(&mut UtxoRecord<'arena>, OneUtxoOut),
+) -> Result<(), UtxoError> {
     let script = payload.txout.script_pubkey.as_bytes();
     let script_len =
         u16::try_from(script.len()).map_err(|_| UtxoError::ScriptTooLarge { len: script.len() })?;
@@ -562,15 +592,29 @@ fn append_build_output<'arena>(
         })?;
     table.script_bytes.extend_from_slice(script);
     table.byte_arena_high_water = table.byte_arena_high_water.max(table.script_bytes.len());
-    record.add_output(OneUtxoOut {
-        vout: payload.vout,
-        value: payload.txout.value.to_sat(),
-        script_pubkey_offset: offset,
-        script_pubkey_len: script_len,
-        coinbase: payload.coinbase,
-        height: payload.height,
-    });
+    add_output(
+        record,
+        OneUtxoOut {
+            vout: payload.vout,
+            value: payload.txout.value.to_sat(),
+            script_pubkey_offset: offset,
+            script_pubkey_len: script_len,
+            coinbase: payload.coinbase,
+            height: payload.height,
+        },
+    );
     Ok(())
+}
+
+fn build_adds_extend_record(record: &UtxoRecord<'_>, vouts: impl Iterator<Item = u32>) -> bool {
+    let mut previous = record.max_vout();
+    for vout in vouts {
+        if previous.is_some_and(|previous| vout <= previous) {
+            return false;
+        }
+        previous = Some(vout);
+    }
+    true
 }
 
 fn append_owned_output<'arena>(
