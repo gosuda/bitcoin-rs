@@ -566,7 +566,7 @@ fn append_build_output<'arena>(
     record: &mut UtxoRecord<'arena>,
     payload: &BuildPayload<'_>,
 ) -> Result<(), UtxoError> {
-    append_record_output(table, record, payload, UtxoRecord::add_output)
+    append_record_output::<false>(table, record, payload)
 }
 
 fn append_unique_build_output<'arena>(
@@ -574,14 +574,13 @@ fn append_unique_build_output<'arena>(
     record: &mut UtxoRecord<'arena>,
     payload: &BuildPayload<'_>,
 ) -> Result<(), UtxoError> {
-    append_record_output(table, record, payload, UtxoRecord::add_unique_output)
+    append_record_output::<true>(table, record, payload)
 }
 
-fn append_record_output<'arena>(
+fn append_record_output<'arena, const UNIQUE: bool>(
     table: &mut ShardTable<'arena>,
     record: &mut UtxoRecord<'arena>,
     payload: &BuildPayload<'_>,
-    add_output: fn(&mut UtxoRecord<'arena>, OneUtxoOut),
 ) -> Result<(), UtxoError> {
     let script = payload.txout.script_pubkey.as_bytes();
     let script_len =
@@ -592,17 +591,19 @@ fn append_record_output<'arena>(
         })?;
     table.script_bytes.extend_from_slice(script);
     table.byte_arena_high_water = table.byte_arena_high_water.max(table.script_bytes.len());
-    add_output(
-        record,
-        OneUtxoOut {
-            vout: payload.vout,
-            value: payload.txout.value.to_sat(),
-            script_pubkey_offset: offset,
-            script_pubkey_len: script_len,
-            coinbase: payload.coinbase,
-            height: payload.height,
-        },
-    );
+    let output = OneUtxoOut {
+        vout: payload.vout,
+        value: payload.txout.value.to_sat(),
+        script_pubkey_offset: offset,
+        script_pubkey_len: script_len,
+        coinbase: payload.coinbase,
+        height: payload.height,
+    };
+    if UNIQUE {
+        record.add_unique_output(output);
+    } else {
+        record.add_output(output);
+    }
     Ok(())
 }
 
