@@ -237,6 +237,7 @@ impl CoinStatsDelta {
         self
     }
 
+    #[inline]
     fn apply_to(self, stats: &mut CoinStats) {
         stats.muhash.combine(&self.muhash);
         stats.total_amount = stats
@@ -253,6 +254,7 @@ impl CoinStatsDelta {
             .saturating_sub(self.removed_utxos);
     }
 
+    #[inline]
     fn insert_utxo(
         &mut self,
         scratch: &mut Vec<u8>,
@@ -268,6 +270,7 @@ impl CoinStatsDelta {
         self.added_utxos = self.added_utxos.saturating_add(1);
     }
 
+    #[inline]
     fn remove_utxo(
         &mut self,
         scratch: &mut Vec<u8>,
@@ -423,6 +426,7 @@ fn coin_hash_capacity(txout: &TxOut) -> usize {
     OUTPOINT_BYTES + 4 + txout.script_pubkey.len() + 16
 }
 
+#[inline]
 fn coin_hash_bytes_into(
     out: &mut Vec<u8>,
     op: &OutPoint,
@@ -437,6 +441,7 @@ fn coin_hash_bytes_into(
     encode_txout_into(out, txout);
 }
 
+#[inline]
 fn encode_txout_into(out: &mut Vec<u8>, txout: &TxOut) {
     out.extend_from_slice(&txout.value.to_sat().to_le_bytes());
     let script = txout.script_pubkey.as_bytes();
@@ -444,6 +449,7 @@ fn encode_txout_into(out: &mut Vec<u8>, txout: &TxOut) {
     out.extend_from_slice(script);
 }
 
+#[inline]
 fn encode_compact_size_into(out: &mut Vec<u8>, len: usize) {
     if let Ok(byte_len) = u8::try_from(len)
         && byte_len < 0xfd
@@ -466,6 +472,7 @@ fn encode_compact_size_into(out: &mut Vec<u8>, len: usize) {
     out.extend_from_slice(&qword_len.to_le_bytes());
 }
 
+#[inline]
 fn bogo_size(txout: &TxOut) -> u64 {
     let script_len = u64::try_from(txout.script_pubkey.len()).unwrap_or(u64::MAX);
     36_u64
