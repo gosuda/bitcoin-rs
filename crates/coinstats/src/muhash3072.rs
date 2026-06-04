@@ -257,6 +257,7 @@ impl Default for MuHash3072 {
     }
 }
 
+#[inline]
 fn element(data: &[u8]) -> Num3072 {
     let key: [u8; 32] = Sha256::digest(data).into();
     let key_words = chacha20_key_words(&key);
@@ -272,14 +273,17 @@ fn element(data: &[u8]) -> Num3072 {
     Num3072 { limbs }
 }
 
+#[inline]
 fn low_u64(value: u128) -> u64 {
     u64::try_from(value & u128::from(u64::MAX)).unwrap_or(u64::MAX)
 }
 
+#[inline]
 fn high_u64(value: u128) -> u64 {
     u64::try_from(value >> LIMB_BITS).unwrap_or(u64::MAX)
 }
 
+#[inline]
 fn extract3(c0: &mut u64, c1: &mut u64, c2: &mut u64) -> u64 {
     let limb = *c0;
     *c0 = *c1;
@@ -288,12 +292,14 @@ fn extract3(c0: &mut u64, c1: &mut u64, c2: &mut u64) -> u64 {
     limb
 }
 
+#[inline]
 fn mul_limb(c0: &mut u64, c1: &mut u64, left: u64, right: u64) {
     let product = u128::from(left) * u128::from(right);
     *c0 = low_u64(product);
     *c1 = high_u64(product);
 }
 
+#[inline]
 fn mulnadd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, d0: u64, d1: u64, d2: u64, n: u64) {
     let mut product = u128::from(d0) * u128::from(n) + u128::from(*c0);
     *c0 = low_u64(product);
@@ -302,6 +308,7 @@ fn mulnadd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, d0: u64, d1: u64, d2: u64,
     *c2 = low_u64((product >> LIMB_BITS) + u128::from(d2) * u128::from(n));
 }
 
+#[inline]
 fn muln2(c0: &mut u64, c1: &mut u64, n: u64) {
     let mut product = u128::from(*c0) * u128::from(n);
     *c0 = low_u64(product);
@@ -309,6 +316,7 @@ fn muln2(c0: &mut u64, c1: &mut u64, n: u64) {
     *c1 = low_u64(product);
 }
 
+#[inline]
 fn muladd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, left: u64, right: u64) {
     let product = u128::from(left) * u128::from(right);
     let low = low_u64(product);
@@ -322,6 +330,7 @@ fn muladd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, left: u64, right: u64) {
     *c2 = c2.wrapping_add(u64::from(carry1));
 }
 
+#[inline]
 fn addnextract2(c0: &mut u64, c1: &mut u64, value: u64) -> u64 {
     let mut c2 = 0_u64;
     let (new_c0, carry) = c0.overflowing_add(value);
@@ -351,6 +360,7 @@ fn chacha20_keystream(key: &[u8; 32], out: &mut [u8; BYTE_LEN]) {
     }
 }
 
+#[inline]
 fn chacha20_key_words(key: &[u8; 32]) -> [u32; 8] {
     core::array::from_fn(|idx| {
         let offset = idx * 4;
@@ -363,6 +373,7 @@ fn chacha20_key_words(key: &[u8; 32]) -> [u32; 8] {
     })
 }
 
+#[inline]
 fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
     let state = [
         0x6170_7865,
@@ -407,6 +418,7 @@ fn chacha20_block(words: &[u32; 16], out: &mut [u8]) {
     }
 }
 
+#[inline]
 const fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     state[a] = state[a].wrapping_add(state[b]);
     state[d] = (state[d] ^ state[a]).rotate_left(16);
