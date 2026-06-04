@@ -18,7 +18,7 @@ use parking_lot::RwLock;
 
 use crate::state::ApplyError;
 use bitcoin_rs_storage::{KvStore, StorageError};
-use scratch::ApplyScratch;
+use scratch::{ApplyScratch, ApplyScratchCapacities};
 
 /// Number of blocks after a coinbase that its outputs become spendable.
 /// Consensus rule since Bitcoin v0.3.1; universal across networks.
@@ -227,14 +227,10 @@ pub fn apply_block(
     metrics::histogram!("node.apply_block.block_rules_seconds")
         .record(block_rules_dur.as_secs_f64());
     block_rules_result?;
-    let txids: Vec<_> = block
-        .txdata
-        .iter()
-        .map(bitcoin::Transaction::compute_txid)
-        .collect();
+    let tx_plan = plan_block_transactions(block);
     // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
     let bip30_bip34_started = quanta::Instant::now();
-    let bip30_bip34_result = check_bip30_and_bip34(handles, block, height, &txids);
+    let bip30_bip34_result = check_bip30_and_bip34(handles, block, height, tx_plan.txids());
     let bip30_bip34_dur = bip30_bip34_started.elapsed();
     metrics::histogram!("node.apply_block.bip30_bip34_seconds")
         .record(bip30_bip34_dur.as_secs_f64());
@@ -258,7 +254,7 @@ pub fn apply_block(
     let script_verify_result = verify_block_transactions(
         handles,
         block,
-        &txids,
+        &tx_plan,
         height,
         locktime_cutoff,
         verify_flags,
@@ -270,7 +266,7 @@ pub fn apply_block(
 
     let coinbase_maturity_started = quanta::Instant::now();
     let coinbase_maturity_result =
-        check_coinbase_maturity_with_txids(handles, block, &txids, height);
+        check_coinbase_maturity_with_tx_plan(handles, block, &tx_plan, height);
     let coinbase_maturity_dur = coinbase_maturity_started.elapsed();
     metrics::histogram!("node.apply_block.coinbase_maturity_seconds")
         .record(coinbase_maturity_dur.as_secs_f64());
@@ -280,7 +276,7 @@ pub fn apply_block(
     let bip68_result = check_bip68_sequence_locks(
         handles,
         block,
-        &txids,
+        &tx_plan,
         height,
         prev_tip_state.median_time_past,
         softfork_state,
@@ -292,7 +288,15 @@ pub fn apply_block(
 
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
     let wants_filters = handles.filter_index.wants_filters();
-    let scratch = ApplyScratch::with_txids(block, height, wants_rawtx, wants_filters, txids)?;
+    let scratch_capacities = tx_plan.scratch_capacities();
+    let scratch = ApplyScratch::with_txids_and_capacities(
+        block,
+        height,
+        wants_rawtx,
+        wants_filters,
+        tx_plan.into_txids(),
+        scratch_capacities,
+    )?;
     let filter_bytes = wants_filters
         .then(|| compute_basic_filter(block, handles, block_hash, height, &scratch))
         .flatten();
@@ -535,6 +539,67 @@ fn applied_header_tip(
     })
 }
 
+struct BlockTxPlan {
+    txids: Vec<Txid>,
+    only_coinbase: bool,
+    overlay_capacity: usize,
+    non_coinbase_input_count: usize,
+    created_output_count: usize,
+    spent_input_count: usize,
+}
+
+impl BlockTxPlan {
+    fn txids(&self) -> &[Txid] {
+        &self.txids
+    }
+
+    fn into_txids(self) -> Vec<Txid> {
+        self.txids
+    }
+
+    fn scratch_capacities(&self) -> ApplyScratchCapacities {
+        ApplyScratchCapacities {
+            created_outputs: self.created_output_count,
+            spent_inputs: self.spent_input_count,
+        }
+    }
+}
+
+fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
+    let mut txids = Vec::with_capacity(block.txdata.len());
+    let mut only_coinbase = true;
+    let mut overlay_capacity = 0usize;
+    let mut non_coinbase_input_count = 0usize;
+    let mut created_output_count = 0usize;
+    let mut spent_input_count = 0usize;
+
+    for tx in &block.txdata {
+        let is_coinbase = tx.is_coinbase();
+        let output_count = tx.output.len();
+        txids.push(tx.compute_txid());
+        only_coinbase &= is_coinbase;
+        created_output_count = created_output_count.saturating_add(output_count);
+        if is_coinbase {
+            overlay_capacity = overlay_capacity.saturating_add(output_count);
+        } else {
+            let input_count = tx.input.len();
+            non_coinbase_input_count = non_coinbase_input_count.saturating_add(input_count);
+            spent_input_count = spent_input_count.saturating_add(input_count);
+            overlay_capacity =
+                overlay_capacity.saturating_add(output_count.saturating_add(input_count));
+        }
+    }
+
+    BlockTxPlan {
+        txids,
+        only_coinbase,
+        overlay_capacity,
+        non_coinbase_input_count,
+        created_output_count,
+        spent_input_count,
+    }
+}
+
 fn compute_basic_filter(
     block: &bitcoin::Block,
     handles: &ApplyHandles,
@@ -571,13 +636,14 @@ fn compute_basic_filter(
 fn verify_block_transactions(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
-    txids: &[bitcoin::Txid],
+    tx_plan: &BlockTxPlan,
     height: u32,
     locktime_cutoff: u32,
     flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
+    let txids = tx_plan.txids();
     debug_assert_eq!(block.txdata.len(), txids.len());
-    if block_has_only_coinbase_transactions(block) {
+    if tx_plan.only_coinbase {
         for tx in &block.txdata {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
         }
@@ -587,8 +653,7 @@ fn verify_block_transactions(
     // spend an output created earlier in the same block. Coinbase outputs enter
     // this view too, so maturity failures stay in the maturity pass instead of
     // degrading into bogus missing-prevout script checks.
-    let mut view =
-        BlockLocalUtxoView::new(Arc::clone(&handles.utxo), block_overlay_capacity(block));
+    let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo), tx_plan.overlay_capacity);
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
@@ -608,36 +673,9 @@ fn verify_block_transactions(
     Ok(())
 }
 
-fn block_has_only_coinbase_transactions(block: &bitcoin::Block) -> bool {
-    block.txdata.iter().all(bitcoin::Transaction::is_coinbase)
-}
-
 struct BlockLocalUtxoView {
     base: Arc<UtxoSet>,
     overlay: HashMap<bitcoin::OutPoint, Option<LiveOutput>>,
-}
-
-fn block_overlay_capacity(block: &bitcoin::Block) -> usize {
-    block
-        .txdata
-        .iter()
-        .map(|tx| {
-            if tx.is_coinbase() {
-                tx.output.len()
-            } else {
-                tx.output.len().saturating_add(tx.input.len())
-            }
-        })
-        .sum()
-}
-
-fn block_non_coinbase_input_count(block: &bitcoin::Block) -> usize {
-    block
-        .txdata
-        .iter()
-        .filter(|tx| !tx.is_coinbase())
-        .map(|tx| tx.input.len())
-        .sum()
 }
 
 impl BlockLocalUtxoView {
@@ -762,27 +800,22 @@ pub(crate) fn check_coinbase_maturity(
     block: &bitcoin::Block,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
-    let txids: Vec<_> = block
-        .txdata
-        .iter()
-        .map(bitcoin::Transaction::compute_txid)
-        .collect();
-    check_coinbase_maturity_with_txids(handles, block, &txids, height)
+    check_coinbase_maturity_with_tx_plan(handles, block, &plan_block_transactions(block), height)
 }
 
-fn check_coinbase_maturity_with_txids(
+fn check_coinbase_maturity_with_tx_plan(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
-    txids: &[bitcoin::Txid],
+    tx_plan: &BlockTxPlan,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
+    let txids = tx_plan.txids();
     debug_assert_eq!(block.txdata.len(), txids.len());
-    if block_has_only_coinbase_transactions(block) {
+    if tx_plan.only_coinbase {
         return Ok(());
     }
     // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
-    let mut view =
-        BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), block_overlay_capacity(block));
+    let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), tx_plan.overlay_capacity);
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             view.add_output_meta(tx, *txid, height)?;
@@ -814,7 +847,7 @@ fn check_coinbase_maturity_with_txids(
 fn check_bip68_sequence_locks(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
-    txids: &[bitcoin::Txid],
+    tx_plan: &BlockTxPlan,
     height: u32,
     mtp: u32,
     softfork_state: crate::bip9_context::ContextualSoftforkState,
@@ -823,14 +856,14 @@ fn check_bip68_sequence_locks(
     if !softfork_state.csv_active {
         return Ok(());
     }
-    if block_has_only_coinbase_transactions(block) {
+    if tx_plan.only_coinbase {
         return Ok(());
     }
 
+    let txids = tx_plan.txids();
     debug_assert_eq!(block.txdata.len(), txids.len());
-    let mut view =
-        BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), block_overlay_capacity(block));
-    let mut prevout_mtp_by_height = HashMap::with_capacity(block_non_coinbase_input_count(block));
+    let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), tx_plan.overlay_capacity);
+    let mut prevout_mtp_by_height = HashMap::with_capacity(tx_plan.non_coinbase_input_count);
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             continue;
@@ -1173,12 +1206,8 @@ mod consensus_rule_tests {
     const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
     const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
 
-    fn txids(block: &bitcoin::Block) -> Vec<bitcoin::Txid> {
-        block
-            .txdata
-            .iter()
-            .map(bitcoin::Transaction::compute_txid)
-            .collect()
+    fn tx_plan(block: &bitcoin::Block) -> BlockTxPlan {
+        plan_block_transactions(block)
     }
 
     #[test]
@@ -1314,7 +1343,7 @@ mod consensus_rule_tests {
         verify_block_transactions(
             &handles,
             &block,
-            &txids(&block),
+            &tx_plan(&block),
             2,
             0,
             bitcoin_rs_script::VerifyFlags::NONE,
@@ -1332,7 +1361,7 @@ mod consensus_rule_tests {
         let error = match verify_block_transactions(
             &handles,
             &block,
-            &txids(&block),
+            &tx_plan(&block),
             1,
             0,
             bitcoin_rs_script::VerifyFlags::MANDATORY,
@@ -1491,10 +1520,11 @@ mod consensus_rule_tests {
         let block = block_with_transactions(vec![coinbase, spend]);
         let handles = empty_apply_handles();
 
-        let error = match check_coinbase_maturity_with_txids(&handles, &block, &txids(&block), 1) {
-            Ok(()) => panic!("same-block coinbase spend must fail maturity"),
-            Err(error) => error,
-        };
+        let error =
+            match check_coinbase_maturity_with_tx_plan(&handles, &block, &tx_plan(&block), 1) {
+                Ok(()) => panic!("same-block coinbase spend must fail maturity"),
+                Err(error) => error,
+            };
         assert_bip_error(&error, "COINBASE_MATURITY");
     }
 
@@ -1518,17 +1548,18 @@ mod consensus_rule_tests {
             verify_block_transactions(
                 &handles,
                 &block,
-                &txids(&block),
+                &tx_plan(&block),
                 1,
                 0,
                 bitcoin_rs_script::VerifyFlags::NONE
             )
             .is_ok()
         );
-        let error = match check_coinbase_maturity_with_txids(&handles, &block, &txids(&block), 1) {
-            Ok(()) => panic!("same-block coinbase spend must fail maturity"),
-            Err(error) => error,
-        };
+        let error =
+            match check_coinbase_maturity_with_tx_plan(&handles, &block, &tx_plan(&block), 1) {
+                Ok(()) => panic!("same-block coinbase spend must fail maturity"),
+                Err(error) => error,
+            };
         assert_bip_error(&error, "COINBASE_MATURITY");
     }
 
@@ -1551,7 +1582,7 @@ mod consensus_rule_tests {
         let error = match check_bip68_sequence_locks(
             &handles,
             &block,
-            &txids(&block),
+            &tx_plan(&block),
             101,
             0,
             active,
@@ -1562,7 +1593,7 @@ mod consensus_rule_tests {
         };
         assert_bip_error(&error, "BIP68");
         assert!(
-            check_bip68_sequence_locks(&handles, &block, &txids(&block), 102, 0, active, None)
+            check_bip68_sequence_locks(&handles, &block, &tx_plan(&block), 102, 0, active, None)
                 .is_ok()
         );
         Ok(())
@@ -1590,7 +1621,7 @@ mod consensus_rule_tests {
         let error = match check_bip68_sequence_locks(
             &handles,
             &block,
-            &txids(&block),
+            &tx_plan(&block),
             0,
             required_mtp - 1,
             active,
@@ -1604,7 +1635,7 @@ mod consensus_rule_tests {
             check_bip68_sequence_locks(
                 &handles,
                 &block,
-                &txids(&block),
+                &tx_plan(&block),
                 0,
                 required_mtp,
                 active,
@@ -1635,7 +1666,7 @@ mod consensus_rule_tests {
             check_bip68_sequence_locks(
                 &handles,
                 &block,
-                &txids(&block),
+                &tx_plan(&block),
                 prevout_height + 1,
                 200,
                 softfork_state(true),
@@ -1681,7 +1712,7 @@ mod consensus_rule_tests {
             check_bip68_sequence_locks(
                 &handles,
                 &block,
-                &txids(&block),
+                &tx_plan(&block),
                 prevout_height + 1,
                 BIP68_TEST_PREVOUT_MTP,
                 softfork_state(true),
@@ -1710,7 +1741,7 @@ mod consensus_rule_tests {
             check_bip68_sequence_locks(
                 &handles,
                 &block,
-                &txids(&block),
+                &tx_plan(&block),
                 101,
                 BIP68_TEST_PREVOUT_MTP,
                 softfork_state(true),
@@ -1738,7 +1769,7 @@ mod consensus_rule_tests {
         let error = match check_bip68_sequence_locks(
             &handles,
             &block,
-            &txids(&block),
+            &tx_plan(&block),
             101,
             BIP68_TEST_PREVOUT_MTP,
             softfork_state(true),
@@ -1773,7 +1804,7 @@ mod consensus_rule_tests {
         let error = match check_bip68_sequence_locks(
             &handles,
             &block,
-            &txids(&block),
+            &tx_plan(&block),
             0,
             BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
             active,
@@ -1807,7 +1838,7 @@ mod consensus_rule_tests {
         let error = match check_bip68_sequence_locks(
             &handles,
             &block,
-            &txids(&block),
+            &tx_plan(&block),
             0,
             BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
             active,
@@ -1838,7 +1869,7 @@ mod consensus_rule_tests {
             check_bip68_sequence_locks(
                 &handles,
                 &block,
-                &txids(&block),
+                &tx_plan(&block),
                 101,
                 0,
                 softfork_state(false),
@@ -1869,7 +1900,7 @@ mod consensus_rule_tests {
             check_bip68_sequence_locks(
                 &handles,
                 &version_one_block,
-                &txids(&version_one_block),
+                &tx_plan(&version_one_block),
                 101,
                 0,
                 active,
@@ -1887,7 +1918,7 @@ mod consensus_rule_tests {
             check_bip68_sequence_locks(
                 &handles,
                 &disabled_block,
-                &txids(&disabled_block),
+                &tx_plan(&disabled_block),
                 101,
                 0,
                 active,

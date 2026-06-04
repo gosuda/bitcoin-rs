@@ -8,6 +8,12 @@ use crate::state::ApplyError;
 type SameBlockScriptMap = HashMap<OutPoint, ScriptBuf>;
 type SameBlockSpentSet = HashSet<OutPoint>;
 
+#[derive(Clone, Copy)]
+pub(super) struct ApplyScratchCapacities {
+    pub(super) created_outputs: usize,
+    pub(super) spent_inputs: usize,
+}
+
 pub(super) struct ApplyScratch {
     txids: Vec<Txid>,
     raw_txs: Option<Vec<Vec<u8>>>,
@@ -39,6 +45,7 @@ impl ApplyScratch {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn with_txids(
         block: &bitcoin::Block,
         height: u32,
@@ -46,15 +53,37 @@ impl ApplyScratch {
         include_same_block_output_scripts: bool,
         txids: Vec<Txid>,
     ) -> Result<Self, ApplyError> {
+        let capacities = ApplyScratchCapacities {
+            created_outputs: block.txdata.iter().map(|tx| tx.output.len()).sum(),
+            spent_inputs: block
+                .txdata
+                .iter()
+                .filter(|tx| !tx.is_coinbase())
+                .map(|tx| tx.input.len())
+                .sum(),
+        };
+        Self::with_txids_and_capacities(
+            block,
+            height,
+            include_raw_txs,
+            include_same_block_output_scripts,
+            txids,
+            capacities,
+        )
+    }
+
+    pub(super) fn with_txids_and_capacities(
+        block: &bitcoin::Block,
+        height: u32,
+        include_raw_txs: bool,
+        include_same_block_output_scripts: bool,
+        txids: Vec<Txid>,
+        capacities: ApplyScratchCapacities,
+    ) -> Result<Self, ApplyError> {
         debug_assert_eq!(txids.len(), block.txdata.len());
         let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txdata.len()));
-        let created_capacity = block.txdata.iter().map(|tx| tx.output.len()).sum();
-        let spent_capacity = block
-            .txdata
-            .iter()
-            .filter(|tx| !tx.is_coinbase())
-            .map(|tx| tx.input.len())
-            .sum();
+        let created_capacity = capacities.created_outputs;
+        let spent_capacity = capacities.spent_inputs;
         let mut created_outpoints: Option<SameBlockSpentSet> =
             (!include_same_block_output_scripts).then(|| HashSet::with_capacity(created_capacity));
         let mut created_scripts: Option<SameBlockScriptMap> =
