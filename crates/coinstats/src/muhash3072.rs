@@ -405,9 +405,22 @@ fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
         quarter_round(&mut working, 3, 4, 9, 14);
     }
 
-    for (working_word, state_word) in working.iter_mut().zip(state) {
-        *working_word = working_word.wrapping_add(state_word);
-    }
+    working[0] = working[0].wrapping_add(state[0]);
+    working[1] = working[1].wrapping_add(state[1]);
+    working[2] = working[2].wrapping_add(state[2]);
+    working[3] = working[3].wrapping_add(state[3]);
+    working[4] = working[4].wrapping_add(state[4]);
+    working[5] = working[5].wrapping_add(state[5]);
+    working[6] = working[6].wrapping_add(state[6]);
+    working[7] = working[7].wrapping_add(state[7]);
+    working[8] = working[8].wrapping_add(state[8]);
+    working[9] = working[9].wrapping_add(state[9]);
+    working[10] = working[10].wrapping_add(state[10]);
+    working[11] = working[11].wrapping_add(state[11]);
+    working[12] = working[12].wrapping_add(state[12]);
+    working[13] = working[13].wrapping_add(state[13]);
+    working[14] = working[14].wrapping_add(state[14]);
+    working[15] = working[15].wrapping_add(state[15]);
     working
 }
 
