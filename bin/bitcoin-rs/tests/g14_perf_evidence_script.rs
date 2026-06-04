@@ -114,6 +114,132 @@ fn producer_marks_command_wrapper_manifest_as_non_criterion()
 }
 
 #[test]
+fn producer_emits_collectable_manifest_with_explicit_criterion_elapsed_seconds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = write_text(temp.path(), "criterion.json", "{\"ok\":true}\n")?;
+    let manifest = temp.path().join("g14-produced-criterion.json");
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.25",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-get-history-p95-ms",
+            "20.0",
+            "--rss-bytes",
+            "1024",
+        ])
+        .output()?;
+    assert_success(&producer_output);
+
+    let manifest_json = fs::read_to_string(&manifest)?;
+    assert!(manifest_json.contains(r#""bench_tool": "criterion""#));
+    assert!(manifest_json.contains(r#""elapsed_seconds_source": "criterion""#));
+    assert!(manifest_json.contains(r#""bitcoin_rs_elapsed_seconds": 1.25"#));
+    assert!(manifest_json.contains(r#""bitcoin_core_elapsed_seconds": 2.5"#));
+
+    let collector_output = Command::new("bash")
+        .arg(script_path())
+        .arg(&manifest)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert_success(&collector_output);
+    Ok(())
+}
+
+#[test]
+fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = write_text(temp.path(), "criterion.json", "{\"ok\":true}\n")?;
+    let manifest = temp.path().join("g14-produced-partial.json");
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.25",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-get-history-p95-ms",
+            "20.0",
+            "--rss-bytes",
+            "1024",
+        ])
+        .output()?;
+
+    assert!(!producer_output.status.success());
+    assert!(String::from_utf8_lossy(&producer_output.stderr).contains("must be supplied together"));
+    assert!(!manifest.exists());
+    Ok(())
+}
+
+#[test]
 fn script_rejects_offline_core_metadata_without_cli() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let evidence = offline_evidence_json(temp.path(), 0, 10)?;

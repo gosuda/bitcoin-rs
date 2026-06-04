@@ -3,9 +3,10 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
+    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
     '' \
-    'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window.' \
+    'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion elapsed-second arguments are provided.' \
+    'If both Criterion elapsed values are supplied, command strings are recorded as provenance and are not run.' \
     'Writes a wall-clock command-wrapper JSON manifest. collect-g14-perf-evidence.sh intentionally rejects this manifest for G14 unless elapsed seconds are replaced with Criterion-sourced evidence.' \
     'The manifest intentionally excludes Core block hashes and chain metadata; collect-g14-perf-evidence.sh must resolve those with live bitcoin-cli.'
 }
@@ -116,6 +117,8 @@ parser.add_argument("--benchmark-artifact")
 parser.add_argument("--utxo-commit-p95-ms")
 parser.add_argument("--electrum-get-history-p95-ms")
 parser.add_argument("--rss-bytes")
+parser.add_argument("--criterion-bitcoin-rs-elapsed-seconds")
+parser.add_argument("--criterion-bitcoin-core-elapsed-seconds")
 args = parser.parse_args()
 
 if args.help:
@@ -123,6 +126,8 @@ if args.help:
         "usage: produce-g14-ibd-manifest.sh --output <evidence.json> "
         "--ibd-start-height <height> --ibd-stop-height <height> "
         "--bitcoin-rs-command <command> --bitcoin-core-command <command> "
+        "[--criterion-bitcoin-rs-elapsed-seconds <seconds> "
+        "--criterion-bitcoin-core-elapsed-seconds <seconds>] "
         "--bitcoin-rs-config <path> --bitcoin-core-config <path> "
         "--bitcoin-core-version <version> --bitcoin-core-commit <40-hex> "
         "--benchmark-artifact <path> --utxo-commit-p95-ms <ms> "
@@ -176,14 +181,38 @@ electrum_get_history_p95_ms = positive_float(
 )
 rss_bytes = positive_int(args.rss_bytes, "--rss-bytes")
 
-bitcoin_rs_elapsed_seconds = run_timed(bitcoin_rs_command, "--bitcoin-rs-command")
-bitcoin_core_elapsed_seconds = run_timed(bitcoin_core_command, "--bitcoin-core-command")
+criterion_elapsed_args = (
+    args.criterion_bitcoin_rs_elapsed_seconds,
+    args.criterion_bitcoin_core_elapsed_seconds,
+)
+criterion_elapsed_supplied = [value is not None for value in criterion_elapsed_args]
+if any(criterion_elapsed_supplied) and not all(criterion_elapsed_supplied):
+    die(
+        "--criterion-bitcoin-rs-elapsed-seconds and "
+        "--criterion-bitcoin-core-elapsed-seconds must be supplied together"
+    )
+if all(criterion_elapsed_supplied):
+    bench_tool = "criterion"
+    elapsed_seconds_source = "criterion"
+    bitcoin_rs_elapsed_seconds = positive_float(
+        args.criterion_bitcoin_rs_elapsed_seconds,
+        "--criterion-bitcoin-rs-elapsed-seconds",
+    )
+    bitcoin_core_elapsed_seconds = positive_float(
+        args.criterion_bitcoin_core_elapsed_seconds,
+        "--criterion-bitcoin-core-elapsed-seconds",
+    )
+else:
+    bench_tool = "wall-clock-command-wrapper"
+    elapsed_seconds_source = "wall-clock-command-wrapper"
+    bitcoin_rs_elapsed_seconds = run_timed(bitcoin_rs_command, "--bitcoin-rs-command")
+    bitcoin_core_elapsed_seconds = run_timed(bitcoin_core_command, "--bitcoin-core-command")
 
 manifest = {
     "ibd_start_height": start_height,
     "ibd_stop_height": stop_height,
-    "bench_tool": "wall-clock-command-wrapper",
-    "elapsed_seconds_source": "wall-clock-command-wrapper",
+    "bench_tool": bench_tool,
+    "elapsed_seconds_source": elapsed_seconds_source,
     "bitcoin_rs_elapsed_seconds": bitcoin_rs_elapsed_seconds,
     "bitcoin_core_elapsed_seconds": bitcoin_core_elapsed_seconds,
     "bitcoin_core_version": bitcoin_core_version,
