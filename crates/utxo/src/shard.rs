@@ -558,6 +558,11 @@ fn apply_remove_run<'arena>(
     let Some(first) = removes.first() else {
         return;
     };
+    if delete_record_if_fully_spent(table, first.key, first.txid, removes.len(), |vout| {
+        removes.iter().any(|remove| remove.vout == vout)
+    }) {
+        return;
+    }
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
@@ -576,6 +581,11 @@ fn apply_outpoint_remove_run<'arena>(
     txid: Hash256,
     removes: &[OutPoint],
 ) {
+    if delete_record_if_fully_spent(table, key, txid, removes.len(), |vout| {
+        removes.iter().any(|remove| remove.vout == vout)
+    }) {
+        return;
+    }
     let Some(mut record) = take_record(table, key, txid) else {
         return;
     };
@@ -975,6 +985,35 @@ fn take_record<'arena>(
     let (record, _vacant) = entry.remove();
     table.deleted = table.deleted.saturating_add(1);
     Some(record.clone())
+}
+
+fn delete_record_if_fully_spent(
+    table: &mut ShardTable<'_>,
+    key: UtxoKey,
+    txid: Hash256,
+    remove_count: usize,
+    contains_vout: impl Fn(u32) -> bool,
+) -> bool {
+    let Some(record) = table.table.find(key.hash(), |record| {
+        record.key() == key && record.txid() == txid
+    }) else {
+        return false;
+    };
+    if record.output_count() != remove_count
+        || !record
+            .iter_outputs()
+            .all(|output| contains_vout(output.vout))
+    {
+        return false;
+    }
+    let Ok(entry) = table.table.find_entry(key.hash(), |record| {
+        record.key() == key && record.txid() == txid
+    }) else {
+        return false;
+    };
+    let (_record, _vacant) = entry.remove();
+    table.deleted = table.deleted.saturating_add(1);
+    true
 }
 
 fn insert_record<'arena>(

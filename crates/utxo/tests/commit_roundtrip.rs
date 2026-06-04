@@ -603,3 +603,53 @@ fn same_prefix_txids_do_not_collide_in_get_or_remove_paths()
     assert_eq!(set.get(&second), Some(second_txout));
     Ok(())
 }
+
+#[test]
+fn full_record_delete_uses_full_txid_and_preserves_collision_peer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let prefix = 0xfeed_face_cafe_beef_u64;
+    let first = OutPoint::new(txid_with_prefix(prefix, 10), 0);
+    let second = OutPoint::new(txid_with_prefix(prefix, 11), 0);
+    let second_txout = txout(202);
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(first, txout(101), false, 1));
+    changes.add(UtxoAdd::new(second, second_txout.clone(), false, 1));
+    set.commit_block(&changes, &txid(300))?;
+
+    let mut spend = BlockChanges::default();
+    spend.remove(first);
+    set.commit_block(&spend, &txid(301))?;
+
+    assert_eq!(set.get(&first), None);
+    assert_eq!(set.get(&second), Some(second_txout));
+    assert!(set.has_live_outputs_for_txid(&second.txid));
+    assert_eq!(set.record_count(), 1);
+    assert_eq!(set.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn duplicate_remove_does_not_fast_delete_unspent_vout() -> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let live_txid = txid(700);
+    let removed = OutPoint::new(live_txid, 0);
+    let retained = OutPoint::new(live_txid, 1);
+    let retained_txout = txout(701);
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(removed, txout(700), false, 1));
+    changes.add(UtxoAdd::new(retained, retained_txout.clone(), false, 1));
+    set.commit_block(&changes, &txid(702))?;
+
+    let mut duplicate_spend = BlockChanges::default();
+    duplicate_spend.remove(removed);
+    duplicate_spend.remove(removed);
+    set.commit_block(&duplicate_spend, &txid(703))?;
+
+    assert_eq!(set.get(&removed), None);
+    assert_eq!(set.get(&retained), Some(retained_txout));
+    assert!(set.has_live_outputs_for_txid(&live_txid));
+    assert_eq!(set.record_count(), 1);
+    assert_eq!(set.len(), 1);
+    Ok(())
+}
