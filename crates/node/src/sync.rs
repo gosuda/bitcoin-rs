@@ -315,15 +315,13 @@ impl BlockSync {
         let started = Instant::now();
         let mut applied = 0_usize;
         let mut failed = 0_usize;
-        let staged_count = self.block_stager.lock().received_len();
-        if staged_count == 0 {
+        let Some(staged_count) = self
+            .block_stager
+            .lock()
+            .ready_received_len(next_expected_hash)
+        else {
             return (0, 0);
-        }
-        if let Some(next_expected_hash) = next_expected_hash
-            && !self.block_stager.lock().contains(&next_expected_hash)
-        {
-            return (0, 0);
-        }
+        };
         let expected_hashes = self
             .cached_expected_block_hashes(staged_count)
             .unwrap_or_else(|| self.expected_block_hashes(staged_count));

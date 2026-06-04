@@ -68,6 +68,19 @@ impl BlockStager {
         self.received_bytes
     }
 
+    pub(super) fn ready_received_len(&self, next_expected_hash: Option<Hash256>) -> Option<usize> {
+        let received_len = self.received.len();
+        if received_len == 0 {
+            return None;
+        }
+        if let Some(next_expected_hash) = next_expected_hash
+            && !self.received.contains_key(&next_expected_hash)
+        {
+            return None;
+        }
+        Some(received_len)
+    }
+
     pub(super) fn insert(
         &mut self,
         hash: Hash256,
@@ -108,6 +121,7 @@ impl BlockStager {
         StagedBlock::Memory { bytes, dropped }
     }
 
+    #[cfg(test)]
     pub(super) fn contains(&self, hash: &Hash256) -> bool {
         self.received.contains_key(hash)
     }
@@ -345,6 +359,23 @@ mod tests {
         assert!(!stager.contains(&first));
         assert!(stager.contains(&second));
         assert!(stager.contains(&third));
+    }
+
+    #[test]
+    fn ready_received_len_requires_next_expected_hash_when_provided() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut stager = BlockStager::new(default_sync_budget());
+        let now = std::time::Instant::now();
+        let staged = Hash256::from_le_bytes(&[0x31; 32]);
+        let missing = Hash256::from_le_bytes(&[0x32; 32]);
+
+        assert_eq!(stager.ready_received_len(None), None);
+
+        stager.insert(staged, None, block, now);
+
+        assert_eq!(stager.ready_received_len(None), Some(1));
+        assert_eq!(stager.ready_received_len(Some(staged)), Some(1));
+        assert_eq!(stager.ready_received_len(Some(missing)), None);
     }
 
     #[test]
