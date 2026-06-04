@@ -3,10 +3,10 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds> --criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id>] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
+    'usage: produce-g14-ibd-manifest.sh --output <evidence.json> --ibd-start-height <height> --ibd-stop-height <height> --bitcoin-rs-command <command> --bitcoin-core-command <command> [--criterion-bitcoin-rs-benchmark-id <id> --criterion-bitcoin-core-benchmark-id <id> [--criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds>]] --bitcoin-rs-config <path> --bitcoin-core-config <path> --bitcoin-core-version <version> --bitcoin-core-commit <40-hex> --benchmark-artifact <path> --utxo-commit-p95-ms <ms> --electrum-get-history-p95-ms <ms> --rss-bytes <bytes>' \
     '' \
-    'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion elapsed-second arguments are provided.' \
-    'If both Criterion elapsed values are supplied, command strings are recorded as provenance and are not run.' \
+    'Runs one bitcoin-rs IBD command and one Bitcoin Core IBD command for the same mainnet height window unless both Criterion benchmark IDs are provided.' \
+    'If both Criterion benchmark IDs are supplied, elapsed seconds are read from a fail-closed g14-criterion-artifact-v1 JSON artifact and command strings are recorded as provenance only.' \
     'Writes a wall-clock command-wrapper JSON manifest. collect-g14-perf-evidence.sh intentionally rejects this manifest for G14 unless elapsed seconds are replaced with Criterion-sourced evidence.' \
     'The manifest intentionally excludes Core block hashes and chain metadata; collect-g14-perf-evidence.sh must resolve those with live bitcoin-cli.'
 }
@@ -26,6 +26,8 @@ import re
 import subprocess
 import sys
 import time
+
+CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
 
 
 def die(message: str) -> None:
@@ -91,6 +93,59 @@ def read_text(path: Path, name: str) -> str:
     return non_empty_text(value, name)
 
 
+def read_json_file(path: Path, name: str):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except UnicodeDecodeError as error:
+        die(f"{name} must be UTF-8 JSON: {error}")
+    except json.JSONDecodeError as error:
+        die(f"{name} must be JSON: {error}")
+
+
+def criterion_artifact_elapsed_seconds(path: Path, rs_id: str, core_id: str) -> tuple[float, float]:
+    data = read_json_file(path, "--benchmark-artifact")
+    if not isinstance(data, dict):
+        die("--benchmark-artifact Criterion evidence must be a JSON object")
+    if data.get("schema") != CRITERION_ARTIFACT_SCHEMA:
+        die(f"--benchmark-artifact schema must be {CRITERION_ARTIFACT_SCHEMA!r}")
+    benchmarks = data.get("benchmarks")
+    if not isinstance(benchmarks, list):
+        die("--benchmark-artifact benchmarks must be an array")
+    elapsed_by_id = {}
+    for index, entry in enumerate(benchmarks):
+        if not isinstance(entry, dict):
+            die(f"--benchmark-artifact benchmarks[{index}] must be an object")
+        benchmark_id = entry.get("benchmark_id")
+        if not isinstance(benchmark_id, str) or not benchmark_id.strip():
+            die(f"--benchmark-artifact benchmarks[{index}].benchmark_id must be a non-empty string")
+        if benchmark_id in elapsed_by_id:
+            die(f"--benchmark-artifact contains duplicate benchmark_id {benchmark_id!r}")
+        if "elapsed_seconds" not in entry:
+            die(f"--benchmark-artifact benchmark {benchmark_id!r} is missing elapsed_seconds")
+        elapsed_by_id[benchmark_id] = positive_float(
+            str(entry["elapsed_seconds"]),
+            f"--benchmark-artifact benchmark {benchmark_id!r} elapsed_seconds",
+        )
+    missing = [benchmark_id for benchmark_id in (rs_id, core_id) if benchmark_id not in elapsed_by_id]
+    if missing:
+        die("--benchmark-artifact is missing benchmark_id " + ", ".join(repr(value) for value in missing))
+    return elapsed_by_id[rs_id], elapsed_by_id[core_id]
+
+
+def require_optional_elapsed_matches_artifact(
+    supplied: str | None,
+    artifact_elapsed: float,
+    name: str,
+) -> float:
+    if supplied is None:
+        return artifact_elapsed
+    supplied_elapsed = positive_float(supplied, name)
+    if not math.isclose(supplied_elapsed, artifact_elapsed, rel_tol=0.0, abs_tol=1e-12):
+        die(f"{name} must match the hashed Criterion artifact elapsed_seconds")
+    return supplied_elapsed
+
+
 def run_timed(command: str, name: str) -> float:
     started = time.monotonic()
     result = subprocess.run(command, shell=True, text=True, check=False)
@@ -128,10 +183,10 @@ if args.help:
         "usage: produce-g14-ibd-manifest.sh --output <evidence.json> "
         "--ibd-start-height <height> --ibd-stop-height <height> "
         "--bitcoin-rs-command <command> --bitcoin-core-command <command> "
+        "[--criterion-bitcoin-rs-benchmark-id <id> "
+        "--criterion-bitcoin-core-benchmark-id <id> "
         "[--criterion-bitcoin-rs-elapsed-seconds <seconds> "
-        "--criterion-bitcoin-core-elapsed-seconds <seconds> "
-        "--criterion-bitcoin-rs-benchmark-id <id> "
-        "--criterion-bitcoin-core-benchmark-id <id>] "
+        "--criterion-bitcoin-core-elapsed-seconds <seconds>]] "
         "--bitcoin-rs-config <path> --bitcoin-core-config <path> "
         "--bitcoin-core-version <version> --bitcoin-core-commit <40-hex> "
         "--benchmark-artifact <path> --utxo-commit-p95-ms <ms> "
@@ -178,6 +233,7 @@ bitcoin_core_commit = non_empty_text(args.bitcoin_core_commit, "--bitcoin-core-c
 if not re.fullmatch(r"[0-9a-f]{40}", bitcoin_core_commit):
     die("--bitcoin-core-commit must be 40 lowercase hex characters")
 benchmark_artifact = require_file(args.benchmark_artifact, "--benchmark-artifact")
+benchmark_artifact_path = str(benchmark_artifact.resolve())
 utxo_commit_p95_ms = positive_float(args.utxo_commit_p95_ms, "--utxo-commit-p95-ms")
 electrum_get_history_p95_ms = positive_float(
     args.electrum_get_history_p95_ms,
@@ -195,30 +251,45 @@ if any(criterion_elapsed_supplied) and not all(criterion_elapsed_supplied):
         "--criterion-bitcoin-rs-elapsed-seconds and "
         "--criterion-bitcoin-core-elapsed-seconds must be supplied together"
     )
-if all(criterion_elapsed_supplied):
+criterion_benchmark_id_args = (
+    args.criterion_bitcoin_rs_benchmark_id,
+    args.criterion_bitcoin_core_benchmark_id,
+)
+criterion_benchmark_ids_supplied = [value is not None for value in criterion_benchmark_id_args]
+if any(criterion_benchmark_ids_supplied) and not all(criterion_benchmark_ids_supplied):
+    die(
+        "--criterion-bitcoin-rs-benchmark-id and "
+        "--criterion-bitcoin-core-benchmark-id must be supplied together"
+    )
+if any(criterion_elapsed_supplied) and not all(criterion_benchmark_ids_supplied):
+    die("Criterion elapsed-second arguments require Criterion benchmark IDs")
+if all(criterion_benchmark_ids_supplied):
     bench_tool = "criterion"
     elapsed_seconds_source = "criterion"
     bitcoin_rs_benchmark_id = non_empty_text(
-        args.criterion_bitcoin_rs_benchmark_id or "",
+        args.criterion_bitcoin_rs_benchmark_id,
         "--criterion-bitcoin-rs-benchmark-id",
     )
     bitcoin_core_benchmark_id = non_empty_text(
-        args.criterion_bitcoin_core_benchmark_id or "",
+        args.criterion_bitcoin_core_benchmark_id,
         "--criterion-bitcoin-core-benchmark-id",
     )
-    bitcoin_rs_elapsed_seconds = positive_float(
+    artifact_rs_elapsed_seconds, artifact_core_elapsed_seconds = criterion_artifact_elapsed_seconds(
+        benchmark_artifact,
+        bitcoin_rs_benchmark_id,
+        bitcoin_core_benchmark_id,
+    )
+    bitcoin_rs_elapsed_seconds = require_optional_elapsed_matches_artifact(
         args.criterion_bitcoin_rs_elapsed_seconds,
+        artifact_rs_elapsed_seconds,
         "--criterion-bitcoin-rs-elapsed-seconds",
     )
-    bitcoin_core_elapsed_seconds = positive_float(
+    bitcoin_core_elapsed_seconds = require_optional_elapsed_matches_artifact(
         args.criterion_bitcoin_core_elapsed_seconds,
+        artifact_core_elapsed_seconds,
         "--criterion-bitcoin-core-elapsed-seconds",
     )
 else:
-    if args.criterion_bitcoin_rs_benchmark_id is not None:
-        die("--criterion-bitcoin-rs-benchmark-id requires Criterion elapsed-second arguments")
-    if args.criterion_bitcoin_core_benchmark_id is not None:
-        die("--criterion-bitcoin-core-benchmark-id requires Criterion elapsed-second arguments")
     bench_tool = "wall-clock-command-wrapper"
     elapsed_seconds_source = "wall-clock-command-wrapper"
     bitcoin_rs_benchmark_id = None
@@ -239,12 +310,14 @@ manifest = {
     "bitcoin_core_command": bitcoin_core_command,
     "bitcoin_rs_config": bitcoin_rs_config,
     "bitcoin_core_config": bitcoin_core_config,
+    "benchmark_artifact_path": benchmark_artifact_path,
     "benchmark_artifact_sha256": sha256_file(benchmark_artifact),
     "utxo_commit_p95_ms": utxo_commit_p95_ms,
     "electrum_get_history_p95_ms": electrum_get_history_p95_ms,
     "rss_bytes": rss_bytes,
 }
-if all(criterion_elapsed_supplied):
+if all(criterion_benchmark_ids_supplied):
+    manifest["criterion_artifact_schema"] = CRITERION_ARTIFACT_SCHEMA
     manifest["criterion_bitcoin_rs_benchmark_id"] = bitcoin_rs_benchmark_id
     manifest["criterion_bitcoin_core_benchmark_id"] = bitcoin_core_benchmark_id
 

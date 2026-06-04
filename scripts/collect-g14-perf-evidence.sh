@@ -17,7 +17,7 @@ usage() {
     '  bitcoin_core_version, bitcoin_core_commit,' \
     '  bitcoin_rs_command, bitcoin_core_command,' \
     '  bitcoin_rs_config, bitcoin_core_config,' \
-    '  benchmark_artifact_sha256,' \
+    '  benchmark_artifact_path, benchmark_artifact_sha256, criterion_artifact_schema=g14-criterion-artifact-v1,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.' \
@@ -105,13 +105,16 @@ chain_info_source="bitcoin-cli"
 G14_START_HASH="$start_hash" G14_STOP_HASH="$stop_hash" G14_CHAIN_INFO="$chain_info" G14_CHAIN_INFO_SOURCE="$chain_info_source" python3 - "$evidence_path" <<'PY'
 import hashlib
 import json
+import math
 import os
+from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
 
 EVIDENCE_HELP = "collect-g14-perf-evidence.sh requires the JSON keys listed in --help"
+CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
 
 
 def die(message: str) -> None:
@@ -180,6 +183,60 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_criterion_artifact(path: Path) -> dict[str, float]:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except UnicodeDecodeError as error:
+        die(f"benchmark_artifact_path must point to UTF-8 JSON: {error}")
+    except json.JSONDecodeError as error:
+        die(f"benchmark_artifact_path must point to JSON: {error}")
+    if not isinstance(data, dict):
+        die("benchmark_artifact_path Criterion evidence must be a JSON object")
+    if data.get("schema") != CRITERION_ARTIFACT_SCHEMA:
+        die(f"benchmark_artifact_path schema must be {CRITERION_ARTIFACT_SCHEMA!r}")
+    benchmarks = data.get("benchmarks")
+    if not isinstance(benchmarks, list):
+        die("benchmark_artifact_path benchmarks must be an array")
+    elapsed_by_id = {}
+    for index, entry in enumerate(benchmarks):
+        if not isinstance(entry, dict):
+            die(f"benchmark_artifact_path benchmarks[{index}] must be an object")
+        benchmark_id = entry.get("benchmark_id")
+        if not isinstance(benchmark_id, str) or not benchmark_id.strip():
+            die(f"benchmark_artifact_path benchmarks[{index}].benchmark_id must be a non-empty string")
+        if benchmark_id in elapsed_by_id:
+            die(f"benchmark_artifact_path contains duplicate benchmark_id {benchmark_id!r}")
+        elapsed = entry.get("elapsed_seconds")
+        if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
+            die(f"benchmark_artifact_path benchmark {benchmark_id!r} elapsed_seconds must be a number")
+        elapsed = float(elapsed)
+        if not elapsed > 0.0 or elapsed == float("inf"):
+            die(f"benchmark_artifact_path benchmark {benchmark_id!r} elapsed_seconds must be finite and positive")
+        elapsed_by_id[benchmark_id] = elapsed
+    return elapsed_by_id
+
+
+def require_artifact_elapsed(
+    elapsed_by_id: dict[str, float],
+    benchmark_id: str,
+    elapsed_seconds: str,
+    name: str,
+) -> None:
+    if benchmark_id not in elapsed_by_id:
+        die(f"benchmark_artifact_path is missing benchmark_id {benchmark_id!r}")
+    if not math.isclose(float(elapsed_seconds), elapsed_by_id[benchmark_id], rel_tol=0.0, abs_tol=1e-12):
+        die(f"{name} must match benchmark_artifact_path elapsed_seconds for {benchmark_id!r}")
+
+
 def current_head() -> str:
     output = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], text=True)
     return require_hex(output.strip(), 40, "git HEAD")
@@ -220,11 +277,30 @@ benchmark_artifact_sha256 = require_hex(
     64,
     "benchmark_artifact_sha256",
 )
+benchmark_artifact_path = Path(require_text(data, "benchmark_artifact_path"))
+if not benchmark_artifact_path.is_file():
+    die(f"benchmark_artifact_path is not a readable file: {benchmark_artifact_path}")
+if sha256_file(benchmark_artifact_path) != benchmark_artifact_sha256:
+    die("benchmark_artifact_sha256 must match benchmark_artifact_path")
+require_literal_value(data, "criterion_artifact_schema", CRITERION_ARTIFACT_SCHEMA)
+artifact_elapsed_by_id = read_criterion_artifact(benchmark_artifact_path)
 block_count = stop_height - start_height + 1
 bitcoin_rs_elapsed_seconds = require_number(data, "bitcoin_rs_elapsed_seconds")
 bitcoin_core_elapsed_seconds = require_number(data, "bitcoin_core_elapsed_seconds")
 criterion_bitcoin_rs_benchmark_id = require_text(data, "criterion_bitcoin_rs_benchmark_id")
 criterion_bitcoin_core_benchmark_id = require_text(data, "criterion_bitcoin_core_benchmark_id")
+require_artifact_elapsed(
+    artifact_elapsed_by_id,
+    criterion_bitcoin_rs_benchmark_id,
+    bitcoin_rs_elapsed_seconds,
+    "bitcoin_rs_elapsed_seconds",
+)
+require_artifact_elapsed(
+    artifact_elapsed_by_id,
+    criterion_bitcoin_core_benchmark_id,
+    bitcoin_core_elapsed_seconds,
+    "bitcoin_core_elapsed_seconds",
+)
 if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
     die(
         "bitcoin-rs initial sync evidence must be faster than Bitcoin Core "

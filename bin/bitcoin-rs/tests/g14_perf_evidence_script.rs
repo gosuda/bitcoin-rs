@@ -121,7 +121,7 @@ fn producer_marks_command_wrapper_manifest_as_non_criterion()
 }
 
 #[test]
-fn producer_emits_collectable_manifest_with_explicit_criterion_elapsed_seconds()
+fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_seconds()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
@@ -131,7 +131,7 @@ fn producer_emits_collectable_manifest_with_explicit_criterion_elapsed_seconds()
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let artifact = write_text(temp.path(), "criterion.json", "{\"ok\":true}\n")?;
+    let artifact = criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
     let manifest = temp.path().join("g14-produced-criterion.json");
 
     let producer_output = Command::new("bash")
@@ -147,10 +147,6 @@ fn producer_emits_collectable_manifest_with_explicit_criterion_elapsed_seconds()
             "false",
             "--bitcoin-core-command",
             "false",
-            "--criterion-bitcoin-rs-elapsed-seconds",
-            "1.25",
-            "--criterion-bitcoin-core-elapsed-seconds",
-            "2.50",
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -182,6 +178,8 @@ fn producer_emits_collectable_manifest_with_explicit_criterion_elapsed_seconds()
     let manifest_json = fs::read_to_string(&manifest)?;
     assert!(manifest_json.contains(r#""bench_tool": "criterion""#));
     assert!(manifest_json.contains(r#""elapsed_seconds_source": "criterion""#));
+    assert!(manifest_json.contains(r#""criterion_artifact_schema": "g14-criterion-artifact-v1""#));
+    assert!(manifest_json.contains(r#""benchmark_artifact_path":"#));
     assert!(
         manifest_json.contains(r#""criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd""#)
     );
@@ -210,7 +208,7 @@ fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn st
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let artifact = write_text(temp.path(), "criterion.json", "{\"ok\":true}\n")?;
+    let artifact = criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
     let manifest = temp.path().join("g14-produced-partial.json");
 
     let producer_output = Command::new("bash")
@@ -253,6 +251,72 @@ fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn st
 
     assert!(!producer_output.status.success());
     assert!(String::from_utf8_lossy(&producer_output.stderr).contains("must be supplied together"));
+    assert!(!manifest.exists());
+    Ok(())
+}
+
+#[test]
+fn producer_rejects_criterion_elapsed_seconds_not_bound_to_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let manifest = temp.path().join("g14-produced-mismatched-artifact.json");
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.26",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--criterion-bitcoin-rs-benchmark-id",
+            "bitcoin-rs/mainnet-ibd",
+            "--criterion-bitcoin-core-benchmark-id",
+            "bitcoin-core/mainnet-ibd",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-get-history-p95-ms",
+            "20.0",
+            "--rss-bytes",
+            "1024",
+        ])
+        .output()?;
+
+    assert!(!producer_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&producer_output.stderr)
+            .contains("must match the hashed Criterion artifact")
+    );
     assert!(!manifest.exists());
     Ok(())
 }
@@ -380,6 +444,39 @@ fn write_text(
     Ok(path)
 }
 
+fn criterion_artifact_json(
+    dir: &Path,
+    name: &str,
+    bitcoin_rs_elapsed_seconds: &str,
+    bitcoin_core_elapsed_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    write_text(
+        dir,
+        name,
+        &format!(
+            r#"{{
+  "schema": "g14-criterion-artifact-v1",
+  "benchmarks": [
+    {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "elapsed_seconds": {bitcoin_rs_elapsed_seconds}}},
+    {{"benchmark_id": "bitcoin-core/mainnet-ibd", "elapsed_seconds": {bitcoin_core_elapsed_seconds}}}
+  ]
+}}
+"#,
+        ),
+    )
+}
+
+fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("sha256sum").arg(path).output()?;
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    let digest = stdout
+        .split_whitespace()
+        .next()
+        .ok_or("sha256sum did not print a digest")?;
+    Ok(digest.to_owned())
+}
+
 fn fake_ibd_command(
     dir: &Path,
     name: &str,
@@ -418,6 +515,14 @@ fn evidence_json_with_elapsed(
     bitcoin_core_elapsed_seconds: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("g14.json");
+    let artifact = criterion_artifact_json(
+        dir,
+        "criterion-direct.json",
+        bitcoin_rs_elapsed_seconds,
+        bitcoin_core_elapsed_seconds,
+    )?;
+    let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
+    let artifact_sha256 = sha256_file(&artifact)?;
     fs::write(
         &path,
         format!(
@@ -426,6 +531,7 @@ fn evidence_json_with_elapsed(
   "ibd_stop_height": {stop_height},
   "bench_tool": "criterion",
   "elapsed_seconds_source": "criterion",
+  "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
@@ -436,7 +542,8 @@ fn evidence_json_with_elapsed(
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
-  "benchmark_artifact_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "benchmark_artifact_path": "{artifact_path}",
+  "benchmark_artifact_sha256": "{artifact_sha256}",
   "utxo_commit_p95_ms": 12.5,
   "electrum_get_history_p95_ms": 20.0,
   "rss_bytes": 1024
@@ -462,6 +569,14 @@ fn offline_evidence_json_with_elapsed(
     bitcoin_core_elapsed_seconds: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("g14-offline.json");
+    let artifact = criterion_artifact_json(
+        dir,
+        "criterion-offline.json",
+        bitcoin_rs_elapsed_seconds,
+        bitcoin_core_elapsed_seconds,
+    )?;
+    let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
+    let artifact_sha256 = sha256_file(&artifact)?;
     fs::write(
         &path,
         format!(
@@ -473,6 +588,7 @@ fn offline_evidence_json_with_elapsed(
   "bitcoin_core_chain_info": {{"chain": "main", "blocks": 10, "headers": 10}},
   "bench_tool": "criterion",
   "elapsed_seconds_source": "criterion",
+  "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
@@ -483,7 +599,8 @@ fn offline_evidence_json_with_elapsed(
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
-  "benchmark_artifact_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "benchmark_artifact_path": "{artifact_path}",
+  "benchmark_artifact_sha256": "{artifact_sha256}",
   "utxo_commit_p95_ms": 12.5,
   "electrum_get_history_p95_ms": 20.0,
   "rss_bytes": 1024
