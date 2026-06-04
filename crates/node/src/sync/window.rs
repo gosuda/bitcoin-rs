@@ -418,9 +418,7 @@ impl DownloadWindow {
             .min(request_tip_height);
         let entries =
             contiguous_request_entries(tree, chain_tip.tip_id, height, request_end_height)?;
-        let next_request_height = entries.iter().fold(next_request_height, |height, entry| {
-            height.max(entry.height.saturating_add(1))
-        });
+        let next_request_height = next_request_height.max(request_end_height.saturating_add(1));
         non_empty_request(peer_addr, entries, next_request_height)
     }
 
