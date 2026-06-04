@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
-use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SyncBudget {
@@ -266,12 +265,6 @@ impl DownloadWindow {
             .min(byte_capacity / self.ewma_block_bytes);
         if height <= request_tip_height && remaining_limit > 0 {
             if entries.is_empty() {
-                let scan = RequestScan {
-                    height,
-                    request_tip_height,
-                    remaining_limit,
-                    next_request_height,
-                };
                 if let Some(request) = self.clean_contiguous_peer_request(
                     peer_addr,
                     chain_tip,
@@ -281,11 +274,6 @@ impl DownloadWindow {
                     remaining_limit,
                     next_request_height,
                 ) {
-                    return Some(request);
-                }
-                if let Some(request) =
-                    self.received_filtered_peer_request(peer_addr, chain_tip, tree, scan)
-                {
                     return Some(request);
                 }
             }
@@ -375,94 +363,6 @@ impl DownloadWindow {
                 next_request_height.max(scan.request_tip_height.saturating_add(1));
         }
         next_request_height
-    }
-
-    fn received_filtered_peer_request(
-        &self,
-        peer_addr: SocketAddr,
-        chain_tip: &TipSnapshot,
-        tree: &BlockTree,
-        scan: RequestScan,
-    ) -> Option<PeerRequest> {
-        if !self.pending.is_empty() || self.received.is_empty() || scan.remaining_limit == 0 {
-            return None;
-        }
-        let scan_limit = self.received_filtered_scan_limit(scan);
-        let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
-        let request_end_height = scan
-            .height
-            .saturating_add(scan_span)
-            .min(scan.request_tip_height);
-        let mut cursor = tree.node_at_height_from(chain_tip.tip_id, request_end_height)?;
-        let capacity = usize::try_from(
-            request_end_height
-                .saturating_sub(scan.height)
-                .saturating_add(1),
-        )
-        .ok()?;
-        let mut entries = Vec::with_capacity(capacity.min(scan_limit));
-        while let Ok(node) = tree.node(cursor) {
-            if node.height < scan.height {
-                break;
-            }
-            if !self.received.contains_key(&node.hash) {
-                entries.push(PeerRequestEntry {
-                    hash: node.hash,
-                    height: node.height,
-                });
-            }
-            if node.height == scan.height {
-                break;
-            }
-            let Some(parent) = node.parent else {
-                break;
-            };
-            cursor = parent;
-        }
-        entries.reverse();
-        if entries.len() > scan.remaining_limit {
-            entries.truncate(scan.remaining_limit);
-            let next_request_height = entries
-                .iter()
-                .fold(scan.next_request_height, |height, entry| {
-                    height.max(entry.height.saturating_add(1))
-                });
-            return non_empty_request(peer_addr, entries, next_request_height);
-        }
-        let next_request_height = scan
-            .next_request_height
-            .max(request_end_height.saturating_add(1));
-        non_empty_request(peer_addr, entries, next_request_height)
-    }
-
-    fn received_filtered_scan_limit(&self, scan: RequestScan) -> usize {
-        let mut received_heights = SmallVec::<[u32; 128]>::new();
-        for received in self.received.values() {
-            if (scan.height..=scan.request_tip_height).contains(&received.height) {
-                received_heights.push(received.height);
-            }
-        }
-        received_heights.sort_unstable();
-
-        let mut scan_limit = scan.remaining_limit;
-        let mut received_in_span = 0_usize;
-        loop {
-            let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
-            let request_end_height = scan
-                .height
-                .saturating_add(scan_span)
-                .min(scan.request_tip_height);
-            while received_in_span < received_heights.len()
-                && received_heights[received_in_span] <= request_end_height
-            {
-                received_in_span = received_in_span.saturating_add(1);
-            }
-            let next_scan_limit = scan.remaining_limit.saturating_add(received_in_span);
-            if next_scan_limit == scan_limit || request_end_height == scan.request_tip_height {
-                return next_scan_limit;
-            }
-            scan_limit = next_scan_limit;
-        }
     }
 
     fn expired_request_entries(
@@ -683,31 +583,7 @@ mod tests {
 
     use bitcoin_rs_primitives::Hash256;
 
-    use super::{DownloadWindow, ReceivedBlock, RequestScan, SyncBudget};
-
-    #[test]
-    fn received_filtered_scan_limit_ignores_far_ahead_received_blocks() {
-        let mut window = DownloadWindow::new(test_budget());
-        for height in [2, 3, 100] {
-            window.received.insert(
-                hash(height),
-                ReceivedBlock {
-                    height: u32::from(height),
-                    bytes: 80,
-                },
-            );
-        }
-
-        assert_eq!(
-            window.received_filtered_scan_limit(RequestScan {
-                height: 1,
-                request_tip_height: 100,
-                remaining_limit: 2,
-                next_request_height: 1,
-            }),
-            4
-        );
-    }
+    use super::{DownloadWindow, SyncBudget};
 
     #[test]
     fn request_peer_scan_limit_accounts_for_pending_bytes_and_inflight_peers() {
