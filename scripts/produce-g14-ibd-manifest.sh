@@ -28,6 +28,8 @@ import sys
 import time
 
 CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
+BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
+BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
 
 
 def die(message: str) -> None:
@@ -37,6 +39,13 @@ def die(message: str) -> None:
 def non_empty_text(value: str, name: str) -> str:
     if not value.strip():
         die(f"{name} must not be empty")
+    return value
+
+
+def required_literal(value: str, expected: str, name: str) -> str:
+    value = non_empty_text(value, name)
+    if value != expected:
+        die(f"{name} must be {expected!r}")
     return value
 
 
@@ -323,8 +332,18 @@ if all(criterion_benchmark_ids_supplied):
         args.criterion_bitcoin_rs_benchmark_id,
         "--criterion-bitcoin-rs-benchmark-id",
     )
+    required_literal(
+        bitcoin_rs_benchmark_id,
+        BITCOIN_RS_CRITERION_BENCHMARK_ID,
+        "--criterion-bitcoin-rs-benchmark-id",
+    )
     bitcoin_core_benchmark_id = non_empty_text(
         args.criterion_bitcoin_core_benchmark_id,
+        "--criterion-bitcoin-core-benchmark-id",
+    )
+    required_literal(
+        bitcoin_core_benchmark_id,
+        BITCOIN_CORE_CRITERION_BENCHMARK_ID,
         "--criterion-bitcoin-core-benchmark-id",
     )
     artifact_rs_elapsed_seconds, artifact_core_elapsed_seconds = criterion_artifact_elapsed_seconds(

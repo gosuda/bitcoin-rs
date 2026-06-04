@@ -501,6 +501,89 @@ fn script_rejects_slower_bitcoin_rs_ibd_evidence() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn script_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json_with_benchmark_ids(
+        temp.path(),
+        "bitcoin-rs/not-mainnet-ibd",
+        "bitcoin-core/mainnet-ibd",
+    )?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("criterion_bitcoin_rs_benchmark_id"));
+    Ok(())
+}
+
+#[test]
+fn producer_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let manifest = temp.path().join("g14-produced-renamed-benchmark.json");
+
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-benchmark-id",
+            "bitcoin-rs/not-mainnet-ibd",
+            "--criterion-bitcoin-core-benchmark-id",
+            "bitcoin-core/mainnet-ibd",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-p95-ms",
+            "12.5",
+            "--electrum-get-history-p95-ms",
+            "20.0",
+            "--rss-bytes",
+            "1024",
+        ])
+        .output()?;
+
+    assert!(!producer_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&producer_output.stderr)
+            .contains("--criterion-bitcoin-rs-benchmark-id")
+    );
+    assert!(!manifest.exists());
+    Ok(())
+}
+
+#[test]
 fn script_rejects_evidence_from_different_bitcoin_rs_commit()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -1036,6 +1119,70 @@ fn evidence_json_with_binding_fields(
   "electrum_get_history_p95_ms": 20.0,
   "rss_bytes": 1024
 }}"#,
+        ),
+    )?;
+    Ok(path)
+}
+
+fn evidence_json_with_benchmark_ids(
+    dir: &Path,
+    bitcoin_rs_benchmark_id: &str,
+    bitcoin_core_benchmark_id: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join("g14-renamed-benchmark.json");
+    let artifact = write_text(
+        dir,
+        "criterion-renamed-benchmark.json",
+        &format!(
+            r#"{{
+  "schema": "g14-criterion-artifact-v1",
+  "ibd_start_height": 0,
+  "ibd_start_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "ibd_stop_height": 10,
+  "ibd_stop_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+  "bitcoin_rs_command_sha256": "{DIRECT_BITCOIN_RS_COMMAND_SHA256}",
+  "bitcoin_core_command_sha256": "{DIRECT_BITCOIN_CORE_COMMAND_SHA256}",
+  "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
+  "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
+  "benchmarks": [
+    {{"benchmark_id": "{bitcoin_rs_benchmark_id}", "elapsed_seconds": 1.25}},
+    {{"benchmark_id": "{bitcoin_core_benchmark_id}", "elapsed_seconds": 2.50}}
+  ]
+}}
+"#
+        ),
+    )?;
+    let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
+    let artifact_sha256 = sha256_file(&artifact)?;
+    fs::write(
+        &path,
+        format!(
+            r#"{{
+  "ibd_start_height": 0,
+  "ibd_stop_height": 10,
+  "bench_tool": "criterion",
+  "elapsed_seconds_source": "criterion",
+  "criterion_artifact_schema": "g14-criterion-artifact-v1",
+  "criterion_bitcoin_rs_benchmark_id": "{bitcoin_rs_benchmark_id}",
+  "criterion_bitcoin_core_benchmark_id": "{bitcoin_core_benchmark_id}",
+  "bitcoin_rs_elapsed_seconds": 1.25,
+  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_core_version": "v27.0.0",
+  "bitcoin_rs_commit": "{}",
+  "storage_backend": "fjall",
+  "indexes": "all",
+  "bitcoin_core_commit": "1111111111111111111111111111111111111111",
+  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_core_command": "bitcoind -chain=main",
+  "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
+  "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "benchmark_artifact_path": "{artifact_path}",
+  "benchmark_artifact_sha256": "{artifact_sha256}",
+  "utxo_commit_p95_ms": 12.5,
+  "electrum_get_history_p95_ms": 20.0,
+  "rss_bytes": 1024
+}}"#,
+            current_head()?,
         ),
     )?;
     Ok(path)

@@ -105,8 +105,16 @@ impl G14Evidence {
         let bitcoin_core_elapsed_seconds = positive_f64("G14_BITCOIN_CORE_ELAPSED_SECONDS");
         let bitcoin_rs_criterion_benchmark_id =
             required_env("G14_BITCOIN_RS_CRITERION_BENCHMARK_ID");
+        assert_eq!(
+            bitcoin_rs_criterion_benchmark_id, "bitcoin-rs/mainnet-ibd",
+            "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID must identify bitcoin-rs mainnet IBD"
+        );
         let bitcoin_core_criterion_benchmark_id =
             required_env("G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID");
+        assert_eq!(
+            bitcoin_core_criterion_benchmark_id, "bitcoin-core/mainnet-ibd",
+            "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID must identify Bitcoin Core mainnet IBD"
+        );
         let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
         let bitcoin_core_commit = required_hex("G14_BITCOIN_CORE_COMMIT", 40);
         let bitcoin_rs_command_sha256 = required_hex("G14_BITCOIN_RS_COMMAND_SHA256", 64);

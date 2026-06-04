@@ -118,6 +118,8 @@ import sys
 
 EVIDENCE_HELP = "collect-g14-perf-evidence.sh requires the JSON keys listed in --help"
 CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
+BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
+BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
 
 
 def die(message: str) -> None:
@@ -351,6 +353,16 @@ bitcoin_rs_elapsed_seconds = require_number(data, "bitcoin_rs_elapsed_seconds")
 bitcoin_core_elapsed_seconds = require_number(data, "bitcoin_core_elapsed_seconds")
 criterion_bitcoin_rs_benchmark_id = require_text(data, "criterion_bitcoin_rs_benchmark_id")
 criterion_bitcoin_core_benchmark_id = require_text(data, "criterion_bitcoin_core_benchmark_id")
+if criterion_bitcoin_rs_benchmark_id != BITCOIN_RS_CRITERION_BENCHMARK_ID:
+    die(
+        "criterion_bitcoin_rs_benchmark_id must be "
+        f"{BITCOIN_RS_CRITERION_BENCHMARK_ID!r}"
+    )
+if criterion_bitcoin_core_benchmark_id != BITCOIN_CORE_CRITERION_BENCHMARK_ID:
+    die(
+        "criterion_bitcoin_core_benchmark_id must be "
+        f"{BITCOIN_CORE_CRITERION_BENCHMARK_ID!r}"
+    )
 require_artifact_elapsed(
     artifact_elapsed_by_id,
     criterion_bitcoin_rs_benchmark_id,
