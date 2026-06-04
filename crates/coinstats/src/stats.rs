@@ -2,8 +2,12 @@ use alloc::sync::Arc;
 use core::convert::Infallible;
 
 use bitcoin_rs_primitives::{OutPoint, TxOut};
-use bitcoin_rs_utxo::{UtxoChangeListener, UtxoInserted, UtxoRemoved};
+use bitcoin_rs_utxo::{
+    UtxoChangeListener, UtxoInserted, UtxoRemoved,
+    set::{UtxoChangeEvents, UtxoCommittedEvent},
+};
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use zerocopy::IntoBytes;
 
 use crate::MuHash3072;
@@ -120,6 +124,166 @@ impl Default for CoinStats {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CoinStatsDelta {
+    muhash: MuHash3072,
+    added_amount: u64,
+    added_bogo_size: u64,
+    added_utxos: u64,
+    removed_amount: u64,
+    removed_bogo_size: u64,
+    removed_utxos: u64,
+}
+
+impl CoinStatsDelta {
+    const fn new() -> Self {
+        Self {
+            muhash: MuHash3072::new(),
+            added_amount: 0,
+            added_bogo_size: 0,
+            added_utxos: 0,
+            removed_amount: 0,
+            removed_bogo_size: 0,
+            removed_utxos: 0,
+        }
+    }
+
+    fn from_insertions(insertions: &[UtxoInserted<'_>]) -> Self {
+        let mut delta = Self::new();
+        let mut scratch = Vec::new();
+        for insertion in insertions {
+            delta.insert_utxo(
+                &mut scratch,
+                insertion.op,
+                insertion.txout,
+                insertion.height,
+                insertion.coinbase,
+            );
+        }
+        delta
+    }
+
+    fn from_removals(removals: &[UtxoRemoved]) -> Self {
+        let mut delta = Self::new();
+        let mut scratch = Vec::new();
+        for removal in removals {
+            delta.remove_utxo(
+                &mut scratch,
+                &removal.op,
+                &removal.txout,
+                removal.height,
+                removal.coinbase,
+            );
+        }
+        delta
+    }
+
+    fn from_events(events: &UtxoChangeEvents<'_>) -> Self {
+        let mut delta = Self::new();
+        let mut scratch = Vec::new();
+        events.for_each(|event| match event {
+            UtxoCommittedEvent::InsertBatch(insertions) => {
+                for insertion in insertions {
+                    delta.insert_utxo(
+                        &mut scratch,
+                        insertion.op,
+                        insertion.txout,
+                        insertion.height,
+                        insertion.coinbase,
+                    );
+                }
+            }
+            UtxoCommittedEvent::RemoveBatch(removals) => {
+                for removal in removals {
+                    delta.remove_utxo(
+                        &mut scratch,
+                        &removal.op,
+                        &removal.txout,
+                        removal.height,
+                        removal.coinbase,
+                    );
+                }
+            }
+            UtxoCommittedEvent::RemoveCoin(removal) => {
+                delta.remove_utxo(
+                    &mut scratch,
+                    &removal.op,
+                    &removal.txout,
+                    removal.height,
+                    removal.coinbase,
+                );
+            }
+        });
+        delta
+    }
+
+    fn combine(mut self, other: Self) -> Self {
+        let Self {
+            muhash,
+            added_amount,
+            added_bogo_size,
+            added_utxos,
+            removed_amount,
+            removed_bogo_size,
+            removed_utxos,
+        } = other;
+        self.muhash.combine(&muhash);
+        self.added_amount = self.added_amount.saturating_add(added_amount);
+        self.added_bogo_size = self.added_bogo_size.saturating_add(added_bogo_size);
+        self.added_utxos = self.added_utxos.saturating_add(added_utxos);
+        self.removed_amount = self.removed_amount.saturating_add(removed_amount);
+        self.removed_bogo_size = self.removed_bogo_size.saturating_add(removed_bogo_size);
+        self.removed_utxos = self.removed_utxos.saturating_add(removed_utxos);
+        self
+    }
+
+    fn apply_to(self, stats: &mut CoinStats) {
+        stats.muhash.combine(&self.muhash);
+        stats.total_amount = stats
+            .total_amount
+            .saturating_add(self.added_amount)
+            .saturating_sub(self.removed_amount);
+        stats.bogo_size = stats
+            .bogo_size
+            .saturating_add(self.added_bogo_size)
+            .saturating_sub(self.removed_bogo_size);
+        stats.utxo_count = stats
+            .utxo_count
+            .saturating_add(self.added_utxos)
+            .saturating_sub(self.removed_utxos);
+    }
+
+    fn insert_utxo(
+        &mut self,
+        scratch: &mut Vec<u8>,
+        op: &OutPoint,
+        txout: &TxOut,
+        height: u32,
+        coinbase: bool,
+    ) {
+        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
+        self.muhash.insert(scratch.as_slice());
+        self.added_amount = self.added_amount.saturating_add(txout.value.to_sat());
+        self.added_bogo_size = self.added_bogo_size.saturating_add(bogo_size(txout));
+        self.added_utxos = self.added_utxos.saturating_add(1);
+    }
+
+    fn remove_utxo(
+        &mut self,
+        scratch: &mut Vec<u8>,
+        op: &OutPoint,
+        txout: &TxOut,
+        height: u32,
+        coinbase: bool,
+    ) {
+        coin_hash_bytes_into(scratch, op, txout, height, coinbase);
+        self.muhash.remove(scratch.as_slice());
+        self.removed_amount = self.removed_amount.saturating_add(txout.value.to_sat());
+        self.removed_bogo_size = self.removed_bogo_size.saturating_add(bogo_size(txout));
+        self.removed_utxos = self.removed_utxos.saturating_add(1);
+    }
+}
+
 /// Decode error for persisted coinstats rows.
 #[derive(Debug, thiserror::Error)]
 pub enum CoinStatsDecodeError {
@@ -203,25 +367,9 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
+        let delta = CoinStatsDelta::from_insertions(insertions);
         let mut state = self.state.lock();
-        let mut total_amount = 0_u64;
-        let mut total_bogo_size = 0_u64;
-        let mut utxo_count = 0_u64;
-        for insertion in insertions {
-            state.insert_utxo_hash(
-                insertion.op,
-                insertion.txout,
-                insertion.height,
-                insertion.coinbase,
-            );
-            total_amount = total_amount.saturating_add(insertion.txout.value.to_sat());
-            total_bogo_size = total_bogo_size.saturating_add(bogo_size(insertion.txout));
-            utxo_count = utxo_count.saturating_add(1);
-        }
-        state.stats.total_amount = state.stats.total_amount.saturating_add(total_amount);
-        state.stats.bogo_size = state.stats.bogo_size.saturating_add(total_bogo_size);
-        state.stats.utxo_count = state.stats.utxo_count.saturating_add(utxo_count);
-        state.trim_scratch_capacity();
+        delta.apply_to(&mut state.stats);
     }
 
     fn on_remove(&self, op: &OutPoint, txout: &TxOut, height: u32) {
@@ -237,25 +385,23 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
+        let delta = CoinStatsDelta::from_removals(removals);
         let mut state = self.state.lock();
-        let mut total_amount = 0_u64;
-        let mut total_bogo_size = 0_u64;
-        let mut utxo_count = 0_u64;
-        for removal in removals {
-            state.remove_utxo_hash(
-                &removal.op,
-                &removal.txout,
-                removal.height,
-                removal.coinbase,
-            );
-            total_amount = total_amount.saturating_add(removal.txout.value.to_sat());
-            total_bogo_size = total_bogo_size.saturating_add(bogo_size(&removal.txout));
-            utxo_count = utxo_count.saturating_add(1);
+        delta.apply_to(&mut state.stats);
+    }
+
+    fn on_committed_event_batches(&self, batches: &[UtxoChangeEvents<'_>]) -> bool {
+        if batches.is_empty() {
+            return true;
         }
-        state.stats.total_amount = state.stats.total_amount.saturating_sub(total_amount);
-        state.stats.bogo_size = state.stats.bogo_size.saturating_sub(total_bogo_size);
-        state.stats.utxo_count = state.stats.utxo_count.saturating_sub(utxo_count);
-        state.trim_scratch_capacity();
+
+        let delta = batches
+            .par_iter()
+            .map(CoinStatsDelta::from_events)
+            .reduce(CoinStatsDelta::new, CoinStatsDelta::combine);
+        let mut state = self.state.lock();
+        delta.apply_to(&mut state.stats);
+        true
     }
 
     fn muhash3072(&self) -> Option<[u8; 384]> {

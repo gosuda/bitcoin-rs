@@ -137,6 +137,14 @@ pub trait UtxoChangeListener {
         }
     }
 
+    #[doc(hidden)]
+    /// Applies committed shard event batches when this listener's final state is event-order
+    /// independent.
+    fn on_committed_event_batches(&self, batches: &[UtxoChangeEvents<'_>]) -> bool {
+        let _ = batches;
+        false
+    }
+
     /// Returns the current `MuHash3072` snapshot trailer, when this listener tracks one.
     fn muhash3072(&self) -> Option<[u8; 384]> {
         None
@@ -195,15 +203,27 @@ impl UtxoRemoved {
     }
 }
 
-pub(crate) enum UtxoChangeEvent<'a> {
+enum UtxoChangeEvent<'a> {
     InsertBatch(SmallVec<[UtxoInserted<'a>; 8]>),
     RemoveBatch(Vec<UtxoRemoved>),
     RemoveCoin(UtxoRemoved),
 }
 
 #[derive(Default)]
-pub(crate) struct UtxoChangeEvents<'a> {
+#[doc(hidden)]
+pub struct UtxoChangeEvents<'a> {
     events: Vec<UtxoChangeEvent<'a>>,
+}
+
+#[doc(hidden)]
+/// Read-only view over one committed UTXO event.
+pub enum UtxoCommittedEvent<'batch, 'coin> {
+    /// Batch of inserted UTXOs.
+    InsertBatch(&'batch [UtxoInserted<'coin>]),
+    /// Batch of removed UTXOs.
+    RemoveBatch(&'batch [UtxoRemoved]),
+    /// Single removed UTXO emitted at an overwrite boundary.
+    RemoveCoin(&'batch UtxoRemoved),
 }
 
 impl<'a> UtxoChangeEvents<'a> {
@@ -219,6 +239,23 @@ impl<'a> UtxoChangeEvents<'a> {
 
     pub(crate) fn push_remove_coin(&mut self, removal: UtxoRemoved) {
         self.events.push(UtxoChangeEvent::RemoveCoin(removal));
+    }
+
+    /// Visits committed events in the same order the fallback listener replay uses.
+    pub fn for_each(&self, mut visit: impl FnMut(UtxoCommittedEvent<'_, 'a>)) {
+        for event in &self.events {
+            match event {
+                UtxoChangeEvent::InsertBatch(insertions) => {
+                    visit(UtxoCommittedEvent::InsertBatch(insertions));
+                }
+                UtxoChangeEvent::RemoveBatch(removals) => {
+                    visit(UtxoCommittedEvent::RemoveBatch(removals));
+                }
+                UtxoChangeEvent::RemoveCoin(removal) => {
+                    visit(UtxoCommittedEvent::RemoveCoin(removal));
+                }
+            }
+        }
     }
 
     fn replay(&self, listener: &(dyn UtxoChangeListener + Send + Sync)) {
@@ -679,14 +716,22 @@ impl UtxoSet {
 
         let mut events = events.into_inner();
         events.sort_unstable_by_key(|(shard_idx, _events)| *shard_idx);
-        for (_shard_idx, shard_events) in events {
-            shard_events.replay(listener);
+
+        let shard_events: Vec<_> = events
+            .into_iter()
+            .map(|(_shard_idx, shard_events)| shard_events)
+            .collect();
+        if !listener.on_committed_event_batches(&shard_events) {
+            for shard_events in &shard_events {
+                shard_events.replay(listener);
+            }
         }
 
         let mut errors = errors.into_inner();
         if let Some(error) = errors.pop() {
             return Err(error);
         }
+
         Ok(())
     }
 

@@ -2,7 +2,9 @@
 use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
-use bitcoin_rs_utxo::{BlockChanges, UndoBatch, UtxoAdd, UtxoSet, aggregate_hash, write_snapshot};
+use bitcoin_rs_utxo::{
+    BlockChanges, UndoBatch, UtxoAdd, UtxoKey, UtxoSet, aggregate_hash, write_snapshot,
+};
 
 #[test]
 fn snapshot_trailer_uses_listener_muhash() -> Result<(), Box<dyn std::error::Error>> {
@@ -109,6 +111,65 @@ fn listener_tracks_duplicate_txid_overwrite() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn listener_parallel_shard_delta_matches_serial_stats() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(listener.clone()));
+    let mut expected = CoinStats::new();
+    let mut initial = BlockChanges::default();
+    let mut removals = Vec::new();
+    let mut replacements = Vec::new();
+
+    for shard in 0_u8..20 {
+        let index = u32::from(shard);
+        let outpoint = OutPoint::new(txid_in_shard(shard, 700 + u64::from(shard)), index);
+        let txout = txout(700 + index);
+        assert_eq!(UtxoKey::from_txid(&outpoint.txid).shard(), shard);
+        expected.insert_utxo(&outpoint, &txout, 70, shard % 2 == 0);
+        initial.add(UtxoAdd::new(outpoint, txout, shard % 2 == 0, 70));
+        removals.push(outpoint);
+    }
+    set.commit_block(&initial, &txid(1_700))?;
+
+    let mut mixed = BlockChanges::default();
+    for shard in (0_u8..20).rev() {
+        let index = u32::from(shard);
+        let replacement = OutPoint::new(txid_in_shard(shard, 900 + u64::from(shard)), 100 + index);
+        let replacement_txout = txout(900 + index);
+        let removed_txout = txout(700 + index);
+        expected.remove_utxo(
+            &removals[usize::from(shard)],
+            &removed_txout,
+            70,
+            shard % 2 == 0,
+        );
+        expected.insert_utxo(&replacement, &replacement_txout, 71, false);
+        mixed.remove(removals[usize::from(shard)]);
+        mixed.add(UtxoAdd::new(replacement, replacement_txout, false, 71));
+        replacements.push((replacement, txout(900 + index)));
+    }
+    set.commit_block(&mixed, &txid(1_701))?;
+
+    let actual = listener.snapshot();
+    assert_observable_stats_eq(&actual, &expected);
+    for removed in removals {
+        assert_eq!(set.get(&removed), None);
+    }
+    for (replacement, txout) in replacements {
+        assert_eq!(set.get(&replacement), Some(txout));
+    }
+
+    let mut snapshot = Vec::new();
+    let trailer = write_snapshot(&set, &txid(1_701), 71, &mut snapshot)?;
+    assert_eq!(trailer, expected.muhash.finalize());
+    assert_eq!(
+        &snapshot[snapshot.len() - 384..],
+        expected.muhash.finalize()
+    );
+    Ok(())
+}
+
+#[test]
 fn listener_undo_restores_muhash_and_accounting() -> Result<(), Box<dyn std::error::Error>> {
     let (full, full_listener) = listener_set();
     let coinbase_outpoint = OutPoint::new(txid(40), 0);
@@ -197,5 +258,14 @@ fn txout(index: u32) -> TxOut {
 fn txid(index: u32) -> Hash256 {
     let mut bytes = [0_u8; 32];
     bytes[..4].copy_from_slice(&index.to_le_bytes());
+    Hash256::from_le_bytes(&bytes)
+}
+
+fn txid_in_shard(shard: u8, suffix: u64) -> Hash256 {
+    let mut bytes = [0_u8; 32];
+    bytes[0] = shard;
+    bytes[1..9].copy_from_slice(&suffix.to_le_bytes());
+    bytes[9..17].copy_from_slice(&suffix.rotate_left(13).to_le_bytes());
+    bytes[17..25].copy_from_slice(&suffix.wrapping_mul(29).to_le_bytes());
     Hash256::from_le_bytes(&bytes)
 }

@@ -21,6 +21,7 @@ ruint.workspace = true
 bytemuck.workspace = true
 zerocopy.workspace = true
 parking_lot.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
