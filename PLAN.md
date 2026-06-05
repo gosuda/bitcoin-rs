@@ -210,6 +210,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `da9e31c`.
 - [x] Coinstats MuHash insert hot paths were compressed with measured private arithmetic-helper inlining.
   Evidence commit: `0b39026`.
+- [x] Coinstats direct listener batches were compressed with thresholded parallel insert/remove reductions for large single-shard batches.
+  Evidence commit: `4540052`.
 - [x] Performance evidence scaffolding was expanded with a mainnet prefix replay measurement example.
   Evidence commit: `2234ad5`.
 
