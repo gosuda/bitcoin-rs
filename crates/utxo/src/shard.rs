@@ -995,11 +995,12 @@ fn delete_record_if_fully_spent(
     remove_count: usize,
     contains_vout: impl Fn(u32) -> bool,
 ) -> bool {
-    let Some(record) = table.table.find(key.hash(), |record| {
+    let Ok(entry) = table.table.find_entry(key.hash(), |record| {
         record.key() == key && record.txid() == txid
     }) else {
         return false;
     };
+    let record = entry.get();
     if record.output_count() != remove_count
         || !record
             .iter_outputs()
@@ -1007,11 +1008,6 @@ fn delete_record_if_fully_spent(
     {
         return false;
     }
-    let Ok(entry) = table.table.find_entry(key.hash(), |record| {
-        record.key() == key && record.txid() == txid
-    }) else {
-        return false;
-    };
     let (_record, _vacant) = entry.remove();
     table.deleted = table.deleted.saturating_add(1);
     true
