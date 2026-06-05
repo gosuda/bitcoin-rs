@@ -188,6 +188,25 @@ fn same_txid_churn_case(seed: u64) -> (UtxoSet, BlockChanges) {
     (set, changes)
 }
 
+fn same_txid_full_spend_case(seed: u64) -> (UtxoSet, BlockChanges) {
+    let set = UtxoSet::new();
+    let live_txid = txid(seed);
+    let mut preload = BlockChanges::default();
+    let mut changes = BlockChanges::default();
+
+    for vout in 0_u32..64 {
+        let seed = seed.wrapping_add(u64::from(vout));
+        let outpoint = OutPoint::new(live_txid, vout);
+        preload.add(UtxoAdd::new(outpoint, txout(seed), false, 1));
+        changes.remove(outpoint);
+    }
+    if let Err(error) = set.commit_block(&preload, &txid(seed.wrapping_add(1))) {
+        panic!("same-txid full-spend preload failed: {error}");
+    }
+
+    (set, changes)
+}
+
 fn utxo_add(entry: &SyntheticEntry) -> UtxoAdd {
     UtxoAdd::new(
         entry.outpoint,
@@ -344,6 +363,55 @@ fn bench_same_txid_churn_noop_listener(c: &mut Criterion) {
     });
 }
 
+fn bench_same_txid_full_spend(c: &mut Criterion) {
+    c.bench_function("utxo_commit/same_txid_full_spend", |b| {
+        b.iter_batched(
+            || same_txid_full_spend_case(0x0203_0405),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0212_1314)) {
+                    panic!("same-txid full-spend commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn bench_same_txid_full_spend_noop_listener(c: &mut Criterion) {
+    c.bench_function("utxo_commit/same_txid_full_spend_noop_listener", |b| {
+        b.iter_batched(
+            || {
+                let (mut set, changes) = same_txid_full_spend_case(0x0203_0405);
+                set.set_listener(Box::new(NoopListener));
+                (set, changes)
+            },
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0212_1314)) {
+                    panic!("same-txid full-spend listener commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+fn bench_same_txid_cases(c: &mut Criterion) {
+    c.bench_function("utxo_commit/same_txid_churn", |b| {
+        b.iter_batched(
+            || same_txid_churn_case(0x0102_0304),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0112_1314)) {
+                    panic!("same-txid churn commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    bench_same_txid_churn_noop_listener(c);
+    bench_same_txid_full_spend(c);
+    bench_same_txid_full_spend_noop_listener(c);
+}
+
 fn utxo_commit_synthetic_block(c: &mut Criterion) {
     print_synthetic_summary("existing", ShardShape::Existing);
     c.bench_function("utxo_commit/existing", |b| {
@@ -373,19 +441,7 @@ fn utxo_commit_synthetic_block(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
-
-    c.bench_function("utxo_commit/same_txid_churn", |b| {
-        b.iter_batched(
-            || same_txid_churn_case(0x0102_0304),
-            |(set, changes)| {
-                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0112_1314)) {
-                    panic!("same-txid churn commit failed: {error}");
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
-    bench_same_txid_churn_noop_listener(c);
+    bench_same_txid_cases(c);
 
     print_synthetic_summary("uniform", ShardShape::Uniform);
     c.bench_function("utxo_commit/uniform", |b| {

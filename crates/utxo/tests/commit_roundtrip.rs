@@ -425,6 +425,47 @@ fn listener_emits_explicit_removes_before_add_batches_in_single_shard_commit()
 }
 
 #[test]
+fn listener_full_record_spend_preserves_remove_input_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut set = UtxoSet::new();
+    set.set_listener(Box::new(RecordingListener {
+        events: Arc::clone(&events),
+    }));
+    let live_txid = txid(625);
+
+    let mut initial = BlockChanges::default();
+    for vout in 0_u32..4 {
+        initial.add(UtxoAdd::new(
+            OutPoint::new(live_txid, vout),
+            txout(u64::from(vout) + 625),
+            false,
+            303,
+        ));
+    }
+    set.commit_block(&initial, &txid(626))?;
+    events.lock().clear();
+
+    let mut spend = BlockChanges::default();
+    for vout in [3_u32, 0, 2, 1] {
+        spend.remove(OutPoint::new(live_txid, vout));
+    }
+    set.commit_block(&spend, &txid(627))?;
+
+    assert_eq!(
+        events.lock().clone(),
+        vec![
+            ListenerEvent::Remove(3),
+            ListenerEvent::Remove(0),
+            ListenerEvent::Remove(2),
+            ListenerEvent::Remove(1),
+        ]
+    );
+    assert!(!set.has_live_outputs_for_txid(&live_txid));
+    Ok(())
+}
+
+#[test]
 fn listener_replays_parallel_multi_shard_events_in_shard_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let events = Arc::new(Mutex::new(Vec::new()));

@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::{
     UtxoError, UtxoKey,
-    record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord},
+    record::{OneUtxoOut, OwnedUtxoOut, UtxoRecord, bitmap_vout_bit},
     set::{
         BuildPayload, ScannedUtxo, SpendPayload, UtxoAddView, UtxoChangeEvents, UtxoChangeListener,
         UtxoInserted, UtxoRemoved, UtxoScan,
@@ -609,6 +609,16 @@ fn apply_remove_run_with_listener<'arena>(
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
+    if let Some(removed_coins) = full_record_removals_by_order::<[UtxoRemoved; 2]>(
+        table,
+        &record,
+        removes.len(),
+        |index| removes[index].vout,
+        |index| *removes[index].op,
+    ) {
+        listener.on_remove_coins(&removed_coins);
+        return;
+    }
     let mut removed_coins = SmallVec::<[UtxoRemoved; 2]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
@@ -636,6 +646,20 @@ fn apply_remove_run_collect_events<'arena>(
     let Some(mut record) = take_record(table, first.key, first.txid) else {
         return;
     };
+    if let Some(removed_coins) = full_record_removals_by_order::<[UtxoRemoved; 2]>(
+        table,
+        &record,
+        removes.len(),
+        |index| removes[index].vout,
+        |index| *removes[index].op,
+    ) {
+        if coalesce_events {
+            events.push_remove_batch_coalesced(removed_coins);
+        } else {
+            events.push_remove_batch(removed_coins);
+        }
+        return;
+    }
     let mut removed_coins = SmallVec::<[UtxoRemoved; 2]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
@@ -665,6 +689,16 @@ fn apply_outpoint_remove_run_with_listener<'arena>(
     let Some(mut record) = take_record(table, key, txid) else {
         return;
     };
+    if let Some(removed_coins) = full_record_removals_by_order::<[UtxoRemoved; 8]>(
+        table,
+        &record,
+        removes.len(),
+        |index| removes[index].vout,
+        |index| removes[index],
+    ) {
+        listener.on_remove_coins(&removed_coins);
+        return;
+    }
     let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
@@ -677,6 +711,58 @@ fn apply_outpoint_remove_run_with_listener<'arena>(
     if !record.is_empty() {
         insert_record(arena, table, record);
     }
+}
+
+fn full_record_removals_by_order<A>(
+    table: &ShardTable<'_>,
+    record: &UtxoRecord<'_>,
+    remove_count: usize,
+    mut remove_vout: impl FnMut(usize) -> u32,
+    mut remove_outpoint: impl FnMut(usize) -> OutPoint,
+) -> Option<SmallVec<A>>
+where
+    A: smallvec::Array<Item = UtxoRemoved>,
+{
+    if record.output_count() != remove_count
+        || usize::try_from(record.vout_bitmap.count_ones()).ok()? != remove_count
+    {
+        return None;
+    }
+
+    let mut outputs = [None; 64];
+    let mut record_bitmap = 0_u64;
+    for output in record.iter_outputs() {
+        let bit = bitmap_vout_bit(output.vout)?;
+        let index = usize::try_from(output.vout).ok()?;
+        if outputs[index].replace(*output).is_some() {
+            return None;
+        }
+        record_bitmap |= bit;
+    }
+    if record_bitmap != record.vout_bitmap {
+        return None;
+    }
+
+    let mut remove_bitmap = 0_u64;
+    let mut removed_coins = SmallVec::<A>::with_capacity(remove_count);
+    for index in 0..remove_count {
+        let vout = remove_vout(index);
+        let bit = bitmap_vout_bit(vout)?;
+        if remove_bitmap & bit != 0 {
+            return None;
+        }
+        remove_bitmap |= bit;
+        let output = outputs[usize::try_from(vout).ok()?]?;
+        let (txout, height, coinbase) = output_details(table, &output)?;
+        removed_coins.push(UtxoRemoved::new(
+            remove_outpoint(index),
+            txout,
+            height,
+            coinbase,
+        ));
+    }
+
+    (remove_bitmap == record.vout_bitmap).then_some(removed_coins)
 }
 
 fn apply_add_run<'arena>(
