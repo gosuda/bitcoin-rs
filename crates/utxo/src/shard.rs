@@ -479,6 +479,7 @@ fn commit_single_shard_coalesced<'arena, A: UtxoAddView>(
         remaining_removes = &remaining_removes[run_len..];
     }
 
+    reserve_add_runs(table, utxo_add_run_count(adds));
     let mut remaining_adds = adds;
     while let Some((first, rest)) = remaining_adds.split_first() {
         let key = UtxoKey::from_txid(&first.outpoint().txid);
@@ -528,6 +529,7 @@ fn commit_single_shard_with_listener<'arena, A: UtxoAddView>(
         remaining_removes = &remaining_removes[run_len..];
     }
 
+    reserve_add_runs(table, utxo_add_run_count(adds));
     let mut remaining_adds = adds;
     while let Some((first, rest)) = remaining_adds.split_first() {
         let key = UtxoKey::from_txid(&first.outpoint().txid);
@@ -548,6 +550,29 @@ fn commit_single_shard_with_listener<'arena, A: UtxoAddView>(
         remaining_adds = &remaining_adds[run_len..];
     }
     Ok(())
+}
+
+fn reserve_add_runs(table: &mut ShardTable<'_>, additional_runs: usize) {
+    if additional_runs != 0 {
+        table
+            .table
+            .reserve(additional_runs, |record| record.key().hash());
+    }
+}
+
+fn utxo_add_run_count<A: UtxoAddView>(adds: &[A]) -> usize {
+    let mut run_count = 0usize;
+    let mut remaining_adds = adds;
+    while let Some((first, rest)) = remaining_adds.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|add| add.outpoint().txid == first.outpoint().txid)
+            .count()
+            .saturating_add(1);
+        run_count = run_count.saturating_add(1);
+        remaining_adds = &remaining_adds[run_len..];
+    }
+    run_count
 }
 
 fn apply_remove_run<'arena>(
