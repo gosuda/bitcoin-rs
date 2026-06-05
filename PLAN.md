@@ -246,6 +246,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `4d10d85`.
 - [x] Buffered sync apply now stores applied block hashes in the existing inline `ExpectedBlockHashes` buffer, removing one heap allocation from the contiguous staged-apply tick without changing retry or failure handling.
   Evidence commit: `7d18912`.
+- [x] Buffered sync apply now defers its apply-latency timestamp until staged blocks are actually ready, removing an unused `Instant::now()` call from no-ready sync ticks without changing the recorded apply latency window for ready blocks.
+  Evidence commit: `dd9995a`.
 
 **Measured but rejected in this campaign:**
 
@@ -265,6 +267,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected changing no-spend `ApplyScratch` script capture from `Some(HashMap::new())` to `None` after rerunning `sync_pipeline_apply_spend_heavy_proxy_filter` showed no statistically defensible improvement.
 - [x] Rejected storing same-block membership in `ApplyScratch` as `HashSet<Txid>` after the spend-heavy, filter, and production apply-tick sync proxies all stayed within Criterion noise.
 - [x] Rejected pre-converting `sync_peer_selection` applied height to `i32` after `many_peers_512` showed no significant movement and the follow-up received-scan/oversized-burst rerun fell back inside Criterion noise.
+- [x] Rejected returning drained staged blocks in a `SmallVec` after `production_state_128_blocks` and `production_state_apply_tick_128_blocks` both regressed within Criterion noise, exposing stack/inline-size displacement without a defensible win.
 
 **Still pending:**
 
