@@ -220,7 +220,21 @@ impl BlockSync {
         let dropped = self.block_stager.lock().prune_expired(now);
         let pruned = !dropped.is_empty();
         if pruned {
+            let tree = self.handles.block_tree.read();
+            let height_updates: Vec<(Hash256, u32)> = dropped
+                .iter()
+                .filter_map(|dropped| {
+                    let node_id = tree.lookup(dropped.hash)?;
+                    tree.node(node_id)
+                        .ok()
+                        .map(|node| (dropped.hash, node.height))
+                })
+                .collect();
+            drop(tree);
             let mut window = self.download_window.lock();
+            for (hash, height) in height_updates {
+                window.update_received_height(&hash, height);
+            }
             for dropped in dropped {
                 window.drop_received_for_retry(&dropped.hash);
             }
@@ -280,7 +294,6 @@ impl BlockSync {
             }
         }
 
-        let mut height_lookups = Vec::new();
         let mut retry_count = 0_u64;
         let staged_count = staged_blocks.len();
         {
@@ -289,9 +302,7 @@ impl BlockSync {
                 match staged {
                     StagedBlock::AlreadyStaged => {}
                     StagedBlock::Memory { bytes, dropped } => {
-                        if window.mark_received(hash, bytes) {
-                            height_lookups.push(hash);
-                        }
+                        window.mark_received(hash, bytes);
                         for dropped in dropped {
                             window.drop_received_for_retry(&dropped.hash);
                             retry_count = retry_count.saturating_add(1);
@@ -307,24 +318,6 @@ impl BlockSync {
         }
         if retry_count > 0 {
             metrics::counter!("node.sync.retry_count").increment(retry_count);
-        }
-
-        if !height_lookups.is_empty() {
-            let tree = self.handles.block_tree.read();
-            let height_updates: Vec<(Hash256, u32)> = height_lookups
-                .into_iter()
-                .filter_map(|hash| {
-                    let node_id = tree.lookup(hash)?;
-                    tree.node(node_id).ok().map(|node| (hash, node.height))
-                })
-                .collect();
-            drop(tree);
-            if !height_updates.is_empty() {
-                let mut window = self.download_window.lock();
-                for (hash, height) in height_updates {
-                    window.update_received_height(&hash, height);
-                }
-            }
         }
         staged_count
     }
