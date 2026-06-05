@@ -866,6 +866,161 @@ fn artifact_producer_rejects_unlabeled_raw_output_time() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn criterion_runner_emits_artifact_with_canonical_raw_outputs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-rs-runner-criterion",
+        "bitcoin-rs/mainnet-ibd",
+        "1.25",
+    )?;
+    let bitcoin_core_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-core-runner-criterion",
+        "bitcoin-core/mainnet-ibd",
+        "2.50",
+    )?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = temp.path().join("g14-runner-artifact.json");
+    let bitcoin_rs_raw_output = temp.path().join("bitcoin-rs-runner-raw.txt");
+    let bitcoin_core_raw_output = temp.path().join("bitcoin-core-runner-raw.txt");
+
+    let output = Command::new("bash")
+        .arg(criterion_runner_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-runner",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            bitcoin_rs_command
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--bitcoin-core-command",
+            bitcoin_core_command
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core command")?,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--",
+            "-datadir=/tmp/fake-core",
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert_success(&output);
+    let artifact_json = fs::read_to_string(&artifact)?;
+    assert!(artifact_json.contains(r#""schema": "g14-criterion-artifact-v1""#));
+    assert!(artifact_json.contains(r#""benchmark_id": "bitcoin-rs/mainnet-ibd""#));
+    assert!(artifact_json.contains(r#""benchmark_id": "bitcoin-core/mainnet-ibd""#));
+    let bitcoin_rs_raw = fs::read_to_string(&bitcoin_rs_raw_output)?;
+    let bitcoin_core_raw = fs::read_to_string(&bitcoin_core_raw_output)?;
+    assert!(bitcoin_rs_raw.contains("Benchmarking bitcoin-rs/mainnet-ibd"));
+    assert!(bitcoin_rs_raw.contains("bitcoin-rs/mainnet-ibd   time:"));
+    assert!(bitcoin_core_raw.contains("Benchmarking bitcoin-core/mainnet-ibd"));
+    assert!(bitcoin_core_raw.contains("bitcoin-core/mainnet-ibd   time:"));
+    Ok(())
+}
+
+#[test]
+fn criterion_runner_removes_partial_outputs_when_command_fails()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-rs-runner-criterion",
+        "bitcoin-rs/mainnet-ibd",
+        "1.25",
+    )?;
+    let bitcoin_core_command = fake_failing_command(temp.path(), "bitcoin-core-runner-fails")?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = temp.path().join("g14-runner-failed-artifact.json");
+    let bitcoin_rs_raw_output = temp.path().join("bitcoin-rs-runner-failed-raw.txt");
+    let bitcoin_core_raw_output = temp.path().join("bitcoin-core-runner-failed-raw.txt");
+
+    let output = Command::new("bash")
+        .arg(criterion_runner_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-runner-failed",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            bitcoin_rs_command
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--bitcoin-core-command",
+            bitcoin_core_command
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core command")?,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--bitcoin-core-command failed"));
+    assert!(!artifact.exists());
+    assert!(!bitcoin_rs_raw_output.exists());
+    assert!(!bitcoin_core_raw_output.exists());
+    Ok(())
+}
+
+#[test]
 fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_rs_config = write_text(
@@ -1651,6 +1806,10 @@ fn artifact_producer_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-criterion-artifact.sh")
 }
 
+fn criterion_runner_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-g14-mainnet-ibd-criterion.sh")
+}
+
 fn write_text(
     dir: &Path,
     name: &str,
@@ -1979,6 +2138,42 @@ import time
 time.sleep({sleep_seconds})
 ",
         ),
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+fn fake_criterion_command(
+    dir: &Path,
+    name: &str,
+    benchmark_id: &str,
+    elapsed_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r"#!/usr/bin/env python3
+print({raw_output:?}, end='')
+",
+            raw_output = criterion_raw_output(benchmark_id, elapsed_seconds),
+        ),
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+fn fake_failing_command(dir: &Path, name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        r"#!/usr/bin/env python3
+raise SystemExit(7)
+",
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(0o755);
@@ -2460,14 +2655,16 @@ fn fake_bitcoin_cli(
 import json
 import sys
 
-if len(sys.argv) == 2 and sys.argv[1] == "getblockchaininfo":
+args = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
+
+if len(args) == 1 and args[0] == "getblockchaininfo":
     print(json.dumps({{"chain": "{chain}", "blocks": {blocks}, "headers": {headers}}}))
     raise SystemExit(0)
 
-if len(sys.argv) != 3 or sys.argv[1] != "getblockhash":
+if len(args) != 2 or args[0] != "getblockhash":
     raise SystemExit(f"unexpected arguments: {{sys.argv[1:]!r}}")
 
-height = int(sys.argv[2])
+height = int(args[1])
 print({hash_expr})
 "#,
         ),

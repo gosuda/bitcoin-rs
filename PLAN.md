@@ -256,6 +256,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `42479b8`.
 - [x] G14 Criterion artifact production now binds supplied elapsed seconds to exact raw Criterion benchmark sections, rejecting elapsed/raw mismatches, non-exact benchmark labels, and unlabeled timing lines before artifact creation.
   Evidence commit: this commit; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb` passed 34/34.
+- [x] G14 Criterion measurement now has a runner that captures raw canonical `bitcoin-rs/mainnet-ibd` and `bitcoin-core/mainnet-ibd` command output, parses elapsed seconds, delegates artifact validation, forwards bitcoin-cli args, and removes partial outputs on failure.
+  Evidence commit: this commit; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus` passed 36/36.
 
 **Measured but rejected in this campaign:**
 
