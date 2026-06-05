@@ -282,6 +282,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected enabling txid-run grouping for `coalesces_committed_events()` listeners after the targeted CoinStats listener benches stayed statistically unchanged (`two_shard_8192` -1.9375%, `two_shard_512` +2.1615%, fanout -0.0733%), and node spend-heavy proxies did not produce a material end-to-end win (unfiltered -2.1686% within noise threshold, filter +1.0430% no change).
 - [x] Rejected direct serial application of sub-threshold CoinStats committed-event batches after `coinstats/utxo_commit_listener_two_shard_8192` regressed by +27.682% and no-listener `coinstats/utxo_commit_two_shard_8192` regressed by +25.090%; `two_shard_512` and fanout listener workloads showed no significant improvement.
 - [x] Rejected binary-search insertion for the already bounded sync request-peer list after scheduler targets showed no significant movement: `many_peers_512` +0.8717%, deep-headers pure +0.3328%, indexed +0.6761%, and received-scan +0.1106%.
+- [x] Rejected returning early from `expired_request_entries()` when the expired list is empty after deterministic sync targets regressed: indexed +2.1219% and received-scan +4.6699%; pure and many-peer showed no significant movement, and production-state stayed within the Criterion noise threshold.
 
 **Still pending:**
 
