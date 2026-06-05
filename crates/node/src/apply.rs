@@ -546,6 +546,7 @@ struct BlockTxPlan {
     txids: Vec<Txid>,
     only_coinbase: bool,
     overlay_capacity: usize,
+    has_bip68_sequence_locks: bool,
     created_output_count: usize,
     spent_input_count: usize,
 }
@@ -571,6 +572,7 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
     let mut txids = Vec::with_capacity(block.txdata.len());
     let mut only_coinbase = true;
     let mut overlay_capacity = 0usize;
+    let mut has_bip68_sequence_locks = false;
     let mut created_output_count = 0usize;
     let mut spent_input_count = 0usize;
 
@@ -584,6 +586,12 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
             overlay_capacity = overlay_capacity.saturating_add(output_count);
         } else {
             let input_count = tx.input.len();
+            if tx.version.0 >= 2 {
+                has_bip68_sequence_locks |= tx
+                    .input
+                    .iter()
+                    .any(|input| input.sequence.to_consensus_u32() & BIP68_DISABLE_FLAG == 0);
+            }
             spent_input_count = spent_input_count.saturating_add(input_count);
             overlay_capacity =
                 overlay_capacity.saturating_add(output_count.saturating_add(input_count));
@@ -594,6 +602,7 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
         txids,
         only_coinbase,
         overlay_capacity,
+        has_bip68_sequence_locks,
         created_output_count,
         spent_input_count,
     }
@@ -856,6 +865,9 @@ fn check_bip68_sequence_locks(
         return Ok(());
     }
     if tx_plan.only_coinbase {
+        return Ok(());
+    }
+    if !tx_plan.has_bip68_sequence_locks {
         return Ok(());
     }
 
