@@ -200,6 +200,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 
 - [x] Node sync request scheduling was compressed with bounded peer selection, FIFO staged-block eviction, collapsed received-block scans, fused getdata cache construction, alternate-peer retries for expired blocks, contiguous received-scan candidates, inbound drain batching, inbound wakeups, and retry-metric coalescing.
   Evidence commits: `ff2f211`, `74dafc0`, `d868d80`, `90b76b2`, `ec0c5e8`, `46846e1`, `a11b811`, `be99fc4`, `8a5cca6`.
+- [x] Node sync peer selection now skips saturated selected-peer scans when a candidate cannot enter the top-N request list, preserving equal-height order while shrinking many-peer scheduler ticks.
+  Evidence commit: `e2f766e`.
 - [x] Node apply-path hot spots were compressed with UTXO change txid conversion hoisting, cached apply-hash slice drains, and related block-apply scan reductions.
   Evidence commits: `7a337b3`, `196c63c`.
 - [x] Node UTXO-change assembly was compressed by hoisting per-transaction coinbase classification out of the output/removal branches.
