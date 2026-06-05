@@ -53,8 +53,8 @@ impl BlockStager {
     pub(super) fn new(budget: SyncBudget) -> Self {
         Self {
             budget,
-            received: HashMap::new(),
-            received_order: VecDeque::new(),
+            received: HashMap::with_capacity(budget.max_received_blocks),
+            received_order: VecDeque::with_capacity(budget.max_received_blocks),
             received_bytes: 0,
             next_received_deadline: None,
         }

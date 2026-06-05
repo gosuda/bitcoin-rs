@@ -89,9 +89,11 @@ impl DownloadWindow {
     pub(super) fn new(budget: SyncBudget) -> Self {
         Self {
             budget,
-            pending: HashMap::new(),
-            received: HashMap::new(),
-            peer_inflight: HashMap::new(),
+            pending: HashMap::with_capacity(budget.max_pending_blocks),
+            received: HashMap::with_capacity(budget.max_received_blocks),
+            peer_inflight: HashMap::with_capacity(
+                budget.max_pending_blocks.min(budget.max_peer_inflight),
+            ),
             pending_bytes: 0,
             received_bytes: 0,
             ewma_block_bytes: 256 * 1024,
