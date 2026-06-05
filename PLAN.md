@@ -238,6 +238,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `0dd244e`.
 - [x] UTXO key hot helpers now use explicit inline annotations without changing the `NoHashHasher` table-hash value, shrinking spend-heavy apply and guarded UTXO commit shapes.
   Evidence commit: `b85ad05`.
+- [x] Block staging eviction now removes selected FIFO eviction candidates from the received-order queue immediately, avoiding repeated stale-entry cleanup on received-scan paths without changing retry semantics.
+  Evidence commit: `cd353f2`.
 
 **Measured but rejected in this campaign:**
 
@@ -252,6 +254,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected stack-backed coinstats coin-hash scratch buffers after `sync_pipeline_apply_spend_heavy_proxy_filter` regressed by 3.6128% and `deterministic_initial_sync_proxy_production_state_apply_tick_128_blocks` regressed by 2.9976%.
 - [x] Rejected ordered full-record UTXO removal before the existing order-independent fallback after the targeted sync proxies showed no statistically defensible improvement.
 - [x] Rejected replacing `UtxoKey::hash()` with direct `as_u64()` after multi-shard UTXO commit shapes regressed despite concentrated single-shard wins.
+- [x] Rejected broad `UtxoRecord` helper inlining after `utxo_commit/uniform`, `concentrated`, and `concentrated_noop_listener` regressed significantly.
+- [x] Rejected replacing the inbound staged-result `Vec` with a chunk-sized `SmallVec` after received-scan and many-peer scheduler targets regressed despite improving oversized bursts.
 
 **Still pending:**
 
