@@ -250,6 +250,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `7d18912`.
 - [x] Buffered sync apply now defers its apply-latency timestamp until staged blocks are actually ready, removing an unused `Instant::now()` call from no-ready sync ticks without changing the recorded apply latency window for ready blocks.
   Evidence commit: `dd9995a`.
+- [x] Empty staged-block ticks now return before timeout pruning and apply-readiness checks, shrinking many-peer scheduler ticks while preserving stale-prune and contiguous-apply behavior.
+  Evidence commit: this commit; Criterion `many_peers_512` -2.6818%, deep-header pure/indexed unchanged, production-state within noise.
 - [x] Coinstats committed-event chunk staging now uses inline storage for small parallel listener reductions, removing one heap allocation from common two-shard listener batches without changing event order or UTXO semantics.
   Evidence commit: `42479b8`.
 

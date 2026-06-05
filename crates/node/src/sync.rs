@@ -215,6 +215,9 @@ impl BlockSync {
                 );
             }
         }
+        if received == 0 && self.block_stager.lock().received_len() == 0 {
+            return;
+        }
 
         let now = Instant::now();
         let dropped = self.block_stager.lock().prune_expired(now);
