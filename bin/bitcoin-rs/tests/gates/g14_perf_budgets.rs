@@ -39,6 +39,7 @@ G14_BITCOIN_CORE_ELAPSED_SECONDS, \
 G14_BITCOIN_RS_CRITERION_BENCHMARK_ID, \
 G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID, \
 G14_BENCHMARK_RUN_ID, \
+G14_BENCHMARK_HOST_ID, \
 G14_BITCOIN_CORE_VERSION, \
 G14_BITCOIN_CORE_COMMIT=<40 lowercase hex>, \
 G14_BITCOIN_RS_COMMAND_SHA256=<64 lowercase hex>, \
@@ -72,6 +73,7 @@ struct G14Evidence {
     bitcoin_rs_criterion_benchmark_id: String,
     bitcoin_core_criterion_benchmark_id: String,
     benchmark_run_id: String,
+    benchmark_host_id: String,
     bitcoin_core_version: String,
     bitcoin_core_commit: String,
     bitcoin_rs_command_sha256: String,
@@ -132,6 +134,7 @@ impl G14Evidence {
             "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID must identify Bitcoin Core mainnet IBD"
         );
         let benchmark_run_id = required_env("G14_BENCHMARK_RUN_ID");
+        let benchmark_host_id = required_env("G14_BENCHMARK_HOST_ID");
         let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
         let bitcoin_core_commit = required_hex("G14_BITCOIN_CORE_COMMIT", 40);
         let bitcoin_rs_command_sha256 = required_hex("G14_BITCOIN_RS_COMMAND_SHA256", 64);
@@ -181,6 +184,7 @@ impl G14Evidence {
             bitcoin_rs_criterion_benchmark_id,
             bitcoin_core_criterion_benchmark_id,
             benchmark_run_id,
+            benchmark_host_id,
             bitcoin_core_version,
             bitcoin_core_commit,
             bitcoin_rs_command_sha256,
@@ -264,6 +268,7 @@ impl G14Evidence {
         let bitcoin_rs_criterion_benchmark_id = &self.bitcoin_rs_criterion_benchmark_id;
         let bitcoin_core_criterion_benchmark_id = &self.bitcoin_core_criterion_benchmark_id;
         let benchmark_run_id = &self.benchmark_run_id;
+        let benchmark_host_id = &self.benchmark_host_id;
         let bitcoin_core_version = &self.bitcoin_core_version;
         let bitcoin_core_commit = &self.bitcoin_core_commit;
         let bitcoin_rs_command_sha256 = &self.bitcoin_rs_command_sha256;
@@ -294,6 +299,7 @@ impl G14Evidence {
         println!("bitcoin_rs_criterion_benchmark_id={bitcoin_rs_criterion_benchmark_id}");
         println!("bitcoin_core_criterion_benchmark_id={bitcoin_core_criterion_benchmark_id}");
         println!("benchmark_run_id={benchmark_run_id}");
+        println!("benchmark_host_id={benchmark_host_id}");
         println!("bitcoin_core_version={bitcoin_core_version}");
         println!("bitcoin_core_commit={bitcoin_core_commit}");
         println!("bitcoin_rs_command_sha256={bitcoin_rs_command_sha256}");

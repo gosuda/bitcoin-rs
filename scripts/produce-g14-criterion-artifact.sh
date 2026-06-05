@@ -3,11 +3,11 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: produce-g14-criterion-artifact.sh --output <artifact.json> --benchmark-run-id <id> --ibd-start-height <height> --ibd-stop-height <height> --criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds> --criterion-bitcoin-rs-raw-output <path> --criterion-bitcoin-core-raw-output <path> --bitcoin-rs-command <command> --bitcoin-core-command <command> --bitcoin-rs-config <path> --bitcoin-core-config <path> [--force] [-- <bitcoin-cli-arg>...]' \
+    'usage: produce-g14-criterion-artifact.sh --output <artifact.json> --benchmark-run-id <id> --benchmark-host-id <id> --ibd-start-height <height> --ibd-stop-height <height> --criterion-bitcoin-rs-elapsed-seconds <seconds> --criterion-bitcoin-core-elapsed-seconds <seconds> --criterion-bitcoin-rs-raw-output <path> --criterion-bitcoin-core-raw-output <path> --bitcoin-rs-command <command> --bitcoin-core-command <command> --bitcoin-rs-config <path> --bitcoin-core-config <path> [--force] [-- <bitcoin-cli-arg>...]' \
     '' \
     'Packages externally measured Criterion elapsed seconds for one bitcoin-rs IBD run and one Bitcoin Core IBD run over a live mainnet height window.' \
     'Writes a fail-closed g14-criterion-artifact-v1 JSON artifact consumable by produce-g14-ibd-manifest.sh; this helper does not time commands itself.' \
-    'The artifact binds live bitcoin-cli start/stop hashes, canonical benchmark IDs, one shared benchmark_run_id, command/config SHA-256 fields, and raw Criterion output SHA-256 fields.' \
+    'The artifact binds live bitcoin-cli start/stop hashes, canonical benchmark IDs, one shared benchmark_run_id, one shared benchmark_host_id, command/config SHA-256 fields, and raw Criterion output SHA-256 fields.' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.'
 }
@@ -142,6 +142,7 @@ parser = argparse.ArgumentParser(add_help=False)
 parser.add_argument("-h", "--help", action="store_true")
 parser.add_argument("--output")
 parser.add_argument("--benchmark-run-id")
+parser.add_argument("--benchmark-host-id")
 parser.add_argument("--ibd-start-height")
 parser.add_argument("--ibd-stop-height")
 parser.add_argument("--criterion-bitcoin-rs-elapsed-seconds")
@@ -159,7 +160,7 @@ args = parser.parse_args()
 if args.help:
     usage = (
         "usage: produce-g14-criterion-artifact.sh --output <artifact.json> "
-        "--benchmark-run-id <id> --ibd-start-height <height> "
+        "--benchmark-run-id <id> --benchmark-host-id <id> --ibd-start-height <height> "
         "--ibd-stop-height <height> --criterion-bitcoin-rs-elapsed-seconds <seconds> "
         "--criterion-bitcoin-core-elapsed-seconds <seconds> "
         "--criterion-bitcoin-rs-raw-output <path> --criterion-bitcoin-core-raw-output <path> "
@@ -172,6 +173,7 @@ if args.help:
 required = {
     "--output": args.output,
     "--benchmark-run-id": args.benchmark_run_id,
+    "--benchmark-host-id": args.benchmark_host_id,
     "--ibd-start-height": args.ibd_start_height,
     "--ibd-stop-height": args.ibd_stop_height,
     "--criterion-bitcoin-rs-elapsed-seconds": args.criterion_bitcoin_rs_elapsed_seconds,
@@ -198,6 +200,7 @@ if output.exists():
     output.unlink()
 
 benchmark_run_id = non_empty_text(args.benchmark_run_id, "--benchmark-run-id")
+benchmark_host_id = non_empty_text(args.benchmark_host_id, "--benchmark-host-id")
 start_height = non_negative_height(args.ibd_start_height, "--ibd-start-height")
 stop_height = non_negative_height(args.ibd_stop_height, "--ibd-stop-height")
 if stop_height < start_height:
@@ -238,6 +241,7 @@ require_mainnet_chain_info(
 artifact = {
     "schema": CRITERION_ARTIFACT_SCHEMA,
     "benchmark_run_id": benchmark_run_id,
+    "benchmark_host_id": benchmark_host_id,
     "ibd_start_height": start_height,
     "ibd_start_hash": start_hash,
     "ibd_stop_height": stop_height,
