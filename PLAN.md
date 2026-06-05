@@ -236,6 +236,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `2234ad5`.
 - [x] Node sync received-block handling now defers unsolicited-block height resolution to rare retry/drop paths, removing an eager block-tree lookup from the hot received-scan path.
   Evidence commit: `0dd244e`.
+- [x] UTXO key hot helpers now use explicit inline annotations without changing the `NoHashHasher` table-hash value, shrinking spend-heavy apply and guarded UTXO commit shapes.
+  Evidence commit: `b85ad05`.
 
 **Measured but rejected in this campaign:**
 
@@ -249,6 +251,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected a no-listener low-vout bitmap detector for full-record spends after `utxo_commit/interleaved_same_txid_churn` regressed by 14.494% and the no-listener variant regressed by 22.785%.
 - [x] Rejected stack-backed coinstats coin-hash scratch buffers after `sync_pipeline_apply_spend_heavy_proxy_filter` regressed by 3.6128% and `deterministic_initial_sync_proxy_production_state_apply_tick_128_blocks` regressed by 2.9976%.
 - [x] Rejected ordered full-record UTXO removal before the existing order-independent fallback after the targeted sync proxies showed no statistically defensible improvement.
+- [x] Rejected replacing `UtxoKey::hash()` with direct `as_u64()` after multi-shard UTXO commit shapes regressed despite concentrated single-shard wins.
 
 **Still pending:**
 
