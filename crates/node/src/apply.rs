@@ -16,7 +16,7 @@ use bitcoin_rs_utxo::{
     LiveOutput, LiveOutputMeta, UtxoSet,
     set::{BorrowedBlockChanges, BorrowedUtxoAdd},
 };
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use parking_lot::RwLock;
 
 use crate::state::ApplyError;
@@ -32,6 +32,7 @@ const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
 const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
+const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 
 pub(crate) trait PruneBodyStore: Send + Sync {
     fn persist_block_body(
@@ -545,6 +546,7 @@ fn applied_header_tip(
 struct BlockTxPlan {
     txids: Vec<Txid>,
     only_coinbase: bool,
+    needs_local_utxo_overlay: bool,
     overlay_capacity: usize,
     has_bip68_sequence_locks: bool,
     created_output_count: usize,
@@ -571,21 +573,50 @@ impl BlockTxPlan {
 fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
     let mut txids = Vec::with_capacity(block.txdata.len());
     let mut only_coinbase = true;
+    let mut needs_local_utxo_overlay = false;
     let mut overlay_capacity = 0usize;
     let mut has_bip68_sequence_locks = false;
     let mut created_output_count = 0usize;
     let mut spent_input_count = 0usize;
+    let mut created_txids: Option<HashSet<Txid>> = None;
+    let mut spent_outpoints: Option<HashSet<bitcoin::OutPoint>> = None;
+    let track_spent_conflicts = block.txdata.len() > 2;
+    let mut saw_non_coinbase = false;
 
     for tx in &block.txdata {
         let is_coinbase = tx.is_coinbase();
         let output_count = tx.output.len();
-        txids.push(tx.compute_txid());
+        let txid = tx.compute_txid();
+        txids.push(txid);
         only_coinbase &= is_coinbase;
         created_output_count = created_output_count.saturating_add(output_count);
         if is_coinbase {
             overlay_capacity = overlay_capacity.saturating_add(output_count);
         } else {
             let input_count = tx.input.len();
+            for input in &tx.input {
+                let prior_txids = &txids[..txids.len().saturating_sub(1)];
+                let spends_created_output = if prior_txids.len() <= LOCAL_OVERLAY_TXID_SET_THRESHOLD
+                {
+                    prior_txids.contains(&input.previous_output.txid)
+                } else {
+                    let created_txids = created_txids.get_or_insert_with(|| {
+                        let mut set = HashSet::with_capacity(block.txdata.len());
+                        set.extend(prior_txids.iter().copied());
+                        set
+                    });
+                    created_txids.contains(&input.previous_output.txid)
+                };
+                let repeats_prior_spend = if track_spent_conflicts {
+                    let spent_outpoints =
+                        spent_outpoints.get_or_insert_with(|| HashSet::with_capacity(input_count));
+                    !spent_outpoints.insert(input.previous_output)
+                } else {
+                    saw_non_coinbase
+                };
+                needs_local_utxo_overlay |= spends_created_output || repeats_prior_spend;
+            }
+            saw_non_coinbase = true;
             if tx.version.0 >= 2 {
                 has_bip68_sequence_locks |= tx
                     .input
@@ -596,11 +627,15 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
             overlay_capacity =
                 overlay_capacity.saturating_add(output_count.saturating_add(input_count));
         }
+        if let Some(created_txids) = &mut created_txids {
+            created_txids.insert(txid);
+        }
     }
 
     BlockTxPlan {
         txids,
         only_coinbase,
+        needs_local_utxo_overlay,
         overlay_capacity,
         has_bip68_sequence_locks,
         created_output_count,
@@ -654,6 +689,23 @@ fn verify_block_transactions(
     if tx_plan.only_coinbase {
         for tx in &block.txdata {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+        }
+        return Ok(());
+    }
+    if !tx_plan.needs_local_utxo_overlay {
+        let view = crate::UtxoSetView::new(Arc::clone(&handles.utxo));
+        for tx in &block.txdata {
+            if tx.is_coinbase() {
+                bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+                continue;
+            }
+            bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
+                tx,
+                &view,
+                height,
+                locktime_cutoff,
+                flags,
+            )?;
         }
         return Ok(());
     }
@@ -1360,6 +1412,48 @@ mod consensus_rule_tests {
             0,
             bitcoin_rs_script::VerifyFlags::NONE,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_rejects_cross_transaction_duplicate_spend()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x64; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(base_prevout, 1)?;
+        let handles = apply_handles(utxo);
+        let first_spend = spending_transaction_to_script(
+            base_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let second_spend = spending_transaction_to_script(
+            base_prevout,
+            Sequence::MAX.to_consensus_u32() - 1,
+            op_true_script(),
+        );
+        let block = block_with_transactions(vec![first_spend, second_spend]);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &tx_plan(&block),
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::NONE,
+        ) {
+            Ok(()) => panic!("cross-transaction duplicate spend must fail script verification"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::MissingPrevout {
+                input_index: 0
+            })
+        ));
         Ok(())
     }
 
