@@ -212,6 +212,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `0b39026`.
 - [x] Coinstats direct listener batches were compressed with thresholded parallel insert/remove reductions for large single-shard batches.
   Evidence commit: `4540052`.
+- [x] Coinstats small committed event batches were compressed by using serial delta reduction below the parallel chunk threshold, with a 512-entry two-shard listener benchmark guard.
+  Evidence commit: `d5718e9`.
 - [x] UTXO fully-spent record deletion was compressed from two hash-table probes to one occupied-entry probe.
   Evidence commit: `7e8f194`.
 - [x] Performance evidence scaffolding was expanded with a mainnet prefix replay measurement example.
@@ -223,6 +225,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected UTXO script-slab bulk reservation after repaired preflight-safe versions produced mixed Criterion results and regressions in same-txid, listener, and concentrated workloads.
 - [x] Rejected the empty-mempool write-lock skip as a commit candidate because `sync_apply_metrics` did not produce a defensible fast-path win at printed metric resolution.
 - [x] Rejected lowering `PARALLEL_LISTENER_SHARD_THRESHOLD` from 16 to 2 after `utxo_commit/two_shard_noop_listener` regressed by roughly 200% against the current baseline.
+- [x] Rejected replacing the sync reverse-scan candidate `Vec` with a ring buffer after `deep_headers_received_scan_128_blocks` regressed by 5.3575% and `many_peers_512` regressed by 10.071%.
 
 **Still pending:**
 
