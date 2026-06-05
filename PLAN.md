@@ -202,6 +202,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commits: `ff2f211`, `74dafc0`, `d868d80`, `90b76b2`, `ec0c5e8`, `46846e1`, `a11b811`, `be99fc4`, `8a5cca6`.
 - [x] Node apply-path hot spots were compressed with UTXO change txid conversion hoisting, cached apply-hash slice drains, and related block-apply scan reductions.
   Evidence commits: `7a337b3`, `196c63c`.
+- [x] Node UTXO-change assembly was compressed by hoisting per-transaction coinbase classification out of the output/removal branches.
+  Evidence commit: `97d9a75`.
 - [x] Node BIP68 apply-path planning was compressed by lazy-allocating the prevout-MTP cache only for time-based sequence locks and removing the unused non-coinbase input-count accumulator.
   Evidence commit: `0c9394d`.
 - [x] Node BIP68 apply-path planning was compressed again by skipping the full same-block metadata overlay pass when a block has no version-2 inputs with BIP68 enabled.
@@ -238,6 +240,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected replacing the sync reverse-scan candidate `Vec` with a ring buffer after `deep_headers_received_scan_128_blocks` regressed by 5.3575% and `many_peers_512` regressed by 10.071%.
 - [x] Rejected a serial coinstats event-batch reducer after `coinstats/utxo_commit_listener_two_shard_512` and `8192` showed no significant Criterion movement.
 - [x] Rejected a coinstats fanout chunk-capacity hint after `coinstats/utxo_commit_listener_fanout_8192` regressed by 6.5366% and `two_shard_8192` regressed by 3.4566%.
+- [x] Rejected a no-listener low-vout bitmap detector for full-record spends after `utxo_commit/interleaved_same_txid_churn` regressed by 14.494% and the no-listener variant regressed by 22.785%.
 
 **Still pending:**
 
