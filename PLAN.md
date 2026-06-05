@@ -272,6 +272,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected returning drained staged blocks in a `SmallVec` after `production_state_128_blocks` and `production_state_apply_tick_128_blocks` both regressed within Criterion noise, exposing stack/inline-size displacement without a defensible win.
 - [x] Rejected skipping disconnected-peer release work when the download window had no pending or inflight state after deterministic sync proxies regressed: deep-headers pure +2.4631%, indexed +3.0131%, received-scan +4.0984%, and many-peers +4.2122%.
 - [x] Rejected increasing inserted UTXO event batch inline capacity from 8 to 64 after CoinStats two-shard commit paths regressed: listener two-shard 8192 +12.289%, listener two-shard 512 +7.0375%, and no-listener two-shard 8192 +8.9538%.
+- [x] Rejected raising the CoinStats committed-event parallel threshold from 64 to 256 despite two-shard microbench wins, because node spend-heavy sync proxies regressed: unfiltered +14.390% and filter +23.508%.
 
 **Still pending:**
 
