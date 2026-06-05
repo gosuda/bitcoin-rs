@@ -847,7 +847,6 @@ fn check_coinbase_maturity_with_tx_plan(
             }
         }
         view.spend_inputs(tx);
-        view.add_output_meta(tx, *txid, height)?;
     }
     Ok(())
 }
