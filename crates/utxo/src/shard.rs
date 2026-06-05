@@ -641,12 +641,10 @@ fn apply_remove_run_with_listener<'arena>(
     let Some(first) = removes.first() else {
         return;
     };
-    let Some(mut record) = take_record(table, first.key, first.txid) else {
-        return;
-    };
-    if let Some(removed_coins) = full_record_removals_by_order::<[UtxoRemoved; 2]>(
+    if let Some(removed_coins) = remove_full_record_removals_by_order::<[UtxoRemoved; 2]>(
         table,
-        &record,
+        first.key,
+        first.txid,
         removes.len(),
         |index| removes[index].vout,
         |index| *removes[index].op,
@@ -654,6 +652,9 @@ fn apply_remove_run_with_listener<'arena>(
         listener.on_remove_coins(&removed_coins);
         return;
     }
+    let Some(mut record) = take_record(table, first.key, first.txid) else {
+        return;
+    };
     let mut removed_coins = SmallVec::<[UtxoRemoved; 2]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
@@ -678,12 +679,10 @@ fn apply_remove_run_collect_events<'arena>(
     let Some(first) = removes.first() else {
         return;
     };
-    let Some(mut record) = take_record(table, first.key, first.txid) else {
-        return;
-    };
-    if let Some(removed_coins) = full_record_removals_by_order::<[UtxoRemoved; 2]>(
+    if let Some(removed_coins) = remove_full_record_removals_by_order::<[UtxoRemoved; 2]>(
         table,
-        &record,
+        first.key,
+        first.txid,
         removes.len(),
         |index| removes[index].vout,
         |index| *removes[index].op,
@@ -695,6 +694,9 @@ fn apply_remove_run_collect_events<'arena>(
         }
         return;
     }
+    let Some(mut record) = take_record(table, first.key, first.txid) else {
+        return;
+    };
     let mut removed_coins = SmallVec::<[UtxoRemoved; 2]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
@@ -721,12 +723,10 @@ fn apply_outpoint_remove_run_with_listener<'arena>(
     removes: &[OutPoint],
     listener: &(dyn UtxoChangeListener + Send + Sync),
 ) {
-    let Some(mut record) = take_record(table, key, txid) else {
-        return;
-    };
-    if let Some(removed_coins) = full_record_removals_by_order::<[UtxoRemoved; 8]>(
+    if let Some(removed_coins) = remove_full_record_removals_by_order::<[UtxoRemoved; 8]>(
         table,
-        &record,
+        key,
+        txid,
         removes.len(),
         |index| removes[index].vout,
         |index| removes[index],
@@ -734,6 +734,9 @@ fn apply_outpoint_remove_run_with_listener<'arena>(
         listener.on_remove_coins(&removed_coins);
         return;
     }
+    let Some(mut record) = take_record(table, key, txid) else {
+        return;
+    };
     let mut removed_coins = SmallVec::<[UtxoRemoved; 8]>::with_capacity(removes.len());
     for remove in removes {
         if let Some(removed_output) = record.remove_output(remove.vout)
@@ -748,8 +751,37 @@ fn apply_outpoint_remove_run_with_listener<'arena>(
     }
 }
 
+fn remove_full_record_removals_by_order<A>(
+    table: &mut ShardTable<'_>,
+    key: UtxoKey,
+    txid: Hash256,
+    remove_count: usize,
+    remove_vout: impl FnMut(usize) -> u32,
+    remove_outpoint: impl FnMut(usize) -> OutPoint,
+) -> Option<SmallVec<A>>
+where
+    A: smallvec::Array<Item = UtxoRemoved>,
+{
+    let entry = table
+        .table
+        .find_entry(key.hash(), |record| {
+            record.key() == key && record.txid() == txid
+        })
+        .ok()?;
+    let removed_coins = full_record_removals_by_order::<A>(
+        &table.script_bytes,
+        entry.get(),
+        remove_count,
+        remove_vout,
+        remove_outpoint,
+    )?;
+    let (_record, _vacant) = entry.remove();
+    table.deleted = table.deleted.saturating_add(1);
+    Some(removed_coins)
+}
+
 fn full_record_removals_by_order<A>(
-    table: &ShardTable<'_>,
+    script_bytes: &[u8],
     record: &UtxoRecord<'_>,
     remove_count: usize,
     mut remove_vout: impl FnMut(usize) -> u32,
@@ -788,7 +820,7 @@ where
         }
         remove_bitmap |= bit;
         let output = outputs[usize::try_from(vout).ok()?]?;
-        let (txout, height, coinbase) = output_details(table, &output)?;
+        let (txout, height, coinbase) = output_details_from_script_bytes(script_bytes, &output)?;
         removed_coins.push(UtxoRemoved::new(
             remove_outpoint(index),
             txout,
@@ -1216,11 +1248,26 @@ fn script_slice<'table>(
 
 fn output_details(table: &ShardTable<'_>, output: &OneUtxoOut) -> Option<(TxOut, u32, bool)> {
     let script = script_slice(table, output)?;
-    Some((
+    Some(output_details_from_parts(output, script))
+}
+
+fn output_details_from_script_bytes(
+    script_bytes: &[u8],
+    output: &OneUtxoOut,
+) -> Option<(TxOut, u32, bool)> {
+    let start = usize::try_from(output.script_pubkey_offset).ok()?;
+    let len = usize::from(output.script_pubkey_len);
+    let end = start.checked_add(len)?;
+    let script = script_bytes.get(start..end)?;
+    Some(output_details_from_parts(output, script))
+}
+
+fn output_details_from_parts(output: &OneUtxoOut, script: &[u8]) -> (TxOut, u32, bool) {
+    (
         txout_from_parts(output.value, script),
         output.height,
         output.coinbase,
-    ))
+    )
 }
 
 fn txout_from_parts(value: u64, script: &[u8]) -> TxOut {
