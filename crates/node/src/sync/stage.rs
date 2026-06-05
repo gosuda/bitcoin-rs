@@ -4,7 +4,7 @@ use std::{
 };
 
 use bitcoin_rs_primitives::Hash256;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, hash_map::Entry};
 
 use super::window::SyncBudget;
 
@@ -88,10 +88,10 @@ impl BlockStager {
         block: bitcoin::Block,
         now: Instant,
     ) -> StagedBlock {
-        if self.received.contains_key(&hash) {
-            return StagedBlock::AlreadyStaged;
-        }
-
+        let entry = match self.received.entry(hash) {
+            Entry::Occupied(_) => return StagedBlock::AlreadyStaged,
+            Entry::Vacant(entry) => entry,
+        };
         let bytes = block_size(&block);
         if bytes > self.budget.max_received_bytes {
             return StagedBlock::DroppedForRetry {
@@ -99,19 +99,12 @@ impl BlockStager {
             };
         }
 
-        let previous = self.received.insert(
-            hash,
-            ReceivedBlock {
-                block,
-                received_at: now,
-                bytes,
-            },
-        );
-        if let Some(previous) = previous {
-            self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
-        } else {
-            self.received_order.push_back(hash);
-        }
+        entry.insert(ReceivedBlock {
+            block,
+            received_at: now,
+            bytes,
+        });
+        self.received_order.push_back(hash);
         self.received_bytes = self.received_bytes.saturating_add(bytes);
         self.track_received_deadline(now);
 
