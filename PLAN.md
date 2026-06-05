@@ -4,7 +4,7 @@
 
 **Goal:** Ship `bitcoin-rs` — a single-binary ultra-fast Bitcoin full node in Rust 2024. Natively-integrated UTXO (gocoin shape), Electrum-style index (electrs shape), utreexo accumulator (utreexod shape), in-process wallet (PSBT builder; **no private keys, no signing**), in-process mining (getblocktemplate), pruning, BIP157/158 compact filters, coinstats index, four pluggable storage backends (RocksDB / MDBX / fjall / redb), SIMD JSON on the RPC hot path. All production polish (graceful shutdown, ban-score, crash recovery, metrics, structured logging, config) is part of core scope.
 
-**Architecture:** One process. One `crossbeam-channel`-driven event loop (no tokio/async-std). UTXO held as 256 shards of `hashbrown::HashTable<ArenaRef<'arena>>` over `bumpalo::Bump`, arenas pinned via `self_cell!` so the lifetime is sound (not transmuted), each shard guarded by `parking_lot::RwLock` and `CachePadded` against false sharing. Block tree as `slab::Slab<Node>` + `u32 NodeId`; tip published via `arc_swap::ArcSwapOption<TipSnapshot>`; chainwork as `ruint::Uint<256,4>`. Consensus *borrowed* from `bitcoinkernel >=0.1` (default-on, alpha-but-load-bearing) — our Rust validator runs in parallel and is asserted byte-identical to kernel for every accepted block. Wallet is in-process PSBT builder + descriptor watcher with **zero private-key surface**: external signers receive a PSBT, return a signed PSBT, finalize happens inside the daemon. Storage is a `KvStore` trait with **fjall as the launch default**; RocksDB, `signet-libmdbx` (MDBX — Reth/Erigon-proven memory-mapped CoW B+tree), and `redb` (pure-Rust B+tree) live behind cargo features. All four backends are gated by G7 backend-equivalence.
+**Architecture:** One process. One `crossbeam-channel`-driven event loop (no tokio/async-std). UTXO held as 256 shards of `hashbrown::HashTable<ArenaRef<'arena>>` over `bumpalo::Bump`, arenas pinned via `self_cell!` so the lifetime is sound (not transmuted), each shard guarded by `parking_lot::RwLock` and `CachePadded` against false sharing. Block tree as `slab::Slab<Node>` + `u32 NodeId`; tip published via `arc_swap::ArcSwapOption<TipSnapshot>`; chainwork as `ruint::Uint<256,4>`. Consensus *borrowed* from `bitcoinkernel >=0.2, <0.3` (default-on, alpha-but-load-bearing) — our Rust validator runs in parallel and is asserted byte-identical to kernel for every accepted block. Wallet is in-process PSBT builder + descriptor watcher with **zero private-key surface**: external signers receive a PSBT, return a signed PSBT, finalize happens inside the daemon. Storage is a `KvStore` trait with **fjall as the launch default**; RocksDB, `signet-libmdbx` (MDBX — Reth/Erigon-proven memory-mapped CoW B+tree), and `redb` (pure-Rust B+tree) live behind cargo features. All four backends are gated by G7 backend-equivalence.
 
 **Tech stack:** Rust 2024 edition, MSRV 1.95.0, resolver `"3"`. `mimalloc` global allocator; allocator and non-UTXO hasher alternates require fresh G14 evidence before promotion. See the full Dependency Table below for the vetted floor list; every entry was audited against crates.io / GitHub on 2026-05-19 and pins to the latest stable line. The audit summary lives in the *Ultrareview Log* at the bottom.
 
@@ -19,8 +19,8 @@
 5. **Zig-style scratch arenas.** Thread-local `bumpalo::Bump`, `Bump::reset()` on block boundary (no `Drop` calls). Per-shard arenas live until shutdown and are pinned via `self_cell!`.
 6. **Pre-allocate.** Any `Vec`/`HashMap` whose final size is knowable uses `with_capacity` + `push_within_capacity`.
 7. **Unsafe when it pays its way.** `unsafe` is permitted wherever a bench shows a genuine win. Every `unsafe` block carries a `// SAFETY:` rationale (enforced via `clippy::undocumented_unsafe_blocks = deny`) and a one-line bench delta in the commit body (`Δp95: NNμs → MMμs`). Prefer `zerocopy` / `NonNull<T>` / `bumpalo` shapes when they match the win; reach for raw `unsafe` when they don't.
-8. **Best-of-breed data structures.** UTXO map: `hashbrown::HashTable` over `Box<bumpalo::Bump>` pinned via `self_cell!`. Block tree: `slab::Slab<Node>` + `u32 NodeId`. Chainwork compare: `ruint::Uint<256, 4>`. Mempool by-fee: gocoin's Pareto-front priority queue on `tinyvec::ArrayVec`. Mempool funding/spending: `BTreeSet` (Electrum needs prefix range scans). SHA-256: `sha2 >=0.10, <0.11` with `asm`, `bitcoin_hashes` with `asm`. Non-UTXO hashing: `foldhash` default; `gxhash` opt-in behind an `x86_64-aes` runtime check; `nohash-hasher` for UTXO key (8-byte TXID prefix is already uniform).
-9. **Consensus is borrowed, not invented.** `bitcoinkernel >=0.1` is the consensus authority. Our Rust validator runs in parallel and must be byte-identical for every accepted block. If kernel and our Rust path disagree, kernel wins and our Rust path is the bug. A `pure-rust-validation` feature is deferred until 12 months of unbroken mainnet kernel parity.
+8. **Best-of-breed data structures.** UTXO map: `hashbrown::HashTable` over `Box<bumpalo::Bump>` pinned via `self_cell!`. Block tree: `slab::Slab<Node>` + `u32 NodeId`. Chainwork compare: `ruint::Uint<256, 4>`. Mempool by-fee: gocoin's Pareto-front priority queue on `tinyvec::ArrayVec`. Mempool funding/spending: `BTreeSet` (Electrum needs prefix range scans). SHA-256 follows the current manifest: `sha2 >=0.11, <0.12` and `bitcoin_hashes >=0.14.100, <0.15`; any SHA acceleration change requires fresh G14 evidence against that dependency graph. Non-UTXO hashing: `foldhash` default; `gxhash` opt-in behind an `x86_64-aes` runtime check; `nohash-hasher` for UTXO key (8-byte TXID prefix is already uniform).
+9. **Consensus is borrowed, not invented.** `bitcoinkernel >=0.2, <0.3` is the consensus authority. Our Rust validator runs in parallel and must be byte-identical for every accepted block. If kernel and our Rust path disagree, kernel wins and our Rust path is the bug. A `pure-rust-validation` feature is deferred until 12 months of unbroken mainnet kernel parity.
 10. **Wallet has no private-key surface.** The wallet crate builds PSBTs, watches descriptors, selects coins, bumps fees, finalizes signed PSBTs. It never reads, stores, or accepts a private key. External signers (HWI, MPC service, hardware wallet, air-gapped device) sign PSBTs and hand them back. The signing trait is a `Fn(&Psbt) -> Psbt` — implementation lives outside the daemon.
 
 ---
@@ -77,11 +77,11 @@ Stored once in `bitcoin-rs/Cargo.toml` under `[workspace.dependencies]`. Per-cra
 | Dep | Floor | Features | Notes |
 |---|---|---|---|
 | `mimalloc` | `>=0.1.50` | `[]` | `#[global_allocator]` in `bin/bitcoin-rs`; latest 0.1.50 (2026-04) [purpleprotocol/mimalloc_rust](https://github.com/purpleprotocol/mimalloc_rust) |
-| `bitcoinkernel` | `>=0.1` | `[]` | default-on consensus authority; latest 0.1.0 (alpha — vendored libbitcoinkernel); [TheCharlatan/rust-bitcoinkernel](https://github.com/TheCharlatan/rust-bitcoinkernel). Plan accepts the alpha cost because parity gating is the load-bearing safety net. |
+| `bitcoinkernel` | `>=0.2, <0.3` | `[]` | default-on consensus authority; active manifest line. Plan accepts the alpha cost because parity gating is the load-bearing safety net. |
 | `bitcoin` | `>=0.32, <0.33` | `["serde", "rand-std", "secp-recovery", "std"]` | encode/decode + types. Stay on stable 0.32.x; 0.33 is still `0.33.0-beta` as of 2026-05 — wait for final |
 | `secp256k1` | `>=0.31` | `["recovery", "rand-std", "serde", "global-context"]` | latest stable 0.31.x; 0.32 is still beta. Batch Schnorr `verify_schnorr_batch` available in 0.31+ |
-| `sha2` | `>=0.10, <0.11` | `["asm"]` | feature removed in 0.11; pin until upstream replacement lands. Bench delta documents the win |
-| `bitcoin_hashes` | `>=0.14` | `["asm"]` | `asm` is the feature name (pulls `sha2-asm` transitively); 0.20 is the bleeding-edge but introduces breaking trait changes — stay on the 0.14 line that aligns with `bitcoin 0.32` |
+| `sha2` | `>=0.11, <0.12` | `[]` | active manifest line; 0.11 exposes no `std`/`asm` feature, so SHA acceleration changes require fresh G14 evidence |
+| `bitcoin_hashes` | `>=0.14.100, <0.15` | `["std"]` | active manifest line aligned with `bitcoin 0.32`; 0.14 exposes no `asm` feature and 1.0 breaks the current bitcoin-io graph |
 | `hashbrown` | `>=0.17` | `["inline-more", "default-hasher", "nightly"]` (nightly behind `feature = "nightly-hashbrown"`) | `HashTable` API is the stable raw-insertion API (the old `raw-entry` API is deprecated); MSRV 1.95 matches |
 | `bumpalo` | `>=3.20` | `["collections"]` | per-shard + thread-local scratch arenas with `Bump::reset()` on block boundary |
 | `self_cell` | `>=1.2.2` | `[]` | proc-macro-free; pins `Box<Bump>` address so `HashTable<&'arena T>` is sound across moves |
@@ -260,6 +260,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `d84a84f`; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus` passed 36/36.
 - [x] G14 Criterion evidence now binds each artifact benchmark entry to a raw output path, verifies raw-output hashes at manifest/collector time, and re-parses canonical Criterion elapsed seconds from archived raw output before accepting faster-than-Core evidence.
   Evidence command: `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus`.
+- [x] The final G14 ignored gate now requires and reports the raw Criterion output path/hash fields exported by the collector, preserving raw-output custody in the accepted gate transcript without claiming the live faster-than-Core run is complete.
+  Evidence command: `cargo test -p bitcoin-rs --test g14_perf_budgets -- --ignored --nocapture` with synthetic current-HEAD G14 env.
 
 **Measured but rejected in this campaign:**
 
@@ -445,7 +447,7 @@ The reference for layout and constants: `bitcoin/src/primitives/transaction.h`, 
 
 - [ ] **Step 3: `Varint` codec.** Decode `u64` from `&[u8]` advancing a cursor; encode `u64` into a `tinyvec::ArrayVec<u8, 9>`. Property tests round-trip 1 000 random `u64` values + boundary values `0`, `0xfc`, `0xfd`, `0xffff`, `0x10000`, `0xffff_ffff`, `0x1_0000_0000`, `u64::MAX`.
 
-- [ ] **Step 4: `TxIn` + `TxOut` + `Tx` + `Block` + `BlockHeader`** — wrap `bitcoin::*` types where ergonomic, add zerocopy accessors where the layout permits. `Tx::txid()` and `Tx::wtxid()` use `sha2` + `asm` directly (skip the `bitcoin` crate's compute path) and panic if the input has SegWit witness data but no SegWit marker.
+- [ ] **Step 4: `TxIn` + `TxOut` + `Tx` + `Block` + `BlockHeader`** — wrap `bitcoin::*` types where ergonomic, add zerocopy accessors where the layout permits. `Tx::txid()` and `Tx::wtxid()` use the active `sha2`/`bitcoin_hashes` dependency graph directly only if fresh G14 evidence proves a win over the `bitcoin` crate's compute path; panic if the input has SegWit witness data but no SegWit marker.
 
 - [ ] **Step 5: `Network` enum** — `Mainnet`, `Testnet3`, `Testnet4`, `Signet`, `Regtest`. Constants: magic bytes, default ports, dns seeds, max target, retarget interval, genesis block hash.
 
@@ -1088,7 +1090,7 @@ Recorded so subsequent reviewers can see what changed during the original plan's
 | Original claim | Actual fact | Source |
 | --- | --- | --- |
 | `sha2 >=0.10` with `features = ["asm"]` would always work | `sha2 0.11` **removed** the `asm` cargo feature; assembly is now picked automatically via stable inline asm | https://github.com/RustCrypto/hashes/blob/master/sha2/CHANGELOG.md |
-| `bitcoin_hashes` feature is `sha2-asm` | Feature name is `asm` (it pulls `sha2-asm` transitively) | https://docs.rs/sha2-asm |
+| `bitcoin_hashes` feature is `sha2-asm` | Current workspace uses `bitcoin_hashes >=0.14.100, <0.15` with `std`; no `asm` feature is exposed in the active manifest line | Cargo.toml |
 | `hashbrown` raw-entry feature is needed for `HashTable` | `HashTable` is the stable replacement for the experimental `raw` API; raw API is being phased out | https://docs.rs/crate/hashbrown/latest/source/CHANGELOG.md |
 | `rustreexo >=0.3` exposes `Pollard`/`MemForest` | Current stable is `0.7.x`; older 0.3 line predates the three-accumulator public API | https://docs.rs/rustreexo |
 
@@ -1130,7 +1132,7 @@ Triggered by user feedback: *"RocksDB is also previous generation. Use better on
 | `bytemuck` | `>=1.18` | `>=1.25` | 1.25.0 (2026-01-31) latest |
 | `zerocopy` | `>=0.7` | `>=0.8` | 0.8 is a trait redesign (`TryFromBytes`/`IntoBytes`/`KnownLayout`); migrate now |
 | `secp256k1` | `>=0.30` | `>=0.31` | 0.31 stable (batch Schnorr verify); 0.32 is still beta |
-| `bitcoinkernel` | `>=0.2` | `>=0.1` | Corrected: actual latest is 0.1.0 (alpha). Earlier plan over-specified. |
+| `bitcoinkernel` | `>=0.1` | `>=0.2, <0.3` | Corrected to match the active workspace manifest and kernel parity gate. |
 | `rustreexo` | `>=0.7` | `>=0.5` | Corrected: actual latest stable is 0.5.0; 0.7 does not exist on crates.io |
 | `miniscript` | `>=12` | `>=13` | 13.0.0 (2025-10-28) latest stable |
 | `thiserror` | `>=1.0` | `>=2.0` | 2.0.18 (2026-01-18) latest |

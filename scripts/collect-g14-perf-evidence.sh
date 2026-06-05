@@ -26,7 +26,7 @@ usage() {
     '  Criterion artifact ibd_start_height/hash and ibd_stop_height/hash matching the live Core window,' \
     '  Criterion artifact bitcoin_rs/core command/config sha256 fields matching the evidence JSON,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
-    '  optional Electrum/RSS binding: electrum_rss_measurement_path, electrum_rss_measurement_sha256,' \
+    '  required Electrum/RSS binding: electrum_rss_measurement_path, electrum_rss_measurement_sha256,' \
     '  electrum_rss_measurement_schema=g14-electrum-rss-measurement-v1, electrum_rss_measurement_sample_size=10000,' \
     '  electrum_rss_measurement_tip_height/hash matching the live stop height/hash' \
     '' \

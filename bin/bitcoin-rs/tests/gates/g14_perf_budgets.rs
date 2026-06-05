@@ -38,6 +38,10 @@ G14_BITCOIN_RS_ELAPSED_SECONDS, \
 G14_BITCOIN_CORE_ELAPSED_SECONDS, \
 G14_BITCOIN_RS_CRITERION_BENCHMARK_ID, \
 G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID, \
+G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH, \
+G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_SHA256=<64 lowercase hex>, \
+G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH, \
+G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_SHA256=<64 lowercase hex>, \
 G14_BENCHMARK_RUN_ID, \
 G14_BENCHMARK_HOST_ID, \
 G14_BITCOIN_CORE_VERSION, \
@@ -72,6 +76,7 @@ struct G14Evidence {
     bitcoin_core_elapsed_seconds: f64,
     bitcoin_rs_criterion_benchmark_id: String,
     bitcoin_core_criterion_benchmark_id: String,
+    criterion_raw_output: CriterionRawOutputCustody,
     benchmark_run_id: String,
     benchmark_host_id: String,
     bitcoin_core_version: String,
@@ -90,6 +95,13 @@ struct G14Evidence {
     electrum_rss_measurement_sha256: String,
     electrum_scripthash_corpus: String,
     electrum_scripthash_corpus_sha256: String,
+}
+
+struct CriterionRawOutputCustody {
+    bitcoin_rs_path: String,
+    bitcoin_rs_sha256: String,
+    bitcoin_core_path: String,
+    bitcoin_core_sha256: String,
 }
 
 /// Gate G14 manual run instructions: run
@@ -133,6 +145,7 @@ impl G14Evidence {
             bitcoin_core_criterion_benchmark_id, "bitcoin-core/mainnet-ibd",
             "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID must identify Bitcoin Core mainnet IBD"
         );
+        let criterion_raw_output = CriterionRawOutputCustody::from_env();
         let benchmark_run_id = required_env("G14_BENCHMARK_RUN_ID");
         let benchmark_host_id = required_env("G14_BENCHMARK_HOST_ID");
         let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
@@ -183,6 +196,7 @@ impl G14Evidence {
             bitcoin_core_elapsed_seconds,
             bitcoin_rs_criterion_benchmark_id,
             bitcoin_core_criterion_benchmark_id,
+            criterion_raw_output,
             benchmark_run_id,
             benchmark_host_id,
             bitcoin_core_version,
@@ -267,6 +281,11 @@ impl G14Evidence {
         let bitcoin_core_elapsed_seconds = self.bitcoin_core_elapsed_seconds;
         let bitcoin_rs_criterion_benchmark_id = &self.bitcoin_rs_criterion_benchmark_id;
         let bitcoin_core_criterion_benchmark_id = &self.bitcoin_core_criterion_benchmark_id;
+        let bitcoin_rs_criterion_raw_output_path = &self.criterion_raw_output.bitcoin_rs_path;
+        let bitcoin_rs_criterion_raw_output_sha256 = &self.criterion_raw_output.bitcoin_rs_sha256;
+        let bitcoin_core_criterion_raw_output_path = &self.criterion_raw_output.bitcoin_core_path;
+        let bitcoin_core_criterion_raw_output_sha256 =
+            &self.criterion_raw_output.bitcoin_core_sha256;
         let benchmark_run_id = &self.benchmark_run_id;
         let benchmark_host_id = &self.benchmark_host_id;
         let bitcoin_core_version = &self.bitcoin_core_version;
@@ -298,6 +317,12 @@ impl G14Evidence {
         println!("bitcoin_core_elapsed_seconds={bitcoin_core_elapsed_seconds}");
         println!("bitcoin_rs_criterion_benchmark_id={bitcoin_rs_criterion_benchmark_id}");
         println!("bitcoin_core_criterion_benchmark_id={bitcoin_core_criterion_benchmark_id}");
+        println!("bitcoin_rs_criterion_raw_output_path={bitcoin_rs_criterion_raw_output_path}");
+        println!("bitcoin_rs_criterion_raw_output_sha256={bitcoin_rs_criterion_raw_output_sha256}");
+        println!("bitcoin_core_criterion_raw_output_path={bitcoin_core_criterion_raw_output_path}");
+        println!(
+            "bitcoin_core_criterion_raw_output_sha256={bitcoin_core_criterion_raw_output_sha256}"
+        );
         println!("benchmark_run_id={benchmark_run_id}");
         println!("benchmark_host_id={benchmark_host_id}");
         println!("bitcoin_core_version={bitcoin_core_version}");
@@ -317,6 +342,17 @@ impl G14Evidence {
         println!("electrum_rss_measurement_sha256={electrum_rss_measurement_sha256}");
         println!("electrum_scripthash_corpus={electrum_scripthash_corpus}");
         println!("electrum_scripthash_corpus_sha256={electrum_scripthash_corpus_sha256}");
+    }
+}
+
+impl CriterionRawOutputCustody {
+    fn from_env() -> Self {
+        Self {
+            bitcoin_rs_path: required_env("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH"),
+            bitcoin_rs_sha256: required_hex("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_SHA256", 64),
+            bitcoin_core_path: required_env("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH"),
+            bitcoin_core_sha256: required_hex("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_SHA256", 64),
+        }
     }
 }
 
