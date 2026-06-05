@@ -478,10 +478,8 @@ impl BlockSync {
     fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
         let request_peer_limit = self.download_window.lock().request_peer_scan_limit(now);
         let peers = self.peers.read();
-        let mut selection = SyncPeerSelection {
-            header_peer: None,
-            request_peers: Vec::with_capacity(request_peer_limit.min(peers.len())),
-        };
+        let mut header_peer = None;
+        let mut request_peers = Vec::with_capacity(request_peer_limit.min(peers.len()));
         let mut single_request_peer = None;
         for peer in peers.iter() {
             if u32::try_from(peer.start_height)
@@ -494,11 +492,10 @@ impl BlockSync {
                 addr: peer.addr,
                 start_height: peer.start_height,
             };
-            if selection
-                .header_peer
-                .is_none_or(|current| current.start_height < sync_peer.start_height)
+            if header_peer
+                .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
             {
-                selection.header_peer = Some(sync_peer);
+                header_peer = Some(sync_peer);
             }
             match request_peer_limit {
                 0 => {}
@@ -510,18 +507,20 @@ impl BlockSync {
                     }
                 }
                 _ => {
-                    insert_request_peer(
-                        &mut selection.request_peers,
-                        request_peer_limit,
-                        sync_peer,
-                    );
+                    request_peers.push(sync_peer);
                 }
             }
         }
         if let Some(peer) = single_request_peer {
-            selection.request_peers.push(peer);
+            request_peers.push(peer);
+        } else if request_peer_limit > 1 {
+            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+            request_peers.truncate(request_peer_limit);
         }
-        selection
+        SyncPeerSelection {
+            header_peer,
+            request_peers,
+        }
     }
 
     fn send_getdata_for_pending_blocks(
@@ -712,29 +711,6 @@ fn bitcoin_network(network: bitcoin_rs_primitives::Network) -> bitcoin::Network 
 
 fn metric_count(value: usize) -> f64 {
     f64::from(u32::try_from(value).unwrap_or(u32::MAX))
-}
-
-fn insert_request_peer(request_peers: &mut Vec<SyncPeer>, limit: usize, peer: SyncPeer) {
-    if limit == 0 {
-        return;
-    }
-    if request_peers.len() >= limit
-        && request_peers
-            .last()
-            .is_some_and(|current| current.start_height >= peer.start_height)
-    {
-        return;
-    }
-    let insert_at = request_peers
-        .iter()
-        .position(|current| current.start_height < peer.start_height)
-        .unwrap_or(request_peers.len());
-    if request_peers.len() < limit {
-        request_peers.insert(insert_at, peer);
-    } else if insert_at < limit {
-        request_peers.insert(insert_at, peer);
-        request_peers.truncate(limit);
-    }
 }
 
 const fn default_sync_budget() -> SyncBudget {
