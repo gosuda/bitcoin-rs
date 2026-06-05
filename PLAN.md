@@ -206,8 +206,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `0c9394d`.
 - [x] Node BIP68 apply-path planning was compressed again by skipping the full same-block metadata overlay pass when a block has no version-2 inputs with BIP68 enabled.
   Evidence commit: `3c60937`.
-- [x] UTXO listener/commit hot paths were compressed with ordered listener event collection, order-independent listener coalescing, coalesced listener event preallocation, small listener shard commit coalescing, serial listener error-vec removal, and fast deletion for fully spent records.
-  Evidence commits: `15bd917`, `87141a3`, `80806a3`, `cfb0c74`, `316738b`, `13ab475`.
+- [x] UTXO listener/commit hot paths were compressed with ordered listener event collection, order-independent listener coalescing, coalesced listener event preallocation, small listener shard commit coalescing, serial listener error-vec removal, fast deletion for fully spent records, and listener-aware full-record spend removal.
+  Evidence commits: `15bd917`, `87141a3`, `80806a3`, `cfb0c74`, `316738b`, `13ab475`, `6262a8d`.
 - [x] Coinstats hot helpers were compressed with private MuHash helper inlining, event-delta helper inlining, and ChaCha final-state add unrolling.
   Evidence commits: `84e8645`, `cdbeb07`, `4ebcfce`.
 - [x] Coinstats listener aggregation was compressed for large coalesced UTXO event batches with bounded parallel chunks, plus a no-listener two-shard attribution benchmark.
@@ -239,7 +239,6 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [ ] Prove all G14 budgets, not just proxy workloads: UTXO commit p95 <= 50 ms per 4 MiB block, Electrum history p95 <= 30 ms over the required sample, and RSS <= 16 GiB at mainnet tip with fjall default plus indexes.
 - [ ] Run and preserve full gate evidence for G1-G14 across two consecutive `main` CI runs before declaring bitcoin-rs shippable.
 - [ ] Keep Task 5, Task 18, and Task 20 below pending as broad roadmap tasks until their complete step lists and gate evidence are satisfied.
-- [ ] Measure and either ship or reject a listener-aware UTXO full-record removal fast path for same-txid full spends in `crates/utxo/src/shard.rs`.
 
 ---
 
