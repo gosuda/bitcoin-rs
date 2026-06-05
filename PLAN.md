@@ -260,6 +260,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected replacing `UtxoKey::hash()` with direct `as_u64()` after multi-shard UTXO commit shapes regressed despite concentrated single-shard wins.
 - [x] Rejected broad `UtxoRecord` helper inlining after `utxo_commit/uniform`, `concentrated`, and `concentrated_noop_listener` regressed significantly.
 - [x] Rejected replacing the inbound staged-result `Vec` with a chunk-sized `SmallVec` after received-scan and many-peer scheduler targets regressed despite improving oversized bursts.
+- [x] Rejected changing no-spend `ApplyScratch` script capture from `Some(HashMap::new())` to `None` after rerunning `sync_pipeline_apply_spend_heavy_proxy_filter` showed no statistically defensible improvement.
+- [x] Rejected storing same-block membership in `ApplyScratch` as `HashSet<Txid>` after the spend-heavy, filter, and production apply-tick sync proxies all stayed within Criterion noise.
 
 **Still pending:**
 
