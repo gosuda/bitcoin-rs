@@ -17,6 +17,8 @@ const COIN_HEADER_BYTES: u64 = 4;
 const AMOUNT_BYTES: u64 = 8;
 const SCRIPT_LEN_BYTES: u64 = 2;
 const MAX_RETAINED_SCRATCH_CAPACITY: usize = 4096;
+const PARALLEL_COIN_BATCH_OP_THRESHOLD: usize = 1024;
+const COIN_BATCH_CHUNK_SIZE: usize = 512;
 const PARALLEL_EVENT_CHUNK_OP_THRESHOLD: usize = 4096;
 const EVENT_CHUNK_SIZE: usize = 512;
 
@@ -391,7 +393,14 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
-        let delta = CoinStatsDelta::from_insertions(insertions);
+        let delta = if insertions.len() >= PARALLEL_COIN_BATCH_OP_THRESHOLD {
+            insertions
+                .par_chunks(COIN_BATCH_CHUNK_SIZE)
+                .map(CoinStatsDelta::from_insertions)
+                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
+        } else {
+            CoinStatsDelta::from_insertions(insertions)
+        };
         let mut state = self.state.lock();
         delta.apply_to(&mut state.stats);
     }
@@ -409,7 +418,14 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
-        let delta = CoinStatsDelta::from_removals(removals);
+        let delta = if removals.len() >= PARALLEL_COIN_BATCH_OP_THRESHOLD {
+            removals
+                .par_chunks(COIN_BATCH_CHUNK_SIZE)
+                .map(CoinStatsDelta::from_removals)
+                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
+        } else {
+            CoinStatsDelta::from_removals(removals)
+        };
         let mut state = self.state.lock();
         delta.apply_to(&mut state.stats);
     }

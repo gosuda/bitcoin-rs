@@ -3,7 +3,8 @@ use bitcoin::{Amount, ScriptBuf};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::{
-    BlockChanges, UndoBatch, UtxoAdd, UtxoKey, UtxoSet, aggregate_hash, write_snapshot,
+    BlockChanges, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoKey, UtxoRemoved,
+    UtxoSet, aggregate_hash, write_snapshot,
 };
 
 #[test]
@@ -268,6 +269,49 @@ fn listener_chunked_two_shard_delta_matches_serial_stats() -> Result<(), Box<dyn
     for (replacement, txout) in replacements {
         assert_eq!(set.get(&replacement), Some(txout));
     }
+    Ok(())
+}
+
+#[test]
+fn listener_parallel_direct_coin_batches_match_serial_stats()
+-> Result<(), Box<dyn std::error::Error>> {
+    const ENTRIES: u32 = 2_048;
+
+    let listener = CoinStatsListener::new(CoinStats::new());
+    let mut expected = CoinStats::new();
+    let mut outpoints = Vec::with_capacity(usize::try_from(ENTRIES)?);
+    let mut txouts = Vec::with_capacity(usize::try_from(ENTRIES)?);
+    let mut removals = Vec::with_capacity(usize::try_from(ENTRIES)?);
+
+    for index in 0_u32..ENTRIES {
+        let outpoint = OutPoint::new(txid(index), index);
+        let txout = txout(index);
+        let coinbase = index % 2 == 0;
+        expected.insert_utxo(&outpoint, &txout, 300, coinbase);
+        removals.push(UtxoRemoved::new(outpoint, txout.clone(), 300, coinbase));
+        outpoints.push(outpoint);
+        txouts.push(txout);
+    }
+
+    let insertions = outpoints
+        .iter()
+        .zip(&txouts)
+        .enumerate()
+        .map(|(index, (outpoint, txout))| UtxoInserted::new(outpoint, txout, 300, index % 2 == 0))
+        .collect::<Vec<_>>();
+    listener.on_insert_coins(&insertions);
+    assert_observable_stats_eq(&listener.snapshot(), &expected);
+
+    for removal in &removals {
+        expected.remove_utxo(
+            &removal.op,
+            &removal.txout,
+            removal.height,
+            removal.coinbase,
+        );
+    }
+    listener.on_remove_coins(&removals);
+    assert_observable_stats_eq(&listener.snapshot(), &expected);
     Ok(())
 }
 
