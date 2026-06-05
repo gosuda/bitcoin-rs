@@ -21,6 +21,8 @@ usage() {
     '  benchmark_artifact_path, benchmark_artifact_sha256, criterion_artifact_schema=g14-criterion-artifact-v1,' \
     '  benchmark_run_id shared by both Criterion benchmark entries,' \
     '  benchmark_host_id shared by both Criterion benchmark entries,' \
+    '  criterion_bitcoin_rs_raw_output_path, criterion_bitcoin_rs_raw_output_sha256,' \
+    '  criterion_bitcoin_core_raw_output_path, criterion_bitcoin_core_raw_output_sha256,' \
     '  Criterion artifact ibd_start_height/hash and ibd_stop_height/hash matching the live Core window,' \
     '  Criterion artifact bitcoin_rs/core command/config sha256 fields matching the evidence JSON,' \
     '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
@@ -128,6 +130,23 @@ ELECTRUM_HISTORY_METHOD = "blockchain.scripthash.get_history"
 ELECTRUM_SAMPLE_SIZE = 10_000
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
+CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
+CRITERION_UNIT_PATTERN = "(?:ns|us|\u00b5s|ms|s)"
+CRITERION_INTERVAL_RE = re.compile(
+    rf"time:\s*\[\s*({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})\s+"
+    rf"({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})\s+"
+    rf"({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})\s*\]"
+)
+CRITERION_SINGLE_RE = re.compile(
+    rf"time:\s*({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})"
+)
+CRITERION_UNIT_SECONDS = {
+    "ns": 0.000_000_001,
+    "us": 0.000_001,
+    "\u00b5s": 0.000_001,
+    "ms": 0.001,
+    "s": 1.0,
+}
 
 
 def die(message: str) -> None:
@@ -258,6 +277,92 @@ def require_raw_output_sha256(data: dict, source: str) -> str:
     return value
 
 
+def require_raw_output_path(data: dict, source: str) -> Path:
+    value = data.get("raw_output_path")
+    if not isinstance(value, str) or not value.strip():
+        die(f"{source} raw_output_path must be a non-empty string")
+    path = Path(value)
+    if not path.is_file():
+        die(f"{source} raw_output_path is not a readable file: {path}")
+    return path
+
+
+def criterion_seconds(value: str, unit: str) -> float:
+    return float(value) * CRITERION_UNIT_SECONDS[unit]
+
+
+def criterion_label_matches(line: str, benchmark_id: str) -> bool:
+    stripped = line.strip()
+    return stripped == benchmark_id or stripped == f"Benchmarking {benchmark_id}"
+
+
+def criterion_phase_matches(line: str, benchmark_id: str) -> bool:
+    return line.strip().startswith(f"Benchmarking {benchmark_id}:")
+
+
+def criterion_label_like(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith("Benchmarking "):
+        stripped = stripped.removeprefix("Benchmarking ").split(":", 1)[0].strip()
+    return re.fullmatch(r"[^\s:]+(?:/[^\s:]+)+", stripped) is not None
+
+
+def criterion_time_prefix_matches(line: str, benchmark_id: str) -> bool:
+    prefix = line.split("time:", 1)[0].strip()
+    return prefix == benchmark_id
+
+
+def criterion_elapsed_seconds(raw_output: str, benchmark_id: str, source: str) -> float:
+    lines = raw_output.splitlines()
+    for index, line in enumerate(lines):
+        if not criterion_label_matches(line, benchmark_id):
+            continue
+        for offset, candidate in enumerate(lines[index : min(len(lines), index + 16)]):
+            if offset > 0 and criterion_phase_matches(candidate, benchmark_id):
+                continue
+            if offset > 0 and criterion_label_like(candidate) and not criterion_label_matches(candidate, benchmark_id):
+                break
+            if "time:" in candidate and not criterion_time_prefix_matches(candidate, benchmark_id):
+                break
+            interval = CRITERION_INTERVAL_RE.search(candidate)
+            if interval:
+                return criterion_seconds(interval.group(3), interval.group(4))
+            single = CRITERION_SINGLE_RE.search(candidate)
+            if single:
+                return criterion_seconds(single.group(1), single.group(2))
+    die(f"{source} must contain Criterion time output for benchmark {benchmark_id!r}")
+
+
+def read_raw_output(path: Path, source: str) -> str:
+    try:
+        value = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        die(f"{source} raw_output_path must be UTF-8: {error}")
+    if not value.strip():
+        die(f"{source} raw_output_path must not be empty")
+    return value
+
+
+def require_raw_output_binding(
+    entry: dict,
+    benchmark_id: str,
+    elapsed_seconds: float,
+    source: str,
+) -> tuple[str, str]:
+    raw_output_path = require_raw_output_path(entry, source)
+    raw_output_sha256 = require_raw_output_sha256(entry, source)
+    if sha256_file(raw_output_path) != raw_output_sha256:
+        die(f"{source} raw_output_sha256 must match raw_output_path")
+    parsed_seconds = criterion_elapsed_seconds(
+        read_raw_output(raw_output_path, source),
+        benchmark_id,
+        source,
+    )
+    if not math.isclose(elapsed_seconds, parsed_seconds, rel_tol=0.0, abs_tol=1e-12):
+        die(f"{source} elapsed_seconds must match raw_output_path Criterion output")
+    return str(raw_output_path.resolve()), raw_output_sha256
+
+
 def require_exact_int(data: dict, key: str, expected: int, source: str) -> int:
     value = data.get(key)
     if not isinstance(value, int) or isinstance(value, bool):
@@ -286,7 +391,7 @@ def read_criterion_artifact(
     start_hash: str,
     stop_hash: str,
     command_config_hashes: dict[str, str],
-) -> tuple[str, str, dict[str, float]]:
+) -> tuple[str, str, dict[str, float], dict[str, str], dict[str, str]]:
     try:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -315,6 +420,8 @@ def read_criterion_artifact(
     if not isinstance(benchmarks, list):
         die("benchmark_artifact_path benchmarks must be an array")
     elapsed_by_id = {}
+    raw_output_path_by_id = {}
+    raw_output_sha256_by_id = {}
     for index, entry in enumerate(benchmarks):
         if not isinstance(entry, dict):
             die(f"benchmark_artifact_path benchmarks[{index}] must be an object")
@@ -327,7 +434,6 @@ def read_criterion_artifact(
             benchmark_run_id,
             f"benchmark_artifact_path benchmarks[{index}]",
         )
-        require_raw_output_sha256(entry, f"benchmark_artifact_path benchmarks[{index}]")
         if benchmark_id in elapsed_by_id:
             die(f"benchmark_artifact_path contains duplicate benchmark_id {benchmark_id!r}")
         elapsed = entry.get("elapsed_seconds")
@@ -336,8 +442,16 @@ def read_criterion_artifact(
         elapsed = float(elapsed)
         if not elapsed > 0.0 or elapsed == float("inf"):
             die(f"benchmark_artifact_path benchmark {benchmark_id!r} elapsed_seconds must be finite and positive")
+        raw_path, raw_sha256 = require_raw_output_binding(
+            entry,
+            benchmark_id,
+            elapsed,
+            f"benchmark_artifact_path benchmarks[{index}]",
+        )
         elapsed_by_id[benchmark_id] = elapsed
-    return benchmark_run_id, benchmark_host_id, elapsed_by_id
+        raw_output_path_by_id[benchmark_id] = raw_path
+        raw_output_sha256_by_id[benchmark_id] = raw_sha256
+    return benchmark_run_id, benchmark_host_id, elapsed_by_id, raw_output_path_by_id, raw_output_sha256_by_id
 
 
 def read_json_file(path: Path, source: str):
@@ -447,6 +561,15 @@ def require_artifact_elapsed(
         die(f"{name} must match benchmark_artifact_path elapsed_seconds for {benchmark_id!r}")
 
 
+def optional_manifest_binding(data: dict, key: str, expected: str) -> str:
+    if key not in data:
+        return expected
+    value = require_text(data, key)
+    if value != expected:
+        die(f"{key} must match benchmark_artifact_path")
+    return value
+
+
 def current_head() -> str:
     output = subprocess.check_output(["git", "rev-parse", "--verify", "HEAD"], text=True)
     return require_hex(output.strip(), 40, "git HEAD")
@@ -503,7 +626,13 @@ if not benchmark_artifact_path.is_file():
 if sha256_file(benchmark_artifact_path) != benchmark_artifact_sha256:
     die("benchmark_artifact_sha256 must match benchmark_artifact_path")
 require_literal_value(data, "criterion_artifact_schema", CRITERION_ARTIFACT_SCHEMA)
-artifact_benchmark_run_id, artifact_benchmark_host_id, artifact_elapsed_by_id = read_criterion_artifact(
+(
+    artifact_benchmark_run_id,
+    artifact_benchmark_host_id,
+    artifact_elapsed_by_id,
+    artifact_raw_output_path_by_id,
+    artifact_raw_output_sha256_by_id,
+) = read_criterion_artifact(
     benchmark_artifact_path,
     start_height,
     stop_height,
@@ -548,6 +677,28 @@ require_artifact_elapsed(
     bitcoin_core_elapsed_seconds,
     "bitcoin_core_elapsed_seconds",
 )
+criterion_bitcoin_rs_raw_output_path = optional_manifest_binding(
+    data,
+    "criterion_bitcoin_rs_raw_output_path",
+    artifact_raw_output_path_by_id[criterion_bitcoin_rs_benchmark_id],
+)
+criterion_bitcoin_rs_raw_output_sha256 = optional_manifest_binding(
+    data,
+    "criterion_bitcoin_rs_raw_output_sha256",
+    artifact_raw_output_sha256_by_id[criterion_bitcoin_rs_benchmark_id],
+)
+require_hex(criterion_bitcoin_rs_raw_output_sha256, 64, "criterion_bitcoin_rs_raw_output_sha256")
+criterion_bitcoin_core_raw_output_path = optional_manifest_binding(
+    data,
+    "criterion_bitcoin_core_raw_output_path",
+    artifact_raw_output_path_by_id[criterion_bitcoin_core_benchmark_id],
+)
+criterion_bitcoin_core_raw_output_sha256 = optional_manifest_binding(
+    data,
+    "criterion_bitcoin_core_raw_output_sha256",
+    artifact_raw_output_sha256_by_id[criterion_bitcoin_core_benchmark_id],
+)
+require_hex(criterion_bitcoin_core_raw_output_sha256, 64, "criterion_bitcoin_core_raw_output_sha256")
 if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
     die(
         "bitcoin-rs initial sync evidence must be faster than Bitcoin Core "
@@ -574,6 +725,10 @@ env = {
     "G14_BITCOIN_CORE_ELAPSED_SECONDS": bitcoin_core_elapsed_seconds,
     "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID": criterion_bitcoin_rs_benchmark_id,
     "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID": criterion_bitcoin_core_benchmark_id,
+    "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH": criterion_bitcoin_rs_raw_output_path,
+    "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_SHA256": criterion_bitcoin_rs_raw_output_sha256,
+    "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH": criterion_bitcoin_core_raw_output_path,
+    "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_SHA256": criterion_bitcoin_core_raw_output_sha256,
     "G14_BENCHMARK_RUN_ID": artifact_benchmark_run_id,
     "G14_BENCHMARK_HOST_ID": benchmark_host_id,
     "G14_BITCOIN_CORE_VERSION": require_text(data, "bitcoin_core_version"),

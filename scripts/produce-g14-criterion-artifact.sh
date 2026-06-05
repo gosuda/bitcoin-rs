@@ -7,7 +7,7 @@ usage() {
     '' \
     'Packages externally measured Criterion elapsed seconds for one bitcoin-rs IBD run and one Bitcoin Core IBD run over a live mainnet height window.' \
     'Writes a fail-closed g14-criterion-artifact-v1 JSON artifact consumable by produce-g14-ibd-manifest.sh; this helper does not time commands itself.' \
-    'The artifact binds live bitcoin-cli start/stop hashes, canonical benchmark IDs, one shared benchmark_run_id, one shared benchmark_host_id, command/config SHA-256 fields, and raw Criterion output SHA-256 fields.' \
+    'The artifact binds live bitcoin-cli start/stop hashes, canonical benchmark IDs, one shared benchmark_run_id, one shared benchmark_host_id, command/config SHA-256 fields, and raw Criterion output paths/SHA-256 fields.' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.'
 }
@@ -349,12 +349,14 @@ artifact = {
             "benchmark_id": BITCOIN_RS_CRITERION_BENCHMARK_ID,
             "benchmark_run_id": benchmark_run_id,
             "elapsed_seconds": bitcoin_rs_elapsed_seconds,
+            "raw_output_path": str(bitcoin_rs_raw_output.resolve()),
             "raw_output_sha256": sha256_file(bitcoin_rs_raw_output),
         },
         {
             "benchmark_id": BITCOIN_CORE_CRITERION_BENCHMARK_ID,
             "benchmark_run_id": benchmark_run_id,
             "elapsed_seconds": bitcoin_core_elapsed_seconds,
+            "raw_output_path": str(bitcoin_core_raw_output.resolve()),
             "raw_output_sha256": sha256_file(bitcoin_core_raw_output),
         },
     ],

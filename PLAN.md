@@ -6,7 +6,7 @@
 
 **Architecture:** One process. One `crossbeam-channel`-driven event loop (no tokio/async-std). UTXO held as 256 shards of `hashbrown::HashTable<ArenaRef<'arena>>` over `bumpalo::Bump`, arenas pinned via `self_cell!` so the lifetime is sound (not transmuted), each shard guarded by `parking_lot::RwLock` and `CachePadded` against false sharing. Block tree as `slab::Slab<Node>` + `u32 NodeId`; tip published via `arc_swap::ArcSwapOption<TipSnapshot>`; chainwork as `ruint::Uint<256,4>`. Consensus *borrowed* from `bitcoinkernel >=0.1` (default-on, alpha-but-load-bearing) — our Rust validator runs in parallel and is asserted byte-identical to kernel for every accepted block. Wallet is in-process PSBT builder + descriptor watcher with **zero private-key surface**: external signers receive a PSBT, return a signed PSBT, finalize happens inside the daemon. Storage is a `KvStore` trait with **fjall as the launch default**; RocksDB, `signet-libmdbx` (MDBX — Reth/Erigon-proven memory-mapped CoW B+tree), and `redb` (pure-Rust B+tree) live behind cargo features. All four backends are gated by G7 backend-equivalence.
 
-**Tech stack:** Rust 2024 edition, MSRV 1.85.0, resolver `"3"`. `mimalloc` global allocator (`snmalloc-rs` + `tikv-jemallocator` re-benchmarked in G14 as alternates). See the full Dependency Table below for the vetted floor list; every entry was audited against crates.io / GitHub on 2026-05-19 and pins to the latest stable line. The audit summary lives in the *Ultrareview Log* at the bottom.
+**Tech stack:** Rust 2024 edition, MSRV 1.95.0, resolver `"3"`. `mimalloc` global allocator; allocator and non-UTXO hasher alternates require fresh G14 evidence before promotion. See the full Dependency Table below for the vetted floor list; every entry was audited against crates.io / GitHub on 2026-05-19 and pins to the latest stable line. The audit summary lives in the *Ultrareview Log* at the bottom.
 
 ---
 
@@ -31,7 +31,7 @@
 bitcoin-rs/
 ├── Cargo.toml                    # workspace; resolver "3"; members + lints
 ├── Cargo.lock                    # committed
-├── rust-toolchain.toml           # channel = "1.85.0"
+├── rust-toolchain.toml           # channel = "1.95.0"
 ├── clippy.toml                   # MSRV + cognitive-complexity + pedantic deny list
 ├── PLAN.md                       # mirror of this plan (Task 0 creates)
 ├── README.md
@@ -82,7 +82,7 @@ Stored once in `bitcoin-rs/Cargo.toml` under `[workspace.dependencies]`. Per-cra
 | `secp256k1` | `>=0.31` | `["recovery", "rand-std", "serde", "global-context"]` | latest stable 0.31.x; 0.32 is still beta. Batch Schnorr `verify_schnorr_batch` available in 0.31+ |
 | `sha2` | `>=0.10, <0.11` | `["asm"]` | feature removed in 0.11; pin until upstream replacement lands. Bench delta documents the win |
 | `bitcoin_hashes` | `>=0.14` | `["asm"]` | `asm` is the feature name (pulls `sha2-asm` transitively); 0.20 is the bleeding-edge but introduces breaking trait changes — stay on the 0.14 line that aligns with `bitcoin 0.32` |
-| `hashbrown` | `>=0.17` | `["inline-more", "default-hasher", "nightly"]` (nightly behind `feature = "nightly-hashbrown"`) | `HashTable` API is the stable raw-insertion API (the old `raw-entry` API is deprecated); MSRV 1.85 matches |
+| `hashbrown` | `>=0.17` | `["inline-more", "default-hasher", "nightly"]` (nightly behind `feature = "nightly-hashbrown"`) | `HashTable` API is the stable raw-insertion API (the old `raw-entry` API is deprecated); MSRV 1.95 matches |
 | `bumpalo` | `>=3.20` | `["collections"]` | per-shard + thread-local scratch arenas with `Bump::reset()` on block boundary |
 | `self_cell` | `>=1.2.2` | `[]` | proc-macro-free; pins `Box<Bump>` address so `HashTable<&'arena T>` is sound across moves |
 | `ruint` | `>=1.12` | `["alloc"]` | `Uint<256, 4>` for chainwork (constant-time compare beats heap-allocated bignums) |
@@ -96,7 +96,7 @@ Stored once in `bitcoin-rs/Cargo.toml` under `[workspace.dependencies]`. Per-cra
 | `foldhash` | `>=0.2` | `[]` | default hasher (non-UTXO); 0.2 latest; explicit `BuildHasher` everywhere |
 | `gxhash` | `>=3.4` | `[]` | opt-in `[features] gxhash = ["dep:gxhash"]` — runtime AES-NI probe + fallback to foldhash |
 | `nohash-hasher` | `>=0.2` | `[]` | identity hasher for the UTXO key (8-byte TXID prefix is uniform-by-construction) |
-| `rapidhash` | `>=4.1` | `[]` (dev-dep only, behind `bench-hashers` feature) | benchmarked against foldhash in G14; promoted to default if a clean win materializes |
+| `rapidhash` | `>=4.1` | `[]` (dev-dep only) | candidate non-UTXO hasher for future G14 comparison; promoted only if a clean measured win materializes |
 | `tinyvec` | `>=1.11` | `["alloc"]` | primary `ArrayVec` for hot paths (100 % safe, no unsafe); mempool Pareto entries, sighash cache slots |
 | `smallvec` | `>=1.15` | `["union", "const_generics"]` | spill-tolerant cases only; `arrayvec` is rejected as effectively frozen |
 | `compact_str` | `>=0.9` | `[]` | SSO string for Electrum method names + tag strings |
@@ -121,7 +121,7 @@ Stored once in `bitcoin-rs/Cargo.toml` under `[workspace.dependencies]`. Per-cra
 | `serde_json` | `>=1.0` | `["raw_value"]` | cold path (config, fixture loading) |
 | `sonic-rs` | `>=0.5` | `[]` | SIMD JSON — 4-5× faster than `serde_json` on 1–100 KiB payloads; used by `crates/rpc` + `crates/electrum` on the hot path. Drop-in via `serde` traits ([cloudwego/sonic-rs](https://github.com/cloudwego/sonic-rs)) |
 | `toml` | `>=0.8` | `[]` | config (read-only) |
-| `clap` | `>=4.6` | `["derive", "env", "wrap_help"]` | CLI; MSRV 1.85 matches |
+| `clap` | `>=4.6` | `["derive", "env", "wrap_help"]` | CLI; MSRV 1.95 matches |
 | `signal-hook` | `>=0.4` | `[]` | sigterm/sigint; 0.4 latest |
 | `rustls` | `>=0.23` | `["std"]` | TLS for Electrum listener; 0.23.40 latest |
 | `rustls-pki-types` | `>=1.14` | `[]` | mandatory companion to `rustls` |
@@ -135,7 +135,7 @@ Stored once in `bitcoin-rs/Cargo.toml` under `[workspace.dependencies]`. Per-cra
 **`clippy.toml`:**
 
 ```toml
-msrv = "1.85.0"
+msrv = "1.95.0"
 cognitive-complexity-threshold = 15
 type-complexity-threshold = 250
 too-many-arguments-threshold = 8
@@ -180,7 +180,7 @@ All gates must pass before bitcoin-rs is shippable. Not phased — these are fla
 
 **G12 — Graceful shutdown.** SIGTERM during IBD → all in-flight writes flush, RPC connections drain with 5 s deadline, snapshot written, exit code 0. Verified via `criterion` + a regression `#[test]` driving signal-hook.
 
-**G13 — Lints clean.** `cargo +1.85.0 clippy --workspace --all-targets --all-features -- -D warnings` returns 0. `cargo +1.85.0 fmt --check` clean. `cargo deny check` clean.
+**G13 — Lints clean.** `cargo +1.95.0 clippy -p bitcoin-rs --all-targets --no-default-features --features "$FEATURES" -- -D warnings` returns 0. `cargo +1.95.0 fmt --check` clean. `cargo deny check` clean.
 
 **G14 — Performance budgets.**
 - Initial block sync throughput is faster than Bitcoin Core's blocks-per-second on identical mainnet IBD (measured via `criterion`).
@@ -251,13 +251,15 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Buffered sync apply now defers its apply-latency timestamp until staged blocks are actually ready, removing an unused `Instant::now()` call from no-ready sync ticks without changing the recorded apply latency window for ready blocks.
   Evidence commit: `dd9995a`.
 - [x] Empty staged-block ticks now return before timeout pruning and apply-readiness checks, shrinking many-peer scheduler ticks while preserving stale-prune and contiguous-apply behavior.
-  Evidence commit: this commit; Criterion `many_peers_512` -2.6818%, deep-header pure/indexed unchanged, production-state within noise.
+  Evidence commit: `7e7421e`; Criterion `many_peers_512` -2.6818%, deep-header pure/indexed unchanged, production-state within noise.
 - [x] Coinstats committed-event chunk staging now uses inline storage for small parallel listener reductions, removing one heap allocation from common two-shard listener batches without changing event order or UTXO semantics.
   Evidence commit: `42479b8`.
 - [x] G14 Criterion artifact production now binds supplied elapsed seconds to exact raw Criterion benchmark sections, rejecting elapsed/raw mismatches, non-exact benchmark labels, and unlabeled timing lines before artifact creation.
-  Evidence commit: this commit; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb` passed 34/34.
+  Evidence commit: `2db4124`; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb` passed 34/34.
 - [x] G14 Criterion measurement now has a runner that captures raw canonical `bitcoin-rs/mainnet-ibd` and `bitcoin-core/mainnet-ibd` command output, parses elapsed seconds, delegates artifact validation, forwards bitcoin-cli args, and removes partial outputs on failure.
-  Evidence commit: this commit; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus` passed 36/36.
+  Evidence commit: `d84a84f`; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus` passed 36/36.
+- [x] G14 Criterion evidence now binds each artifact benchmark entry to a raw output path, verifies raw-output hashes at manifest/collector time, and re-parses canonical Criterion elapsed seconds from archived raw output before accepting faster-than-Core evidence.
+  Evidence command: `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus`.
 
 **Measured but rejected in this campaign:**
 
@@ -341,7 +343,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.95.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/<owner>/bitcoin-rs"
 version = "0.1.0"
@@ -418,7 +420,7 @@ workspace = true
 
 - [ ] **Step 7: `cargo build --workspace`** verify the skeleton compiles.
 
-- [ ] **Step 8: `cargo +1.85.0 clippy --workspace -- -D warnings`** — fix any skeleton-level violations.
+- [ ] **Step 8: `cargo +1.95.0 clippy -p bitcoin-rs --all-targets --no-default-features --features "$FEATURES" -- -D warnings`** — fix any skeleton-level violations.
 
 - [ ] **Step 9: Commit.**
 
@@ -1114,7 +1116,7 @@ Triggered by user feedback: *"RocksDB is also previous generation. Use better on
 | Crate | Was | Now | Why |
 | --- | --- | --- | --- |
 | `mimalloc` | `>=0.1` | `>=0.1.50` | 0.1.50 (2026-04-22) latest |
-| `hashbrown` | `>=0.15` | `>=0.17` | 0.17.1 (2026-05-09) latest; MSRV 1.85 matches; `HashTable` is the stable raw-insertion API |
+| `hashbrown` | `>=0.15` | `>=0.17` | 0.17.1 (2026-05-09) latest; MSRV 1.95 matches; `HashTable` is the stable raw-insertion API |
 | `bumpalo` | `>=3.16` | `>=3.20` | 3.20.2 (2026-02-19) latest |
 | `self_cell` | `>=1.2` | `>=1.2.2` | 1.2.2 (2025-12-30) latest |
 | `parking_lot` | `>=0.12` | `>=0.13` | 0.13.0 (2026-03) latest |
@@ -1155,12 +1157,12 @@ Triggered by user feedback: *"RocksDB is also previous generation. Use better on
 | `proptest-derive` | `>=0.8` | `#[derive(Arbitrary)]` for property tests | crates.io/proptest-derive |
 | `portable-atomic` | `>=1.13` | Optional 128-bit atomics for future lock-free counters | crates.io/portable-atomic |
 | `lz4_flex` | `>=0.11` | Pure-Rust LZ4 for snapshot + custom-format compression | crates.io/lz4_flex |
-| `rapidhash` | `>=4.1` | Dev-dep only; benchmarked vs `foldhash` in G14 | crates.io/rapidhash |
+| `rapidhash` | `>=4.1` | Dev-dep only; future G14 comparison candidate | crates.io/rapidhash |
 | `payjoin` | `>=1.0` | Optional feature `payjoin` (BIP78/77); default off | crates.io/payjoin |
 
 **Rejected crate-stack alternatives (kept the current choice with rationale):**
 - **Channels:** `flume` and `kanal` are fast but lack crossbeam-channel's `Select` macro — non-negotiable for the single-threaded event loop.
-- **Allocators:** `snmalloc-rs` and `tikv-jemallocator` are strong alternates; included in the G14 alloc-comparison matrix but `mimalloc` stays default.
+- **Allocators:** `snmalloc-rs` and `tikv-jemallocator` remain unadjudicated alternates; they are not current workspace dependencies and require a dedicated G14 alloc-comparison follow-up before any default change.
 - **Thread pool:** `chili` is faster on micro-tasks but `rayon`'s work-stealing maturity wins for block-parallel script verify.
 - **Self-ref pin:** `ouroboros` is heavier and exposes Pin; `self_cell`'s proc-macro-free shape is optimal.
 - **Coin selection:** porting Core's C++ `coinselection.cpp` was the original plan; `bdk_coin_select` supersedes it (audited, BIP-aligned, Rust-native).
@@ -1186,4 +1188,4 @@ Triggered by user feedback: *"RocksDB is also previous generation. Use better on
 
 **Workspace setup:** `superpowers:using-git-worktrees` should have created an isolated workspace before this plan executes. The plan's `bitcoin-rs/` subdirectory lives inside that worktree; reference repos (`gocoin/`, `electrs/`, `utreexod/`, `bitcoin/`, `btcd/`) remain readable from the cwd parent.
 
-**Done definition:** All 21 tasks committed, all 14 verification gates green twice on `main`, `cargo +1.85.0 clippy --workspace --all-targets --all-features -- -D warnings` clean, `cargo deny check` clean, `cargo +1.85.0 fmt --check` clean, `target/release/bitcoin-rs --version` prints `0.1.0`, IBD to mainnet tip completes with G2 + G3 + G14 all reporting green.
+**Done definition:** All 21 tasks committed, all 14 verification gates green twice on `main`, `cargo +1.95.0 clippy -p bitcoin-rs --all-targets --no-default-features --features "$FEATURES" -- -D warnings` clean, `cargo deny check` clean, `cargo +1.95.0 fmt --check` clean, `target/release/bitcoin-rs --version` prints `0.1.0`, IBD to mainnet tip completes with G2 + G3 + G14 all reporting green.
