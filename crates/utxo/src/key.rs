@@ -20,36 +20,42 @@ impl UtxoKey {
 
     /// Builds a key from the first eight little-endian txid bytes.
     #[must_use]
+    #[inline]
     pub fn from_txid(txid: &Hash256) -> Self {
         Self(txid.prefix8())
     }
 
     /// Builds a key from a serialized snapshot prefix.
     #[must_use]
+    #[inline]
     pub const fn from_prefix(prefix: [u8; 8]) -> Self {
         Self(prefix)
     }
 
     /// Returns the shard index selected by the first prefix byte.
     #[must_use]
+    #[inline]
     pub const fn shard(&self) -> u8 {
         self.0[0]
     }
 
     /// Returns the little-endian prefix as a `u64`.
     #[must_use]
+    #[inline]
     pub const fn as_u64(&self) -> u64 {
         u64::from_le_bytes(self.0)
     }
 
     /// Returns the raw eight-byte prefix.
     #[must_use]
+    #[inline]
     pub const fn to_prefix(self) -> [u8; 8] {
         self.0
     }
 
     /// Returns the identity hash used by `hashbrown::HashTable` operations.
     #[must_use]
+    #[inline]
     pub fn hash(self) -> u64 {
         UtxoBuildHasher::default().hash_one(self.as_u64())
     }
