@@ -225,10 +225,10 @@ impl BlockStager {
         next_expected_hash: Option<Hash256>,
     ) -> Option<Hash256> {
         self.compact_received_order_prefix();
-        self.received_order
-            .iter()
-            .copied()
-            .find(|hash| Some(*hash) != next_expected_hash && self.received.contains_key(hash))
+        let candidate_index = self.received_order.iter().position(|hash| {
+            Some(*hash) != next_expected_hash && self.received.contains_key(hash)
+        })?;
+        self.received_order.remove(candidate_index)
     }
 
     fn is_over_budget(&self) -> bool {
