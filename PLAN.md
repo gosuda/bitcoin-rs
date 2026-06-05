@@ -273,6 +273,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected skipping disconnected-peer release work when the download window had no pending or inflight state after deterministic sync proxies regressed: deep-headers pure +2.4631%, indexed +3.0131%, received-scan +4.0984%, and many-peers +4.2122%.
 - [x] Rejected increasing inserted UTXO event batch inline capacity from 8 to 64 after CoinStats two-shard commit paths regressed: listener two-shard 8192 +12.289%, listener two-shard 512 +7.0375%, and no-listener two-shard 8192 +8.9538%.
 - [x] Rejected raising the CoinStats committed-event parallel threshold from 64 to 256 despite two-shard microbench wins, because node spend-heavy sync proxies regressed: unfiltered +14.390% and filter +23.508%.
+- [x] Rejected raising the CoinStats committed-event chunk size from 32 to 64 after `coinstats/utxo_commit_listener_two_shard_512` regressed by +22.086% with no significant 8192-listener win.
+- [x] Rejected lowering the CoinStats inline event-chunk descriptor buffer from 64 to 16 after `coinstats/utxo_commit_listener_two_shard_8192` regressed by +9.5260% and no-listener two-shard 8192 regressed by +43.149%.
 
 **Still pending:**
 
