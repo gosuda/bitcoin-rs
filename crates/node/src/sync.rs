@@ -323,7 +323,6 @@ impl BlockSync {
     }
 
     fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
-        let started = Instant::now();
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let Some(staged_count) = self
@@ -333,6 +332,7 @@ impl BlockSync {
         else {
             return (0, 0);
         };
+        let started = Instant::now();
         let (drained, expected_len) = self
             .drain_cached_expected_blocks(staged_count)
             .unwrap_or_else(|| {
