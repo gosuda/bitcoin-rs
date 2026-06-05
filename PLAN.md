@@ -218,6 +218,10 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `4540052`.
 - [x] Coinstats small committed event batches were compressed by using serial delta reduction below the parallel chunk threshold, with a 512-entry two-shard listener benchmark guard.
   Evidence commit: `d5718e9`.
+- [x] Coinstats committed-event batches were retuned so 64+ operation blocks use bounded 32-op parallel event chunks, shrinking the spend-heavy sync proxy without changing consensus validation.
+  Evidence commit: `dd8e9bb`.
+- [x] UTXO low-shard no-listener commits now group txid-local bucket runs behind an 8-shard gate, with an interleaved same-txid churn benchmark guarding the duplicate-heavy shape and existing/uniform guard benches checked.
+  Evidence commit: `dd8e9bb`.
 - [x] UTXO fully-spent record deletion was compressed from two hash-table probes to one occupied-entry probe.
   Evidence commit: `7e8f194`.
 - [x] Performance evidence scaffolding was expanded with a mainnet prefix replay measurement example.
