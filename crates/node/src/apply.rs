@@ -546,7 +546,6 @@ struct BlockTxPlan {
     txids: Vec<Txid>,
     only_coinbase: bool,
     overlay_capacity: usize,
-    non_coinbase_input_count: usize,
     created_output_count: usize,
     spent_input_count: usize,
 }
@@ -572,7 +571,6 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
     let mut txids = Vec::with_capacity(block.txdata.len());
     let mut only_coinbase = true;
     let mut overlay_capacity = 0usize;
-    let mut non_coinbase_input_count = 0usize;
     let mut created_output_count = 0usize;
     let mut spent_input_count = 0usize;
 
@@ -586,7 +584,6 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
             overlay_capacity = overlay_capacity.saturating_add(output_count);
         } else {
             let input_count = tx.input.len();
-            non_coinbase_input_count = non_coinbase_input_count.saturating_add(input_count);
             spent_input_count = spent_input_count.saturating_add(input_count);
             overlay_capacity =
                 overlay_capacity.saturating_add(output_count.saturating_add(input_count));
@@ -597,7 +594,6 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
         txids,
         only_coinbase,
         overlay_capacity,
-        non_coinbase_input_count,
         created_output_count,
         spent_input_count,
     }
@@ -866,7 +862,7 @@ fn check_bip68_sequence_locks(
     let txids = tx_plan.txids();
     debug_assert_eq!(block.txdata.len(), txids.len());
     let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), tx_plan.overlay_capacity);
-    let mut prevout_mtp_by_height = HashMap::with_capacity(tx_plan.non_coinbase_input_count);
+    let mut prevout_mtp_by_height = None;
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
             continue;
@@ -892,12 +888,16 @@ fn check_bip68_sequence_locks(
                     // before the block being connected; the previous tip cannot
                     // contain an ancestor at the current block height yet.
                     mtp
-                } else if let Some(prevout_mtp) = prevout_mtp_by_height.get(&entry.height) {
-                    *prevout_mtp
                 } else {
-                    let prevout_mtp = bip68_prevout_mtp(handles, previous_tip_id, entry.height)?;
-                    prevout_mtp_by_height.insert(entry.height, prevout_mtp);
-                    prevout_mtp
+                    let cache = prevout_mtp_by_height.get_or_insert_with(HashMap::new);
+                    if let Some(prevout_mtp) = cache.get(&entry.height) {
+                        *prevout_mtp
+                    } else {
+                        let prevout_mtp =
+                            bip68_prevout_mtp(handles, previous_tip_id, entry.height)?;
+                        cache.insert(entry.height, prevout_mtp);
+                        prevout_mtp
+                    }
                 };
                 let earliest_time = prevout_mtp.saturating_add(
                     relative_intervals.saturating_mul(BIP68_TIME_GRANULARITY_SECONDS),
