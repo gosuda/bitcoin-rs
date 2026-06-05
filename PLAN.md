@@ -240,6 +240,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `b85ad05`.
 - [x] Block staging eviction now removes selected FIFO eviction candidates from the received-order queue immediately, avoiding repeated stale-entry cleanup on received-scan paths without changing retry semantics.
   Evidence commit: `cd353f2`.
+- [x] Block-tree active-chain height lookups now use a private active-height index for published-tip requests, removing deep parent-pointer walks from sync getdata construction without changing fork fallback semantics.
+  Evidence commit: `2db5c4e`.
 
 **Measured but rejected in this campaign:**
 
