@@ -206,6 +206,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `0c9394d`.
 - [x] Node BIP68 apply-path planning was compressed again by skipping the full same-block metadata overlay pass when a block has no version-2 inputs with BIP68 enabled.
   Evidence commit: `3c60937`.
+- [x] Consensus block-rule merkle validation was compressed by fusing merkle-root calculation and merkle-mutation detection into one in-place pass.
+  Evidence commit: `ae04303`.
 - [x] UTXO listener/commit hot paths were compressed with ordered listener event collection, order-independent listener coalescing, coalesced listener event preallocation, small listener shard commit coalescing, serial listener error-vec removal, fast deletion for fully spent records, and listener-aware full-record spend removal.
   Evidence commits: `15bd917`, `87141a3`, `80806a3`, `cfb0c74`, `316738b`, `13ab475`, `6262a8d`.
 - [x] Coinstats hot helpers were compressed with private MuHash helper inlining, event-delta helper inlining, and ChaCha final-state add unrolling.
