@@ -1098,6 +1098,7 @@ fn build_utxo_changes<'a>(
 
     let (add_capacity, remove_capacity) = scratch.utxo_change_capacity();
     let mut changes = BorrowedBlockChanges::with_capacity(add_capacity, remove_capacity);
+    let net_same_block_spends = scratch.has_same_block_spends();
     for (tx, txid) in block.txdata.iter().zip(scratch.txids()) {
         let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
         let coinbase = tx.is_coinbase();
@@ -1106,7 +1107,7 @@ fn build_utxo_changes<'a>(
                 txid,
                 u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
             );
-            if scratch.contains_same_block_spent(&outpoint) {
+            if net_same_block_spends && scratch.contains_same_block_spent(&outpoint) {
                 continue;
             }
             changes.add(BorrowedUtxoAdd::new(outpoint, txout, coinbase, height));
@@ -1115,7 +1116,7 @@ fn build_utxo_changes<'a>(
         if !coinbase {
             for tx_input in &tx.input {
                 let previous_output = internal_outpoint(&tx_input.previous_output);
-                if scratch.contains_same_block_spent(&previous_output) {
+                if net_same_block_spends && scratch.contains_same_block_spent(&previous_output) {
                     continue;
                 }
                 changes.remove(previous_output);

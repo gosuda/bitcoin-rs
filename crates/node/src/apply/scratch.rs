@@ -156,6 +156,12 @@ impl ApplyScratch {
             .is_some_and(|spent| spent.contains(outpoint))
     }
 
+    pub(super) fn has_same_block_spends(&self) -> bool {
+        self.same_block_spent
+            .as_ref()
+            .is_some_and(|spent| !spent.is_empty())
+    }
+
     pub(super) fn utxo_change_capacity(&self) -> (usize, usize) {
         (self.utxo_add_capacity, self.utxo_remove_capacity)
     }
