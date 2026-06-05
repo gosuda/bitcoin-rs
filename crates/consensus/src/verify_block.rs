@@ -75,45 +75,37 @@ pub fn verify_block_rules_borrowed_contextual(
 }
 
 fn verify_merkle_root(block: &bitcoin::Block) -> Result<(), ConsensusError> {
-    let hashes: Vec<_> = block
+    let mut hashes: Vec<_> = block
         .txdata
         .iter()
         .map(bitcoin::Transaction::compute_txid)
         .collect();
-    let Some(root) = merkle_root(&hashes) else {
+    let Some((root, mutated)) = merkle_root_and_mutation(&mut hashes)? else {
         return Err(ConsensusError::MerkleRoot);
     };
     if block.header.merkle_root != root.into() {
         return Err(ConsensusError::MerkleRoot);
     }
-    if merkle_tree_is_mutated(&hashes)? {
+    if mutated {
         return Err(ConsensusError::MerkleMutation);
     }
     Ok(())
 }
 
-fn merkle_tree_is_mutated<T>(hashes: &[T]) -> Result<bool, ConsensusError>
+fn merkle_root_and_mutation<T>(hashes: &mut Vec<T>) -> Result<Option<(T, bool)>, ConsensusError>
 where
     T: bitcoin::hashes::Hash + bitcoin::consensus::Encodable + Eq + Copy,
     <T as bitcoin::hashes::Hash>::Engine: bitcoin::io::Write,
 {
-    let mut level = hashes.to_vec();
-    while level.len() > 1 {
-        if level.chunks_exact(2).any(|pair| pair[0] == pair[1]) {
-            return Ok(true);
-        }
-        next_merkle_level(&mut level)?;
+    if hashes.is_empty() {
+        return Ok(None);
     }
-    Ok(false)
-}
-
-fn merkle_root<T>(hashes: &[T]) -> Option<T>
-where
-    T: bitcoin::hashes::Hash + bitcoin::consensus::Encodable + Copy,
-    <T as bitcoin::hashes::Hash>::Engine: bitcoin::io::Write,
-{
-    let mut hashes = hashes.to_vec();
-    bitcoin::merkle_tree::calculate_root_inline(&mut hashes)
+    let mut mutated = false;
+    while hashes.len() > 1 {
+        mutated |= hashes.chunks_exact(2).any(|pair| pair[0] == pair[1]);
+        next_merkle_level(hashes)?;
+    }
+    Ok(Some((hashes[0], mutated)))
 }
 
 fn next_merkle_level<T>(level: &mut Vec<T>) -> Result<(), ConsensusError>
