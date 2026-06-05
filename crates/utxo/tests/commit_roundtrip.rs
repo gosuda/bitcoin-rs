@@ -27,6 +27,7 @@ struct RecordingListener {
 struct CoalescingRecordingListener {
     events: Arc<Mutex<Vec<ListenerEvent>>>,
     batch_calls: Arc<Mutex<usize>>,
+    operation_counts: Arc<Mutex<Vec<usize>>>,
 }
 
 impl UtxoChangeListener for RecordingListener {
@@ -70,6 +71,10 @@ impl UtxoChangeListener for CoalescingRecordingListener {
         let mut batch_calls = self.batch_calls.lock();
         *batch_calls = batch_calls.saturating_add(1);
         drop(batch_calls);
+
+        self.operation_counts
+            .lock()
+            .extend(batches.iter().map(UtxoChangeEvents::operation_count));
 
         let mut events = self.events.lock();
         for batch in batches {
@@ -524,6 +529,7 @@ fn coalescing_listener_batches_small_multi_shard_commits() -> Result<(), Box<dyn
 {
     let events = Arc::new(Mutex::new(Vec::new()));
     let batch_calls = Arc::new(Mutex::new(0_usize));
+    let operation_counts = Arc::new(Mutex::new(Vec::new()));
     let mut set = UtxoSet::new();
 
     let mut initial = BlockChanges::default();
@@ -538,6 +544,7 @@ fn coalescing_listener_batches_small_multi_shard_commits() -> Result<(), Box<dyn
     set.set_listener(Box::new(CoalescingRecordingListener {
         events: Arc::clone(&events),
         batch_calls: Arc::clone(&batch_calls),
+        operation_counts: Arc::clone(&operation_counts),
     }));
     let mut mixed = BlockChanges::default();
     mixed.add(UtxoAdd::new(second_insert, txout(653), false, 307));
@@ -547,6 +554,7 @@ fn coalescing_listener_batches_small_multi_shard_commits() -> Result<(), Box<dyn
     set.commit_block(&mixed, &txid(655))?;
 
     assert_eq!(*batch_calls.lock(), 1);
+    assert_eq!(operation_counts.lock().clone(), vec![2, 2]);
     assert_eq!(
         events.lock().clone(),
         vec![

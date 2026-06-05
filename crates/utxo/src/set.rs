@@ -221,6 +221,7 @@ enum UtxoChangeEvent<'a> {
 #[doc(hidden)]
 pub struct UtxoChangeEvents<'a> {
     events: Vec<UtxoChangeEvent<'a>>,
+    operation_count: usize,
     coalesced_insert_capacity: usize,
     coalesced_remove_capacity: usize,
 }
@@ -241,6 +242,7 @@ impl<'a> UtxoChangeEvents<'a> {
     pub(crate) fn with_coalesced_capacity(insertions: usize, removals: usize) -> Self {
         Self {
             events: Vec::with_capacity(usize::from(insertions > 0) + usize::from(removals > 0)),
+            operation_count: 0,
             coalesced_insert_capacity: insertions,
             coalesced_remove_capacity: removals,
         }
@@ -248,6 +250,7 @@ impl<'a> UtxoChangeEvents<'a> {
 
     pub(crate) fn push_insert_batch(&mut self, insertions: SmallVec<[UtxoInserted<'a>; 8]>) {
         if !insertions.is_empty() {
+            self.operation_count = self.operation_count.saturating_add(insertions.len());
             self.events.push(UtxoChangeEvent::InsertBatch(insertions));
         }
     }
@@ -259,6 +262,7 @@ impl<'a> UtxoChangeEvents<'a> {
         if insertions.is_empty() {
             return;
         }
+        self.operation_count = self.operation_count.saturating_add(insertions.len());
         if let Some(UtxoChangeEvent::InsertBatch(existing)) = self.events.last_mut() {
             existing.extend(insertions);
         } else {
@@ -269,6 +273,7 @@ impl<'a> UtxoChangeEvents<'a> {
     }
 
     pub(crate) fn push_remove_batch(&mut self, removals: SmallVec<[UtxoRemoved; 2]>) {
+        self.operation_count = self.operation_count.saturating_add(removals.len());
         self.events.push(UtxoChangeEvent::RemoveBatch(removals));
     }
 
@@ -276,6 +281,7 @@ impl<'a> UtxoChangeEvents<'a> {
         if removals.is_empty() {
             return;
         }
+        self.operation_count = self.operation_count.saturating_add(removals.len());
         if let Some(UtxoChangeEvent::RemoveBatch(existing)) = self.events.last_mut() {
             existing.extend(removals);
         } else {
@@ -286,6 +292,7 @@ impl<'a> UtxoChangeEvents<'a> {
     }
 
     pub(crate) fn push_remove_coin(&mut self, removal: UtxoRemoved) {
+        self.operation_count = self.operation_count.saturating_add(1);
         self.events.push(UtxoChangeEvent::RemoveCoin(removal));
     }
 
@@ -309,14 +316,7 @@ impl<'a> UtxoChangeEvents<'a> {
     /// Returns the number of output-level mutations represented by these events.
     #[must_use]
     pub fn operation_count(&self) -> usize {
-        self.events
-            .iter()
-            .map(|event| match event {
-                UtxoChangeEvent::InsertBatch(insertions) => insertions.len(),
-                UtxoChangeEvent::RemoveBatch(removals) => removals.len(),
-                UtxoChangeEvent::RemoveCoin(_removal) => 1,
-            })
-            .sum()
+        self.operation_count
     }
 
     /// Visits committed events split into bounded chunks.
