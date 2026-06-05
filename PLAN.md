@@ -212,6 +212,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `ae04303`.
 - [x] UTXO listener/commit hot paths were compressed with ordered listener event collection, order-independent listener coalescing, coalesced listener event preallocation, small listener shard commit coalescing, serial listener error-vec removal, fast deletion for fully spent records, and listener-aware full-record spend removal.
   Evidence commits: `15bd917`, `87141a3`, `80806a3`, `cfb0c74`, `316738b`, `13ab475`, `6262a8d`.
+- [x] UTXO committed-event batches now cache their output-level operation count, avoiding a listener-side event-vector rescan before CoinStats chunking decisions.
+  Evidence commit: `124c5ad`.
 - [x] Coinstats hot helpers were compressed with private MuHash helper inlining, event-delta helper inlining, and ChaCha final-state add unrolling.
   Evidence commits: `84e8645`, `cdbeb07`, `4ebcfce`.
 - [x] Coinstats listener aggregation was compressed for large coalesced UTXO event batches with bounded parallel chunks, plus a no-listener two-shard attribution benchmark.
