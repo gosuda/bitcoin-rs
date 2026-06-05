@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -338,7 +339,8 @@ impl DownloadWindow {
         else {
             return scan.next_request_height;
         };
-        let mut candidates: Vec<PeerRequestEntry> = Vec::with_capacity(scan.remaining_limit);
+        let mut candidates: VecDeque<PeerRequestEntry> =
+            VecDeque::with_capacity(scan.remaining_limit);
         while let Ok(node) = tree.node(cursor) {
             if node.height < scan.height {
                 break;
@@ -350,15 +352,17 @@ impl DownloadWindow {
                     .is_none_or(|hashes| !hashes.contains(&node.hash))
             {
                 if candidates.len() == scan.remaining_limit {
-                    let removed = candidates.remove(0);
-                    if let Some(selected_hashes) = selected_hashes.as_mut() {
+                    let removed = candidates.pop_front();
+                    if let (Some(selected_hashes), Some(removed)) =
+                        (selected_hashes.as_mut(), removed)
+                    {
                         selected_hashes.remove(&removed.hash);
                     }
                 }
                 if let Some(selected_hashes) = selected_hashes.as_mut() {
                     selected_hashes.insert(node.hash);
                 }
-                candidates.push(PeerRequestEntry {
+                candidates.push_back(PeerRequestEntry {
                     hash: node.hash,
                     height: node.height,
                 });
