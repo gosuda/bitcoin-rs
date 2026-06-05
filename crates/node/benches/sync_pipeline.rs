@@ -47,6 +47,9 @@ const SYNC_PROXY_START_HEIGHT: i32 = 4_096;
 const SYNC_PROXY_PEERS: usize = 512;
 const SYNC_OVERSIZED_BURST_BLOCKS: u32 = 1_024;
 const SYNC_OVERSIZED_BURST_BLOCKS_USIZE: usize = 1_024;
+const SYNC_REVERSE_SCAN_OVERFLOW_BODY_BLOCKS: u32 = 384;
+const SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_START_HEIGHT: usize = 257;
+const SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_BLOCKS: usize = 128;
 const SPEND_PROXY_COINBASE_MATURITY: u32 = 100;
 const SPEND_PROXY_SPEND_BLOCKS: u32 = 16;
 const SPEND_PROXY_FANOUT: u32 = 64;
@@ -179,6 +182,16 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             b.iter_batched(
                 || SyncFixture::new(TxIndexMode::Disabled),
                 |fixture| black_box(fixture.request_after_unsolicited_received()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
+    c.bench_function(
+        "deterministic_initial_sync_proxy_deep_headers_reverse_scan_overflow_128_blocks",
+        |b| {
+            b.iter_batched(
+                || SyncFixture::new_reverse_scan_overflow(TxIndexMode::Disabled),
+                |fixture| black_box(fixture.run_reverse_scan_overflow()),
                 BatchSize::SmallInput,
             );
         },
@@ -355,6 +368,8 @@ struct SyncFixture {
     sync: BlockSync,
     inbound_blocks_tx: crossbeam_channel::Sender<Block>,
     outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
+    peers: Arc<RwLock<Vec<PeerInfo>>>,
+    peer_outbound: Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
     received_scan_expected: Vec<BlockHash>,
@@ -410,30 +425,41 @@ impl SyncFixture {
             inbound_blocks_rx,
         );
 
-        let mut outbound_rxs = Vec::with_capacity(peer_count);
-        {
-            let mut peers = peers.write();
-            let mut peer_outbound = peer_outbound.write();
-            for index in 0..peer_count {
-                let port = u16::try_from(8_333_usize.saturating_add(index))
-                    .unwrap_or_else(|error| panic!("invalid synthetic peer port: {error}"));
-                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-                peers.push(synthetic_peer(addr));
-                let (outbound_tx, outbound_rx) = unbounded::<Message>();
-                peer_outbound.insert(addr, outbound_tx);
-                outbound_rxs.push(outbound_rx);
-            }
-        }
+        let outbound_rxs = install_synthetic_peers(&peers, &peer_outbound, peer_count);
 
         Self {
             sync,
             inbound_blocks_tx,
             outbound_rxs,
+            peers,
+            peer_outbound,
             applied_tip,
             blocks,
             received_scan_expected,
             _tx_index_dir: tx_index_dir,
         }
+    }
+
+    fn new_reverse_scan_overflow(tx_index_mode: TxIndexMode) -> Self {
+        let mut fixture =
+            Self::new_with_block_count(tx_index_mode, 0, SYNC_REVERSE_SCAN_OVERFLOW_BODY_BLOCKS);
+        let first_index = SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_START_HEIGHT.saturating_sub(1);
+        let last_index = first_index.saturating_add(SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_BLOCKS);
+        for block in fixture
+            .blocks
+            .get(first_index..last_index)
+            .unwrap_or_else(|| panic!("reverse-scan overflow block range missing"))
+            .iter()
+            .rev()
+        {
+            fixture
+                .inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send staged overflow block failed: {error}"));
+        }
+        fixture.sync.tick();
+        fixture.outbound_rxs = install_synthetic_peers(&fixture.peers, &fixture.peer_outbound, 1);
+        fixture
     }
 
     fn run(self) -> u32 {
@@ -515,6 +541,32 @@ impl SyncFixture {
             other => panic!("expected scan-path getdata, got {other:?}"),
         };
         assert_eq!(requested, self.received_scan_expected);
+        requested.len()
+    }
+
+    fn run_reverse_scan_overflow(self) -> usize {
+        self.sync.tick();
+        let requested = match self
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing overflow outbound receiver"))
+            .try_recv()
+            .unwrap_or_else(|error| panic!("expected overflow scan getdata: {error}"))
+        {
+            NetworkMessage::GetData(inventory) => inventory
+                .into_iter()
+                .map(|item| match item {
+                    Inventory::WitnessBlock(hash) => hash,
+                    other => panic!("expected overflow witness inventory, got {other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected overflow scan getdata, got {other:?}"),
+        };
+        let expected = self.blocks[..SYNC_PROXY_BLOCKS_USIZE]
+            .iter()
+            .map(bitcoin::Block::block_hash)
+            .collect::<Vec<_>>();
+        assert_eq!(requested, expected);
         requested.len()
     }
 
