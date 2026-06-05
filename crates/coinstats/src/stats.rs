@@ -451,9 +451,9 @@ impl UtxoChangeListener for CoinStatsListener {
                 .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
         } else {
             batches
-                .par_iter()
+                .iter()
                 .map(CoinStatsDelta::from_events)
-                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
+                .fold(CoinStatsDelta::new(), CoinStatsDelta::combine)
         };
         let mut state = self.state.lock();
         delta.apply_to(&mut state.stats);

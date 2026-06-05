@@ -12,6 +12,7 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use zerocopy::IntoBytes;
 
 const ENTRY_COUNT: usize = 8_192;
+const SMALL_EVENT_ENTRY_COUNT: usize = 512;
 
 #[derive(Clone)]
 struct CoinFixture {
@@ -249,6 +250,18 @@ fn bench_commit_fanout(c: &mut Criterion, fixture: &CoinFixture, inserted_stats:
             BatchSize::SmallInput,
         );
     });
+    c.bench_function("coinstats/utxo_commit_listener_two_shard_512", |b| {
+        b.iter_batched(
+            || coinstats_listener_two_shard_commit_case_with_count(SMALL_EVENT_ENTRY_COUNT),
+            |(set, changes)| {
+                set.commit_block(black_box(&changes), &txid(0xfeed_cafe))
+                    .unwrap_or_else(|error| {
+                        panic!("coinstats small two-shard commit failed: {error}")
+                    });
+            },
+            BatchSize::SmallInput,
+        );
+    });
 
     c.bench_function("coinstats/utxo_commit_two_shard_8192", |b| {
         b.iter_batched(
@@ -293,18 +306,25 @@ fn coinstats_listener_commit_case(
 }
 
 fn coinstats_listener_two_shard_commit_case() -> (UtxoSet, BlockChanges) {
-    coinstats_two_shard_commit_case_with_listener(true)
+    coinstats_two_shard_commit_case_with_listener(ENTRY_COUNT, true)
 }
 
 fn coinstats_two_shard_commit_case() -> (UtxoSet, BlockChanges) {
-    coinstats_two_shard_commit_case_with_listener(false)
+    coinstats_two_shard_commit_case_with_listener(ENTRY_COUNT, false)
 }
 
-fn coinstats_two_shard_commit_case_with_listener(with_listener: bool) -> (UtxoSet, BlockChanges) {
+fn coinstats_listener_two_shard_commit_case_with_count(count: usize) -> (UtxoSet, BlockChanges) {
+    coinstats_two_shard_commit_case_with_listener(count, true)
+}
+
+fn coinstats_two_shard_commit_case_with_listener(
+    count: usize,
+    with_listener: bool,
+) -> (UtxoSet, BlockChanges) {
     let mut set = UtxoSet::new();
-    let mut preload = BlockChanges::with_capacity(ENTRY_COUNT, 0);
+    let mut preload = BlockChanges::with_capacity(count, 0);
     let mut stats = CoinStats::new();
-    for index in 0..ENTRY_COUNT {
+    for index in 0..count {
         let outpoint = OutPoint::new(two_shard_txid(index), 0);
         let txout = txout(index);
         stats.insert_utxo(&outpoint, &txout, 100, true);
@@ -316,12 +336,12 @@ fn coinstats_two_shard_commit_case_with_listener(with_listener: bool) -> (UtxoSe
         set.set_listener(Box::new(CoinStatsListener::new(stats)));
     }
 
-    let mut changes = BlockChanges::with_capacity(ENTRY_COUNT, ENTRY_COUNT);
-    for index in 0..ENTRY_COUNT {
+    let mut changes = BlockChanges::with_capacity(count, count);
+    for index in 0..count {
         changes.remove(OutPoint::new(two_shard_txid(index), 0));
     }
-    for index in 0..ENTRY_COUNT {
-        let add_index = index.saturating_add(ENTRY_COUNT);
+    for index in 0..count {
+        let add_index = index.saturating_add(count);
         changes.add(UtxoAdd::new(
             OutPoint::new(two_shard_txid(add_index), 0),
             txout(add_index),
