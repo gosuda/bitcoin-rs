@@ -18,6 +18,7 @@ use crate::{
 pub struct BlockTree {
     nodes: Slab<BlockTreeNode>,
     by_hash: HashTable<NodeId>,
+    active_by_height: Vec<NodeId>,
     tip: Arc<ArcSwapOption<TipSnapshot>>,
     bip9_cache: Bip9Cache,
 }
@@ -29,6 +30,7 @@ impl BlockTree {
         Self {
             nodes: Slab::new(),
             by_hash: HashTable::new(),
+            active_by_height: Vec::new(),
             tip: Arc::new(ArcSwapOption::empty()),
             bip9_cache: Bip9Cache::new(),
         }
@@ -311,6 +313,10 @@ impl BlockTree {
     /// `target_height > start_id.height` or the chain is broken.
     #[must_use]
     pub fn node_at_height_from(&self, start_id: NodeId, target_height: u32) -> Option<NodeId> {
+        if self.active_by_height.last().copied() == Some(start_id) {
+            return active_node_id_at_height(&self.active_by_height, target_height);
+        }
+
         let Ok(start_node) = self.node(start_id) else {
             return None;
         };
@@ -503,6 +509,29 @@ impl BlockTree {
             chainwork: node.chainwork,
             hash: node.hash,
         })));
+        self.refresh_active_height_index(node_id)?;
+        Ok(())
+    }
+
+    fn refresh_active_height_index(&mut self, tip_id: NodeId) -> Result<(), ChainError> {
+        let tip = self.node(tip_id)?;
+        if let Some(parent) = tip.parent
+            && self.active_by_height.last().copied() == Some(parent)
+            && u32::try_from(self.active_by_height.len()).ok() == Some(tip.height)
+        {
+            self.active_by_height.push(tip_id);
+            return Ok(());
+        }
+
+        let mut active_by_height = Vec::new();
+        let mut cursor = Some(tip_id);
+        while let Some(id) = cursor {
+            let node = self.node(id)?;
+            active_by_height.push(id);
+            cursor = node.parent;
+        }
+        active_by_height.reverse();
+        self.active_by_height = active_by_height;
         Ok(())
     }
 }
@@ -529,6 +558,11 @@ fn node_hash_key(nodes: &Slab<BlockTreeNode>, id: NodeId) -> u64 {
     id.index()
         .and_then(|index| nodes.get(index))
         .map_or(0, |node| hash_table_key(node.hash))
+}
+
+fn active_node_id_at_height(active_by_height: &[NodeId], height: u32) -> Option<NodeId> {
+    let index = usize::try_from(height).ok()?;
+    active_by_height.get(index).copied()
 }
 
 fn work_from_header(header: &BlockHeader) -> ChainWork {
@@ -834,6 +868,57 @@ mod tests {
         assert_eq!(tree.node_at_height_from(tip_id, 0), Some(genesis_id));
         assert_eq!(tree.node_at_height_from(tip_id, 4), Some(tip_id));
         assert_eq!(tree.node_at_height_from(tip_id, 99), None);
+        Ok(())
+    }
+
+    #[test]
+    fn node_at_height_from_uses_rebuilt_active_height_index_after_fork_switch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let genesis_hash = BlockHash::from_byte_array(tree.node(genesis_id)?.hash.to_le_bytes());
+
+        let main_child = test_header(genesis_hash, 1);
+        let main_child_id =
+            tree.insert_node(Some(genesis_id), main_child, NodeStatus::HeaderValid)?;
+        let main_child_hash =
+            BlockHash::from_byte_array(tree.node(main_child_id)?.hash.to_le_bytes());
+        let main_tip = test_header(main_child_hash, 2);
+        let main_tip_id =
+            tree.insert_node(Some(main_child_id), main_tip, NodeStatus::HeaderValid)?;
+
+        assert_eq!(
+            tree.node_at_height_from(main_tip_id, 1),
+            Some(main_child_id)
+        );
+
+        let fork_child = test_header(genesis_hash, 11);
+        let fork_child_id =
+            tree.insert_node(Some(genesis_id), fork_child, NodeStatus::HeaderValid)?;
+        let fork_child_hash =
+            BlockHash::from_byte_array(tree.node(fork_child_id)?.hash.to_le_bytes());
+        let fork_mid = test_header(fork_child_hash, 12);
+        let fork_mid_id =
+            tree.insert_node(Some(fork_child_id), fork_mid, NodeStatus::HeaderValid)?;
+        let fork_mid_hash = BlockHash::from_byte_array(tree.node(fork_mid_id)?.hash.to_le_bytes());
+        let fork_tip = test_header(fork_mid_hash, 13);
+        let fork_tip_id = tree.insert_node(Some(fork_mid_id), fork_tip, NodeStatus::HeaderValid)?;
+
+        assert_eq!(
+            tree.node_at_height_from(fork_tip_id, 1),
+            Some(fork_child_id)
+        );
+        assert_eq!(
+            tree.active_node_at_height(1)
+                .unwrap_or_else(|| panic!("missing active node at fork height"))
+                .hash,
+            tree.node(fork_child_id)?.hash
+        );
+        assert_eq!(
+            tree.node_at_height_from(main_tip_id, 1),
+            Some(main_child_id)
+        );
         Ok(())
     }
 
