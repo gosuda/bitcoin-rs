@@ -968,6 +968,19 @@ fn apply_add_run_collect_events<'arena, 'add>(
         &record,
         adds.iter().map(|(_key, _txid, payload)| payload.vout),
     );
+    if add_unique && coalesce_events {
+        for (_key, _txid, payload) in adds {
+            append_unique_build_output(table, &mut record, payload)?;
+            events.push_insert_coin_coalesced(UtxoInserted::new(
+                payload.outpoint,
+                payload.txout,
+                payload.height,
+                payload.coinbase,
+            ));
+        }
+        insert_record(arena, table, record);
+        return Ok(());
+    }
     let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
     for (_key, _txid, payload) in adds {
         if add_unique {

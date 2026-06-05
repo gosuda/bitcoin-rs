@@ -272,6 +272,18 @@ impl<'a> UtxoChangeEvents<'a> {
         }
     }
 
+    pub(crate) fn push_insert_coin_coalesced(&mut self, insertion: UtxoInserted<'a>) {
+        self.operation_count = self.operation_count.saturating_add(1);
+        if let Some(UtxoChangeEvent::InsertBatch(existing)) = self.events.last_mut() {
+            existing.push(insertion);
+        } else {
+            let mut insertions = SmallVec::<[UtxoInserted<'a>; 8]>::new();
+            reserve_smallvec(&mut insertions, self.coalesced_insert_capacity);
+            insertions.push(insertion);
+            self.events.push(UtxoChangeEvent::InsertBatch(insertions));
+        }
+    }
+
     pub(crate) fn push_remove_batch(&mut self, removals: SmallVec<[UtxoRemoved; 2]>) {
         self.operation_count = self.operation_count.saturating_add(removals.len());
         self.events.push(UtxoChangeEvent::RemoveBatch(removals));
