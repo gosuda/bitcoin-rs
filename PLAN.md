@@ -213,7 +213,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Coinstats direct listener batches were compressed with thresholded parallel insert/remove reductions for large single-shard batches.
   Evidence commit: `4540052`.
 - [x] UTXO fully-spent record deletion was compressed from two hash-table probes to one occupied-entry probe.
-  Evidence commit: `ab56a4b`.
+  Evidence commit: `7e8f194`.
 - [x] Performance evidence scaffolding was expanded with a mainnet prefix replay measurement example.
   Evidence commit: `2234ad5`.
 
