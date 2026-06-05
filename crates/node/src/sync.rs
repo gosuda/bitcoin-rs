@@ -486,7 +486,6 @@ impl BlockSync {
         let peers = self.peers.read();
         let mut header_peer = None;
         let mut request_peers = Vec::with_capacity(request_peer_limit.min(peers.len()));
-        let mut single_request_peer = None;
         for peer in peers.iter() {
             if u32::try_from(peer.start_height)
                 .ok()
@@ -503,22 +502,14 @@ impl BlockSync {
             {
                 header_peer = Some(sync_peer);
             }
-            match request_peer_limit {
-                0 => {}
-                1 => {
-                    if single_request_peer.is_none_or(|current: SyncPeer| {
-                        current.start_height < sync_peer.start_height
-                    }) {
-                        single_request_peer = Some(sync_peer);
-                    }
-                }
-                _ => {
-                    request_peers.push(sync_peer);
-                }
+            if request_peer_limit > 1 {
+                request_peers.push(sync_peer);
             }
         }
-        if let Some(peer) = single_request_peer {
-            request_peers.push(peer);
+        if request_peer_limit == 1 {
+            if let Some(peer) = header_peer {
+                request_peers.push(peer);
+            }
         } else if request_peer_limit > 1 {
             request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
             request_peers.truncate(request_peer_limit);
