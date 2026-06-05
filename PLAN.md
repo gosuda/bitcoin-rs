@@ -242,6 +242,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `cd353f2`.
 - [x] Block-tree active-chain height lookups now use a private active-height index for published-tip requests, removing deep parent-pointer walks from sync getdata construction without changing fork fallback semantics.
   Evidence commit: `2db5c4e`.
+- [x] Block staging inserts now use a single vacant-entry hash-table probe for new received blocks, avoiding the previous contains-then-insert double lookup while preserving duplicate and retry behavior.
+  Evidence commit: `4d10d85`.
 
 **Measured but rejected in this campaign:**
 
