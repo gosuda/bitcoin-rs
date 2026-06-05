@@ -204,6 +204,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commits: `7a337b3`, `196c63c`.
 - [x] Node UTXO-change assembly was compressed by hoisting per-transaction coinbase classification out of the output/removal branches.
   Evidence commit: `97d9a75`.
+- [x] Node UTXO-change assembly now skips same-block-spend membership probes when `ApplyScratch` proves the block has no same-block spends.
+  Evidence commit: `c3c258c`.
 - [x] Node BIP68 apply-path planning was compressed by lazy-allocating the prevout-MTP cache only for time-based sequence locks and removing the unused non-coinbase input-count accumulator.
   Evidence commit: `0c9394d`.
 - [x] Node BIP68 apply-path planning was compressed again by skipping the full same-block metadata overlay pass when a block has no version-2 inputs with BIP68 enabled.
