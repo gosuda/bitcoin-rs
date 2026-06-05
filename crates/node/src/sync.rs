@@ -344,7 +344,7 @@ impl BlockSync {
                     .drain_expected_prefix(&expected_hashes);
                 (drained, expected_len)
             });
-        let mut applied_hashes = Vec::with_capacity(expected_len);
+        let mut applied_hashes = ExpectedBlockHashes::with_capacity(expected_len);
         let mut failed_hash = None;
         let mut drained = drained.into_iter();
         while let Some(drained_block) = drained.next() {
