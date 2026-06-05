@@ -583,9 +583,14 @@ fn apply_remove_run<'arena>(
     let Some(first) = removes.first() else {
         return;
     };
-    if delete_record_if_fully_spent(table, first.key, first.txid, removes.len(), |vout| {
-        removes.iter().any(|remove| remove.vout == vout)
-    }) {
+    if delete_record_if_fully_spent(
+        table,
+        first.key,
+        first.txid,
+        removes.len(),
+        |index| removes[index].vout,
+        |vout| removes.iter().any(|remove| remove.vout == vout),
+    ) {
         return;
     }
     let Some(mut record) = take_record(table, first.key, first.txid) else {
@@ -606,9 +611,14 @@ fn apply_outpoint_remove_run<'arena>(
     txid: Hash256,
     removes: &[OutPoint],
 ) {
-    if delete_record_if_fully_spent(table, key, txid, removes.len(), |vout| {
-        removes.iter().any(|remove| remove.vout == vout)
-    }) {
+    if delete_record_if_fully_spent(
+        table,
+        key,
+        txid,
+        removes.len(),
+        |index| removes[index].vout,
+        |vout| removes.iter().any(|remove| remove.vout == vout),
+    ) {
         return;
     }
     let Some(mut record) = take_record(table, key, txid) else {
@@ -1104,6 +1114,7 @@ fn delete_record_if_fully_spent(
     key: UtxoKey,
     txid: Hash256,
     remove_count: usize,
+    mut remove_vout: impl FnMut(usize) -> u32,
     contains_vout: impl Fn(u32) -> bool,
 ) -> bool {
     let Ok(entry) = table.table.find_entry(key.hash(), |record| {
@@ -1112,16 +1123,52 @@ fn delete_record_if_fully_spent(
         return false;
     };
     let record = entry.get();
-    if record.output_count() != remove_count
-        || !record
-            .iter_outputs()
-            .all(|output| contains_vout(output.vout))
-    {
+    if record.output_count() != remove_count {
         return false;
+    }
+    match record_fully_spent_by_bitmap(record, remove_count, &mut remove_vout) {
+        Some(true) => {}
+        Some(false) => return false,
+        None => {
+            if !record
+                .iter_outputs()
+                .all(|output| contains_vout(output.vout))
+            {
+                return false;
+            }
+        }
     }
     let (_record, _vacant) = entry.remove();
     table.deleted = table.deleted.saturating_add(1);
     true
+}
+
+fn record_fully_spent_by_bitmap(
+    record: &UtxoRecord<'_>,
+    remove_count: usize,
+    remove_vout: &mut impl FnMut(usize) -> u32,
+) -> Option<bool> {
+    let mut record_bitmap = 0_u64;
+    for output in record.iter_outputs() {
+        let bit = bitmap_vout_bit(output.vout)?;
+        if record_bitmap & bit != 0 {
+            return None;
+        }
+        record_bitmap |= bit;
+    }
+    if record_bitmap != record.vout_bitmap {
+        return None;
+    }
+
+    let mut remove_bitmap = 0_u64;
+    for index in 0..remove_count {
+        let bit = bitmap_vout_bit(remove_vout(index))?;
+        if remove_bitmap & bit != 0 {
+            return None;
+        }
+        remove_bitmap |= bit;
+    }
+    Some(remove_bitmap == record_bitmap)
 }
 
 fn insert_record<'arena>(
