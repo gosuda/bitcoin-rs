@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
 const PARALLEL_LISTENER_SHARD_THRESHOLD: usize = 16;
+const TXID_RUN_GROUPING_MAX_SHARDS: usize = 8;
 
 /// Errors returned by UTXO mutation and snapshot operations.
 #[derive(Debug, Error)]
@@ -847,11 +848,14 @@ impl UtxoSet {
             return self.commit_single_shard(adds, removes, active_shards[0]);
         }
 
-        let buckets = ShardCommitBuckets::new(adds, removes, &add_counts, &remove_counts);
+        let listener = self.listener.as_deref();
+        let group_txid_runs =
+            listener.is_none() && active_shard_count <= TXID_RUN_GROUPING_MAX_SHARDS;
+        let buckets =
+            ShardCommitBuckets::new(adds, removes, &add_counts, &remove_counts, group_txid_runs);
 
         let _stable_commit = self.stable_view_lock.write();
 
-        let listener = self.listener.as_deref();
         if let Some(listener) = listener {
             return self.commit_multi_shard_with_listener(
                 &active_shards,
@@ -1064,11 +1068,16 @@ impl<'a> ShardCommitBuckets<'a> {
         removes: &'a [OutPoint],
         add_counts: &[usize; UtxoKey::SHARD_COUNT],
         remove_counts: &[usize; UtxoKey::SHARD_COUNT],
+        group_txid_runs: bool,
     ) -> Self {
-        Self {
+        let mut buckets = Self {
             adds: build_add_side(adds, add_counts),
             removes: build_remove_side(removes, remove_counts),
+        };
+        if group_txid_runs {
+            buckets.group_txid_runs();
         }
+        buckets
     }
 
     fn adds(&self, shard_idx: usize) -> &[(UtxoKey, Hash256, BuildPayload<'a>)] {
@@ -1077,6 +1086,11 @@ impl<'a> ShardCommitBuckets<'a> {
 
     fn removes(&self, shard_idx: usize) -> &[SpendPayload<'a>] {
         self.removes.get(shard_idx)
+    }
+
+    fn group_txid_runs(&mut self) {
+        group_add_txid_runs(&mut self.adds);
+        group_remove_txid_runs(&mut self.removes);
     }
 }
 
@@ -1127,6 +1141,36 @@ fn build_remove_side<'a>(
         BucketShape::Scattered => {
             let (ranges, payloads) = scattered_removes(removes, counts);
             ShardBucketSide::scattered(&ranges, payloads)
+        }
+    }
+}
+
+fn group_add_txid_runs(side: &mut ShardBucketSide<AddPayload<'_>>) {
+    side.group_payloads_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+}
+
+fn group_remove_txid_runs(side: &mut ShardBucketSide<SpendPayload<'_>>) {
+    side.group_payloads_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| left.txid.cmp(&right.txid))
+    });
+}
+
+impl<T> ShardBucketSide<T> {
+    fn group_payloads_by(&mut self, mut compare: impl FnMut(&T, &T) -> core::cmp::Ordering) {
+        match self.shape {
+            BucketShape::Empty => {}
+            BucketShape::Single(_shard_idx) => {
+                self.payloads.sort_by(compare);
+            }
+            BucketShape::Scattered => {
+                for (start, end) in self.ranges {
+                    if end.saturating_sub(start) > 1 {
+                        self.payloads[start..end].sort_by(&mut compare);
+                    }
+                }
+            }
         }
     }
 }

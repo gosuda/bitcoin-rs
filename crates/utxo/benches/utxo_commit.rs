@@ -13,6 +13,8 @@ use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoChangeListener, UtxoSet};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 const ENTRY_COUNT: u64 = 10_000;
+const INTERLEAVED_TXID_COUNT: u32 = 256;
+const INTERLEAVED_VOUTS_PER_TXID: u32 = 16;
 
 #[derive(Copy, Clone, Debug)]
 enum ShardShape {
@@ -202,6 +204,56 @@ fn same_txid_full_spend_case(seed: u64) -> (UtxoSet, BlockChanges) {
     }
     if let Err(error) = set.commit_block(&preload, &txid(seed.wrapping_add(1))) {
         panic!("same-txid full-spend preload failed: {error}");
+    }
+
+    (set, changes)
+}
+
+fn interleaved_same_txid_churn_case(seed: u64) -> (UtxoSet, BlockChanges) {
+    let set = UtxoSet::new();
+    let mut preload = BlockChanges::default();
+    let mut changes = BlockChanges::default();
+    let mut txids = Vec::with_capacity(usize::try_from(INTERLEAVED_TXID_COUNT).unwrap_or(0));
+
+    for tx_index in 0_u32..INTERLEAVED_TXID_COUNT {
+        txids.push(shaped_txid(
+            seed.wrapping_add(u64::from(tx_index)),
+            u64::from(tx_index),
+            ShardShape::TwoShard,
+        ));
+    }
+
+    for vout in 0_u32..INTERLEAVED_VOUTS_PER_TXID {
+        for (tx_index, txid) in txids.iter().enumerate() {
+            let tx_index = u64::try_from(tx_index).unwrap_or(0);
+            let outpoint = OutPoint::new(*txid, vout);
+            preload.add(UtxoAdd::new(
+                outpoint,
+                txout(seed.wrapping_add(tx_index).wrapping_add(u64::from(vout))),
+                false,
+                1,
+            ));
+            changes.remove(outpoint);
+        }
+    }
+    if let Err(error) = set.commit_block(&preload, &txid(seed.wrapping_add(1))) {
+        panic!("interleaved same-txid preload failed: {error}");
+    }
+
+    for vout in INTERLEAVED_VOUTS_PER_TXID..INTERLEAVED_VOUTS_PER_TXID.saturating_mul(2) {
+        for (tx_index, txid) in txids.iter().enumerate() {
+            let tx_index = u64::try_from(tx_index).unwrap_or(0);
+            changes.add(UtxoAdd::new(
+                OutPoint::new(*txid, vout),
+                txout(
+                    seed.wrapping_add(0x1000)
+                        .wrapping_add(tx_index)
+                        .wrapping_add(u64::from(vout)),
+                ),
+                false,
+                2,
+            ));
+        }
     }
 
     (set, changes)
@@ -410,6 +462,35 @@ fn bench_same_txid_cases(c: &mut Criterion) {
     bench_same_txid_churn_noop_listener(c);
     bench_same_txid_full_spend(c);
     bench_same_txid_full_spend_noop_listener(c);
+    c.bench_function("utxo_commit/interleaved_same_txid_churn", |b| {
+        b.iter_batched(
+            || interleaved_same_txid_churn_case(0x0304_0506),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0312_1314)) {
+                    panic!("interleaved same-txid churn commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    c.bench_function(
+        "utxo_commit/interleaved_same_txid_churn_noop_listener",
+        |b| {
+            b.iter_batched(
+                || {
+                    let (mut set, changes) = interleaved_same_txid_churn_case(0x0304_0506);
+                    set.set_listener(Box::new(NoopListener));
+                    (set, changes)
+                },
+                |(set, changes)| {
+                    if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0312_1314)) {
+                        panic!("interleaved same-txid churn listener commit failed: {error}");
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
 }
 
 fn utxo_commit_synthetic_block(c: &mut Criterion) {
