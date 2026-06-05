@@ -8,6 +8,7 @@ use bitcoin_rs_utxo::{
 };
 use parking_lot::Mutex;
 use rayon::prelude::*;
+use smallvec::SmallVec;
 use zerocopy::IntoBytes;
 
 use crate::MuHash3072;
@@ -21,6 +22,7 @@ const PARALLEL_COIN_BATCH_OP_THRESHOLD: usize = 1024;
 const COIN_BATCH_CHUNK_SIZE: usize = 512;
 const PARALLEL_EVENT_CHUNK_OP_THRESHOLD: usize = 64;
 const EVENT_CHUNK_SIZE: usize = 32;
+const INLINE_EVENT_CHUNKS: usize = 64;
 
 /// Incremental UTXO set statistics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -440,7 +442,10 @@ impl UtxoChangeListener for CoinStatsListener {
             .map(UtxoChangeEvents::operation_count)
             .sum::<usize>();
         let delta = if operation_count >= PARALLEL_EVENT_CHUNK_OP_THRESHOLD {
-            let mut chunks = Vec::with_capacity(operation_count.div_ceil(EVENT_CHUNK_SIZE));
+            let mut chunks =
+                SmallVec::<[UtxoCommittedEvent<'_, '_>; INLINE_EVENT_CHUNKS]>::with_capacity(
+                    operation_count.div_ceil(EVENT_CHUNK_SIZE),
+                );
             for batch in batches {
                 batch.for_each_chunk(EVENT_CHUNK_SIZE, |event| chunks.push(event));
             }

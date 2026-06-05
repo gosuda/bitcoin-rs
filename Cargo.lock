@@ -304,6 +304,7 @@ dependencies = [
  "ruint",
  "serde_json",
  "sha2 0.11.0",
+ "smallvec",
  "tempfile",
  "thiserror",
  "tracing",
