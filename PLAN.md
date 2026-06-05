@@ -276,6 +276,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected raising the CoinStats committed-event chunk size from 32 to 64 after `coinstats/utxo_commit_listener_two_shard_512` regressed by +22.086% with no significant 8192-listener win.
 - [x] Rejected lowering the CoinStats inline event-chunk descriptor buffer from 64 to 16 after `coinstats/utxo_commit_listener_two_shard_8192` regressed by +9.5260% and no-listener two-shard 8192 regressed by +43.149%.
 - [x] Rejected enabling txid-run grouping for `coalesces_committed_events()` listeners after the targeted CoinStats listener benches stayed statistically unchanged (`two_shard_8192` -1.9375%, `two_shard_512` +2.1615%, fanout -0.0733%), and node spend-heavy proxies did not produce a material end-to-end win (unfiltered -2.1686% within noise threshold, filter +1.0430% no change).
+- [x] Rejected direct serial application of sub-threshold CoinStats committed-event batches after `coinstats/utxo_commit_listener_two_shard_8192` regressed by +27.682% and no-listener `coinstats/utxo_commit_two_shard_8192` regressed by +25.090%; `two_shard_512` and fanout listener workloads showed no significant improvement.
 
 **Still pending:**
 
