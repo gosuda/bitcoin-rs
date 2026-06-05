@@ -217,7 +217,16 @@ impl BlockStager {
         &mut self,
         next_expected_hash: Option<Hash256>,
     ) -> Option<Hash256> {
-        self.compact_received_order_prefix();
+        while let Some(hash) = self.received_order.pop_front() {
+            if !self.received.contains_key(&hash) {
+                continue;
+            }
+            if Some(hash) == next_expected_hash {
+                self.received_order.push_front(hash);
+                break;
+            }
+            return Some(hash);
+        }
         let candidate_index = self.received_order.iter().position(|hash| {
             Some(*hash) != next_expected_hash && self.received.contains_key(hash)
         })?;
@@ -241,16 +250,6 @@ impl BlockStager {
             self.next_received_deadline
                 .map_or(deadline, |current| current.min(deadline)),
         );
-    }
-
-    fn compact_received_order_prefix(&mut self) {
-        while self
-            .received_order
-            .front()
-            .is_some_and(|hash| !self.received.contains_key(hash))
-        {
-            let _stale = self.received_order.pop_front();
-        }
     }
 
     fn maybe_compact_received_order(&mut self) {
