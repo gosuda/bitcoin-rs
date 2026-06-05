@@ -53,8 +53,10 @@ const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
 /// Maximum serialized bytes staged in memory while waiting for predecessors.
 const RECEIVED_BLOCK_BYTE_BUDGET: usize = 128 * 256 * 1024;
-/// Maximum decoded inbound blocks held before handing them to `BlockStager`.
-const INBOUND_BLOCK_STAGE_CHUNK: usize = RECEIVED_BLOCK_BUDGET;
+/// Maximum decoded inbound blocks held before handing them to `BlockStager`,
+/// sized from the same byte budget that bounds retained staged blocks.
+const INBOUND_BLOCK_STAGE_CHUNK: usize =
+    at_least_one(RECEIVED_BLOCK_BYTE_BUDGET / PENDING_BLOCK_BYTE_ESTIMATE);
 /// Maximum block requests one peer may own at once.
 ///
 /// Keep the default per-peer cap equal to the global cap so the bounded
@@ -62,6 +64,10 @@ const INBOUND_BLOCK_STAGE_CHUNK: usize = RECEIVED_BLOCK_BUDGET;
 const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
+
+const fn at_least_one(value: usize) -> usize {
+    if value == 0 { 1 } else { value }
+}
 
 /// Block download orchestrator.
 pub struct BlockSync {
