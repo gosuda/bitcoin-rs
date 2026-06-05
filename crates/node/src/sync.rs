@@ -709,6 +709,13 @@ fn insert_request_peer(request_peers: &mut Vec<SyncPeer>, limit: usize, peer: Sy
     if limit == 0 {
         return;
     }
+    if request_peers.len() >= limit
+        && request_peers
+            .last()
+            .is_some_and(|current| current.start_height >= peer.start_height)
+    {
+        return;
+    }
     let insert_at = request_peers
         .iter()
         .position(|current| current.start_height < peer.start_height)
