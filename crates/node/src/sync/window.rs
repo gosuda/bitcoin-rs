@@ -428,7 +428,7 @@ impl DownloadWindow {
         non_empty_request(peer_addr, entries, next_request_height)
     }
 
-    pub(super) fn mark_requested(&mut self, request: &PeerRequest, now: Instant) {
+    pub(super) fn mark_requested(&mut self, request: &PeerRequest, now: Instant) -> bool {
         let estimated_bytes = self.ewma_block_bytes;
         let inflight = self.peer_inflight.entry(request.peer_addr).or_default();
         for entry in &request.entries {
@@ -451,6 +451,7 @@ impl DownloadWindow {
             self.record_pending_deadline(now);
         }
         self.next_request_height = self.next_request_height.max(request.next_request_height);
+        self.has_request_capacity()
     }
 
     pub(super) fn mark_received(&mut self, hash: Hash256, bytes: usize) -> bool {

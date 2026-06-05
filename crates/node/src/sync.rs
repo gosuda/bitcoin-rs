@@ -101,6 +101,12 @@ struct ExpectedApplyCache {
     hashes: ExpectedBlockHashes,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct GetdataRequestOutcome {
+    sent: bool,
+    has_request_capacity: bool,
+}
+
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
@@ -146,7 +152,7 @@ impl BlockSync {
         let request_peer_count = sync_peer_selection.request_peers.len();
         for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
-            let requested_blocks = match (&chain_tip, &applied_tip) {
+            let request_outcome = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
                     peer.addr,
                     peer_idx + 1 == request_peer_count,
@@ -154,10 +160,10 @@ impl BlockSync {
                     chain_tip,
                     applied_tip,
                 ),
-                _ => false,
+                _ => GetdataRequestOutcome::default(),
             };
-            sent_getdata |= requested_blocks;
-            if requested_blocks && !self.download_window.lock().has_request_capacity() {
+            sent_getdata |= request_outcome.sent;
+            if request_outcome.sent && !request_outcome.has_request_capacity {
                 break;
             }
         }
@@ -530,10 +536,10 @@ impl BlockSync {
         peer_best_height: u32,
         chain_tip: &TipSnapshot,
         applied_tip: &TipSnapshot,
-    ) -> bool {
+    ) -> GetdataRequestOutcome {
         let applied_height = applied_tip.height;
         if chain_tip.height <= applied_height {
-            return false;
+            return GetdataRequestOutcome::default();
         }
 
         let now = Instant::now();
@@ -549,7 +555,7 @@ impl BlockSync {
         );
         drop(tree);
         let Some(request) = request else {
-            return false;
+            return GetdataRequestOutcome::default();
         };
 
         let count = request.len();
@@ -584,14 +590,14 @@ impl BlockSync {
                 peer_addr = %request.peer_addr(),
                 "block sync: target peer has no outbound channel (getdata skipped)"
             );
-            return false;
+            return GetdataRequestOutcome::default();
         };
         if tx.send(msg).is_err() {
             tracing::warn!(
                 peer_addr = %request.peer_addr(),
                 "block sync: outbound channel disconnected (getdata)"
             );
-            return false;
+            return GetdataRequestOutcome::default();
         }
         if is_contiguous {
             *self.expected_apply_cache.lock() = Some(ExpectedApplyCache {
@@ -601,7 +607,7 @@ impl BlockSync {
                 hashes: expected_hashes,
             });
         }
-        self.download_window.lock().mark_requested(&request, now);
+        let has_request_capacity = self.download_window.lock().mark_requested(&request, now);
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
         tracing::debug!(
             peer_addr = %request.peer_addr(),
@@ -610,7 +616,10 @@ impl BlockSync {
             chain_height = chain_tip.height,
             "block sync: sent getdata batch"
         );
-        true
+        GetdataRequestOutcome {
+            sent: true,
+            has_request_capacity,
+        }
     }
 
     fn send_getheaders(&self, sync_peer_addr: SocketAddr, our_height: u32, target_height: i32) {
