@@ -254,6 +254,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: this commit; Criterion `many_peers_512` -2.6818%, deep-header pure/indexed unchanged, production-state within noise.
 - [x] Coinstats committed-event chunk staging now uses inline storage for small parallel listener reductions, removing one heap allocation from common two-shard listener batches without changing event order or UTXO semantics.
   Evidence commit: `42479b8`.
+- [x] G14 Criterion artifact production now binds supplied elapsed seconds to exact raw Criterion benchmark sections, rejecting elapsed/raw mismatches, non-exact benchmark labels, and unlabeled timing lines before artifact creation.
+  Evidence commit: this commit; `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb` passed 34/34.
 
 **Measured but rejected in this campaign:**
 

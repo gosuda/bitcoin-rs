@@ -527,12 +527,12 @@ fn produce_g14_criterion_artifact(
     let bitcoin_rs_raw_output = write_text(
         artifact_dir,
         "bitcoin-rs-criterion-raw-output.txt",
-        "bitcoin-rs Criterion raw output\n",
+        &criterion_raw_output("bitcoin-rs/mainnet-ibd", "1.25"),
     )?;
     let bitcoin_core_raw_output = write_text(
         artifact_dir,
         "bitcoin-core-criterion-raw-output.txt",
-        "Bitcoin Core Criterion raw output\n",
+        &criterion_raw_output("bitcoin-core/mainnet-ibd", "2.50"),
     )?;
     Ok(Command::new("bash")
         .arg(artifact_producer_script_path())
@@ -589,12 +589,12 @@ fn artifact_producer_rejects_invalid_elapsed_seconds() -> Result<(), Box<dyn std
     let bitcoin_rs_raw_output = write_text(
         temp.path(),
         "bitcoin-rs-criterion-raw-output.txt",
-        "bitcoin-rs Criterion raw output\n",
+        &criterion_raw_output("bitcoin-rs/mainnet-ibd", "1.25"),
     )?;
     let bitcoin_core_raw_output = write_text(
         temp.path(),
         "bitcoin-core-criterion-raw-output.txt",
-        "Bitcoin Core Criterion raw output\n",
+        &criterion_raw_output("bitcoin-core/mainnet-ibd", "2.50"),
     )?;
     let artifact = temp.path().join("g14-failed-artifact.json");
     fs::write(&artifact, "stale artifact\n")?;
@@ -646,6 +646,221 @@ fn artifact_producer_rejects_invalid_elapsed_seconds() -> Result<(), Box<dyn std
         String::from_utf8_lossy(&artifact_output.stderr)
             .contains("--criterion-bitcoin-rs-elapsed-seconds")
     );
+    assert!(!artifact.exists());
+    Ok(())
+}
+
+#[test]
+fn artifact_producer_rejects_elapsed_seconds_not_in_raw_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let bitcoin_rs_raw_output = write_text(
+        temp.path(),
+        "bitcoin-rs-criterion-raw-output.txt",
+        &criterion_raw_output("bitcoin-rs/mainnet-ibd", "1.25"),
+    )?;
+    let bitcoin_core_raw_output = write_text(
+        temp.path(),
+        "bitcoin-core-criterion-raw-output.txt",
+        &criterion_raw_output("bitcoin-core/mainnet-ibd", "2.50"),
+    )?;
+    let artifact = temp.path().join("g14-mismatched-artifact.json");
+
+    let artifact_output = Command::new("bash")
+        .arg(artifact_producer_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-mismatched",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.26",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--bitcoin-rs-command",
+            "target/release/bitcoin-rs --network mainnet",
+            "--bitcoin-core-command",
+            "bitcoind -chain=main",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!artifact_output.status.success());
+    let stderr = String::from_utf8_lossy(&artifact_output.stderr);
+    assert!(stderr.contains("--criterion-bitcoin-rs-elapsed-seconds"));
+    assert!(stderr.contains("does not match"));
+    assert!(!artifact.exists());
+    Ok(())
+}
+
+#[test]
+fn artifact_producer_rejects_non_exact_raw_output_benchmark_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let bitcoin_rs_raw_output = write_text(
+        temp.path(),
+        "bitcoin-rs-criterion-raw-output.txt",
+        "Benchmarking bitcoin-rs/mainnet-ibd\nbitcoin-rs/mainnet-ibd-cache-warm\ntime:   [1.00 s 1.25 s 3.00 s]\n",
+    )?;
+    let bitcoin_core_raw_output = write_text(
+        temp.path(),
+        "bitcoin-core-criterion-raw-output.txt",
+        &criterion_raw_output("bitcoin-core/mainnet-ibd", "2.50"),
+    )?;
+    let artifact = temp.path().join("g14-wrong-benchmark-artifact.json");
+
+    let artifact_output = Command::new("bash")
+        .arg(artifact_producer_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-wrong-benchmark",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.25",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--bitcoin-rs-command",
+            "target/release/bitcoin-rs --network mainnet",
+            "--bitcoin-core-command",
+            "bitcoind -chain=main",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!artifact_output.status.success());
+    let stderr = String::from_utf8_lossy(&artifact_output.stderr);
+    assert!(stderr.contains("--criterion-bitcoin-rs-raw-output"));
+    assert!(stderr.contains("bitcoin-rs/mainnet-ibd"));
+    assert!(!artifact.exists());
+    Ok(())
+}
+
+#[test]
+fn artifact_producer_rejects_unlabeled_raw_output_time() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let bitcoin_rs_raw_output = write_text(
+        temp.path(),
+        "bitcoin-rs-criterion-raw-output.txt",
+        "Benchmarking bitcoin-rs/mainnet-ibd\nunrelated text\ntime:   [1.00 s 1.25 s 3.00 s]\n",
+    )?;
+    let bitcoin_core_raw_output = write_text(
+        temp.path(),
+        "bitcoin-core-criterion-raw-output.txt",
+        &criterion_raw_output("bitcoin-core/mainnet-ibd", "2.50"),
+    )?;
+    let artifact = temp.path().join("g14-unlabeled-time-artifact.json");
+
+    let artifact_output = Command::new("bash")
+        .arg(artifact_producer_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-unlabeled-time",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.25",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--bitcoin-rs-command",
+            "target/release/bitcoin-rs --network mainnet",
+            "--bitcoin-core-command",
+            "bitcoind -chain=main",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!artifact_output.status.success());
+    let stderr = String::from_utf8_lossy(&artifact_output.stderr);
+    assert!(stderr.contains("--criterion-bitcoin-rs-raw-output"));
+    assert!(stderr.contains("bitcoin-rs/mainnet-ibd"));
     assert!(!artifact.exists());
     Ok(())
 }
@@ -1444,6 +1659,12 @@ fn write_text(
     let path = dir.join(name);
     fs::write(&path, contents)?;
     Ok(path)
+}
+
+fn criterion_raw_output(benchmark_id: &str, elapsed_seconds: &str) -> String {
+    format!(
+        "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\n"
+    )
 }
 
 fn criterion_artifact_json(

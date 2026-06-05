@@ -30,6 +30,23 @@ import subprocess
 CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
+CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
+CRITERION_UNIT_PATTERN = "(?:ns|us|\u00b5s|ms|s)"
+CRITERION_INTERVAL_RE = re.compile(
+    rf"time:\s*\[\s*({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})\s+"
+    rf"({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})\s+"
+    rf"({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})\s*\]"
+)
+CRITERION_SINGLE_RE = re.compile(
+    rf"time:\s*({CRITERION_NUMBER_PATTERN})\s*({CRITERION_UNIT_PATTERN})"
+)
+CRITERION_UNIT_SECONDS = {
+    "ns": 0.000_000_001,
+    "us": 0.000_001,
+    "\u00b5s": 0.000_001,
+    "ms": 0.001,
+    "s": 1.0,
+}
 
 
 def die(message: str) -> None:
@@ -78,6 +95,67 @@ def read_text(path: Path, name: str) -> str:
     except UnicodeDecodeError as error:
         die(f"{name} must be UTF-8: {error}")
     return non_empty_text(value, name)
+
+
+def criterion_seconds(value: str, unit: str) -> float:
+    return float(value) * CRITERION_UNIT_SECONDS[unit]
+
+
+def criterion_label_matches(line: str, benchmark_id: str) -> bool:
+    stripped = line.strip()
+    return stripped == benchmark_id or stripped == f"Benchmarking {benchmark_id}"
+
+
+def criterion_phase_matches(line: str, benchmark_id: str) -> bool:
+    return line.strip().startswith(f"Benchmarking {benchmark_id}:")
+
+
+def criterion_label_like(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith("Benchmarking "):
+        stripped = stripped.removeprefix("Benchmarking ").split(":", 1)[0].strip()
+    return re.fullmatch(r"[^\s:]+(?:/[^\s:]+)+", stripped) is not None
+
+
+def criterion_time_prefix_matches(line: str, benchmark_id: str) -> bool:
+    prefix = line.split("time:", 1)[0].strip()
+    return prefix == benchmark_id
+
+
+def criterion_elapsed_seconds(raw_output: str, benchmark_id: str, name: str) -> float:
+    lines = raw_output.splitlines()
+    for index, line in enumerate(lines):
+        if not criterion_label_matches(line, benchmark_id):
+            continue
+        for offset, candidate in enumerate(lines[index : min(len(lines), index + 16)]):
+            if offset > 0 and criterion_phase_matches(candidate, benchmark_id):
+                continue
+            if offset > 0 and criterion_label_like(candidate) and not criterion_label_matches(candidate, benchmark_id):
+                break
+            if "time:" in candidate and not criterion_time_prefix_matches(candidate, benchmark_id):
+                break
+            interval = CRITERION_INTERVAL_RE.search(candidate)
+            if interval:
+                return criterion_seconds(interval.group(3), interval.group(4))
+            single = CRITERION_SINGLE_RE.search(candidate)
+            if single:
+                return criterion_seconds(single.group(1), single.group(2))
+    die(f"{name} must contain Criterion time output for benchmark {benchmark_id!r}")
+
+
+def require_elapsed_matches_raw(
+    supplied_seconds: float,
+    raw_output: str,
+    benchmark_id: str,
+    elapsed_name: str,
+    raw_name: str,
+) -> None:
+    parsed_seconds = criterion_elapsed_seconds(raw_output, benchmark_id, raw_name)
+    if not math.isclose(supplied_seconds, parsed_seconds, rel_tol=1e-9, abs_tol=1e-9):
+        die(
+            f"{elapsed_name}={supplied_seconds:.12g} does not match "
+            f"{raw_name} benchmark {benchmark_id!r} elapsed seconds {parsed_seconds:.12g}"
+        )
 
 
 def sha256_text(value: str) -> str:
@@ -216,6 +294,22 @@ bitcoin_core_elapsed_seconds = positive_float(
 )
 bitcoin_rs_raw_output = require_file(args.criterion_bitcoin_rs_raw_output, "--criterion-bitcoin-rs-raw-output")
 bitcoin_core_raw_output = require_file(args.criterion_bitcoin_core_raw_output, "--criterion-bitcoin-core-raw-output")
+bitcoin_rs_raw_text = read_text(bitcoin_rs_raw_output, "--criterion-bitcoin-rs-raw-output")
+bitcoin_core_raw_text = read_text(bitcoin_core_raw_output, "--criterion-bitcoin-core-raw-output")
+require_elapsed_matches_raw(
+    bitcoin_rs_elapsed_seconds,
+    bitcoin_rs_raw_text,
+    BITCOIN_RS_CRITERION_BENCHMARK_ID,
+    "--criterion-bitcoin-rs-elapsed-seconds",
+    "--criterion-bitcoin-rs-raw-output",
+)
+require_elapsed_matches_raw(
+    bitcoin_core_elapsed_seconds,
+    bitcoin_core_raw_text,
+    BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+    "--criterion-bitcoin-core-elapsed-seconds",
+    "--criterion-bitcoin-core-raw-output",
+)
 bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-command")
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = read_text(require_file(args.bitcoin_rs_config, "--bitcoin-rs-config"), "--bitcoin-rs-config")
