@@ -244,6 +244,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `2db5c4e`.
 - [x] Block staging inserts now use a single vacant-entry hash-table probe for new received blocks, avoiding the previous contains-then-insert double lookup while preserving duplicate and retry behavior.
   Evidence commit: `4d10d85`.
+- [x] Buffered sync apply now stores applied block hashes in the existing inline `ExpectedBlockHashes` buffer, removing one heap allocation from the contiguous staged-apply tick without changing retry or failure handling.
+  Evidence commit: `7d18912`.
 
 **Measured but rejected in this campaign:**
 
@@ -262,6 +264,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected replacing the inbound staged-result `Vec` with a chunk-sized `SmallVec` after received-scan and many-peer scheduler targets regressed despite improving oversized bursts.
 - [x] Rejected changing no-spend `ApplyScratch` script capture from `Some(HashMap::new())` to `None` after rerunning `sync_pipeline_apply_spend_heavy_proxy_filter` showed no statistically defensible improvement.
 - [x] Rejected storing same-block membership in `ApplyScratch` as `HashSet<Txid>` after the spend-heavy, filter, and production apply-tick sync proxies all stayed within Criterion noise.
+- [x] Rejected pre-converting `sync_peer_selection` applied height to `i32` after `many_peers_512` showed no significant movement and the follow-up received-scan/oversized-burst rerun fell back inside Criterion noise.
 
 **Still pending:**
 
