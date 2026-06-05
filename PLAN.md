@@ -202,6 +202,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commits: `ff2f211`, `74dafc0`, `d868d80`, `90b76b2`, `ec0c5e8`, `46846e1`, `a11b811`, `be99fc4`, `8a5cca6`.
 - [x] Node apply-path hot spots were compressed with UTXO change txid conversion hoisting, cached apply-hash slice drains, and related block-apply scan reductions.
   Evidence commits: `7a337b3`, `196c63c`.
+- [x] Node BIP68 apply-path planning was compressed by lazy-allocating the prevout-MTP cache only for time-based sequence locks and removing the unused non-coinbase input-count accumulator.
+  Evidence commit: `0c9394d`.
 - [x] UTXO listener/commit hot paths were compressed with ordered listener event collection, order-independent listener coalescing, coalesced listener event preallocation, small listener shard commit coalescing, serial listener error-vec removal, and fast deletion for fully spent records.
   Evidence commits: `15bd917`, `87141a3`, `80806a3`, `cfb0c74`, `316738b`, `13ab475`.
 - [x] Coinstats hot helpers were compressed with private MuHash helper inlining, event-delta helper inlining, and ChaCha final-state add unrolling.
@@ -226,6 +228,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected the empty-mempool write-lock skip as a commit candidate because `sync_apply_metrics` did not produce a defensible fast-path win at printed metric resolution.
 - [x] Rejected lowering `PARALLEL_LISTENER_SHARD_THRESHOLD` from 16 to 2 after `utxo_commit/two_shard_noop_listener` regressed by roughly 200% against the current baseline.
 - [x] Rejected replacing the sync reverse-scan candidate `Vec` with a ring buffer after `deep_headers_received_scan_128_blocks` regressed by 5.3575% and `many_peers_512` regressed by 10.071%.
+- [x] Rejected a serial coinstats event-batch reducer after `coinstats/utxo_commit_listener_two_shard_512` and `8192` showed no significant Criterion movement.
+- [x] Rejected a coinstats fanout chunk-capacity hint after `coinstats/utxo_commit_listener_fanout_8192` regressed by 6.5366% and `two_shard_8192` regressed by 3.4566%.
 
 **Still pending:**
 
