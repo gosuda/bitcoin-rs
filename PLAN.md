@@ -306,7 +306,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected a coinstats fanout chunk-capacity hint after `coinstats/utxo_commit_listener_fanout_8192` regressed by 6.5366% and `two_shard_8192` regressed by 3.4566%.
 - [x] Rejected a no-listener low-vout bitmap detector for full-record spends after `utxo_commit/interleaved_same_txid_churn` regressed by 14.494% and the no-listener variant regressed by 22.785%.
 - [x] Rejected stack-backed coinstats coin-hash scratch buffers after `sync_pipeline_apply_spend_heavy_proxy_filter` regressed by 3.6128% and `deterministic_initial_sync_proxy_production_state_apply_tick_128_blocks` regressed by 2.9976%.
-- [x] Rejected ordered full-record UTXO removal before the existing order-independent fallback after the targeted sync proxies showed no statistically defensible improvement.
+- [x] Rejected ordered full-record UTXO removal before the existing order-independent fallback after the rerun regressed `utxo_commit/spend_fanout_64` by +10.018%, `utxo_commit/spend_fanout_64_noop_listener` by +6.7293%, and `coinstats/utxo_commit_listener_spend_fanout_64` by +11.512%.
 - [x] Rejected replacing `UtxoKey::hash()` with direct `as_u64()` after multi-shard UTXO commit shapes regressed despite concentrated single-shard wins.
 - [x] Rejected broad `UtxoRecord` helper inlining after `utxo_commit/uniform`, `concentrated`, and `concentrated_noop_listener` regressed significantly.
 - [x] Rejected replacing the inbound staged-result `Vec` with a chunk-sized `SmallVec` after received-scan and many-peer scheduler targets regressed despite improving oversized bursts.
