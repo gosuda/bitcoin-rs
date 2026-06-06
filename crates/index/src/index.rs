@@ -4,8 +4,11 @@ use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError, WriteBatch as _};
 use bitcoin_slices::{Visit as _, Visitor, bsl};
 use thiserror::Error;
 use tracing::debug;
+use zerocopy::IntoBytes;
 
-use crate::types::{HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow};
+use crate::types::{
+    HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow,
+};
 
 /// Errors returned while indexing confirmed blocks.
 #[derive(Debug, Error)]
@@ -451,13 +454,13 @@ impl<S: KvStore> Indexer<S> {
         let counts = rows.counts();
         let mut batch = self.store.new_batch();
         for row in &rows.txid_rows {
-            batch.put(ColumnFamily::TxConfirmed, row, &[]);
+            batch.put(ColumnFamily::TxConfirmed, row.as_bytes(), &[]);
         }
         for row in &rows.funding_rows {
-            batch.put(ColumnFamily::Funding, row, &[]);
+            batch.put(ColumnFamily::Funding, row.as_bytes(), &[]);
         }
         for row in &rows.spending_rows {
-            batch.put(ColumnFamily::Spending, row, &[]);
+            batch.put(ColumnFamily::Spending, row.as_bytes(), &[]);
         }
         for row in &rows.header_rows {
             batch.put(ColumnFamily::BlockHeaders, row, &[]);
@@ -506,9 +509,9 @@ fn pending_rows_for_block(
 
 #[derive(Default)]
 struct PendingRows {
-    txid_rows: Vec<[u8; crate::types::HASH_PREFIX_ROW_SIZE]>,
-    funding_rows: Vec<[u8; crate::types::HASH_PREFIX_ROW_SIZE]>,
-    spending_rows: Vec<[u8; crate::types::HASH_PREFIX_ROW_SIZE]>,
+    txid_rows: Vec<HashPrefixRow>,
+    funding_rows: Vec<HashPrefixRow>,
+    spending_rows: Vec<HashPrefixRow>,
     header_rows: Vec<[u8; crate::types::HEADER_ROW_SIZE]>,
 }
 
@@ -558,38 +561,34 @@ impl Visitor for IndexBlockVisitor<'_> {
                 let txid = tx.txid_sha2();
                 self.rows
                     .txid_rows
-                    .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+                    .push(TxidRow::row_bytes(txid.as_slice(), self.height));
             }
             TxidSource::Validate(txids) => {
                 if let Some(txid) = txids.get(self.txid_count) {
                     let computed = tx.txid_sha2();
                     let txid_bytes: &[u8] = txid.as_ref();
                     if txid_bytes == computed.as_slice() {
-                        self.rows
-                            .txid_rows
-                            .push(TxidRow::row(txid, self.height).to_db_row());
+                        self.rows.txid_rows.push(TxidRow::row(txid, self.height));
                     } else {
                         self.rows
                             .txid_rows
-                            .push(TxidRow::row_bytes(computed.as_slice(), self.height).to_db_row());
+                            .push(TxidRow::row_bytes(computed.as_slice(), self.height));
                     }
                 } else {
                     let txid = tx.txid_sha2();
                     self.rows
                         .txid_rows
-                        .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+                        .push(TxidRow::row_bytes(txid.as_slice(), self.height));
                 }
             }
             TxidSource::Trusted(txids) => {
                 if let Some(txid) = txids.get(self.txid_count) {
-                    self.rows
-                        .txid_rows
-                        .push(TxidRow::row(txid, self.height).to_db_row());
+                    self.rows.txid_rows.push(TxidRow::row(txid, self.height));
                 } else {
                     let txid = tx.txid_sha2();
                     self.rows
                         .txid_rows
-                        .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+                        .push(TxidRow::row_bytes(txid.as_slice(), self.height));
                 }
             }
         }
@@ -600,10 +599,11 @@ impl Visitor for IndexBlockVisitor<'_> {
     fn visit_tx_in(&mut self, _vin: usize, tx_in: &bsl::TxIn<'_>) -> ControlFlow<()> {
         let prevout = tx_in.prevout();
         if !is_null_prevout(prevout) {
-            self.rows.spending_rows.push(
-                SpendingPrefixRow::row_parts(prevout.txid(), prevout.vout(), self.height)
-                    .to_db_row(),
-            );
+            self.rows.spending_rows.push(SpendingPrefixRow::row_parts(
+                prevout.txid(),
+                prevout.vout(),
+                self.height,
+            ));
         }
         ControlFlow::Continue(())
     }
@@ -611,9 +611,10 @@ impl Visitor for IndexBlockVisitor<'_> {
     fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut<'_>) -> ControlFlow<()> {
         let script = tx_out.script_pubkey();
         if !is_op_return_script(script) {
-            self.rows.funding_rows.push(
-                ScriptHashRow::row(ScriptHash::from_script_bytes(script), self.height).to_db_row(),
-            );
+            self.rows.funding_rows.push(ScriptHashRow::row(
+                ScriptHash::from_script_bytes(script),
+                self.height,
+            ));
         }
         ControlFlow::Continue(())
     }
