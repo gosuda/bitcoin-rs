@@ -987,7 +987,8 @@ impl UtxoSet {
         }
 
         let mut error = None;
-        let mut shard_events = Vec::with_capacity(active_shard_count);
+        let mut shard_events =
+            SmallVec::<[UtxoChangeEvents<'_>; PARALLEL_LISTENER_SHARD_THRESHOLD]>::new();
         for &shard_idx in &active_shards[..active_shard_count] {
             let shard_adds = buckets.adds(shard_idx);
             let shard_removes = buckets.removes(shard_idx);
