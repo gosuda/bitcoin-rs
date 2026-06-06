@@ -79,6 +79,16 @@ fn main() {
     let metrics = install_diagnostic_metrics();
     print_utxo_fanout_commit_metrics("utxo_fanout_128_no_listener", false);
     print_utxo_fanout_commit_metrics("utxo_fanout_128_listener", true);
+    print_utxo_block_commit_metrics(
+        "utxo_spend_heavy_117_no_listener",
+        &spend_heavy_proxy_blocks(),
+        false,
+    );
+    print_utxo_block_commit_metrics(
+        "utxo_spend_heavy_117_listener",
+        &spend_heavy_proxy_blocks(),
+        true,
+    );
     print_apply_metrics(
         "coinbase_32",
         &proxy_blocks(COINBASE_PROXY_BLOCKS),
@@ -141,6 +151,38 @@ fn main() {
         true,
         true,
         &metrics,
+    );
+}
+
+fn print_utxo_block_commit_metrics(name: &str, blocks: &[Block], with_listener: bool) {
+    let commit_inputs: Vec<_> = blocks
+        .iter()
+        .enumerate()
+        .map(|(height, block)| {
+            let height =
+                u32::try_from(height).unwrap_or_else(|error| panic!("invalid height: {error}"));
+            (height_hash(height), block_utxo_changes(block, height))
+        })
+        .collect();
+    let mut set = UtxoSet::new();
+    if with_listener {
+        set.set_listener(Box::new(CoinStatsListener::new(CoinStats::new())));
+    }
+    let started = Instant::now();
+    for (block_hash, changes) in &commit_inputs {
+        set.commit_block(changes, block_hash)
+            .unwrap_or_else(|error| panic!("{name} commit failed: {error}"));
+    }
+    let elapsed = started.elapsed();
+    let commit_count = f64::from(
+        u32::try_from(commit_inputs.len())
+            .unwrap_or_else(|error| panic!("invalid commit count: {error}")),
+    );
+    let commits_per_second = commit_count / elapsed.as_secs_f64();
+    let avg_commit_ms = (elapsed.as_secs_f64() / commit_count) * 1_000.0;
+    println!(
+        "utxo_commit_metrics workload={name} listener={with_listener} commits={} elapsed={elapsed:?} commits_per_second={commits_per_second:.2} avg_commit_ms={avg_commit_ms:.4}",
+        commit_inputs.len(),
     );
 }
 
@@ -331,6 +373,37 @@ fn fanout_utxo_changes(height: u32) -> BlockChanges {
         ));
     }
     changes
+}
+
+fn block_utxo_changes(block: &Block, height: u32) -> BlockChanges {
+    let mut changes = BlockChanges::default();
+    for transaction in &block.txdata {
+        let coinbase = transaction.is_coinbase();
+        if !coinbase {
+            for input in &transaction.input {
+                changes.remove(primitive_outpoint(input.previous_output));
+            }
+        }
+        let txid = transaction.compute_txid();
+        let txid = Hash256::from_le_bytes(&txid.to_byte_array());
+        for (vout, txout) in transaction.output.iter().enumerate() {
+            let vout = u32::try_from(vout).unwrap_or_else(|error| panic!("invalid vout: {error}"));
+            changes.add(UtxoAdd::new(
+                PrimitiveOutPoint::new(txid, vout),
+                txout.clone(),
+                coinbase,
+                height,
+            ));
+        }
+    }
+    changes
+}
+
+fn primitive_outpoint(outpoint: OutPoint) -> PrimitiveOutPoint {
+    PrimitiveOutPoint::new(
+        Hash256::from_le_bytes(&outpoint.txid.to_byte_array()),
+        outpoint.vout,
+    )
 }
 
 fn height_hash(height: u32) -> Hash256 {
