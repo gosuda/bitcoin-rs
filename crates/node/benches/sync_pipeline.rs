@@ -265,6 +265,17 @@ fn bench_production_state_sync(c: &mut Criterion) {
             );
         },
     );
+    #[cfg(feature = "fjall")]
+    c.bench_function(
+        "deterministic_initial_sync_proxy_production_state_fjall_all_indexes_spend_heavy",
+        |b| {
+            b.iter_batched(
+                ProductionStateSyncFixture::new_fjall_all_indexes_spend_heavy,
+                |fixture| black_box(fixture.run()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     c.bench_function(
         "deterministic_initial_sync_proxy_production_state_apply_tick_128_blocks",
         |b| {
@@ -649,6 +660,7 @@ struct ProductionStateSyncFixture {
     state: NodeState,
     outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
     blocks: Vec<Block>,
+    expected_getdata_count: usize,
 }
 
 impl ProductionStateSyncFixture {
@@ -665,7 +677,47 @@ impl ProductionStateSyncFixture {
         Self::with_config(peer_count, config)
     }
 
-    fn with_config(peer_count: usize, mut config: Config) -> Self {
+    fn with_config(peer_count: usize, config: Config) -> Self {
+        Self::with_config_and_header_blocks(
+            peer_count,
+            config,
+            |tree| {
+                let (blocks, _received_scan_expected) =
+                    populate_sync_header_chain(tree, SYNC_PROXY_BLOCKS);
+                blocks
+            },
+            SYNC_PROXY_BLOCKS_USIZE,
+        )
+    }
+
+    #[cfg(feature = "fjall")]
+    fn new_fjall_all_indexes_spend_heavy() -> Self {
+        let mut config = production_state_config();
+        "fjall".clone_into(&mut config.storage_backend);
+        config.txindex = true;
+        config.blockfilterindex = true;
+        let body_blocks = spend_heavy_proxy_blocks()
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<_>>();
+        let expected_getdata_count = body_blocks.len();
+        Self::with_config_and_header_blocks(
+            1,
+            config,
+            |tree| {
+                populate_header_chain_from_blocks(tree, &body_blocks);
+                body_blocks
+            },
+            expected_getdata_count,
+        )
+    }
+
+    fn with_config_and_header_blocks(
+        peer_count: usize,
+        mut config: Config,
+        populate_blocks: impl FnOnce(&mut BlockTree) -> Vec<Block>,
+        expected_getdata_count: usize,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         config.data_dir = dir.path().join("node");
         let state = NodeState::open(config)
@@ -673,9 +725,7 @@ impl ProductionStateSyncFixture {
         let blocks = {
             let block_tree = state.block_tree();
             let mut tree = block_tree.write();
-            let (blocks, _received_scan_expected) =
-                populate_sync_header_chain(&mut tree, SYNC_PROXY_BLOCKS);
-            blocks
+            populate_blocks(&mut tree)
         };
         let outbound_rxs =
             install_synthetic_peers(&state.peers(), &state.peer_outbound(), peer_count);
@@ -684,6 +734,7 @@ impl ProductionStateSyncFixture {
             state,
             outbound_rxs,
             blocks,
+            expected_getdata_count,
         }
     }
 
@@ -776,7 +827,7 @@ impl ProductionStateSyncFixture {
             NetworkMessage::GetData(inventory) => inventory.len(),
             other => panic!("expected production getdata, got {other:?}"),
         };
-        assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
+        assert_eq!(getdata_count, self.expected_getdata_count);
     }
 }
 
@@ -830,6 +881,19 @@ fn populate_sync_header_chain(
         }
     }
     (blocks, received_scan_expected)
+}
+
+fn populate_header_chain_from_blocks(tree: &mut BlockTree, blocks: &[Block]) {
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_id = tree
+        .insert_node(None, genesis.header, NodeStatus::HeaderValid)
+        .unwrap_or_else(|error| panic!("regtest genesis header insert failed: {error}"));
+    let mut tip_id = genesis_id;
+    for block in blocks {
+        tip_id = tree
+            .insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)
+            .unwrap_or_else(|error| panic!("synthetic body header insert failed: {error}"));
+    }
 }
 
 fn install_synthetic_peers(

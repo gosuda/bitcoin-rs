@@ -268,6 +268,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence: Criterion `deterministic_initial_sync_proxy_in_order_inbound_128_blocks` completed at `1.8655ms` for 128 in-order inbound blocks.
 - [x] Deterministic sync proxy coverage now includes the G14-relevant fjall/all-index production shape, exercising real chainstate, txindex, and compact-filter fjall stores instead of only the previous no-index production fixture.
   Evidence: Criterion `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_128_blocks` completed at `6.7892ms` for 128 deterministic blocks with `--no-default-features --features fjall`.
+- [x] Deterministic sync proxy coverage now includes a spend-heavy fjall/all-index production shape, exercising fanout spends through real chainstate, txindex, and compact-filter fjall stores.
+  Evidence: Criterion `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_spend_heavy` completed at `99.810ms` for the 117-block, 1,141-transaction spend-heavy proxy with `--no-default-features --features fjall`.
 - [x] Node block-source height lookups now use a dense active-chain index fast path before the existing binary-search rewind fallback, preserving duplicate-height record semantics.
   Evidence: Criterion `block_source_height_lookup_tail_4096` -8.5845%; production-state sync proxies stayed within noise.
 - [x] Buffered sync apply now checks for an expected-apply cache before loading chain/applied tip snapshots, avoiding unnecessary `ArcSwap` loads on no-cache apply ticks.
