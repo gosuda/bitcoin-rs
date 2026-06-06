@@ -309,6 +309,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected single-pass protected-head `BlockStager` eviction after `deep_headers_received_scan_128_blocks` improved by -3.4380% but production-state sync regressed by +4.8993% and production apply-tick regressed by +2.1062%.
 - [x] Rejected adding a private contiguous flag to `PeerRequest` after clean request and scheduler proxies regressed: `deep_headers_pure_128_blocks` +10.175%, `deep_headers_indexed_128_blocks` +5.3938%, `deep_headers_received_scan_128_blocks` +3.4194%, `production_state_apply_tick_128_blocks` +3.3182%, `production_state_partial_apply_tick_128_blocks` +8.4149%, and `many_peers_512` +3.5686%.
 - [x] Rejected skipping redundant `BlockStager` received-deadline writes after the first run's `production_state_partial_apply_tick_128_blocks` win (-7.8512%) did not reproduce; the repeat showed no significant movement across received-scan, production-state, apply-tick, partial-apply, and many-peer targets.
+- [x] Rejected direct serialized-header slicing in `applied_block_record` after `sync_pipeline_apply_proxy` improved by -7.5194% but filter and production sync guards regressed: `sync_pipeline_apply_spend_heavy_proxy_filter` +2.2945%, `production_state_128_blocks` +2.4467%, `production_state_apply_tick_128_blocks` +7.5058%, and `production_state_partial_apply_tick_128_blocks` +2.6409%.
 
 **Still pending:**
 
