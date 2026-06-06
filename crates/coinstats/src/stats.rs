@@ -21,7 +21,7 @@ const MAX_RETAINED_SCRATCH_CAPACITY: usize = 4096;
 const PARALLEL_COIN_BATCH_OP_THRESHOLD: usize = 1024;
 const COIN_BATCH_CHUNK_SIZE: usize = 512;
 const PARALLEL_EVENT_CHUNK_OP_THRESHOLD: usize = 64;
-const EVENT_CHUNK_SIZE: usize = 32;
+const EVENT_CHUNK_SIZE: usize = 16;
 const INLINE_EVENT_CHUNKS: usize = 64;
 
 /// Incremental UTXO set statistics.
