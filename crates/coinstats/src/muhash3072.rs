@@ -280,24 +280,59 @@ fn element(data: &[u8]) -> Num3072 {
     let mut limbs = [0_u64; LIMBS];
     let mut block_counter = 0_u32;
     for limb_block in limbs.chunks_exact_mut(8) {
-        let words = chacha20_block_words(&key_words, block_counter);
-        write_chacha_words_as_limbs(limb_block, &words);
+        write_chacha_block_as_limbs(limb_block, &key_words, block_counter);
         block_counter = block_counter.wrapping_add(1);
     }
     Num3072 { limbs }
 }
 
 #[inline(always)]
-fn write_chacha_words_as_limbs(limbs: &mut [u64], words: &[u32; 16]) {
+fn write_chacha_block_as_limbs(limbs: &mut [u64], key_words: &[u32; 8], counter: u32) {
     debug_assert_eq!(limbs.len(), 8);
-    limbs[0] = u64::from(words[0]) | (u64::from(words[1]) << 32);
-    limbs[1] = u64::from(words[2]) | (u64::from(words[3]) << 32);
-    limbs[2] = u64::from(words[4]) | (u64::from(words[5]) << 32);
-    limbs[3] = u64::from(words[6]) | (u64::from(words[7]) << 32);
-    limbs[4] = u64::from(words[8]) | (u64::from(words[9]) << 32);
-    limbs[5] = u64::from(words[10]) | (u64::from(words[11]) << 32);
-    limbs[6] = u64::from(words[12]) | (u64::from(words[13]) << 32);
-    limbs[7] = u64::from(words[14]) | (u64::from(words[15]) << 32);
+    let state = [
+        0x6170_7865,
+        0x3320_646e,
+        0x7962_2d32,
+        0x6b20_6574,
+        key_words[0],
+        key_words[1],
+        key_words[2],
+        key_words[3],
+        key_words[4],
+        key_words[5],
+        key_words[6],
+        key_words[7],
+        counter,
+        0,
+        0,
+        0,
+    ];
+    let mut working = state;
+    for _ in 0..10 {
+        quarter_round(&mut working, 0, 4, 8, 12);
+        quarter_round(&mut working, 1, 5, 9, 13);
+        quarter_round(&mut working, 2, 6, 10, 14);
+        quarter_round(&mut working, 3, 7, 11, 15);
+        quarter_round(&mut working, 0, 5, 10, 15);
+        quarter_round(&mut working, 1, 6, 11, 12);
+        quarter_round(&mut working, 2, 7, 8, 13);
+        quarter_round(&mut working, 3, 4, 9, 14);
+    }
+    limbs[0] = chacha_limb(working[0], state[0], working[1], state[1]);
+    limbs[1] = chacha_limb(working[2], state[2], working[3], state[3]);
+    limbs[2] = chacha_limb(working[4], state[4], working[5], state[5]);
+    limbs[3] = chacha_limb(working[6], state[6], working[7], state[7]);
+    limbs[4] = chacha_limb(working[8], state[8], working[9], state[9]);
+    limbs[5] = chacha_limb(working[10], state[10], working[11], state[11]);
+    limbs[6] = chacha_limb(working[12], state[12], working[13], state[13]);
+    limbs[7] = chacha_limb(working[14], state[14], working[15], state[15]);
+}
+
+#[inline(always)]
+fn chacha_limb(left: u32, left_state: u32, right: u32, right_state: u32) -> u64 {
+    let left = left.wrapping_add(left_state);
+    let right = right.wrapping_add(right_state);
+    u64::from(left) | (u64::from(right) << 32)
 }
 
 #[inline(always)]
@@ -400,6 +435,7 @@ fn chacha20_key_words(key: &[u8; 32]) -> [u32; 8] {
     })
 }
 
+#[cfg(test)]
 #[inline]
 fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
     let state = [
