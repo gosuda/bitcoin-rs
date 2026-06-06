@@ -520,10 +520,8 @@ fn encode_txout_into(out: &mut Vec<u8>, txout: &TxOut) {
 
 #[inline]
 fn encode_compact_size_into(out: &mut Vec<u8>, len: usize) {
-    if let Ok(byte_len) = u8::try_from(len)
-        && byte_len < 0xfd
-    {
-        out.push(byte_len);
+    if len < 0xfd {
+        out.push(u8::try_from(len).unwrap_or(0));
         return;
     }
     if let Ok(word_len) = u16::try_from(len) {
