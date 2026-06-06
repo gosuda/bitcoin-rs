@@ -291,6 +291,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected direct serial application of sub-threshold CoinStats committed-event batches after `coinstats/utxo_commit_listener_two_shard_8192` regressed by +27.682% and no-listener `coinstats/utxo_commit_two_shard_8192` regressed by +25.090%; `two_shard_512` and fanout listener workloads showed no significant improvement.
 - [x] Rejected binary-search insertion for the already bounded sync request-peer list after scheduler targets showed no significant movement: `many_peers_512` +0.8717%, deep-headers pure +0.3328%, indexed +0.6761%, and received-scan +0.1106%.
 - [x] Rejected returning early from `expired_request_entries()` when the expired list is empty after deterministic sync targets regressed: indexed +2.1219% and received-scan +4.6699%; pure and many-peer showed no significant movement, and production-state stayed within the Criterion noise threshold.
+- [x] Rejected batching unique coalesced UTXO insert events once per add run after the changed CoinStats guard regressed (`coinstats/utxo_commit_listener_two_shard_512` +4.3772%) and `sync_pipeline_apply_proxy` regressed by +5.5447%; production apply-tick stayed within noise.
+- [x] Rejected passing `BlockTxPlan`'s no-overlay proof into `ApplyScratch` to skip same-block spend tracking after the intended spend-heavy proxies stayed within noise and deterministic initial-sync apply-tick stayed within the Criterion noise threshold; the unrelated `apply_proxy` win was treated as noise because that path had no spent-input scratch tracking to skip.
 
 **Still pending:**
 
