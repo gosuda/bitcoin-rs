@@ -446,6 +446,7 @@ fn commit_batch_coalesced<'arena>(
         remaining_removes = &remaining_removes[run_len..];
     }
 
+    reserve_add_runs(table, coalesced_add_run_count(adds));
     let mut remaining_adds = adds;
     while let Some(((key, txid, _payload), rest)) = remaining_adds.split_first() {
         let run_len = rest
@@ -558,6 +559,21 @@ fn reserve_add_runs(table: &mut ShardTable<'_>, additional_runs: usize) {
             .table
             .reserve(additional_runs, |record| record.key().hash());
     }
+}
+
+fn coalesced_add_run_count(adds: &[(UtxoKey, Hash256, BuildPayload<'_>)]) -> usize {
+    let mut run_count = 0usize;
+    let mut remaining_adds = adds;
+    while let Some(((key, txid, _payload), rest)) = remaining_adds.split_first() {
+        let run_len = rest
+            .iter()
+            .take_while(|(next_key, next_txid, _payload)| next_key == key && next_txid == txid)
+            .count()
+            .saturating_add(1);
+        run_count = run_count.saturating_add(1);
+        remaining_adds = &remaining_adds[run_len..];
+    }
+    run_count
 }
 
 fn utxo_add_run_count<A: UtxoAddView>(adds: &[A]) -> usize {
