@@ -22,7 +22,9 @@ const MAX_RETAINED_SCRATCH_CAPACITY: usize = 4096;
 const PARALLEL_COIN_BATCH_OP_THRESHOLD: usize = 1024;
 const COIN_BATCH_CHUNK_SIZE: usize = 512;
 const PARALLEL_EVENT_CHUNK_OP_THRESHOLD: usize = 64;
-const EVENT_CHUNK_SIZE: usize = 16;
+const WIDE_EVENT_BATCH_SHARD_THRESHOLD: usize = 16;
+const NARROW_EVENT_CHUNK_SIZE: usize = 16;
+const WIDE_EVENT_CHUNK_SIZE: usize = 4;
 const INLINE_EVENT_CHUNKS: usize = 64;
 
 /// Incremental UTXO set statistics.
@@ -473,12 +475,17 @@ impl UtxoChangeListener for CoinStatsListener {
             .map(UtxoChangeEvents::operation_count)
             .sum::<usize>();
         let delta = if operation_count >= PARALLEL_EVENT_CHUNK_OP_THRESHOLD {
+            let event_chunk_size = if batches.len() >= WIDE_EVENT_BATCH_SHARD_THRESHOLD {
+                WIDE_EVENT_CHUNK_SIZE
+            } else {
+                NARROW_EVENT_CHUNK_SIZE
+            };
             let mut chunks =
                 SmallVec::<[UtxoCommittedEvent<'_, '_>; INLINE_EVENT_CHUNKS]>::with_capacity(
-                    operation_count.div_ceil(EVENT_CHUNK_SIZE),
+                    operation_count.div_ceil(event_chunk_size),
                 );
             for batch in batches {
-                batch.for_each_chunk(EVENT_CHUNK_SIZE, |event| chunks.push(event));
+                batch.for_each_chunk(event_chunk_size, |event| chunks.push(event));
             }
             chunks
                 .par_iter()
