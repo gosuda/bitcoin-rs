@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use bytes::Bytes;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch};
@@ -73,7 +74,11 @@ impl KvStore for FjallStore {
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    fjall_batch.insert(cached_keyspace(self, &mut keyspaces, cf)?, key, value);
+                    fjall_batch.insert(
+                        cached_keyspace(self, &mut keyspaces, cf)?,
+                        key,
+                        value.as_ref(),
+                    );
                 }
                 BatchOp::Delete { cf, key } => {
                     fjall_batch.remove(cached_keyspace(self, &mut keyspaces, cf)?, key);
@@ -135,10 +140,14 @@ pub struct FjallWriteBatch {
 
 impl WriteBatch for FjallWriteBatch {
     fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
+        self.put_value(cf, key, Bytes::copy_from_slice(value));
+    }
+
+    fn put_value(&mut self, cf: ColumnFamily, key: &[u8], value: Bytes) {
         self.ops.push(BatchOp::Put {
             cf,
             key: key.to_vec(),
-            value: value.to_vec(),
+            value,
         });
     }
 
@@ -162,7 +171,7 @@ enum BatchOp {
     Put {
         cf: ColumnFamily,
         key: Vec<u8>,
-        value: Vec<u8>,
+        value: Bytes,
     },
     Delete {
         cf: ColumnFamily,

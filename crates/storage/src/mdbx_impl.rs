@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use bytes::Bytes;
 use signet_libmdbx::{
     Database, DatabaseFlags, Environment, Geometry, WriteFlags,
     tx::aliases::{RoTxSync, RwTxSync},
@@ -148,10 +149,14 @@ pub struct MdbxWriteBatch {
 
 impl WriteBatch for MdbxWriteBatch {
     fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
+        self.put_value(cf, key, Bytes::copy_from_slice(value));
+    }
+
+    fn put_value(&mut self, cf: ColumnFamily, key: &[u8], value: Bytes) {
         self.ops.push(BatchOp::Put {
             cf,
             key: key.to_vec(),
-            value: value.to_vec(),
+            value,
         });
     }
 
@@ -175,7 +180,7 @@ enum BatchOp {
     Put {
         cf: ColumnFamily,
         key: Vec<u8>,
-        value: Vec<u8>,
+        value: Bytes,
     },
     Delete {
         cf: ColumnFamily,

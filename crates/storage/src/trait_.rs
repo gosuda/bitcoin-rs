@@ -1,4 +1,5 @@
 use crate::{ColumnFamily, StorageError};
+use bytes::Bytes;
 
 /// Owned key-value pair returned by portable iterators.
 pub type KvPair = (Vec<u8>, Vec<u8>);
@@ -31,6 +32,13 @@ pub trait KvStore: Send + Sync + 'static {
         self.write(batch)
     }
 
+    /// Inserts or replaces one `key` with an owned `value` in `cf`.
+    fn put_value(&self, cf: ColumnFamily, key: &[u8], value: Bytes) -> Result<(), StorageError> {
+        let mut batch = self.new_batch();
+        batch.put_value(cf, key, value);
+        self.write(batch)
+    }
+
     /// Atomically applies `batch`.
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError>;
 
@@ -45,6 +53,11 @@ pub trait KvStore: Send + Sync + 'static {
 pub trait WriteBatch: Send {
     /// Inserts or replaces `key` with `value` in `cf`.
     fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]);
+
+    /// Inserts or replaces `key` with an owned `value` in `cf`.
+    fn put_value(&mut self, cf: ColumnFamily, key: &[u8], value: Bytes) {
+        self.put(cf, key, &value);
+    }
 
     /// Deletes `key` from `cf`.
     fn delete(&mut self, cf: ColumnFamily, key: &[u8]);

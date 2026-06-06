@@ -450,6 +450,7 @@ dependencies = [
  "bitcoin-rs-utreexo",
  "bitcoin-rs-utxo",
  "bitcoin-rs-wallet",
+ "bytes",
  "clap",
  "compact_str",
  "criterion",

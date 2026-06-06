@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use bytes::Bytes;
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch};
@@ -104,10 +105,14 @@ pub struct RedbWriteBatch {
 
 impl WriteBatch for RedbWriteBatch {
     fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
+        self.put_value(cf, key, Bytes::copy_from_slice(value));
+    }
+
+    fn put_value(&mut self, cf: ColumnFamily, key: &[u8], value: Bytes) {
         self.ops.push(BatchOp::Put {
             cf,
             key: key.to_vec(),
-            value: value.to_vec(),
+            value,
         });
     }
 
@@ -131,7 +136,7 @@ enum BatchOp {
     Put {
         cf: ColumnFamily,
         key: Vec<u8>,
-        value: Vec<u8>,
+        value: Bytes,
     },
     Delete {
         cf: ColumnFamily,
@@ -158,7 +163,7 @@ fn apply_redb_batch_op(
 ) -> Result<(), StorageError> {
     match op {
         BatchOp::Put { key, value, .. } => table
-            .insert(key.as_slice(), value.as_slice())
+            .insert(key.as_slice(), value.as_ref())
             .map(|_| ())
             .map_err(StorageError::backend),
         BatchOp::Delete { key, .. } => table

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use bytes::Bytes;
 use rust_rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction, IteratorMode,
     Options, ReadOptions, WriteBatch as RocksWriteBatch,
@@ -152,10 +153,14 @@ pub struct RocksDbWriteBatch {
 
 impl WriteBatch for RocksDbWriteBatch {
     fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
+        self.put_value(cf, key, Bytes::copy_from_slice(value));
+    }
+
+    fn put_value(&mut self, cf: ColumnFamily, key: &[u8], value: Bytes) {
         self.ops.push(BatchOp::Put {
             cf,
             key: key.to_vec(),
-            value: value.to_vec(),
+            value,
         });
     }
 
@@ -179,7 +184,7 @@ enum BatchOp {
     Put {
         cf: ColumnFamily,
         key: Vec<u8>,
-        value: Vec<u8>,
+        value: Bytes,
     },
     Delete {
         cf: ColumnFamily,

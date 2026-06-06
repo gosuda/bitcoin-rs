@@ -42,6 +42,15 @@ pub(crate) trait PruneBodyStore: Send + Sync {
         body: &[u8],
     ) -> Result<(), StorageError>;
 
+    fn persist_block_body_value(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+        body: bytes::Bytes,
+    ) -> Result<(), StorageError> {
+        self.persist_block_body(height, hash, &body)
+    }
+
     fn load_block_body(
         &self,
         height: u32,
@@ -57,6 +66,19 @@ impl<S: KvStore> PruneBodyStore for S {
         body: &[u8],
     ) -> Result<(), StorageError> {
         self.put(
+            bitcoin_rs_pruning::BLOCK_DATA_CF,
+            &bitcoin_rs_pruning::block_body_key(height, hash),
+            body,
+        )
+    }
+
+    fn persist_block_body_value(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+        body: bytes::Bytes,
+    ) -> Result<(), StorageError> {
+        self.put_value(
             bitcoin_rs_pruning::BLOCK_DATA_CF,
             &bitcoin_rs_pruning::block_body_key(height, hash),
             body,
@@ -310,7 +332,7 @@ pub fn apply_block(
         .then(|| compute_basic_filter(block, handles, block_hash, height, &scratch))
         .flatten();
 
-    let block_bytes = bitcoin::consensus::encode::serialize(block);
+    let block_bytes = bytes::Bytes::from(bitcoin::consensus::encode::serialize(block));
 
     let utxo_changes_started = quanta::Instant::now();
     let changes = build_utxo_changes(block, height, &scratch)?;
@@ -320,7 +342,7 @@ pub fn apply_block(
     let block_body_persist_started = quanta::Instant::now();
     let block_body_persist_result = if let Some(store) = &handles.block_body_store {
         store
-            .persist_block_body(height, block_hash, &block_bytes)
+            .persist_block_body_value(height, block_hash, block_bytes.clone())
             .map_err(ApplyError::BlockBodyPersistence)
     } else {
         Ok(())

@@ -1,6 +1,7 @@
 //! Cross-backend equivalence tests for the storage abstraction.
 
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteBatch};
+use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
 const ROWS: u32 = 10_000;
@@ -16,6 +17,7 @@ fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError>
     verify_rows(&store)?;
     verify_prefix_iteration(&store)?;
     verify_mixed_column_family_batch_ordering(&store)?;
+    verify_mixed_owned_value_batch_ordering(&store)?;
     overwrite_one_row_with_direct_put(&store)?;
     verify_direct_put_overwrite(&store)?;
     delete_first_rows(&store)?;
@@ -25,6 +27,39 @@ fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError>
     let hash = aggregate_hash(&store)?;
     drop(store);
     Ok(hash)
+}
+
+fn verify_mixed_owned_value_batch_ordering(store: &impl KvStore) -> Result<(), StorageError> {
+    let key = b"owned-batch-order";
+    let mut batch = store.new_batch();
+    batch.put_value(
+        ColumnFamily::BlockBodies,
+        key,
+        Bytes::from_static(b"first-body"),
+    );
+    batch.put(ColumnFamily::TxConfirmed, key, b"first-confirmed-borrowed");
+    batch.delete(ColumnFamily::BlockBodies, key);
+    batch.put_value(
+        ColumnFamily::TxConfirmed,
+        key,
+        Bytes::from_static(b"second-confirmed-owned"),
+    );
+    batch.put_value(
+        ColumnFamily::BlockBodies,
+        key,
+        Bytes::from_static(b"second-body"),
+    );
+    store.write(batch)?;
+
+    assert_eq!(
+        store.get(ColumnFamily::BlockBodies, key)?,
+        Some(b"second-body".to_vec())
+    );
+    assert_eq!(
+        store.get(ColumnFamily::TxConfirmed, key)?,
+        Some(b"second-confirmed-owned".to_vec())
+    );
+    Ok(())
 }
 
 fn verify_mixed_column_family_batch_ordering(store: &impl KvStore) -> Result<(), StorageError> {

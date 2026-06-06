@@ -111,6 +111,7 @@ bitcoin-rs-rpc.workspace = true
 bitcoin-rs-electrum.workspace = true
 
 bitcoin.workspace = true
+bytes.workspace = true
 clap.workspace = true
 toml.workspace = true
 serde.workspace = true
