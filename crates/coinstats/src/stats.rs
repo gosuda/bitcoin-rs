@@ -245,7 +245,12 @@ impl CoinStatsDelta {
 
     #[inline]
     fn apply_to(self, stats: &mut CoinStats) {
-        stats.muhash.combine(&self.muhash);
+        match (self.added_utxos != 0, self.removed_utxos != 0) {
+            (true, true) => stats.muhash.combine(&self.muhash),
+            (true, false) => stats.muhash.combine_numerator(&self.muhash),
+            (false, true) => stats.muhash.combine_denominator(&self.muhash),
+            (false, false) => {}
+        }
         stats.total_amount = stats
             .total_amount
             .saturating_add(self.added_amount)
