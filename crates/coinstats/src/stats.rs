@@ -406,14 +406,24 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
-        let delta = if insertions.len() >= PARALLEL_COIN_BATCH_OP_THRESHOLD {
-            insertions
-                .par_chunks(COIN_BATCH_CHUNK_SIZE)
-                .map(CoinStatsDelta::from_insertions)
-                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
-        } else {
-            CoinStatsDelta::from_insertions(insertions)
-        };
+        if insertions.len() < PARALLEL_COIN_BATCH_OP_THRESHOLD {
+            let mut state = self.state.lock();
+            for insertion in insertions {
+                state.insert_utxo(
+                    insertion.op,
+                    insertion.txout,
+                    insertion.height,
+                    insertion.coinbase,
+                );
+            }
+            state.trim_scratch_capacity();
+            return;
+        }
+
+        let delta = insertions
+            .par_chunks(COIN_BATCH_CHUNK_SIZE)
+            .map(CoinStatsDelta::from_insertions)
+            .reduce(CoinStatsDelta::new, CoinStatsDelta::combine);
         let mut state = self.state.lock();
         delta.apply_to(&mut state.stats);
     }
@@ -431,14 +441,24 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 
     fn on_remove_coins(&self, removals: &[UtxoRemoved]) {
-        let delta = if removals.len() >= PARALLEL_COIN_BATCH_OP_THRESHOLD {
-            removals
-                .par_chunks(COIN_BATCH_CHUNK_SIZE)
-                .map(CoinStatsDelta::from_removals)
-                .reduce(CoinStatsDelta::new, CoinStatsDelta::combine)
-        } else {
-            CoinStatsDelta::from_removals(removals)
-        };
+        if removals.len() < PARALLEL_COIN_BATCH_OP_THRESHOLD {
+            let mut state = self.state.lock();
+            for removal in removals {
+                state.remove_utxo(
+                    &removal.op,
+                    &removal.txout,
+                    removal.height,
+                    removal.coinbase,
+                );
+            }
+            state.trim_scratch_capacity();
+            return;
+        }
+
+        let delta = removals
+            .par_chunks(COIN_BATCH_CHUNK_SIZE)
+            .map(CoinStatsDelta::from_removals)
+            .reduce(CoinStatsDelta::new, CoinStatsDelta::combine);
         let mut state = self.state.lock();
         delta.apply_to(&mut state.stats);
     }
