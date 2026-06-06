@@ -875,6 +875,21 @@ fn check_coinbase_maturity_with_tx_plan(
         return Ok(());
     }
     // COINBASE_MATURITY: spent coinbase outputs must be at least 100 blocks deep.
+    if !tx_plan.needs_local_utxo_overlay {
+        for tx in block.txdata.iter().filter(|tx| !tx.is_coinbase()) {
+            for tx_input in &tx.input {
+                let Some(entry) = handles
+                    .utxo
+                    .get_meta(&internal_outpoint(&tx_input.previous_output))
+                else {
+                    continue;
+                };
+                check_coinbase_input_maturity(entry, height)?;
+            }
+        }
+        return Ok(());
+    }
+
     let mut view = BlockLocalUtxoMetaView::new(Arc::clone(&handles.utxo), tx_plan.overlay_capacity);
     for (tx, txid) in block.txdata.iter().zip(txids) {
         if tx.is_coinbase() {
@@ -885,19 +900,24 @@ fn check_coinbase_maturity_with_tx_plan(
             let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {
                 continue;
             };
-            let depth = height.saturating_sub(entry.height);
-            if entry.coinbase && depth < COINBASE_MATURITY {
-                return Err(ApplyError::Consensus(
-                    bitcoin_rs_consensus::ConsensusError::Bip {
-                        bip: "COINBASE_MATURITY",
-                        reason: format!(
-                            "spent coinbase output created at height {} cannot be spent at height {} (depth {} < {})",
-                            entry.height, height, depth, COINBASE_MATURITY,
-                        ),
-                    },
-                ));
-            }
+            check_coinbase_input_maturity(entry, height)?;
         }
+    }
+    Ok(())
+}
+
+fn check_coinbase_input_maturity(entry: LiveOutputMeta, height: u32) -> Result<(), ApplyError> {
+    let depth = height.saturating_sub(entry.height);
+    if entry.coinbase && depth < COINBASE_MATURITY {
+        return Err(ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Bip {
+                bip: "COINBASE_MATURITY",
+                reason: format!(
+                    "spent coinbase output created at height {} cannot be spent at height {} (depth {} < {})",
+                    entry.height, height, depth, COINBASE_MATURITY,
+                ),
+            },
+        ));
     }
     Ok(())
 }
