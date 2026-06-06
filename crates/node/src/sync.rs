@@ -387,13 +387,16 @@ impl BlockSync {
             }
         }
         if !applied_hashes.is_empty() || failed_hash.is_some() {
-            let mut window = self.download_window.lock();
-            for hash in applied_hashes {
-                window.mark_applied(&hash);
+            {
+                let mut window = self.download_window.lock();
+                for hash in &applied_hashes {
+                    window.mark_applied(hash);
+                }
+                if let Some(hash) = failed_hash {
+                    window.drop_received_for_retry(&hash);
+                }
             }
-            if let Some(hash) = failed_hash {
-                window.drop_received_for_retry(&hash);
-            }
+            self.advance_expected_apply_cache(&applied_hashes, failed_hash.is_some());
             metrics::histogram!("node.sync.apply_buffered_blocks_seconds")
                 .record(started.elapsed().as_secs_f64());
         }
@@ -467,6 +470,51 @@ impl BlockSync {
             .lock()
             .drain_expected_prefix(&cache.hashes[..expected_len]);
         Some((drained, expected_len))
+    }
+
+    fn advance_expected_apply_cache(&self, applied_hashes: &[Hash256], failed: bool) {
+        if failed {
+            *self.expected_apply_cache.lock() = None;
+            return;
+        }
+        if applied_hashes.is_empty() {
+            return;
+        }
+        let Some(chain_tip) = self.handles.chain_tip.load_full() else {
+            *self.expected_apply_cache.lock() = None;
+            return;
+        };
+        let Some(applied_tip) = self.handles.applied_tip.load_full() else {
+            *self.expected_apply_cache.lock() = None;
+            return;
+        };
+        let mut cache_guard = self.expected_apply_cache.lock();
+        let Some(cache) = cache_guard.as_mut() else {
+            return;
+        };
+        let applied_count = applied_hashes.len();
+        let Some(expected_applied_height) = u32::try_from(applied_count)
+            .ok()
+            .and_then(|count| cache.applied_tip_height.checked_add(count))
+        else {
+            *cache_guard = None;
+            return;
+        };
+        if cache.chain_tip_hash != chain_tip.hash
+            || cache.hashes.len() < applied_count
+            || cache.hashes[..applied_count] != *applied_hashes
+            || applied_tip.height != expected_applied_height
+            || applied_tip.hash != applied_hashes[applied_count - 1]
+        {
+            *cache_guard = None;
+            return;
+        }
+        cache.applied_tip_hash = applied_tip.hash;
+        cache.applied_tip_height = applied_tip.height;
+        cache.hashes.drain(..applied_count);
+        if cache.hashes.is_empty() {
+            *cache_guard = None;
+        }
     }
 
     fn next_expected_block_hash(&self) -> Option<Hash256> {
