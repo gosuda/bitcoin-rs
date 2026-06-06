@@ -169,6 +169,19 @@ fn bench_insert_paths(
             BatchSize::SmallInput,
         );
     });
+
+    c.bench_function("coinstats/listener_insert_singleton_batches_64", |b| {
+        b.iter_batched(
+            || CoinStatsListener::new(CoinStats::new()),
+            |listener| {
+                for insertion in &insertions[..SPEND_PROXY_FANOUT] {
+                    listener.on_insert_coins(black_box(core::slice::from_ref(insertion)));
+                }
+                black_box(listener.snapshot().muhash.finalize_hash());
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 fn bench_remove_paths(
