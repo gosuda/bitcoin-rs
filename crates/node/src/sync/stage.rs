@@ -109,6 +109,9 @@ impl BlockStager {
         self.track_received_deadline(now);
 
         let dropped = self.evict_over_budget(next_expected_hash);
+        if !dropped.is_empty() {
+            self.refresh_next_received_deadline();
+        }
         self.maybe_compact_received_order();
 
         StagedBlock::Memory { bytes, dropped }
@@ -250,6 +253,14 @@ impl BlockStager {
             self.next_received_deadline
                 .map_or(deadline, |current| current.min(deadline)),
         );
+    }
+
+    fn refresh_next_received_deadline(&mut self) {
+        self.next_received_deadline = self
+            .received
+            .values()
+            .map(|entry| received_deadline(entry.received_at, self.budget.received_timeout))
+            .min();
     }
 
     fn maybe_compact_received_order(&mut self) {
@@ -507,6 +518,30 @@ mod tests {
         assert!(!stager.contains(&second));
         assert!(stager.contains(&third));
         assert!(stager.contains(&incoming));
+    }
+
+    #[test]
+    fn insert_eviction_refreshes_received_deadline() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut budget = default_sync_budget();
+        budget.max_received_blocks = 1;
+        budget.received_timeout = Duration::from_secs(10);
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let old = Hash256::from_le_bytes(&[0x65; 32]);
+        let fresh = Hash256::from_le_bytes(&[0x66; 32]);
+
+        stager.insert(old, None, block.clone(), now);
+        stager.insert(fresh, None, block, now + Duration::from_secs(5));
+
+        assert_eq!(
+            stager.next_received_deadline,
+            Some(now + Duration::from_secs(15))
+        );
+        let dropped = stager.prune_expired(now + Duration::from_secs(10));
+
+        assert!(dropped.is_empty());
+        assert!(stager.contains(&fresh));
     }
 
     #[test]

@@ -215,16 +215,29 @@ impl DownloadWindow {
         mut is_live_peer: impl FnMut(&SocketAddr) -> bool,
     ) {
         let mut retry_height = self.next_request_height;
+        let mut removed_earliest_deadline = false;
+        let pending_timeout = self.budget.pending_timeout;
+        let next_pending_deadline = self.next_pending_deadline;
         self.pending.retain(|_hash, pending| {
             if is_live_peer(&pending.peer_addr) {
                 return true;
             }
             retry_height = retry_height.min(pending.height);
             self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
+            let deadline = pending
+                .requested_at
+                .checked_add(pending_timeout)
+                .unwrap_or(pending.requested_at);
+            if Some(deadline) == next_pending_deadline {
+                removed_earliest_deadline = true;
+            }
             false
         });
         self.peer_inflight
             .retain(|peer, _inflight| is_live_peer(peer));
+        if removed_earliest_deadline {
+            self.refresh_next_pending_deadline();
+        }
         self.next_request_height = retry_height;
     }
 
@@ -455,9 +468,7 @@ impl DownloadWindow {
     }
 
     pub(super) fn mark_received(&mut self, hash: Hash256, bytes: usize) -> bool {
-        let (height, needs_height_lookup) = if let Some(pending) = self.pending.remove(&hash) {
-            self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-            self.release_peer_block(pending.peer_addr);
+        let (height, needs_height_lookup) = if let Some(pending) = self.remove_pending(&hash) {
             (pending.height, false)
         } else {
             (0, true)
@@ -484,10 +495,7 @@ impl DownloadWindow {
 
     pub(super) fn mark_applied(&mut self, hash: &Hash256) {
         self.remove_received(hash);
-        if let Some(pending) = self.pending.remove(hash) {
-            self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-            self.release_peer_block(pending.peer_addr);
-        }
+        self.remove_pending(hash);
     }
 
     pub(super) fn drop_received_for_retry(&mut self, hash: &Hash256) {
@@ -498,9 +506,7 @@ impl DownloadWindow {
 
     pub(super) fn drop_for_retry(&mut self, hash: &Hash256) {
         self.drop_received_for_retry(hash);
-        if let Some(pending) = self.pending.remove(hash) {
-            self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-            self.release_peer_block(pending.peer_addr);
+        if let Some(pending) = self.remove_pending(hash) {
             self.next_request_height = self.next_request_height.min(pending.height);
         }
     }
@@ -538,6 +544,16 @@ impl DownloadWindow {
         let received = self.received.remove(hash)?;
         self.received_bytes = self.received_bytes.saturating_sub(received.bytes);
         Some(received)
+    }
+
+    fn remove_pending(&mut self, hash: &Hash256) -> Option<PendingBlock> {
+        let pending = self.pending.remove(hash)?;
+        self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
+        self.release_peer_block(pending.peer_addr);
+        if Some(self.pending_deadline(pending.requested_at)) == self.next_pending_deadline {
+            self.refresh_next_pending_deadline();
+        }
+        Some(pending)
     }
 
     fn release_peer_block(&mut self, peer_addr: SocketAddr) {
@@ -666,6 +682,92 @@ mod tests {
             .saturating_mul(window.ewma_block_bytes);
 
         assert!(window.has_request_capacity());
+    }
+
+    #[test]
+    fn release_disconnected_peers_refreshes_pending_deadline() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            pending_timeout: Duration::from_secs(10),
+            ..test_budget()
+        });
+        let now = Instant::now();
+        let stale_peer = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        let live_peer = std::net::SocketAddr::from(([127, 0, 0, 2], 8333));
+        let stale_requested_at = now
+            .checked_sub(Duration::from_secs(9))
+            .unwrap_or_else(|| panic!("test instant underflow"));
+        let estimated_bytes = 256 * 1024;
+        for (peer_addr, requested_at, height, byte) in [
+            (stale_peer, stale_requested_at, 1_u32, 0x81),
+            (live_peer, now, 2_u32, 0x82),
+        ] {
+            window.pending.insert(
+                hash(byte),
+                super::PendingBlock {
+                    peer_addr,
+                    requested_at,
+                    height,
+                    estimated_bytes,
+                },
+            );
+            window.pending_bytes = window.pending_bytes.saturating_add(estimated_bytes);
+            window.record_pending_deadline(requested_at);
+        }
+
+        window.release_disconnected_peers(|peer| *peer == live_peer);
+
+        assert_eq!(window.pending_len(), 1);
+        assert_eq!(window.pending_bytes(), estimated_bytes);
+        assert_eq!(window.next_request_height, 1);
+        assert_eq!(
+            window.next_pending_deadline,
+            Some(now + Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn mark_received_refreshes_pending_deadline_after_earliest_pending() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            pending_timeout: Duration::from_secs(10),
+            ..test_budget()
+        });
+        let now = Instant::now();
+        let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        let earliest = hash(0x91);
+        let later = hash(0x92);
+        let earliest_requested_at = now
+            .checked_sub(Duration::from_secs(5))
+            .unwrap_or_else(|| panic!("test instant underflow"));
+        let estimated_bytes = 256 * 1024;
+        for (hash, requested_at, height) in [
+            (earliest, earliest_requested_at, 1_u32),
+            (later, now, 2_u32),
+        ] {
+            window.pending.insert(
+                hash,
+                super::PendingBlock {
+                    peer_addr,
+                    requested_at,
+                    height,
+                    estimated_bytes,
+                },
+            );
+            window.pending_bytes = window.pending_bytes.saturating_add(estimated_bytes);
+            window.record_pending_deadline(requested_at);
+        }
+        window
+            .peer_inflight
+            .insert(peer_addr, super::PeerInflight { blocks: 2 });
+
+        let needs_height_lookup = window.mark_received(earliest, 80);
+
+        assert!(!needs_height_lookup);
+        assert_eq!(window.pending_len(), 1);
+        assert!(window.contains_pending(&later));
+        assert_eq!(
+            window.next_pending_deadline,
+            Some(now + Duration::from_secs(10))
+        );
     }
 
     fn test_budget() -> SyncBudget {
