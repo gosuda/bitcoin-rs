@@ -277,36 +277,21 @@ impl Default for MuHash3072 {
 fn element(data: &[u8]) -> Num3072 {
     let key: [u8; 32] = Sha256::digest(data).into();
     let key_words = chacha20_key_words(&key);
+    let base_state = chacha20_base_state(&key_words);
     let mut limbs = [0_u64; LIMBS];
     let mut block_counter = 0_u32;
     for limb_block in limbs.chunks_exact_mut(8) {
-        write_chacha_block_as_limbs(limb_block, &key_words, block_counter);
+        write_chacha_block_as_limbs(limb_block, &base_state, block_counter);
         block_counter = block_counter.wrapping_add(1);
     }
     Num3072 { limbs }
 }
 
 #[inline(always)]
-fn write_chacha_block_as_limbs(limbs: &mut [u64], key_words: &[u32; 8], counter: u32) {
+fn write_chacha_block_as_limbs(limbs: &mut [u64], base_state: &[u32; 16], counter: u32) {
     debug_assert_eq!(limbs.len(), 8);
-    let state = [
-        0x6170_7865,
-        0x3320_646e,
-        0x7962_2d32,
-        0x6b20_6574,
-        key_words[0],
-        key_words[1],
-        key_words[2],
-        key_words[3],
-        key_words[4],
-        key_words[5],
-        key_words[6],
-        key_words[7],
-        counter,
-        0,
-        0,
-        0,
-    ];
+    let mut state = *base_state;
+    state[12] = counter;
     let mut working = state;
     for _ in 0..10 {
         quarter_round(&mut working, 0, 4, 8, 12);
@@ -435,10 +420,9 @@ fn chacha20_key_words(key: &[u8; 32]) -> [u32; 8] {
     })
 }
 
-#[cfg(test)]
 #[inline]
-fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
-    let state = [
+fn chacha20_base_state(key_words: &[u32; 8]) -> [u32; 16] {
+    [
         0x6170_7865,
         0x3320_646e,
         0x7962_2d32,
@@ -451,11 +435,18 @@ fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
         key_words[5],
         key_words[6],
         key_words[7],
-        counter,
         0,
         0,
         0,
-    ];
+        0,
+    ]
+}
+
+#[cfg(test)]
+#[inline]
+fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
+    let mut state = chacha20_base_state(key_words);
+    state[12] = counter;
     let mut working = state;
     for _ in 0..10 {
         quarter_round(&mut working, 0, 4, 8, 12);
