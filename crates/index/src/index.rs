@@ -402,7 +402,7 @@ impl<S: KvStore> Indexer<S> {
         block: &[u8],
         height: u32,
     ) -> Result<IndexRowCounts, IndexError> {
-        let (rows, _txid_count) = pending_rows_for_block(block, height, None)?;
+        let (rows, _txid_count) = pending_rows_for_block(block, height, TxidSource::Compute)?;
         self.write_pending_rows(rows, height)
     }
 
@@ -416,7 +416,26 @@ impl<S: KvStore> Indexer<S> {
         height: u32,
         txids: &[bitcoin::Txid],
     ) -> Result<IndexRowCounts, IndexError> {
-        let (rows, txid_count) = pending_rows_for_block(block, height, Some(txids))?;
+        let (rows, txid_count) =
+            pending_rows_for_block(block, height, TxidSource::Validate(txids))?;
+        if txids.len() != txid_count {
+            return self.ingest_block(block, height);
+        }
+        self.write_pending_rows(rows, height)
+    }
+
+    /// Walks one serialized block using caller-verified transaction IDs.
+    ///
+    /// This preserves [`Self::ingest_block_with_txids`] for untrusted callers while allowing
+    /// block-apply code to avoid hashing transactions a second time after it has already built
+    /// txids from the same block.
+    pub fn ingest_block_with_verified_txids(
+        &mut self,
+        block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        let (rows, txid_count) = pending_rows_for_block(block, height, TxidSource::Trusted(txids))?;
         if txids.len() != txid_count {
             return self.ingest_block(block, height);
         }
@@ -460,7 +479,7 @@ impl<S: KvStore> Indexer<S> {
 fn pending_rows_for_block(
     block: &[u8],
     height: u32,
-    txids: Option<&[bitcoin::Txid]>,
+    txids: TxidSource<'_>,
 ) -> Result<(PendingRows, usize), IndexError> {
     let mut rows = PendingRows::default();
     let txid_count = {
@@ -518,7 +537,7 @@ impl PendingRows {
 struct IndexBlockVisitor<'a> {
     rows: &'a mut PendingRows,
     height: u32,
-    txids: Option<&'a [bitcoin::Txid]>,
+    txids: TxidSource<'a>,
     txid_count: usize,
     invalid_header_len: Option<usize>,
 }
@@ -534,23 +553,45 @@ impl Visitor for IndexBlockVisitor<'_> {
     }
 
     fn visit_transaction(&mut self, tx: &bsl::Transaction<'_>) -> ControlFlow<()> {
-        if let Some(txid) = self.txids.and_then(|txids| txids.get(self.txid_count)) {
-            let computed = tx.txid_sha2();
-            let txid_bytes: &[u8] = txid.as_ref();
-            if txid_bytes == computed.as_slice() {
+        match self.txids {
+            TxidSource::Compute => {
+                let txid = tx.txid_sha2();
                 self.rows
                     .txid_rows
-                    .push(TxidRow::row(txid, self.height).to_db_row());
-            } else {
-                self.rows
-                    .txid_rows
-                    .push(TxidRow::row_bytes(computed.as_slice(), self.height).to_db_row());
+                    .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
             }
-        } else {
-            let txid = tx.txid_sha2();
-            self.rows
-                .txid_rows
-                .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+            TxidSource::Validate(txids) => {
+                if let Some(txid) = txids.get(self.txid_count) {
+                    let computed = tx.txid_sha2();
+                    let txid_bytes: &[u8] = txid.as_ref();
+                    if txid_bytes == computed.as_slice() {
+                        self.rows
+                            .txid_rows
+                            .push(TxidRow::row(txid, self.height).to_db_row());
+                    } else {
+                        self.rows
+                            .txid_rows
+                            .push(TxidRow::row_bytes(computed.as_slice(), self.height).to_db_row());
+                    }
+                } else {
+                    let txid = tx.txid_sha2();
+                    self.rows
+                        .txid_rows
+                        .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+                }
+            }
+            TxidSource::Trusted(txids) => {
+                if let Some(txid) = txids.get(self.txid_count) {
+                    self.rows
+                        .txid_rows
+                        .push(TxidRow::row(txid, self.height).to_db_row());
+                } else {
+                    let txid = tx.txid_sha2();
+                    self.rows
+                        .txid_rows
+                        .push(TxidRow::row_bytes(txid.as_slice(), self.height).to_db_row());
+                }
+            }
         }
         self.txid_count += 1;
         ControlFlow::Continue(())
@@ -584,6 +625,13 @@ impl Visitor for IndexBlockVisitor<'_> {
 
 fn is_null_prevout(prevout: &bsl::OutPoint<'_>) -> bool {
     prevout.vout() == u32::MAX && prevout.txid().iter().all(|byte| *byte == 0)
+}
+
+#[derive(Clone, Copy)]
+enum TxidSource<'a> {
+    Compute,
+    Validate(&'a [bitcoin::Txid]),
+    Trusted(&'a [bitcoin::Txid]),
 }
 
 fn collect_prefix_rows(
@@ -622,6 +670,20 @@ pub trait IndexerLike: Send + Sync {
     ) -> Result<IndexRowCounts, IndexError> {
         let _ = txids;
         self.ingest_block(block, height)
+    }
+
+    /// Walks `block` once and writes index rows, trusting caller-verified transaction IDs when
+    /// supported.
+    ///
+    /// The default implementation preserves existing implementations by validating through
+    /// [`IndexerLike::ingest_block_with_txids`].
+    fn ingest_block_with_verified_txids(
+        &mut self,
+        block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        self.ingest_block_with_txids(block, height, txids)
     }
 
     /// Resolves a confirmed transaction by txid via `source`.
@@ -675,6 +737,15 @@ impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
         txids: &[bitcoin::Txid],
     ) -> Result<IndexRowCounts, IndexError> {
         Self::ingest_block_with_txids(self, block, height, txids)
+    }
+
+    fn ingest_block_with_verified_txids(
+        &mut self,
+        block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        Self::ingest_block_with_verified_txids(self, block, height, txids)
     }
 
     fn resolve_transaction(

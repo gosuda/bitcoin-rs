@@ -332,7 +332,7 @@ pub fn apply_block(
         let tx_index_ingest_result =
             tx_index
                 .lock()
-                .ingest_block_with_txids(&block_bytes, height, scratch.txids());
+                .ingest_block_with_verified_txids(&block_bytes, height, scratch.txids());
         match tx_index_ingest_result {
             Ok(counts) => {
                 tracing::debug!(

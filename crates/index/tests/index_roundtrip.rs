@@ -242,6 +242,20 @@ fn ingest_with_precomputed_txids_matches_standard_ingest() -> Result<(), Box<dyn
 }
 
 #[test]
+fn ingest_with_verified_txids_matches_standard_ingest() -> Result<(), Box<dyn std::error::Error>> {
+    let height = 170_u32;
+    let block_bytes = read_fixture(height)?;
+    let block: bitcoin::Block = bitcoin::consensus::deserialize(&block_bytes)?;
+    let txids = block
+        .txdata
+        .iter()
+        .map(bitcoin::Transaction::compute_txid)
+        .collect::<Vec<_>>();
+
+    assert_verified_ingest_matches_standard(&block_bytes, height, &txids)
+}
+
+#[test]
 fn ingest_with_mismatched_precomputed_txids_falls_back_to_standard_ingest()
 -> Result<(), Box<dyn std::error::Error>> {
     let height = 170_u32;
@@ -273,17 +287,39 @@ fn assert_precomputed_ingest_matches_standard(
     height: u32,
     txids: &[bitcoin::Txid],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_ingest_matches_standard(block, height, |indexer| {
+        indexer.ingest_block_with_txids(block, height, txids)
+    })
+}
+
+fn assert_verified_ingest_matches_standard(
+    block: &[u8],
+    height: u32,
+    txids: &[bitcoin::Txid],
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_ingest_matches_standard(block, height, |indexer| {
+        indexer.ingest_block_with_verified_txids(block, height, txids)
+    })
+}
+
+fn assert_ingest_matches_standard(
+    block: &[u8],
+    height: u32,
+    ingest: impl FnOnce(
+        &mut Indexer<MemoryStore>,
+    ) -> Result<IndexRowCounts, bitcoin_rs_index::IndexError>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let standard_store = std::sync::Arc::new(MemoryStore::default());
     let mut standard_indexer = Indexer::new(std::sync::Arc::clone(&standard_store));
-    let precomputed_store = std::sync::Arc::new(MemoryStore::default());
-    let mut precomputed_indexer = Indexer::new(std::sync::Arc::clone(&precomputed_store));
+    let candidate_store = std::sync::Arc::new(MemoryStore::default());
+    let mut candidate_indexer = Indexer::new(std::sync::Arc::clone(&candidate_store));
 
     let standard_counts = standard_indexer.ingest_block(block, height)?;
-    let precomputed_counts = precomputed_indexer.ingest_block_with_txids(block, height, txids)?;
+    let candidate_counts = ingest(&mut candidate_indexer)?;
 
-    assert_eq!(precomputed_counts, standard_counts);
+    assert_eq!(candidate_counts, standard_counts);
     for &cf in ColumnFamily::ALL {
-        assert_eq!(precomputed_store.rows(cf), standard_store.rows(cf));
+        assert_eq!(candidate_store.rows(cf), standard_store.rows(cf));
     }
     Ok(())
 }
