@@ -266,6 +266,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence command: `cargo test -p bitcoin-rs --test g14_perf_budgets -- --ignored --nocapture` with synthetic current-HEAD G14 env.
 - [x] Node block-source height lookups now use a dense active-chain index fast path before the existing binary-search rewind fallback, preserving duplicate-height record semantics.
   Evidence: Criterion `block_source_height_lookup_tail_4096` -8.5845%; production-state sync proxies stayed within noise.
+- [x] Buffered sync apply now checks for an expected-apply cache before loading chain/applied tip snapshots, avoiding unnecessary `ArcSwap` loads on no-cache apply ticks.
+  Evidence: Criterion `production_state_128_blocks` -4.6290%, `production_state_apply_tick_128_blocks` -2.2947%, and `production_state_partial_apply_tick_128_blocks` -3.7774%; `many_peers_512` unchanged.
 
 **Measured but rejected in this campaign:**
 
@@ -299,6 +301,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected passing `BlockTxPlan`'s no-overlay proof into `ApplyScratch` to skip same-block spend tracking after the intended spend-heavy proxies stayed within noise and deterministic initial-sync apply-tick stayed within the Criterion noise threshold; the unrelated `apply_proxy` win was treated as noise because that path had no spent-input scratch tracking to skip.
 - [x] Rejected storing `DownloadWindow` peer-request entries in inline `SmallVec<[PeerRequestEntry; 16]>` after request construction improved (`deep_headers_pure` -6.9547%, `deep_headers_indexed` -2.3811%) but received-scan regressed by +5.8838%, making the net scheduler shape unacceptable.
 - [x] Rejected moving exact same-block spent-outpoint planning from `ApplyScratch` into `BlockTxPlan` after `sync_pipeline_apply_proxy` regressed by +7.2032%; spend-heavy and production apply-tick targets stayed within noise.
+- [x] Rejected skipping `HashTable::reserve` when shard spare capacity already covers add runs after `utxo_commit/uniform` regressed by +7.6393%, despite wins in `existing` (-4.5789%) and `spend_fanout_64` (-6.2923%).
 
 **Still pending:**
 

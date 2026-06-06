@@ -486,15 +486,18 @@ impl BlockSync {
         if applied_hashes.is_empty() {
             return;
         }
+        let mut cache_guard = self.expected_apply_cache.lock();
+        if cache_guard.is_none() {
+            return;
+        }
         let Some(chain_tip) = self.handles.chain_tip.load_full() else {
-            *self.expected_apply_cache.lock() = None;
+            *cache_guard = None;
             return;
         };
         let Some(applied_tip) = self.handles.applied_tip.load_full() else {
-            *self.expected_apply_cache.lock() = None;
+            *cache_guard = None;
             return;
         };
-        let mut cache_guard = self.expected_apply_cache.lock();
         let Some(cache) = cache_guard.as_mut() else {
             return;
         };
