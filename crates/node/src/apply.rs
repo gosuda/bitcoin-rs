@@ -898,7 +898,6 @@ fn check_coinbase_maturity_with_tx_plan(
                 ));
             }
         }
-        view.spend_inputs(tx);
     }
     Ok(())
 }
