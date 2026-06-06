@@ -313,6 +313,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected caching contiguous remove-run `UtxoKey` derivation in UTXO remove bucket builders after intended spend/full-spend shapes regressed: `utxo_commit/same_txid_full_spend` +10.937%, `same_txid_full_spend_noop_listener` +12.708%, `spend_fanout_64_noop_listener` +9.9217%, and neutral `uniform_noop_listener` +7.1491%.
 - [x] Rejected direct spare-capacity backfill in `contiguous_request_entries` after clean request-path guards failed to improve and indexed deep headers regressed: `deep_headers_pure` +0.0643% no change, `deep_headers_indexed` +3.2427%, and `received_scan` +8.2898% within Criterion noise but directionally worse.
 - [x] Rejected preallocating per-worker `CoinStatsDelta` scratch buffers after coinstats-local listener wins did not survive node sync guards: patched `sync_pipeline_apply_proxy` was `1.8280ms` versus `1.6535ms` after reverting, and patched `sync_pipeline_apply_spend_heavy_proxy` was `82.357ms` versus clean `79.544ms`.
+- [x] Rejected deferring `ApplyScratch` same-block txid `HashSet` allocation behind an eight-transaction linear scan after node apply guards failed to show a durable win: clean `sync_pipeline_apply_proxy` was `1.7140ms` versus patched `1.7665ms`, clean `sync_pipeline_apply_spend_heavy_proxy` was `80.266ms` versus patched `79.475ms` with no significant change, and clean `sync_pipeline_apply_spend_heavy_proxy_filter` was `81.266ms` versus patched `81.285ms` with no significant change.
 
 **Still pending:**
 
