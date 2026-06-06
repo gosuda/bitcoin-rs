@@ -135,6 +135,13 @@ fn main() {
         false,
         &metrics,
     );
+    print_apply_metrics(
+        "spend_heavy_117_all_indexes",
+        &spend_heavy_proxy_blocks(),
+        true,
+        true,
+        &metrics,
+    );
 }
 
 fn print_utxo_fanout_commit_metrics(name: &str, with_listener: bool) {

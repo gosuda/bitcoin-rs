@@ -270,6 +270,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence: Criterion `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_128_blocks` completed at `6.7892ms` for 128 deterministic blocks with `--no-default-features --features fjall`.
 - [x] Deterministic sync proxy coverage now includes a spend-heavy fjall/all-index production shape, exercising fanout spends through real chainstate, txindex, and compact-filter fjall stores.
   Evidence: Criterion `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_spend_heavy` completed at `99.810ms` for the 117-block, 1,141-transaction spend-heavy proxy with `--no-default-features --features fjall`.
+- [x] Apply-stage diagnostics now include the spend-heavy fjall/all-index workload, identifying UTXO/CoinStats commit work as the dominant measured stage before further all-index sync optimization.
+  Evidence: `cargo bench -p bitcoin-rs-node --no-default-features --features fjall --bench sync_apply_metrics` reported `spend_heavy_117_all_indexes` at `78.375296ms` total elapsed, `0.6688ms` average apply total, with `utxo_commit_avg_ms=0.4980`, `tx_index_ingest_avg_ms=0.0660`, and `filter_index_avg_ms=0.0080`.
 - [x] Node block-source height lookups now use a dense active-chain index fast path before the existing binary-search rewind fallback, preserving duplicate-height record semantics.
   Evidence: Criterion `block_source_height_lookup_tail_4096` -8.5845%; production-state sync proxies stayed within noise.
 - [x] Buffered sync apply now checks for an expected-apply cache before loading chain/applied tip snapshots, avoiding unnecessary `ArcSwap` loads on no-cache apply ticks.
