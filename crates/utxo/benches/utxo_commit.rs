@@ -369,6 +369,20 @@ fn bench_uniform_noop_listener(c: &mut Criterion) {
     });
 }
 
+fn bench_two_shard(c: &mut Criterion) {
+    c.bench_function("utxo_commit/two_shard", |b| {
+        b.iter_batched(
+            || synthetic_case(0x00ab_cdef, ShardShape::TwoShard),
+            |(set, changes, _distribution)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0012_3456)) {
+                    panic!("synthetic two-shard commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn bench_two_shard_noop_listener(c: &mut Criterion) {
     c.bench_function("utxo_commit/two_shard_noop_listener", |b| {
         b.iter_batched(
@@ -537,6 +551,7 @@ fn utxo_commit_synthetic_block(c: &mut Criterion) {
         );
     });
     bench_uniform_noop_listener(c);
+    bench_two_shard(c);
     bench_two_shard_noop_listener(c);
     c.bench_function("utxo_build_commit/uniform", |b| {
         b.iter_batched(

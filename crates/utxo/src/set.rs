@@ -12,6 +12,7 @@ use thiserror::Error;
 
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
+const PARALLEL_NO_LISTENER_SHARD_THRESHOLD: usize = 3;
 const PARALLEL_LISTENER_SHARD_THRESHOLD: usize = 16;
 const TXID_RUN_GROUPING_MAX_SHARDS: usize = 8;
 
@@ -875,6 +876,15 @@ impl UtxoSet {
                 &buckets,
                 listener,
             );
+        }
+
+        if active_shard_count < PARALLEL_NO_LISTENER_SHARD_THRESHOLD {
+            for &shard_idx in &active_shards[..active_shard_count] {
+                let shard_adds = buckets.adds(shard_idx);
+                let shard_removes = buckets.removes(shard_idx);
+                self.shards[shard_idx].commit_batch(shard_adds, shard_removes, None)?;
+            }
+            return Ok(());
         }
 
         let errors = Mutex::new(Vec::new());
