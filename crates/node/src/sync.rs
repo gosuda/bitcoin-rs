@@ -710,7 +710,6 @@ impl BlockSync {
     }
 
     fn build_locator(&self) -> Vec<Hash256> {
-        self.ensure_genesis_tip();
         if let Some(tip) = self.handles.chain_tip.load_full() {
             return self
                 .handles
