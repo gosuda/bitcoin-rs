@@ -15,6 +15,11 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 const ENTRY_COUNT: u64 = 10_000;
 const INTERLEAVED_TXID_COUNT: u32 = 256;
 const INTERLEAVED_VOUTS_PER_TXID: u32 = 16;
+const SPEND_PROXY_FANOUT: usize = 64;
+const SPEND_PROXY_SOURCE_HEIGHT: u32 = 1;
+const SPEND_PROXY_SPEND_HEIGHT: u32 = 101;
+const SPEND_PROXY_COINBASE_OUTPUT_VALUE: u64 = 78_125_000;
+const SPEND_PROXY_SPEND_OUTPUT_VALUE: u64 = 78_124_999;
 
 #[derive(Copy, Clone, Debug)]
 enum ShardShape {
@@ -215,6 +220,54 @@ fn same_txid_full_spend_case(seed: u64) -> (UtxoSet, BlockChanges) {
     (set, changes)
 }
 
+fn spend_fanout_case(seed: u64) -> (UtxoSet, BlockChanges) {
+    let set = UtxoSet::new();
+    let source_txid = txid(seed);
+    let mut preload = BlockChanges::with_capacity(SPEND_PROXY_FANOUT, 0);
+    let mut changes =
+        BlockChanges::with_capacity(SPEND_PROXY_FANOUT.saturating_mul(2), SPEND_PROXY_FANOUT);
+
+    for vout in 0..SPEND_PROXY_FANOUT {
+        let outpoint = OutPoint::new(source_txid, u32::try_from(vout).unwrap_or(0));
+        preload.add(UtxoAdd::new(
+            outpoint,
+            spend_proxy_coinbase_txout(),
+            true,
+            SPEND_PROXY_SOURCE_HEIGHT,
+        ));
+        changes.remove(outpoint);
+    }
+    if let Err(error) = set.commit_block(&preload, &txid(seed.wrapping_add(1))) {
+        panic!("spend-fanout preload failed: {error}");
+    }
+
+    let coinbase_txid = txid(seed.wrapping_add(2));
+    for vout in 0..SPEND_PROXY_FANOUT {
+        changes.add(UtxoAdd::new(
+            OutPoint::new(coinbase_txid, u32::try_from(vout).unwrap_or(0)),
+            spend_proxy_coinbase_txout(),
+            true,
+            SPEND_PROXY_SPEND_HEIGHT,
+        ));
+    }
+    for index in 0..SPEND_PROXY_FANOUT {
+        changes.add(UtxoAdd::new(
+            OutPoint::new(
+                txid(
+                    seed.wrapping_add(3)
+                        .wrapping_add(u64::try_from(index).unwrap_or(0)),
+                ),
+                0,
+            ),
+            spend_proxy_spend_txout(),
+            false,
+            SPEND_PROXY_SPEND_HEIGHT,
+        ));
+    }
+
+    (set, changes)
+}
+
 fn interleaved_same_txid_churn_case(seed: u64) -> (UtxoSet, BlockChanges) {
     let set = UtxoSet::new();
     let mut preload = BlockChanges::default();
@@ -287,6 +340,20 @@ fn synthetic_listener_case(seed: u64, shape: ShardShape) -> (UtxoSet, BlockChang
     set.set_listener(Box::new(NoopListener));
     let changes = block_changes(&workload);
     (set, changes)
+}
+
+fn spend_proxy_coinbase_txout() -> TxOut {
+    TxOut {
+        value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }
+}
+
+fn spend_proxy_spend_txout() -> TxOut {
+    TxOut {
+        value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }
 }
 
 fn summarize_distribution(distribution: &[usize; 256]) -> (usize, usize, usize) {
@@ -481,6 +548,35 @@ fn bench_same_txid_full_spend_noop_listener(c: &mut Criterion) {
     });
 }
 
+fn bench_spend_fanout(c: &mut Criterion) {
+    c.bench_function("utxo_commit/spend_fanout_64", |b| {
+        b.iter_batched(
+            || spend_fanout_case(0x0405_0607),
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0412_1314)) {
+                    panic!("spend-fanout commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    c.bench_function("utxo_commit/spend_fanout_64_noop_listener", |b| {
+        b.iter_batched(
+            || {
+                let (mut set, changes) = spend_fanout_case(0x0405_0607);
+                set.set_listener(Box::new(NoopListener));
+                (set, changes)
+            },
+            |(set, changes)| {
+                if let Err(error) = set.commit_block(black_box(&changes), &txid(0x0412_1314)) {
+                    panic!("spend-fanout listener commit failed: {error}");
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn bench_same_txid_cases(c: &mut Criterion) {
     c.bench_function("utxo_commit/same_txid_churn", |b| {
         b.iter_batched(
@@ -496,6 +592,7 @@ fn bench_same_txid_cases(c: &mut Criterion) {
     bench_same_txid_churn_noop_listener(c);
     bench_same_txid_full_spend(c);
     bench_same_txid_full_spend_noop_listener(c);
+    bench_spend_fanout(c);
     c.bench_function("utxo_commit/interleaved_same_txid_churn", |b| {
         b.iter_batched(
             || interleaved_same_txid_churn_case(0x0304_0506),
