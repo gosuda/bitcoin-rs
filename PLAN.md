@@ -311,6 +311,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected skipping redundant `BlockStager` received-deadline writes after the first run's `production_state_partial_apply_tick_128_blocks` win (-7.8512%) did not reproduce; the repeat showed no significant movement across received-scan, production-state, apply-tick, partial-apply, and many-peer targets.
 - [x] Rejected direct serialized-header slicing in `applied_block_record` after `sync_pipeline_apply_proxy` improved by -7.5194% but filter and production sync guards regressed: `sync_pipeline_apply_spend_heavy_proxy_filter` +2.2945%, `production_state_128_blocks` +2.4467%, `production_state_apply_tick_128_blocks` +7.5058%, and `production_state_partial_apply_tick_128_blocks` +2.6409%.
 - [x] Rejected caching contiguous remove-run `UtxoKey` derivation in UTXO remove bucket builders after intended spend/full-spend shapes regressed: `utxo_commit/same_txid_full_spend` +10.937%, `same_txid_full_spend_noop_listener` +12.708%, `spend_fanout_64_noop_listener` +9.9217%, and neutral `uniform_noop_listener` +7.1491%.
+- [x] Rejected direct spare-capacity backfill in `contiguous_request_entries` after clean request-path guards failed to improve and indexed deep headers regressed: `deep_headers_pure` +0.0643% no change, `deep_headers_indexed` +3.2427%, and `received_scan` +8.2898% within Criterion noise but directionally worse.
 
 **Still pending:**
 
