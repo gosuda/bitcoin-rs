@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SyncBudget {
@@ -50,6 +51,41 @@ struct RequestScan {
     request_tip_height: u32,
     remaining_limit: usize,
     next_request_height: u32,
+}
+
+enum SelectedHashes {
+    Inline(SmallVec<[Hash256; 4]>),
+    Set(HashSet<Hash256>),
+}
+
+impl SelectedHashes {
+    fn from_entries(entries: &[PeerRequestEntry]) -> Option<Self> {
+        if entries.is_empty() {
+            return None;
+        }
+        if entries.len() <= 4 {
+            return Some(Self::Inline(
+                entries.iter().map(|entry| entry.hash).collect(),
+            ));
+        }
+        let mut selected_hashes = HashSet::with_capacity(entries.len());
+        selected_hashes.extend(entries.iter().map(|entry| entry.hash));
+        Some(Self::Set(selected_hashes))
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(hashes) => hashes.len(),
+            Self::Set(hashes) => hashes.len(),
+        }
+    }
+
+    fn contains(&self, hash: &Hash256) -> bool {
+        match self {
+            Self::Inline(hashes) => hashes.contains(hash),
+            Self::Set(hashes) => hashes.contains(hash),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -279,11 +315,7 @@ impl DownloadWindow {
         }
 
         let mut entries = self.expired_request_entries(expired, batch_limit, &mut byte_capacity);
-        let selected_hashes = (!entries.is_empty()).then(|| {
-            let mut selected_hashes = HashSet::with_capacity(entries.len());
-            selected_hashes.extend(entries.iter().map(|entry| entry.hash));
-            selected_hashes
-        });
+        let selected_hashes = SelectedHashes::from_entries(&entries);
 
         let Some(mut height) = applied_tip.height.checked_add(1) else {
             return non_empty_request(peer_addr, entries, self.next_request_height);
@@ -330,7 +362,7 @@ impl DownloadWindow {
         chain_tip: &TipSnapshot,
         tree: &BlockTree,
         scan: RequestScan,
-        selected_hashes: Option<&HashSet<Hash256>>,
+        selected_hashes: Option<&SelectedHashes>,
         entries: &mut Vec<PeerRequestEntry>,
     ) -> u32 {
         if scan.remaining_limit == 0 {
@@ -341,7 +373,7 @@ impl DownloadWindow {
             .pending
             .len()
             .saturating_add(self.received.len())
-            .saturating_add(selected_hashes.map_or(0, HashSet::len));
+            .saturating_add(selected_hashes.map_or(0, SelectedHashes::len));
         // Each skipped hash can displace at most one eligible height from the prefix.
         let scan_limit = scan.remaining_limit.saturating_add(skipped_hashes);
         let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
