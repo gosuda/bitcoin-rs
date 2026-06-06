@@ -270,6 +270,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence: Criterion `production_state_128_blocks` -4.6290%, `production_state_apply_tick_128_blocks` -2.2947%, and `production_state_partial_apply_tick_128_blocks` -3.7774%; `many_peers_512` unchanged.
 - [x] Block staging inserts now skip the overflow-eviction helper on the common within-budget path, avoiding unnecessary helper entry and empty dropped-vector construction without changing eviction order.
   Evidence: Criterion `deep_headers_received_scan_128_blocks` -4.4914% and `production_state_128_blocks` -5.0979%; reverse-scan overflow, oversized inbound burst, many-peer, apply-tick, and partial-apply guards stayed within noise.
+- [x] Block staging full drains now clear stale received-order and deadline metadata when no received blocks remain, avoiding retained FIFO/deadline state across successful staged-apply ticks without changing restore-tail ordering.
+  Evidence: Criterion `deep_headers_pure_128_blocks` -2.5513%, `deep_headers_indexed_128_blocks` -5.0847%, and `deep_headers_received_scan_128_blocks` -10.844%; production-state, apply-tick, partial-apply, reverse-scan overflow, many-peer, and oversized inbound guards stayed within noise on the broader deterministic proxy rerun.
 
 **Measured but rejected in this campaign:**
 

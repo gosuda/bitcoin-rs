@@ -137,6 +137,10 @@ impl BlockStager {
             };
             drained.push(block);
         }
+        if self.received.is_empty() {
+            self.received_order.clear();
+            self.next_received_deadline = None;
+        }
         drained
     }
 
@@ -357,11 +361,14 @@ mod tests {
         stager.insert(second, None, block.clone(), now);
         stager.insert(third, None, block, now);
         let mut drained = stager.drain_expected_prefix(&[first, second, third]);
+        assert_eq!(stager.received_order_len(), 0);
+        assert_eq!(stager.next_received_deadline, None);
         let restored_tail = drained.split_off(1);
 
         stager.restore_many(restored_tail);
 
         assert_eq!(stager.received_len(), 2);
+        assert_eq!(stager.received_order_len(), 2);
         assert_eq!(stager.received_bytes(), block_bytes.saturating_mul(2));
         assert!(!stager.contains(&first));
         assert!(stager.contains(&second));
