@@ -47,12 +47,31 @@ pub fn verify_block_rules_borrowed(
 /// Verifies block rules for borrowed blocks with caller-supplied deployment context.
 pub fn verify_block_rules_borrowed_contextual(
     block: &bitcoin::Block,
+    prev_tip: &TipState,
+    context: BlockRuleContext,
+) -> Result<(), ConsensusError> {
+    let txids = block
+        .txdata
+        .iter()
+        .map(bitcoin::Transaction::compute_txid)
+        .collect::<Vec<_>>();
+    verify_block_rules_borrowed_contextual_with_txids(block, prev_tip, context, &txids)
+}
+
+#[doc(hidden)]
+/// Verifies borrowed block rules using caller-supplied transaction IDs.
+pub fn verify_block_rules_borrowed_contextual_with_txids(
+    block: &bitcoin::Block,
     _prev_tip: &TipState,
     context: BlockRuleContext,
+    txids: &[bitcoin::Txid],
 ) -> Result<(), ConsensusError> {
     let txdata = &block.txdata;
     if txdata.is_empty() {
         return Err(ConsensusError::EmptyBlock);
+    }
+    if txids.len() != txdata.len() {
+        return Err(ConsensusError::MerkleRoot);
     }
     if !txdata[0].is_coinbase() {
         return Err(ConsensusError::MissingCoinbase);
@@ -62,7 +81,7 @@ pub fn verify_block_rules_borrowed_contextual(
             return Err(ConsensusError::ExtraCoinbase { tx_index });
         }
     }
-    verify_merkle_root(block)?;
+    verify_merkle_root_with_txids(block, txids)?;
     if context.segwit_active && !block.check_witness_commitment() {
         return Err(ConsensusError::WitnessCommitment);
     }
@@ -74,12 +93,11 @@ pub fn verify_block_rules_borrowed_contextual(
     Ok(())
 }
 
-fn verify_merkle_root(block: &bitcoin::Block) -> Result<(), ConsensusError> {
-    let mut hashes: Vec<_> = block
-        .txdata
-        .iter()
-        .map(bitcoin::Transaction::compute_txid)
-        .collect();
+fn verify_merkle_root_with_txids(
+    block: &bitcoin::Block,
+    txids: &[bitcoin::Txid],
+) -> Result<(), ConsensusError> {
+    let mut hashes = txids.to_vec();
     let Some((root, mutated)) = merkle_root_and_mutation(&mut hashes)? else {
         return Err(ConsensusError::MerkleRoot);
     };

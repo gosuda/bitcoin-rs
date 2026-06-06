@@ -219,19 +219,21 @@ pub fn apply_block(
     } else {
         block.header.time
     };
+    let tx_plan = plan_block_transactions(block);
     let block_rules_started = quanta::Instant::now();
-    let block_rules_result = bitcoin_rs_consensus::verify_block_rules_borrowed_contextual(
-        block,
-        &prev_tip_state,
-        bitcoin_rs_consensus::BlockRuleContext {
-            segwit_active: softfork_state.segwit_active,
-        },
-    );
+    let block_rules_result =
+        bitcoin_rs_consensus::verify_block_rules_borrowed_contextual_with_txids(
+            block,
+            &prev_tip_state,
+            bitcoin_rs_consensus::BlockRuleContext {
+                segwit_active: softfork_state.segwit_active,
+            },
+            tx_plan.txids(),
+        );
     let block_rules_dur = block_rules_started.elapsed();
     metrics::histogram!("node.apply_block.block_rules_seconds")
         .record(block_rules_dur.as_secs_f64());
     block_rules_result?;
-    let tx_plan = plan_block_transactions(block);
     // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
     let bip30_bip34_started = quanta::Instant::now();
     let bip30_bip34_result = check_bip30_and_bip34(handles, block, height, tx_plan.txids());
