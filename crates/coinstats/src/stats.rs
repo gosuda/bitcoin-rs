@@ -228,7 +228,12 @@ impl CoinStatsDelta {
             removed_bogo_size,
             removed_utxos,
         } = other;
-        self.muhash.combine(&muhash);
+        if added_utxos != 0 {
+            self.muhash.combine_numerator(&muhash);
+        }
+        if removed_utxos != 0 {
+            self.muhash.combine_denominator(&muhash);
+        }
         self.added_amount = self.added_amount.saturating_add(added_amount);
         self.added_bogo_size = self.added_bogo_size.saturating_add(added_bogo_size);
         self.added_utxos = self.added_utxos.saturating_add(added_utxos);

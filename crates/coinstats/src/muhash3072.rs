@@ -212,8 +212,19 @@ impl MuHash3072 {
     }
 
     /// Combines another accumulator into this accumulator.
+    #[inline(always)]
     pub fn combine(&mut self, other: &Self) {
         self.numerator.multiply(&other.numerator);
+        self.denominator.multiply(&other.denominator);
+    }
+
+    #[inline(always)]
+    pub(crate) fn combine_numerator(&mut self, other: &Self) {
+        self.numerator.multiply(&other.numerator);
+    }
+
+    #[inline(always)]
+    pub(crate) fn combine_denominator(&mut self, other: &Self) {
         self.denominator.multiply(&other.denominator);
     }
 
