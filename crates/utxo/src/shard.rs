@@ -903,6 +903,19 @@ fn apply_utxo_add_run_with_listener<'arena, A: UtxoAddView>(
 ) -> Result<(), UtxoError> {
     let mut record = take_record(table, key, txid).unwrap_or_else(|| UtxoRecord::new(key, txid));
     let add_unique = build_adds_extend_record(&record, adds.iter().map(|add| add.outpoint().vout));
+    if add_unique && let [add] = adds {
+        let payload = add.payload();
+        append_unique_build_output(table, &mut record, &payload)?;
+        insert_record(arena, table, record);
+        let inserted_coin = UtxoInserted::new(
+            payload.outpoint,
+            payload.txout,
+            payload.height,
+            payload.coinbase,
+        );
+        listener.on_insert_coins(core::slice::from_ref(&inserted_coin));
+        return Ok(());
+    }
     let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
     for add in adds {
         let payload = add.payload();
@@ -944,6 +957,18 @@ fn apply_add_run_with_listener<'arena>(
         &record,
         adds.iter().map(|(_key, _txid, payload)| payload.vout),
     );
+    if add_unique && let [(_key, _txid, payload)] = adds {
+        append_unique_build_output(table, &mut record, payload)?;
+        insert_record(arena, table, record);
+        let inserted_coin = UtxoInserted::new(
+            payload.outpoint,
+            payload.txout,
+            payload.height,
+            payload.coinbase,
+        );
+        listener.on_insert_coins(core::slice::from_ref(&inserted_coin));
+        return Ok(());
+    }
     let mut inserted_coins = SmallVec::<[UtxoInserted<'_>; 8]>::with_capacity(adds.len());
     for (_key, _txid, payload) in adds {
         if add_unique {
