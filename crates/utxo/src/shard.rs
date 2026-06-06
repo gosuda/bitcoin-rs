@@ -406,6 +406,7 @@ fn commit_batch_collect_events<'arena, 'add>(
         remaining_removes = &remaining_removes[run_len..];
     }
 
+    reserve_add_runs(table, coalesced_add_run_count(adds));
     let mut remaining_adds = adds;
     while let Some(((key, txid, _payload), rest)) = remaining_adds.split_first() {
         let run_len = rest
