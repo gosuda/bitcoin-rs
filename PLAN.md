@@ -297,6 +297,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected returning early from `expired_request_entries()` when the expired list is empty after deterministic sync targets regressed: indexed +2.1219% and received-scan +4.6699%; pure and many-peer showed no significant movement, and production-state stayed within the Criterion noise threshold.
 - [x] Rejected batching unique coalesced UTXO insert events once per add run after the changed CoinStats guard regressed (`coinstats/utxo_commit_listener_two_shard_512` +4.3772%) and `sync_pipeline_apply_proxy` regressed by +5.5447%; production apply-tick stayed within noise.
 - [x] Rejected passing `BlockTxPlan`'s no-overlay proof into `ApplyScratch` to skip same-block spend tracking after the intended spend-heavy proxies stayed within noise and deterministic initial-sync apply-tick stayed within the Criterion noise threshold; the unrelated `apply_proxy` win was treated as noise because that path had no spent-input scratch tracking to skip.
+- [x] Rejected storing `DownloadWindow` peer-request entries in inline `SmallVec<[PeerRequestEntry; 16]>` after request construction improved (`deep_headers_pure` -6.9547%, `deep_headers_indexed` -2.3811%) but received-scan regressed by +5.8838%, making the net scheduler shape unacceptable.
+- [x] Rejected moving exact same-block spent-outpoint planning from `ApplyScratch` into `BlockTxPlan` after `sync_pipeline_apply_proxy` regressed by +7.2032%; spend-heavy and production apply-tick targets stayed within noise.
 
 **Still pending:**
 
