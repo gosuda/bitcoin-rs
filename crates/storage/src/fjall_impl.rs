@@ -69,7 +69,7 @@ impl KvStore for FjallStore {
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let mut fjall_batch = self.db.batch();
-        let mut keyspaces = vec![None; ColumnFamily::ALL.len()];
+        let mut keyspaces = [None; ColumnFamily::ALL.len()];
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {

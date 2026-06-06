@@ -97,7 +97,7 @@ impl KvStore for RocksDbStore {
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let mut rocks_batch = RocksWriteBatch::default();
-        let mut handles = vec![None; ColumnFamily::ALL.len()];
+        let mut handles = [None; ColumnFamily::ALL.len()];
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {

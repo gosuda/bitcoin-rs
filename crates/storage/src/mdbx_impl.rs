@@ -82,7 +82,7 @@ impl KvStore for MdbxStore {
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
-        let mut databases = vec![None; ColumnFamily::ALL.len()];
+        let mut databases = [None; ColumnFamily::ALL.len()];
         for op in batch.ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
