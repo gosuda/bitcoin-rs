@@ -1303,7 +1303,11 @@ fn range_ends(ranges: &[(usize, usize); UtxoKey::SHARD_COUNT]) -> [usize; UtxoKe
 
 fn uninit_slots<T>(len: usize) -> Vec<MaybeUninit<T>> {
     let mut slots = Vec::with_capacity(len);
-    slots.resize_with(len, MaybeUninit::uninit);
+    // SAFETY: `MaybeUninit<T>` does not require initialization. The callers
+    // fill every slot before converting this allocation to `Vec<T>`.
+    unsafe {
+        slots.set_len(len);
+    }
     slots
 }
 
