@@ -610,8 +610,9 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
                     created_txids.contains(&input.previous_output.txid)
                 };
                 let repeats_prior_spend = if track_spent_conflicts {
-                    let spent_outpoints =
-                        spent_outpoints.get_or_insert_with(|| HashSet::with_capacity(input_count));
+                    let spent_outpoints = spent_outpoints.get_or_insert_with(|| {
+                        HashSet::with_capacity(input_count.max(block.txdata.len()))
+                    });
                     !spent_outpoints.insert(input.previous_output)
                 } else {
                     saw_non_coinbase

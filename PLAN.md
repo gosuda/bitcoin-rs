@@ -292,6 +292,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence: Criterion `deep_headers_received_scan_128_blocks` -4.4914% and `production_state_128_blocks` -5.0979%; reverse-scan overflow, oversized inbound burst, many-peer, apply-tick, and partial-apply guards stayed within noise.
 - [x] Block staging full drains now clear stale received-order and deadline metadata when no received blocks remain, avoiding retained FIFO/deadline state across successful staged-apply ticks without changing restore-tail ordering.
   Evidence: Criterion `deep_headers_pure_128_blocks` -2.5513%, `deep_headers_indexed_128_blocks` -5.0847%, and `deep_headers_received_scan_128_blocks` -10.844%; production-state, apply-tick, partial-apply, reverse-scan overflow, many-peer, and oversized inbound guards stayed within noise on the broader deterministic proxy rerun.
+- [x] Node apply-path duplicate-spend planning now sizes the spent-outpoint conflict set for spend-heavy multi-transaction blocks, avoiding growth in the common spend-heavy proxy shape without changing membership semantics.
+  Evidence: Criterion `sync_pipeline_apply_spend_heavy_proxy` -6.4981%, `sync_pipeline_apply_spend_heavy_proxy_filter` -6.2339%, and `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_spend_heavy` -9.1276%; all reported `p = 0.00 < 0.05`.
 
 **Measured but rejected in this campaign:**
 
