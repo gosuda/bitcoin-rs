@@ -17,6 +17,7 @@ const OUTPOINT_BYTES: usize = 36;
 const COIN_HEADER_BYTES: u64 = 4;
 const AMOUNT_BYTES: u64 = 8;
 const SCRIPT_LEN_BYTES: u64 = 2;
+const FIXED_BOGO_SIZE: u64 = 36 + COIN_HEADER_BYTES + AMOUNT_BYTES + SCRIPT_LEN_BYTES;
 const MAX_RETAINED_SCRATCH_CAPACITY: usize = 4096;
 const PARALLEL_COIN_BATCH_OP_THRESHOLD: usize = 1024;
 const COIN_BATCH_CHUNK_SIZE: usize = 512;
@@ -543,11 +544,7 @@ fn encode_compact_size_into(out: &mut Vec<u8>, len: usize) {
 #[inline]
 fn bogo_size(txout: &TxOut) -> u64 {
     let script_len = u64::try_from(txout.script_pubkey.len()).unwrap_or(u64::MAX);
-    36_u64
-        .saturating_add(COIN_HEADER_BYTES)
-        .saturating_add(AMOUNT_BYTES)
-        .saturating_add(SCRIPT_LEN_BYTES)
-        .saturating_add(script_len)
+    FIXED_BOGO_SIZE.saturating_add(script_len)
 }
 
 fn read_array<const N: usize>(
