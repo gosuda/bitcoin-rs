@@ -196,6 +196,16 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             );
         },
     );
+    c.bench_function(
+        "deterministic_initial_sync_proxy_in_order_inbound_128_blocks",
+        |b| {
+            b.iter_batched(
+                || SyncFixture::new(TxIndexMode::Disabled),
+                |fixture| black_box(fixture.run_in_order_inbound()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     bench_production_state_sync(c);
     c.bench_function("deterministic_initial_sync_proxy_many_peers_512", |b| {
         b.iter_batched(
@@ -582,6 +592,33 @@ impl SyncFixture {
             .collect::<Vec<_>>();
         assert_eq!(requested, expected);
         requested.len()
+    }
+
+    fn run_in_order_inbound(self) -> u32 {
+        self.sync.tick();
+        let getdata_count = match self
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
+            .try_recv()
+            .unwrap_or_else(|error| panic!("expected getdata: {error}"))
+        {
+            NetworkMessage::GetData(inventory) => inventory.len(),
+            other => panic!("expected getdata, got {other:?}"),
+        };
+        assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
+
+        for block in &self.blocks {
+            self.inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send in-order block failed: {error}"));
+        }
+        self.sync.tick();
+
+        self.applied_tip
+            .load_full()
+            .unwrap_or_else(|| panic!("in-order sync proxy did not publish applied tip"))
+            .height
     }
 
     fn run_oversized_inbound_burst(self) -> usize {
