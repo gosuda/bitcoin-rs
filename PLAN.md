@@ -268,6 +268,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence: Criterion `block_source_height_lookup_tail_4096` -8.5845%; production-state sync proxies stayed within noise.
 - [x] Buffered sync apply now checks for an expected-apply cache before loading chain/applied tip snapshots, avoiding unnecessary `ArcSwap` loads on no-cache apply ticks.
   Evidence: Criterion `production_state_128_blocks` -4.6290%, `production_state_apply_tick_128_blocks` -2.2947%, and `production_state_partial_apply_tick_128_blocks` -3.7774%; `many_peers_512` unchanged.
+- [x] Block staging inserts now skip the overflow-eviction helper on the common within-budget path, avoiding unnecessary helper entry and empty dropped-vector construction without changing eviction order.
+  Evidence: Criterion `deep_headers_received_scan_128_blocks` -4.4914% and `production_state_128_blocks` -5.0979%; reverse-scan overflow, oversized inbound burst, many-peer, apply-tick, and partial-apply guards stayed within noise.
 
 **Measured but rejected in this campaign:**
 
@@ -304,6 +306,7 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
 - [x] Rejected skipping `HashTable::reserve` when shard spare capacity already covers add runs after `utxo_commit/uniform` regressed by +7.6393%, despite wins in `existing` (-4.5789%) and `spend_fanout_64` (-6.2923%).
 - [x] Rejected checking `expected_apply_cache` before loading tip snapshots in `drain_cached_expected_blocks` after `production_state_apply_tick_128_blocks` regressed by +4.4620%; production-state, partial-apply, and many-peer targets showed no significant win.
 - [x] Rejected one-block inbound staging fast paths after deterministic sync proxies stayed mixed: the helper-factored version improved deep-header scan by -6.0545% and apply-tick by -4.0185% but regressed oversized inbound bursts by +12.405%; the narrowed inline multi-block version improved apply-tick by -2.0777% and oversized bursts by -10.560% but regressed deep-header scan by +9.4876%.
+- [x] Rejected single-pass protected-head `BlockStager` eviction after `deep_headers_received_scan_128_blocks` improved by -3.4380% but production-state sync regressed by +4.8993% and production apply-tick regressed by +2.1062%.
 
 **Still pending:**
 

@@ -108,7 +108,11 @@ impl BlockStager {
         self.received_bytes = self.received_bytes.saturating_add(bytes);
         self.track_received_deadline(now);
 
-        let dropped = self.evict_over_budget(next_expected_hash);
+        let dropped = if self.is_over_budget() {
+            self.evict_over_budget(next_expected_hash)
+        } else {
+            Vec::new()
+        };
         if !dropped.is_empty() {
             self.refresh_next_received_deadline();
         }
