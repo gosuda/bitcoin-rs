@@ -254,6 +254,17 @@ fn bench_production_state_sync(c: &mut Criterion) {
             );
         },
     );
+    #[cfg(feature = "fjall")]
+    c.bench_function(
+        "deterministic_initial_sync_proxy_production_state_fjall_all_indexes_128_blocks",
+        |b| {
+            b.iter_batched(
+                || ProductionStateSyncFixture::new_fjall_all_indexes(1),
+                |fixture| black_box(fixture.run()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     c.bench_function(
         "deterministic_initial_sync_proxy_production_state_apply_tick_128_blocks",
         |b| {
@@ -642,11 +653,21 @@ struct ProductionStateSyncFixture {
 
 impl ProductionStateSyncFixture {
     fn new(peer_count: usize) -> Self {
+        Self::with_config(peer_count, production_state_config())
+    }
+
+    #[cfg(feature = "fjall")]
+    fn new_fjall_all_indexes(peer_count: usize) -> Self {
+        let mut config = production_state_config();
+        "fjall".clone_into(&mut config.storage_backend);
+        config.txindex = true;
+        config.blockfilterindex = true;
+        Self::with_config(peer_count, config)
+    }
+
+    fn with_config(peer_count: usize, mut config: Config) -> Self {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
-        let mut config = Config::default_for_network(Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = false;
         let state = NodeState::open(config)
             .unwrap_or_else(|error| panic!("open node state failed: {error}"));
         let blocks = {
@@ -757,6 +778,14 @@ impl ProductionStateSyncFixture {
         };
         assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
     }
+}
+
+fn production_state_config() -> Config {
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.p2p_listen.clear();
+    config.txindex = false;
+    config.blockfilterindex = false;
+    config
 }
 
 fn populate_sync_header_chain(

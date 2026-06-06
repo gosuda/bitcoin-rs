@@ -266,6 +266,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence command: `cargo test -p bitcoin-rs --test g14_perf_budgets -- --ignored --nocapture` with synthetic current-HEAD G14 env.
 - [x] Deterministic sync proxy coverage now includes in-order inbound block delivery, isolating the common successful IBD receive/apply path from the existing out-of-order and oversized-burst stress shapes.
   Evidence: Criterion `deterministic_initial_sync_proxy_in_order_inbound_128_blocks` completed at `1.8655ms` for 128 in-order inbound blocks.
+- [x] Deterministic sync proxy coverage now includes the G14-relevant fjall/all-index production shape, exercising real chainstate, txindex, and compact-filter fjall stores instead of only the previous no-index production fixture.
+  Evidence: Criterion `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_128_blocks` completed at `6.7892ms` for 128 deterministic blocks with `--no-default-features --features fjall`.
 - [x] Node block-source height lookups now use a dense active-chain index fast path before the existing binary-search rewind fallback, preserving duplicate-height record semantics.
   Evidence: Criterion `block_source_height_lookup_tail_4096` -8.5845%; production-state sync proxies stayed within noise.
 - [x] Buffered sync apply now checks for an expected-apply cache before loading chain/applied tip snapshots, avoiding unnecessary `ArcSwap` loads on no-cache apply ticks.
