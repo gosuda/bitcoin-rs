@@ -13,6 +13,11 @@ use zerocopy::IntoBytes;
 
 const ENTRY_COUNT: usize = 8_192;
 const SMALL_EVENT_ENTRY_COUNT: usize = 512;
+const SPEND_PROXY_FANOUT: usize = 64;
+const SPEND_PROXY_SOURCE_HEIGHT: u32 = 1;
+const SPEND_PROXY_SPEND_HEIGHT: u32 = 101;
+const SPEND_PROXY_COINBASE_OUTPUT_VALUE: u64 = 78_125_000;
+const SPEND_PROXY_SPEND_OUTPUT_VALUE: u64 = 78_124_999;
 
 #[derive(Clone)]
 struct CoinFixture {
@@ -114,6 +119,7 @@ fn coinstats_hotpath(c: &mut Criterion) {
         &same_txid_inserted_stats,
     );
     bench_commit_fanout(c, &fixture, &inserted_stats);
+    bench_spend_heavy_commit(c);
 }
 
 fn bench_insert_paths(
@@ -275,6 +281,19 @@ fn bench_commit_fanout(c: &mut Criterion, fixture: &CoinFixture, inserted_stats:
     });
 }
 
+fn bench_spend_heavy_commit(c: &mut Criterion) {
+    c.bench_function("coinstats/utxo_commit_listener_spend_fanout_64", |b| {
+        b.iter_batched(
+            coinstats_listener_spend_fanout_commit_case,
+            |(set, changes)| {
+                set.commit_block(black_box(&changes), &txid(0xfeed_cafe))
+                    .unwrap_or_else(|error| panic!("coinstats spend-heavy commit failed: {error}"));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn coinstats_listener_commit_case(
     fixture: &CoinFixture,
     stats: &CoinStats,
@@ -299,6 +318,52 @@ fn coinstats_listener_commit_case(
             txout(add_index),
             false,
             101,
+        ));
+    }
+
+    (set, changes)
+}
+
+fn coinstats_listener_spend_fanout_commit_case() -> (UtxoSet, BlockChanges) {
+    let mut set = UtxoSet::new();
+    let mut stats = CoinStats::new();
+    let source_txid = txid(0x51_0000);
+    let mut preload = BlockChanges::with_capacity(SPEND_PROXY_FANOUT, 0);
+    for vout in 0..SPEND_PROXY_FANOUT {
+        let outpoint = OutPoint::new(source_txid, u32::try_from(vout).unwrap_or(0));
+        let txout = spend_proxy_coinbase_txout();
+        stats.insert_utxo(&outpoint, &txout, SPEND_PROXY_SOURCE_HEIGHT, true);
+        preload.add(UtxoAdd::new(
+            outpoint,
+            txout,
+            true,
+            SPEND_PROXY_SOURCE_HEIGHT,
+        ));
+    }
+    set.commit_block(&preload, &txid(0xabcd_1234))
+        .unwrap_or_else(|error| panic!("coinstats spend-heavy preload failed: {error}"));
+    set.set_listener(Box::new(CoinStatsListener::new(stats)));
+
+    let mut changes =
+        BlockChanges::with_capacity(SPEND_PROXY_FANOUT.saturating_mul(2), SPEND_PROXY_FANOUT);
+    for vout in 0..SPEND_PROXY_FANOUT {
+        changes.remove(OutPoint::new(source_txid, u32::try_from(vout).unwrap_or(0)));
+    }
+    let coinbase_txid = txid(0x52_0000);
+    for vout in 0..SPEND_PROXY_FANOUT {
+        changes.add(UtxoAdd::new(
+            OutPoint::new(coinbase_txid, u32::try_from(vout).unwrap_or(0)),
+            spend_proxy_coinbase_txout(),
+            true,
+            SPEND_PROXY_SPEND_HEIGHT,
+        ));
+    }
+    for index in 0..SPEND_PROXY_FANOUT {
+        changes.add(UtxoAdd::new(
+            OutPoint::new(txid(0x53_0000_usize.saturating_add(index)), 0),
+            spend_proxy_spend_txout(),
+            false,
+            SPEND_PROXY_SPEND_HEIGHT,
         ));
     }
 
@@ -393,6 +458,20 @@ fn txout(index: usize) -> TxOut {
     TxOut {
         value: Amount::from_sat(50_000 + u64::try_from(index).unwrap_or(u64::MAX)),
         script_pubkey: ScriptBuf::from_bytes(script),
+    }
+}
+
+fn spend_proxy_coinbase_txout() -> TxOut {
+    TxOut {
+        value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+    }
+}
+
+fn spend_proxy_spend_txout() -> TxOut {
+    TxOut {
+        value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
     }
 }
 
