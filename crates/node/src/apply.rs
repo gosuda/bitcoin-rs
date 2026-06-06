@@ -21,7 +21,7 @@ use parking_lot::RwLock;
 
 use crate::state::ApplyError;
 use bitcoin_rs_storage::{KvStore, StorageError};
-use scratch::{ApplyScratch, ApplyScratchCapacities};
+use scratch::{ApplyScratch, ApplyScratchCapacities, SameBlockSpentSet};
 
 /// Number of blocks after a coinbase that its outputs become spendable.
 /// Consensus rule since Bitcoin v0.3.1; universal across networks.
@@ -294,14 +294,17 @@ pub fn apply_block(
 
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
     let wants_filters = handles.filter_index.wants_filters();
-    let scratch_capacities = tx_plan.scratch_capacities();
-    let scratch = ApplyScratch::with_txids_and_capacities(
+    let (txids, scratch_capacities, same_block_spent, same_block_spent_input_count) =
+        tx_plan.into_scratch_parts();
+    let scratch = ApplyScratch::from_prepared_parts(
         block,
         height,
         wants_rawtx,
         wants_filters,
-        tx_plan.into_txids(),
+        txids,
         scratch_capacities,
+        same_block_spent,
+        same_block_spent_input_count,
     )?;
     let filter_bytes = wants_filters
         .then(|| compute_basic_filter(block, handles, block_hash, height, &scratch))
@@ -553,6 +556,8 @@ struct BlockTxPlan {
     has_bip68_sequence_locks: bool,
     created_output_count: usize,
     spent_input_count: usize,
+    same_block_spent: Option<SameBlockSpentSet>,
+    same_block_spent_input_count: usize,
 }
 
 impl BlockTxPlan {
@@ -560,15 +565,23 @@ impl BlockTxPlan {
         &self.txids
     }
 
-    fn into_txids(self) -> Vec<Txid> {
-        self.txids
-    }
-
-    fn scratch_capacities(&self) -> ApplyScratchCapacities {
-        ApplyScratchCapacities {
-            created_outputs: self.created_output_count,
-            spent_inputs: self.spent_input_count,
-        }
+    fn into_scratch_parts(
+        self,
+    ) -> (
+        Vec<Txid>,
+        ApplyScratchCapacities,
+        Option<SameBlockSpentSet>,
+        usize,
+    ) {
+        (
+            self.txids,
+            ApplyScratchCapacities {
+                created_outputs: self.created_output_count,
+                spent_inputs: self.spent_input_count,
+            },
+            self.same_block_spent,
+            self.same_block_spent_input_count,
+        )
     }
 }
 
@@ -580,6 +593,8 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
     let mut has_bip68_sequence_locks = false;
     let mut created_output_count = 0usize;
     let mut spent_input_count = 0usize;
+    let mut same_block_spent: Option<SameBlockSpentSet> = None;
+    let mut same_block_spent_input_count = 0usize;
     let mut created_txids: Option<HashSet<Txid>> = None;
     let mut spent_outpoints: Option<HashSet<bitcoin::OutPoint>> = None;
     let track_spent_conflicts = block.txdata.len() > 2;
@@ -609,6 +624,12 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
                     });
                     created_txids.contains(&input.previous_output.txid)
                 };
+                if spends_created_output {
+                    same_block_spent
+                        .get_or_insert_with(|| HashSet::with_capacity(input_count))
+                        .insert(internal_outpoint(&input.previous_output));
+                    same_block_spent_input_count = same_block_spent_input_count.saturating_add(1);
+                }
                 let repeats_prior_spend = if track_spent_conflicts {
                     let spent_outpoints = spent_outpoints.get_or_insert_with(|| {
                         HashSet::with_capacity(input_count.max(block.txdata.len()))
@@ -643,6 +664,8 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
         has_bip68_sequence_locks,
         created_output_count,
         spent_input_count,
+        same_block_spent,
+        same_block_spent_input_count,
     }
 }
 

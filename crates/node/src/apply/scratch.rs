@@ -6,7 +6,7 @@ use hashbrown::{HashMap, HashSet};
 use crate::state::ApplyError;
 
 type SameBlockScriptMap = HashMap<OutPoint, ScriptBuf>;
-type SameBlockSpentSet = HashSet<OutPoint>;
+pub(super) type SameBlockSpentSet = HashSet<OutPoint>;
 
 #[derive(Clone, Copy)]
 pub(super) struct ApplyScratchCapacities {
@@ -62,23 +62,29 @@ impl ApplyScratch {
                 .map(|tx| tx.input.len())
                 .sum(),
         };
-        Self::with_txids_and_capacities(
+        let (same_block_spent, same_block_spent_input_count) =
+            detect_same_block_spends(block, &txids, capacities.spent_inputs);
+        Self::from_prepared_parts(
             block,
             height,
             include_raw_txs,
             include_same_block_output_scripts,
             txids,
             capacities,
+            same_block_spent,
+            same_block_spent_input_count,
         )
     }
 
-    pub(super) fn with_txids_and_capacities(
+    pub(super) fn from_prepared_parts(
         block: &bitcoin::Block,
         height: u32,
         include_raw_txs: bool,
         include_same_block_output_scripts: bool,
         txids: Vec<Txid>,
         capacities: ApplyScratchCapacities,
+        same_block_spent: Option<SameBlockSpentSet>,
+        same_block_spent_input_count: usize,
     ) -> Result<Self, ApplyError> {
         debug_assert_eq!(txids.len(), block.txdata.len());
         let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txdata.len()));
@@ -86,36 +92,10 @@ impl ApplyScratch {
         let spent_capacity = capacities.spent_inputs;
         let track_same_block_spends = spent_capacity != 0;
         let track_same_block_scripts = include_same_block_output_scripts && track_same_block_spends;
-        let mut seen_txids: Option<HashSet<Hash256>> =
-            track_same_block_spends.then(|| HashSet::with_capacity(block.txdata.len()));
-        let mut same_block_spent: Option<SameBlockSpentSet> = None;
-        let mut same_block_spent_input_count = 0usize;
 
-        for (tx, txid) in block.txdata.iter().zip(&txids) {
+        for tx in &block.txdata {
             if let Some(raw_txs) = &mut raw_txs {
                 raw_txs.push(bitcoin::consensus::encode::serialize(tx));
-            }
-
-            let txid = Hash256::from_le_bytes(txid.as_byte_array());
-            if !tx.is_coinbase() {
-                for input in &tx.input {
-                    let previous_txid =
-                        Hash256::from_le_bytes(input.previous_output.txid.as_byte_array());
-                    if let Some(seen_txids) = &seen_txids
-                        && seen_txids.contains(&previous_txid)
-                    {
-                        let previous_output = internal_outpoint(&input.previous_output);
-                        same_block_spent
-                            .get_or_insert_with(|| HashSet::with_capacity(spent_capacity))
-                            .insert(previous_output);
-                        same_block_spent_input_count =
-                            same_block_spent_input_count.saturating_add(1);
-                    }
-                }
-            }
-
-            if let Some(seen_txids) = &mut seen_txids {
-                seen_txids.insert(txid);
             }
         }
         let same_block_spent_len = same_block_spent
@@ -173,6 +153,37 @@ impl ApplyScratch {
     }
 }
 
+#[cfg(test)]
+fn detect_same_block_spends(
+    block: &bitcoin::Block,
+    txids: &[Txid],
+    spent_capacity: usize,
+) -> (Option<SameBlockSpentSet>, usize) {
+    if spent_capacity == 0 {
+        return (None, 0);
+    }
+
+    let mut seen_txids = HashSet::with_capacity(block.txdata.len());
+    let mut same_block_spent = None;
+    let mut same_block_spent_input_count = 0usize;
+    for (tx, txid) in block.txdata.iter().zip(txids) {
+        if !tx.is_coinbase() {
+            for input in &tx.input {
+                let previous_txid =
+                    Hash256::from_le_bytes(input.previous_output.txid.as_byte_array());
+                if seen_txids.contains(&previous_txid) {
+                    same_block_spent
+                        .get_or_insert_with(|| HashSet::with_capacity(spent_capacity))
+                        .insert(internal_outpoint(&input.previous_output));
+                    same_block_spent_input_count = same_block_spent_input_count.saturating_add(1);
+                }
+            }
+        }
+        seen_txids.insert(Hash256::from_le_bytes(txid.as_byte_array()));
+    }
+    (same_block_spent, same_block_spent_input_count)
+}
+
 fn same_block_spent_scripts(
     block: &bitcoin::Block,
     height: u32,
@@ -195,6 +206,7 @@ fn same_block_spent_scripts(
     Ok(scripts)
 }
 
+#[cfg(test)]
 fn internal_outpoint(outpoint: &bitcoin::OutPoint) -> OutPoint {
     OutPoint::new(
         Hash256::from_le_bytes(outpoint.txid.as_byte_array()),
