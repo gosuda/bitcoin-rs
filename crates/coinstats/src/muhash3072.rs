@@ -281,12 +281,23 @@ fn element(data: &[u8]) -> Num3072 {
     let mut block_counter = 0_u32;
     for limb_block in limbs.chunks_exact_mut(8) {
         let words = chacha20_block_words(&key_words, block_counter);
-        for (limb, word_pair) in limb_block.iter_mut().zip(words.chunks_exact(2)) {
-            *limb = u64::from(word_pair[0]) | (u64::from(word_pair[1]) << 32);
-        }
+        write_chacha_words_as_limbs(limb_block, &words);
         block_counter = block_counter.wrapping_add(1);
     }
     Num3072 { limbs }
+}
+
+#[inline(always)]
+fn write_chacha_words_as_limbs(limbs: &mut [u64], words: &[u32; 16]) {
+    debug_assert_eq!(limbs.len(), 8);
+    limbs[0] = u64::from(words[0]) | (u64::from(words[1]) << 32);
+    limbs[1] = u64::from(words[2]) | (u64::from(words[3]) << 32);
+    limbs[2] = u64::from(words[4]) | (u64::from(words[5]) << 32);
+    limbs[3] = u64::from(words[6]) | (u64::from(words[7]) << 32);
+    limbs[4] = u64::from(words[8]) | (u64::from(words[9]) << 32);
+    limbs[5] = u64::from(words[10]) | (u64::from(words[11]) << 32);
+    limbs[6] = u64::from(words[12]) | (u64::from(words[13]) << 32);
+    limbs[7] = u64::from(words[14]) | (u64::from(words[15]) << 32);
 }
 
 #[inline(always)]
