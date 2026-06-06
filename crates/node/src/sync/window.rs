@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -280,7 +279,7 @@ impl DownloadWindow {
         }
 
         let mut entries = self.expired_request_entries(expired, batch_limit, &mut byte_capacity);
-        let mut selected_hashes = (!entries.is_empty()).then(|| {
+        let selected_hashes = (!entries.is_empty()).then(|| {
             let mut selected_hashes = HashSet::with_capacity(entries.len());
             selected_hashes.extend(entries.iter().map(|entry| entry.hash));
             selected_hashes
@@ -319,7 +318,7 @@ impl DownloadWindow {
                     remaining_limit,
                     next_request_height,
                 },
-                &mut selected_hashes,
+                selected_hashes.as_ref(),
                 &mut entries,
             );
         }
@@ -331,7 +330,7 @@ impl DownloadWindow {
         chain_tip: &TipSnapshot,
         tree: &BlockTree,
         scan: RequestScan,
-        selected_hashes: &mut Option<HashSet<Hash256>>,
+        selected_hashes: Option<&HashSet<Hash256>>,
         entries: &mut Vec<PeerRequestEntry>,
     ) -> u32 {
         if scan.remaining_limit == 0 {
@@ -342,7 +341,7 @@ impl DownloadWindow {
             .pending
             .len()
             .saturating_add(self.received.len())
-            .saturating_add(selected_hashes.as_ref().map_or(0, HashSet::len));
+            .saturating_add(selected_hashes.map_or(0, HashSet::len));
         // Each skipped hash can displace at most one eligible height from the prefix.
         let scan_limit = scan.remaining_limit.saturating_add(skipped_hashes);
         let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
@@ -354,30 +353,16 @@ impl DownloadWindow {
         else {
             return scan.next_request_height;
         };
-        let mut candidates: VecDeque<PeerRequestEntry> =
-            VecDeque::with_capacity(scan.remaining_limit);
+        let mut candidates = Vec::with_capacity(scan_limit);
         while let Ok(node) = tree.node(cursor) {
             if node.height < scan.height {
                 break;
             }
             if !self.pending.contains_key(&node.hash)
                 && !self.received.contains_key(&node.hash)
-                && selected_hashes
-                    .as_ref()
-                    .is_none_or(|hashes| !hashes.contains(&node.hash))
+                && selected_hashes.is_none_or(|hashes| !hashes.contains(&node.hash))
             {
-                if candidates.len() == scan.remaining_limit {
-                    let removed = candidates.pop_front();
-                    if let (Some(selected_hashes), Some(removed)) =
-                        (selected_hashes.as_mut(), removed)
-                    {
-                        selected_hashes.remove(&removed.hash);
-                    }
-                }
-                if let Some(selected_hashes) = selected_hashes.as_mut() {
-                    selected_hashes.insert(node.hash);
-                }
-                candidates.push_back(PeerRequestEntry {
+                candidates.push(PeerRequestEntry {
                     hash: node.hash,
                     height: node.height,
                 });
@@ -388,7 +373,8 @@ impl DownloadWindow {
             cursor = parent;
         }
         let scanned_all_eligible = candidates.len() < scan.remaining_limit;
-        for entry in candidates.into_iter().rev() {
+        let first_selected = candidates.len().saturating_sub(scan.remaining_limit);
+        for entry in candidates[first_selected..].iter().rev().copied() {
             next_request_height = next_request_height.max(entry.height.saturating_add(1));
             entries.push(entry);
         }
