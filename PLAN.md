@@ -248,6 +248,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence commit: `4d10d85`.
 - [x] Buffered sync apply now stores applied block hashes in the existing inline `ExpectedBlockHashes` buffer, removing one heap allocation from the contiguous staged-apply tick without changing retry or failure handling.
   Evidence commit: `7d18912`.
+- [x] Buffered sync apply now advances the expected-apply cache with an offset cursor instead of front-draining cached hashes, avoiding repeated hash-buffer shifts across staged apply ticks.
+  Evidence: Criterion `production_state_partial_apply_tick_128_blocks` -10.564% on first patched comparison; repeat showed `production_state_128_blocks` -4.7655% and `production_state_apply_tick_128_blocks` -2.1743%.
 - [x] Buffered sync apply now defers its apply-latency timestamp until staged blocks are actually ready, removing an unused `Instant::now()` call from no-ready sync ticks without changing the recorded apply latency window for ready blocks.
   Evidence commit: `dd9995a`.
 - [x] Empty staged-block ticks now return before timeout pruning and apply-readiness checks, shrinking many-peer scheduler ticks while preserving stale-prune and contiguous-apply behavior.

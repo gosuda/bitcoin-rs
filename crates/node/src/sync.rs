@@ -98,6 +98,7 @@ struct ExpectedApplyCache {
     chain_tip_hash: Hash256,
     applied_tip_hash: Hash256,
     applied_tip_height: u32,
+    offset: usize,
     hashes: ExpectedBlockHashes,
 }
 
@@ -464,11 +465,16 @@ impl BlockSync {
         {
             return None;
         }
-        let expected_len = cache.hashes.len().min(max_count);
+        let remaining = cache.hashes.len().saturating_sub(cache.offset);
+        let expected_len = remaining.min(max_count);
+        if expected_len == 0 {
+            return None;
+        }
+        let expected_end = cache.offset.saturating_add(expected_len);
         let drained = self
             .block_stager
             .lock()
-            .drain_expected_prefix(&cache.hashes[..expected_len]);
+            .drain_expected_prefix(&cache.hashes[cache.offset..expected_end]);
         Some((drained, expected_len))
     }
 
@@ -501,8 +507,9 @@ impl BlockSync {
             return;
         };
         if cache.chain_tip_hash != chain_tip.hash
-            || cache.hashes.len() < applied_count
-            || cache.hashes[..applied_count] != *applied_hashes
+            || cache.hashes.len().saturating_sub(cache.offset) < applied_count
+            || cache.hashes[cache.offset..cache.offset.saturating_add(applied_count)]
+                != *applied_hashes
             || applied_tip.height != expected_applied_height
             || applied_tip.hash != applied_hashes[applied_count - 1]
         {
@@ -511,8 +518,8 @@ impl BlockSync {
         }
         cache.applied_tip_hash = applied_tip.hash;
         cache.applied_tip_height = applied_tip.height;
-        cache.hashes.drain(..applied_count);
-        if cache.hashes.is_empty() {
+        cache.offset = cache.offset.saturating_add(applied_count);
+        if cache.offset >= cache.hashes.len() {
             *cache_guard = None;
         }
     }
@@ -643,6 +650,7 @@ impl BlockSync {
                 chain_tip_hash: chain_tip.hash,
                 applied_tip_hash: applied_tip.hash,
                 applied_tip_height: applied_tip.height,
+                offset: 0,
                 hashes: expected_hashes,
             });
         }
