@@ -264,6 +264,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence command: `cargo test -p bitcoin-rs --test g14_perf_evidence_script --no-default-features --features rocksdb,fjall,redb,mdbx,bitcoinconsensus`.
 - [x] The final G14 ignored gate now requires and reports the raw Criterion output path/hash fields exported by the collector, preserving raw-output custody in the accepted gate transcript without claiming the live faster-than-Core run is complete.
   Evidence command: `cargo test -p bitcoin-rs --test g14_perf_budgets -- --ignored --nocapture` with synthetic current-HEAD G14 env.
+- [x] Node block-source height lookups now use a dense active-chain index fast path before the existing binary-search rewind fallback, preserving duplicate-height record semantics.
+  Evidence: Criterion `block_source_height_lookup_tail_4096` -8.5845%; production-state sync proxies stayed within noise.
 
 **Measured but rejected in this campaign:**
 

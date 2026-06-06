@@ -68,6 +68,17 @@ impl NodeBlockSource {
 }
 
 fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRecord> {
+    if let Ok(index) = usize::try_from(height)
+        && let Some(record) = records.get(index)
+        && record.height == height
+        && index
+            .checked_sub(1)
+            .and_then(|previous| records.get(previous))
+            .is_none_or(|previous| previous.height < height)
+    {
+        return Some(record);
+    }
+
     let mut index = records
         .binary_search_by_key(&height, |record| record.height)
         .ok()?;
@@ -132,5 +143,25 @@ mod tests {
             panic!("expected block at height 0");
         };
         assert_eq!(decoded.block_hash(), genesis.block_hash());
+    }
+
+    #[test]
+    fn block_at_height_returns_first_record_for_duplicate_height() {
+        let anchor = genesis_block(Network::Regtest);
+        let mut first = anchor.clone();
+        first.header.nonce = first.header.nonce.saturating_add(1);
+        let mut second = first.clone();
+        second.header.nonce = second.header.nonce.saturating_add(1);
+        let records = vec![
+            BlockRecord::from_block(0, &anchor),
+            BlockRecord::from_block(2, &first),
+            BlockRecord::from_block(2, &second),
+        ];
+        let source = NodeBlockSource::new(Arc::new(RwLock::new(records)));
+
+        let Some(decoded) = source.block_at_height(2) else {
+            panic!("expected duplicate height record");
+        };
+        assert_eq!(decoded.block_hash(), first.block_hash());
     }
 }
