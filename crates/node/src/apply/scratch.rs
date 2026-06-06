@@ -122,11 +122,10 @@ impl ApplyScratch {
             .as_ref()
             .map_or(0_usize, SameBlockSpentSet::len);
         let same_block_spent_output_scripts = if track_same_block_scripts {
-            if let Some(spent) = same_block_spent.as_ref() {
-                Some(same_block_spent_scripts(block, height, &txids, spent)?)
-            } else {
-                Some(HashMap::new())
-            }
+            same_block_spent
+                .as_ref()
+                .map(|spent| same_block_spent_scripts(block, height, &txids, spent))
+                .transpose()?
         } else {
             None
         };
