@@ -609,14 +609,10 @@ impl Visitor for IndexBlockVisitor<'_> {
     }
 
     fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut<'_>) -> ControlFlow<()> {
-        let script = bitcoin::Script::from_bytes(tx_out.script_pubkey());
-        if !script.is_op_return() {
+        let script = tx_out.script_pubkey();
+        if !is_op_return_script(script) {
             self.rows.funding_rows.push(
-                ScriptHashRow::row(
-                    ScriptHash::from_script_bytes(tx_out.script_pubkey()),
-                    self.height,
-                )
-                .to_db_row(),
+                ScriptHashRow::row(ScriptHash::from_script_bytes(script), self.height).to_db_row(),
             );
         }
         ControlFlow::Continue(())
@@ -625,6 +621,11 @@ impl Visitor for IndexBlockVisitor<'_> {
 
 fn is_null_prevout(prevout: &bsl::OutPoint<'_>) -> bool {
     prevout.vout() == u32::MAX && prevout.txid().iter().all(|byte| *byte == 0)
+}
+
+#[inline]
+fn is_op_return_script(script: &[u8]) -> bool {
+    matches!(script.first(), Some(0x6a))
 }
 
 #[derive(Clone, Copy)]
@@ -777,10 +778,18 @@ mod tests {
     };
     use bitcoin_rs_storage::RocksDbStore;
 
-    use super::{BlockSource, Indexer};
+    use super::{BlockSource, Indexer, is_op_return_script};
     use crate::{HistoryEntry, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow};
 
     const HEIGHT: u32 = 42;
+
+    #[test]
+    fn raw_op_return_check_matches_script_prefix_semantics() {
+        assert!(!is_op_return_script(&[]));
+        assert!(is_op_return_script(&[0x6a]));
+        assert!(is_op_return_script(&[0x6a, 0x01, 0x00]));
+        assert!(!is_op_return_script(&[0x00, 0x6a]));
+    }
 
     #[test]
     fn iter_block_headers_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
