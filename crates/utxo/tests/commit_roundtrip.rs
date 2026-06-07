@@ -795,6 +795,41 @@ fn vout_64_roundtrips_through_public_utxo_api() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn high_vout_full_record_delete_removes_all_outputs_in_one_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let set = UtxoSet::new();
+    let live_txid = txid(93);
+    let mut preload = BlockChanges::default();
+    let mut spend = BlockChanges::default();
+
+    for vout in 64_u32..128 {
+        let outpoint = OutPoint::new(live_txid, vout);
+        preload.add(UtxoAdd::new(
+            outpoint,
+            txout(1_000 + u64::from(vout)),
+            false,
+            302,
+        ));
+        spend.remove(outpoint);
+    }
+    set.commit_block(&preload, &txid(94))?;
+    assert_eq!(set.record_count(), 1);
+    assert_eq!(set.len(), 64);
+    assert!(set.has_live_outputs_for_txid(&live_txid));
+
+    set.commit_block(&spend, &txid(95))?;
+
+    for vout in 64_u32..128 {
+        assert_eq!(set.get(&OutPoint::new(live_txid, vout)), None);
+    }
+    assert!(!set.has_live_outputs_for_txid(&live_txid));
+    assert_eq!(set.record_count(), 0);
+    assert_eq!(set.len(), 0);
+    assert!(set.is_empty());
+    Ok(())
+}
+
+#[test]
 fn hash_serialized_3_matches_independent_core_serialization_for_unsorted_utxos()
 -> Result<(), Box<dyn std::error::Error>> {
     let set = UtxoSet::new();
