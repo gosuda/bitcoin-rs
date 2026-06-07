@@ -391,7 +391,7 @@ impl BlockSync {
             {
                 let mut window = self.download_window.lock();
                 for hash in &applied_hashes {
-                    window.mark_applied(hash);
+                    window.mark_received_applied(hash);
                 }
                 if let Some(hash) = failed_hash {
                     window.drop_received_for_retry(&hash);

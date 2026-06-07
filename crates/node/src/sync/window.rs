@@ -511,9 +511,14 @@ impl DownloadWindow {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn mark_applied(&mut self, hash: &Hash256) {
-        self.remove_received(hash);
+        self.mark_received_applied(hash);
         self.remove_pending(hash);
+    }
+
+    pub(super) fn mark_received_applied(&mut self, hash: &Hash256) {
+        self.remove_received(hash);
     }
 
     pub(super) fn drop_received_for_retry(&mut self, hash: &Hash256) {
@@ -786,6 +791,43 @@ mod tests {
             window.next_pending_deadline,
             Some(now + Duration::from_secs(10))
         );
+    }
+
+    #[test]
+    fn mark_received_applied_removes_only_received_accounting() {
+        let mut window = DownloadWindow::new(test_budget());
+        let now = Instant::now();
+        let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        let applied = hash(0xa1);
+        let pending = hash(0xa2);
+        let pending_bytes = 256 * 1024;
+        let received_bytes = 80;
+        window.pending.insert(
+            pending,
+            super::PendingBlock {
+                peer_addr,
+                requested_at: now,
+                height: 2,
+                estimated_bytes: pending_bytes,
+            },
+        );
+        window.pending_bytes = pending_bytes;
+        window.received.insert(
+            applied,
+            super::ReceivedBlock {
+                height: 1,
+                bytes: received_bytes,
+            },
+        );
+        window.received_bytes = received_bytes;
+
+        window.mark_received_applied(&applied);
+
+        assert_eq!(window.received_len(), 0);
+        assert_eq!(window.received_bytes, 0);
+        assert_eq!(window.pending_len(), 1);
+        assert!(window.contains_pending(&pending));
+        assert_eq!(window.pending_bytes(), pending_bytes);
     }
 
     fn test_budget() -> SyncBudget {
