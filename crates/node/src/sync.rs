@@ -175,7 +175,7 @@ impl BlockSync {
             }
         }
         if sent_getdata {
-            self.record_sync_metrics();
+            self.record_pending_sync_metrics();
         }
     }
 
@@ -754,6 +754,12 @@ impl BlockSync {
         metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
         metrics::gauge!("node.sync.received_blocks").set(metric_count(stager.received_len()));
         metrics::gauge!("node.sync.received_bytes").set(metric_count(stager.received_bytes()));
+    }
+
+    fn record_pending_sync_metrics(&self) {
+        let window = self.download_window.lock();
+        metrics::gauge!("node.sync.pending_blocks").set(metric_count(window.pending_len()));
+        metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
     }
 }
 
@@ -2128,6 +2134,8 @@ mod tests {
             let pending_count = inventory.len();
             assert_eq!(pending_count, DETERMINISTIC_PROXY_BLOCKS);
             assert_gauge(&recorder, "node.sync.pending_blocks", pending_count);
+            assert_metric_absent(&recorder, "node.sync.received_blocks");
+            assert_metric_absent(&recorder, "node.sync.received_bytes");
             let _headers = outbound_rx.try_recv()?;
 
             for block in blocks[1..].iter().rev() {
@@ -2564,6 +2572,13 @@ mod tests {
             recorder.snapshot().get(name),
             Some(&TestMetric::Gauge(expected)),
             "{name} gauge must match deterministic sync pipeline state",
+        );
+    }
+
+    fn assert_metric_absent(recorder: &TestRecorder, name: &str) {
+        assert!(
+            !recorder.snapshot().contains_key(name),
+            "{name} metric should not be recorded"
         );
     }
 
