@@ -286,11 +286,39 @@ fn bench_production_state_sync(c: &mut Criterion) {
             );
         },
     );
+    #[cfg(feature = "fjall")]
+    c.bench_function(
+        "deterministic_initial_sync_proxy_production_state_fjall_all_indexes_apply_tick_128_blocks",
+        |b| {
+            b.iter_batched(
+                || {
+                    ProductionStateSyncFixture::new_fjall_all_indexes(1)
+                        .stage_for_contiguous_apply()
+                },
+                |fixture| black_box(fixture.apply_staged()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
     c.bench_function(
         "deterministic_initial_sync_proxy_production_state_partial_apply_tick_128_blocks",
         |b| {
             b.iter_batched(
                 || ProductionStateSyncFixture::new(1).stage_for_partial_cached_apply(),
+                |fixture| black_box(fixture.apply_staged()),
+                BatchSize::SmallInput,
+            );
+        },
+    );
+    #[cfg(feature = "fjall")]
+    c.bench_function(
+        "deterministic_initial_sync_proxy_production_state_fjall_all_indexes_partial_apply_tick_128_blocks",
+        |b| {
+            b.iter_batched(
+                || {
+                    ProductionStateSyncFixture::new_fjall_all_indexes(1)
+                        .stage_for_partial_cached_apply()
+                },
                 |fixture| black_box(fixture.apply_staged()),
                 BatchSize::SmallInput,
             );
