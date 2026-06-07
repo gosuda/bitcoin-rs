@@ -95,8 +95,7 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
     assert!(stdout.contains("export G14_IBD_START_HASH=0000000000000000000000000000000000000000000000000000000000000000\n"));
     assert!(stdout.contains("export G14_IBD_STOP_HASH=000000000000000000000000000000000000000000000000000000000000000a\n"));
     assert!(stdout.contains(&format!(
-        "export G14_BITCOIN_RS_COMMAND={}\n",
-        DIRECT_BITCOIN_RS_COMMAND
+        "export G14_BITCOIN_RS_COMMAND={DIRECT_BITCOIN_RS_COMMAND}\n"
     )));
     assert_64_hex_export(&stdout, "G14_BITCOIN_RS_COMMAND_SHA256");
     assert_64_hex_export(&stdout, "G14_BITCOIN_CORE_COMMAND_SHA256");
@@ -845,6 +844,117 @@ fn produce_g14_criterion_artifact(
             bitcoin_core_config
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core config")?,
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?)
+}
+
+fn replay_wrapper_producer_bitcoin_rs_command(
+    dir: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let replay_command = fake_mainnet_prefix_replay_command(
+        dir,
+        "bitcoin-rs-producer-mainnet-prefix-replay",
+        "1.25",
+    )?;
+    let replay_output = dir.join("bitcoin-rs-producer-mainnet-prefix-replay.json");
+    Ok(format!(
+        "bash {} --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a --replay-command {} --replay-output {} --force",
+        bitcoin_rs_mainnet_ibd_script_path().display(),
+        replay_command.display(),
+        replay_output.display()
+    ))
+}
+
+fn run_replay_wrapper_artifact_producer(
+    artifact: &Path,
+    bitcoin_rs_command: &str,
+    bitcoin_core_command: &str,
+    bitcoin_rs_config: &Path,
+    bitcoin_core_config: &Path,
+    bitcoin_cli: &Path,
+) -> Result<Output, Box<dyn std::error::Error>> {
+    let artifact_dir = artifact.parent().ok_or("artifact path has no parent")?;
+    let benchmark_run_id = "g14-mainnet-window-replay-wrapper-producer";
+    let start_height = 0;
+    let stop_height = 10;
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
+    let bitcoin_rs_command_sha256 = sha256_text(bitcoin_rs_command);
+    let bitcoin_core_command_sha256 = sha256_text(bitcoin_core_command);
+    let bitcoin_rs_config_sha256 = sha256_text(&fs::read_to_string(bitcoin_rs_config)?);
+    let bitcoin_core_config_sha256 = sha256_text(&fs::read_to_string(bitcoin_core_config)?);
+    let bitcoin_rs_raw_output = write_text(
+        artifact_dir,
+        "bitcoin-rs-replay-wrapper-producer-raw.txt",
+        &criterion_raw_output_with_proof(
+            "bitcoin-rs/mainnet-ibd",
+            "1.25",
+            benchmark_run_id,
+            BENCHMARK_HOST_ID,
+            start_height,
+            stop_height,
+            &start_hash,
+            &stop_hash,
+            &bitcoin_rs_command_sha256,
+            &bitcoin_rs_config_sha256,
+        ),
+    )?;
+    let bitcoin_core_raw_output = write_text(
+        artifact_dir,
+        "bitcoin-core-replay-wrapper-producer-raw.txt",
+        &criterion_raw_output_with_proof(
+            "bitcoin-core/mainnet-ibd",
+            "2.50",
+            benchmark_run_id,
+            BENCHMARK_HOST_ID,
+            start_height,
+            stop_height,
+            &start_hash,
+            &stop_hash,
+            &bitcoin_core_command_sha256,
+            &bitcoin_core_config_sha256,
+        ),
+    )?;
+    Ok(Command::new("bash")
+        .arg(artifact_producer_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            benchmark_run_id,
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.25",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--bitcoin-rs-command",
+            bitcoin_rs_command,
+            "--bitcoin-core-command",
+            bitcoin_core_command,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--",
+            "-datadir=/tmp/fake-core",
         ])
         .env("BITCOIN_CLI", bitcoin_cli)
         .output()?)
@@ -2454,20 +2564,7 @@ fn criterion_artifact_producer_rejects_replay_wrapper_with_adapter_proof()
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let replay_command = fake_mainnet_prefix_replay_command(
-        temp.path(),
-        "bitcoin-rs-producer-mainnet-prefix-replay",
-        "1.25",
-    )?;
-    let replay_output = temp
-        .path()
-        .join("bitcoin-rs-producer-mainnet-prefix-replay.json");
-    let bitcoin_rs_command = format!(
-        "bash {} --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a --replay-command {} --replay-output {} --force",
-        bitcoin_rs_mainnet_ibd_script_path().display(),
-        replay_command.display(),
-        replay_output.display()
-    );
+    let bitcoin_rs_command = replay_wrapper_producer_bitcoin_rs_command(temp.path())?;
     let bitcoin_core_command = fake_criterion_command(
         temp.path(),
         "bitcoin-core-producer-criterion",
@@ -2480,85 +2577,14 @@ fn criterion_artifact_producer_rejects_replay_wrapper_with_adapter_proof()
     let artifact = temp
         .path()
         .join("g14-replay-wrapper-producer-artifact.json");
-    let bitcoin_rs_command_sha256 = sha256_text(&bitcoin_rs_command);
-    let bitcoin_core_command_sha256 = sha256_text(&bitcoin_core_command);
-    let bitcoin_rs_config_sha256 = sha256_text(&fs::read_to_string(&bitcoin_rs_config)?);
-    let bitcoin_core_config_sha256 = sha256_text(&fs::read_to_string(&bitcoin_core_config)?);
-    let bitcoin_rs_raw_output = write_text(
-        temp.path(),
-        "bitcoin-rs-replay-wrapper-producer-raw.txt",
-        &criterion_raw_output_with_proof(
-            "bitcoin-rs/mainnet-ibd",
-            "1.25",
-            "g14-mainnet-window-replay-wrapper-producer",
-            BENCHMARK_HOST_ID,
-            0,
-            10,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            "000000000000000000000000000000000000000000000000000000000000000a",
-            &bitcoin_rs_command_sha256,
-            &bitcoin_rs_config_sha256,
-        ),
+    let output = run_replay_wrapper_artifact_producer(
+        &artifact,
+        &bitcoin_rs_command,
+        &bitcoin_core_command,
+        &bitcoin_rs_config,
+        &bitcoin_core_config,
+        &bitcoin_cli,
     )?;
-    let bitcoin_core_raw_output = write_text(
-        temp.path(),
-        "bitcoin-core-replay-wrapper-producer-raw.txt",
-        &criterion_raw_output_with_proof(
-            "bitcoin-core/mainnet-ibd",
-            "2.50",
-            "g14-mainnet-window-replay-wrapper-producer",
-            BENCHMARK_HOST_ID,
-            0,
-            10,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            "000000000000000000000000000000000000000000000000000000000000000a",
-            &bitcoin_core_command_sha256,
-            &bitcoin_core_config_sha256,
-        ),
-    )?;
-
-    let output = Command::new("bash")
-        .arg(artifact_producer_script_path())
-        .args([
-            "--output",
-            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
-            "--benchmark-run-id",
-            "g14-mainnet-window-replay-wrapper-producer",
-            "--benchmark-host-id",
-            BENCHMARK_HOST_ID,
-            "--ibd-start-height",
-            "0",
-            "--ibd-stop-height",
-            "10",
-            "--criterion-bitcoin-rs-elapsed-seconds",
-            "1.25",
-            "--criterion-bitcoin-core-elapsed-seconds",
-            "2.50",
-            "--criterion-bitcoin-rs-raw-output",
-            bitcoin_rs_raw_output
-                .to_str()
-                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
-            "--criterion-bitcoin-core-raw-output",
-            bitcoin_core_raw_output
-                .to_str()
-                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
-            "--bitcoin-rs-command",
-            &bitcoin_rs_command,
-            "--bitcoin-core-command",
-            &bitcoin_core_command,
-            "--bitcoin-rs-config",
-            bitcoin_rs_config
-                .to_str()
-                .ok_or("non-UTF-8 bitcoin-rs config")?,
-            "--bitcoin-core-config",
-            bitcoin_core_config
-                .to_str()
-                .ok_or("non-UTF-8 Bitcoin Core config")?,
-            "--",
-            "-datadir=/tmp/fake-core",
-        ])
-        .env("BITCOIN_CLI", bitcoin_cli)
-        .output()?;
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3948,6 +3974,13 @@ fn artifact_producer_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-criterion-artifact.sh")
 }
 
+fn remove_json_object_field(value: &mut Value, field: &str) {
+    let object = value.as_object_mut().unwrap_or_else(|| {
+        panic!("expected JSON object when removing `{field}`");
+    });
+    object.remove(field);
+}
+
 #[test]
 fn criterion_artifact_producer_rejects_missing_bitcoin_rs_ibd_adapter()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -3956,10 +3989,7 @@ fn criterion_artifact_producer_rejects_missing_bitcoin_rs_ibd_adapter()
     let artifact = criterion_artifact_json(temp.path(), "missing-adapter.json", "1.25", "2.50")?;
     let artifact_text = fs::read_to_string(&artifact)?;
     let mut value: Value = serde_json::from_str(&artifact_text)?;
-    value
-        .as_object_mut()
-        .unwrap()
-        .remove("bitcoin_rs_ibd_adapter");
+    remove_json_object_field(&mut value, "bitcoin_rs_ibd_adapter");
     fs::write(&artifact, serde_json::to_string_pretty(&value)?)?;
     let output = Command::new("bash")
         .arg(collect_g14_perf_evidence_script_path())
