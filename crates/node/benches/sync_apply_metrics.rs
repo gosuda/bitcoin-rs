@@ -5,34 +5,44 @@
 
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bitcoin::absolute;
 use bitcoin::block::Header;
 use bitcoin::hashes::Hash as _;
+use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::script::Builder;
 use bitcoin::{
-    Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode,
-    TxOut, Txid, Witness, transaction,
+    Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+    TxMerkleNode, TxOut, Txid, Witness, transaction,
 };
+use bitcoin_rs_chain::{BlockTree, NodeStatus};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_node::{
     Config, Network,
     metrics::{MetricValue, MetricsHandle, install_metrics},
     state::NodeState,
 };
+use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::{Hash256, OutPoint as PrimitiveOutPoint};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
+use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
+use parking_lot::RwLock;
 use tempfile::TempDir;
 
 const COINBASE_PROXY_BLOCKS: u32 = 32;
 const PRODUCTION_PROXY_BLOCKS: u32 = 128;
+const SYNC_PROXY_HEADER_HEIGHT: u32 = 4_096;
+const SYNC_PROXY_START_HEIGHT: i32 = 4_096;
 const SPEND_PROXY_COINBASE_MATURITY: u32 = 100;
 const SPEND_PROXY_SPEND_BLOCKS: u32 = 16;
 const SPEND_PROXY_FANOUT: u32 = 64;
 const SPEND_PROXY_COINBASE_OUTPUT_VALUE: u64 = 78_125_000;
 const SPEND_PROXY_SPEND_OUTPUT_VALUE: u64 = 78_124_999;
+const SYNC_APPLY_BUFFERED_METRIC: &str = "node.sync.apply_buffered_blocks_seconds";
+const APPLY_TOTAL_METRIC: &str = "node.apply_block.total_seconds";
 const APPLY_STAGE_METRICS: &[(&str, &str)] = &[
     (
         "pow_self_consistency",
@@ -152,6 +162,16 @@ fn main() {
         true,
         &metrics,
     );
+    print_staged_sync_apply_metrics(
+        "staged_fjall_all_indexes_apply_tick_128_blocks",
+        StagedSyncApplyKind::Contiguous,
+        &metrics,
+    );
+    print_staged_sync_apply_metrics(
+        "staged_fjall_all_indexes_partial_apply_tick_128_blocks",
+        StagedSyncApplyKind::PartialCached,
+        &metrics,
+    );
 }
 
 fn print_utxo_block_commit_metrics(name: &str, blocks: &[Block], with_listener: bool) {
@@ -251,6 +271,152 @@ fn print_apply_metrics(
     );
 }
 
+#[derive(Clone, Copy)]
+enum StagedSyncApplyKind {
+    Contiguous,
+    PartialCached,
+}
+
+fn print_staged_sync_apply_metrics(name: &str, kind: StagedSyncApplyKind, metrics: &MetricsHandle) {
+    let fixture = match kind {
+        StagedSyncApplyKind::Contiguous => {
+            StagedSyncApplyFixture::new_fjall_all_indexes().stage_for_contiguous_apply()
+        }
+        StagedSyncApplyKind::PartialCached => {
+            StagedSyncApplyFixture::new_fjall_all_indexes().stage_for_partial_cached_apply()
+        }
+    };
+    let before = metrics.snapshot();
+    let started = Instant::now();
+    let height = fixture.apply_staged();
+    let elapsed = started.elapsed();
+    let after = metrics.snapshot();
+    let block_count = height.saturating_add(1);
+    let blocks_per_second = f64::from(block_count) / elapsed.as_secs_f64();
+    let sync_apply = required_histogram_delta_ms(
+        &before,
+        &after,
+        SYNC_APPLY_BUFFERED_METRIC,
+        "sync apply buffered",
+    );
+    let apply_total =
+        required_histogram_delta_ms(&before, &after, APPLY_TOTAL_METRIC, "apply total");
+    let sync_wrapper_gap_ms = sync_apply.sum_ms - apply_total.sum_ms;
+    println!(
+        "staged_sync_apply_metrics backend=fjall workload={name} txindex=true blockfilterindex=true blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} sync_apply_buffered_samples={} sync_apply_buffered_sum_ms={:.4} sync_apply_buffered_avg_ms={:.4} apply_total_samples={} apply_total_sum_ms={:.4} apply_total_avg_ms={:.4} sync_wrapper_gap_ms={sync_wrapper_gap_ms:.4} selected_apply_stage_metrics={} {}",
+        sync_apply.count,
+        sync_apply.sum_ms,
+        sync_apply.avg_ms,
+        apply_total.count,
+        apply_total.sum_ms,
+        apply_total.avg_ms,
+        APPLY_STAGE_METRICS.len(),
+        apply_stage_sum_summary(&before, &after),
+    );
+}
+
+struct StagedSyncApplyFixture {
+    _dir: TempDir,
+    state: NodeState,
+    outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
+    blocks: Vec<Block>,
+}
+
+impl StagedSyncApplyFixture {
+    fn new_fjall_all_indexes() -> Self {
+        let mut config = production_state_config();
+        "fjall".clone_into(&mut config.storage_backend);
+        config.txindex = true;
+        config.blockfilterindex = true;
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        config.data_dir = dir.path().join("node");
+        let state = NodeState::open(config)
+            .unwrap_or_else(|error| panic!("open staged sync state failed: {error}"));
+        let blocks = {
+            let block_tree = state.block_tree();
+            let mut tree = block_tree.write();
+            populate_sync_header_chain(&mut tree, PRODUCTION_PROXY_BLOCKS)
+        };
+        let outbound_rxs = install_synthetic_peers(&state.peers(), &state.peer_outbound());
+        Self {
+            _dir: dir,
+            state,
+            outbound_rxs,
+            blocks,
+        }
+    }
+
+    fn stage_for_contiguous_apply(self) -> Self {
+        let sync = self.state.sync();
+        sync.tick();
+        self.assert_getdata_batch();
+        let inbound_blocks_tx = self.state.inbound_blocks_sender();
+        for block in self.blocks[1..].iter().rev() {
+            inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
+        }
+        sync.tick();
+        inbound_blocks_tx
+            .send(self.blocks[0].clone())
+            .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
+        self
+    }
+
+    fn stage_for_partial_cached_apply(self) -> Self {
+        let split = self.blocks.len() / 2;
+        let sync = self.state.sync();
+        sync.tick();
+        self.assert_getdata_batch();
+        let inbound_blocks_tx = self.state.inbound_blocks_sender();
+
+        for block in self.blocks[1..split].iter().rev() {
+            inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send first partial staged block failed: {error}"));
+        }
+        sync.tick();
+        inbound_blocks_tx
+            .send(self.blocks[0].clone())
+            .unwrap_or_else(|error| panic!("send first partial contiguous block failed: {error}"));
+        sync.tick();
+
+        for block in self.blocks[split + 1..].iter().rev() {
+            inbound_blocks_tx
+                .send(block.clone())
+                .unwrap_or_else(|error| panic!("send second partial staged block failed: {error}"));
+        }
+        sync.tick();
+        inbound_blocks_tx
+            .send(self.blocks[split].clone())
+            .unwrap_or_else(|error| panic!("send second partial contiguous block failed: {error}"));
+        self
+    }
+
+    fn apply_staged(self) -> u32 {
+        self.state.sync().tick();
+        self.state
+            .applied_tip()
+            .load_full()
+            .unwrap_or_else(|| panic!("staged sync proxy did not publish applied tip"))
+            .height
+    }
+
+    fn assert_getdata_batch(&self) {
+        let getdata_count = match self
+            .outbound_rxs
+            .first()
+            .unwrap_or_else(|| panic!("missing primary outbound receiver"))
+            .try_recv()
+            .unwrap_or_else(|error| panic!("expected production getdata: {error}"))
+        {
+            NetworkMessage::GetData(inventory) => inventory.len(),
+            other => panic!("expected production getdata, got {other:?}"),
+        };
+        assert_eq!(getdata_count, self.blocks.len());
+    }
+}
+
 fn storage_backend() -> &'static str {
     match std::env::var("BITCOIN_RS_SYNC_APPLY_BACKEND") {
         Ok(backend) if backend == "fjall" => "fjall",
@@ -260,6 +426,14 @@ fn storage_backend() -> &'static str {
         Ok(backend) => panic!("unsupported BITCOIN_RS_SYNC_APPLY_BACKEND={backend}"),
         Err(_) => "fjall",
     }
+}
+
+fn production_state_config() -> Config {
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.p2p_listen.clear();
+    config.txindex = false;
+    config.blockfilterindex = false;
+    config
 }
 
 fn open_regtest_state(
@@ -301,11 +475,64 @@ fn apply_stage_summary(
     summary
 }
 
+fn apply_stage_sum_summary(
+    before: &HashMap<String, MetricValue>,
+    after: &HashMap<String, MetricValue>,
+) -> String {
+    let mut summary = String::new();
+    for (label, metric) in APPLY_STAGE_METRICS {
+        if !summary.is_empty() {
+            summary.push(' ');
+        }
+        summary.push_str(label);
+        if let Some(delta) = histogram_delta_stats_ms(before, after, metric) {
+            write!(
+                &mut summary,
+                "_samples={} {label}_sum_ms={:.4} {label}_avg_ms={:.4}",
+                delta.count, delta.sum_ms, delta.avg_ms,
+            )
+            .unwrap_or_else(|error| panic!("format apply stage summary failed: {error}"));
+        } else {
+            summary.push_str("_samples=0 ");
+            summary.push_str(label);
+            summary.push_str("_sum_ms=missing ");
+            summary.push_str(label);
+            summary.push_str("_avg_ms=missing");
+        }
+    }
+    summary
+}
+
 fn histogram_delta_average_ms(
     before: &HashMap<String, MetricValue>,
     after: &HashMap<String, MetricValue>,
     metric: &str,
 ) -> Option<(u64, f64)> {
+    histogram_delta_stats_ms(before, after, metric).map(|delta| (delta.count, delta.avg_ms))
+}
+
+#[derive(Clone, Copy)]
+struct HistogramDelta {
+    count: u64,
+    sum_ms: f64,
+    avg_ms: f64,
+}
+
+fn required_histogram_delta_ms(
+    before: &HashMap<String, MetricValue>,
+    after: &HashMap<String, MetricValue>,
+    metric: &str,
+    label: &str,
+) -> HistogramDelta {
+    histogram_delta_stats_ms(before, after, metric)
+        .unwrap_or_else(|| panic!("missing {label} histogram delta for {metric}"))
+}
+
+fn histogram_delta_stats_ms(
+    before: &HashMap<String, MetricValue>,
+    after: &HashMap<String, MetricValue>,
+    metric: &str,
+) -> Option<HistogramDelta> {
     let (after_count, after_sum) = histogram_parts(after.get(metric)?)?;
     let (before_count, before_sum) = before
         .get(metric)
@@ -313,8 +540,12 @@ fn histogram_delta_average_ms(
         .unwrap_or((0, 0.0));
     let count = after_count.saturating_sub(before_count);
     (count > 0).then(|| {
-        let sum = after_sum - before_sum;
-        (count, (sum / metric_sample_count(count)) * 1_000.0)
+        let sum_ms = (after_sum - before_sum) * 1_000.0;
+        HistogramDelta {
+            count,
+            sum_ms,
+            avg_ms: sum_ms / metric_sample_count(count),
+        }
     })
 }
 
@@ -344,6 +575,40 @@ fn proxy_blocks(count: u32) -> Vec<Block> {
     blocks
 }
 
+fn populate_sync_header_chain(tree: &mut BlockTree, body_blocks: u32) -> Vec<Block> {
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_id = tree
+        .insert_node(None, genesis.header, NodeStatus::HeaderValid)
+        .unwrap_or_else(|error| panic!("regtest genesis header insert failed: {error}"));
+    let mut tip_id = genesis_id;
+    let mut parent = genesis;
+    let mut prev_hash = parent.block_hash();
+    let mut header_time = parent.header.time;
+    let block_capacity =
+        usize::try_from(body_blocks).unwrap_or_else(|error| panic!("invalid body count: {error}"));
+    let mut blocks = Vec::with_capacity(block_capacity);
+
+    for height in 1_u32..=SYNC_PROXY_HEADER_HEIGHT {
+        let header = if height <= body_blocks {
+            let block = child_coinbase_block(&parent, height);
+            parent = block.clone();
+            prev_hash = block.block_hash();
+            header_time = block.header.time;
+            blocks.push(block.clone());
+            block.header
+        } else {
+            header_time = header_time.saturating_add(1);
+            let header = child_header(prev_hash, header_time);
+            prev_hash = header.block_hash();
+            header
+        };
+        tip_id = tree
+            .insert_node(Some(tip_id), header, NodeStatus::HeaderValid)
+            .unwrap_or_else(|error| panic!("synthetic header insert failed: {error}"));
+    }
+    blocks
+}
+
 fn fanout_proxy_blocks(count: u32) -> Vec<Block> {
     let mut blocks = Vec::with_capacity(
         usize::try_from(count).unwrap_or_else(|error| panic!("invalid fanout count: {error}")),
@@ -357,6 +622,42 @@ fn fanout_proxy_blocks(count: u32) -> Vec<Block> {
         blocks.push(block);
     }
     blocks
+}
+
+fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
+    Header {
+        version: bitcoin::block::Version::ONE,
+        prev_blockhash,
+        merkle_root: TxMerkleNode::all_zeros(),
+        time,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 0,
+    }
+}
+
+fn install_synthetic_peers(
+    peers: &Arc<RwLock<Vec<PeerInfo>>>,
+    peer_outbound: &Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
+) -> Vec<crossbeam_channel::Receiver<Message>> {
+    let mut peers = peers.write();
+    let mut peer_outbound = peer_outbound.write();
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8_333);
+    let (outbound_tx, outbound_rx) = unbounded::<Message>();
+    peers.push(synthetic_peer(addr));
+    peer_outbound.insert(addr, outbound_tx);
+    vec![outbound_rx]
+}
+
+fn synthetic_peer(addr: SocketAddr) -> PeerInfo {
+    PeerInfo {
+        addr,
+        version: 70_016,
+        services: 0,
+        user_agent: "/bitcoin-rs-sync-apply-metrics:0.0.0/".to_owned(),
+        start_height: SYNC_PROXY_START_HEIGHT,
+        conn_time: 0,
+        inbound: false,
+    }
 }
 
 fn fanout_utxo_changes(height: u32) -> BlockChanges {
