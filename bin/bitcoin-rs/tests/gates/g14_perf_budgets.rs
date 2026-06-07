@@ -11,6 +11,7 @@
 
 use std::{env, fs::File, io::Read, path::Path, process::Command};
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const MIN_INITIAL_SYNC_RATIO_VS_BITCOIN_CORE: f64 = 1.0;
@@ -20,6 +21,7 @@ const MAX_RSS_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const FOUR_MIB_BYTES: u64 = 4 * 1024 * 1024;
 const EXPECTED_ELECTRUM_SAMPLE_SIZE: u64 = 10_000;
 const ELECTRUM_RSS_MEASUREMENT_SCHEMA: &str = "g14-electrum-rss-measurement-v1";
+const ELECTRUM_HISTORY_METHOD: &str = "blockchain.scripthash.get_history";
 
 const EVIDENCE_HELP: &str = "required G14 evidence env: \
 G14_COMMIT_SHA=<current git HEAD as 40 lowercase hex>, \
@@ -157,11 +159,21 @@ impl G14Evidence {
         let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
         let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
         let benchmark_artifact_sha256 = required_hex("G14_BENCHMARK_ARTIFACT_SHA256", 64);
-        let (electrum_rss_measurement_path, electrum_rss_measurement_sha256) =
-            verified_electrum_rss_measurement_from_env(stop_height, &stop_hash);
         let electrum_scripthash_corpus = required_env("G14_ELECTRUM_SCRIPTHASH_CORPUS");
         let electrum_scripthash_corpus_sha256 =
             required_hex("G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256", 64);
+        let utxo_commit_p95_ms = positive_f64("G14_UTXO_COMMIT_P95_MS");
+        let electrum_get_history_p95_ms = positive_f64("G14_ELECTRUM_GET_HISTORY_P95_MS");
+        let rss_bytes = positive_u64("G14_RSS_BYTES");
+        let (electrum_rss_measurement_path, electrum_rss_measurement_sha256) =
+            verified_electrum_rss_measurement_from_env(
+                stop_height,
+                &stop_hash,
+                electrum_get_history_p95_ms,
+                rss_bytes,
+                &electrum_scripthash_corpus,
+                &electrum_scripthash_corpus_sha256,
+            );
         let initial_sync_bps = measured_bps(bitcoin_rs_ibd_blocks, bitcoin_rs_elapsed_seconds);
         let bitcoin_core_initial_sync_bps =
             measured_bps(bitcoin_core_ibd_blocks, bitcoin_core_elapsed_seconds);
@@ -190,9 +202,9 @@ impl G14Evidence {
             benchmark_artifact_sha256,
             initial_sync_bps,
             bitcoin_core_initial_sync_bps,
-            utxo_commit_p95_ms: positive_f64("G14_UTXO_COMMIT_P95_MS"),
-            electrum_get_history_p95_ms: positive_f64("G14_ELECTRUM_GET_HISTORY_P95_MS"),
-            rss_bytes: positive_u64("G14_RSS_BYTES"),
+            utxo_commit_p95_ms,
+            electrum_get_history_p95_ms,
+            rss_bytes,
             electrum_rss_measurement_path,
             electrum_rss_measurement_sha256,
             electrum_scripthash_corpus,
@@ -474,6 +486,10 @@ fn require_literal(name: &str, expected: &str) {
 fn verified_electrum_rss_measurement_from_env(
     stop_height: u64,
     stop_hash: &str,
+    electrum_get_history_p95_ms: f64,
+    rss_bytes: u64,
+    electrum_scripthash_corpus: &str,
+    electrum_scripthash_corpus_sha256: &str,
 ) -> (String, String) {
     require_literal(
         "G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA",
@@ -497,7 +513,154 @@ fn verified_electrum_rss_measurement_from_env(
     let path = required_env("G14_ELECTRUM_RSS_MEASUREMENT_PATH");
     let sha256 = required_hex("G14_ELECTRUM_RSS_MEASUREMENT_SHA256", 64);
     require_sha256_file(&path, &sha256, "G14_ELECTRUM_RSS_MEASUREMENT_PATH");
+    verify_electrum_rss_measurement_json(
+        &path,
+        stop_height,
+        stop_hash,
+        electrum_get_history_p95_ms,
+        rss_bytes,
+        electrum_scripthash_corpus,
+        electrum_scripthash_corpus_sha256,
+    );
     (path, sha256)
+}
+
+fn verify_electrum_rss_measurement_json(
+    path: &str,
+    stop_height: u64,
+    stop_hash: &str,
+    electrum_get_history_p95_ms: f64,
+    rss_bytes: u64,
+    electrum_scripthash_corpus: &str,
+    electrum_scripthash_corpus_sha256: &str,
+) {
+    let data = read_json_object(path, "G14_ELECTRUM_RSS_MEASUREMENT_PATH");
+    require_json_literal(
+        &data,
+        "schema",
+        ELECTRUM_RSS_MEASUREMENT_SCHEMA,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    require_json_literal(
+        &data,
+        "measurement_kind",
+        "evidence",
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    require_json_literal(
+        &data,
+        "method",
+        ELECTRUM_HISTORY_METHOD,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    require_json_exact_u64(
+        &data,
+        "electrum_sample_size",
+        EXPECTED_ELECTRUM_SAMPLE_SIZE,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    require_json_exact_u64(
+        &data,
+        "electrum_non_empty_history_count",
+        EXPECTED_ELECTRUM_SAMPLE_SIZE,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    require_json_exact_u64(
+        &data,
+        "electrum_tip_height",
+        stop_height,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    let measurement_tip_hash = require_json_hex(
+        &data,
+        "electrum_tip_hash",
+        64,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    assert_eq!(
+        measurement_tip_hash, stop_hash,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH electrum_tip_hash must match G14_IBD_STOP_HASH",
+    );
+    require_json_literal(
+        &data,
+        "electrum_scripthash_corpus",
+        electrum_scripthash_corpus,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    let measurement_corpus_sha256 = require_json_hex(
+        &data,
+        "electrum_scripthash_corpus_sha256",
+        64,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    assert_eq!(
+        measurement_corpus_sha256, electrum_scripthash_corpus_sha256,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH electrum_scripthash_corpus_sha256 must match G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256",
+    );
+    require_json_exact_f64(
+        &data,
+        "electrum_get_history_p95_ms",
+        electrum_get_history_p95_ms,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+    require_json_exact_u64(
+        &data,
+        "rss_bytes",
+        rss_bytes,
+        "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+    );
+}
+
+fn read_json_object(path: &str, name: &str) -> Value {
+    let file = match File::open(Path::new(path)) {
+        Ok(file) => file,
+        Err(error) => panic!("{name} must be a readable JSON file at {path}: {error}"),
+    };
+    let data = match serde_json::from_reader::<_, Value>(file) {
+        Ok(data) => data,
+        Err(error) => panic!("{name} must point to valid JSON at {path}: {error}"),
+    };
+    assert!(data.is_object(), "{name} must point to a JSON object");
+    data
+}
+
+fn require_json_literal(data: &Value, key: &str, expected: &str, source: &str) {
+    let value = match data.get(key).and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => panic!("{source} {key} must be a non-empty string"),
+    };
+    assert_eq!(value, expected, "{source} {key} must be {expected:?}");
+}
+
+fn require_json_hex(data: &Value, key: &str, len: usize, source: &str) -> String {
+    let value = match data.get(key).and_then(Value::as_str) {
+        Some(value) => value,
+        None => panic!("{source} {key} must be a string"),
+    };
+    assert!(
+        is_lower_hex_len(value, len),
+        "{source} {key} must be a {len}-character lowercase hex value, got {value:?}",
+    );
+    value.to_owned()
+}
+
+fn require_json_exact_u64(data: &Value, key: &str, expected: u64, source: &str) {
+    let value = match data.get(key).and_then(Value::as_u64) {
+        Some(value) => value,
+        None => panic!("{source} {key} must be a non-negative integer"),
+    };
+    assert_eq!(value, expected, "{source} {key} must be {expected}");
+}
+
+fn require_json_exact_f64(data: &Value, key: &str, expected: f64, source: &str) {
+    let value = match data.get(key).and_then(Value::as_f64) {
+        Some(value) if value.is_finite() && value > 0.0 => value,
+        _ => panic!("{source} {key} must be a finite positive number"),
+    };
+    assert!(
+        (value - expected).abs() <= 1e-12,
+        "{source} {key} must match final G14 evidence env; measurement={value}, env={expected}",
+    );
 }
 
 fn require_sha256_file(path: &str, expected_sha256: &str, name: &str) {
@@ -597,6 +760,11 @@ mod tests {
 
     use super::*;
 
+    const TEST_TIP_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_CORPUS_SHA256: &str =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const TEST_CORPUS_PATH: &str = "/tmp/g14-scripthashes.txt";
+
     #[test]
     fn final_gate_accepts_hash_bound_local_custody_files() {
         let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
@@ -693,5 +861,78 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_accepts_electrum_rss_measurement_contents() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let measurement = dir.path().join("electrum-rss.json");
+        fs::write(
+            &measurement,
+            electrum_rss_measurement_json(20.0, 1024, TEST_TIP_HASH),
+        )
+        .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
+
+        verify_electrum_rss_measurement_json(
+            &measurement.display().to_string(),
+            800_000,
+            TEST_TIP_HASH,
+            20.0,
+            1024,
+            TEST_CORPUS_PATH,
+            TEST_CORPUS_SHA256,
+        );
+    }
+
+    #[test]
+    fn final_gate_rejects_electrum_rss_measurement_content_mismatch() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let measurement = dir.path().join("electrum-rss.json");
+        fs::write(
+            &measurement,
+            electrum_rss_measurement_json(25.0, 1024, TEST_TIP_HASH),
+        )
+        .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
+        let matching_file_hash = sha256_file(
+            &measurement.display().to_string(),
+            "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+        );
+        require_sha256_file(
+            &measurement.display().to_string(),
+            &matching_file_hash,
+            "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+        );
+
+        let result = panic::catch_unwind(|| {
+            verify_electrum_rss_measurement_json(
+                &measurement.display().to_string(),
+                800_000,
+                TEST_TIP_HASH,
+                20.0,
+                1024,
+                TEST_CORPUS_PATH,
+                TEST_CORPUS_SHA256,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    fn electrum_rss_measurement_json(p95_ms: f64, rss_bytes: u64, tip_hash: &str) -> String {
+        format!(
+            r#"{{
+  "schema": "g14-electrum-rss-measurement-v1",
+  "measurement_kind": "evidence",
+  "method": "blockchain.scripthash.get_history",
+  "electrum_sample_size": 10000,
+  "electrum_non_empty_history_count": 10000,
+  "electrum_tip_height": 800000,
+  "electrum_tip_hash": "{tip_hash}",
+  "electrum_scripthash_corpus": "{TEST_CORPUS_PATH}",
+  "electrum_scripthash_corpus_sha256": "{TEST_CORPUS_SHA256}",
+  "electrum_get_history_p95_ms": {p95_ms},
+  "rss_bytes": {rss_bytes}
+}}"#
+        )
     }
 }
