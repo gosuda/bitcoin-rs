@@ -27,6 +27,7 @@ const MAX_RSS_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const FOUR_MIB_BYTES: u64 = 4 * 1024 * 1024;
 const EXPECTED_ELECTRUM_SAMPLE_SIZE: u64 = 10_000;
 const ELECTRUM_RSS_MEASUREMENT_SCHEMA: &str = "g14-electrum-rss-measurement-v1";
+const UTXO_COMMIT_MEASUREMENT_SCHEMA: &str = "g14-utxo-commit-measurement-v1";
 const ELECTRUM_HISTORY_METHOD: &str = "blockchain.scripthash.get_history";
 const IBD_COMPLETION_PROOF_SCHEMA: &str = "g14-ibd-completion-proof-v1";
 const IBD_COMPLETION_PROOF_PREFIX: &str = "G14_IBD_COMPLETION_PROOF ";
@@ -66,6 +67,15 @@ G14_BITCOIN_RS_CONFIG_SHA256=<64 lowercase hex>, \
 G14_BITCOIN_CORE_CONFIG_SHA256=<64 lowercase hex>, \
 G14_BENCHMARK_ARTIFACT_SHA256=<64 lowercase hex>, \
 G14_UTXO_COMMIT_P95_MS, \
+G14_UTXO_COMMIT_MEASUREMENT_PATH, \
+G14_UTXO_COMMIT_MEASUREMENT_SHA256=<64 lowercase hex>, \
+G14_UTXO_COMMIT_MEASUREMENT_SCHEMA=g14-utxo-commit-measurement-v1, \
+G14_UTXO_COMMIT_MEASUREMENT_SAMPLE_COUNT, \
+G14_UTXO_COMMIT_MEASUREMENT_START_HEIGHT=G14_IBD_START_HEIGHT, \
+G14_UTXO_COMMIT_MEASUREMENT_START_HASH=G14_IBD_START_HASH, \
+G14_UTXO_COMMIT_MEASUREMENT_STOP_HEIGHT=G14_IBD_STOP_HEIGHT, \
+G14_UTXO_COMMIT_MEASUREMENT_STOP_HASH=G14_IBD_STOP_HASH, \
+G14_UTXO_COMMIT_BLOCK_SIZE_THRESHOLD_BYTES=4194304, \
 G14_ELECTRUM_GET_HISTORY_P95_MS, \
 G14_RSS_BYTES, \
 G14_ELECTRUM_RSS_MEASUREMENT_PATH, \
@@ -103,6 +113,8 @@ struct G14Evidence {
     initial_sync_bps: f64,
     bitcoin_core_initial_sync_bps: f64,
     utxo_commit_p95_ms: f64,
+    utxo_commit_measurement_path: String,
+    utxo_commit_measurement_sha256: String,
     electrum_get_history_p95_ms: f64,
     rss_bytes: u64,
     electrum_rss_measurement_path: String,
@@ -116,6 +128,21 @@ struct CriterionRawOutputCustody {
     bitcoin_rs_sha256: String,
     bitcoin_core_path: String,
     bitcoin_core_sha256: String,
+}
+
+struct UtxoCommitMeasurementEvidence {
+    p95_ms: f64,
+    path: String,
+    sha256: String,
+}
+
+struct ElectrumRssMeasurementEvidence {
+    get_history_p95_ms: f64,
+    rss_bytes: u64,
+    measurement_path: String,
+    measurement_sha256: String,
+    scripthash_corpus: String,
+    scripthash_corpus_sha256: String,
 }
 
 #[derive(Clone, Copy)]
@@ -287,21 +314,14 @@ impl G14Evidence {
             ),
         );
         let benchmark_artifact_sha256 = required_hex("G14_BENCHMARK_ARTIFACT_SHA256", 64);
-        let electrum_scripthash_corpus = required_env("G14_ELECTRUM_SCRIPTHASH_CORPUS");
-        let electrum_scripthash_corpus_sha256 =
-            required_hex("G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256", 64);
-        let utxo_commit_p95_ms = positive_f64("G14_UTXO_COMMIT_P95_MS");
-        let electrum_get_history_p95_ms = positive_f64("G14_ELECTRUM_GET_HISTORY_P95_MS");
-        let rss_bytes = positive_u64("G14_RSS_BYTES");
-        let (electrum_rss_measurement_path, electrum_rss_measurement_sha256) =
-            verified_electrum_rss_measurement_from_env(
-                stop_height,
-                &stop_hash,
-                electrum_get_history_p95_ms,
-                rss_bytes,
-                &electrum_scripthash_corpus,
-                &electrum_scripthash_corpus_sha256,
-            );
+        let utxo_commit = UtxoCommitMeasurementEvidence::from_env(
+            &commit_sha,
+            start_height,
+            &start_hash,
+            stop_height,
+            &stop_hash,
+        );
+        let electrum = ElectrumRssMeasurementEvidence::from_env(stop_height, &stop_hash);
         let initial_sync_bps = measured_bps(bitcoin_rs_ibd_blocks, bitcoin_rs_elapsed_seconds);
         let bitcoin_core_initial_sync_bps =
             measured_bps(bitcoin_core_ibd_blocks, bitcoin_core_elapsed_seconds);
@@ -330,13 +350,15 @@ impl G14Evidence {
             benchmark_artifact_sha256,
             initial_sync_bps,
             bitcoin_core_initial_sync_bps,
-            utxo_commit_p95_ms,
-            electrum_get_history_p95_ms,
-            rss_bytes,
-            electrum_rss_measurement_path,
-            electrum_rss_measurement_sha256,
-            electrum_scripthash_corpus,
-            electrum_scripthash_corpus_sha256,
+            utxo_commit_p95_ms: utxo_commit.p95_ms,
+            utxo_commit_measurement_path: utxo_commit.path,
+            utxo_commit_measurement_sha256: utxo_commit.sha256,
+            electrum_get_history_p95_ms: electrum.get_history_p95_ms,
+            rss_bytes: electrum.rss_bytes,
+            electrum_rss_measurement_path: electrum.measurement_path,
+            electrum_rss_measurement_sha256: electrum.measurement_sha256,
+            electrum_scripthash_corpus: electrum.scripthash_corpus,
+            electrum_scripthash_corpus_sha256: electrum.scripthash_corpus_sha256,
         }
     }
 
@@ -422,6 +444,8 @@ impl G14Evidence {
         let initial_sync_speedup_vs_bitcoin_core =
             self.initial_sync_bps / self.bitcoin_core_initial_sync_bps;
         let utxo_commit_p95_ms = self.utxo_commit_p95_ms;
+        let utxo_commit_measurement_path = &self.utxo_commit_measurement_path;
+        let utxo_commit_measurement_sha256 = &self.utxo_commit_measurement_sha256;
         let electrum_get_history_p95_ms = self.electrum_get_history_p95_ms;
         let rss_bytes = self.rss_bytes;
         let electrum_rss_measurement_path = &self.electrum_rss_measurement_path;
@@ -458,6 +482,8 @@ impl G14Evidence {
         println!("bitcoin_core_initial_sync_bps={bitcoin_core_initial_sync_bps}");
         println!("initial_sync_speedup_vs_bitcoin_core={initial_sync_speedup_vs_bitcoin_core}");
         println!("utxo_commit_p95_ms={utxo_commit_p95_ms}");
+        println!("utxo_commit_measurement_path={utxo_commit_measurement_path}");
+        println!("utxo_commit_measurement_sha256={utxo_commit_measurement_sha256}");
         println!("electrum_get_history_p95_ms={electrum_get_history_p95_ms}");
         println!("rss_bytes={rss_bytes}");
         println!("electrum_rss_measurement_path={electrum_rss_measurement_path}");
@@ -813,46 +839,389 @@ fn criterion_seconds(value: &str, unit: &str, name: &str) -> f64 {
     value * scale
 }
 
-fn verified_electrum_rss_measurement_from_env(
+fn utxo_percentile_ms(samples_ms: &[f64], numerator: u64, denominator: u64) -> f64 {
+    assert!(
+        !samples_ms.is_empty(),
+        "cannot calculate percentile for an empty sample"
+    );
+    assert!(denominator > 0, "percentile denominator must be positive");
+    let mut ordered = samples_ms.to_vec();
+    ordered.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let len = ordered.len();
+    let len_u64 = u64::try_from(len).unwrap_or_else(|_| {
+        panic!("cannot calculate percentile when sample length exceeds u64::MAX")
+    });
+    let rank = len_u64
+        .saturating_mul(numerator)
+        .saturating_add(denominator.saturating_sub(1))
+        / denominator;
+    let index = usize::try_from(rank)
+        .unwrap_or_else(|_| panic!("percentile rank exceeds usize::MAX"))
+        .saturating_sub(1)
+        .min(len - 1);
+    ordered[index]
+}
+
+fn utxo_positive_sample_float(value: &Value, name: &str) -> f64 {
+    let number = match value {
+        Value::Number(number) => number.as_f64(),
+        _ => None,
+    };
+    let number = number.unwrap_or_else(|| panic!("{name} must be a finite positive number"));
+    assert!(
+        number.is_finite() && number > 0.0,
+        "{name} must be finite and positive"
+    );
+    number
+}
+
+fn utxo_sample_non_negative_u64(value: Option<&Value>, field_name: &str) -> u64 {
+    match value {
+        Some(Value::Number(number)) => {
+            if let Some(value) = number.as_u64() {
+                return value;
+            }
+            let signed = number
+                .as_i64()
+                .unwrap_or_else(|| panic!("{field_name} must be a non-negative integer"));
+            u64::try_from(signed)
+                .unwrap_or_else(|_| panic!("{field_name} must be a non-negative integer"))
+        }
+        _ => panic!("{field_name} must be a non-negative integer"),
+    }
+}
+
+fn utxo_sample_height(value: Option<&Value>, index: usize) -> u64 {
+    utxo_sample_non_negative_u64(value, &format!("sample[{index}].height"))
+}
+
+fn utxo_sample_block_size(value: Option<&Value>, index: usize) -> u64 {
+    utxo_sample_non_negative_u64(value, &format!("sample[{index}].block_size_bytes"))
+}
+
+fn read_utxo_samples_from_path(path: &Path, source: &str) -> Vec<Value> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => panic!(
+            "{source} sample_source_path must be readable at {}: {error}",
+            path.display()
+        ),
+    };
+    let payload = match serde_json::from_reader::<_, Value>(file) {
+        Ok(payload) => payload,
+        Err(error) => panic!(
+            "{source} sample_source_path must be valid JSON at {}: {error}",
+            path.display()
+        ),
+    };
+    if let Value::Array(samples) = payload {
+        return samples;
+    }
+    if let Value::Object(object) = payload {
+        if let Some(Value::Array(samples)) = object.get("samples") {
+            return samples.clone();
+        }
+    }
+    panic!("{source} sample source must be a JSON array or an object with a samples array");
+}
+
+fn utxo_sample_commit_ms(sample: &Value, index: usize) -> f64 {
+    let object = sample.as_object().unwrap_or_else(|| {
+        panic!("sample[{index}] must be an object");
+    });
+    let has_ms = object.contains_key("utxo_commit_ms");
+    let has_us = object.contains_key("utxo_commit_us");
+    assert!(
+        !(has_ms && has_us),
+        "sample[{index}] must not include both utxo_commit_ms and utxo_commit_us"
+    );
+    if let Some(value) = object.get("utxo_commit_ms") {
+        return utxo_positive_sample_float(value, &format!("sample[{index}].utxo_commit_ms"));
+    }
+    if let Some(value) = object.get("utxo_commit_us") {
+        return utxo_positive_sample_float(value, &format!("sample[{index}].utxo_commit_us"))
+            / 1000.0;
+    }
+    panic!("sample[{index}] must include utxo_commit_ms or utxo_commit_us");
+}
+
+fn parse_utxo_sample(
+    sample: &Value,
+    index: usize,
+    start_height: u64,
+    stop_height: u64,
+    threshold_bytes: u64,
+) -> Option<f64> {
+    let object = sample.as_object().unwrap_or_else(|| {
+        panic!("sample[{index}] must be an object");
+    });
+    let height = utxo_sample_height(object.get("height"), index);
+    assert!(
+        height >= start_height && height <= stop_height,
+        "sample[{index}].height must be within the IBD window"
+    );
+    let _block_hash = require_json_hex(
+        &Value::Object(object.clone()),
+        "block_hash",
+        64,
+        &format!("sample[{index}]"),
+    );
+    let block_size = utxo_sample_block_size(object.get("block_size_bytes"), index);
+    if block_size < threshold_bytes {
+        return None;
+    }
+    Some(utxo_sample_commit_ms(sample, index))
+}
+
+fn qualifying_utxo_commit_samples_ms(
+    samples_path: &Path,
+    source: &str,
+    start_height: u64,
+    stop_height: u64,
+    threshold_bytes: u64,
+) -> Vec<f64> {
+    read_utxo_samples_from_path(samples_path, source)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| {
+            parse_utxo_sample(sample, index, start_height, stop_height, threshold_bytes)
+        })
+        .collect()
+}
+
+fn verify_utxo_commit_sample_custody(
+    data: &Value,
+    source: &str,
+    start_height: u64,
+    stop_height: u64,
+    threshold_bytes: u64,
+    expected_sample_count: u64,
+    expected_p95_ms: f64,
+) {
+    let sample_source_path = data
+        .get("sample_source_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| panic!("{source} sample_source_path must be a non-empty string"));
+    let path = Path::new(sample_source_path);
+    assert!(
+        path.is_file(),
+        "{source} sample_source_path is not a readable file: {sample_source_path}"
+    );
+    let expected_sample_sha = require_json_hex(data, "sample_source_sha256", 64, source);
+    let actual_sample_sha = sha256_file(sample_source_path, source);
+    assert_eq!(
+        actual_sample_sha, expected_sample_sha,
+        "{source} sample_source_sha256 must match sample_source_path"
+    );
+    require_json_exact_u64(data, "sample_count", expected_sample_count, source);
+    let qualifying_ms =
+        qualifying_utxo_commit_samples_ms(path, source, start_height, stop_height, threshold_bytes);
+    let qualifying_count = u64::try_from(qualifying_ms.len())
+        .unwrap_or_else(|_| panic!("{source} sample_count exceeds u64::MAX"));
+    assert_eq!(
+        qualifying_count, expected_sample_count,
+        "{source} sample_count must match qualifying samples from sample_source_path"
+    );
+    let recomputed_p95_ms = utxo_percentile_ms(&qualifying_ms, 95, 100);
+    assert!(
+        (recomputed_p95_ms - expected_p95_ms).abs() <= 1e-12,
+        "{source} utxo_commit_p95_ms must match sample_source_path"
+    );
+}
+
+impl UtxoCommitMeasurementEvidence {
+    fn from_env(
+        commit_sha: &str,
+        start_height: u64,
+        start_hash: &str,
+        stop_height: u64,
+        stop_hash: &str,
+    ) -> Self {
+        let p95_ms = positive_f64("G14_UTXO_COMMIT_P95_MS");
+        require_literal(
+            "G14_UTXO_COMMIT_MEASUREMENT_SCHEMA",
+            UTXO_COMMIT_MEASUREMENT_SCHEMA,
+        );
+        require_exact_u64("G14_UTXO_COMMIT_MEASUREMENT_START_HEIGHT", start_height);
+        let measurement_start_hash = required_hex("G14_UTXO_COMMIT_MEASUREMENT_START_HASH", 64);
+        assert_eq!(
+            measurement_start_hash, start_hash,
+            "G14_UTXO_COMMIT_MEASUREMENT_START_HASH must match G14_IBD_START_HASH"
+        );
+        require_exact_u64("G14_UTXO_COMMIT_MEASUREMENT_STOP_HEIGHT", stop_height);
+        let measurement_stop_hash = required_hex("G14_UTXO_COMMIT_MEASUREMENT_STOP_HASH", 64);
+        assert_eq!(
+            measurement_stop_hash, stop_hash,
+            "G14_UTXO_COMMIT_MEASUREMENT_STOP_HASH must match G14_IBD_STOP_HASH"
+        );
+        require_exact_u64("G14_UTXO_COMMIT_BLOCK_SIZE_THRESHOLD_BYTES", FOUR_MIB_BYTES);
+        let sample_count = positive_u64("G14_UTXO_COMMIT_MEASUREMENT_SAMPLE_COUNT");
+        let path = required_env("G14_UTXO_COMMIT_MEASUREMENT_PATH");
+        let sha256 = required_hex("G14_UTXO_COMMIT_MEASUREMENT_SHA256", 64);
+        require_sha256_file(&path, &sha256, "G14_UTXO_COMMIT_MEASUREMENT_PATH");
+        verify_utxo_commit_measurement_json(
+            &path,
+            commit_sha,
+            sample_count,
+            start_height,
+            start_hash,
+            stop_height,
+            stop_hash,
+            p95_ms,
+        );
+        Self {
+            p95_ms,
+            path,
+            sha256,
+        }
+    }
+}
+
+fn verify_utxo_commit_measurement_json(
+    path: &str,
+    commit_sha: &str,
+    expected_sample_count: u64,
+    start_height: u64,
+    start_hash: &str,
     stop_height: u64,
     stop_hash: &str,
-    electrum_get_history_p95_ms: f64,
-    rss_bytes: u64,
-    electrum_scripthash_corpus: &str,
-    electrum_scripthash_corpus_sha256: &str,
-) -> (String, String) {
-    require_literal(
-        "G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA",
-        ELECTRUM_RSS_MEASUREMENT_SCHEMA,
+    utxo_commit_p95_ms: f64,
+) {
+    let data = read_json_object(path, "G14_UTXO_COMMIT_MEASUREMENT_PATH");
+    require_json_literal(
+        &data,
+        "schema",
+        UTXO_COMMIT_MEASUREMENT_SCHEMA,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
     );
-    require_exact_u64(
-        "G14_ELECTRUM_RSS_MEASUREMENT_SAMPLE_SIZE",
-        EXPECTED_ELECTRUM_SAMPLE_SIZE,
+    require_json_literal(
+        &data,
+        "measurement_kind",
+        "evidence",
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
     );
-    require_exact_u64(
-        "G14_ELECTRUM_RSS_MEASUREMENT_NON_EMPTY_HISTORY_COUNT",
-        EXPECTED_ELECTRUM_SAMPLE_SIZE,
+    let measurement_commit = require_json_hex(
+        &data,
+        "bitcoin_rs_commit",
+        40,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
     );
-    require_exact_u64("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HEIGHT", stop_height);
-    let electrum_rss_measurement_tip_hash =
-        required_hex("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH", 64);
     assert_eq!(
-        electrum_rss_measurement_tip_hash, stop_hash,
-        "G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH must match G14_IBD_STOP_HASH"
+        measurement_commit, commit_sha,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH bitcoin_rs_commit must match G14_COMMIT_SHA"
     );
-    let path = required_env("G14_ELECTRUM_RSS_MEASUREMENT_PATH");
-    let sha256 = required_hex("G14_ELECTRUM_RSS_MEASUREMENT_SHA256", 64);
-    require_sha256_file(&path, &sha256, "G14_ELECTRUM_RSS_MEASUREMENT_PATH");
-    verify_electrum_rss_measurement_json(
-        &path,
+    require_json_exact_u64(
+        &data,
+        "ibd_start_height",
+        start_height,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+    );
+    let measurement_start_hash = require_json_hex(
+        &data,
+        "ibd_start_hash",
+        64,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+    );
+    assert_eq!(
+        measurement_start_hash, start_hash,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH ibd_start_hash must match G14_IBD_START_HASH",
+    );
+    require_json_exact_u64(
+        &data,
+        "ibd_stop_height",
         stop_height,
-        stop_hash,
-        electrum_get_history_p95_ms,
-        rss_bytes,
-        electrum_scripthash_corpus,
-        electrum_scripthash_corpus_sha256,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
     );
-    (path, sha256)
+    let measurement_stop_hash = require_json_hex(
+        &data,
+        "ibd_stop_hash",
+        64,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+    );
+    assert_eq!(
+        measurement_stop_hash, stop_hash,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH ibd_stop_hash must match G14_IBD_STOP_HASH",
+    );
+    require_json_exact_u64(
+        &data,
+        "block_size_threshold_bytes",
+        FOUR_MIB_BYTES,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+    );
+    require_json_exact_u64(
+        &data,
+        "sample_count",
+        expected_sample_count,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+    );
+    require_json_exact_f64(
+        &data,
+        "utxo_commit_p95_ms",
+        utxo_commit_p95_ms,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+    );
+    verify_utxo_commit_sample_custody(
+        &data,
+        "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+        start_height,
+        stop_height,
+        FOUR_MIB_BYTES,
+        expected_sample_count,
+        utxo_commit_p95_ms,
+    );
+}
+
+impl ElectrumRssMeasurementEvidence {
+    fn from_env(stop_height: u64, stop_hash: &str) -> Self {
+        let get_history_p95_ms = positive_f64("G14_ELECTRUM_GET_HISTORY_P95_MS");
+        let rss_bytes = positive_u64("G14_RSS_BYTES");
+        let scripthash_corpus = required_env("G14_ELECTRUM_SCRIPTHASH_CORPUS");
+        let scripthash_corpus_sha256 = required_hex("G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256", 64);
+        require_literal(
+            "G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA",
+            ELECTRUM_RSS_MEASUREMENT_SCHEMA,
+        );
+        require_exact_u64(
+            "G14_ELECTRUM_RSS_MEASUREMENT_SAMPLE_SIZE",
+            EXPECTED_ELECTRUM_SAMPLE_SIZE,
+        );
+        require_exact_u64(
+            "G14_ELECTRUM_RSS_MEASUREMENT_NON_EMPTY_HISTORY_COUNT",
+            EXPECTED_ELECTRUM_SAMPLE_SIZE,
+        );
+        require_exact_u64("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HEIGHT", stop_height);
+        let electrum_rss_measurement_tip_hash =
+            required_hex("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH", 64);
+        assert_eq!(
+            electrum_rss_measurement_tip_hash, stop_hash,
+            "G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH must match G14_IBD_STOP_HASH"
+        );
+        let measurement_path = required_env("G14_ELECTRUM_RSS_MEASUREMENT_PATH");
+        let measurement_sha256 = required_hex("G14_ELECTRUM_RSS_MEASUREMENT_SHA256", 64);
+        require_sha256_file(
+            &measurement_path,
+            &measurement_sha256,
+            "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+        );
+        verify_electrum_rss_measurement_json(
+            &measurement_path,
+            stop_height,
+            stop_hash,
+            get_history_p95_ms,
+            rss_bytes,
+            &scripthash_corpus,
+            &scripthash_corpus_sha256,
+        );
+        Self {
+            get_history_p95_ms,
+            rss_bytes,
+            measurement_path,
+            measurement_sha256,
+            scripthash_corpus,
+            scripthash_corpus_sha256,
+        }
+    }
 }
 
 fn verify_electrum_rss_measurement_json(
@@ -1385,6 +1754,245 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_rejects_tampered_utxo_commit_measurement() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let measurement = dir.path().join("utxo-commit.json");
+        fs::write(
+            &measurement,
+            br#"{"schema":"g14-utxo-commit-measurement-v1"}"#,
+        )
+        .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
+        let stale_sha = sha256_file(
+            &measurement.display().to_string(),
+            "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+        );
+        fs::write(&measurement, br#"{"schema":"tampered"}"#)
+            .unwrap_or_else(|error| panic!("tamper measurement failed: {error}"));
+
+        let result = panic::catch_unwind(|| {
+            require_sha256_file(
+                &measurement.display().to_string(),
+                &stale_sha,
+                "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_accepts_utxo_commit_measurement_contents() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let commit_sha = current_git_head();
+        let measurement = write_utxo_commit_measurement_fixture(
+            dir.path(),
+            &commit_sha,
+            0,
+            800_000,
+            TEST_START_HASH,
+            TEST_TIP_HASH,
+            12.5,
+        );
+
+        verify_utxo_commit_measurement_json(
+            &measurement.display().to_string(),
+            &commit_sha,
+            20,
+            0,
+            TEST_START_HASH,
+            800_000,
+            TEST_TIP_HASH,
+            12.5,
+        );
+    }
+
+    #[test]
+    fn final_gate_rejects_utxo_commit_measurement_content_mismatch() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let measurement = dir.path().join("utxo-commit.json");
+        fs::write(
+            &measurement,
+            utxo_commit_measurement_json(25.0, TEST_START_HASH, TEST_TIP_HASH),
+        )
+        .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
+        let matching_file_hash = sha256_file(
+            &measurement.display().to_string(),
+            "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+        );
+        require_sha256_file(
+            &measurement.display().to_string(),
+            &matching_file_hash,
+            "G14_UTXO_COMMIT_MEASUREMENT_PATH",
+        );
+
+        let result = panic::catch_unwind(|| {
+            verify_utxo_commit_measurement_json(
+                &measurement.display().to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                20,
+                0,
+                TEST_START_HASH,
+                800_000,
+                TEST_TIP_HASH,
+                12.5,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_rejects_utxo_commit_measurement_commit_mismatch() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let commit_sha = current_git_head();
+        let measurement = write_utxo_commit_measurement_fixture(
+            dir.path(),
+            &commit_sha,
+            0,
+            800_000,
+            TEST_START_HASH,
+            TEST_TIP_HASH,
+            12.5,
+        );
+
+        let result = panic::catch_unwind(|| {
+            verify_utxo_commit_measurement_json(
+                &measurement.display().to_string(),
+                "cccccccccccccccccccccccccccccccccccccccc",
+                20,
+                0,
+                TEST_START_HASH,
+                800_000,
+                TEST_TIP_HASH,
+                12.5,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_rejects_utxo_commit_measurement_sample_count_mismatch() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let commit_sha = current_git_head();
+        let measurement = write_utxo_commit_measurement_fixture(
+            dir.path(),
+            &commit_sha,
+            0,
+            800_000,
+            TEST_START_HASH,
+            TEST_TIP_HASH,
+            12.5,
+        );
+
+        let result = panic::catch_unwind(|| {
+            verify_utxo_commit_measurement_json(
+                &measurement.display().to_string(),
+                &commit_sha,
+                99,
+                0,
+                TEST_START_HASH,
+                800_000,
+                TEST_TIP_HASH,
+                12.5,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    fn write_utxo_commit_samples(
+        dir: &std::path::Path,
+        start_height: u64,
+        stop_height: u64,
+        p95_ms: f64,
+        stop_hash: &str,
+    ) -> std::path::PathBuf {
+        let span = stop_height - start_height + 1;
+        let mut samples = Vec::new();
+        for index in 0..20 {
+            let height = start_height + (index % span);
+            let commit_ms = match index {
+                18 => p95_ms,
+                19 => p95_ms + 7.5,
+                _ => 10.0,
+            };
+            samples.push(format!(
+                r#"{{"height": {height}, "block_hash": "{stop_hash}", "block_size_bytes": 4194304, "utxo_commit_ms": {commit_ms}}}"#
+            ));
+        }
+        let samples_path = dir.join("utxo-commit-samples.json");
+        fs::write(&samples_path, format!("[{}]", samples.join(",")))
+            .unwrap_or_else(|error| panic!("write utxo samples failed: {error}"));
+        samples_path
+    }
+
+    fn write_utxo_commit_measurement_fixture(
+        dir: &std::path::Path,
+        commit_sha: &str,
+        start_height: u64,
+        stop_height: u64,
+        start_hash: &str,
+        stop_hash: &str,
+        p95_ms: f64,
+    ) -> std::path::PathBuf {
+        let samples_path =
+            write_utxo_commit_samples(dir, start_height, stop_height, p95_ms, stop_hash);
+        let sample_source_sha256 = sha256_file(
+            &samples_path.display().to_string(),
+            "utxo commit sample source",
+        );
+        let measurement = dir.join("utxo-commit.json");
+        fs::write(
+            &measurement,
+            format!(
+                r#"{{
+  "schema": "g14-utxo-commit-measurement-v1",
+  "measurement_kind": "evidence",
+  "bitcoin_rs_commit": "{commit_sha}",
+  "ibd_start_height": {start_height},
+  "ibd_start_hash": "{start_hash}",
+  "ibd_stop_height": {stop_height},
+  "ibd_stop_hash": "{stop_hash}",
+  "block_size_threshold_bytes": 4194304,
+  "sample_source_path": "{sample_source_path}",
+  "sample_source_sha256": "{sample_source_sha256}",
+  "sample_count": 20,
+  "utxo_commit_p50_ms": 10.0,
+  "utxo_commit_p95_ms": {p95_ms},
+  "utxo_commit_p99_ms": 30.0,
+  "utxo_commit_max_ms": 40.0
+}}"#,
+                sample_source_path = samples_path.display(),
+            ),
+        )
+        .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
+        measurement
+    }
+
+    fn utxo_commit_measurement_json(p95_ms: f64, start_hash: &str, stop_hash: &str) -> String {
+        format!(
+            r#"{{
+  "schema": "g14-utxo-commit-measurement-v1",
+  "measurement_kind": "evidence",
+  "bitcoin_rs_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "ibd_start_height": 0,
+  "ibd_start_hash": "{start_hash}",
+  "ibd_stop_height": 800000,
+  "ibd_stop_hash": "{stop_hash}",
+  "block_size_threshold_bytes": 4194304,
+  "sample_source_path": "/tmp/g14-utxo-samples.json",
+  "sample_source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sample_count": 20,
+  "utxo_commit_p50_ms": 10.0,
+  "utxo_commit_p95_ms": {p95_ms},
+  "utxo_commit_p99_ms": 30.0,
+  "utxo_commit_max_ms": 40.0
+}}"#
+        )
     }
 
     fn electrum_rss_measurement_json(p95_ms: f64, rss_bytes: u64, tip_hash: &str) -> String {

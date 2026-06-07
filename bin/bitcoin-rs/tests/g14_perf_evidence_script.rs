@@ -10,6 +10,7 @@ use std::process::{Child, Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 type FakeElectrumServer = (thread::JoinHandle<std::io::Result<()>>, u16);
@@ -202,6 +203,7 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
         10,
         "000000000000000000000000000000000000000000000000000000000000000a",
     )?;
+    let utxo_measurement = produce_utxo_commit_measurement(temp.path(), 0, 10, 12.5)?;
     let manifest = temp.path().join("g14-produced-criterion.json");
 
     let producer_output = Command::new("bash")
@@ -235,8 +237,10 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
             "1111111111111111111111111111111111111111",
             "--benchmark-artifact",
             artifact.to_str().ok_or("non-UTF-8 artifact")?,
-            "--utxo-commit-p95-ms",
-            "12.5",
+            "--utxo-commit-measurement",
+            utxo_measurement
+                .to_str()
+                .ok_or("non-UTF-8 utxo measurement")?,
             "--electrum-rss-measurement",
             measurement.to_str().ok_or("non-UTF-8 measurement")?,
         ])
@@ -296,8 +300,90 @@ fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
         10,
         "000000000000000000000000000000000000000000000000000000000000000a",
     )?;
+    let utxo_measurement = produce_utxo_commit_measurement(temp.path(), 0, 10, 12.5)?;
     let manifest = temp.path().join("g14-produced-with-electrum-rss.json");
 
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-benchmark-id",
+            "bitcoin-rs/mainnet-ibd",
+            "--criterion-bitcoin-core-benchmark-id",
+            "bitcoin-core/mainnet-ibd",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-measurement",
+            utxo_measurement
+                .to_str()
+                .ok_or("non-UTF-8 utxo measurement")?,
+            "--electrum-rss-measurement",
+            measurement.to_str().ok_or("non-UTF-8 measurement")?,
+        ])
+        .output()?;
+    assert_success(&producer_output);
+
+    let manifest_json = fs::read_to_string(&manifest)?;
+    assert!(manifest_json.contains(r#""electrum_get_history_p95_ms": 20.0"#));
+    assert!(manifest_json.contains(r#""rss_bytes": 1024"#));
+    assert!(
+        manifest_json
+            .contains(r#""electrum_rss_measurement_schema": "g14-electrum-rss-measurement-v1""#)
+    );
+    assert!(manifest_json.contains(r#""electrum_rss_measurement_sample_size": 10000"#));
+    assert!(manifest_json.contains(r#""electrum_rss_measurement_non_empty_history_count": 10000"#));
+    assert!(manifest_json.contains(r#""electrum_rss_measurement_sha256":"#));
+
+    let collector_output = Command::new("bash")
+        .arg(script_path())
+        .arg(&manifest)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert_success(&collector_output);
+    Ok(())
+}
+
+#[test]
+fn producer_rejects_criterion_manifest_without_utxo_commit_measurement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let measurement = electrum_rss_measurement_json(
+        temp.path(),
+        "electrum-rss.json",
+        "g14-electrum-rss-measurement-v1",
+        "evidence",
+        10,
+        "000000000000000000000000000000000000000000000000000000000000000a",
+    )?;
+    let manifest = temp.path().join("g14-missing-utxo-measurement.json");
     let producer_output = Command::new("bash")
         .arg(producer_script_path())
         .args([
@@ -335,25 +421,113 @@ fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
             measurement.to_str().ok_or("non-UTF-8 measurement")?,
         ])
         .output()?;
-    assert_success(&producer_output);
+    assert!(!producer_output.status.success());
+    assert!(String::from_utf8_lossy(&producer_output.stderr).contains("utxo-commit-measurement"));
+    Ok(())
+}
 
-    let manifest_json = fs::read_to_string(&manifest)?;
-    assert!(manifest_json.contains(r#""electrum_get_history_p95_ms": 20.0"#));
-    assert!(manifest_json.contains(r#""rss_bytes": 1024"#));
-    assert!(
-        manifest_json
-            .contains(r#""electrum_rss_measurement_schema": "g14-electrum-rss-measurement-v1""#)
-    );
-    assert!(manifest_json.contains(r#""electrum_rss_measurement_sample_size": 10000"#));
-    assert!(manifest_json.contains(r#""electrum_rss_measurement_non_empty_history_count": 10000"#));
-    assert!(manifest_json.contains(r#""electrum_rss_measurement_sha256":"#));
-
-    let collector_output = Command::new("bash")
-        .arg(script_path())
-        .arg(&manifest)
-        .env("BITCOIN_CLI", bitcoin_cli)
+#[test]
+fn producer_rejects_smoke_utxo_commit_measurement() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = producer_criterion_artifact_json(temp.path(), "criterion.json", "1.25", "2.50")?;
+    let electrum_measurement = electrum_rss_measurement_json(
+        temp.path(),
+        "electrum-rss.json",
+        "g14-electrum-rss-measurement-v1",
+        "evidence",
+        10,
+        "000000000000000000000000000000000000000000000000000000000000000a",
+    )?;
+    let utxo_measurement = utxo_commit_measurement_json(
+        temp.path(),
+        "utxo-commit-smoke.json",
+        "g14-utxo-commit-measurement-v1",
+        "smoke",
+        0,
+        10,
+        12.5,
+    )?;
+    let manifest = temp.path().join("g14-produced-with-smoke-utxo.json");
+    let producer_output = Command::new("bash")
+        .arg(producer_script_path())
+        .args([
+            "--output",
+            manifest.to_str().ok_or("non-UTF-8 manifest path")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            "false",
+            "--bitcoin-core-command",
+            "false",
+            "--criterion-bitcoin-rs-benchmark-id",
+            "bitcoin-rs/mainnet-ibd",
+            "--criterion-bitcoin-core-benchmark-id",
+            "bitcoin-core/mainnet-ibd",
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--bitcoin-core-version",
+            "v27.0.0",
+            "--bitcoin-core-commit",
+            "1111111111111111111111111111111111111111",
+            "--benchmark-artifact",
+            artifact.to_str().ok_or("non-UTF-8 artifact")?,
+            "--utxo-commit-measurement",
+            utxo_measurement
+                .to_str()
+                .ok_or("non-UTF-8 utxo measurement")?,
+            "--electrum-rss-measurement",
+            electrum_measurement
+                .to_str()
+                .ok_or("non-UTF-8 measurement")?,
+        ])
         .output()?;
-    assert_success(&collector_output);
+    assert!(!producer_output.status.success());
+    assert!(String::from_utf8_lossy(&producer_output.stderr).contains("measurement_kind"));
+    Ok(())
+}
+
+#[test]
+fn utxo_commit_measurement_rejects_sub_threshold_block_size()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let samples = write_text(
+        temp.path(),
+        "utxo-samples-small.json",
+        r#"[{"height": 5, "block_hash": "0000000000000000000000000000000000000000000000000000000000000005", "block_size_bytes": 1, "utxo_commit_ms": 12.5}]"#,
+    )?;
+    let output = temp.path().join("utxo-measurement.json");
+    let status = Command::new("bash")
+        .arg(utxo_commit_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output")?,
+            "--samples",
+            samples.to_str().ok_or("non-UTF-8 samples")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+        ])
+        .status()?;
+    assert!(!status.success());
     Ok(())
 }
 
@@ -375,6 +549,7 @@ fn producer_rejects_smoke_electrum_rss_measurement() -> Result<(), Box<dyn std::
         10,
         "000000000000000000000000000000000000000000000000000000000000000a",
     )?;
+    let utxo_measurement = produce_utxo_commit_measurement(temp.path(), 0, 10, 12.5)?;
     let manifest = temp
         .path()
         .join("g14-produced-with-smoke-electrum-rss.json");
@@ -410,8 +585,10 @@ fn producer_rejects_smoke_electrum_rss_measurement() -> Result<(), Box<dyn std::
             "1111111111111111111111111111111111111111",
             "--benchmark-artifact",
             artifact.to_str().ok_or("non-UTF-8 artifact")?,
-            "--utxo-commit-p95-ms",
-            "12.5",
+            "--utxo-commit-measurement",
+            utxo_measurement
+                .to_str()
+                .ok_or("non-UTF-8 utxo measurement")?,
             "--electrum-rss-measurement",
             measurement.to_str().ok_or("non-UTF-8 measurement")?,
         ])
@@ -450,6 +627,7 @@ fn artifact_producer_emits_collectable_same_window_criterion_artifact()
         10,
         "000000000000000000000000000000000000000000000000000000000000000a",
     )?;
+    let utxo_measurement = produce_utxo_commit_measurement(temp.path(), 0, 10, 12.5)?;
     let artifact = temp.path().join("g14-criterion-artifact.json");
     let manifest = temp.path().join("g14-live-produced.json");
 
@@ -505,8 +683,10 @@ fn artifact_producer_emits_collectable_same_window_criterion_artifact()
             "1111111111111111111111111111111111111111",
             "--benchmark-artifact",
             artifact.to_str().ok_or("non-UTF-8 artifact path")?,
-            "--utxo-commit-p95-ms",
-            "12.5",
+            "--utxo-commit-measurement",
+            utxo_measurement
+                .to_str()
+                .ok_or("non-UTF-8 utxo measurement")?,
             "--electrum-rss-measurement",
             measurement.to_str().ok_or("non-UTF-8 measurement")?,
         ])
@@ -2729,6 +2909,83 @@ fn producer_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn
 }
 
 #[test]
+fn script_rejects_utxo_commit_measurement_missing_sample_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let utxo_measurement = produce_utxo_commit_measurement(temp.path(), 0, 10, 12.5)?;
+    tamper_utxo_commit_measurement_json(&utxo_measurement, |value| {
+        value["sample_source_path"] = Value::String("/nonexistent/g14-utxo-samples.json".into());
+    })?;
+    let evidence = evidence_json_with_utxo_measurement(temp.path(), 0, 10, &utxo_measurement)?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("sample_source_path is not a readable file")
+    );
+    Ok(())
+}
+
+#[test]
+fn script_rejects_utxo_commit_measurement_sample_sha_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let utxo_measurement = produce_utxo_commit_measurement(temp.path(), 0, 10, 12.5)?;
+    tamper_utxo_commit_measurement_json(&utxo_measurement, |value| {
+        value["sample_source_sha256"] = Value::String(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        );
+    })?;
+    let evidence = evidence_json_with_utxo_measurement(temp.path(), 0, 10, &utxo_measurement)?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("sample_source_sha256 must match sample_source_path")
+    );
+    Ok(())
+}
+
+#[test]
+fn script_rejects_utxo_commit_measurement_recomputed_p95_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let utxo_measurement = produce_utxo_commit_measurement(temp.path(), 0, 10, 12.5)?;
+    tamper_utxo_commit_measurement_json(&utxo_measurement, |value| {
+        value["utxo_commit_p95_ms"] = Value::from(99.9);
+    })?;
+    let evidence = evidence_json_with_utxo_measurement(temp.path(), 0, 10, &utxo_measurement)?;
+
+    let output = Command::new("bash")
+        .arg(script_path())
+        .arg(evidence)
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("utxo_commit_p95_ms must match sample_source_path")
+    );
+    Ok(())
+}
+
+#[test]
 fn script_rejects_evidence_from_different_bitcoin_rs_commit()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -3164,6 +3421,219 @@ fn script_path() -> PathBuf {
 
 fn producer_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-ibd-manifest.sh")
+}
+
+fn utxo_commit_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/measure-g14-utxo-commit-p95.sh")
+}
+
+fn utxo_commit_samples_json(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+    p95_ms: f64,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let stop_hash = format!("{stop_height:064x}");
+    let span = stop_height - start_height + 1;
+    let mut samples = Vec::new();
+    for index in 0..20 {
+        let height = start_height + (index % span);
+        let commit_ms = match index {
+            18 => p95_ms,
+            19 => p95_ms + 7.5,
+            _ => 10.0,
+        };
+        samples.push(format!(
+            r#"{{"height": {height}, "block_hash": "{stop_hash}", "block_size_bytes": 4194304, "utxo_commit_ms": {commit_ms}}}"#
+        ));
+    }
+    write_text(
+        dir,
+        "utxo-commit-samples.json",
+        &format!("[{}]", samples.join(",")),
+    )
+}
+
+fn produce_utxo_commit_measurement(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+    p95_ms: f64,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let samples = utxo_commit_samples_json(dir, start_height, stop_height, p95_ms)?;
+    let output = dir.join("utxo-commit-measurement.json");
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
+    let status = Command::new("bash")
+        .arg(utxo_commit_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 utxo measurement path")?,
+            "--samples",
+            samples.to_str().ok_or("non-UTF-8 utxo samples path")?,
+            "--ibd-start-height",
+            &start_height.to_string(),
+            "--ibd-start-hash",
+            &start_hash,
+            "--ibd-stop-height",
+            &stop_height.to_string(),
+            "--ibd-stop-hash",
+            &stop_hash,
+        ])
+        .status()?;
+    if !status.success() {
+        return Err("measure-g14-utxo-commit-p95.sh failed".into());
+    }
+    Ok(output)
+}
+
+fn utxo_commit_measurement_json(
+    dir: &Path,
+    name: &str,
+    schema: &str,
+    measurement_kind: &str,
+    start_height: u32,
+    stop_height: u32,
+    p95_ms: f64,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
+    write_text(
+        dir,
+        name,
+        &format!(
+            r#"{{
+  "schema": "{schema}",
+  "measurement_kind": "{measurement_kind}",
+  "bitcoin_rs_commit": "{}",
+  "ibd_start_height": {start_height},
+  "ibd_start_hash": "{start_hash}",
+  "ibd_stop_height": {stop_height},
+  "ibd_stop_hash": "{stop_hash}",
+  "block_size_threshold_bytes": 4194304,
+  "sample_source_path": "/tmp/g14-utxo-samples.json",
+  "sample_source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sample_count": 20,
+  "utxo_commit_p50_ms": 10.0,
+  "utxo_commit_p95_ms": {p95_ms},
+  "utxo_commit_p99_ms": 30.0,
+  "utxo_commit_max_ms": 40.0
+}}"#,
+            current_head()?
+        ),
+    )
+}
+
+fn tamper_utxo_commit_measurement_json(
+    measurement: &Path,
+    mutate: impl FnOnce(&mut Value),
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(measurement)?;
+    let mut value: Value = serde_json::from_str(&content)?;
+    mutate(&mut value);
+    fs::write(measurement, serde_json::to_string_pretty(&value)?)?;
+    Ok(())
+}
+
+fn evidence_json_with_utxo_measurement(
+    dir: &Path,
+    start_height: u32,
+    stop_height: u32,
+    utxo_measurement: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join("g14.json");
+    let stop_hash = format!("{stop_height:064x}");
+    let artifact = criterion_artifact_json(dir, "criterion-direct.json", "1.25", "2.50")?;
+    let measurement = electrum_rss_measurement_json(
+        dir,
+        "electrum-rss-direct.json",
+        "g14-electrum-rss-measurement-v1",
+        "evidence",
+        stop_height,
+        &stop_hash,
+    )?;
+    let utxo_fragment =
+        utxo_measurement_manifest_fragment(utxo_measurement, start_height, stop_height)?;
+    let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
+    let artifact_sha256 = sha256_file(&artifact)?;
+    let measurement_path = measurement.to_str().ok_or("non-UTF-8 measurement path")?;
+    let measurement_sha256 = sha256_file(&measurement)?;
+    fs::write(
+        &path,
+        format!(
+            r#"{{
+  "ibd_start_height": {start_height},
+  "ibd_stop_height": {stop_height},
+  "bench_tool": "criterion",
+  "elapsed_seconds_source": "criterion",
+  "criterion_artifact_schema": "g14-criterion-artifact-v1",
+  "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
+  "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
+  "bitcoin_rs_elapsed_seconds": 1.25,
+  "bitcoin_core_elapsed_seconds": 2.50,
+  "bitcoin_core_version": "v27.0.0",
+  "bitcoin_rs_commit": "{}",
+  "storage_backend": "fjall",
+  "indexes": "all",
+  "bitcoin_core_commit": "1111111111111111111111111111111111111111",
+  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_core_command": "bitcoind -chain=main",
+  "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
+  "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
+  "benchmark_artifact_path": "{artifact_path}",
+  "benchmark_artifact_sha256": "{artifact_sha256}",{utxo_fragment}
+  "electrum_get_history_p95_ms": 20.0,
+  "rss_bytes": 1024,
+  "electrum_rss_measurement_path": "{measurement_path}",
+  "electrum_rss_measurement_sha256": "{measurement_sha256}",
+  "electrum_rss_measurement_schema": "g14-electrum-rss-measurement-v1",
+  "electrum_rss_measurement_tip_height": {stop_height},
+  "electrum_rss_measurement_tip_hash": "{stop_hash}",
+  "electrum_rss_measurement_sample_size": 10000,
+  "electrum_rss_measurement_non_empty_history_count": 10000,
+  "electrum_scripthash_corpus": "/tmp/g14-scripthashes.txt",
+  "electrum_scripthash_corpus_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+}}"#,
+            current_head()?
+        ),
+    )?;
+    Ok(path)
+}
+
+fn utxo_measurement_manifest_fragment(
+    measurement: &Path,
+    start_height: u32,
+    stop_height: u32,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let measurement_path = measurement
+        .to_str()
+        .ok_or("non-UTF-8 utxo measurement path")?;
+    let measurement_sha256 = sha256_file(measurement)?;
+    let measurement_json: Value = serde_json::from_str(&fs::read_to_string(measurement)?)?;
+    let utxo_commit_p95_ms = measurement_json
+        .get("utxo_commit_p95_ms")
+        .and_then(Value::as_f64)
+        .ok_or("utxo measurement missing utxo_commit_p95_ms")?;
+    let sample_count = measurement_json
+        .get("sample_count")
+        .and_then(Value::as_u64)
+        .ok_or("utxo measurement missing sample_count")?;
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
+    Ok(format!(
+        r#"
+  "utxo_commit_p95_ms": {utxo_commit_p95_ms},
+  "utxo_commit_measurement_path": "{measurement_path}",
+  "utxo_commit_measurement_sha256": "{measurement_sha256}",
+  "utxo_commit_measurement_schema": "g14-utxo-commit-measurement-v1",
+  "utxo_commit_measurement_sample_count": {sample_count},
+  "utxo_commit_measurement_start_height": {start_height},
+  "utxo_commit_measurement_start_hash": "{start_hash}",
+  "utxo_commit_measurement_stop_height": {stop_height},
+  "utxo_commit_measurement_stop_hash": "{stop_hash}",
+  "utxo_commit_block_size_threshold_bytes": 4194304,"#
+    ))
 }
 
 fn electrum_rss_script_path() -> PathBuf {
@@ -4139,6 +4609,8 @@ fn evidence_json_for_artifact(
     let path = dir.join(name);
     let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
     let artifact_sha256 = sha256_file(artifact)?;
+    let utxo_measurement = produce_utxo_commit_measurement(dir, 0, 10, 12.5)?;
+    let utxo_fragment = utxo_measurement_manifest_fragment(&utxo_measurement, 0, 10)?;
     fs::write(
         &path,
         format!(
@@ -4163,12 +4635,12 @@ fn evidence_json_for_artifact(
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
   "benchmark_artifact_path": "{artifact_path}",
-  "benchmark_artifact_sha256": "{artifact_sha256}",
-  "utxo_commit_p95_ms": 12.5,
+  "benchmark_artifact_sha256": "{artifact_sha256}",{utxo_fragment}
   "electrum_get_history_p95_ms": 20.0,
   "rss_bytes": 1024
 }}"#,
             current_head()?,
+            utxo_fragment = utxo_fragment,
         ),
     )?;
     Ok(path)
@@ -4200,6 +4672,9 @@ fn evidence_json_with_binding_fields(
         stop_height,
         &stop_hash,
     )?;
+    let utxo_measurement = produce_utxo_commit_measurement(dir, start_height, stop_height, 12.5)?;
+    let utxo_fragment =
+        utxo_measurement_manifest_fragment(&utxo_measurement, start_height, stop_height)?;
     let artifact_path = artifact.to_str().ok_or("non-UTF-8 artifact path")?;
     let artifact_sha256 = sha256_file(&artifact)?;
     let measurement_path = measurement.to_str().ok_or("non-UTF-8 measurement path")?;
@@ -4228,8 +4703,7 @@ fn evidence_json_with_binding_fields(
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
   "benchmark_artifact_path": "{artifact_path}",
-  "benchmark_artifact_sha256": "{artifact_sha256}",
-  "utxo_commit_p95_ms": 12.5,
+  "benchmark_artifact_sha256": "{artifact_sha256}",{utxo_fragment}
   "electrum_get_history_p95_ms": 20.0,
   "rss_bytes": 1024,
   "electrum_rss_measurement_path": "{measurement_path}",

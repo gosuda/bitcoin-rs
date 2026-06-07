@@ -25,10 +25,10 @@ usage() {
     '  criterion_bitcoin_core_raw_output_path, criterion_bitcoin_core_raw_output_sha256,' \
     '  Criterion artifact ibd_start_height/hash and ibd_stop_height/hash matching the live Core window,' \
     '  Criterion artifact bitcoin_rs/core command/config sha256 fields matching the evidence JSON,' \
-    '  utxo_commit_p95_ms, electrum_get_history_p95_ms, rss_bytes' \
+    '  utxo_commit_p95_ms with utxo_commit_measurement_path/sha256/schema/sample_count/start+stop height/hash bindings,' \n    '  electrum_get_history_p95_ms, rss_bytes' \
     '  required Electrum/RSS binding: electrum_rss_measurement_path, electrum_rss_measurement_sha256,' \
     '  electrum_rss_measurement_schema=g14-electrum-rss-measurement-v1, electrum_rss_measurement_sample_size=10000,' \
-    '  electrum_rss_measurement_tip_height/hash matching the live stop height/hash' \
+    '  utxo_commit_measurement_start/stop height/hash matching the live IBD window,' \n    '  electrum_rss_measurement_tip_height/hash matching the live stop height/hash' \
     '' \
     'Set BITCOIN_CLI=/path/to/bitcoin-cli to override the binary.' \
     '' \
@@ -130,6 +130,8 @@ IBD_COMPLETION_PROOF_PREFIX = "G14_IBD_COMPLETION_PROOF "
 ELECTRUM_RSS_MEASUREMENT_SCHEMA = "g14-electrum-rss-measurement-v1"
 ELECTRUM_HISTORY_METHOD = "blockchain.scripthash.get_history"
 ELECTRUM_SAMPLE_SIZE = 10_000
+UTXO_COMMIT_MEASUREMENT_SCHEMA = "g14-utxo-commit-measurement-v1"
+UTXO_BLOCK_SIZE_THRESHOLD_BYTES = 4 * 1024 * 1024
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
 CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
@@ -639,6 +641,214 @@ def validate_electrum_rss_measurement(
     ):
         die("rss_bytes must match electrum_rss_measurement_path")
 
+def percentile_ms(samples_ms: list[float], numerator: int, denominator: int) -> float:
+    if not samples_ms:
+        die("cannot calculate percentile for an empty sample")
+    ordered = sorted(samples_ms)
+    index = math.ceil(len(ordered) * numerator / denominator) - 1
+    index = max(0, min(index, len(ordered) - 1))
+    return ordered[index]
+
+
+def positive_sample_float(value, name: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        die(f"{name} must be a finite positive number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0.0:
+        die(f"{name} must be finite and positive")
+    return number
+
+
+def read_utxo_samples(path: Path) -> list:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as error:
+        die(f"sample source must be UTF-8 JSON: {error}")
+    except json.JSONDecodeError as error:
+        die(f"sample source must be JSON: {error}")
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        samples = payload.get("samples")
+        if isinstance(samples, list):
+            return samples
+    die("sample source must be a JSON array or an object with a samples array")
+
+
+def utxo_sample_commit_ms(sample: dict, index: int) -> float:
+    if "utxo_commit_ms" in sample and "utxo_commit_us" in sample:
+        die(f"sample[{index}] must not include both utxo_commit_ms and utxo_commit_us")
+    if "utxo_commit_ms" in sample:
+        return positive_sample_float(sample["utxo_commit_ms"], f"sample[{index}].utxo_commit_ms")
+    if "utxo_commit_us" in sample:
+        return positive_sample_float(sample["utxo_commit_us"], f"sample[{index}].utxo_commit_us") / 1000.0
+    die(f"sample[{index}] must include utxo_commit_ms or utxo_commit_us")
+
+
+def parse_utxo_sample(
+    sample,
+    index: int,
+    start_height: int,
+    stop_height: int,
+    threshold_bytes: int,
+) -> float | None:
+    if not isinstance(sample, dict):
+        die(f"sample[{index}] must be an object")
+    height = sample.get("height")
+    if not isinstance(height, int) or isinstance(height, bool):
+        die(f"sample[{index}].height must be an integer")
+    if height < start_height or height > stop_height:
+        die(f"sample[{index}].height must be within the IBD window")
+    block_hash = sample.get("block_hash")
+    if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+        die(f"sample[{index}].block_hash must be 64 lowercase hex characters")
+    block_size = sample.get("block_size_bytes")
+    if not isinstance(block_size, int) or isinstance(block_size, bool):
+        die(f"sample[{index}].block_size_bytes must be an integer")
+    if block_size < threshold_bytes:
+        return None
+    return utxo_sample_commit_ms(sample, index)
+
+
+def qualifying_utxo_commit_samples_ms(
+    samples_path: Path,
+    start_height: int,
+    stop_height: int,
+    threshold_bytes: int,
+) -> list[float]:
+    qualifying_ms: list[float] = []
+    for index, sample in enumerate(read_utxo_samples(samples_path)):
+        parsed = parse_utxo_sample(sample, index, start_height, stop_height, threshold_bytes)
+        if parsed is not None:
+            qualifying_ms.append(parsed)
+    return qualifying_ms
+
+
+def verify_utxo_commit_sample_custody(
+    data: dict,
+    source: str,
+    start_height: int,
+    stop_height: int,
+    threshold_bytes: int,
+) -> None:
+    sample_source_path_value = data.get("sample_source_path")
+    if not isinstance(sample_source_path_value, str) or not sample_source_path_value.strip():
+        die(f"{source} sample_source_path must be a non-empty string")
+    sample_source_path = Path(sample_source_path_value)
+    if not sample_source_path.is_file():
+        die(f"{source} sample_source_path is not a readable file: {sample_source_path}")
+    expected_sample_sha = require_hex_field(data, "sample_source_sha256", 64, source)
+    if sha256_file(sample_source_path) != expected_sample_sha:
+        die(f"{source} sample_source_sha256 must match sample_source_path")
+    expected_sample_count = data.get("sample_count")
+    if not isinstance(expected_sample_count, int) or isinstance(expected_sample_count, bool):
+        die(f"{source} sample_count must be an integer")
+    if expected_sample_count <= 0:
+        die(f"{source} sample_count must be positive")
+    expected_p95_ms = require_number_value(data, "utxo_commit_p95_ms", source)
+    qualifying_ms = qualifying_utxo_commit_samples_ms(
+        sample_source_path,
+        start_height,
+        stop_height,
+        threshold_bytes,
+    )
+    if len(qualifying_ms) != expected_sample_count:
+        die(f"{source} sample_count must match qualifying samples from sample_source_path")
+    recomputed_p95_ms = percentile_ms(qualifying_ms, 95, 100)
+    if not math.isclose(recomputed_p95_ms, expected_p95_ms, rel_tol=0.0, abs_tol=1e-12):
+        die(f"{source} utxo_commit_p95_ms must match sample_source_path")
+
+
+
+
+def validate_utxo_commit_measurement(
+    evidence: dict,
+    start_height: int,
+    start_hash: str,
+    stop_height: int,
+    stop_hash: str,
+    head: str,
+) -> None:
+    if "utxo_commit_measurement_path" not in evidence:
+        die("utxo_commit_measurement_path is required for G14 evidence")
+    path = Path(require_text(evidence, "utxo_commit_measurement_path"))
+    expected_sha = require_hex(
+        require_text(evidence, "utxo_commit_measurement_sha256"),
+        64,
+        "utxo_commit_measurement_sha256",
+    )
+    if not path.is_file():
+        die(f"utxo_commit_measurement_path is not a readable file: {path}")
+    if sha256_file(path) != expected_sha:
+        die("utxo_commit_measurement_sha256 must match utxo_commit_measurement_path")
+    data = read_json_file(path, "utxo_commit_measurement_path")
+    if not isinstance(data, dict):
+        die("utxo_commit_measurement_path must point to a JSON object")
+    require_literal_value(evidence, "utxo_commit_measurement_schema", UTXO_COMMIT_MEASUREMENT_SCHEMA)
+    require_literal_field(data, "schema", UTXO_COMMIT_MEASUREMENT_SCHEMA, "utxo_commit_measurement_path")
+    require_literal_field(data, "measurement_kind", "evidence", "utxo_commit_measurement_path")
+    require_literal_field(data, "bitcoin_rs_commit", head, "utxo_commit_measurement_path")
+    require_exact_int(evidence, "utxo_commit_measurement_start_height", start_height, "evidence JSON")
+    require_exact_int(data, "ibd_start_height", start_height, "utxo_commit_measurement_path")
+    require_exact_int(evidence, "utxo_commit_measurement_stop_height", stop_height, "evidence JSON")
+    require_exact_int(data, "ibd_stop_height", stop_height, "utxo_commit_measurement_path")
+    manifest_start_hash = require_hex_field(
+        evidence,
+        "utxo_commit_measurement_start_hash",
+        64,
+        "evidence JSON",
+    )
+    artifact_start_hash = require_hex_field(
+        data,
+        "ibd_start_hash",
+        64,
+        "utxo_commit_measurement_path",
+    )
+    manifest_stop_hash = require_hex_field(
+        evidence,
+        "utxo_commit_measurement_stop_hash",
+        64,
+        "evidence JSON",
+    )
+    artifact_stop_hash = require_hex_field(
+        data,
+        "ibd_stop_hash",
+        64,
+        "utxo_commit_measurement_path",
+    )
+    if manifest_start_hash != start_hash or artifact_start_hash != start_hash:
+        die("utxo_commit_measurement start hash must match live bitcoin-cli ibd_start_hash")
+    if manifest_stop_hash != stop_hash or artifact_stop_hash != stop_hash:
+        die("utxo_commit_measurement stop hash must match live bitcoin-cli ibd_stop_hash")
+    require_exact_int(
+        evidence,
+        "utxo_commit_block_size_threshold_bytes",
+        UTXO_BLOCK_SIZE_THRESHOLD_BYTES,
+        "evidence JSON",
+    )
+    require_exact_int(
+        data,
+        "block_size_threshold_bytes",
+        UTXO_BLOCK_SIZE_THRESHOLD_BYTES,
+        "utxo_commit_measurement_path",
+    )
+    sample_count = require_int(evidence, "utxo_commit_measurement_sample_count", positive=True)
+    require_exact_int(data, "sample_count", sample_count, "utxo_commit_measurement_path")
+    if not math.isclose(
+        float(require_number(evidence, "utxo_commit_p95_ms")),
+        require_number_value(data, "utxo_commit_p95_ms", "utxo_commit_measurement_path"),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        die("utxo_commit_p95_ms must match utxo_commit_measurement_path")
+    verify_utxo_commit_sample_custody(
+        data,
+        "utxo_commit_measurement_path",
+        start_height,
+        stop_height,
+        UTXO_BLOCK_SIZE_THRESHOLD_BYTES,
+    )
+
 
 def require_artifact_elapsed(
     elapsed_by_id: dict[str, float],
@@ -795,6 +1005,7 @@ if float(bitcoin_rs_elapsed_seconds) >= float(bitcoin_core_elapsed_seconds):
         "bitcoin-rs initial sync evidence must be faster than Bitcoin Core "
         f"for the same {block_count}-block IBD window"
     )
+validate_utxo_commit_measurement(data, start_height, start_hash, stop_height, stop_hash, bitcoin_rs_commit)
 validate_electrum_rss_measurement(data, stop_height, stop_hash)
 
 env = {
@@ -830,6 +1041,46 @@ env = {
     "G14_BITCOIN_CORE_CONFIG_SHA256": core_config_sha256,
     "G14_BENCHMARK_ARTIFACT_SHA256": benchmark_artifact_sha256,
     "G14_UTXO_COMMIT_P95_MS": require_number(data, "utxo_commit_p95_ms"),
+    "G14_UTXO_COMMIT_MEASUREMENT_PATH": require_text(data, "utxo_commit_measurement_path"),
+    "G14_UTXO_COMMIT_MEASUREMENT_SHA256": require_hex(
+        require_text(data, "utxo_commit_measurement_sha256"),
+        64,
+        "utxo_commit_measurement_sha256",
+    ),
+    "G14_UTXO_COMMIT_MEASUREMENT_SCHEMA": require_literal_value(
+        data,
+        "utxo_commit_measurement_schema",
+        UTXO_COMMIT_MEASUREMENT_SCHEMA,
+    ),
+    "G14_UTXO_COMMIT_MEASUREMENT_SAMPLE_COUNT": str(
+        require_int(data, "utxo_commit_measurement_sample_count", positive=True)
+    ),
+    "G14_UTXO_COMMIT_MEASUREMENT_START_HEIGHT": str(
+        require_exact_int(data, "utxo_commit_measurement_start_height", start_height, "evidence JSON")
+    ),
+    "G14_UTXO_COMMIT_MEASUREMENT_START_HASH": require_hex_field(
+        data,
+        "utxo_commit_measurement_start_hash",
+        64,
+        "evidence JSON",
+    ),
+    "G14_UTXO_COMMIT_MEASUREMENT_STOP_HEIGHT": str(
+        require_exact_int(data, "utxo_commit_measurement_stop_height", stop_height, "evidence JSON")
+    ),
+    "G14_UTXO_COMMIT_MEASUREMENT_STOP_HASH": require_hex_field(
+        data,
+        "utxo_commit_measurement_stop_hash",
+        64,
+        "evidence JSON",
+    ),
+    "G14_UTXO_COMMIT_BLOCK_SIZE_THRESHOLD_BYTES": str(
+        require_exact_int(
+            data,
+            "utxo_commit_block_size_threshold_bytes",
+            UTXO_BLOCK_SIZE_THRESHOLD_BYTES,
+            "evidence JSON",
+        )
+    ),
     "G14_ELECTRUM_GET_HISTORY_P95_MS": require_number(data, "electrum_get_history_p95_ms"),
     "G14_RSS_BYTES": str(require_int(data, "rss_bytes", positive=True)),
     "G14_ELECTRUM_RSS_MEASUREMENT_PATH": require_text(data, "electrum_rss_measurement_path"),
