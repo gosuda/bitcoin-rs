@@ -17,7 +17,7 @@ use bitcoin_rs_utxo::{
     set::{BorrowedBlockChanges, BorrowedUtxoAdd},
 };
 use hashbrown::{HashMap, HashSet};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::state::ApplyError;
 use bitcoin_rs_storage::{KvStore, StorageError};
@@ -125,6 +125,7 @@ pub struct ApplyHandles {
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
     pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
+    pub(crate) filter_header_cache: Arc<Mutex<Option<(Hash256, Hash256)>>>,
     pub(crate) cache_block_bodies_in_memory: bool,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
@@ -161,6 +162,7 @@ impl ApplyHandles {
             blocks,
             transactions,
             zmq_publisher,
+            filter_header_cache: Arc::new(Mutex::new(None)),
             cache_block_bodies_in_memory: true,
             block_body_store: None,
             g2_muhash_sampler: None,
@@ -440,16 +442,13 @@ pub fn apply_block(
         .record(coin_stats_dur.as_secs_f64());
     let filter_started = quanta::Instant::now();
     if let Some(filter_bytes) = filter_bytes {
-        let prev_filter_header = handles
-            .applied_tip
-            .load_full()
-            .and_then(|tip| handles.filter_index.filter_header(tip.hash).ok().flatten())
-            .unwrap_or_default();
+        let prev_filter_header = previous_filter_header(handles, prior.as_deref());
         match handles
             .filter_index
             .put_filter(block_hash, prev_filter_header, &filter_bytes)
         {
             Ok(filter_header) => {
+                *handles.filter_header_cache.lock() = Some((block_hash, filter_header));
                 tracing::debug!(
                     height,
                     %filter_header,
@@ -545,6 +544,23 @@ fn applied_predecessor(
         0_u32
     };
     Ok((prior, height))
+}
+
+fn previous_filter_header(handles: &ApplyHandles, prior: Option<&TipSnapshot>) -> Hash256 {
+    let Some(tip) = prior else {
+        return Hash256::default();
+    };
+    if let Some((cached_hash, cached_header)) = handles.filter_header_cache.lock().as_ref()
+        && *cached_hash == tip.hash
+    {
+        return *cached_header;
+    }
+    handles
+        .filter_index
+        .filter_header(tip.hash)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 fn applied_header_tip(
@@ -2692,6 +2708,55 @@ mod consensus_rule_tests {
 
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_block_carries_filter_header_to_next_contiguous_block()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let filter_index = Arc::new(RecordingFilterIndex::default());
+        let handles = apply_handles_with_filter_index(
+            Network::Regtest,
+            Arc::new(UtxoSet::new()),
+            &filter_index,
+        );
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let block_1 = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+        let block_1_hash = Hash256::from_le_bytes(block_1.block_hash().as_byte_array());
+        apply_block(&handles, &block_1)?;
+
+        let block_2 = mined_block_with_prev_hash_and_transactions(
+            block_1.block_hash(),
+            vec![coinbase_transaction(2)],
+        )?;
+        apply_block(&handles, &block_2)?;
+
+        let first_filter_header = *filter_index
+            .headers
+            .lock()
+            .get(&block_1_hash)
+            .ok_or_else(|| std::io::Error::other("first filter header missing"))?;
+        let prev_headers = filter_index.prev_headers.lock();
+        assert_eq!(prev_headers.len(), 2);
+        assert_eq!(prev_headers[0], Hash256::default());
+        assert_eq!(prev_headers[1], first_filter_header);
+        assert_eq!(
+            *filter_index.header_lookup_count.lock(),
+            1,
+            "second contiguous block should reuse the just-stored filter header"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn apply_block_skips_confirmed_transaction_cache() -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
@@ -3526,6 +3591,9 @@ mod consensus_rule_tests {
         let filter_index: Arc<Box<dyn FilterIndexLike>> =
             Arc::new(Box::new(RecordingFilterIndex {
                 rows: Arc::clone(&filter_index.rows),
+                headers: Arc::clone(&filter_index.headers),
+                prev_headers: Arc::clone(&filter_index.prev_headers),
+                header_lookup_count: Arc::clone(&filter_index.header_lookup_count),
             }));
         ApplyHandles::new(
             network,
@@ -3692,21 +3760,29 @@ mod consensus_rule_tests {
     #[derive(Default)]
     struct RecordingFilterIndex {
         rows: Arc<Mutex<HashMap<Hash256, Vec<u8>>>>,
+        headers: Arc<Mutex<HashMap<Hash256, Hash256>>>,
+        prev_headers: Arc<Mutex<Vec<Hash256>>>,
+        header_lookup_count: Arc<Mutex<usize>>,
     }
 
     impl FilterIndexLike for RecordingFilterIndex {
         fn put_filter(
             &self,
             block_hash: Hash256,
-            _prev_header: Hash256,
+            prev_header: Hash256,
             filter_bytes: &[u8],
         ) -> Result<Hash256, FilterIndexError> {
             self.rows.lock().insert(block_hash, filter_bytes.to_vec());
-            Ok(Hash256::default())
+            self.prev_headers.lock().push(prev_header);
+            let filter_header =
+                bitcoin_rs_filters::cfheaders::next_header(prev_header, filter_bytes);
+            self.headers.lock().insert(block_hash, filter_header);
+            Ok(filter_header)
         }
 
-        fn filter_header(&self, _block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
-            Ok(None)
+        fn filter_header(&self, block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
+            *self.header_lookup_count.lock() += 1;
+            Ok(self.headers.lock().get(&block_hash).copied())
         }
 
         fn filter(&self, block_hash: Hash256) -> Result<Option<Vec<u8>>, FilterIndexError> {
