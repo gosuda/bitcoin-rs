@@ -1,6 +1,7 @@
 use std::{
     io,
     mem::{self, MaybeUninit},
+    time::Instant,
 };
 
 use bitcoin::ScriptBuf;
@@ -961,10 +962,17 @@ impl UtxoSet {
                 shard_events
             })
             .collect();
-        if !listener.on_committed_event_batches(&shard_events) {
+        let listener_started = Instant::now();
+        let handled_batches = listener.on_committed_event_batches(&shard_events);
+        metrics::histogram!("node.utxo.listener.event_batches_seconds")
+            .record(listener_started.elapsed().as_secs_f64());
+        if !handled_batches {
+            let replay_started = Instant::now();
             for shard_events in &shard_events {
                 shard_events.replay(listener);
             }
+            metrics::histogram!("node.utxo.listener.replay_seconds")
+                .record(replay_started.elapsed().as_secs_f64());
         }
 
         let mut errors = errors.into_inner();
@@ -999,10 +1007,17 @@ impl UtxoSet {
             }
             shard_events.push(events);
         }
-        if !listener.on_committed_event_batches(&shard_events) {
+        let listener_started = Instant::now();
+        let handled_batches = listener.on_committed_event_batches(&shard_events);
+        metrics::histogram!("node.utxo.listener.event_batches_seconds")
+            .record(listener_started.elapsed().as_secs_f64());
+        if !handled_batches {
+            let replay_started = Instant::now();
             for shard_events in &shard_events {
                 shard_events.replay(listener);
             }
+            metrics::histogram!("node.utxo.listener.replay_seconds")
+                .record(replay_started.elapsed().as_secs_f64());
         }
 
         if let Some(error) = error {

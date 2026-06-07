@@ -628,6 +628,7 @@ dependencies = [
  "crossbeam-utils",
  "hashbrown 0.17.1",
  "lz4_flex",
+ "metrics",
  "nohash-hasher",
  "parking_lot",
  "proptest",

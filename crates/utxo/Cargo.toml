@@ -34,6 +34,7 @@ zerocopy.workspace = true
 tinyvec.workspace = true
 smallvec.workspace = true
 lz4_flex.workspace = true
+metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true

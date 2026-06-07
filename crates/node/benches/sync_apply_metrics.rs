@@ -72,6 +72,11 @@ const APPLY_STAGE_METRICS: &[(&str, &str)] = &[
     ),
     ("utxo_commit", "node.apply_block.utxo_commit_seconds"),
     (
+        "utxo_listener_event_batches",
+        "node.utxo.listener.event_batches_seconds",
+    ),
+    ("utxo_listener_replay", "node.utxo.listener.replay_seconds"),
+    (
         "block_tree_insert",
         "node.apply_block.block_tree_insert_seconds",
     ),
@@ -275,7 +280,7 @@ fn print_apply_metrics(
     println!(
         "sync_apply_metrics backend={backend} workload={name} txindex={txindex} blockfilterindex={blockfilterindex} blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes} selected_apply_stage_metrics={} {}",
         APPLY_STAGE_METRICS.len(),
-        apply_stage_summary(&before, &after),
+        apply_stage_sum_summary(&before, &after),
     );
 }
 
@@ -461,28 +466,6 @@ fn open_regtest_state(
     (dir, state)
 }
 
-fn apply_stage_summary(
-    before: &HashMap<String, MetricValue>,
-    after: &HashMap<String, MetricValue>,
-) -> String {
-    let mut summary = String::new();
-    for (label, metric) in APPLY_STAGE_METRICS {
-        if !summary.is_empty() {
-            summary.push(' ');
-        }
-        summary.push_str(label);
-        if let Some((count, avg_ms)) = histogram_delta_average_ms(before, after, metric) {
-            write!(&mut summary, "_samples={count} {label}_avg_ms={avg_ms:.4}")
-                .unwrap_or_else(|error| panic!("format apply stage summary failed: {error}"));
-        } else {
-            summary.push_str("_samples=0 ");
-            summary.push_str(label);
-            summary.push_str("_avg_ms=missing");
-        }
-    }
-    summary
-}
-
 fn apply_stage_sum_summary(
     before: &HashMap<String, MetricValue>,
     after: &HashMap<String, MetricValue>,
@@ -509,14 +492,6 @@ fn apply_stage_sum_summary(
         }
     }
     summary
-}
-
-fn histogram_delta_average_ms(
-    before: &HashMap<String, MetricValue>,
-    after: &HashMap<String, MetricValue>,
-    metric: &str,
-) -> Option<(u64, f64)> {
-    histogram_delta_stats_ms(before, after, metric).map(|delta| (delta.count, delta.avg_ms))
 }
 
 #[derive(Clone, Copy)]
