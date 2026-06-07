@@ -83,8 +83,13 @@ pub struct Shard {
 // SAFETY: `Shard` never exposes the self-cell owner or dependent by reference
 // outside methods that hold the `RwLock`. Read methods only inspect immutable
 // table/script data; all arena allocation and table mutation happen under the
-// write lock, so sharing `&Shard` across rayon workers does not create
-// concurrent access to `Bump`'s interior `Cell`s or to `bumpalo::Vec`.
+// write lock, so sending or sharing `Shard` across rayon workers does not
+// create concurrent access to `Bump`'s interior `Cell`s or to `bumpalo::Vec`.
+#[allow(clippy::non_send_fields_in_send_ty)]
+unsafe impl Send for Shard {}
+// SAFETY: same rationale as `Send` — all mutation is behind `RwLock` write
+// guards; read-only table/script access through `RwLock` read guards is
+// safe to share across threads.
 unsafe impl Sync for Shard {}
 
 impl Shard {

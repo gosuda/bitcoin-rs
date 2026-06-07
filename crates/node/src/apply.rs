@@ -18,6 +18,7 @@ use bitcoin_rs_utxo::{
 };
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, RwLock};
+use rayon::prelude::*;
 
 use crate::state::ApplyError;
 use bitcoin_rs_storage::{KvStore, StorageError};
@@ -347,7 +348,20 @@ pub fn apply_block(
     let utxo_changes_dur = utxo_changes_started.elapsed();
     metrics::histogram!("node.apply_block.utxo_changes_seconds")
         .record(utxo_changes_dur.as_secs_f64());
-    let block_bytes = bytes::Bytes::from(bitcoin::consensus::encode::serialize(block));
+    // Serialize the block lazily: only when a consumer actually needs the
+    // full bytes. During IBD with pruning+txindex disabled this avoids a
+    // full-block serialize on every apply.
+    let block_bytes: bytes::Bytes = {
+        let needs_body = handles.block_body_store.is_some()
+            || handles.tx_index.is_some()
+            || handles.cache_block_bodies_in_memory;
+        if needs_body {
+            bytes::Bytes::from(bitcoin::consensus::encode::serialize(block))
+        } else {
+            // Header-only: 80 bytes is enough for the block record.
+            bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block.header))
+        }
+    };
 
     let block_body_persist_started = quanta::Instant::now();
     let block_body_persist_result = if let Some(store) = &handles.block_body_store {
@@ -802,10 +816,13 @@ fn verify_block_transactions(
     }
     if !tx_plan.needs_local_utxo_overlay {
         let view = crate::UtxoSetView::new(Arc::clone(&handles.utxo));
-        for tx in &block.txdata {
+        // Parallel verification: when no same-block overlay is needed, all
+        // non-coinbase transactions read from the shared UTXO set independently.
+        // Rayon parallelizes across transactions for significant IBD speedup.
+        block.txdata.par_iter().try_for_each(|tx| {
             if tx.is_coinbase() {
                 bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
-                continue;
+                return Ok(());
             }
             bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
                 tx,
@@ -813,8 +830,8 @@ fn verify_block_transactions(
                 height,
                 locktime_cutoff,
                 flags,
-            )?;
-        }
+            )
+        })?;
         return Ok(());
     }
     // Consensus connects transactions in block order. A later transaction may

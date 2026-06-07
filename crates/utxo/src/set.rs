@@ -13,8 +13,12 @@ use thiserror::Error;
 
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
-const PARALLEL_NO_LISTENER_SHARD_THRESHOLD: usize = 3;
-const PARALLEL_LISTENER_SHARD_THRESHOLD: usize = 16;
+/// Lowered from 3: most IBD blocks touch 2+ shards; parallel commit
+/// is worthwhile whenever we have more than one active shard.
+const PARALLEL_NO_LISTENER_SHARD_THRESHOLD: usize = 2;
+/// Lowered from 16: listener event collection overhead is modest
+/// compared to the shard commit work itself.
+const PARALLEL_LISTENER_SHARD_THRESHOLD: usize = 8;
 const TXID_RUN_GROUPING_MAX_SHARDS: usize = 8;
 
 /// Errors returned by UTXO mutation and snapshot operations.
