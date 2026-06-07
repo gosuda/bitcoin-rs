@@ -328,9 +328,16 @@ pub fn apply_block(
         same_block_spent,
         same_block_spent_input_count,
     )?;
-    let filter_bytes = wants_filters
-        .then(|| compute_basic_filter(block, handles, block_hash, height, &scratch))
-        .flatten();
+    let filter_bytes = if wants_filters {
+        let filter_build_started = quanta::Instant::now();
+        let filter_bytes = compute_basic_filter(block, handles, block_hash, height, &scratch);
+        let filter_build_dur = filter_build_started.elapsed();
+        metrics::histogram!("node.apply_block.filter_build_seconds")
+            .record(filter_build_dur.as_secs_f64());
+        filter_bytes
+    } else {
+        None
+    };
 
     let block_bytes = bytes::Bytes::from(bitcoin::consensus::encode::serialize(block));
 

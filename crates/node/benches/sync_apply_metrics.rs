@@ -81,6 +81,7 @@ const APPLY_STAGE_METRICS: &[(&str, &str)] = &[
         "coin_stats_finish",
         "node.apply_block.coin_stats_finish_seconds",
     ),
+    ("filter_build", "node.apply_block.filter_build_seconds"),
     ("filter_index", "node.apply_block.filter_index_seconds"),
     ("total", "node.apply_block.total_seconds"),
 ];
@@ -131,6 +132,13 @@ fn main() {
         "fanout_128_filter",
         &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
         false,
+        true,
+        &metrics,
+    );
+    print_apply_metrics(
+        "fanout_128_all_indexes",
+        &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
+        true,
         true,
         &metrics,
     );
