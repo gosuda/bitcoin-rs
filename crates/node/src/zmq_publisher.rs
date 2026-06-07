@@ -68,6 +68,15 @@ impl ZmqTopic {
 /// into the apply pipeline. Use interior mutability + atomics if state is
 /// needed; the trait is `&self`-only.
 pub trait ZmqPublisher: Send + Sync + core::fmt::Debug {
+    /// Returns whether any ZMQ notification emitted by the apply path is observable.
+    ///
+    /// The default is conservative for external implementations: keep invoking
+    /// publisher methods unless an implementation proves the whole publisher is
+    /// a no-op.
+    fn wants_notifications(&self) -> bool {
+        true
+    }
+
     /// Returns whether the publisher can consume per-transaction raw bytes.
     ///
     /// The default is conservative for external implementations: keep producing
@@ -96,6 +105,10 @@ pub trait ZmqPublisher: Send + Sync + core::fmt::Debug {
 pub struct NoOpZmqPublisher;
 
 impl ZmqPublisher for NoOpZmqPublisher {
+    fn wants_notifications(&self) -> bool {
+        false
+    }
+
     fn wants_rawtx(&self) -> bool {
         false
     }
@@ -279,6 +292,10 @@ impl SocketZmqPublisher {
 }
 
 impl ZmqPublisher for SocketZmqPublisher {
+    fn wants_notifications(&self) -> bool {
+        !self.endpoints.is_empty()
+    }
+
     fn wants_rawtx(&self) -> bool {
         !self.rawtx_endpoints.is_empty()
     }
@@ -337,6 +354,7 @@ mod tests {
     #[test]
     fn noop_publisher_methods_are_callable() {
         let publisher = NoOpZmqPublisher;
+        assert!(!publisher.wants_notifications());
         assert!(!publisher.wants_rawtx());
         publisher.publish_hashblock(Hash256::default());
         publisher.publish_hashtx(bitcoin::Txid::from_byte_array([0; 32]));
@@ -347,6 +365,7 @@ mod tests {
     #[test]
     fn tracing_publisher_methods_are_callable() {
         let publisher = TracingZmqPublisher;
+        assert!(publisher.wants_notifications());
         assert!(publisher.wants_rawtx());
         publisher.publish_hashblock(Hash256::default());
         publisher.publish_hashtx(bitcoin::Txid::from_byte_array([0; 32]));
@@ -404,6 +423,7 @@ mod tests {
             endpoint: "inproc://bitcoin-rs-zmq-hashblock-only".to_owned(),
             hwm: 1,
         }])?;
+        assert!(without_rawtx.wants_notifications());
         assert!(!without_rawtx.wants_rawtx());
 
         let with_rawtx = SocketZmqPublisher::bind(&[ZmqPublication {
@@ -411,6 +431,7 @@ mod tests {
             endpoint: "inproc://bitcoin-rs-zmq-rawtx".to_owned(),
             hwm: 1,
         }])?;
+        assert!(with_rawtx.wants_notifications());
         assert!(with_rawtx.wants_rawtx());
         Ok(())
     }

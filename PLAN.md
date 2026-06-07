@@ -298,6 +298,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence: Criterion `sync_pipeline_apply_spend_heavy_proxy` -6.4981%, `sync_pipeline_apply_spend_heavy_proxy_filter` -6.2339%, and `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_spend_heavy` -9.1276%; all reported `p = 0.00 < 0.05`.
 - [x] Txindex row construction now computes the block-height little-endian bytes once per block visitor and reuses them for txid, spending, and funding rows, preserving electrs row bytes while removing repeated per-row height encoding.
   Evidence: same-session clean `sync_apply_metrics` baseline reported `spend_heavy_117_txindex` at `0.7161ms` average total with `tx_index_ingest_avg_ms=0.0861` and `spend_heavy_117_all_indexes` at `0.6611ms` / `tx_index_ingest_avg_ms=0.0681`; patched repeat reported `0.6138ms` / `0.0665` and `0.6175ms` / `0.0635`.
+- [x] The default no-ZMQ apply tail now skips the post-commit block/transaction notification loop when the publisher is explicitly unobservable, preserving configured/custom publisher behavior through a conservative trait default.
+  Evidence: Criterion `sync_pipeline_apply_spend_heavy_proxy` reported -3.9619% mean change (`p = 0.04`) and `sync_pipeline_apply_spend_heavy_proxy_filter` reported -8.1084% mean change (`p = 0.00`) on the patched run; same-HEAD clean clone means were `73.851ms` / `72.245ms` versus patched `71.987ms` / `71.187ms`. Full fjall/all-index spend-heavy proxy stayed effectively neutral on repeat (`86.122ms` clean vs `86.286ms` patched), so this is recorded only as a narrow no-ZMQ apply-tail compression.
 
 **Measured but rejected in this campaign:**
 

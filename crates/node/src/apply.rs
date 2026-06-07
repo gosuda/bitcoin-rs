@@ -481,18 +481,20 @@ pub fn apply_block(
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
-    // Best-effort ZMQ event emission. Failures must not propagate per the
-    // ZmqPublisher contract; the trait's methods return `()`.
-    handles.zmq_publisher.publish_hashblock(tip.hash);
-    handles.zmq_publisher.publish_rawblock(&block_bytes);
-    if let Some(raw_txs) = scratch.raw_txs() {
-        for (txid, rawtx_bytes) in scratch.txids().iter().zip(raw_txs) {
-            handles.zmq_publisher.publish_hashtx(*txid);
-            handles.zmq_publisher.publish_rawtx(rawtx_bytes);
-        }
-    } else {
-        for txid in scratch.txids() {
-            handles.zmq_publisher.publish_hashtx(*txid);
+    if handles.zmq_publisher.wants_notifications() {
+        // Best-effort ZMQ event emission. Failures must not propagate per the
+        // ZmqPublisher contract; the trait's methods return `()`.
+        handles.zmq_publisher.publish_hashblock(tip.hash);
+        handles.zmq_publisher.publish_rawblock(&block_bytes);
+        if let Some(raw_txs) = scratch.raw_txs() {
+            for (txid, rawtx_bytes) in scratch.txids().iter().zip(raw_txs) {
+                handles.zmq_publisher.publish_hashtx(*txid);
+                handles.zmq_publisher.publish_rawtx(rawtx_bytes);
+            }
+        } else {
+            for txid in scratch.txids() {
+                handles.zmq_publisher.publish_hashtx(*txid);
+            }
         }
     }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
@@ -2607,6 +2609,31 @@ mod consensus_rule_tests {
 
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_block_skips_zmq_publish_loop_when_publisher_opts_out()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(PanickingOptOutPublisher);
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
+            .with_zmq_publisher(publisher);
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+
+        apply_block(&handles, &block)?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn apply_block_keeps_txindex_failure_best_effort() -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let handles = apply_handles_with_tx_index(
@@ -3433,6 +3460,31 @@ mod consensus_rule_tests {
 
         fn publish_rawtx(&self, bytes: &[u8]) {
             self.raw_txs.lock().push(bytes.to_vec());
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PanickingOptOutPublisher;
+
+    impl crate::ZmqPublisher for PanickingOptOutPublisher {
+        fn wants_notifications(&self) -> bool {
+            false
+        }
+
+        fn publish_hashblock(&self, _hash: Hash256) {
+            panic!("hashblock publish should be skipped");
+        }
+
+        fn publish_hashtx(&self, _txid: bitcoin::Txid) {
+            panic!("hashtx publish should be skipped");
+        }
+
+        fn publish_rawblock(&self, _bytes: &[u8]) {
+            panic!("rawblock publish should be skipped");
+        }
+
+        fn publish_rawtx(&self, _bytes: &[u8]) {
+            panic!("rawtx publish should be skipped");
         }
     }
 
