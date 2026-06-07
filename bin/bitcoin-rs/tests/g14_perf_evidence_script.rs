@@ -988,6 +988,212 @@ fn criterion_runner_emits_artifact_with_canonical_raw_outputs()
 }
 
 #[test]
+fn bitcoin_rs_mainnet_ibd_wrapper_emits_canonical_criterion_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let replay_command = fake_mainnet_prefix_replay_command(
+        temp.path(),
+        "bitcoin-rs-mainnet-prefix-replay",
+        "1.25",
+    )?;
+    let replay_output = temp.path().join("bitcoin-rs-mainnet-prefix-replay.json");
+
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--replay-command",
+            replay_command
+                .to_str()
+                .ok_or("non-UTF-8 replay command path")?,
+            "--replay-output",
+            replay_output
+                .to_str()
+                .ok_or("non-UTF-8 replay output path")?,
+        ])
+        .output()?;
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("Benchmarking bitcoin-rs/mainnet-ibd\n"));
+    assert!(stdout.contains("bitcoin-rs/mainnet-ibd   time:   [1.25 s 1.25 s 1.25 s]\n"));
+    assert!(replay_output.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_rs_mainnet_ibd_wrapper_rejects_invalid_replay_json()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let replay_command = fake_mainnet_prefix_replay_command_with_body(
+        temp.path(),
+        "bitcoin-rs-invalid-mainnet-prefix-replay",
+        r#"{"schema":"not-mainnet-prefix-replay","elapsed_seconds":1.25}"#,
+    )?;
+
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--replay-command",
+            replay_command
+                .to_str()
+                .ok_or("non-UTF-8 replay command path")?,
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("replay artifact schema"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn bitcoin_rs_mainnet_ibd_wrapper_rejects_wrong_replay_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let replay_command = fake_mainnet_prefix_replay_command_with_window(
+        temp.path(),
+        "bitcoin-rs-wrong-window-mainnet-prefix-replay",
+        "1.25",
+        0,
+        9,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000000000000000000000000009",
+    )?;
+
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--replay-command",
+            replay_command
+                .to_str()
+                .ok_or("non-UTF-8 replay command path")?,
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("replay artifact stop_height"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn criterion_runner_accepts_bitcoin_rs_mainnet_ibd_wrapper()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let replay_command = fake_mainnet_prefix_replay_command(
+        temp.path(),
+        "bitcoin-rs-runner-mainnet-prefix-replay",
+        "1.25",
+    )?;
+    let replay_output = temp
+        .path()
+        .join("bitcoin-rs-runner-mainnet-prefix-replay.json");
+    let bitcoin_rs_command = format!(
+        "bash {} --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a --replay-command {} --replay-output {} --force",
+        bitcoin_rs_mainnet_ibd_script_path().display(),
+        replay_command.display(),
+        replay_output.display()
+    );
+    let bitcoin_core_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-core-runner-criterion",
+        "bitcoin-core/mainnet-ibd",
+        "2.50",
+    )?;
+    let artifact = temp.path().join("g14-wrapper-runner-artifact.json");
+    let bitcoin_rs_raw_output = temp.path().join("bitcoin-rs-wrapper-runner-raw.txt");
+    let bitcoin_core_raw_output = temp.path().join("bitcoin-core-wrapper-runner-raw.txt");
+
+    let output = Command::new("bash")
+        .arg(criterion_runner_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-wrapper-runner",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            &bitcoin_rs_command,
+            "--bitcoin-core-command",
+            bitcoin_core_command
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core command")?,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--",
+            "-datadir=/tmp/fake-core",
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert_success(&output);
+    let artifact_json = fs::read_to_string(&artifact)?;
+    assert!(artifact_json.contains(r#""schema": "g14-criterion-artifact-v1""#));
+    let bitcoin_rs_raw = fs::read_to_string(&bitcoin_rs_raw_output)?;
+    assert!(bitcoin_rs_raw.contains("Benchmarking bitcoin-rs/mainnet-ibd"));
+    assert!(bitcoin_rs_raw.contains("bitcoin-rs/mainnet-ibd   time:"));
+    assert!(bitcoin_rs_raw.contains("G14_IBD_COMPLETION_PROOF "));
+    assert!(replay_output.exists());
+    Ok(())
+}
+
+#[test]
 fn criterion_runner_removes_partial_outputs_when_command_fails()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -1951,6 +2157,10 @@ fn criterion_runner_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-g14-mainnet-ibd-criterion.sh")
 }
 
+fn bitcoin_rs_mainnet_ibd_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-g14-bitcoin-rs-mainnet-ibd.sh")
+}
+
 fn write_text(
     dir: &Path,
     name: &str,
@@ -2483,6 +2693,79 @@ fn fake_failing_command(dir: &Path, name: &str) -> Result<PathBuf, Box<dyn std::
         r"#!/usr/bin/env python3
 raise SystemExit(7)
 ",
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+fn fake_mainnet_prefix_replay_command(
+    dir: &Path,
+    name: &str,
+    elapsed_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fake_mainnet_prefix_replay_command_with_window(
+        dir,
+        name,
+        elapsed_seconds,
+        0,
+        10,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000a",
+    )
+}
+
+fn fake_mainnet_prefix_replay_command_with_window(
+    dir: &Path,
+    name: &str,
+    elapsed_seconds: &str,
+    start_height: u32,
+    stop_height: u32,
+    start_hash: &str,
+    stop_hash: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fake_mainnet_prefix_replay_command_with_body(
+        dir,
+        name,
+        &format!(
+            r#"{{
+  "schema": "mainnet-prefix-replay-v1",
+  "measurement_target": "mainnet-prefix-replay",
+  "start_height": {start_height},
+  "start_hash": "{start_hash}",
+  "stop_height": {stop_height},
+  "stop_hash": "{stop_hash}",
+  "block_count": {},
+  "elapsed_seconds": {elapsed_seconds},
+  "blocks_per_second": 8.8
+}}"#,
+            stop_height - start_height + 1
+        ),
+    )
+}
+
+fn fake_mainnet_prefix_replay_command_with_body(
+    dir: &Path,
+    name: &str,
+    body: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"#!/usr/bin/env python3
+import pathlib
+import sys
+
+args = sys.argv[1:]
+try:
+    output_index = args.index("--output")
+except ValueError:
+    raise SystemExit("--output is required")
+pathlib.Path(args[output_index + 1]).write_text({body:?} + "\n", encoding="utf-8")
+"#
+        ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(0o755);
