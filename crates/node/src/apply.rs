@@ -334,13 +334,13 @@ pub fn apply_block(
         None
     };
 
-    let block_bytes = bytes::Bytes::from(bitcoin::consensus::encode::serialize(block));
-
     let utxo_changes_started = quanta::Instant::now();
     let changes = build_utxo_changes(block, height, &scratch)?;
     let utxo_changes_dur = utxo_changes_started.elapsed();
     metrics::histogram!("node.apply_block.utxo_changes_seconds")
         .record(utxo_changes_dur.as_secs_f64());
+    let block_bytes = bytes::Bytes::from(bitcoin::consensus::encode::serialize(block));
+
     let block_body_persist_started = quanta::Instant::now();
     let block_body_persist_result = if let Some(store) = &handles.block_body_store {
         store
