@@ -48,6 +48,7 @@ pub use rust_path::{BlockState, RustValidator, TipState, UtxoView};
 pub use verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_borrowed,
     verify_block_rules_borrowed_contextual, verify_block_rules_borrowed_contextual_with_txids,
+    verify_block_rules_borrowed_contextual_with_txids_and_witness_hint,
     verify_block_rules_contextual,
 };
 pub use verify_tx::{

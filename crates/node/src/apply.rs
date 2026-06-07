@@ -244,13 +244,14 @@ pub fn apply_block(
     let tx_plan = plan_block_transactions(block);
     let block_rules_started = quanta::Instant::now();
     let block_rules_result =
-        bitcoin_rs_consensus::verify_block_rules_borrowed_contextual_with_txids(
+        bitcoin_rs_consensus::verify_block_rules_borrowed_contextual_with_txids_and_witness_hint(
             block,
             &prev_tip_state,
             bitcoin_rs_consensus::BlockRuleContext {
                 segwit_active: softfork_state.segwit_active,
             },
             tx_plan.txids(),
+            tx_plan.witness_presence.is_present(),
         );
     let block_rules_dur = block_rules_started.elapsed();
     metrics::histogram!("node.apply_block.block_rules_seconds")
@@ -579,6 +580,7 @@ struct BlockTxPlan {
     only_coinbase: bool,
     needs_local_utxo_overlay: bool,
     overlay_capacity: usize,
+    witness_presence: WitnessPresence,
     has_bip68_sequence_locks: bool,
     created_output_count: usize,
     spent_input_count: usize,
@@ -611,11 +613,32 @@ impl BlockTxPlan {
     }
 }
 
+#[derive(Clone, Copy)]
+enum WitnessPresence {
+    Absent,
+    Present,
+}
+
+impl WitnessPresence {
+    const fn from_bool(has_witness: bool) -> Self {
+        if has_witness {
+            Self::Present
+        } else {
+            Self::Absent
+        }
+    }
+
+    const fn is_present(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
 fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
     let mut txids = Vec::with_capacity(block.txdata.len());
     let mut only_coinbase = true;
     let mut needs_local_utxo_overlay = false;
     let mut overlay_capacity = 0usize;
+    let mut has_witness = false;
     let mut has_bip68_sequence_locks = false;
     let mut created_output_count = 0usize;
     let mut spent_input_count = 0usize;
@@ -634,10 +657,12 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
         only_coinbase &= is_coinbase;
         created_output_count = created_output_count.saturating_add(output_count);
         if is_coinbase {
+            has_witness |= tx.input.iter().any(|input| !input.witness.is_empty());
             overlay_capacity = overlay_capacity.saturating_add(output_count);
         } else {
             let input_count = tx.input.len();
             for input in &tx.input {
+                has_witness |= !input.witness.is_empty();
                 let prior_txids = &txids[..txids.len().saturating_sub(1)];
                 let spends_created_output = if prior_txids.len() <= LOCAL_OVERLAY_TXID_SET_THRESHOLD
                 {
@@ -687,6 +712,7 @@ fn plan_block_transactions(block: &bitcoin::Block) -> BlockTxPlan {
         only_coinbase,
         needs_local_utxo_overlay,
         overlay_capacity,
+        witness_presence: WitnessPresence::from_bool(has_witness),
         has_bip68_sequence_locks,
         created_output_count,
         spent_input_count,

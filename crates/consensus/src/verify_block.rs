@@ -62,10 +62,30 @@ pub fn verify_block_rules_borrowed_contextual(
 /// Verifies borrowed block rules using caller-supplied transaction IDs.
 pub fn verify_block_rules_borrowed_contextual_with_txids(
     block: &bitcoin::Block,
-    _prev_tip: &TipState,
+    prev_tip: &TipState,
     context: BlockRuleContext,
     txids: &[bitcoin::Txid],
 ) -> Result<(), ConsensusError> {
+    let has_witness = block_has_witness(block);
+    verify_block_rules_borrowed_contextual_with_txids_and_witness_hint(
+        block,
+        prev_tip,
+        context,
+        txids,
+        has_witness,
+    )
+}
+
+#[doc(hidden)]
+/// Verifies borrowed block rules using caller-supplied transaction IDs and witness presence.
+pub fn verify_block_rules_borrowed_contextual_with_txids_and_witness_hint(
+    block: &bitcoin::Block,
+    _prev_tip: &TipState,
+    context: BlockRuleContext,
+    txids: &[bitcoin::Txid],
+    has_witness: bool,
+) -> Result<(), ConsensusError> {
+    debug_assert_eq!(has_witness, block_has_witness(block));
     let txdata = &block.txdata;
     if txdata.is_empty() {
         return Err(ConsensusError::EmptyBlock);
@@ -82,7 +102,7 @@ pub fn verify_block_rules_borrowed_contextual_with_txids(
         }
     }
     verify_merkle_root_with_txids(block, txids)?;
-    if context.segwit_active && !block.check_witness_commitment() {
+    if context.segwit_active && has_witness && !block.check_witness_commitment() {
         return Err(ConsensusError::WitnessCommitment);
     }
     let weight = block.weight().to_wu();
@@ -91,6 +111,13 @@ pub fn verify_block_rules_borrowed_contextual_with_txids(
         return Err(ConsensusError::BlockWeight { weight, max });
     }
     Ok(())
+}
+
+fn block_has_witness(block: &bitcoin::Block) -> bool {
+    block
+        .txdata
+        .iter()
+        .any(|tx| tx.input.iter().any(|input| !input.witness.is_empty()))
 }
 
 fn verify_merkle_root_with_txids(
