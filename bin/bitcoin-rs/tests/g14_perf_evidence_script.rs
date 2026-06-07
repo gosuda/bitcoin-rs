@@ -33,21 +33,21 @@ impl Drop for FakeBitcoinRsProcess {
     }
 }
 
+const DIRECT_BITCOIN_RS_COMMAND: &str = "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh";
 const DIRECT_BITCOIN_RS_COMMAND_SHA256: &str =
-    "e321b331d0f8168adf37d502710c2a26adf2c452c5eb25c0cd72f69cbb041099";
+    "37dd3a598f0a88a0143042ee21c82af187aff2f0427d432a37549c16f7b9178c";
 const DIRECT_BITCOIN_CORE_COMMAND_SHA256: &str =
     "022e36196e1baa86c9f90b731e17f501823bc65a65603e64876cb970cb7a5193";
 const DIRECT_BITCOIN_RS_CONFIG_SHA256: &str =
     "83dfe453d078861eaf0d230622275942d382edb597ab52dc7ee3e5edfef7c062";
 const DIRECT_BITCOIN_CORE_CONFIG_SHA256: &str =
     "71f61114f6dfa4ea4bdb00565e18759a4264f4ad6200d7e951b15076c7e258cc";
-const PRODUCER_FALSE_COMMAND_SHA256: &str =
-    "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa";
 const PRODUCER_BITCOIN_RS_CONFIG_SHA256: &str =
     "e09d513a25da5fb122b789d9296f1ebc7988b0ad9950eb5b8d33a8f28da15bb2";
 const PRODUCER_BITCOIN_CORE_CONFIG_SHA256: &str =
     "fa2075ea5013454e21228fa9261aa51a36a3ac196892af528829dc0a3ebac1c1";
 const BENCHMARK_HOST_ID: &str = "g14-test-host";
+const BITCOIN_RS_IBD_ADAPTER: &str = "bitcoin-rs-daemon-mainnet-ibd-v1";
 
 #[derive(Clone, Copy)]
 struct CriterionArtifactBinding<'a> {
@@ -94,6 +94,10 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
     assert!(stdout.contains("export G14_BENCHMARK_HOST_ID=g14-test-host\n"));
     assert!(stdout.contains("export G14_IBD_START_HASH=0000000000000000000000000000000000000000000000000000000000000000\n"));
     assert!(stdout.contains("export G14_IBD_STOP_HASH=000000000000000000000000000000000000000000000000000000000000000a\n"));
+    assert!(stdout.contains(&format!(
+        "export G14_BITCOIN_RS_COMMAND={}\n",
+        DIRECT_BITCOIN_RS_COMMAND
+    )));
     assert_64_hex_export(&stdout, "G14_BITCOIN_RS_COMMAND_SHA256");
     assert_64_hex_export(&stdout, "G14_BITCOIN_CORE_COMMAND_SHA256");
     assert_64_hex_export(&stdout, "G14_BITCOIN_RS_CONFIG_SHA256");
@@ -111,7 +115,11 @@ fn producer_marks_command_wrapper_manifest_as_non_criterion()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
-    let bitcoin_rs_command = fake_ibd_command(temp.path(), "bitcoin-rs-ibd", "0.01")?;
+    let bitcoin_rs_command = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
+        temp.path(),
+        "bitcoin-rs-ibd",
+        "0.01",
+    )?;
     let bitcoin_core_command = fake_ibd_command(temp.path(), "bitcoin-core-ibd", "0.05")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
@@ -187,6 +195,15 @@ fn producer_marks_command_wrapper_manifest_as_non_criterion()
 fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_seconds()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
     let bitcoin_rs_config = write_text(
         temp.path(),
@@ -216,9 +233,9 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -284,6 +301,15 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
 fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
     let bitcoin_rs_config = write_text(
         temp.path(),
@@ -313,9 +339,9 @@ fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -368,6 +394,15 @@ fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
 fn producer_rejects_criterion_manifest_without_utxo_commit_measurement()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
         "bitcoin-rs.toml",
@@ -394,9 +429,9 @@ fn producer_rejects_criterion_manifest_without_utxo_commit_measurement()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -429,6 +464,15 @@ fn producer_rejects_criterion_manifest_without_utxo_commit_measurement()
 #[test]
 fn producer_rejects_smoke_utxo_commit_measurement() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
         "bitcoin-rs.toml",
@@ -464,9 +508,9 @@ fn producer_rejects_smoke_utxo_commit_measurement() -> Result<(), Box<dyn std::e
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -534,6 +578,15 @@ fn utxo_commit_measurement_rejects_sub_threshold_block_size()
 #[test]
 fn producer_rejects_smoke_electrum_rss_measurement() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
         "bitcoin-rs.toml",
@@ -564,9 +617,9 @@ fn producer_rejects_smoke_electrum_rss_measurement() -> Result<(), Box<dyn std::
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -605,7 +658,11 @@ fn artifact_producer_emits_collectable_same_window_criterion_artifact()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
-    let bitcoin_rs_command = fake_ibd_command(temp.path(), "bitcoin-rs-live-ibd", "0.01")?;
+    let bitcoin_rs_command = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
+        temp.path(),
+        "bitcoin-rs-live-ibd",
+        "0.01",
+    )?;
     let bitcoin_core_command = fake_ibd_command(temp.path(), "bitcoin-core-live-ibd", "0.05")?;
     let bitcoin_rs_command = bitcoin_rs_command
         .to_str()
@@ -843,7 +900,7 @@ fn artifact_producer_rejects_invalid_elapsed_seconds() -> Result<(), Box<dyn std
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            "target/release/bitcoin-rs --network mainnet",
+            DIRECT_BITCOIN_RS_COMMAND,
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -916,7 +973,7 @@ fn artifact_producer_rejects_elapsed_seconds_not_in_raw_output()
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            "target/release/bitcoin-rs --network mainnet",
+            DIRECT_BITCOIN_RS_COMMAND,
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -988,7 +1045,7 @@ fn artifact_producer_rejects_non_exact_raw_output_benchmark_id()
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            "target/release/bitcoin-rs --network mainnet",
+            DIRECT_BITCOIN_RS_COMMAND,
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -1059,7 +1116,7 @@ fn artifact_producer_rejects_unlabeled_raw_output_time() -> Result<(), Box<dyn s
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            "target/release/bitcoin-rs --network mainnet",
+            DIRECT_BITCOIN_RS_COMMAND,
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -1093,10 +1150,9 @@ fn criterion_runner_emits_artifact_with_canonical_raw_outputs()
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let bitcoin_rs_command = fake_criterion_command(
+    let bitcoin_rs_command = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
         temp.path(),
         "bitcoin-rs-runner-criterion",
-        "bitcoin-rs/mainnet-ibd",
         "1.25",
     )?;
     let bitcoin_core_command = fake_criterion_command(
@@ -1162,6 +1218,7 @@ fn criterion_runner_emits_artifact_with_canonical_raw_outputs()
     let bitcoin_core_raw = fs::read_to_string(&bitcoin_core_raw_output)?;
     assert!(bitcoin_rs_raw.contains("Benchmarking bitcoin-rs/mainnet-ibd"));
     assert!(bitcoin_rs_raw.contains("bitcoin-rs/mainnet-ibd   time:"));
+    assert!(bitcoin_rs_raw.contains("\"ibd_adapter\":\"bitcoin-rs-daemon-mainnet-ibd-v1\""));
     assert!(bitcoin_core_raw.contains("Benchmarking bitcoin-core/mainnet-ibd"));
     assert!(bitcoin_core_raw.contains("bitcoin-core/mainnet-ibd   time:"));
     Ok(())
@@ -2142,7 +2199,7 @@ fn criterion_runner_accepts_bitcoin_rs_daemon_mainnet_ibd_wrapper()
     let command_output = temp.path().join("runner-bitcoin-rs.log");
     let rpc_url = format!("http://127.0.0.1:{rpc_port}/");
     let bitcoin_rs_command = format!(
-        "bash {} --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a --datadir {} --bitcoin-rs-config {} --bitcoin-rs-command {} --rpc-url {} --rpc-user g14-user --rpc-password g14-pass --command-output {} --force --poll-interval-seconds 0.01 --startup-timeout-seconds 5",
+        "{} --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a --datadir {} --bitcoin-rs-config {} --bitcoin-rs-command {} --rpc-url {} --rpc-user g14-user --rpc-password g14-pass --command-output {} --force --poll-interval-seconds 0.01 --startup-timeout-seconds 5",
         bitcoin_rs_daemon_mainnet_ibd_script_path().display(),
         datadir.display(),
         bitcoin_rs_config.display(),
@@ -2210,12 +2267,13 @@ fn criterion_runner_accepts_bitcoin_rs_daemon_mainnet_ibd_wrapper()
     assert!(bitcoin_rs_raw.contains("Benchmarking bitcoin-rs/mainnet-ibd"));
     assert!(bitcoin_rs_raw.contains("bitcoin-rs/mainnet-ibd   time:"));
     assert!(bitcoin_rs_raw.contains("G14_IBD_COMPLETION_PROOF "));
+    assert!(bitcoin_rs_raw.contains("\"ibd_adapter\":\"bitcoin-rs-daemon-mainnet-ibd-v1\""));
     assert!(stop_file.exists());
     Ok(())
 }
 
 #[test]
-fn criterion_runner_accepts_bitcoin_rs_mainnet_ibd_wrapper()
+fn criterion_runner_rejects_bitcoin_rs_mainnet_ibd_replay_wrapper()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
@@ -2290,14 +2348,225 @@ fn criterion_runner_accepts_bitcoin_rs_mainnet_ibd_wrapper()
         .env("BITCOIN_CLI", bitcoin_cli)
         .output()?;
 
-    assert_success(&output);
-    let artifact_json = fs::read_to_string(&artifact)?;
-    assert!(artifact_json.contains(r#""schema": "g14-criterion-artifact-v1""#));
-    let bitcoin_rs_raw = fs::read_to_string(&bitcoin_rs_raw_output)?;
-    assert!(bitcoin_rs_raw.contains("Benchmarking bitcoin-rs/mainnet-ibd"));
-    assert!(bitcoin_rs_raw.contains("bitcoin-rs/mainnet-ibd   time:"));
-    assert!(bitcoin_rs_raw.contains("G14_IBD_COMPLETION_PROOF "));
-    assert!(replay_output.exists());
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must not invoke the mainnet prefix replay wrapper"),
+        "stderr: {stderr}"
+    );
+    assert!(!artifact.exists());
+    Ok(())
+}
+
+#[test]
+fn criterion_runner_rejects_replay_argv0_with_inert_daemon_basename()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let replay_wrapper = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
+        temp.path(),
+        "bitcoin-rs-runner-replay-alias",
+        "1.25",
+    )?;
+    let replay_alias = temp.path().join("run-g14-bitcoin-rs-mainnet-ibd.sh");
+    fs::rename(replay_wrapper, &replay_alias)?;
+    let bitcoin_rs_command = format!(
+        "{} --decorator {}",
+        replay_alias.display(),
+        bitcoin_rs_daemon_mainnet_ibd_script_path().display(),
+    );
+    let bitcoin_core_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-core-runner-criterion",
+        "bitcoin-core/mainnet-ibd",
+        "2.50",
+    )?;
+    let artifact = temp.path().join("g14-replay-alias-runner-artifact.json");
+    let bitcoin_rs_raw_output = temp.path().join("bitcoin-rs-replay-alias-runner-raw.txt");
+    let bitcoin_core_raw_output = temp.path().join("bitcoin-core-replay-alias-runner-raw.txt");
+
+    let output = Command::new("bash")
+        .arg(criterion_runner_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-replay-alias-runner",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            &bitcoin_rs_command,
+            "--bitcoin-core-command",
+            bitcoin_core_command
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core command")?,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--",
+            "-datadir=/tmp/fake-core",
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must not invoke the mainnet prefix replay wrapper")
+            || stderr.contains("must start with the bitcoin-rs daemon IBD adapter"),
+        "stderr: {stderr}"
+    );
+    assert!(!artifact.exists());
+    Ok(())
+}
+
+#[test]
+fn criterion_artifact_producer_rejects_replay_wrapper_with_adapter_proof()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let replay_command = fake_mainnet_prefix_replay_command(
+        temp.path(),
+        "bitcoin-rs-producer-mainnet-prefix-replay",
+        "1.25",
+    )?;
+    let replay_output = temp
+        .path()
+        .join("bitcoin-rs-producer-mainnet-prefix-replay.json");
+    let bitcoin_rs_command = format!(
+        "bash {} --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a --replay-command {} --replay-output {} --force",
+        bitcoin_rs_mainnet_ibd_script_path().display(),
+        replay_command.display(),
+        replay_output.display()
+    );
+    let bitcoin_core_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-core-producer-criterion",
+        "bitcoin-core/mainnet-ibd",
+        "2.50",
+    )?
+    .to_str()
+    .ok_or("non-UTF-8 Bitcoin Core command")?
+    .to_owned();
+    let artifact = temp
+        .path()
+        .join("g14-replay-wrapper-producer-artifact.json");
+    let bitcoin_rs_command_sha256 = sha256_text(&bitcoin_rs_command);
+    let bitcoin_core_command_sha256 = sha256_text(&bitcoin_core_command);
+    let bitcoin_rs_config_sha256 = sha256_text(&fs::read_to_string(&bitcoin_rs_config)?);
+    let bitcoin_core_config_sha256 = sha256_text(&fs::read_to_string(&bitcoin_core_config)?);
+    let bitcoin_rs_raw_output = write_text(
+        temp.path(),
+        "bitcoin-rs-replay-wrapper-producer-raw.txt",
+        &criterion_raw_output_with_proof(
+            "bitcoin-rs/mainnet-ibd",
+            "1.25",
+            "g14-mainnet-window-replay-wrapper-producer",
+            BENCHMARK_HOST_ID,
+            0,
+            10,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            &bitcoin_rs_command_sha256,
+            &bitcoin_rs_config_sha256,
+        ),
+    )?;
+    let bitcoin_core_raw_output = write_text(
+        temp.path(),
+        "bitcoin-core-replay-wrapper-producer-raw.txt",
+        &criterion_raw_output_with_proof(
+            "bitcoin-core/mainnet-ibd",
+            "2.50",
+            "g14-mainnet-window-replay-wrapper-producer",
+            BENCHMARK_HOST_ID,
+            0,
+            10,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            &bitcoin_core_command_sha256,
+            &bitcoin_core_config_sha256,
+        ),
+    )?;
+
+    let output = Command::new("bash")
+        .arg(artifact_producer_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-replay-wrapper-producer",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--criterion-bitcoin-rs-elapsed-seconds",
+            "1.25",
+            "--criterion-bitcoin-core-elapsed-seconds",
+            "2.50",
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--bitcoin-rs-command",
+            &bitcoin_rs_command,
+            "--bitcoin-core-command",
+            &bitcoin_core_command,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--",
+            "-datadir=/tmp/fake-core",
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("must not invoke the mainnet prefix replay wrapper"),
+        "stderr: {stderr}"
+    );
+    assert!(!artifact.exists());
     Ok(())
 }
 
@@ -2312,10 +2581,9 @@ fn criterion_runner_accepts_bitcoin_core_mainnet_ibd_wrapper()
         "storage_backend=fjall\nindexes=all\n",
     )?;
     let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
-    let bitcoin_rs_command = fake_criterion_command(
+    let bitcoin_rs_command = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
         temp.path(),
         "bitcoin-rs-runner-criterion",
-        "bitcoin-rs/mainnet-ibd",
         "1.25",
     )?;
     let datadir = temp.path().join("core-wrapper-runner-datadir");
@@ -2399,10 +2667,9 @@ fn criterion_runner_removes_partial_outputs_when_command_fails()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
-    let bitcoin_rs_command = fake_criterion_command(
+    let bitcoin_rs_command = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
         temp.path(),
         "bitcoin-rs-runner-criterion",
-        "bitcoin-rs/mainnet-ibd",
         "1.25",
     )?;
     let bitcoin_core_command = fake_failing_command(temp.path(), "bitcoin-core-runner-fails")?;
@@ -2468,6 +2735,15 @@ fn criterion_runner_removes_partial_outputs_when_command_fails()
 #[test]
 fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
         "bitcoin-rs.toml",
@@ -2487,9 +2763,9 @@ fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn st
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-elapsed-seconds",
             "1.25",
             "--bitcoin-rs-config",
@@ -2525,6 +2801,15 @@ fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn st
 fn producer_rejects_criterion_elapsed_seconds_not_bound_to_artifact()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
         "bitcoin-rs.toml",
@@ -2544,9 +2829,9 @@ fn producer_rejects_criterion_elapsed_seconds_not_bound_to_artifact()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-elapsed-seconds",
             "1.26",
             "--criterion-bitcoin-core-elapsed-seconds",
@@ -2591,6 +2876,15 @@ fn producer_rejects_criterion_elapsed_seconds_not_bound_to_artifact()
 fn producer_rejects_criterion_artifact_for_different_ibd_window()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
         "bitcoin-rs.toml",
@@ -2617,9 +2911,9 @@ fn producer_rejects_criterion_artifact_for_different_ibd_window()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -2850,6 +3144,15 @@ fn script_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn s
 fn producer_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn std::error::Error>>
 {
     let temp = tempfile::tempdir()?;
+    let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
+    let producer_bitcoin_rs_command = producer_fixture_commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_core_command = producer_fixture_commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
     let bitcoin_rs_config = write_text(
         temp.path(),
         "bitcoin-rs.toml",
@@ -2869,9 +3172,9 @@ fn producer_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            "false",
+            producer_bitcoin_rs_command,
             "--bitcoin-core-command",
-            "false",
+            producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
             "bitcoin-rs/not-mainnet-ibd",
             "--criterion-bitcoin-core-benchmark-id",
@@ -3568,6 +3871,7 @@ fn evidence_json_with_utxo_measurement(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": 1.25,
@@ -3577,7 +3881,7 @@ fn evidence_json_with_utxo_measurement(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -3642,6 +3946,108 @@ fn electrum_rss_script_path() -> PathBuf {
 
 fn artifact_producer_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/produce-g14-criterion-artifact.sh")
+}
+
+#[test]
+fn criterion_artifact_producer_rejects_missing_bitcoin_rs_ibd_adapter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let artifact = criterion_artifact_json(temp.path(), "missing-adapter.json", "1.25", "2.50")?;
+    let artifact_text = fs::read_to_string(&artifact)?;
+    let mut value: Value = serde_json::from_str(&artifact_text)?;
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("bitcoin_rs_ibd_adapter");
+    fs::write(&artifact, serde_json::to_string_pretty(&value)?)?;
+    let output = Command::new("bash")
+        .arg(collect_g14_perf_evidence_script_path())
+        .arg(evidence_json_for_artifact(
+            temp.path(),
+            "missing-adapter-evidence.json",
+            &artifact,
+        )?)
+        .args(["--", "-datadir=/tmp/fake-core"])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bitcoin_rs_ibd_adapter"),
+        "stderr: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn collector_rejects_bitcoin_rs_raw_output_missing_ibd_adapter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let evidence = evidence_json(temp.path(), 0, 10)?;
+    let evidence_text = fs::read_to_string(&evidence)?;
+    let value: Value = serde_json::from_str(&evidence_text)?;
+    let artifact_path = value
+        .get("benchmark_artifact_path")
+        .and_then(Value::as_str)
+        .ok_or("missing benchmark_artifact_path")?;
+    let artifact = PathBuf::from(artifact_path);
+    let rs_raw_path = {
+        let artifact_value: Value = serde_json::from_str(&fs::read_to_string(&artifact)?)?;
+        let benchmarks = artifact_value
+            .get("benchmarks")
+            .and_then(Value::as_array)
+            .ok_or("missing benchmarks")?;
+        let entry = benchmarks
+            .iter()
+            .find(|entry| {
+                entry.get("benchmark_id") == Some(&Value::String("bitcoin-rs/mainnet-ibd".into()))
+            })
+            .ok_or("missing bitcoin-rs benchmark")?;
+        PathBuf::from(
+            entry
+                .get("raw_output_path")
+                .and_then(Value::as_str)
+                .ok_or("missing raw_output_path")?,
+        )
+    };
+    let mut raw = fs::read_to_string(&rs_raw_path)?;
+    raw = raw.replace(
+        "\"ibd_adapter\":\"bitcoin-rs-daemon-mainnet-ibd-v1\"",
+        "\"ibd_adapter\":\"replay-era\"",
+    );
+    fs::write(&rs_raw_path, raw)?;
+    let new_raw_sha256 = sha256_file(&rs_raw_path)?;
+    let mut artifact_value: Value = serde_json::from_str(&fs::read_to_string(&artifact)?)?;
+    if let Some(benchmarks) = artifact_value
+        .get_mut("benchmarks")
+        .and_then(Value::as_array_mut)
+    {
+        for entry in benchmarks {
+            if entry.get("benchmark_id") == Some(&Value::String("bitcoin-rs/mainnet-ibd".into())) {
+                entry["raw_output_sha256"] = Value::String(new_raw_sha256.clone());
+            }
+        }
+    }
+    fs::write(&artifact, serde_json::to_string_pretty(&artifact_value)?)?;
+    let mut evidence_value: Value = serde_json::from_str(&evidence_text)?;
+    evidence_value["benchmark_artifact_sha256"] = Value::String(sha256_file(&artifact)?);
+    fs::write(&evidence, serde_json::to_string_pretty(&evidence_value)?)?;
+    let output = Command::new("bash")
+        .arg(collect_g14_perf_evidence_script_path())
+        .arg(&evidence)
+        .args(["--", "-datadir=/tmp/fake-core"])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ibd_adapter"), "stderr: {stderr}");
+    Ok(())
+}
+
+fn collect_g14_perf_evidence_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/collect-g14-perf-evidence.sh")
 }
 
 fn criterion_runner_script_path() -> PathBuf {
@@ -3719,9 +4125,15 @@ fn criterion_raw_output_with_proof(
     command_sha256: &str,
     config_sha256: &str,
 ) -> String {
+    let adapter_fragment = if benchmark_id == "bitcoin-rs/mainnet-ibd" {
+        format!(",\"ibd_adapter\":\"{BITCOIN_RS_IBD_ADAPTER}\"")
+    } else {
+        String::new()
+    };
     format!(
-        "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\nG14_IBD_COMPLETION_PROOF {{\"schema\":\"g14-ibd-completion-proof-v1\",\"benchmark_id\":\"{benchmark_id}\",\"benchmark_run_id\":\"{benchmark_run_id}\",\"benchmark_host_id\":\"{benchmark_host_id}\",\"ibd_start_height\":{start_height},\"ibd_start_hash\":\"{start_hash}\",\"ibd_stop_height\":{stop_height},\"ibd_stop_hash\":\"{stop_hash}\",\"ibd_blocks\":{},\"command_sha256\":\"{command_sha256}\",\"config_sha256\":\"{config_sha256}\"}}\n",
-        stop_height - start_height + 1
+        "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\nG14_IBD_COMPLETION_PROOF {{\"schema\":\"g14-ibd-completion-proof-v1\",\"benchmark_id\":\"{benchmark_id}\",\"benchmark_run_id\":\"{benchmark_run_id}\",\"benchmark_host_id\":\"{benchmark_host_id}\",\"ibd_start_height\":{start_height},\"ibd_start_hash\":\"{start_hash}\",\"ibd_stop_height\":{stop_height},\"ibd_stop_hash\":\"{stop_hash}\",\"ibd_blocks\":{},\"command_sha256\":\"{command_sha256}\",\"config_sha256\":\"{config_sha256}\"{adapter_fragment}}}\n",
+        stop_height - start_height + 1,
+        adapter_fragment = adapter_fragment,
     )
 }
 
@@ -3838,6 +4250,33 @@ fn criterion_artifact_json_with_window(
     )
 }
 
+struct ProducerFixtureIbdCommands {
+    bitcoin_rs: PathBuf,
+    bitcoin_core: PathBuf,
+}
+
+fn install_producer_fixture_ibd_commands(
+    dir: &Path,
+) -> Result<ProducerFixtureIbdCommands, Box<dyn std::error::Error>> {
+    let bitcoin_rs = dir.join("run-g14-bitcoin-rs-daemon-mainnet-ibd.sh");
+    fs::write(
+        &bitcoin_rs,
+        "#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+",
+    )?;
+    let mut bitcoin_rs_permissions = fs::metadata(&bitcoin_rs)?.permissions();
+    bitcoin_rs_permissions.set_mode(0o755);
+    fs::set_permissions(&bitcoin_rs, bitcoin_rs_permissions)?;
+
+    let bitcoin_core = fake_ibd_command(dir, "producer-fixture-bitcoin-core-ibd", "0")?;
+    Ok(ProducerFixtureIbdCommands {
+        bitcoin_rs,
+        bitcoin_core,
+    })
+}
+
 fn producer_criterion_artifact_json(
     dir: &Path,
     name: &str,
@@ -3862,6 +4301,17 @@ fn producer_criterion_artifact_json_with_window(
     start_height: u32,
     stop_height: u32,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let commands = install_producer_fixture_ibd_commands(dir)?;
+    let bitcoin_rs_command = commands
+        .bitcoin_rs
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let bitcoin_core_command = commands
+        .bitcoin_core
+        .to_str()
+        .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
+    let bitcoin_rs_command_sha256 = sha256_text(bitcoin_rs_command);
+    let bitcoin_core_command_sha256 = sha256_text(bitcoin_core_command);
     let start_hash = format!("{start_height:064x}");
     let stop_hash = format!("{stop_height:064x}");
     criterion_artifact_json_with_window_and_hashes(
@@ -3875,8 +4325,8 @@ fn producer_criterion_artifact_json_with_window(
             benchmark_host_id: BENCHMARK_HOST_ID,
             start_hash: &start_hash,
             stop_hash: &stop_hash,
-            bitcoin_rs_command_sha256: PRODUCER_FALSE_COMMAND_SHA256,
-            bitcoin_core_command_sha256: PRODUCER_FALSE_COMMAND_SHA256,
+            bitcoin_rs_command_sha256: &bitcoin_rs_command_sha256,
+            bitcoin_core_command_sha256: &bitcoin_core_command_sha256,
             bitcoin_rs_config_sha256: PRODUCER_BITCOIN_RS_CONFIG_SHA256,
             bitcoin_core_config_sha256: PRODUCER_BITCOIN_CORE_CONFIG_SHA256,
         },
@@ -3944,6 +4394,7 @@ fn criterion_artifact_json_with_window_and_hashes(
   "bitcoin_core_command_sha256": "{bitcoin_core_command_sha256}",
   "bitcoin_rs_config_sha256": "{bitcoin_rs_config_sha256}",
   "bitcoin_core_config_sha256": "{bitcoin_core_config_sha256}",
+  "bitcoin_rs_ibd_adapter": "{BITCOIN_RS_IBD_ADAPTER}",
   "benchmarks": [
     {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_rs_elapsed_seconds}, "raw_output_path": "{bitcoin_rs_raw_output_path}", "raw_output_sha256": "{bitcoin_rs_raw_output_sha256}"}},
     {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": {bitcoin_core_elapsed_seconds}, "raw_output_path": "{bitcoin_core_raw_output_path}", "raw_output_sha256": "{bitcoin_core_raw_output_sha256}"}}
@@ -4086,6 +4537,7 @@ fn evidence_json_with_artifact_binding(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": 1.25,
@@ -4095,7 +4547,7 @@ fn evidence_json_with_artifact_binding(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4162,6 +4614,26 @@ time.sleep({sleep_seconds})
     permissions.set_mode(0o755);
     fs::set_permissions(&path, permissions)?;
     Ok(path)
+}
+
+fn fake_bitcoin_rs_criterion_command_with_daemon_adapter(
+    dir: &Path,
+    name: &str,
+    elapsed_seconds: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let fake = fake_criterion_command(dir, name, "bitcoin-rs/mainnet-ibd", elapsed_seconds)?;
+    let wrapper = dir.join("run-g14-bitcoin-rs-daemon-mainnet-ibd.sh");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nexec \"{}\"\n",
+            fake.display()
+        ),
+    )?;
+    let mut permissions = fs::metadata(&wrapper)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions)?;
+    Ok(wrapper)
 }
 
 fn fake_criterion_command(
@@ -4368,6 +4840,7 @@ fn evidence_json_with_artifact_window(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
@@ -4377,7 +4850,7 @@ fn evidence_json_with_artifact_window(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4410,6 +4883,7 @@ fn evidence_json_with_mixed_benchmark_run_ids(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": 1.25,
@@ -4419,7 +4893,7 @@ fn evidence_json_with_mixed_benchmark_run_ids(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4472,6 +4946,7 @@ fn criterion_artifact_json_with_mixed_benchmark_run_ids(
   "bitcoin_core_command_sha256": "{DIRECT_BITCOIN_CORE_COMMAND_SHA256}",
   "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
   "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
+  "bitcoin_rs_ibd_adapter": "{BITCOIN_RS_IBD_ADAPTER}",
   "benchmarks": [
     {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25, "raw_output_path": "{bitcoin_rs_raw_output_path}", "raw_output_sha256": "{bitcoin_rs_raw_output_sha256}"}},
     {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-11111111", "elapsed_seconds": 2.50, "raw_output_path": "{bitcoin_core_raw_output_path}", "raw_output_sha256": "{bitcoin_core_raw_output_sha256}"}}
@@ -4520,6 +4995,7 @@ fn evidence_json_with_missing_raw_output_sha256(
   "bitcoin_core_command_sha256": "{DIRECT_BITCOIN_CORE_COMMAND_SHA256}",
   "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
   "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
+  "bitcoin_rs_ibd_adapter": "{BITCOIN_RS_IBD_ADAPTER}",
   "benchmarks": [
     {{"benchmark_id": "bitcoin-rs/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25, "raw_output_path": "{bitcoin_rs_raw_output_path}"}},
     {{"benchmark_id": "bitcoin-core/mainnet-ibd", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 2.50, "raw_output_path": "{bitcoin_core_raw_output_path}", "raw_output_sha256": "{bitcoin_core_raw_output_sha256}"}}
@@ -4540,6 +5016,7 @@ fn evidence_json_with_missing_raw_output_sha256(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": 1.25,
@@ -4549,7 +5026,7 @@ fn evidence_json_with_missing_raw_output_sha256(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4621,6 +5098,7 @@ fn evidence_json_for_artifact(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": 1.25,
@@ -4630,7 +5108,7 @@ fn evidence_json_for_artifact(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4689,6 +5167,7 @@ fn evidence_json_with_binding_fields(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
@@ -4698,7 +5177,7 @@ fn evidence_json_with_binding_fields(
   "storage_backend": "{storage_backend}",
   "indexes": "{indexes}",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4761,6 +5240,7 @@ fn evidence_json_with_benchmark_ids(
   "bitcoin_core_command_sha256": "{DIRECT_BITCOIN_CORE_COMMAND_SHA256}",
   "bitcoin_rs_config_sha256": "{DIRECT_BITCOIN_RS_CONFIG_SHA256}",
   "bitcoin_core_config_sha256": "{DIRECT_BITCOIN_CORE_CONFIG_SHA256}",
+  "bitcoin_rs_ibd_adapter": "{BITCOIN_RS_IBD_ADAPTER}",
   "benchmarks": [
     {{"benchmark_id": "{bitcoin_rs_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 1.25, "raw_output_path": "{bitcoin_rs_raw_output_path}", "raw_output_sha256": "{bitcoin_rs_raw_output_sha256}"}},
     {{"benchmark_id": "{bitcoin_core_benchmark_id}", "benchmark_run_id": "g14-mainnet-window-00000000", "elapsed_seconds": 2.50, "raw_output_path": "{bitcoin_core_raw_output_path}", "raw_output_sha256": "{bitcoin_core_raw_output_sha256}"}}
@@ -4781,6 +5261,7 @@ fn evidence_json_with_benchmark_ids(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "{bitcoin_rs_benchmark_id}",
   "criterion_bitcoin_core_benchmark_id": "{bitcoin_core_benchmark_id}",
   "bitcoin_rs_elapsed_seconds": 1.25,
@@ -4790,7 +5271,7 @@ fn evidence_json_with_benchmark_ids(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4843,13 +5324,14 @@ fn offline_evidence_json_with_elapsed(
   "elapsed_seconds_source": "criterion",
   "criterion_artifact_schema": "g14-criterion-artifact-v1",
   "benchmark_host_id": "{BENCHMARK_HOST_ID}",
+  "bitcoin_rs_ibd_adapter": "bitcoin-rs-daemon-mainnet-ibd-v1",
   "criterion_bitcoin_rs_benchmark_id": "bitcoin-rs/mainnet-ibd",
   "criterion_bitcoin_core_benchmark_id": "bitcoin-core/mainnet-ibd",
   "bitcoin_rs_elapsed_seconds": {bitcoin_rs_elapsed_seconds},
   "bitcoin_core_elapsed_seconds": {bitcoin_core_elapsed_seconds},
   "bitcoin_core_version": "v27.0.0",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "target/release/bitcoin-rs --network mainnet",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",

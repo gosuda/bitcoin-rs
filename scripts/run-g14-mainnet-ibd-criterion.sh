@@ -25,6 +25,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -32,6 +33,9 @@ BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
 IBD_COMPLETION_PROOF_SCHEMA = "g14-ibd-completion-proof-v1"
 IBD_COMPLETION_PROOF_PREFIX = "G14_IBD_COMPLETION_PROOF "
+BITCOIN_RS_IBD_ADAPTER = "bitcoin-rs-daemon-mainnet-ibd-v1"
+BITCOIN_RS_DAEMON_ADAPTER_BASENAME = "run-g14-bitcoin-rs-daemon-mainnet-ibd.sh"
+BITCOIN_RS_REPLAY_ADAPTER_BASENAME = "run-g14-bitcoin-rs-mainnet-ibd.sh"
 CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
 CRITERION_UNIT_PATTERN = "(?:ns|us|\u00b5s|ms|s)"
 CRITERION_INTERVAL_RE = re.compile(
@@ -90,6 +94,30 @@ def read_text(path: Path, name: str) -> str:
 
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+def bitcoin_rs_command_argv(command: str, name: str) -> list[str]:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError as error:
+        die(f"{name} must be shell-parseable: {error}")
+    if not tokens:
+        die(f"{name} must not be empty")
+    return tokens
+
+
+def validate_bitcoin_rs_ibd_command(command: str, name: str = "--bitcoin-rs-command") -> None:
+    tokens = bitcoin_rs_command_argv(command, name)
+    basenames = [Path(token).name for token in tokens]
+    if BITCOIN_RS_REPLAY_ADAPTER_BASENAME in basenames:
+        die(
+            f"{name} must not invoke the mainnet prefix replay wrapper "
+            f"{BITCOIN_RS_REPLAY_ADAPTER_BASENAME!r}"
+        )
+    if basenames[0] != BITCOIN_RS_DAEMON_ADAPTER_BASENAME:
+        die(
+            f"{name} must start with the bitcoin-rs daemon IBD adapter "
+            f"{BITCOIN_RS_DAEMON_ADAPTER_BASENAME!r}, got {basenames[0]!r}"
+        )
 
 
 def ensure_output_path(path: str | None, name: str, force: bool) -> Path:
@@ -180,6 +208,7 @@ def append_ibd_completion_proof(
     stop_hash: str,
     command_sha256: str,
     config_sha256: str,
+    ibd_adapter: str | None = None,
 ) -> None:
     proof = {
         "schema": IBD_COMPLETION_PROOF_SCHEMA,
@@ -194,15 +223,27 @@ def append_ibd_completion_proof(
         "command_sha256": command_sha256,
         "config_sha256": config_sha256,
     }
+    if ibd_adapter is not None:
+        proof["ibd_adapter"] = ibd_adapter
     with raw_output.open("a", encoding="utf-8") as handle:
         handle.write(IBD_COMPLETION_PROOF_PREFIX)
         json.dump(proof, handle, separators=(",", ":"))
         handle.write("\n")
 
 
-def run_criterion_command(command: str, raw_output: Path, benchmark_id: str, name: str) -> str:
+def run_criterion_command(
+    command: str,
+    raw_output: Path,
+    benchmark_id: str,
+    name: str,
+    *,
+    argv: list[str] | None = None,
+) -> str:
     with raw_output.open("w", encoding="utf-8") as handle:
-        result = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT)
+        if argv is not None:
+            result = subprocess.run(argv, shell=False, stdout=handle, stderr=subprocess.STDOUT)
+        else:
+            result = subprocess.run(command, shell=True, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"{name} failed with status {result.returncode}")
     elapsed = criterion_elapsed_seconds(read_text(raw_output, name), benchmark_id, name)
@@ -268,6 +309,7 @@ if stop_height < start_height:
 benchmark_run_id = non_empty_text(args.benchmark_run_id, "--benchmark-run-id")
 benchmark_host_id = non_empty_text(args.benchmark_host_id, "--benchmark-host-id")
 bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-command")
+validate_bitcoin_rs_ibd_command(bitcoin_rs_command)
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = require_file(args.bitcoin_rs_config, "--bitcoin-rs-config")
 bitcoin_core_config = require_file(args.bitcoin_core_config, "--bitcoin-core-config")
@@ -303,6 +345,7 @@ try:
         bitcoin_rs_raw_output,
         BITCOIN_RS_CRITERION_BENCHMARK_ID,
         "--bitcoin-rs-command",
+        argv=bitcoin_rs_command_argv(bitcoin_rs_command, "--bitcoin-rs-command"),
     )
     bitcoin_core_elapsed_seconds = run_criterion_command(
         bitcoin_core_command,
@@ -321,6 +364,7 @@ try:
         stop_hash,
         sha256_text(bitcoin_rs_command),
         sha256_text(bitcoin_rs_config_text),
+        BITCOIN_RS_IBD_ADAPTER,
     )
     append_ibd_completion_proof(
         bitcoin_core_raw_output,

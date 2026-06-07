@@ -134,6 +134,9 @@ UTXO_COMMIT_MEASUREMENT_SCHEMA = "g14-utxo-commit-measurement-v1"
 UTXO_BLOCK_SIZE_THRESHOLD_BYTES = 4 * 1024 * 1024
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
+BITCOIN_RS_IBD_ADAPTER = "bitcoin-rs-daemon-mainnet-ibd-v1"
+BITCOIN_RS_DAEMON_ADAPTER_BASENAME = "run-g14-bitcoin-rs-daemon-mainnet-ibd.sh"
+BITCOIN_RS_REPLAY_ADAPTER_BASENAME = "run-g14-bitcoin-rs-mainnet-ibd.sh"
 CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
 CRITERION_UNIT_PATTERN = "(?:ns|us|\u00b5s|ms|s)"
 CRITERION_INTERVAL_RE = re.compile(
@@ -151,6 +154,31 @@ CRITERION_UNIT_SECONDS = {
     "ms": 0.001,
     "s": 1.0,
 }
+
+
+def bitcoin_rs_command_argv(command: str, name: str) -> list[str]:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError as error:
+        die(f"{name} must be shell-parseable: {error}")
+    if not tokens:
+        die(f"{name} must not be empty")
+    return tokens
+
+
+def validate_bitcoin_rs_ibd_command(command: str, name: str = "--bitcoin-rs-command") -> None:
+    tokens = bitcoin_rs_command_argv(command, name)
+    basenames = [Path(token).name for token in tokens]
+    if BITCOIN_RS_REPLAY_ADAPTER_BASENAME in basenames:
+        die(
+            f"{name} must not invoke the mainnet prefix replay wrapper "
+            f"{BITCOIN_RS_REPLAY_ADAPTER_BASENAME!r}"
+        )
+    if basenames[0] != BITCOIN_RS_DAEMON_ADAPTER_BASENAME:
+        die(
+            f"{name} must start with the bitcoin-rs daemon IBD adapter "
+            f"{BITCOIN_RS_DAEMON_ADAPTER_BASENAME!r}, got {basenames[0]!r}"
+        )
 
 
 def die(message: str) -> None:
@@ -375,6 +403,7 @@ def require_ibd_completion_proof(
     command_sha256: str,
     config_sha256: str,
     source: str,
+    expected_ibd_adapter: str | None = None,
 ) -> None:
     payloads = [
         line.removeprefix(IBD_COMPLETION_PROOF_PREFIX).strip()
@@ -400,6 +429,11 @@ def require_ibd_completion_proof(
     require_proof_int(proof, "ibd_blocks", stop_height - start_height + 1, source)
     require_proof_text(proof, "command_sha256", command_sha256, source)
     require_proof_text(proof, "config_sha256", config_sha256, source)
+
+    if expected_ibd_adapter is not None:
+        require_proof_text(proof, "ibd_adapter", expected_ibd_adapter, source)
+    elif proof.get("ibd_adapter") is not None:
+        die(f"{source} IBD completion proof must not include ibd_adapter for {benchmark_id!r}")
 
 
 def require_raw_output_binding(
@@ -440,6 +474,7 @@ def require_raw_output_binding(
         command_sha256,
         config_sha256,
         source,
+        BITCOIN_RS_IBD_ADAPTER if benchmark_id == BITCOIN_RS_CRITERION_BENCHMARK_ID else None,
     )
     return str(raw_output_path.resolve()), raw_output_sha256
 
@@ -472,7 +507,7 @@ def read_criterion_artifact(
     start_hash: str,
     stop_hash: str,
     command_config_hashes: dict[str, str],
-) -> tuple[str, str, dict[str, float], dict[str, str], dict[str, str]]:
+) -> tuple[str, str, dict[str, float], dict[str, str], dict[str, str], str]:
     try:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -497,6 +532,11 @@ def read_criterion_artifact(
     require_artifact_hash(data, "ibd_stop_hash", stop_hash)
     for key, expected in command_config_hashes.items():
         require_artifact_binding(data, key, expected)
+    bitcoin_rs_ibd_adapter = require_literal_value(
+        data,
+        "bitcoin_rs_ibd_adapter",
+        BITCOIN_RS_IBD_ADAPTER,
+    )
     benchmarks = data.get("benchmarks")
     if not isinstance(benchmarks, list):
         die("benchmark_artifact_path benchmarks must be an array")
@@ -544,7 +584,7 @@ def read_criterion_artifact(
         elapsed_by_id[benchmark_id] = elapsed
         raw_output_path_by_id[benchmark_id] = raw_path
         raw_output_sha256_by_id[benchmark_id] = raw_sha256
-    return benchmark_run_id, benchmark_host_id, elapsed_by_id, raw_output_path_by_id, raw_output_sha256_by_id
+    return benchmark_run_id, benchmark_host_id, elapsed_by_id, raw_output_path_by_id, raw_output_sha256_by_id, bitcoin_rs_ibd_adapter
 
 
 def read_json_file(path: Path, source: str):
@@ -909,6 +949,7 @@ core_commit = require_hex(require_text(data, "bitcoin_core_commit"), 40, "bitcoi
 bench_tool = require_literal_value(data, "bench_tool", "criterion")
 require_literal_value(data, "elapsed_seconds_source", "criterion")
 rs_command = require_text(data, "bitcoin_rs_command")
+validate_bitcoin_rs_ibd_command(rs_command, "bitcoin_rs_command")
 core_command = require_text(data, "bitcoin_core_command")
 rs_config = require_text(data, "bitcoin_rs_config")
 core_config = require_text(data, "bitcoin_core_config")
@@ -933,6 +974,7 @@ require_literal_value(data, "criterion_artifact_schema", CRITERION_ARTIFACT_SCHE
     artifact_elapsed_by_id,
     artifact_raw_output_path_by_id,
     artifact_raw_output_sha256_by_id,
+    bitcoin_rs_ibd_adapter_from_artifact,
 ) = read_criterion_artifact(
     benchmark_artifact_path,
     start_height,
@@ -966,6 +1008,13 @@ if criterion_bitcoin_core_benchmark_id != BITCOIN_CORE_CRITERION_BENCHMARK_ID:
         "criterion_bitcoin_core_benchmark_id must be "
         f"{BITCOIN_CORE_CRITERION_BENCHMARK_ID!r}"
     )
+bitcoin_rs_ibd_adapter = require_literal_value(
+    data,
+    "bitcoin_rs_ibd_adapter",
+    BITCOIN_RS_IBD_ADAPTER,
+)
+if bitcoin_rs_ibd_adapter != bitcoin_rs_ibd_adapter_from_artifact:
+    die("bitcoin_rs_ibd_adapter must match benchmark_artifact_path bitcoin_rs_ibd_adapter")
 require_artifact_elapsed(
     artifact_elapsed_by_id,
     criterion_bitcoin_rs_benchmark_id,
@@ -1025,6 +1074,7 @@ env = {
     "G14_BITCOIN_CORE_IBD_BLOCKS": str(block_count),
     "G14_BITCOIN_RS_ELAPSED_SECONDS": bitcoin_rs_elapsed_seconds,
     "G14_BITCOIN_CORE_ELAPSED_SECONDS": bitcoin_core_elapsed_seconds,
+    "G14_BITCOIN_RS_IBD_ADAPTER": bitcoin_rs_ibd_adapter,
     "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID": criterion_bitcoin_rs_benchmark_id,
     "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID": criterion_bitcoin_core_benchmark_id,
     "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH": criterion_bitcoin_rs_raw_output_path,
@@ -1035,6 +1085,7 @@ env = {
     "G14_BENCHMARK_HOST_ID": benchmark_host_id,
     "G14_BITCOIN_CORE_VERSION": require_text(data, "bitcoin_core_version"),
     "G14_BITCOIN_CORE_COMMIT": core_commit,
+    "G14_BITCOIN_RS_COMMAND": rs_command,
     "G14_BITCOIN_RS_COMMAND_SHA256": rs_command_sha256,
     "G14_BITCOIN_CORE_COMMAND_SHA256": core_command_sha256,
     "G14_BITCOIN_RS_CONFIG_SHA256": rs_config_sha256,

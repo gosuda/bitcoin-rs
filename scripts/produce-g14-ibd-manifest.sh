@@ -23,6 +23,7 @@ import json
 import math
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -38,6 +39,9 @@ UTXO_COMMIT_SMOKE_SCHEMA = "g14-utxo-commit-smoke-v1"
 UTXO_BLOCK_SIZE_THRESHOLD_BYTES = 4 * 1024 * 1024
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
+BITCOIN_RS_IBD_ADAPTER = "bitcoin-rs-daemon-mainnet-ibd-v1"
+BITCOIN_RS_DAEMON_ADAPTER_BASENAME = "run-g14-bitcoin-rs-daemon-mainnet-ibd.sh"
+BITCOIN_RS_REPLAY_ADAPTER_BASENAME = "run-g14-bitcoin-rs-mainnet-ibd.sh"
 CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
 CRITERION_UNIT_PATTERN = "(?:ns|us|\u00b5s|ms|s)"
 CRITERION_INTERVAL_RE = re.compile(
@@ -55,6 +59,31 @@ CRITERION_UNIT_SECONDS = {
     "ms": 0.001,
     "s": 1.0,
 }
+
+
+def bitcoin_rs_command_argv(command: str, name: str) -> list[str]:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError as error:
+        die(f"{name} must be shell-parseable: {error}")
+    if not tokens:
+        die(f"{name} must not be empty")
+    return tokens
+
+
+def validate_bitcoin_rs_ibd_command(command: str, name: str = "--bitcoin-rs-command") -> None:
+    tokens = bitcoin_rs_command_argv(command, name)
+    basenames = [Path(token).name for token in tokens]
+    if BITCOIN_RS_REPLAY_ADAPTER_BASENAME in basenames:
+        die(
+            f"{name} must not invoke the mainnet prefix replay wrapper "
+            f"{BITCOIN_RS_REPLAY_ADAPTER_BASENAME!r}"
+        )
+    if basenames[0] != BITCOIN_RS_DAEMON_ADAPTER_BASENAME:
+        die(
+            f"{name} must start with the bitcoin-rs daemon IBD adapter "
+            f"{BITCOIN_RS_DAEMON_ADAPTER_BASENAME!r}, got {basenames[0]!r}"
+        )
 
 
 def die(message: str) -> None:
@@ -316,6 +345,7 @@ def require_ibd_completion_proof(
     command_sha256: str,
     config_sha256: str,
     source: str,
+    expected_ibd_adapter: str | None = None,
 ) -> None:
     payloads = [
         line.removeprefix(IBD_COMPLETION_PROOF_PREFIX).strip()
@@ -341,6 +371,11 @@ def require_ibd_completion_proof(
     require_proof_int(proof, "ibd_blocks", stop_height - start_height + 1, source)
     require_proof_text(proof, "command_sha256", command_sha256, source)
     require_proof_text(proof, "config_sha256", config_sha256, source)
+
+    if expected_ibd_adapter is not None:
+        require_proof_text(proof, "ibd_adapter", expected_ibd_adapter, source)
+    elif proof.get("ibd_adapter") is not None:
+        die(f"{source} IBD completion proof must not include ibd_adapter for {benchmark_id!r}")
 
 
 def require_raw_output_binding(
@@ -381,6 +416,7 @@ def require_raw_output_binding(
         command_sha256,
         config_sha256,
         source,
+        BITCOIN_RS_IBD_ADAPTER if benchmark_id == BITCOIN_RS_CRITERION_BENCHMARK_ID else None,
     )
     return str(raw_output_path.resolve()), raw_output_sha256
 
@@ -392,7 +428,7 @@ def criterion_artifact_elapsed_seconds(
     start_height: int,
     stop_height: int,
     command_config_hashes: dict[str, str],
-) -> tuple[str, str, float, float, dict[str, str], dict[str, str]]:
+) -> tuple[str, str, float, float, dict[str, str], dict[str, str], str]:
     data = read_json_file(path, "--benchmark-artifact")
     if not isinstance(data, dict):
         die("--benchmark-artifact Criterion evidence must be a JSON object")
@@ -411,6 +447,12 @@ def criterion_artifact_elapsed_seconds(
     benchmark_host_id = require_text_field(data, "benchmark_host_id", "--benchmark-artifact")
     for key, expected in command_config_hashes.items():
         require_matching_hash_field(data, key, expected, "--benchmark-artifact")
+    require_literal_field(
+        data,
+        "bitcoin_rs_ibd_adapter",
+        BITCOIN_RS_IBD_ADAPTER,
+        "--benchmark-artifact",
+    )
     benchmarks = data.get("benchmarks")
     if not isinstance(benchmarks, list):
         die("--benchmark-artifact benchmarks must be an array")
@@ -468,6 +510,7 @@ def criterion_artifact_elapsed_seconds(
         elapsed_by_id[core_id],
         raw_output_path_by_id,
         raw_output_sha256_by_id,
+        BITCOIN_RS_IBD_ADAPTER,
     )
 
 
@@ -791,6 +834,7 @@ if stop_height < start_height:
     die("--ibd-stop-height must be greater than or equal to --ibd-start-height")
 
 bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-command")
+validate_bitcoin_rs_ibd_command(bitcoin_rs_command)
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = read_text(require_file(args.bitcoin_rs_config, "--bitcoin-rs-config"), "--bitcoin-rs-config")
 bitcoin_core_config = read_text(require_file(args.bitcoin_core_config, "--bitcoin-core-config"), "--bitcoin-core-config")
@@ -903,6 +947,7 @@ if all(criterion_benchmark_ids_supplied):
         artifact_core_elapsed_seconds,
         raw_output_path_by_id,
         raw_output_sha256_by_id,
+        bitcoin_rs_ibd_adapter,
     ) = criterion_artifact_elapsed_seconds(
         benchmark_artifact,
         bitcoin_rs_benchmark_id,
@@ -968,6 +1013,7 @@ if all(criterion_benchmark_ids_supplied):
     manifest["criterion_bitcoin_rs_raw_output_sha256"] = raw_output_sha256_by_id[bitcoin_rs_benchmark_id]
     manifest["criterion_bitcoin_core_raw_output_path"] = raw_output_path_by_id[bitcoin_core_benchmark_id]
     manifest["criterion_bitcoin_core_raw_output_sha256"] = raw_output_sha256_by_id[bitcoin_core_benchmark_id]
+    manifest["bitcoin_rs_ibd_adapter"] = bitcoin_rs_ibd_adapter
 
 output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(output)

@@ -33,6 +33,9 @@ const IBD_COMPLETION_PROOF_SCHEMA: &str = "g14-ibd-completion-proof-v1";
 const IBD_COMPLETION_PROOF_PREFIX: &str = "G14_IBD_COMPLETION_PROOF ";
 const BITCOIN_RS_CRITERION_BENCHMARK_ID: &str = "bitcoin-rs/mainnet-ibd";
 const BITCOIN_CORE_CRITERION_BENCHMARK_ID: &str = "bitcoin-core/mainnet-ibd";
+const BITCOIN_RS_IBD_ADAPTER: &str = "bitcoin-rs-daemon-mainnet-ibd-v1";
+const BITCOIN_RS_DAEMON_ADAPTER_BASENAME: &str = "run-g14-bitcoin-rs-daemon-mainnet-ibd.sh";
+const BITCOIN_RS_REPLAY_ADAPTER_BASENAME: &str = "run-g14-bitcoin-rs-mainnet-ibd.sh";
 
 const EVIDENCE_HELP: &str = "required G14 evidence env: \
 G14_COMMIT_SHA=<current git HEAD as 40 lowercase hex>, \
@@ -51,6 +54,7 @@ G14_BITCOIN_RS_IBD_BLOCKS, \
 G14_BITCOIN_CORE_IBD_BLOCKS, \
 G14_BITCOIN_RS_ELAPSED_SECONDS, \
 G14_BITCOIN_CORE_ELAPSED_SECONDS, \
+G14_BITCOIN_RS_IBD_ADAPTER=bitcoin-rs-daemon-mainnet-ibd-v1, \
 G14_BITCOIN_RS_CRITERION_BENCHMARK_ID, \
 G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID, \
 G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH, \
@@ -61,6 +65,7 @@ G14_BENCHMARK_RUN_ID, \
 G14_BENCHMARK_HOST_ID, \
 G14_BITCOIN_CORE_VERSION, \
 G14_BITCOIN_CORE_COMMIT=<40 lowercase hex>, \
+G14_BITCOIN_RS_COMMAND, \
 G14_BITCOIN_RS_COMMAND_SHA256=<64 lowercase hex>, \
 G14_BITCOIN_CORE_COMMAND_SHA256=<64 lowercase hex>, \
 G14_BITCOIN_RS_CONFIG_SHA256=<64 lowercase hex>, \
@@ -283,11 +288,14 @@ impl G14Evidence {
             "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID",
             BITCOIN_CORE_CRITERION_BENCHMARK_ID,
         );
+        require_literal("G14_BITCOIN_RS_IBD_ADAPTER", BITCOIN_RS_IBD_ADAPTER);
         let benchmark_run_id = required_env("G14_BENCHMARK_RUN_ID");
         let benchmark_host_id = required_env("G14_BENCHMARK_HOST_ID");
         let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
         let bitcoin_core_commit = required_hex("G14_BITCOIN_CORE_COMMIT", 40);
+        let bitcoin_rs_command = required_env("G14_BITCOIN_RS_COMMAND");
         let bitcoin_rs_command_sha256 = required_hex("G14_BITCOIN_RS_COMMAND_SHA256", 64);
+        verify_bitcoin_rs_command_sha_binding(&bitcoin_rs_command, &bitcoin_rs_command_sha256);
         let bitcoin_core_command_sha256 = required_hex("G14_BITCOIN_CORE_COMMAND_SHA256", 64);
         let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
         let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
@@ -563,6 +571,80 @@ impl CriterionRawOutputCustody {
     }
 }
 
+fn token_basename(token: &str) -> &str {
+    Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(token)
+}
+
+fn shell_split(command: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+
+    for ch in command.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => escape = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+
+    if escape || in_single || in_double {
+        return Err("command must be shell-parseable".to_owned());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+fn validate_bitcoin_rs_ibd_command(command: &str, name: &str) {
+    let command = command.trim();
+    assert!(!command.is_empty(), "{name} must not be empty");
+    let tokens = shell_split(command).unwrap_or_else(|message| panic!("{name} {message}"));
+    assert!(!tokens.is_empty(), "{name} must not be empty");
+    let basenames: Vec<_> = tokens.iter().map(|token| token_basename(token)).collect();
+    assert!(
+        !basenames.contains(&BITCOIN_RS_REPLAY_ADAPTER_BASENAME),
+        "{name} must not invoke the mainnet prefix replay wrapper {BITCOIN_RS_REPLAY_ADAPTER_BASENAME:?}"
+    );
+    assert_eq!(
+        basenames[0], BITCOIN_RS_DAEMON_ADAPTER_BASENAME,
+        "{name} must start with the bitcoin-rs daemon IBD adapter {BITCOIN_RS_DAEMON_ADAPTER_BASENAME:?}, got {:?}",
+        basenames[0]
+    );
+}
+
+fn sha256_text(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    lower_hex(&hasher.finalize())
+}
+
+fn verify_bitcoin_rs_command_sha_binding(command: &str, expected_sha256: &str) {
+    validate_bitcoin_rs_ibd_command(command, "G14_BITCOIN_RS_COMMAND");
+    let computed_sha256 = sha256_text(command);
+    assert_eq!(
+        computed_sha256, expected_sha256,
+        "G14_BITCOIN_RS_COMMAND_SHA256 must match SHA-256(G14_BITCOIN_RS_COMMAND)"
+    );
+}
+
 fn required_env(name: &str) -> String {
     match env::var(name) {
         Ok(value) if !value.trim().is_empty() => value,
@@ -736,6 +818,14 @@ fn verify_ibd_completion_proof(path: &str, name: &str, context: IbdCompletionPro
     );
     require_json_literal(&proof, "command_sha256", context.command_sha256, name);
     require_json_literal(&proof, "config_sha256", context.config_sha256, name);
+    if context.benchmark_id == BITCOIN_RS_CRITERION_BENCHMARK_ID {
+        require_json_literal(&proof, "ibd_adapter", BITCOIN_RS_IBD_ADAPTER, name);
+    } else if proof.get("ibd_adapter").is_some() {
+        panic!(
+            "{name} IBD completion proof must not include ibd_adapter for {}",
+            context.benchmark_id
+        );
+    }
 }
 
 fn criterion_elapsed_seconds(raw_output: &str, benchmark_id: &str, name: &str) -> f64 {
@@ -2140,7 +2230,7 @@ mod tests {
     }
 
     fn completion_proof_value(context: IbdCompletionProofContext<'_>) -> Value {
-        json!({
+        let mut proof = json!({
             "schema": IBD_COMPLETION_PROOF_SCHEMA,
             "benchmark_id": context.benchmark_id,
             "benchmark_run_id": context.benchmark_run_id,
@@ -2152,7 +2242,35 @@ mod tests {
             "ibd_blocks": context.stop_height - context.start_height + 1,
             "command_sha256": context.command_sha256,
             "config_sha256": context.config_sha256,
-        })
+        });
+        if context.benchmark_id == BITCOIN_RS_CRITERION_BENCHMARK_ID {
+            proof["ibd_adapter"] = json!(BITCOIN_RS_IBD_ADAPTER);
+        }
+        proof
+    }
+
+    #[test]
+    fn final_gate_rejects_replay_bitcoin_rs_command() {
+        let replay_command = "/tmp/g14-fixture/run-g14-bitcoin-rs-mainnet-ibd.sh --replay";
+        let result = panic::catch_unwind(|| {
+            validate_bitcoin_rs_ibd_command(replay_command, "G14_BITCOIN_RS_COMMAND");
+        });
+        assert!(result.is_err(), "replay wrapper command must be rejected");
+    }
+
+    #[test]
+    fn final_gate_rejects_bitcoin_rs_command_sha_mismatch() {
+        let command = "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh";
+        let result = panic::catch_unwind(|| {
+            verify_bitcoin_rs_command_sha_binding(command, TEST_RS_COMMAND_SHA256);
+        });
+        assert!(result.is_err(), "command/SHA mismatch must be rejected");
+    }
+
+    #[test]
+    fn final_gate_accepts_daemon_argv0_bitcoin_rs_command_sha_binding() {
+        let command = "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh";
+        verify_bitcoin_rs_command_sha_binding(command, &sha256_text(command));
     }
 
     fn test_completion_context(benchmark_id: &str) -> IbdCompletionProofContext<'_> {
