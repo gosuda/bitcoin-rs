@@ -54,7 +54,6 @@ const APPLY_STAGE_METRICS: &[(&str, &str)] = &[
         "pow_limit_continuity",
         "node.apply_block.pow_limit_continuity_seconds",
     ),
-    ("bip113", "node.apply_block.bip113_seconds"),
     ("script_verify", "node.apply_block.script_verify_seconds"),
     (
         "coinbase_maturity",

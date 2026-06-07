@@ -271,12 +271,6 @@ pub fn apply_block(
         .record(pow_limit_dur.as_secs_f64());
     pow_limit_result?;
 
-    let bip113_started = quanta::Instant::now();
-    let bip113_result = check_bip113_finality(block, height, locktime_cutoff);
-    let bip113_dur = bip113_started.elapsed();
-    metrics::histogram!("node.apply_block.bip113_seconds").record(bip113_dur.as_secs_f64());
-    bip113_result?;
-
     let script_verify_started = quanta::Instant::now();
     let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
     let script_verify_result = verify_block_transactions(
@@ -475,7 +469,6 @@ pub fn apply_block(
         pow_limit_us = pow_limit_dur.as_micros(),
         block_rules_us = block_rules_dur.as_micros(),
         bip30_bip34_us = bip30_bip34_dur.as_micros(),
-        bip113_us = bip113_dur.as_micros(),
         script_verify_us = script_verify_dur.as_micros(),
         coinbase_maturity_us = coinbase_maturity_dur.as_micros(),
         bip68_us = bip68_dur.as_micros(),
@@ -883,32 +876,6 @@ impl BlockLocalUtxoMetaView {
         }
         Ok(())
     }
-}
-
-fn check_bip113_finality(
-    block: &bitcoin::Block,
-    height: u32,
-    locktime_cutoff: u32,
-) -> core::result::Result<(), ApplyError> {
-    for tx in &block.txdata {
-        if tx.is_coinbase() {
-            continue;
-        }
-        if bitcoin_rs_consensus::verify_tx::is_final_tx(tx, height, locktime_cutoff) {
-            continue;
-        }
-        return Err(ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Bip {
-                bip: "BIP113",
-                reason: format!(
-                    "non-final transaction at height {height} locktime cutoff \
-                     {locktime_cutoff}: locktime {}",
-                    tx.lock_time.to_consensus_u32()
-                ),
-            },
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
