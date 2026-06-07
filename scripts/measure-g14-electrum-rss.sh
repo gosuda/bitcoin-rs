@@ -132,6 +132,17 @@ def sampled_scripthash(seed: str, index: int) -> str:
     return hashlib.sha256(f"{seed}:{index}".encode("utf-8")).hexdigest()
 
 
+def select_scripthash_sample(values: list[str], seed: str, sample_size: int) -> list[str]:
+    keyed = sorted(
+        values,
+        key=lambda value: (
+            hashlib.sha256(f"{seed}:{value}".encode("utf-8")).digest(),
+            value,
+        ),
+    )
+    return keyed[:sample_size]
+
+
 def read_scripthash_corpus(path: str) -> list[str]:
     values = []
     try:
@@ -200,6 +211,7 @@ elif args.scripthashes is not None:
     scripthashes = read_scripthash_corpus(args.scripthashes)
     if len(scripthashes) < sample_size:
         die("--scripthashes contains fewer entries than --sample-size")
+    scripthashes = select_scripthash_sample(scripthashes, args.seed, sample_size)
     corpus_source = args.scripthashes
 else:
     die("--scripthashes is required unless --generate-empty-scripthashes-for-smoke-test is set")

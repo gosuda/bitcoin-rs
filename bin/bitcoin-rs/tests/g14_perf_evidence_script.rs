@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 type FakeElectrumServer = (thread::JoinHandle<std::io::Result<()>>, u16);
+type FakeElectrumRecordingServer = (thread::JoinHandle<std::io::Result<Vec<String>>>, u16);
 
 struct FakeBitcoinRsProcess {
     child: Child,
@@ -1679,6 +1680,73 @@ fn electrum_rss_measurement_emits_g14_fragment() -> Result<(), Box<dyn std::erro
 
 #[test]
 #[cfg(target_os = "linux")]
+fn electrum_rss_measurement_samples_real_corpus_by_seeded_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let (server, port) = fake_electrum_history_server(3)?;
+    let fake_node = fake_bitcoin_rs_process()?;
+    let output = temp.path().join("electrum-rss.json");
+    let corpus_contents = [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333333333333333333333333333",
+        "4444444444444444444444444444444444444444444444444444444444444444",
+        "5555555555555555555555555555555555555555555555555555555555555555",
+        "6666666666666666666666666666666666666666666666666666666666666666",
+    ]
+    .join("\n")
+        + "\n";
+    let corpus = write_text(temp.path(), "scripthashes.txt", &corpus_contents)?;
+
+    let command_output = Command::new("bash")
+        .arg(electrum_rss_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output path")?,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--pid",
+            &fake_node.pid(),
+            "--tip-height",
+            "10",
+            "--tip-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--sample-size",
+            "3",
+            "--seed",
+            "sample-seed",
+            "--scripthashes",
+            corpus.to_str().ok_or("non-UTF-8 corpus path")?,
+            "--timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert_success(&command_output);
+    let requested = server
+        .join()
+        .map_err(|_| "fake Electrum server panicked")??;
+    assert_eq!(
+        requested,
+        vec![
+            String::from("3333333333333333333333333333333333333333333333333333333333333333"),
+            String::from("2222222222222222222222222222222222222222222222222222222222222222"),
+            String::from("4444444444444444444444444444444444444444444444444444444444444444"),
+        ]
+    );
+    let measurement = fs::read_to_string(output)?;
+    let measurement: serde_json::Value = serde_json::from_str(&measurement)?;
+    assert_eq!(
+        measurement["electrum_scripthash_corpus_sha256"],
+        "cd75f59f8322b0a49d400a0147d14087d187bbdf0f03cb61bbc8019825e454b0"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn electrum_rss_measurement_rejects_malformed_tip_hash() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let output = temp.path().join("electrum-rss.json");
@@ -2905,6 +2973,47 @@ fn fake_electrum_server(
             writer.flush()?;
         }
         Ok(())
+    });
+    Ok((handle, port))
+}
+
+fn fake_electrum_history_server(
+    response_count: usize,
+) -> Result<FakeElectrumRecordingServer, Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let handle = thread::spawn(move || -> std::io::Result<Vec<String>> {
+        let (stream, _addr) = listener.accept()?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut writer = stream;
+        let mut line = String::new();
+        let mut requested = Vec::with_capacity(response_count);
+        for request_id in 1..=response_count {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let request: serde_json::Value = serde_json::from_str(line.trim_end())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let scripthash = request
+                .get("params")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|params| params.first())
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "request missing scripthash param",
+                    )
+                })?;
+            requested.push(scripthash.to_owned());
+            writeln!(
+                writer,
+                r#"{{"id":{request_id},"result":[{{"height":1,"tx_hash":"0000000000000000000000000000000000000000000000000000000000000001"}}]}}"#
+            )?;
+            writer.flush()?;
+        }
+        Ok(requested)
     });
     Ok((handle, port))
 }
