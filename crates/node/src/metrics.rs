@@ -11,6 +11,8 @@ use metrics::{
 };
 use parking_lot::Mutex;
 
+type MetricCell = Arc<Mutex<MetricValue>>;
+
 /// Handle to the in-memory metrics recorder installed by the node.
 #[derive(Clone, Debug)]
 pub struct MetricsHandle {
@@ -28,7 +30,12 @@ impl MetricsHandle {
     /// Returns a point-in-time copy of recorded metric values.
     #[must_use]
     pub fn snapshot(&self) -> HashMap<String, MetricValue> {
-        self.recorder.values.lock().clone()
+        self.recorder
+            .values
+            .lock()
+            .iter()
+            .map(|(key, value)| (key.clone(), *value.lock()))
+            .collect()
     }
 }
 
@@ -50,7 +57,7 @@ pub enum MetricValue {
 
 #[derive(Clone, Debug, Default)]
 struct InMemoryRecorder {
-    values: Arc<Mutex<HashMap<String, MetricValue>>>,
+    values: Arc<Mutex<HashMap<String, MetricCell>>>,
 }
 
 impl InMemoryRecorder {
@@ -58,25 +65,24 @@ impl InMemoryRecorder {
         key.name().to_owned()
     }
 
-    fn ensure_counter(&self, key: String) {
-        self.values
-            .lock()
-            .entry(key)
-            .or_insert(MetricValue::Counter(0));
+    fn ensure_counter(&self, key: String) -> MetricCell {
+        self.ensure_metric(key, MetricValue::Counter(0))
     }
 
-    fn ensure_gauge(&self, key: String) {
-        self.values
-            .lock()
-            .entry(key)
-            .or_insert(MetricValue::Gauge(0.0));
+    fn ensure_gauge(&self, key: String) -> MetricCell {
+        self.ensure_metric(key, MetricValue::Gauge(0.0))
     }
 
-    fn ensure_histogram(&self, key: String) {
+    fn ensure_histogram(&self, key: String) -> MetricCell {
+        self.ensure_metric(key, MetricValue::Histogram { count: 0, sum: 0.0 })
+    }
+
+    fn ensure_metric(&self, key: String, initial: MetricValue) -> MetricCell {
         self.values
             .lock()
             .entry(key)
-            .or_insert(MetricValue::Histogram { count: 0, sum: 0.0 });
+            .or_insert_with(|| Arc::new(Mutex::new(initial)))
+            .clone()
     }
 }
 
@@ -89,105 +95,75 @@ impl Recorder for InMemoryRecorder {
 
     fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
         let key = Self::metric_key(key);
-        self.ensure_counter(key.clone());
-        Counter::from_arc(Arc::new(CounterHandle {
-            key,
-            recorder: self.clone(),
-        }))
+        let value = self.ensure_counter(key);
+        Counter::from_arc(Arc::new(CounterHandle { value }))
     }
 
     fn register_gauge(&self, key: &Key, _metadata: &Metadata<'_>) -> Gauge {
         let key = Self::metric_key(key);
-        self.ensure_gauge(key.clone());
-        Gauge::from_arc(Arc::new(GaugeHandle {
-            key,
-            recorder: self.clone(),
-        }))
+        let value = self.ensure_gauge(key);
+        Gauge::from_arc(Arc::new(GaugeHandle { value }))
     }
 
     fn register_histogram(&self, key: &Key, _metadata: &Metadata<'_>) -> Histogram {
         let key = Self::metric_key(key);
-        self.ensure_histogram(key.clone());
-        Histogram::from_arc(Arc::new(HistogramHandle {
-            key,
-            recorder: self.clone(),
-        }))
+        let value = self.ensure_histogram(key);
+        Histogram::from_arc(Arc::new(HistogramHandle { value }))
     }
 }
 
 struct CounterHandle {
-    key: String,
-    recorder: InMemoryRecorder,
+    value: MetricCell,
 }
 
 impl CounterFn for CounterHandle {
     fn increment(&self, value: u64) {
-        let mut values = self.recorder.values.lock();
-        let entry = values
-            .entry(self.key.clone())
-            .or_insert(MetricValue::Counter(0));
-        if let MetricValue::Counter(current) = entry {
+        let mut entry = self.value.lock();
+        if let MetricValue::Counter(current) = &mut *entry {
             *current = current.saturating_add(value);
         }
     }
 
     fn absolute(&self, value: u64) {
-        let mut values = self.recorder.values.lock();
-        let entry = values
-            .entry(self.key.clone())
-            .or_insert(MetricValue::Counter(0));
-        if let MetricValue::Counter(current) = entry {
+        let mut entry = self.value.lock();
+        if let MetricValue::Counter(current) = &mut *entry {
             *current = (*current).max(value);
         }
     }
 }
 
 struct GaugeHandle {
-    key: String,
-    recorder: InMemoryRecorder,
+    value: MetricCell,
 }
 
 impl GaugeFn for GaugeHandle {
     fn increment(&self, value: f64) {
-        let mut values = self.recorder.values.lock();
-        let entry = values
-            .entry(self.key.clone())
-            .or_insert(MetricValue::Gauge(0.0));
-        if let MetricValue::Gauge(current) = entry {
+        let mut entry = self.value.lock();
+        if let MetricValue::Gauge(current) = &mut *entry {
             *current += value;
         }
     }
 
     fn decrement(&self, value: f64) {
-        let mut values = self.recorder.values.lock();
-        let entry = values
-            .entry(self.key.clone())
-            .or_insert(MetricValue::Gauge(0.0));
-        if let MetricValue::Gauge(current) = entry {
+        let mut entry = self.value.lock();
+        if let MetricValue::Gauge(current) = &mut *entry {
             *current -= value;
         }
     }
 
     fn set(&self, value: f64) {
-        self.recorder
-            .values
-            .lock()
-            .insert(self.key.clone(), MetricValue::Gauge(value));
+        *self.value.lock() = MetricValue::Gauge(value);
     }
 }
 
 struct HistogramHandle {
-    key: String,
-    recorder: InMemoryRecorder,
+    value: MetricCell,
 }
 
 impl HistogramFn for HistogramHandle {
     fn record(&self, value: f64) {
-        let mut values = self.recorder.values.lock();
-        let entry = values
-            .entry(self.key.clone())
-            .or_insert(MetricValue::Histogram { count: 0, sum: 0.0 });
-        if let MetricValue::Histogram { count, sum } = entry {
+        let mut entry = self.value.lock();
+        if let MetricValue::Histogram { count, sum } = &mut *entry {
             *count = count.saturating_add(1);
             *sum += value;
         }
@@ -253,5 +229,68 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn in_memory_recorder_records_counter_gauge_and_histogram_values() {
+        let (recorder, handle) = test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            metrics::counter!("node.test.counter").increment(2);
+            metrics::counter!("node.test.counter").absolute(5);
+            metrics::counter!("node.test.counter").absolute(3);
+
+            metrics::gauge!("node.test.gauge").set(10.0);
+            metrics::gauge!("node.test.gauge").increment(2.5);
+            metrics::gauge!("node.test.gauge").decrement(1.5);
+
+            metrics::histogram!("node.test.histogram").record(1.25);
+            metrics::histogram!("node.test.histogram").record(2.75);
+        });
+
+        let snapshot = handle.snapshot();
+        assert_eq!(
+            snapshot.get("node.test.counter"),
+            Some(&MetricValue::Counter(5))
+        );
+        assert_eq!(
+            snapshot.get("node.test.gauge"),
+            Some(&MetricValue::Gauge(11.0))
+        );
+        assert_eq!(
+            snapshot.get("node.test.histogram"),
+            Some(&MetricValue::Histogram { count: 2, sum: 4.0 })
+        );
+    }
+
+    #[test]
+    fn in_memory_recorder_duplicate_registrations_share_metric_cell() {
+        let (recorder, handle) = test_recorder();
+
+        metrics::with_local_recorder(&recorder, || {
+            metrics::counter!("node.test.duplicate").increment(2);
+            metrics::counter!("node.test.duplicate").increment(3);
+            metrics::histogram!("node.test.repeat_histogram").record(1.0);
+            metrics::histogram!("node.test.repeat_histogram").record(4.0);
+        });
+
+        let snapshot = handle.snapshot();
+        assert_eq!(
+            snapshot.get("node.test.duplicate"),
+            Some(&MetricValue::Counter(5))
+        );
+        assert_eq!(
+            snapshot.get("node.test.repeat_histogram"),
+            Some(&MetricValue::Histogram { count: 2, sum: 5.0 })
+        );
+    }
+
+    fn test_recorder() -> (InMemoryRecorder, MetricsHandle) {
+        let recorder = InMemoryRecorder::default();
+        let handle = MetricsHandle {
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            recorder: recorder.clone(),
+        };
+        (recorder, handle)
     }
 }
