@@ -1107,6 +1107,264 @@ fn bitcoin_rs_mainnet_ibd_wrapper_rejects_wrong_replay_window()
 }
 
 #[test]
+fn bitcoin_core_mainnet_ibd_wrapper_emits_canonical_criterion_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "bitcoind", &stop_file)?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::Mainnet,
+        &stop_file,
+    )?;
+    let command_output = temp.path().join("bitcoind.log");
+
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--command-output",
+            command_output.to_str().ok_or("non-UTF-8 command output")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("Benchmarking bitcoin-core/mainnet-ibd\n"));
+    assert!(stdout.contains("bitcoin-core/mainnet-ibd   time:"));
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_core_mainnet_ibd_wrapper_retries_rpc_startup() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "bitcoind", &stop_file)?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::RpcWarmup,
+        &stop_file,
+    )?;
+
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("Benchmarking bitcoin-core/mainnet-ibd\n"));
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_core_mainnet_ibd_wrapper_rejects_non_mainnet_chain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "bitcoind", &stop_file)?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::WrongChain,
+        &stop_file,
+    )?;
+
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mainnet"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_core_mainnet_ibd_wrapper_rejects_wrong_stop_hash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "bitcoind", &stop_file)?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::Mainnet,
+        &stop_file,
+    )?;
+
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000b",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("stop hash"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_core_mainnet_ibd_wrapper_rejects_already_synced_datadir()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "bitcoind", &stop_file)?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::AlreadySynced,
+        &stop_file,
+    )?;
+
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("starts past requested IBD start height"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
 fn criterion_runner_accepts_bitcoin_rs_mainnet_ibd_wrapper()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -1190,6 +1448,99 @@ fn criterion_runner_accepts_bitcoin_rs_mainnet_ibd_wrapper()
     assert!(bitcoin_rs_raw.contains("bitcoin-rs/mainnet-ibd   time:"));
     assert!(bitcoin_rs_raw.contains("G14_IBD_COMPLETION_PROOF "));
     assert!(replay_output.exists());
+    Ok(())
+}
+
+#[test]
+fn criterion_runner_accepts_bitcoin_core_mainnet_ibd_wrapper()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let bitcoin_rs_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-rs-runner-criterion",
+        "bitcoin-rs/mainnet-ibd",
+        "1.25",
+    )?;
+    let datadir = temp.path().join("core-wrapper-runner-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-runner-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "runner-bitcoind", &stop_file)?;
+    let measured_bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "runner-bitcoin-cli",
+        FakeBitcoinCliMode::Mainnet,
+        &stop_file,
+    )?;
+    let command_output = temp.path().join("runner-bitcoind.log");
+    let bitcoin_core_command = format!(
+        "bash {} --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a --datadir {} --bitcoin-core-config {} --bitcoind-command {} --bitcoin-cli-command {} --command-output {} --force --poll-interval-seconds 0.01 --startup-timeout-seconds 5",
+        bitcoin_core_mainnet_ibd_script_path().display(),
+        datadir.display(),
+        bitcoin_core_config.display(),
+        bitcoind.display(),
+        measured_bitcoin_cli.display(),
+        command_output.display()
+    );
+    let artifact = temp.path().join("g14-core-wrapper-runner-artifact.json");
+    let bitcoin_rs_raw_output = temp.path().join("bitcoin-rs-core-wrapper-runner-raw.txt");
+    let bitcoin_core_raw_output = temp.path().join("bitcoin-core-wrapper-runner-raw.txt");
+
+    let output = Command::new("bash")
+        .arg(criterion_runner_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-core-wrapper-runner",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            bitcoin_rs_command
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--bitcoin-core-command",
+            &bitcoin_core_command,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--criterion-bitcoin-rs-raw-output",
+            bitcoin_rs_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs raw output")?,
+            "--criterion-bitcoin-core-raw-output",
+            bitcoin_core_raw_output
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core raw output")?,
+            "--",
+            "-datadir=/tmp/fake-core",
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+
+    assert_success(&output);
+    let artifact_json = fs::read_to_string(&artifact)?;
+    assert!(artifact_json.contains(r#""schema": "g14-criterion-artifact-v1""#));
+    let bitcoin_core_raw = fs::read_to_string(&bitcoin_core_raw_output)?;
+    assert!(bitcoin_core_raw.contains("Benchmarking bitcoin-core/mainnet-ibd"));
+    assert!(bitcoin_core_raw.contains("bitcoin-core/mainnet-ibd   time:"));
+    assert!(bitcoin_core_raw.contains("G14_IBD_COMPLETION_PROOF "));
+    assert!(stop_file.exists());
     Ok(())
 }
 
@@ -2161,6 +2512,10 @@ fn bitcoin_rs_mainnet_ibd_script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-g14-bitcoin-rs-mainnet-ibd.sh")
 }
 
+fn bitcoin_core_mainnet_ibd_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/run-g14-bitcoin-core-mainnet-ibd.sh")
+}
+
 fn write_text(
     dir: &Path,
     name: &str,
@@ -2693,6 +3048,35 @@ fn fake_failing_command(dir: &Path, name: &str) -> Result<PathBuf, Box<dyn std::
         r"#!/usr/bin/env python3
 raise SystemExit(7)
 ",
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+fn fake_bitcoind_command(
+    dir: &Path,
+    name: &str,
+    stop_file: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"#!/usr/bin/env python3
+import pathlib
+import time
+
+stop_file = pathlib.Path({stop_file:?})
+deadline = time.monotonic() + 10.0
+while not stop_file.exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit("fake bitcoind stop timeout")
+    time.sleep(0.01)
+"#,
+            stop_file = stop_file.display().to_string()
+        ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
     permissions.set_mode(0o755);
@@ -3338,6 +3722,8 @@ enum FakeBitcoinCliMode {
     WrongChain,
     ShortBlocks,
     ShortHeaders,
+    AlreadySynced,
+    RpcWarmup,
 }
 
 fn fake_bitcoin_cli(
@@ -3350,13 +3736,17 @@ fn fake_bitcoin_cli(
         FakeBitcoinCliMode::Mainnet
         | FakeBitcoinCliMode::WrongChain
         | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders => r#"f"{height:064x}""#,
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => r#"f"{height:064x}""#,
     };
     let chain = match mode {
         FakeBitcoinCliMode::Mainnet
         | FakeBitcoinCliMode::MalformedHash
         | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders => "main",
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => "main",
         FakeBitcoinCliMode::WrongChain => "regtest",
     };
     let blocks = match mode {
@@ -3364,14 +3754,18 @@ fn fake_bitcoin_cli(
         FakeBitcoinCliMode::Mainnet
         | FakeBitcoinCliMode::MalformedHash
         | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortHeaders => 10,
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => 10,
     };
     let headers = match mode {
         FakeBitcoinCliMode::ShortHeaders => 9,
         FakeBitcoinCliMode::Mainnet
         | FakeBitcoinCliMode::MalformedHash
         | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortBlocks => 10,
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => 10,
     };
     fs::write(
         &path,
@@ -3392,6 +3786,113 @@ if len(args) != 2 or args[0] != "getblockhash":
 height = int(args[1])
 print({hash_expr})
 "#,
+        ),
+    )?;
+    let mut permissions = fs::metadata(&path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions)?;
+    Ok(path)
+}
+
+fn fake_measured_bitcoin_core_cli(
+    dir: &Path,
+    name: &str,
+    mode: FakeBitcoinCliMode,
+    stop_file: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    let state_file = dir.join(format!("{name}.chaininfo-calls"));
+    let hash_expr = match mode {
+        FakeBitcoinCliMode::MalformedHash => r#""not-a-hash""#,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => r#"f"{height:064x}""#,
+    };
+    let chain = match mode {
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => "main",
+        FakeBitcoinCliMode::WrongChain => "regtest",
+    };
+    let initial_blocks = match mode {
+        FakeBitcoinCliMode::AlreadySynced => 10,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::RpcWarmup => 0,
+    };
+    let initial_headers = match mode {
+        FakeBitcoinCliMode::AlreadySynced => 10,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::RpcWarmup => 0,
+    };
+    let blocks = match mode {
+        FakeBitcoinCliMode::ShortBlocks => 9,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortHeaders
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => 10,
+    };
+    let headers = match mode {
+        FakeBitcoinCliMode::ShortHeaders => 9,
+        FakeBitcoinCliMode::Mainnet
+        | FakeBitcoinCliMode::MalformedHash
+        | FakeBitcoinCliMode::WrongChain
+        | FakeBitcoinCliMode::ShortBlocks
+        | FakeBitcoinCliMode::AlreadySynced
+        | FakeBitcoinCliMode::RpcWarmup => 10,
+    };
+    let rpc_warmup = matches!(mode, FakeBitcoinCliMode::RpcWarmup);
+    fs::write(
+        &path,
+        format!(
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+args = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
+
+if len(args) == 1 and args[0] == "stop":
+    pathlib.Path({stop_file:?}).write_text("stop\n", encoding="utf-8")
+    print("Bitcoin Core stopping")
+    raise SystemExit(0)
+
+if len(args) == 1 and args[0] == "getblockchaininfo":
+    state_file = pathlib.Path({state_file:?})
+    call_count = int(state_file.read_text(encoding="utf-8")) if state_file.exists() else 0
+    if {rpc_warmup} and not state_file.exists():
+        state_file.write_text("-1", encoding="utf-8")
+        raise SystemExit("RPC server not ready")
+    state_file.write_text(str(call_count + 1), encoding="utf-8")
+    blocks = {initial_blocks} if call_count <= 0 else {blocks}
+    headers = {initial_headers} if call_count <= 0 else {headers}
+    print(json.dumps({{"chain": "{chain}", "blocks": blocks, "headers": headers}}))
+    raise SystemExit(0)
+
+if len(args) != 2 or args[0] != "getblockhash":
+    raise SystemExit(f"unexpected arguments: {{sys.argv[1:]!r}}")
+
+height = int(args[1])
+print({hash_expr})
+"#,
+            stop_file = stop_file.display().to_string(),
+            state_file = state_file.display().to_string(),
+            rpc_warmup = if rpc_warmup { "True" } else { "False" },
         ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
