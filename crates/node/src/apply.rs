@@ -320,6 +320,7 @@ pub fn apply_block(
     bip68_result?;
 
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
+    let wants_rawblock = handles.zmq_publisher.wants_rawblock();
     let wants_filters = handles.filter_index.wants_filters();
     let (txids, scratch_capacities, same_block_spent, same_block_spent_input_count) =
         tx_plan.into_scratch_parts();
@@ -355,7 +356,8 @@ pub fn apply_block(
     let block_bytes: bytes::Bytes = {
         let needs_body = handles.block_body_store.is_some()
             || handles.tx_index.is_some()
-            || handles.cache_block_bodies_in_memory;
+            || handles.cache_block_bodies_in_memory
+            || wants_rawblock;
         if needs_body {
             bytes::Bytes::from(bitcoin::consensus::encode::serialize(block))
         } else {
@@ -508,7 +510,9 @@ pub fn apply_block(
         // Best-effort ZMQ event emission. Failures must not propagate per the
         // ZmqPublisher contract; the trait's methods return `()`.
         handles.zmq_publisher.publish_hashblock(tip.hash);
-        handles.zmq_publisher.publish_rawblock(&block_bytes);
+        if wants_rawblock {
+            handles.zmq_publisher.publish_rawblock(&block_bytes);
+        }
         if let Some(raw_txs) = scratch.raw_txs() {
             for (txid, rawtx_bytes) in scratch.txids().iter().zip(raw_txs) {
                 handles.zmq_publisher.publish_hashtx(*txid);
@@ -3062,6 +3066,43 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    fn apply_block_publishes_full_rawblock_bytes_when_only_rawblock_is_requested()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let publisher = Arc::new(RecordingRawBlockPublisher::default());
+        let publisher_for_handles: Arc<dyn crate::ZmqPublisher> = publisher.clone();
+        let mut handles =
+            apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
+                .with_zmq_publisher(publisher_for_handles);
+        handles.cache_block_bodies_in_memory = false;
+        assert!(handles.block_body_store.is_none());
+        assert!(handles.tx_index.is_none());
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+        let expected_block_bytes = bitcoin::consensus::encode::serialize(&block);
+
+        apply_block(&handles, &block)?;
+
+        let published = publisher
+            .raw_block
+            .lock()
+            .clone()
+            .expect("rawblock bytes should be published");
+        assert_eq!(published, expected_block_bytes);
+        assert!(published.len() > SERIALIZED_BLOCK_HEADER_LEN);
+        Ok(())
+    }
+
+    #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn apply_block_skips_zmq_publish_loop_when_publisher_opts_out()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3069,6 +3110,35 @@ mod consensus_rule_tests {
         let publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(PanickingOptOutPublisher);
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
             .with_zmq_publisher(publisher);
+        let genesis_tip = applied_header_tip(
+            &handles,
+            Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
+            &genesis,
+            0,
+        )?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+
+        apply_block(&handles, &block)?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_block_skips_rawblock_publish_when_publisher_opts_out()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(PanickingNoRawblockPublisher);
+        let mut handles =
+            apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
+                .with_zmq_publisher(publisher);
+        handles.cache_block_bodies_in_memory = false;
+        assert!(handles.block_body_store.is_none());
+        assert!(handles.tx_index.is_none());
         let genesis_tip = applied_header_tip(
             &handles,
             Hash256::from_le_bytes(genesis.block_hash().as_byte_array()),
@@ -4047,6 +4117,33 @@ mod consensus_rule_tests {
     }
 
     #[derive(Debug, Default)]
+    struct RecordingRawBlockPublisher {
+        raw_block: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl crate::ZmqPublisher for RecordingRawBlockPublisher {
+        fn wants_rawtx(&self) -> bool {
+            false
+        }
+
+        fn wants_rawblock(&self) -> bool {
+            true
+        }
+
+        fn publish_hashblock(&self, _hash: Hash256) {}
+
+        fn publish_hashtx(&self, _txid: bitcoin::Txid) {}
+
+        fn publish_rawblock(&self, bytes: &[u8]) {
+            *self.raw_block.lock() = Some(bytes.to_vec());
+        }
+
+        fn publish_rawtx(&self, _bytes: &[u8]) {
+            panic!("rawtx publish should be skipped when wants_rawtx is false");
+        }
+    }
+
+    #[derive(Debug, Default)]
     struct PanickingOptOutPublisher;
 
     impl crate::ZmqPublisher for PanickingOptOutPublisher {
@@ -4068,6 +4165,35 @@ mod consensus_rule_tests {
 
         fn publish_rawtx(&self, _bytes: &[u8]) {
             panic!("rawtx publish should be skipped");
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PanickingNoRawblockPublisher;
+
+    impl crate::ZmqPublisher for PanickingNoRawblockPublisher {
+        fn wants_notifications(&self) -> bool {
+            true
+        }
+
+        fn wants_rawtx(&self) -> bool {
+            false
+        }
+
+        fn wants_rawblock(&self) -> bool {
+            false
+        }
+
+        fn publish_hashblock(&self, _hash: Hash256) {}
+
+        fn publish_hashtx(&self, _txid: bitcoin::Txid) {}
+
+        fn publish_rawblock(&self, _bytes: &[u8]) {
+            panic!("rawblock publish should be skipped when wants_rawblock is false");
+        }
+
+        fn publish_rawtx(&self, _bytes: &[u8]) {
+            panic!("rawtx publish should be skipped when wants_rawtx is false");
         }
     }
 

@@ -85,6 +85,14 @@ pub trait ZmqPublisher: Send + Sync + core::fmt::Debug {
         true
     }
 
+    /// Returns whether the publisher can consume full serialized block bytes.
+    ///
+    /// The default is conservative for external implementations: keep producing
+    /// rawblock payloads unless an implementation proves they are unobservable.
+    fn wants_rawblock(&self) -> bool {
+        true
+    }
+
     /// Publish a `hashblock` notification (block hash big-endian display bytes).
     fn publish_hashblock(&self, hash: Hash256);
 
@@ -110,6 +118,10 @@ impl ZmqPublisher for NoOpZmqPublisher {
     }
 
     fn wants_rawtx(&self) -> bool {
+        false
+    }
+
+    fn wants_rawblock(&self) -> bool {
         false
     }
 
@@ -300,6 +312,10 @@ impl ZmqPublisher for SocketZmqPublisher {
         !self.rawtx_endpoints.is_empty()
     }
 
+    fn wants_rawblock(&self) -> bool {
+        !self.rawblock_endpoints.is_empty()
+    }
+
     fn publish_hashblock(&self, hash: Hash256) {
         let body = hash_body_from_hash(hash);
         self.publish(ZmqTopic::HashBlock, &body);
@@ -356,6 +372,7 @@ mod tests {
         let publisher = NoOpZmqPublisher;
         assert!(!publisher.wants_notifications());
         assert!(!publisher.wants_rawtx());
+        assert!(!publisher.wants_rawblock());
         publisher.publish_hashblock(Hash256::default());
         publisher.publish_hashtx(bitcoin::Txid::from_byte_array([0; 32]));
         publisher.publish_rawblock(&[]);
@@ -367,6 +384,7 @@ mod tests {
         let publisher = TracingZmqPublisher;
         assert!(publisher.wants_notifications());
         assert!(publisher.wants_rawtx());
+        assert!(publisher.wants_rawblock());
         publisher.publish_hashblock(Hash256::default());
         publisher.publish_hashtx(bitcoin::Txid::from_byte_array([0; 32]));
         publisher.publish_rawblock(&[1, 2, 3]);
@@ -425,6 +443,7 @@ mod tests {
         }])?;
         assert!(without_rawtx.wants_notifications());
         assert!(!without_rawtx.wants_rawtx());
+        assert!(!without_rawtx.wants_rawblock());
 
         let with_rawtx = SocketZmqPublisher::bind(&[ZmqPublication {
             topic: ZmqTopic::RawTx,
@@ -433,6 +452,16 @@ mod tests {
         }])?;
         assert!(with_rawtx.wants_notifications());
         assert!(with_rawtx.wants_rawtx());
+        assert!(!with_rawtx.wants_rawblock());
+
+        let with_rawblock = SocketZmqPublisher::bind(&[ZmqPublication {
+            topic: ZmqTopic::RawBlock,
+            endpoint: "inproc://bitcoin-rs-zmq-rawblock".to_owned(),
+            hwm: 1,
+        }])?;
+        assert!(with_rawblock.wants_notifications());
+        assert!(!with_rawblock.wants_rawtx());
+        assert!(with_rawblock.wants_rawblock());
         Ok(())
     }
 
