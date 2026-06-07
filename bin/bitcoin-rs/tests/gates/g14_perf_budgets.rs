@@ -9,7 +9,13 @@
 //! externally collected evidence and fails closed when the evidence contract is
 //! missing or malformed.
 
-use std::{env, fs::File, io::Read, path::Path, process::Command};
+use std::{
+    env,
+    fs::{self, File},
+    io::Read,
+    path::Path,
+    process::Command,
+};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -22,6 +28,8 @@ const FOUR_MIB_BYTES: u64 = 4 * 1024 * 1024;
 const EXPECTED_ELECTRUM_SAMPLE_SIZE: u64 = 10_000;
 const ELECTRUM_RSS_MEASUREMENT_SCHEMA: &str = "g14-electrum-rss-measurement-v1";
 const ELECTRUM_HISTORY_METHOD: &str = "blockchain.scripthash.get_history";
+const BITCOIN_RS_CRITERION_BENCHMARK_ID: &str = "bitcoin-rs/mainnet-ibd";
+const BITCOIN_CORE_CRITERION_BENCHMARK_ID: &str = "bitcoin-core/mainnet-ibd";
 
 const EVIDENCE_HELP: &str = "required G14 evidence env: \
 G14_COMMIT_SHA=<current git HEAD as 40 lowercase hex>, \
@@ -140,16 +148,21 @@ impl G14Evidence {
         let bitcoin_rs_criterion_benchmark_id =
             required_env("G14_BITCOIN_RS_CRITERION_BENCHMARK_ID");
         assert_eq!(
-            bitcoin_rs_criterion_benchmark_id, "bitcoin-rs/mainnet-ibd",
+            bitcoin_rs_criterion_benchmark_id, BITCOIN_RS_CRITERION_BENCHMARK_ID,
             "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID must identify bitcoin-rs mainnet IBD"
         );
         let bitcoin_core_criterion_benchmark_id =
             required_env("G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID");
         assert_eq!(
-            bitcoin_core_criterion_benchmark_id, "bitcoin-core/mainnet-ibd",
+            bitcoin_core_criterion_benchmark_id, BITCOIN_CORE_CRITERION_BENCHMARK_ID,
             "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID must identify Bitcoin Core mainnet IBD"
         );
-        let criterion_raw_output = CriterionRawOutputCustody::from_env();
+        let criterion_raw_output = CriterionRawOutputCustody::from_env(
+            &bitcoin_rs_criterion_benchmark_id,
+            bitcoin_rs_elapsed_seconds,
+            &bitcoin_core_criterion_benchmark_id,
+            bitcoin_core_elapsed_seconds,
+        );
         let benchmark_run_id = required_env("G14_BENCHMARK_RUN_ID");
         let benchmark_host_id = required_env("G14_BENCHMARK_HOST_ID");
         let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
@@ -340,20 +353,33 @@ impl G14Evidence {
 }
 
 impl CriterionRawOutputCustody {
-    fn from_env() -> Self {
+    fn from_env(
+        bitcoin_rs_benchmark_id: &str,
+        bitcoin_rs_elapsed_seconds: f64,
+        bitcoin_core_benchmark_id: &str,
+        bitcoin_core_elapsed_seconds: f64,
+    ) -> Self {
         Self::from_values(
             required_env("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH"),
             required_hex("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_SHA256", 64),
+            bitcoin_rs_benchmark_id,
+            bitcoin_rs_elapsed_seconds,
             required_env("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH"),
             required_hex("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_SHA256", 64),
+            bitcoin_core_benchmark_id,
+            bitcoin_core_elapsed_seconds,
         )
     }
 
     fn from_values(
         bitcoin_rs_path: String,
         bitcoin_rs_sha256: String,
+        bitcoin_rs_benchmark_id: &str,
+        bitcoin_rs_elapsed_seconds: f64,
         bitcoin_core_path: String,
         bitcoin_core_sha256: String,
+        bitcoin_core_benchmark_id: &str,
+        bitcoin_core_elapsed_seconds: f64,
     ) -> Self {
         require_sha256_file(
             &bitcoin_rs_path,
@@ -364,6 +390,18 @@ impl CriterionRawOutputCustody {
             &bitcoin_core_path,
             &bitcoin_core_sha256,
             "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
+        );
+        verify_criterion_raw_output_elapsed(
+            &bitcoin_rs_path,
+            "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+            bitcoin_rs_benchmark_id,
+            bitcoin_rs_elapsed_seconds,
+        );
+        verify_criterion_raw_output_elapsed(
+            &bitcoin_core_path,
+            "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
+            bitcoin_core_benchmark_id,
+            bitcoin_core_elapsed_seconds,
         );
         Self {
             bitcoin_rs_path,
@@ -481,6 +519,121 @@ fn require_literal(name: &str, expected: &str) {
         value, expected,
         "{name} must be {expected:?} for G14 evidence, got {value:?}",
     );
+}
+
+fn verify_criterion_raw_output_elapsed(
+    path: &str,
+    name: &str,
+    benchmark_id: &str,
+    expected_elapsed_seconds: f64,
+) {
+    let raw_output = read_text_file(path, name);
+    let parsed_elapsed_seconds = criterion_elapsed_seconds(&raw_output, benchmark_id, name);
+    assert!(
+        (parsed_elapsed_seconds - expected_elapsed_seconds).abs() <= 1e-12,
+        "{name} Criterion raw output elapsed seconds must match final G14 evidence env for {benchmark_id}; raw={parsed_elapsed_seconds}, env={expected_elapsed_seconds}",
+    );
+}
+
+fn criterion_elapsed_seconds(raw_output: &str, benchmark_id: &str, name: &str) -> f64 {
+    let lines: Vec<_> = raw_output.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        if !criterion_label_matches(line, benchmark_id) {
+            continue;
+        }
+        for (offset, candidate) in lines[index..lines.len().min(index.saturating_add(16))]
+            .iter()
+            .enumerate()
+        {
+            if offset > 0 && criterion_phase_matches(candidate, benchmark_id) {
+                continue;
+            }
+            if offset > 0
+                && criterion_label_like(candidate)
+                && !criterion_label_matches(candidate, benchmark_id)
+            {
+                break;
+            }
+            if candidate.contains("time:")
+                && !criterion_time_prefix_matches(candidate, benchmark_id)
+            {
+                break;
+            }
+            if let Some(elapsed_seconds) = criterion_time_elapsed_seconds(candidate, name) {
+                return elapsed_seconds;
+            }
+        }
+    }
+    panic!("{name} must contain Criterion time output for benchmark {benchmark_id:?}");
+}
+
+fn criterion_label_matches(line: &str, benchmark_id: &str) -> bool {
+    let stripped = line.trim();
+    stripped == benchmark_id || stripped == format!("Benchmarking {benchmark_id}")
+}
+
+fn criterion_phase_matches(line: &str, benchmark_id: &str) -> bool {
+    line.trim()
+        .starts_with(&format!("Benchmarking {benchmark_id}:"))
+}
+
+fn criterion_label_like(line: &str) -> bool {
+    let stripped = line.trim();
+    let candidate = stripped
+        .strip_prefix("Benchmarking ")
+        .map_or(stripped, |rest| {
+            rest.split_once(':').map_or(rest, |(label, _)| label).trim()
+        });
+    candidate.contains('/')
+        && !candidate.starts_with('/')
+        && !candidate.ends_with('/')
+        && candidate.chars().all(|ch| !ch.is_whitespace() && ch != ':')
+}
+
+fn criterion_time_prefix_matches(line: &str, benchmark_id: &str) -> bool {
+    let Some((prefix, _time)) = line.split_once("time:") else {
+        return false;
+    };
+    prefix.trim() == benchmark_id
+}
+
+fn criterion_time_elapsed_seconds(line: &str, name: &str) -> Option<f64> {
+    let (_prefix, time) = line.split_once("time:")?;
+    if let Some(start) = time.find('[') {
+        let interval = &time[start + 1..];
+        let end = interval
+            .find(']')
+            .unwrap_or_else(|| panic!("{name} Criterion interval time line is missing ']'"));
+        let tokens: Vec<_> = interval[..end].split_whitespace().collect();
+        assert!(
+            tokens.len() >= 4,
+            "{name} Criterion interval time line must include low, estimate, and high values",
+        );
+        return Some(criterion_seconds(tokens[2], tokens[3], name));
+    }
+
+    let tokens: Vec<_> = time.split_whitespace().collect();
+    assert!(
+        tokens.len() >= 2,
+        "{name} Criterion time line must include a value and unit",
+    );
+    Some(criterion_seconds(tokens[0], tokens[1], name))
+}
+
+fn criterion_seconds(value: &str, unit: &str, name: &str) -> f64 {
+    let value = match value.parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => value,
+        Ok(value) => panic!("{name} Criterion time value must be finite and positive, got {value}"),
+        Err(error) => panic!("{name} Criterion time value {value:?} is not decimal: {error}"),
+    };
+    let scale = match unit {
+        "ns" => 0.000_000_001,
+        "us" | "\u{00b5}s" => 0.000_001,
+        "ms" => 0.001,
+        "s" => 1.0,
+        _ => panic!("{name} Criterion time unit {unit:?} is not supported"),
+    };
+    value * scale
 }
 
 fn verified_electrum_rss_measurement_from_env(
@@ -622,6 +775,15 @@ fn read_json_object(path: &str, name: &str) -> Value {
     };
     assert!(data.is_object(), "{name} must point to a JSON object");
     data
+}
+
+fn read_text_file(path: &str, name: &str) -> String {
+    let value = match fs::read_to_string(Path::new(path)) {
+        Ok(value) => value,
+        Err(error) => panic!("{name} must be a readable UTF-8 file at {path}: {error}"),
+    };
+    assert!(!value.trim().is_empty(), "{name} must not be empty");
+    value
 }
 
 fn require_json_literal(data: &Value, key: &str, expected: &str, source: &str) {
@@ -770,11 +932,14 @@ mod tests {
         let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let bitcoin_rs_raw = dir.path().join("bitcoin-rs.raw");
         let bitcoin_core_raw = dir.path().join("bitcoin-core.raw");
-        fs::write(&bitcoin_rs_raw, b"Benchmarking bitcoin-rs/mainnet-ibd\n")
-            .unwrap_or_else(|error| panic!("write bitcoin-rs raw failed: {error}"));
+        fs::write(
+            &bitcoin_rs_raw,
+            criterion_raw_output(BITCOIN_RS_CRITERION_BENCHMARK_ID, 1.25),
+        )
+        .unwrap_or_else(|error| panic!("write bitcoin-rs raw failed: {error}"));
         fs::write(
             &bitcoin_core_raw,
-            b"Benchmarking bitcoin-core/mainnet-ibd\n",
+            criterion_raw_output(BITCOIN_CORE_CRITERION_BENCHMARK_ID, 2.50),
         )
         .unwrap_or_else(|error| panic!("write bitcoin-core raw failed: {error}"));
 
@@ -784,11 +949,15 @@ mod tests {
                 &bitcoin_rs_raw.display().to_string(),
                 "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
             ),
+            BITCOIN_RS_CRITERION_BENCHMARK_ID,
+            1.25,
             bitcoin_core_raw.display().to_string(),
             sha256_file(
                 &bitcoin_core_raw.display().to_string(),
                 "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
             ),
+            BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+            2.50,
         );
 
         assert_eq!(
@@ -806,11 +975,14 @@ mod tests {
         let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let bitcoin_rs_raw = dir.path().join("bitcoin-rs.raw");
         let bitcoin_core_raw = dir.path().join("bitcoin-core.raw");
-        fs::write(&bitcoin_rs_raw, b"Benchmarking bitcoin-rs/mainnet-ibd\n")
-            .unwrap_or_else(|error| panic!("write bitcoin-rs raw failed: {error}"));
+        fs::write(
+            &bitcoin_rs_raw,
+            criterion_raw_output(BITCOIN_RS_CRITERION_BENCHMARK_ID, 1.25),
+        )
+        .unwrap_or_else(|error| panic!("write bitcoin-rs raw failed: {error}"));
         fs::write(
             &bitcoin_core_raw,
-            b"Benchmarking bitcoin-core/mainnet-ibd\n",
+            criterion_raw_output(BITCOIN_CORE_CRITERION_BENCHMARK_ID, 2.50),
         )
         .unwrap_or_else(|error| panic!("write bitcoin-core raw failed: {error}"));
         let stale_bitcoin_rs_sha = sha256_file(
@@ -828,8 +1000,94 @@ mod tests {
             CriterionRawOutputCustody::from_values(
                 bitcoin_rs_raw.display().to_string(),
                 stale_bitcoin_rs_sha,
+                BITCOIN_RS_CRITERION_BENCHMARK_ID,
+                1.25,
                 bitcoin_core_raw.display().to_string(),
                 bitcoin_core_sha,
+                BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+                2.50,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_rejects_criterion_raw_output_elapsed_mismatch() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let bitcoin_rs_raw = dir.path().join("bitcoin-rs.raw");
+        let bitcoin_core_raw = dir.path().join("bitcoin-core.raw");
+        fs::write(
+            &bitcoin_rs_raw,
+            criterion_raw_output(BITCOIN_RS_CRITERION_BENCHMARK_ID, 9.00),
+        )
+        .unwrap_or_else(|error| panic!("write bitcoin-rs raw failed: {error}"));
+        fs::write(
+            &bitcoin_core_raw,
+            criterion_raw_output(BITCOIN_CORE_CRITERION_BENCHMARK_ID, 2.50),
+        )
+        .unwrap_or_else(|error| panic!("write bitcoin-core raw failed: {error}"));
+
+        let result = panic::catch_unwind(|| {
+            CriterionRawOutputCustody::from_values(
+                bitcoin_rs_raw.display().to_string(),
+                sha256_file(
+                    &bitcoin_rs_raw.display().to_string(),
+                    "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+                ),
+                BITCOIN_RS_CRITERION_BENCHMARK_ID,
+                1.25,
+                bitcoin_core_raw.display().to_string(),
+                sha256_file(
+                    &bitcoin_core_raw.display().to_string(),
+                    "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
+                ),
+                BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+                2.50,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_rejects_non_exact_criterion_raw_output_label() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let raw = dir.path().join("bitcoin-rs.raw");
+        fs::write(
+            &raw,
+            criterion_raw_output("bitcoin-rs/mainnet-ibd-renamed", 1.25),
+        )
+        .unwrap_or_else(|error| panic!("write raw failed: {error}"));
+
+        let result = panic::catch_unwind(|| {
+            verify_criterion_raw_output_elapsed(
+                &raw.display().to_string(),
+                "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+                BITCOIN_RS_CRITERION_BENCHMARK_ID,
+                1.25,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_rejects_unlabeled_criterion_raw_output_time() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let raw = dir.path().join("bitcoin-rs.raw");
+        fs::write(
+            &raw,
+            "Benchmarking bitcoin-rs/mainnet-ibd\nBenchmarking bitcoin-rs/mainnet-ibd: Analyzing\ntime:   [1.00 s 1.25 s 3.00 s]\n",
+        )
+        .unwrap_or_else(|error| panic!("write raw failed: {error}"));
+
+        let result = panic::catch_unwind(|| {
+            verify_criterion_raw_output_elapsed(
+                &raw.display().to_string(),
+                "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+                BITCOIN_RS_CRITERION_BENCHMARK_ID,
+                1.25,
             );
         });
 
@@ -933,6 +1191,12 @@ mod tests {
   "electrum_get_history_p95_ms": {p95_ms},
   "rss_bytes": {rss_bytes}
 }}"#
+        )
+    }
+
+    fn criterion_raw_output(benchmark_id: &str, elapsed_seconds: f64) -> String {
+        format!(
+            "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\n"
         )
     }
 }
