@@ -93,8 +93,8 @@ impl ApplyScratch {
         let track_same_block_spends = spent_capacity != 0;
         let track_same_block_scripts = include_same_block_output_scripts && track_same_block_spends;
 
-        for tx in &block.txdata {
-            if let Some(raw_txs) = &mut raw_txs {
+        if let Some(raw_txs) = &mut raw_txs {
+            for tx in &block.txdata {
                 raw_txs.push(bitcoin::consensus::encode::serialize(tx));
             }
         }
