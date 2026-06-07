@@ -42,22 +42,46 @@ impl Network {
         }
     }
 
-    /// Returns `true` when BIP34 coinbase-height encoding is enforced at `height`.
+    /// Returns the network's BIP34 coinbase-height activation height.
     ///
-    /// Per Bitcoin Core's `chainparams.cpp`:
-    /// - Mainnet activates at height 227,835
+    /// Per Bitcoin Core's `chainparams.cpp` for fixed public networks:
+    /// - Mainnet activates at height 227,931
     /// - Testnet3 activates at height 21,111
     /// - Testnet4 / Signet activate at height 1
-    /// - Regtest activates at height 500
+    /// - This crate's deterministic regtest default activates at height 500.
     #[must_use]
-    pub const fn is_bip34_active(self, height: u32) -> bool {
-        let activation = match self {
-            Self::Mainnet => 227_835,
+    pub const fn bip34_activation_height(self) -> u32 {
+        match self {
+            Self::Mainnet => 227_931,
             Self::Testnet3 => 21_111,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 500,
-        };
-        height >= activation
+        }
+    }
+
+    /// Returns the fixed BIP34 activation block hash when Core uses one to prove
+    /// that BIP34 implies BIP30 on a known chain.
+    #[must_use]
+    pub const fn bip34_activation_hash(self) -> Option<Hash256> {
+        match self {
+            Self::Mainnet => Some(Hash256::from_le_bytes(&[
+                0xb8, 0x08, 0x08, 0x9c, 0x75, 0x6a, 0xdd, 0x15, 0x91, 0xb1, 0xd1, 0x7b, 0xab, 0x44,
+                0xbb, 0xa3, 0xfe, 0xd9, 0xe0, 0x2f, 0x94, 0x2a, 0xb4, 0x89, 0x4b, 0x02, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+            ])),
+            Self::Testnet3 => Some(Hash256::from_le_bytes(&[
+                0xf8, 0x8e, 0xcd, 0x99, 0x12, 0xd0, 0x0d, 0x3f, 0x5c, 0x2a, 0x8e, 0x0f, 0x50, 0x41,
+                0x7d, 0x3e, 0x41, 0x5c, 0x75, 0xb3, 0xab, 0xe5, 0x84, 0x34, 0x6d, 0xa9, 0xb3, 0x23,
+                0x00, 0x00, 0x00, 0x00,
+            ])),
+            Self::Testnet4 | Self::Signet | Self::Regtest => None,
+        }
+    }
+
+    /// Returns `true` when BIP34 coinbase-height encoding is enforced at `height`.
+    #[must_use]
+    pub const fn is_bip34_active(self, height: u32) -> bool {
+        height >= self.bip34_activation_height()
     }
 
     /// Returns `true` when BIP65 (`OP_CHECKLOCKTIMEVERIFY`) is enforced at `height`.
@@ -337,13 +361,26 @@ mod tests {
     }
 
     #[test]
-    fn bip34_activation_heights_match_core_chainparams() {
-        assert!(!Network::Mainnet.is_bip34_active(227_834));
-        assert!(Network::Mainnet.is_bip34_active(227_835));
+    fn bip34_activation_metadata_matches_network_defaults() {
+        assert!(!Network::Mainnet.is_bip34_active(227_930));
+        assert!(Network::Mainnet.is_bip34_active(227_931));
         assert!(!Network::Regtest.is_bip34_active(499));
         assert!(Network::Regtest.is_bip34_active(500));
         assert!(!Network::Testnet3.is_bip34_active(21_110));
         assert!(Network::Testnet3.is_bip34_active(21_111));
+        assert_eq!(
+            Network::Mainnet
+                .bip34_activation_hash()
+                .map(Hash256::to_string_be),
+            Some("000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8".to_owned())
+        );
+        assert_eq!(
+            Network::Testnet3
+                .bip34_activation_hash()
+                .map(Hash256::to_string_be),
+            Some("0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8".to_owned())
+        );
+        assert_eq!(Network::Regtest.bip34_activation_hash(), None);
     }
 
     #[test]

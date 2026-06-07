@@ -7,7 +7,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin::hex::DisplayHex;
 use bitcoin::{Transaction, Txid};
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_primitives::{Hash256, Network, OutPoint};
@@ -31,6 +31,7 @@ const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
 const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
 const BIP68_MASK: u32 = 0x0000_ffff;
 const BIP68_TIME_GRANULARITY_SECONDS: u32 = 512;
+const BIP34_IMPLIES_BIP30_LIMIT: u32 = 1_983_702;
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 
@@ -259,7 +260,9 @@ pub fn apply_block(
     block_rules_result?;
     // Contextual consensus checks (BIP30 + BIP34) using the resolved height.
     let bip30_bip34_started = quanta::Instant::now();
-    let bip30_bip34_result = check_bip30_and_bip34(handles, block, height, tx_plan.txids());
+    let previous_tip_id = prior.as_deref().map(|tip| tip.tip_id);
+    let bip30_bip34_result =
+        check_bip30_and_bip34(handles, block, height, tx_plan.txids(), previous_tip_id);
     let bip30_bip34_dur = bip30_bip34_started.elapsed();
     metrics::histogram!("node.apply_block.bip30_bip34_seconds")
         .record(bip30_bip34_dur.as_secs_f64());
@@ -1114,6 +1117,7 @@ fn check_bip30_and_bip34(
     block: &bitcoin::Block,
     height: u32,
     txids: &[bitcoin::Txid],
+    previous_tip_id: Option<NodeId>,
 ) -> core::result::Result<(), ApplyError> {
     use bitcoin::hashes::Hash as _;
 
@@ -1121,11 +1125,13 @@ fn check_bip30_and_bip34(
     // any output of the earlier transaction remains unspent, except at the
     // documented historical exception heights handled by `check_bip30`.
     let mut has_duplicate = false;
-    for txid in txids {
-        let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
-        if handles.utxo.has_live_outputs_for_txid(&txid) {
-            has_duplicate = true;
-            break;
+    if should_scan_bip30_duplicates(handles, height, previous_tip_id) {
+        for txid in txids {
+            let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
+            if handles.utxo.has_live_outputs_for_txid(&txid) {
+                has_duplicate = true;
+                break;
+            }
         }
     }
     bitcoin_rs_consensus::bip30::check_bip30(height, has_duplicate)?;
@@ -1149,6 +1155,35 @@ fn check_bip30_and_bip34(
     }
 
     Ok(())
+}
+
+fn should_scan_bip30_duplicates(
+    handles: &ApplyHandles,
+    height: u32,
+    previous_tip_id: Option<NodeId>,
+) -> bool {
+    if height >= BIP34_IMPLIES_BIP30_LIMIT || !handles.network.is_bip34_active(height) {
+        return true;
+    }
+
+    let Some(expected_activation_hash) = handles.network.bip34_activation_hash() else {
+        return true;
+    };
+    let Some(previous_tip_id) = previous_tip_id else {
+        return true;
+    };
+
+    let tree = handles.block_tree.read();
+    let Some(activation_id) =
+        tree.node_at_height_from(previous_tip_id, handles.network.bip34_activation_height())
+    else {
+        return true;
+    };
+    let Ok(activation_node) = tree.node(activation_id) else {
+        return true;
+    };
+
+    activation_node.hash != expected_activation_hash
 }
 
 fn check_pow_limit_and_continuity(
@@ -2176,10 +2211,122 @@ mod consensus_rule_tests {
         };
 
         let txids = [duplicate_txid];
-        let error = match check_bip30_and_bip34(&handles, &block, 1, &txids) {
+        let error = match check_bip30_and_bip34(&handles, &block, 1, &txids, None) {
             Ok(()) => panic!("duplicate txid with live vout 1 must violate BIP30"),
             Err(error) => error,
         };
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP30", .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn bip30_skips_duplicate_scan_after_known_bip34_activation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let height = Network::Testnet3
+            .bip34_activation_height()
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
+        let duplicate_tx = coinbase_transaction_with_height(height);
+        let duplicate_txid = duplicate_tx.compute_txid();
+        let duplicate_hash = Hash256::from_le_bytes(duplicate_txid.as_byte_array());
+        let utxo = Arc::new(UtxoSet::new());
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(duplicate_hash, 0),
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            },
+            false,
+            0,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
+
+        let handles = apply_handles_for_network(Network::Testnet3, utxo);
+        let previous_tip_id = seed_known_bip34_activation_chain(&handles, Network::Testnet3)?;
+        let block = block_with_transaction(duplicate_tx);
+        let txids = [duplicate_txid];
+
+        check_bip30_and_bip34(&handles, &block, height, &txids, Some(previous_tip_id))?;
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn bip30_duplicate_scan_runs_without_known_bip34_activation_hash()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let height = Network::Regtest
+            .bip34_activation_height()
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
+        let duplicate_tx = coinbase_transaction_with_height(height);
+        let duplicate_txid = duplicate_tx.compute_txid();
+        let duplicate_hash = Hash256::from_le_bytes(duplicate_txid.as_byte_array());
+        let utxo = Arc::new(UtxoSet::new());
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(duplicate_hash, 0),
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            },
+            false,
+            0,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
+
+        let handles = apply_handles_for_network(Network::Regtest, utxo);
+        let block = block_with_transaction(duplicate_tx);
+        let txids = [duplicate_txid];
+        let error = match check_bip30_and_bip34(&handles, &block, height, &txids, None) {
+            Ok(()) => panic!("regtest has no fixed BIP34 activation hash and must scan BIP30"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP30", .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn bip30_duplicate_scan_runs_at_core_recheck_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let duplicate_tx = coinbase_transaction_with_height(BIP34_IMPLIES_BIP30_LIMIT);
+        let duplicate_txid = duplicate_tx.compute_txid();
+        let duplicate_hash = Hash256::from_le_bytes(duplicate_txid.as_byte_array());
+        let utxo = Arc::new(UtxoSet::new());
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(duplicate_hash, 0),
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            },
+            false,
+            0,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
+
+        let handles = apply_handles_for_network(Network::Mainnet, utxo);
+        let block = block_with_transaction(duplicate_tx);
+        let txids = [duplicate_txid];
+        let error = match check_bip30_and_bip34(
+            &handles,
+            &block,
+            BIP34_IMPLIES_BIP30_LIMIT,
+            &txids,
+            None,
+        ) {
+            Ok(()) => panic!("Core recheck limit must keep BIP30 duplicate scanning enabled"),
+            Err(error) => error,
+        };
+
         assert!(matches!(
             error,
             ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP30", .. })
@@ -2939,6 +3086,25 @@ mod consensus_rule_tests {
         }
     }
 
+    fn coinbase_transaction_with_height(height: u32) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: bitcoin::OutPoint::null(),
+                script_sig: bitcoin::script::Builder::new()
+                    .push_int(i64::from(height))
+                    .into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
+    }
+
     #[allow(clippy::arc_with_non_send_sync)]
     fn utxo_with_output(
         previous_output: bitcoin::OutPoint,
@@ -3122,6 +3288,39 @@ mod consensus_rule_tests {
         }
         handles.chain_tip.store(tree.tip());
         Ok(prev_hash)
+    }
+
+    fn seed_known_bip34_activation_chain(
+        handles: &ApplyHandles,
+        network: Network,
+    ) -> Result<NodeId, Box<dyn std::error::Error>> {
+        let activation_height = network.bip34_activation_height();
+        let expected_hash = network
+            .bip34_activation_hash()
+            .ok_or_else(|| std::io::Error::other("network has no fixed BIP34 activation hash"))?;
+        let mut tree = handles.block_tree.write();
+        let mut parent = None;
+        let mut prev_hash = bitcoin::BlockHash::all_zeros();
+        let mut activation_id = None;
+        for height in 0..=activation_height.saturating_add(1) {
+            let header = pow_header(
+                prev_hash,
+                CompactTarget::from_consensus(0x207f_ffff),
+                height,
+                height,
+            );
+            let node_id = tree.insert_node(parent, header, NodeStatus::Active)?;
+            if height == activation_height {
+                activation_id = Some(node_id);
+            }
+            parent = Some(node_id);
+            prev_hash = bitcoin::BlockHash::from_byte_array(tree.node(node_id)?.hash.to_le_bytes());
+        }
+        let activation_id =
+            activation_id.ok_or_else(|| std::io::Error::other("missing activation node"))?;
+        tree.node_mut(activation_id)?.hash = expected_hash;
+        handles.chain_tip.store(tree.tip());
+        parent.ok_or_else(|| std::io::Error::other("missing previous tip").into())
     }
 
     fn interpolated_time(anchor_time: u32, tip_time: u32, height: u32, tip_height: u32) -> u32 {
