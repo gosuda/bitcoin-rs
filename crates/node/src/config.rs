@@ -138,6 +138,11 @@ pub struct Config {
     pub zmqpubrawblockhwm: Option<u32>,
     /// Optional `rawtx` PUB socket high-water mark.
     pub zmqpubrawtxhwm: Option<u32>,
+    /// Block height below which script verification is skipped during IBD.
+    /// Equivalent to Bitcoin Core's `-assumevalid`. Zero disables.
+    /// WARNING: Only use with a hash you trust. Setting this incorrectly
+    /// can cause the node to accept invalid blocks.
+    pub assume_valid_height: u32,
     #[serde(skip)]
     pub(crate) shutdown_signal: Option<Receiver<()>>,
 }
@@ -171,6 +176,7 @@ impl fmt::Debug for Config {
             .field("zmqpubhashtxhwm", &self.zmqpubhashtxhwm)
             .field("zmqpubrawblockhwm", &self.zmqpubrawblockhwm)
             .field("zmqpubrawtxhwm", &self.zmqpubrawtxhwm)
+            .field("assume_valid_height", &self.assume_valid_height)
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +218,7 @@ impl Config {
             zmqpubhashtxhwm: None,
             zmqpubrawblockhwm: None,
             zmqpubrawtxhwm: None,
+            assume_valid_height: 0,
             shutdown_signal: None,
         }
     }
@@ -450,6 +457,9 @@ impl Config {
         if let Some(hwm) = layer.zmqpubrawtxhwm {
             self.zmqpubrawtxhwm = Some(hwm);
         }
+        if let Some(height) = layer.assume_valid_height {
+            self.assume_valid_height = height;
+        }
     }
 }
 
@@ -524,6 +534,8 @@ pub(crate) struct ConfigLayer {
     pub(crate) zmqpubrawblockhwm: Option<u32>,
     #[arg(long = "zmqpubrawtxhwm")]
     pub(crate) zmqpubrawtxhwm: Option<u32>,
+    #[arg(long = "assume-valid-height")]
+    pub(crate) assume_valid_height: Option<u32>,
 }
 
 impl ConfigLayer {
@@ -593,6 +605,9 @@ impl ConfigLayer {
                 }
                 "BITCOIN_RS_ZMQPUBRAWTXHWM" => {
                     layer.zmqpubrawtxhwm = Some(value.parse()?);
+                }
+                "BITCOIN_RS_ASSUME_VALID_HEIGHT" => {
+                    layer.assume_valid_height = Some(value.parse()?);
                 }
                 _ => {}
             }

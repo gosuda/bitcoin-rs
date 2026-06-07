@@ -797,6 +797,7 @@ impl NodeState {
             cache_block_bodies_in_memory: false,
             block_body_store: Some(storage.block_body_store()),
             g2_muhash_sampler,
+            assume_valid_height: config.assume_valid_height,
         };
         let sync = Arc::new(crate::BlockSync::new(
             apply_handles.clone(),

@@ -129,6 +129,8 @@ pub struct ApplyHandles {
     pub(crate) cache_block_bodies_in_memory: bool,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
+    /// Block height below which script verification is skipped (assumevalid).
+    pub assume_valid_height: u32,
 }
 
 impl ApplyHandles {
@@ -166,6 +168,7 @@ impl ApplyHandles {
             cache_block_bodies_in_memory: true,
             block_body_store: None,
             g2_muhash_sampler: None,
+            assume_valid_height: 0,
         }
     }
 
@@ -784,6 +787,14 @@ fn verify_block_transactions(
     let txids = tx_plan.txids();
     debug_assert_eq!(block.txdata.len(), txids.len());
     if tx_plan.only_coinbase {
+        for tx in &block.txdata {
+            bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+        }
+        return Ok(());
+    }
+    // Assumevalid fast path: skip script verification for trusted blocks.
+    if handles.assume_valid_height > 0 && height <= handles.assume_valid_height {
+        // Still need to validate coinbase script sig sizes.
         for tx in &block.txdata {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
         }
