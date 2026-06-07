@@ -303,6 +303,52 @@ fn g2_muhash_tip_height_must_be_positive() {
     );
 }
 
+#[test]
+fn assume_valid_height_layers_use_cli_env_toml_precedence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let toml_path = temp.path().join("node.toml");
+
+    fs::write(
+        &toml_path,
+        r#"
+assume_valid_height = 10000
+"#,
+    )?;
+
+    let toml_config = Config::from_layered_sources(
+        Some(&toml_path),
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node"],
+    )?;
+    assert_eq!(toml_config.assume_valid_height, 10_000);
+
+    let env_config = Config::from_layered_sources(
+        Some(&toml_path),
+        None,
+        [("BITCOIN_RS_ASSUME_VALID_HEIGHT", "20000")],
+        ["bitcoin-rs-node"],
+    )?;
+    assert_eq!(env_config.assume_valid_height, 20_000);
+
+    let cli_config = Config::from_layered_sources(
+        Some(&toml_path),
+        None,
+        [("BITCOIN_RS_ASSUME_VALID_HEIGHT", "20000")],
+        ["bitcoin-rs-node", "--assume-valid-height", "30000"],
+    )?;
+    assert_eq!(cli_config.assume_valid_height, 30_000);
+
+    let default_config = Config::from_layered_sources(
+        None,
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node"],
+    )?;
+    assert_eq!(default_config.assume_valid_height, 0);
+    Ok(())
+}
+
 fn assert_auth_user(auth: &Auth, expected: &str) {
     match auth {
         Auth::Basic { user, .. } => assert_eq!(user, expected),

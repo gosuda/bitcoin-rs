@@ -138,10 +138,11 @@ pub struct Config {
     pub zmqpubrawblockhwm: Option<u32>,
     /// Optional `rawtx` PUB socket high-water mark.
     pub zmqpubrawtxhwm: Option<u32>,
-    /// Block height below which script verification is skipped during IBD.
-    /// Equivalent to Bitcoin Core's `-assumevalid`. Zero disables.
-    /// WARNING: Only use with a hash you trust. Setting this incorrectly
-    /// can cause the node to accept invalid blocks.
+    /// Block height at or below which script verification is skipped during block apply.
+    ///
+    /// Height-only trust shortcut for faster catch-up. This is **not** equivalent to Bitcoin
+    /// Core's hash-based `-assumevalid`, which pins a trusted block hash. Zero disables script
+    /// skipping and preserves full consensus checks.
     pub assume_valid_height: u32,
     #[serde(skip)]
     pub(crate) shutdown_signal: Option<Receiver<()>>,

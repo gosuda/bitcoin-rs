@@ -125,6 +125,27 @@ fn bitcoin_conf_zmq_keys_in_non_selected_network_sections_are_ignored() -> Resul
     Ok(())
 }
 
+#[test]
+fn bitcoin_conf_assumevalid_is_not_mapped_to_height_only_setting() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let conf_path = temp.path().join("bitcoin.conf");
+    fs::write(
+        &conf_path,
+        r"
+assumevalid=0000000000000000000000000000000000000000000000000000000000000000
+",
+    )?;
+
+    let mut config = Config::default();
+    bitcoin_conf_compat::apply_file(&mut config, &conf_path)?;
+
+    assert_eq!(
+        config.assume_valid_height, 0,
+        "Bitcoin Core hash-based assumevalid must not populate height-only assume_valid_height"
+    );
+    Ok(())
+}
+
 fn assert_auth(auth: &Auth, expected_user: &str, expected_password: &str) {
     match auth {
         Auth::Basic { user, password } => {

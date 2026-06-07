@@ -130,7 +130,8 @@ pub struct ApplyHandles {
     pub(crate) cache_block_bodies_in_memory: bool,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
-    /// Block height below which script verification is skipped (assumevalid).
+    /// Block height at or below which interpreter / `bitcoinconsensus` script execution is skipped during block apply.
+    /// Non-script transaction checks still run. Zero disables the shortcut (full script checks on every block).
     pub assume_valid_height: u32,
 }
 
@@ -806,11 +807,40 @@ fn verify_block_transactions(
         }
         return Ok(());
     }
-    // Assumevalid fast path: skip script verification for trusted blocks.
-    if handles.assume_valid_height > 0 && height <= handles.assume_valid_height {
-        // Still need to validate coinbase script sig sizes.
-        for tx in &block.txdata {
-            bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+    // Height-only assume-valid: skip interpreter / bitcoinconsensus script execution only.
+    let skip_scripts = handles.assume_valid_height > 0 && height <= handles.assume_valid_height;
+    if skip_scripts && !tx_plan.needs_local_utxo_overlay {
+        let view = crate::UtxoSetView::new(Arc::clone(&handles.utxo));
+        block.txdata.par_iter().try_for_each(|tx| {
+            if tx.is_coinbase() {
+                bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+                return Ok(());
+            }
+            bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_non_script_with_mtp(
+                tx,
+                &view,
+                height,
+                locktime_cutoff,
+            )
+        })?;
+        return Ok(());
+    }
+    if skip_scripts {
+        let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo), tx_plan.overlay_capacity);
+        for (tx, txid) in block.txdata.iter().zip(txids) {
+            if tx.is_coinbase() {
+                bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
+                view.add_outputs(tx, *txid, height)?;
+                continue;
+            }
+            bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_non_script_with_mtp(
+                tx,
+                &view,
+                height,
+                locktime_cutoff,
+            )?;
+            view.spend_inputs(tx);
+            view.add_outputs(tx, *txid, height)?;
         }
         return Ok(());
     }
@@ -1623,6 +1653,188 @@ mod consensus_rule_tests {
             bitcoin_rs_script::VerifyFlags::MANDATORY,
         ) {
             Ok(()) => panic!("bad coinbase scriptSig length must fail transaction verification"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::CoinbaseScriptSigSize { len: 1 }
+            )
+        ));
+    }
+
+    #[test]
+    fn verify_block_transactions_rejects_duplicate_spends_when_assume_valid_height_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (block, plan, utxo) = duplicate_spend_block()?;
+        let handles = apply_handles_with_assume_valid(utxo, 0);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::NONE,
+        ) {
+            Ok(()) => panic!("duplicate spend must fail when assume_valid_height is zero"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::MissingPrevout {
+                input_index: 0
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_rejects_duplicate_spends_within_assume_valid_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (block, plan, utxo) = duplicate_spend_block()?;
+        let handles = apply_handles_with_assume_valid(utxo, 2);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::NONE,
+        ) {
+            Ok(()) => panic!("duplicate spend must fail even under assume_valid_height"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::MissingPrevout {
+                input_index: 0
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_rejects_duplicate_spends_above_assume_valid_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (block, plan, utxo) = duplicate_spend_block()?;
+        let handles = apply_handles_with_assume_valid(utxo, 2);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            3,
+            0,
+            bitcoin_rs_script::VerifyFlags::NONE,
+        ) {
+            Ok(()) => panic!("duplicate spend must fail above assume_valid_height"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::MissingPrevout {
+                input_index: 0
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_skips_script_execution_within_assume_valid_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (block, plan, utxo) = bad_script_spend_block()?;
+        let handles = apply_handles_with_assume_valid(utxo, 2);
+
+        verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_runs_script_checks_when_assume_valid_height_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (block, plan, utxo) = bad_script_spend_block()?;
+        let handles = apply_handles_with_assume_valid(utxo, 0);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ) {
+            Ok(()) => panic!("bad script must fail when assume_valid_height is zero"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+                input_index: 0,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_runs_script_checks_above_assume_valid_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (block, plan, utxo) = bad_script_spend_block()?;
+        let handles = apply_handles_with_assume_valid(utxo, 2);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            3,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ) {
+            Ok(()) => panic!("bad script must fail above assume_valid_height"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+                input_index: 0,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_block_transactions_still_checks_coinbase_script_sig_under_assume_valid_height() {
+        let mut coinbase = coinbase_transaction(0x63);
+        coinbase.input[0].script_sig = ScriptBuf::from_bytes(vec![0x63]);
+        let block = block_with_transaction(coinbase);
+        let mut handles = empty_apply_handles();
+        handles.assume_valid_height = 100;
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &tx_plan(&block),
+            1,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ) {
+            Ok(()) => panic!("bad coinbase scriptSig length must fail under assume_valid_height"),
             Err(error) => error,
         };
 
@@ -3609,6 +3821,80 @@ mod consensus_rule_tests {
     #[allow(clippy::arc_with_non_send_sync)]
     fn apply_handles(utxo: Arc<UtxoSet>) -> ApplyHandles {
         apply_handles_for_network(Network::Mainnet, utxo)
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_handles_with_assume_valid(
+        utxo: Arc<UtxoSet>,
+        assume_valid_height: u32,
+    ) -> ApplyHandles {
+        let mut handles = apply_handles(utxo);
+        handles.assume_valid_height = assume_valid_height;
+        handles
+    }
+
+    fn duplicate_spend_block()
+    -> Result<(bitcoin::Block, BlockTxPlan, Arc<UtxoSet>), Box<dyn std::error::Error>> {
+        let base_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x64; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(base_prevout, 1)?;
+        let first_spend = spending_transaction_to_script(
+            base_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let second_spend = spending_transaction_to_script(
+            base_prevout,
+            Sequence::MAX.to_consensus_u32() - 1,
+            op_true_script(),
+        );
+        let block = block_with_transactions(vec![first_spend, second_spend]);
+        let plan = tx_plan(&block);
+        Ok((block, plan, utxo))
+    }
+
+    fn bad_script_spend_block()
+    -> Result<(bitcoin::Block, BlockTxPlan, Arc<UtxoSet>), Box<dyn std::error::Error>> {
+        use bitcoin::opcodes::all::OP_EQUAL;
+        use bitcoin::script::Builder;
+
+        let base_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x65; 32]),
+            vout: 0,
+        };
+        let utxo = Arc::new(UtxoSet::new());
+        let mut changes = BlockChanges::default();
+        let txid = Hash256::from_le_bytes(base_prevout.txid.as_byte_array());
+        changes.add(UtxoAdd::new(
+            OutPoint::new(txid, base_prevout.vout),
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: Builder::new().push_opcode(OP_EQUAL).into_script(),
+            },
+            false,
+            1,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
+
+        let spend = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: base_prevout,
+                script_sig: Builder::new().push_int(7).push_int(8).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: op_true_script(),
+            }],
+        };
+        let block = block_with_transaction(spend);
+        let plan = tx_plan(&block);
+        Ok((block, plan, utxo))
     }
 
     fn apply_handles_with_filter_index(

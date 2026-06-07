@@ -112,16 +112,45 @@ pub fn verify_transaction_borrowed_with_mtp(
     locktime_cutoff: u32,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    verify_transaction_borrowed_with_locktime_cutoff(tx, prevouts, height, locktime_cutoff, flags)
+    verify_transaction_borrowed_with_locktime_cutoff(
+        tx,
+        prevouts,
+        height,
+        locktime_cutoff,
+        flags,
+        false,
+    )
 }
 
-/// Verifies non-contextual and input-script transaction rules for a borrowed transaction.
+/// Verifies non-script transaction rules for a borrowed transaction with a caller-selected
+/// timestamp cutoff.
+///
+/// Checks finality, empty inputs/outputs, coinbase scriptSig size, duplicate inputs, null
+/// prevouts, missing prevouts, input/output value balance, and sigop limits. Skips interpreter
+/// and `bitcoinconsensus` script execution.
+pub fn verify_transaction_borrowed_non_script_with_mtp(
+    tx: &bitcoin::Transaction,
+    prevouts: &impl UtxoView,
+    height: u32,
+    locktime_cutoff: u32,
+) -> Result<(), ConsensusError> {
+    verify_transaction_borrowed_with_locktime_cutoff(
+        tx,
+        prevouts,
+        height,
+        locktime_cutoff,
+        VerifyFlags::NONE,
+        true,
+    )
+}
+
 fn verify_transaction_borrowed_with_locktime_cutoff(
     tx: &bitcoin::Transaction,
     prevouts: &impl UtxoView,
     height: u32,
     locktime_cutoff: u32,
     flags: VerifyFlags,
+    skip_scripts: bool,
 ) -> Result<(), ConsensusError> {
     if !is_final_tx_with_locktime_cutoff(tx, height, locktime_cutoff) {
         return Err(ConsensusError::Bip {
@@ -161,7 +190,6 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     let mut verified_prevouts = Vec::with_capacity(tx.input.len());
     #[cfg(feature = "bitcoinconsensus")]
     let mut serialized_tx = None;
-    let interpreter = Interpreter;
     for (input_index, input) in tx.input.iter().enumerate() {
         let prevout = prevouts
             .lookup(&input.previous_output)
@@ -170,33 +198,35 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
             .checked_add(prevout.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
 
-        #[cfg(feature = "bitcoinconsensus")]
-        if verify_non_taproot_with_bitcoinconsensus(
-            input_index,
-            &prevout,
-            tx,
-            flags,
-            &mut serialized_tx,
-        )? {
-            verified_prevouts.push((input.previous_output, prevout));
-            continue;
-        }
-
-        let witness = input.witness.to_vec();
-        interpreter
-            .execute(
-                prevout.script_pubkey.as_bytes(),
-                input.script_sig.as_bytes(),
-                &witness,
-                flags,
+        if !skip_scripts {
+            #[cfg(feature = "bitcoinconsensus")]
+            if verify_non_taproot_with_bitcoinconsensus(
+                input_index,
                 &prevout,
                 tx,
-                input_index,
-            )
-            .map_err(|error| ConsensusError::Script {
-                input_index,
-                reason: error.to_string(),
-            })?;
+                flags,
+                &mut serialized_tx,
+            )? {
+                verified_prevouts.push((input.previous_output, prevout));
+                continue;
+            }
+
+            let witness = input.witness.to_vec();
+            Interpreter
+                .execute(
+                    prevout.script_pubkey.as_bytes(),
+                    input.script_sig.as_bytes(),
+                    &witness,
+                    flags,
+                    &prevout,
+                    tx,
+                    input_index,
+                )
+                .map_err(|error| ConsensusError::Script {
+                    input_index,
+                    reason: error.to_string(),
+                })?;
+        }
         verified_prevouts.push((input.previous_output, prevout));
     }
 
