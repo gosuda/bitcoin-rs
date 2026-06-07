@@ -9,7 +9,9 @@
 //! externally collected evidence and fails closed when the evidence contract is
 //! missing or malformed.
 
-use std::{env, process::Command};
+use std::{env, fs::File, io::Read, path::Path, process::Command};
+
+use sha2::{Digest, Sha256};
 
 const MIN_INITIAL_SYNC_RATIO_VS_BITCOIN_CORE: f64 = 1.0;
 const MAX_UTXO_COMMIT_P95_MS: f64 = 50.0;
@@ -155,28 +157,8 @@ impl G14Evidence {
         let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
         let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
         let benchmark_artifact_sha256 = required_hex("G14_BENCHMARK_ARTIFACT_SHA256", 64);
-        require_literal(
-            "G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA",
-            ELECTRUM_RSS_MEASUREMENT_SCHEMA,
-        );
-        require_exact_u64(
-            "G14_ELECTRUM_RSS_MEASUREMENT_SAMPLE_SIZE",
-            EXPECTED_ELECTRUM_SAMPLE_SIZE,
-        );
-        require_exact_u64(
-            "G14_ELECTRUM_RSS_MEASUREMENT_NON_EMPTY_HISTORY_COUNT",
-            EXPECTED_ELECTRUM_SAMPLE_SIZE,
-        );
-        require_exact_u64("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HEIGHT", stop_height);
-        let electrum_rss_measurement_tip_hash =
-            required_hex("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH", 64);
-        assert_eq!(
-            electrum_rss_measurement_tip_hash, stop_hash,
-            "G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH must match G14_IBD_STOP_HASH"
-        );
-        let electrum_rss_measurement_path = required_env("G14_ELECTRUM_RSS_MEASUREMENT_PATH");
-        let electrum_rss_measurement_sha256 =
-            required_hex("G14_ELECTRUM_RSS_MEASUREMENT_SHA256", 64);
+        let (electrum_rss_measurement_path, electrum_rss_measurement_sha256) =
+            verified_electrum_rss_measurement_from_env(stop_height, &stop_hash);
         let electrum_scripthash_corpus = required_env("G14_ELECTRUM_SCRIPTHASH_CORPUS");
         let electrum_scripthash_corpus_sha256 =
             required_hex("G14_ELECTRUM_SCRIPTHASH_CORPUS_SHA256", 64);
@@ -347,11 +329,35 @@ impl G14Evidence {
 
 impl CriterionRawOutputCustody {
     fn from_env() -> Self {
+        Self::from_values(
+            required_env("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH"),
+            required_hex("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_SHA256", 64),
+            required_env("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH"),
+            required_hex("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_SHA256", 64),
+        )
+    }
+
+    fn from_values(
+        bitcoin_rs_path: String,
+        bitcoin_rs_sha256: String,
+        bitcoin_core_path: String,
+        bitcoin_core_sha256: String,
+    ) -> Self {
+        require_sha256_file(
+            &bitcoin_rs_path,
+            &bitcoin_rs_sha256,
+            "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+        );
+        require_sha256_file(
+            &bitcoin_core_path,
+            &bitcoin_core_sha256,
+            "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
+        );
         Self {
-            bitcoin_rs_path: required_env("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH"),
-            bitcoin_rs_sha256: required_hex("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_SHA256", 64),
-            bitcoin_core_path: required_env("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH"),
-            bitcoin_core_sha256: required_hex("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_SHA256", 64),
+            bitcoin_rs_path,
+            bitcoin_rs_sha256,
+            bitcoin_core_path,
+            bitcoin_core_sha256,
         }
     }
 }
@@ -465,6 +471,77 @@ fn require_literal(name: &str, expected: &str) {
     );
 }
 
+fn verified_electrum_rss_measurement_from_env(
+    stop_height: u64,
+    stop_hash: &str,
+) -> (String, String) {
+    require_literal(
+        "G14_ELECTRUM_RSS_MEASUREMENT_SCHEMA",
+        ELECTRUM_RSS_MEASUREMENT_SCHEMA,
+    );
+    require_exact_u64(
+        "G14_ELECTRUM_RSS_MEASUREMENT_SAMPLE_SIZE",
+        EXPECTED_ELECTRUM_SAMPLE_SIZE,
+    );
+    require_exact_u64(
+        "G14_ELECTRUM_RSS_MEASUREMENT_NON_EMPTY_HISTORY_COUNT",
+        EXPECTED_ELECTRUM_SAMPLE_SIZE,
+    );
+    require_exact_u64("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HEIGHT", stop_height);
+    let electrum_rss_measurement_tip_hash =
+        required_hex("G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH", 64);
+    assert_eq!(
+        electrum_rss_measurement_tip_hash, stop_hash,
+        "G14_ELECTRUM_RSS_MEASUREMENT_TIP_HASH must match G14_IBD_STOP_HASH"
+    );
+    let path = required_env("G14_ELECTRUM_RSS_MEASUREMENT_PATH");
+    let sha256 = required_hex("G14_ELECTRUM_RSS_MEASUREMENT_SHA256", 64);
+    require_sha256_file(&path, &sha256, "G14_ELECTRUM_RSS_MEASUREMENT_PATH");
+    (path, sha256)
+}
+
+fn require_sha256_file(path: &str, expected_sha256: &str, name: &str) {
+    let actual_sha256 = sha256_file(path, name);
+    assert_eq!(
+        actual_sha256, expected_sha256,
+        "{name} content hash must match its G14 SHA-256 binding",
+    );
+}
+
+fn sha256_file(path: &str, name: &str) -> String {
+    let path = Path::new(path);
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => panic!(
+            "{name} must be a readable file at {}: {error}",
+            path.display()
+        ),
+    };
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) => panic!("{name} could not be read at {}: {error}", path.display()),
+        };
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    lower_hex(&digest.finalize())
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 fn require_exact_u64(name: &str, expected: u64) {
     let value = positive_u64(name);
     assert_eq!(
@@ -510,4 +587,111 @@ fn positive_u64(name: &str) -> u64 {
     };
     assert_ne!(value, 0, "{name} must be positive");
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, panic};
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn final_gate_accepts_hash_bound_local_custody_files() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let bitcoin_rs_raw = dir.path().join("bitcoin-rs.raw");
+        let bitcoin_core_raw = dir.path().join("bitcoin-core.raw");
+        fs::write(&bitcoin_rs_raw, b"Benchmarking bitcoin-rs/mainnet-ibd\n")
+            .unwrap_or_else(|error| panic!("write bitcoin-rs raw failed: {error}"));
+        fs::write(
+            &bitcoin_core_raw,
+            b"Benchmarking bitcoin-core/mainnet-ibd\n",
+        )
+        .unwrap_or_else(|error| panic!("write bitcoin-core raw failed: {error}"));
+
+        let custody = CriterionRawOutputCustody::from_values(
+            bitcoin_rs_raw.display().to_string(),
+            sha256_file(
+                &bitcoin_rs_raw.display().to_string(),
+                "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+            ),
+            bitcoin_core_raw.display().to_string(),
+            sha256_file(
+                &bitcoin_core_raw.display().to_string(),
+                "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
+            ),
+        );
+
+        assert_eq!(
+            custody.bitcoin_rs_path,
+            bitcoin_rs_raw.display().to_string()
+        );
+        assert_eq!(
+            custody.bitcoin_core_path,
+            bitcoin_core_raw.display().to_string()
+        );
+    }
+
+    #[test]
+    fn final_gate_rejects_tampered_criterion_raw_output() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let bitcoin_rs_raw = dir.path().join("bitcoin-rs.raw");
+        let bitcoin_core_raw = dir.path().join("bitcoin-core.raw");
+        fs::write(&bitcoin_rs_raw, b"Benchmarking bitcoin-rs/mainnet-ibd\n")
+            .unwrap_or_else(|error| panic!("write bitcoin-rs raw failed: {error}"));
+        fs::write(
+            &bitcoin_core_raw,
+            b"Benchmarking bitcoin-core/mainnet-ibd\n",
+        )
+        .unwrap_or_else(|error| panic!("write bitcoin-core raw failed: {error}"));
+        let stale_bitcoin_rs_sha = sha256_file(
+            &bitcoin_rs_raw.display().to_string(),
+            "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+        );
+        let bitcoin_core_sha = sha256_file(
+            &bitcoin_core_raw.display().to_string(),
+            "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
+        );
+        fs::write(&bitcoin_rs_raw, b"tampered\n")
+            .unwrap_or_else(|error| panic!("tamper bitcoin-rs raw failed: {error}"));
+
+        let result = panic::catch_unwind(|| {
+            CriterionRawOutputCustody::from_values(
+                bitcoin_rs_raw.display().to_string(),
+                stale_bitcoin_rs_sha,
+                bitcoin_core_raw.display().to_string(),
+                bitcoin_core_sha,
+            );
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn final_gate_rejects_tampered_electrum_rss_measurement() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let measurement = dir.path().join("electrum-rss.json");
+        fs::write(
+            &measurement,
+            br#"{"schema":"g14-electrum-rss-measurement-v1"}"#,
+        )
+        .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
+        let stale_sha = sha256_file(
+            &measurement.display().to_string(),
+            "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+        );
+        fs::write(&measurement, br#"{"schema":"tampered"}"#)
+            .unwrap_or_else(|error| panic!("tamper measurement failed: {error}"));
+
+        let result = panic::catch_unwind(|| {
+            require_sha256_file(
+                &measurement.display().to_string(),
+                &stale_sha,
+                "G14_ELECTRUM_RSS_MEASUREMENT_PATH",
+            );
+        });
+
+        assert!(result.is_err());
+    }
 }
