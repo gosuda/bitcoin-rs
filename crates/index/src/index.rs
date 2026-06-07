@@ -445,6 +445,25 @@ impl<S: KvStore> Indexer<S> {
         self.write_pending_rows(rows, height)
     }
 
+    /// Walks one decoded block using caller-verified transaction IDs.
+    ///
+    /// The serialized block is retained only as the safe fallback path when the caller-provided
+    /// transaction-id count does not match the decoded block. Normal callers must pass the
+    /// consensus serialization of `block` as `serialized_block`.
+    pub fn ingest_decoded_block_with_verified_txids(
+        &mut self,
+        block: &bitcoin::Block,
+        serialized_block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        if txids.len() != block.txdata.len() {
+            return self.ingest_block_with_verified_txids(serialized_block, height, txids);
+        }
+        let rows = pending_rows_for_decoded_block(block, height, txids)?;
+        self.write_pending_rows(rows, height)
+    }
+
     fn write_pending_rows(
         &mut self,
         mut rows: PendingRows,
@@ -505,6 +524,38 @@ fn pending_rows_for_block(
         }
     };
     Ok((rows, txid_count))
+}
+
+fn pending_rows_for_decoded_block(
+    block: &bitcoin::Block,
+    height: u32,
+    txids: &[bitcoin::Txid],
+) -> Result<PendingRows, IndexError> {
+    let mut rows = PendingRows::default();
+    let header_bytes = bitcoin::consensus::encode::serialize(&block.header);
+    let Some(header) = HeaderRow::from_header_bytes(&header_bytes) else {
+        return Err(IndexError::InvalidHeaderLength {
+            len: header_bytes.len(),
+        });
+    };
+    rows.header_rows.push(header.to_db_row());
+    for (tx, txid) in block.txdata.iter().zip(txids) {
+        rows.txid_rows.push(TxidRow::row(txid, height));
+        for tx_in in &tx.input {
+            if !tx_in.previous_output.is_null() {
+                rows.spending_rows
+                    .push(SpendingPrefixRow::row(&tx_in.previous_output, height));
+            }
+        }
+        for tx_out in &tx.output {
+            if !is_op_return_script(tx_out.script_pubkey.as_bytes()) {
+                let scripthash = ScriptHash::new(&tx_out.script_pubkey);
+                rows.funding_rows
+                    .push(ScriptHashRow::row(scripthash, height));
+            }
+        }
+    }
+    Ok(rows)
 }
 
 #[derive(Default)]
@@ -692,6 +743,22 @@ pub trait IndexerLike: Send + Sync {
         self.ingest_block_with_txids(block, height, txids)
     }
 
+    /// Walks a decoded block and writes rows, trusting caller-verified transaction IDs when
+    /// supported.
+    ///
+    /// The default implementation preserves existing implementations by validating through
+    /// [`IndexerLike::ingest_block_with_verified_txids`].
+    fn ingest_decoded_block_with_verified_txids(
+        &mut self,
+        block: &bitcoin::Block,
+        serialized_block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        let _ = block;
+        self.ingest_block_with_verified_txids(serialized_block, height, txids)
+    }
+
     /// Resolves a confirmed transaction by txid via `source`.
     ///
     /// Default implementations may return `Ok(None)` when the concrete indexer
@@ -754,6 +821,16 @@ impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
         Self::ingest_block_with_verified_txids(self, block, height, txids)
     }
 
+    fn ingest_decoded_block_with_verified_txids(
+        &mut self,
+        block: &bitcoin::Block,
+        serialized_block: &[u8],
+        height: u32,
+        txids: &[bitcoin::Txid],
+    ) -> Result<IndexRowCounts, IndexError> {
+        Self::ingest_decoded_block_with_verified_txids(self, block, serialized_block, height, txids)
+    }
+
     fn resolve_transaction(
         &self,
         txid: bitcoin::Txid,
@@ -781,12 +858,13 @@ mod tests {
         Amount, Block, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
         TxMerkleNode, TxOut, Txid, Witness, absolute, block, transaction,
     };
-    use bitcoin_rs_storage::RocksDbStore;
+    use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
 
     use super::{BlockSource, Indexer, is_op_return_script};
     use crate::{HistoryEntry, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow};
 
     const HEIGHT: u32 = 42;
+    type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
     #[test]
     fn raw_op_return_check_matches_script_prefix_semantics() {
@@ -906,6 +984,91 @@ mod tests {
 
         let rows = indexer.iter_txid_rows(&txid)?;
         assert!(rows.contains(&TxidRow::row(&txid, HEIGHT)));
+        Ok(())
+    }
+
+    #[test]
+    fn decoded_verified_txid_ingest_matches_serialized_ingest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let coinbase = tx(OutPoint::null(), ScriptBuf::from_bytes(vec![0x51, 0x04]));
+        let spender = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: spent_outpoint(9, 1),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(5_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x05]),
+                },
+                TxOut {
+                    value: Amount::from_sat(0),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x00]),
+                },
+            ],
+        };
+        let block = block(vec![coinbase, spender]);
+        let block_bytes = serialize(&block);
+        let txids = block
+            .txdata
+            .iter()
+            .map(Transaction::compute_txid)
+            .collect::<Vec<_>>();
+        let (_serialized_dir, mut serialized_indexer) = indexer()?;
+        let (_decoded_dir, mut decoded_indexer) = indexer()?;
+
+        let serialized_counts =
+            serialized_indexer.ingest_block_with_verified_txids(&block_bytes, HEIGHT, &txids)?;
+        let decoded_counts = decoded_indexer.ingest_decoded_block_with_verified_txids(
+            &block,
+            &block_bytes,
+            HEIGHT,
+            &txids,
+        )?;
+
+        assert_eq!(decoded_counts, serialized_counts);
+        assert_eq!(
+            stored_rows(&decoded_indexer)?,
+            stored_rows(&serialized_indexer)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decoded_verified_txid_ingest_mismatch_falls_back_to_serialized_ingest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let decoded_block = block(vec![tx(
+            OutPoint::null(),
+            ScriptBuf::from_bytes(vec![0x51, 0x08]),
+        )]);
+        let serialized_block = block(vec![
+            tx(OutPoint::null(), ScriptBuf::from_bytes(vec![0x51, 0x06])),
+            tx(
+                spent_outpoint(10, 0),
+                ScriptBuf::from_bytes(vec![0x51, 0x07]),
+            ),
+        ]);
+        let serialized_block_bytes = serialize(&serialized_block);
+        let (_serialized_dir, mut serialized_indexer) = indexer()?;
+        let (_decoded_dir, mut decoded_indexer) = indexer()?;
+
+        let serialized_counts = serialized_indexer.ingest_block(&serialized_block_bytes, HEIGHT)?;
+        let decoded_counts = decoded_indexer.ingest_decoded_block_with_verified_txids(
+            &decoded_block,
+            &serialized_block_bytes,
+            HEIGHT,
+            &[],
+        )?;
+
+        assert_eq!(decoded_counts, serialized_counts);
+        assert_eq!(
+            stored_rows(&decoded_indexer)?,
+            stored_rows(&serialized_indexer)?
+        );
         Ok(())
     }
 
@@ -1175,6 +1338,27 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let store = Arc::new(RocksDbStore::open(dir.path())?);
         Ok((dir, Indexer::new(store)))
+    }
+
+    fn stored_rows(
+        indexer: &Indexer<RocksDbStore>,
+    ) -> Result<StoredRows, Box<dyn std::error::Error>> {
+        let mut rows = Vec::new();
+        for cf in [
+            ColumnFamily::TxConfirmed,
+            ColumnFamily::Funding,
+            ColumnFamily::Spending,
+            ColumnFamily::BlockHeaders,
+        ] {
+            for row in indexer.store().iter_prefix(cf, &[])? {
+                let (key, _value) = row?;
+                rows.push((cf, key));
+            }
+        }
+        rows.sort_by(|left, right| {
+            (left.0.as_str(), left.1.as_slice()).cmp(&(right.0.as_str(), right.1.as_slice()))
+        });
+        Ok(rows)
     }
 
     fn block(txdata: Vec<Transaction>) -> Block {
