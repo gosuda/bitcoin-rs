@@ -158,6 +158,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     }
 
     let mut input_value = 0u64;
+    let mut verified_prevouts = Vec::with_capacity(tx.input.len());
     #[cfg(feature = "bitcoinconsensus")]
     let mut serialized_tx = None;
     let interpreter = Interpreter;
@@ -177,6 +178,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
             flags,
             &mut serialized_tx,
         )? {
+            verified_prevouts.push((input.previous_output, prevout));
             continue;
         }
 
@@ -195,6 +197,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
                 input_index,
                 reason: error.to_string(),
             })?;
+        verified_prevouts.push((input.previous_output, prevout));
     }
 
     if input_value < output_value {
@@ -204,8 +207,11 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         });
     }
 
-    let sigop_cost = u32::try_from(tx.total_sigop_cost(|outpoint| prevouts.lookup(outpoint)))
-        .unwrap_or(u32::MAX);
+    let mut sigop_lookup_cursor = 0usize;
+    let sigop_cost = u32::try_from(tx.total_sigop_cost(|outpoint| {
+        cached_prevout_lookup(&verified_prevouts, &mut sigop_lookup_cursor, outpoint)
+    }))
+    .unwrap_or(u32::MAX);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -214,6 +220,34 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     }
 
     Ok(())
+}
+
+fn cached_prevout_lookup(
+    prevouts: &[(bitcoin::OutPoint, bitcoin::TxOut)],
+    cursor: &mut usize,
+    outpoint: &bitcoin::OutPoint,
+) -> Option<bitcoin::TxOut> {
+    if prevouts.is_empty() {
+        return None;
+    }
+    if *cursor >= prevouts.len() {
+        *cursor = 0;
+    }
+    if let Some((cached_outpoint, txout)) = prevouts.get(*cursor)
+        && cached_outpoint == outpoint
+    {
+        *cursor = (*cursor).saturating_add(1);
+        return Some(txout.clone());
+    }
+    let (index, txout) =
+        prevouts
+            .iter()
+            .enumerate()
+            .find_map(|(index, (cached_outpoint, txout))| {
+                (cached_outpoint == outpoint).then_some((index, txout))
+            })?;
+    *cursor = index.saturating_add(1);
+    Some(txout.clone())
 }
 
 #[cfg(feature = "bitcoinconsensus")]
@@ -259,7 +293,7 @@ fn total_output_value_borrowed(tx: &bitcoin::Transaction) -> Result<u64, Consens
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{cell::Cell, collections::BTreeMap};
 
     use bitcoin::hashes::Hash as _;
     #[cfg(feature = "bitcoinconsensus")]
@@ -277,7 +311,7 @@ mod tests {
         verify_transaction_borrowed, verify_transaction_borrowed_with_mtp,
         verify_transaction_with_mtp,
     };
-    use crate::ConsensusError;
+    use crate::{ConsensusError, rust_path::UtxoView};
 
     #[test]
     fn coinbase_transaction_skips_prevout_lookup() {
@@ -399,6 +433,49 @@ mod tests {
             verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
             Ok(())
         );
+    }
+
+    #[test]
+    fn verify_transaction_reuses_prevouts_for_sigop_counting() {
+        let first = OutPoint {
+            txid: Txid::from_byte_array([11; 32]),
+            vout: 0,
+        };
+        let second = OutPoint {
+            txid: Txid::from_byte_array([12; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![true_spending_input(first), true_spending_input(second)],
+            output: vec![TxOut {
+                value: Amount::from_sat(75),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            first,
+            TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            },
+        );
+        utxos.insert(
+            second,
+            TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: Builder::new().push_int(1).into_script(),
+            },
+        );
+        let view = CountingUtxoView::new(utxos);
+
+        assert_eq!(
+            verify_transaction(&tx, &view, 0, VerifyFlags::MANDATORY),
+            Ok(())
+        );
+        assert_eq!(view.lookup_count(), tx.0.input.len());
     }
 
     #[test]
@@ -626,6 +703,31 @@ mod tests {
             script_sig: ScriptBuf::new(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
+        }
+    }
+
+    struct CountingUtxoView {
+        utxos: BTreeMap<OutPoint, TxOut>,
+        lookups: Cell<usize>,
+    }
+
+    impl CountingUtxoView {
+        fn new(utxos: BTreeMap<OutPoint, TxOut>) -> Self {
+            Self {
+                utxos,
+                lookups: Cell::new(0),
+            }
+        }
+
+        fn lookup_count(&self) -> usize {
+            self.lookups.get()
+        }
+    }
+
+    impl UtxoView for CountingUtxoView {
+        fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+            self.lookups.set(self.lookups.get().saturating_add(1));
+            self.utxos.get(outpoint).cloned()
         }
     }
 
