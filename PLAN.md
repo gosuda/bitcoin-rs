@@ -296,6 +296,8 @@ Do not mark the broad roadmap tasks complete from these slices alone unless the 
   Evidence: Criterion `deep_headers_pure_128_blocks` -2.5513%, `deep_headers_indexed_128_blocks` -5.0847%, and `deep_headers_received_scan_128_blocks` -10.844%; production-state, apply-tick, partial-apply, reverse-scan overflow, many-peer, and oversized inbound guards stayed within noise on the broader deterministic proxy rerun.
 - [x] Node apply-path duplicate-spend planning now sizes the spent-outpoint conflict set for spend-heavy multi-transaction blocks, avoiding growth in the common spend-heavy proxy shape without changing membership semantics.
   Evidence: Criterion `sync_pipeline_apply_spend_heavy_proxy` -6.4981%, `sync_pipeline_apply_spend_heavy_proxy_filter` -6.2339%, and `deterministic_initial_sync_proxy_production_state_fjall_all_indexes_spend_heavy` -9.1276%; all reported `p = 0.00 < 0.05`.
+- [x] Txindex row construction now computes the block-height little-endian bytes once per block visitor and reuses them for txid, spending, and funding rows, preserving electrs row bytes while removing repeated per-row height encoding.
+  Evidence: same-session clean `sync_apply_metrics` baseline reported `spend_heavy_117_txindex` at `0.7161ms` average total with `tx_index_ingest_avg_ms=0.0861` and `spend_heavy_117_all_indexes` at `0.6611ms` / `tx_index_ingest_avg_ms=0.0681`; patched repeat reported `0.6138ms` / `0.0665` and `0.6175ms` / `0.0635`.
 
 **Measured but rejected in this campaign:**
 

@@ -488,7 +488,7 @@ fn pending_rows_for_block(
     let txid_count = {
         let mut visitor = IndexBlockVisitor {
             rows: &mut rows,
-            height,
+            height_bytes: height.to_le_bytes(),
             txids,
             txid_count: 0,
             invalid_header_len: None,
@@ -539,7 +539,7 @@ impl PendingRows {
 
 struct IndexBlockVisitor<'a> {
     rows: &'a mut PendingRows,
-    height: u32,
+    height_bytes: [u8; crate::types::HEIGHT_SIZE],
     txids: TxidSource<'a>,
     txid_count: usize,
     invalid_header_len: Option<usize>,
@@ -561,34 +561,38 @@ impl Visitor for IndexBlockVisitor<'_> {
                 let txid = tx.txid_sha2();
                 self.rows
                     .txid_rows
-                    .push(TxidRow::row_bytes(txid.as_slice(), self.height));
+                    .push(TxidRow::row_bytes(txid.as_slice(), self.height_bytes));
             }
             TxidSource::Validate(txids) => {
                 if let Some(txid) = txids.get(self.txid_count) {
                     let computed = tx.txid_sha2();
                     let txid_bytes: &[u8] = txid.as_ref();
                     if txid_bytes == computed.as_slice() {
-                        self.rows.txid_rows.push(TxidRow::row(txid, self.height));
+                        self.rows
+                            .txid_rows
+                            .push(TxidRow::row_bytes(txid_bytes, self.height_bytes));
                     } else {
                         self.rows
                             .txid_rows
-                            .push(TxidRow::row_bytes(computed.as_slice(), self.height));
+                            .push(TxidRow::row_bytes(computed.as_slice(), self.height_bytes));
                     }
                 } else {
                     let txid = tx.txid_sha2();
                     self.rows
                         .txid_rows
-                        .push(TxidRow::row_bytes(txid.as_slice(), self.height));
+                        .push(TxidRow::row_bytes(txid.as_slice(), self.height_bytes));
                 }
             }
             TxidSource::Trusted(txids) => {
                 if let Some(txid) = txids.get(self.txid_count) {
-                    self.rows.txid_rows.push(TxidRow::row(txid, self.height));
+                    self.rows
+                        .txid_rows
+                        .push(TxidRow::row_bytes(txid.as_ref(), self.height_bytes));
                 } else {
                     let txid = tx.txid_sha2();
                     self.rows
                         .txid_rows
-                        .push(TxidRow::row_bytes(txid.as_slice(), self.height));
+                        .push(TxidRow::row_bytes(txid.as_slice(), self.height_bytes));
                 }
             }
         }
@@ -602,7 +606,7 @@ impl Visitor for IndexBlockVisitor<'_> {
             self.rows.spending_rows.push(SpendingPrefixRow::row_parts(
                 prevout.txid(),
                 prevout.vout(),
-                self.height,
+                self.height_bytes,
             ));
         }
         ControlFlow::Continue(())
@@ -611,10 +615,10 @@ impl Visitor for IndexBlockVisitor<'_> {
     fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut<'_>) -> ControlFlow<()> {
         let script = tx_out.script_pubkey();
         if !is_op_return_script(script) {
-            self.rows.funding_rows.push(ScriptHashRow::row(
-                ScriptHash::from_script_bytes(script),
-                self.height,
-            ));
+            self.rows.funding_rows.push(HashPrefixRow {
+                prefix: ScriptHash::from_script_bytes(script).prefix(),
+                height: self.height_bytes,
+            });
         }
         ControlFlow::Continue(())
     }

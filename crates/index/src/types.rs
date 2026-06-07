@@ -145,8 +145,15 @@ impl SpendingPrefixRow {
     }
 
     /// Builds a database row from zero-copy previous-outpoint parts.
-    pub(crate) fn row_parts(txid_bytes: &[u8], vout: u32, height: u32) -> HashPrefixRow {
-        HashPrefixRow::new(spending_prefix(txid_bytes, vout), height)
+    pub(crate) fn row_parts(
+        txid_bytes: &[u8],
+        vout: u32,
+        height: [u8; HEIGHT_SIZE],
+    ) -> HashPrefixRow {
+        HashPrefixRow {
+            prefix: spending_prefix(txid_bytes, vout),
+            height,
+        }
     }
 }
 
@@ -165,8 +172,11 @@ impl TxidRow {
     }
 
     /// Builds a database row from zero-copy transaction-id bytes.
-    pub(crate) fn row_bytes(txid_bytes: &[u8], height: u32) -> HashPrefixRow {
-        HashPrefixRow::new(txid_prefix(txid_bytes), height)
+    pub(crate) fn row_bytes(txid_bytes: &[u8], height: [u8; HEIGHT_SIZE]) -> HashPrefixRow {
+        HashPrefixRow {
+            prefix: txid_prefix(txid_bytes),
+            height,
+        }
     }
 }
 
