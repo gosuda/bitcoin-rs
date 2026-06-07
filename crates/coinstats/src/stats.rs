@@ -198,7 +198,13 @@ impl CoinStatsDelta {
                 delta.remove_batch(&mut scratch, removals);
             }
             UtxoCommittedEvent::RemoveCoin(removal) => {
-                delta.remove_batch(&mut scratch, core::slice::from_ref(removal));
+                delta.remove_utxo(
+                    &mut scratch,
+                    &removal.op,
+                    &removal.txout,
+                    removal.height,
+                    removal.coinbase,
+                );
             }
         });
         delta
@@ -215,7 +221,13 @@ impl CoinStatsDelta {
                 delta.remove_batch(&mut scratch, removals);
             }
             UtxoCommittedEvent::RemoveCoin(removal) => {
-                delta.remove_batch(&mut scratch, core::slice::from_ref(removal));
+                delta.remove_utxo(
+                    &mut scratch,
+                    &removal.op,
+                    &removal.txout,
+                    removal.height,
+                    removal.coinbase,
+                );
             }
         }
         delta
