@@ -19,6 +19,8 @@ export SCRIPT_DIR
 
 python3 - "$@" <<'PY'
 import argparse
+import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -28,6 +30,8 @@ import sys
 
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
+IBD_COMPLETION_PROOF_SCHEMA = "g14-ibd-completion-proof-v1"
+IBD_COMPLETION_PROOF_PREFIX = "G14_IBD_COMPLETION_PROOF "
 CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
 CRITERION_UNIT_PATTERN = "(?:ns|us|\u00b5s|ms|s)"
 CRITERION_INTERVAL_RE = re.compile(
@@ -82,6 +86,10 @@ def read_text(path: Path, name: str) -> str:
     except UnicodeDecodeError as error:
         die(f"{name} must be UTF-8: {error}")
     return non_empty_text(value, name)
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def ensure_output_path(path: str | None, name: str, force: bool) -> Path:
@@ -140,6 +148,56 @@ def criterion_elapsed_seconds(raw_output: str, benchmark_id: str, name: str) -> 
             if single:
                 return criterion_seconds(single.group(1), single.group(2))
     die(f"{name} must contain Criterion time output for benchmark {benchmark_id!r}")
+
+
+def require_block_hash(value: str, source: str) -> str:
+    block_hash = value.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+        die(f"{source} must return a 64-character lowercase block hash")
+    return block_hash
+
+
+def run_bitcoin_cli(bitcoin_cli: str, bitcoin_cli_args: list[str], command: str, height: int) -> str:
+    result = subprocess.run(
+        [bitcoin_cli, *bitcoin_cli_args, command, str(height)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        die(f"bitcoin-cli {command} {height} failed with status {result.returncode}: {result.stderr.strip()}")
+    return require_block_hash(result.stdout, f"bitcoin-cli {command} {height}")
+
+
+def append_ibd_completion_proof(
+    raw_output: Path,
+    benchmark_id: str,
+    benchmark_run_id: str,
+    benchmark_host_id: str,
+    start_height: int,
+    start_hash: str,
+    stop_height: int,
+    stop_hash: str,
+    command_sha256: str,
+    config_sha256: str,
+) -> None:
+    proof = {
+        "schema": IBD_COMPLETION_PROOF_SCHEMA,
+        "benchmark_id": benchmark_id,
+        "benchmark_run_id": benchmark_run_id,
+        "benchmark_host_id": benchmark_host_id,
+        "ibd_start_height": start_height,
+        "ibd_start_hash": start_hash,
+        "ibd_stop_height": stop_height,
+        "ibd_stop_hash": stop_hash,
+        "ibd_blocks": stop_height - start_height + 1,
+        "command_sha256": command_sha256,
+        "config_sha256": config_sha256,
+    }
+    with raw_output.open("a", encoding="utf-8") as handle:
+        handle.write(IBD_COMPLETION_PROOF_PREFIX)
+        json.dump(proof, handle, separators=(",", ":"))
+        handle.write("\n")
 
 
 def run_criterion_command(command: str, raw_output: Path, benchmark_id: str, name: str) -> str:
@@ -213,6 +271,12 @@ bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-comma
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = require_file(args.bitcoin_rs_config, "--bitcoin-rs-config")
 bitcoin_core_config = require_file(args.bitcoin_core_config, "--bitcoin-core-config")
+bitcoin_rs_config_text = read_text(bitcoin_rs_config, "--bitcoin-rs-config")
+bitcoin_core_config_text = read_text(bitcoin_core_config, "--bitcoin-core-config")
+bitcoin_cli_args = args.bitcoin_cli_args
+if bitcoin_cli_args and bitcoin_cli_args[0] == "--":
+    bitcoin_cli_args = bitcoin_cli_args[1:]
+bitcoin_cli = os.environ.get("BITCOIN_CLI", "bitcoin-cli")
 
 bitcoin_rs_raw_output = ensure_output_path(
     args.criterion_bitcoin_rs_raw_output
@@ -232,6 +296,8 @@ try:
     for path in created_paths:
         if path.exists():
             path.unlink()
+    start_hash = run_bitcoin_cli(bitcoin_cli, bitcoin_cli_args, "getblockhash", start_height)
+    stop_hash = run_bitcoin_cli(bitcoin_cli, bitcoin_cli_args, "getblockhash", stop_height)
     bitcoin_rs_elapsed_seconds = run_criterion_command(
         bitcoin_rs_command,
         bitcoin_rs_raw_output,
@@ -244,10 +310,31 @@ try:
         BITCOIN_CORE_CRITERION_BENCHMARK_ID,
         "--bitcoin-core-command",
     )
+    append_ibd_completion_proof(
+        bitcoin_rs_raw_output,
+        BITCOIN_RS_CRITERION_BENCHMARK_ID,
+        benchmark_run_id,
+        benchmark_host_id,
+        start_height,
+        start_hash,
+        stop_height,
+        stop_hash,
+        sha256_text(bitcoin_rs_command),
+        sha256_text(bitcoin_rs_config_text),
+    )
+    append_ibd_completion_proof(
+        bitcoin_core_raw_output,
+        BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+        benchmark_run_id,
+        benchmark_host_id,
+        start_height,
+        start_hash,
+        stop_height,
+        stop_hash,
+        sha256_text(bitcoin_core_command),
+        sha256_text(bitcoin_core_config_text),
+    )
 
-    bitcoin_cli_args = args.bitcoin_cli_args
-    if bitcoin_cli_args and bitcoin_cli_args[0] == "--":
-        bitcoin_cli_args = bitcoin_cli_args[1:]
     producer = script_dir() / "produce-g14-criterion-artifact.sh"
     command = [
         str(producer),

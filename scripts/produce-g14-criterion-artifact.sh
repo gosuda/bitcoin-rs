@@ -28,6 +28,8 @@ import re
 import subprocess
 
 CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
+IBD_COMPLETION_PROOF_SCHEMA = "g14-ibd-completion-proof-v1"
+IBD_COMPLETION_PROOF_PREFIX = "G14_IBD_COMPLETION_PROOF "
 BITCOIN_RS_CRITERION_BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 BITCOIN_CORE_CRITERION_BENCHMARK_ID = "bitcoin-core/mainnet-ibd"
 CRITERION_NUMBER_PATTERN = r"[0-9]+(?:\.[0-9]+)?"
@@ -156,6 +158,61 @@ def require_elapsed_matches_raw(
             f"{elapsed_name}={supplied_seconds:.12g} does not match "
             f"{raw_name} benchmark {benchmark_id!r} elapsed seconds {parsed_seconds:.12g}"
         )
+
+
+def require_proof_text(data: dict, key: str, expected: str, source: str) -> None:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        die(f"{source} {key} must be a non-empty string")
+    if value != expected:
+        die(f"{source} {key} must be {expected!r}")
+
+
+def require_proof_int(data: dict, key: str, expected: int, source: str) -> None:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        die(f"{source} {key} must be an integer")
+    if value != expected:
+        die(f"{source} {key} must be {expected}")
+
+
+def require_ibd_completion_proof(
+    raw_output: str,
+    benchmark_id: str,
+    benchmark_run_id: str,
+    benchmark_host_id: str,
+    start_height: int,
+    start_hash: str,
+    stop_height: int,
+    stop_hash: str,
+    command_sha256: str,
+    config_sha256: str,
+    source: str,
+) -> None:
+    payloads = [
+        line.removeprefix(IBD_COMPLETION_PROOF_PREFIX).strip()
+        for line in raw_output.splitlines()
+        if line.startswith(IBD_COMPLETION_PROOF_PREFIX)
+    ]
+    if len(payloads) != 1:
+        die(f"{source} must contain exactly one {IBD_COMPLETION_PROOF_PREFIX.strip()} line")
+    try:
+        proof = json.loads(payloads[0])
+    except json.JSONDecodeError as error:
+        die(f"{source} IBD completion proof must be JSON: {error}")
+    if not isinstance(proof, dict):
+        die(f"{source} IBD completion proof must be a JSON object")
+    require_proof_text(proof, "schema", IBD_COMPLETION_PROOF_SCHEMA, source)
+    require_proof_text(proof, "benchmark_id", benchmark_id, source)
+    require_proof_text(proof, "benchmark_run_id", benchmark_run_id, source)
+    require_proof_text(proof, "benchmark_host_id", benchmark_host_id, source)
+    require_proof_int(proof, "ibd_start_height", start_height, source)
+    require_proof_text(proof, "ibd_start_hash", start_hash, source)
+    require_proof_int(proof, "ibd_stop_height", stop_height, source)
+    require_proof_text(proof, "ibd_stop_hash", stop_hash, source)
+    require_proof_int(proof, "ibd_blocks", stop_height - start_height + 1, source)
+    require_proof_text(proof, "command_sha256", command_sha256, source)
+    require_proof_text(proof, "config_sha256", config_sha256, source)
 
 
 def sha256_text(value: str) -> str:
@@ -314,6 +371,10 @@ bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-comma
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = read_text(require_file(args.bitcoin_rs_config, "--bitcoin-rs-config"), "--bitcoin-rs-config")
 bitcoin_core_config = read_text(require_file(args.bitcoin_core_config, "--bitcoin-core-config"), "--bitcoin-core-config")
+bitcoin_rs_command_sha256 = sha256_text(bitcoin_rs_command)
+bitcoin_core_command_sha256 = sha256_text(bitcoin_core_command)
+bitcoin_rs_config_sha256 = sha256_text(bitcoin_rs_config)
+bitcoin_core_config_sha256 = sha256_text(bitcoin_core_config)
 
 bitcoin_cli_args = args.bitcoin_cli_args
 if bitcoin_cli_args and bitcoin_cli_args[0] == "--":
@@ -331,6 +392,32 @@ require_mainnet_chain_info(
     run_bitcoin_cli(bitcoin_cli, bitcoin_cli_args, "getblockchaininfo"),
     stop_height,
 )
+require_ibd_completion_proof(
+    bitcoin_rs_raw_text,
+    BITCOIN_RS_CRITERION_BENCHMARK_ID,
+    benchmark_run_id,
+    benchmark_host_id,
+    start_height,
+    start_hash,
+    stop_height,
+    stop_hash,
+    bitcoin_rs_command_sha256,
+    bitcoin_rs_config_sha256,
+    "--criterion-bitcoin-rs-raw-output",
+)
+require_ibd_completion_proof(
+    bitcoin_core_raw_text,
+    BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+    benchmark_run_id,
+    benchmark_host_id,
+    start_height,
+    start_hash,
+    stop_height,
+    stop_hash,
+    bitcoin_core_command_sha256,
+    bitcoin_core_config_sha256,
+    "--criterion-bitcoin-core-raw-output",
+)
 
 artifact = {
     "schema": CRITERION_ARTIFACT_SCHEMA,
@@ -340,10 +427,10 @@ artifact = {
     "ibd_start_hash": start_hash,
     "ibd_stop_height": stop_height,
     "ibd_stop_hash": stop_hash,
-    "bitcoin_rs_command_sha256": sha256_text(bitcoin_rs_command),
-    "bitcoin_core_command_sha256": sha256_text(bitcoin_core_command),
-    "bitcoin_rs_config_sha256": sha256_text(bitcoin_rs_config),
-    "bitcoin_core_config_sha256": sha256_text(bitcoin_core_config),
+    "bitcoin_rs_command_sha256": bitcoin_rs_command_sha256,
+    "bitcoin_core_command_sha256": bitcoin_core_command_sha256,
+    "bitcoin_rs_config_sha256": bitcoin_rs_config_sha256,
+    "bitcoin_core_config_sha256": bitcoin_core_config_sha256,
     "benchmarks": [
         {
             "benchmark_id": BITCOIN_RS_CRITERION_BENCHMARK_ID,

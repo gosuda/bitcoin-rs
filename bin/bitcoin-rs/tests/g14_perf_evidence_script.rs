@@ -10,6 +10,8 @@ use std::process::{Child, Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest as _, Sha256};
+
 type FakeElectrumServer = (thread::JoinHandle<std::io::Result<()>>, u16);
 type FakeElectrumRecordingServer = (thread::JoinHandle<std::io::Result<Vec<String>>>, u16);
 
@@ -529,15 +531,45 @@ fn produce_g14_criterion_artifact(
     bitcoin_cli: &Path,
 ) -> Result<Output, Box<dyn std::error::Error>> {
     let artifact_dir = artifact.parent().ok_or("artifact path has no parent")?;
+    let start_height = 0;
+    let stop_height = 10;
+    let start_hash = format!("{start_height:064x}");
+    let stop_hash = format!("{stop_height:064x}");
+    let bitcoin_rs_command_sha256 = sha256_text(bitcoin_rs_command);
+    let bitcoin_core_command_sha256 = sha256_text(bitcoin_core_command);
+    let bitcoin_rs_config_sha256 = sha256_text(&fs::read_to_string(bitcoin_rs_config)?);
+    let bitcoin_core_config_sha256 = sha256_text(&fs::read_to_string(bitcoin_core_config)?);
     let bitcoin_rs_raw_output = write_text(
         artifact_dir,
         "bitcoin-rs-criterion-raw-output.txt",
-        &criterion_raw_output("bitcoin-rs/mainnet-ibd", "1.25"),
+        &criterion_raw_output_with_proof(
+            "bitcoin-rs/mainnet-ibd",
+            "1.25",
+            "g14-mainnet-window-live",
+            BENCHMARK_HOST_ID,
+            start_height,
+            stop_height,
+            &start_hash,
+            &stop_hash,
+            &bitcoin_rs_command_sha256,
+            &bitcoin_rs_config_sha256,
+        ),
     )?;
     let bitcoin_core_raw_output = write_text(
         artifact_dir,
         "bitcoin-core-criterion-raw-output.txt",
-        &criterion_raw_output("bitcoin-core/mainnet-ibd", "2.50"),
+        &criterion_raw_output_with_proof(
+            "bitcoin-core/mainnet-ibd",
+            "2.50",
+            "g14-mainnet-window-live",
+            BENCHMARK_HOST_ID,
+            start_height,
+            stop_height,
+            &start_hash,
+            &stop_hash,
+            &bitcoin_core_command_sha256,
+            &bitcoin_core_config_sha256,
+        ),
     )?;
     Ok(Command::new("bash")
         .arg(artifact_producer_script_path())
@@ -875,6 +907,12 @@ fn criterion_runner_emits_artifact_with_canonical_raw_outputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
     let bitcoin_rs_command = fake_criterion_command(
         temp.path(),
         "bitcoin-rs-runner-criterion",
@@ -887,12 +925,6 @@ fn criterion_runner_emits_artifact_with_canonical_raw_outputs()
         "bitcoin-core/mainnet-ibd",
         "2.50",
     )?;
-    let bitcoin_rs_config = write_text(
-        temp.path(),
-        "bitcoin-rs.toml",
-        "storage_backend=fjall\nindexes=all\n",
-    )?;
-    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
     let artifact = temp.path().join("g14-runner-artifact.json");
     let bitcoin_rs_raw_output = temp.path().join("bitcoin-rs-runner-raw.txt");
     let bitcoin_core_raw_output = temp.path().join("bitcoin-core-runner-raw.txt");
@@ -1930,8 +1962,56 @@ fn write_text(
 }
 
 fn criterion_raw_output(benchmark_id: &str, elapsed_seconds: &str) -> String {
+    let (command_sha256, config_sha256) = if benchmark_id == "bitcoin-core/mainnet-ibd" {
+        (
+            DIRECT_BITCOIN_CORE_COMMAND_SHA256,
+            DIRECT_BITCOIN_CORE_CONFIG_SHA256,
+        )
+    } else {
+        (
+            DIRECT_BITCOIN_RS_COMMAND_SHA256,
+            DIRECT_BITCOIN_RS_CONFIG_SHA256,
+        )
+    };
+    criterion_raw_output_with_proof(
+        benchmark_id,
+        elapsed_seconds,
+        "g14-mainnet-window-00000000",
+        BENCHMARK_HOST_ID,
+        0,
+        10,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000a",
+        command_sha256,
+        config_sha256,
+    )
+}
+
+fn criterion_raw_output_without_proof(benchmark_id: &str, elapsed_seconds: &str) -> String {
     format!(
         "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\n"
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test fixture mirrors the G14 proof schema"
+)]
+fn criterion_raw_output_with_proof(
+    benchmark_id: &str,
+    elapsed_seconds: &str,
+    benchmark_run_id: &str,
+    benchmark_host_id: &str,
+    start_height: u32,
+    stop_height: u32,
+    start_hash: &str,
+    stop_hash: &str,
+    command_sha256: &str,
+    config_sha256: &str,
+) -> String {
+    format!(
+        "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\nG14_IBD_COMPLETION_PROOF {{\"schema\":\"g14-ibd-completion-proof-v1\",\"benchmark_id\":\"{benchmark_id}\",\"benchmark_run_id\":\"{benchmark_run_id}\",\"benchmark_host_id\":\"{benchmark_host_id}\",\"ibd_start_height\":{start_height},\"ibd_start_hash\":\"{start_hash}\",\"ibd_stop_height\":{stop_height},\"ibd_stop_hash\":\"{stop_hash}\",\"ibd_blocks\":{},\"command_sha256\":\"{command_sha256}\",\"config_sha256\":\"{config_sha256}\"}}\n",
+        stop_height - start_height + 1
     )
 }
 
@@ -1941,10 +2021,63 @@ fn write_criterion_raw_output(
     benchmark_id: &str,
     elapsed_seconds: &str,
 ) -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
+    write_criterion_raw_output_with_proof(
+        dir,
+        name,
+        benchmark_id,
+        elapsed_seconds,
+        "g14-mainnet-window-00000000",
+        BENCHMARK_HOST_ID,
+        0,
+        10,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000a",
+        if benchmark_id == "bitcoin-core/mainnet-ibd" {
+            DIRECT_BITCOIN_CORE_COMMAND_SHA256
+        } else {
+            DIRECT_BITCOIN_RS_COMMAND_SHA256
+        },
+        if benchmark_id == "bitcoin-core/mainnet-ibd" {
+            DIRECT_BITCOIN_CORE_CONFIG_SHA256
+        } else {
+            DIRECT_BITCOIN_RS_CONFIG_SHA256
+        },
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test fixture mirrors the G14 proof schema"
+)]
+fn write_criterion_raw_output_with_proof(
+    dir: &Path,
+    name: &str,
+    benchmark_id: &str,
+    elapsed_seconds: &str,
+    benchmark_run_id: &str,
+    benchmark_host_id: &str,
+    start_height: u32,
+    stop_height: u32,
+    start_hash: &str,
+    stop_hash: &str,
+    command_sha256: &str,
+    config_sha256: &str,
+) -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
     let path = write_text(
         dir,
         name,
-        &criterion_raw_output(benchmark_id, elapsed_seconds),
+        &criterion_raw_output_with_proof(
+            benchmark_id,
+            elapsed_seconds,
+            benchmark_run_id,
+            benchmark_host_id,
+            start_height,
+            stop_height,
+            start_hash,
+            stop_hash,
+            command_sha256,
+            config_sha256,
+        ),
     )?;
     let sha256 = sha256_file(&path)?;
     Ok((path, sha256))
@@ -2049,18 +2182,36 @@ fn criterion_artifact_json_with_window_and_hashes(
     stop_height: u32,
     binding: CriterionArtifactBinding<'_>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let (bitcoin_rs_raw_output, bitcoin_rs_raw_output_sha256) = write_criterion_raw_output(
-        dir,
-        &format!("{name}.bitcoin-rs.raw.txt"),
-        "bitcoin-rs/mainnet-ibd",
-        bitcoin_rs_elapsed_seconds,
-    )?;
-    let (bitcoin_core_raw_output, bitcoin_core_raw_output_sha256) = write_criterion_raw_output(
-        dir,
-        &format!("{name}.bitcoin-core.raw.txt"),
-        "bitcoin-core/mainnet-ibd",
-        bitcoin_core_elapsed_seconds,
-    )?;
+    let (bitcoin_rs_raw_output, bitcoin_rs_raw_output_sha256) =
+        write_criterion_raw_output_with_proof(
+            dir,
+            &format!("{name}.bitcoin-rs.raw.txt"),
+            "bitcoin-rs/mainnet-ibd",
+            bitcoin_rs_elapsed_seconds,
+            "g14-mainnet-window-00000000",
+            binding.benchmark_host_id,
+            start_height,
+            stop_height,
+            binding.start_hash,
+            binding.stop_hash,
+            binding.bitcoin_rs_command_sha256,
+            binding.bitcoin_rs_config_sha256,
+        )?;
+    let (bitcoin_core_raw_output, bitcoin_core_raw_output_sha256) =
+        write_criterion_raw_output_with_proof(
+            dir,
+            &format!("{name}.bitcoin-core.raw.txt"),
+            "bitcoin-core/mainnet-ibd",
+            bitcoin_core_elapsed_seconds,
+            "g14-mainnet-window-00000000",
+            binding.benchmark_host_id,
+            start_height,
+            stop_height,
+            binding.start_hash,
+            binding.stop_hash,
+            binding.bitcoin_core_command_sha256,
+            binding.bitcoin_core_config_sha256,
+        )?;
     let bitcoin_rs_raw_output_path = bitcoin_rs_raw_output
         .to_str()
         .ok_or("non-UTF-8 bitcoin-rs raw output path")?;
@@ -2261,6 +2412,18 @@ fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     Ok(digest.to_owned())
 }
 
+fn sha256_text(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        digest.push(char::from(HEX[usize::from(byte >> 4)]));
+        digest.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    digest
+}
+
 fn current_head() -> Result<String, Box<dyn std::error::Error>> {
     let output = Command::new("git")
         .args(["rev-parse", "--verify", "HEAD"])
@@ -2304,7 +2467,7 @@ fn fake_criterion_command(
             r"#!/usr/bin/env python3
 print({raw_output:?}, end='')
 ",
-            raw_output = criterion_raw_output(benchmark_id, elapsed_seconds),
+            raw_output = criterion_raw_output_without_proof(benchmark_id, elapsed_seconds),
         ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();

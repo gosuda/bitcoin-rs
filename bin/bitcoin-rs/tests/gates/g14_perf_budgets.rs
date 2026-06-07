@@ -17,7 +17,7 @@ use std::{
     process::Command,
 };
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const MIN_INITIAL_SYNC_RATIO_VS_BITCOIN_CORE: f64 = 1.0;
@@ -28,6 +28,8 @@ const FOUR_MIB_BYTES: u64 = 4 * 1024 * 1024;
 const EXPECTED_ELECTRUM_SAMPLE_SIZE: u64 = 10_000;
 const ELECTRUM_RSS_MEASUREMENT_SCHEMA: &str = "g14-electrum-rss-measurement-v1";
 const ELECTRUM_HISTORY_METHOD: &str = "blockchain.scripthash.get_history";
+const IBD_COMPLETION_PROOF_SCHEMA: &str = "g14-ibd-completion-proof-v1";
+const IBD_COMPLETION_PROOF_PREFIX: &str = "G14_IBD_COMPLETION_PROOF ";
 const BITCOIN_RS_CRITERION_BENCHMARK_ID: &str = "bitcoin-rs/mainnet-ibd";
 const BITCOIN_CORE_CRITERION_BENCHMARK_ID: &str = "bitcoin-core/mainnet-ibd";
 
@@ -116,6 +118,113 @@ struct CriterionRawOutputCustody {
     bitcoin_core_sha256: String,
 }
 
+#[derive(Clone, Copy)]
+struct IbdCompletionProofContext<'a> {
+    benchmark_id: &'a str,
+    benchmark_run_id: &'a str,
+    benchmark_host_id: &'a str,
+    start_height: u64,
+    start_hash: &'a str,
+    stop_height: u64,
+    stop_hash: &'a str,
+    command_sha256: &'a str,
+    config_sha256: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct IbdCompletionProofEnv<'a> {
+    benchmark_run_id: &'a str,
+    benchmark_host_id: &'a str,
+    start_height: u64,
+    start_hash: &'a str,
+    stop_height: u64,
+    stop_hash: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct IbdCompletionProofEntry<'a> {
+    benchmark_id: &'a str,
+    command_sha256: &'a str,
+    config_sha256: &'a str,
+    elapsed_seconds: f64,
+}
+
+impl<'a> IbdCompletionProofEntry<'a> {
+    fn new(
+        benchmark_id: &'a str,
+        command_sha256: &'a str,
+        config_sha256: &'a str,
+        elapsed_seconds: f64,
+    ) -> Self {
+        Self {
+            benchmark_id,
+            command_sha256,
+            config_sha256,
+            elapsed_seconds,
+        }
+    }
+}
+
+impl<'a> IbdCompletionProofEnv<'a> {
+    fn new(
+        benchmark_run_id: &'a str,
+        benchmark_host_id: &'a str,
+        start_height: u64,
+        start_hash: &'a str,
+        stop_height: u64,
+        stop_hash: &'a str,
+    ) -> Self {
+        Self {
+            benchmark_run_id,
+            benchmark_host_id,
+            start_height,
+            start_hash,
+            stop_height,
+            stop_hash,
+        }
+    }
+
+    fn context(
+        self,
+        benchmark_id: &'a str,
+        command_sha256: &'a str,
+        config_sha256: &'a str,
+    ) -> IbdCompletionProofContext<'a> {
+        IbdCompletionProofContext {
+            benchmark_id,
+            benchmark_run_id: self.benchmark_run_id,
+            benchmark_host_id: self.benchmark_host_id,
+            start_height: self.start_height,
+            start_hash: self.start_hash,
+            stop_height: self.stop_height,
+            stop_hash: self.stop_hash,
+            command_sha256,
+            config_sha256,
+        }
+    }
+
+    fn raw_output_from_env(
+        self,
+        bitcoin_rs: IbdCompletionProofEntry<'a>,
+        bitcoin_core: IbdCompletionProofEntry<'a>,
+    ) -> CriterionRawOutputCustody {
+        CriterionRawOutputCustody::from_env(
+            self.context(
+                bitcoin_rs.benchmark_id,
+                bitcoin_rs.command_sha256,
+                bitcoin_rs.config_sha256,
+            ),
+            bitcoin_rs.elapsed_seconds,
+            self.context(
+                bitcoin_core.benchmark_id,
+                bitcoin_core.command_sha256,
+                bitcoin_core.config_sha256,
+            ),
+            bitcoin_core.elapsed_seconds,
+        )
+    }
+}
+
 /// Gate G14 manual run instructions: run
 /// `cargo test -p bitcoin-rs --test g14_perf_budgets -- --ignored --nocapture`
 /// with externally collected mainnet-tip evidence described in this file.
@@ -130,13 +239,7 @@ fn performance_budgets() {
 impl G14Evidence {
     fn from_env() -> Self {
         let commit_sha = required_commit_sha();
-        require_literal("G14_MEASUREMENT_TARGET", "mainnet-ibd");
-        require_literal("G14_STORAGE_BACKEND", "fjall");
-        require_literal("G14_INDEXES", "all");
-        require_literal("G14_REFERENCE_IMPL", "bitcoin-core");
-        require_literal("G14_BENCH_TOOL", "criterion");
-        require_exact_u64("G14_BLOCK_SIZE_BYTES", FOUR_MIB_BYTES);
-        require_exact_u64("G14_ELECTRUM_SAMPLE_SIZE", EXPECTED_ELECTRUM_SAMPLE_SIZE);
+        require_g14_static_env();
         let start_height = positive_or_zero_u64("G14_IBD_START_HEIGHT");
         let start_hash = required_hex("G14_IBD_START_HASH", 64);
         let stop_height = positive_or_zero_u64("G14_IBD_STOP_HEIGHT");
@@ -145,23 +248,13 @@ impl G14Evidence {
         let bitcoin_core_ibd_blocks = positive_u64("G14_BITCOIN_CORE_IBD_BLOCKS");
         let bitcoin_rs_elapsed_seconds = positive_f64("G14_BITCOIN_RS_ELAPSED_SECONDS");
         let bitcoin_core_elapsed_seconds = positive_f64("G14_BITCOIN_CORE_ELAPSED_SECONDS");
-        let bitcoin_rs_criterion_benchmark_id =
-            required_env("G14_BITCOIN_RS_CRITERION_BENCHMARK_ID");
-        assert_eq!(
-            bitcoin_rs_criterion_benchmark_id, BITCOIN_RS_CRITERION_BENCHMARK_ID,
-            "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID must identify bitcoin-rs mainnet IBD"
+        let bitcoin_rs_criterion_benchmark_id = required_criterion_benchmark_id(
+            "G14_BITCOIN_RS_CRITERION_BENCHMARK_ID",
+            BITCOIN_RS_CRITERION_BENCHMARK_ID,
         );
-        let bitcoin_core_criterion_benchmark_id =
-            required_env("G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID");
-        assert_eq!(
-            bitcoin_core_criterion_benchmark_id, BITCOIN_CORE_CRITERION_BENCHMARK_ID,
-            "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID must identify Bitcoin Core mainnet IBD"
-        );
-        let criterion_raw_output = CriterionRawOutputCustody::from_env(
-            &bitcoin_rs_criterion_benchmark_id,
-            bitcoin_rs_elapsed_seconds,
-            &bitcoin_core_criterion_benchmark_id,
-            bitcoin_core_elapsed_seconds,
+        let bitcoin_core_criterion_benchmark_id = required_criterion_benchmark_id(
+            "G14_BITCOIN_CORE_CRITERION_BENCHMARK_ID",
+            BITCOIN_CORE_CRITERION_BENCHMARK_ID,
         );
         let benchmark_run_id = required_env("G14_BENCHMARK_RUN_ID");
         let benchmark_host_id = required_env("G14_BENCHMARK_HOST_ID");
@@ -171,6 +264,28 @@ impl G14Evidence {
         let bitcoin_core_command_sha256 = required_hex("G14_BITCOIN_CORE_COMMAND_SHA256", 64);
         let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
         let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
+        let proof_env = IbdCompletionProofEnv::new(
+            &benchmark_run_id,
+            &benchmark_host_id,
+            start_height,
+            &start_hash,
+            stop_height,
+            &stop_hash,
+        );
+        let criterion_raw_output = proof_env.raw_output_from_env(
+            IbdCompletionProofEntry::new(
+                &bitcoin_rs_criterion_benchmark_id,
+                &bitcoin_rs_command_sha256,
+                &bitcoin_rs_config_sha256,
+                bitcoin_rs_elapsed_seconds,
+            ),
+            IbdCompletionProofEntry::new(
+                &bitcoin_core_criterion_benchmark_id,
+                &bitcoin_core_command_sha256,
+                &bitcoin_core_config_sha256,
+                bitcoin_core_elapsed_seconds,
+            ),
+        );
         let benchmark_artifact_sha256 = required_hex("G14_BENCHMARK_ARTIFACT_SHA256", 64);
         let electrum_scripthash_corpus = required_env("G14_ELECTRUM_SCRIPTHASH_CORPUS");
         let electrum_scripthash_corpus_sha256 =
@@ -354,19 +469,19 @@ impl G14Evidence {
 
 impl CriterionRawOutputCustody {
     fn from_env(
-        bitcoin_rs_benchmark_id: &str,
+        bitcoin_rs_context: IbdCompletionProofContext<'_>,
         bitcoin_rs_elapsed_seconds: f64,
-        bitcoin_core_benchmark_id: &str,
+        bitcoin_core_context: IbdCompletionProofContext<'_>,
         bitcoin_core_elapsed_seconds: f64,
     ) -> Self {
         Self::from_values(
             required_env("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH"),
             required_hex("G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_SHA256", 64),
-            bitcoin_rs_benchmark_id,
+            bitcoin_rs_context,
             bitcoin_rs_elapsed_seconds,
             required_env("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH"),
             required_hex("G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_SHA256", 64),
-            bitcoin_core_benchmark_id,
+            bitcoin_core_context,
             bitcoin_core_elapsed_seconds,
         )
     }
@@ -374,11 +489,11 @@ impl CriterionRawOutputCustody {
     fn from_values(
         bitcoin_rs_path: String,
         bitcoin_rs_sha256: String,
-        bitcoin_rs_benchmark_id: &str,
+        bitcoin_rs_context: IbdCompletionProofContext<'_>,
         bitcoin_rs_elapsed_seconds: f64,
         bitcoin_core_path: String,
         bitcoin_core_sha256: String,
-        bitcoin_core_benchmark_id: &str,
+        bitcoin_core_context: IbdCompletionProofContext<'_>,
         bitcoin_core_elapsed_seconds: f64,
     ) -> Self {
         require_sha256_file(
@@ -394,14 +509,24 @@ impl CriterionRawOutputCustody {
         verify_criterion_raw_output_elapsed(
             &bitcoin_rs_path,
             "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
-            bitcoin_rs_benchmark_id,
+            bitcoin_rs_context.benchmark_id,
             bitcoin_rs_elapsed_seconds,
+        );
+        verify_ibd_completion_proof(
+            &bitcoin_rs_path,
+            "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+            bitcoin_rs_context,
         );
         verify_criterion_raw_output_elapsed(
             &bitcoin_core_path,
             "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
-            bitcoin_core_benchmark_id,
+            bitcoin_core_context.benchmark_id,
             bitcoin_core_elapsed_seconds,
+        );
+        verify_ibd_completion_proof(
+            &bitcoin_core_path,
+            "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
+            bitcoin_core_context,
         );
         Self {
             bitcoin_rs_path,
@@ -521,6 +646,25 @@ fn require_literal(name: &str, expected: &str) {
     );
 }
 
+fn require_g14_static_env() {
+    require_literal("G14_MEASUREMENT_TARGET", "mainnet-ibd");
+    require_literal("G14_STORAGE_BACKEND", "fjall");
+    require_literal("G14_INDEXES", "all");
+    require_literal("G14_REFERENCE_IMPL", "bitcoin-core");
+    require_literal("G14_BENCH_TOOL", "criterion");
+    require_exact_u64("G14_BLOCK_SIZE_BYTES", FOUR_MIB_BYTES);
+    require_exact_u64("G14_ELECTRUM_SAMPLE_SIZE", EXPECTED_ELECTRUM_SAMPLE_SIZE);
+}
+
+fn required_criterion_benchmark_id(name: &str, expected: &str) -> String {
+    let value = required_env(name);
+    assert_eq!(
+        value, expected,
+        "{name} must identify the canonical mainnet IBD benchmark",
+    );
+    value
+}
+
 fn verify_criterion_raw_output_elapsed(
     path: &str,
     name: &str,
@@ -533,6 +677,39 @@ fn verify_criterion_raw_output_elapsed(
         (parsed_elapsed_seconds - expected_elapsed_seconds).abs() <= 1e-12,
         "{name} Criterion raw output elapsed seconds must match final G14 evidence env for {benchmark_id}; raw={parsed_elapsed_seconds}, env={expected_elapsed_seconds}",
     );
+}
+
+fn verify_ibd_completion_proof(path: &str, name: &str, context: IbdCompletionProofContext<'_>) {
+    let raw_output = read_text_file(path, name);
+    let payloads: Vec<_> = raw_output
+        .lines()
+        .filter_map(|line| line.strip_prefix(IBD_COMPLETION_PROOF_PREFIX))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        payloads.len(),
+        1,
+        "{name} must contain exactly one {} line",
+        IBD_COMPLETION_PROOF_PREFIX.trim(),
+    );
+    let proof: Value = serde_json::from_str(payloads[0])
+        .unwrap_or_else(|error| panic!("{name} IBD completion proof must be JSON: {error}"));
+    require_json_literal(&proof, "schema", IBD_COMPLETION_PROOF_SCHEMA, name);
+    require_json_literal(&proof, "benchmark_id", context.benchmark_id, name);
+    require_json_literal(&proof, "benchmark_run_id", context.benchmark_run_id, name);
+    require_json_literal(&proof, "benchmark_host_id", context.benchmark_host_id, name);
+    require_json_exact_u64(&proof, "ibd_start_height", context.start_height, name);
+    require_json_literal(&proof, "ibd_start_hash", context.start_hash, name);
+    require_json_exact_u64(&proof, "ibd_stop_height", context.stop_height, name);
+    require_json_literal(&proof, "ibd_stop_hash", context.stop_hash, name);
+    require_json_exact_u64(
+        &proof,
+        "ibd_blocks",
+        context.stop_height - context.start_height + 1,
+        name,
+    );
+    require_json_literal(&proof, "command_sha256", context.command_sha256, name);
+    require_json_literal(&proof, "config_sha256", context.config_sha256, name);
 }
 
 fn criterion_elapsed_seconds(raw_output: &str, benchmark_id: &str, name: &str) -> f64 {
@@ -926,6 +1103,17 @@ mod tests {
     const TEST_CORPUS_SHA256: &str =
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const TEST_CORPUS_PATH: &str = "/tmp/g14-scripthashes.txt";
+    const TEST_START_HASH: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    const TEST_RUN_ID: &str = "g14-mainnet-window-test";
+    const TEST_RS_COMMAND_SHA256: &str =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const TEST_CORE_COMMAND_SHA256: &str =
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const TEST_RS_CONFIG_SHA256: &str =
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const TEST_CORE_CONFIG_SHA256: &str =
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
     #[test]
     fn final_gate_accepts_hash_bound_local_custody_files() {
@@ -949,14 +1137,14 @@ mod tests {
                 &bitcoin_rs_raw.display().to_string(),
                 "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
             ),
-            BITCOIN_RS_CRITERION_BENCHMARK_ID,
+            test_completion_context(BITCOIN_RS_CRITERION_BENCHMARK_ID),
             1.25,
             bitcoin_core_raw.display().to_string(),
             sha256_file(
                 &bitcoin_core_raw.display().to_string(),
                 "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
             ),
-            BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+            test_completion_context(BITCOIN_CORE_CRITERION_BENCHMARK_ID),
             2.50,
         );
 
@@ -968,6 +1156,29 @@ mod tests {
             custody.bitcoin_core_path,
             bitcoin_core_raw.display().to_string()
         );
+    }
+
+    #[test]
+    fn final_gate_rejects_ibd_completion_proof_mismatches() {
+        let context = test_completion_context(BITCOIN_RS_CRITERION_BENCHMARK_ID);
+
+        for (name, raw_output) in ibd_completion_proof_mismatch_cases(context) {
+            let dir =
+                tempdir().unwrap_or_else(|error| panic!("tempdir failed for {name}: {error}"));
+            let raw = dir.path().join("bitcoin-rs.raw");
+            fs::write(&raw, raw_output)
+                .unwrap_or_else(|error| panic!("write raw failed for {name}: {error}"));
+
+            let result = panic::catch_unwind(|| {
+                verify_ibd_completion_proof(
+                    &raw.display().to_string(),
+                    "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
+                    context,
+                );
+            });
+
+            assert!(result.is_err(), "{name} unexpectedly passed");
+        }
     }
 
     #[test]
@@ -1000,11 +1211,11 @@ mod tests {
             CriterionRawOutputCustody::from_values(
                 bitcoin_rs_raw.display().to_string(),
                 stale_bitcoin_rs_sha,
-                BITCOIN_RS_CRITERION_BENCHMARK_ID,
+                test_completion_context(BITCOIN_RS_CRITERION_BENCHMARK_ID),
                 1.25,
                 bitcoin_core_raw.display().to_string(),
                 bitcoin_core_sha,
-                BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+                test_completion_context(BITCOIN_CORE_CRITERION_BENCHMARK_ID),
                 2.50,
             );
         });
@@ -1035,14 +1246,14 @@ mod tests {
                     &bitcoin_rs_raw.display().to_string(),
                     "G14_BITCOIN_RS_CRITERION_RAW_OUTPUT_PATH",
                 ),
-                BITCOIN_RS_CRITERION_BENCHMARK_ID,
+                test_completion_context(BITCOIN_RS_CRITERION_BENCHMARK_ID),
                 1.25,
                 bitcoin_core_raw.display().to_string(),
                 sha256_file(
                     &bitcoin_core_raw.display().to_string(),
                     "G14_BITCOIN_CORE_CRITERION_RAW_OUTPUT_PATH",
                 ),
-                BITCOIN_CORE_CRITERION_BENCHMARK_ID,
+                test_completion_context(BITCOIN_CORE_CRITERION_BENCHMARK_ID),
                 2.50,
             );
         });
@@ -1195,8 +1406,164 @@ mod tests {
     }
 
     fn criterion_raw_output(benchmark_id: &str, elapsed_seconds: f64) -> String {
-        format!(
-            "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\n"
+        let context = test_completion_context(benchmark_id);
+        criterion_raw_output_with_proofs(
+            benchmark_id,
+            elapsed_seconds,
+            &[completion_proof_value(context)],
         )
+    }
+
+    fn criterion_raw_output_without_proof(benchmark_id: &str, elapsed_seconds: f64) -> String {
+        criterion_raw_output_with_proofs(benchmark_id, elapsed_seconds, &[])
+    }
+
+    fn ibd_completion_proof_mismatch_cases(
+        context: IbdCompletionProofContext<'_>,
+    ) -> Vec<(&'static str, String)> {
+        let valid_proof = completion_proof_value(context);
+        let mut cases = vec![
+            (
+                "missing proof",
+                criterion_raw_output_without_proof(BITCOIN_RS_CRITERION_BENCHMARK_ID, 1.25),
+            ),
+            (
+                "duplicate proof",
+                criterion_raw_output_with_proofs(
+                    BITCOIN_RS_CRITERION_BENCHMARK_ID,
+                    1.25,
+                    &[valid_proof.clone(), valid_proof],
+                ),
+            ),
+        ];
+        cases.extend([
+            proof_mismatch_case(context, "bad schema", "schema", json!("wrong-schema")),
+            proof_mismatch_case(
+                context,
+                "bad benchmark id",
+                "benchmark_id",
+                json!("bitcoin-rs/not-mainnet-ibd"),
+            ),
+            proof_mismatch_case(
+                context,
+                "bad run id",
+                "benchmark_run_id",
+                json!("wrong-run"),
+            ),
+            proof_mismatch_case(
+                context,
+                "bad host id",
+                "benchmark_host_id",
+                json!("wrong-host"),
+            ),
+            proof_mismatch_case(context, "bad start height", "ibd_start_height", json!(1)),
+            proof_mismatch_case(
+                context,
+                "bad start hash",
+                "ibd_start_hash",
+                json!(TEST_TIP_HASH),
+            ),
+            proof_mismatch_case(context, "bad stop height", "ibd_stop_height", json!(11)),
+            proof_mismatch_case(
+                context,
+                "bad stop hash",
+                "ibd_stop_hash",
+                json!(TEST_START_HASH),
+            ),
+            proof_mismatch_case(context, "bad block count", "ibd_blocks", json!(9)),
+            proof_mismatch_case(
+                context,
+                "bad command hash",
+                "command_sha256",
+                json!(TEST_CORE_COMMAND_SHA256),
+            ),
+            proof_mismatch_case(
+                context,
+                "bad config hash",
+                "config_sha256",
+                json!(TEST_CORE_CONFIG_SHA256),
+            ),
+        ]);
+        cases
+    }
+
+    fn proof_mismatch_case(
+        context: IbdCompletionProofContext<'_>,
+        name: &'static str,
+        key: &str,
+        value: Value,
+    ) -> (&'static str, String) {
+        (
+            name,
+            criterion_raw_output_with_mutated_proof(context, key, value),
+        )
+    }
+
+    fn criterion_raw_output_with_mutated_proof(
+        context: IbdCompletionProofContext<'_>,
+        key: &str,
+        value: Value,
+    ) -> String {
+        let mut proof = completion_proof_value(context);
+        let object = proof
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("completion proof fixture must be an object"));
+        object.insert(key.to_owned(), value);
+        criterion_raw_output_with_proofs(context.benchmark_id, 1.25, &[proof])
+    }
+
+    fn criterion_raw_output_with_proofs(
+        benchmark_id: &str,
+        elapsed_seconds: f64,
+        proofs: &[Value],
+    ) -> String {
+        let mut raw_output = format!(
+            "Benchmarking {benchmark_id}\nBenchmarking {benchmark_id}: Warming up for 1.0000 s\nBenchmarking {benchmark_id}: Collecting 100 samples in estimated 5.0000 s\nBenchmarking {benchmark_id}: Analyzing\n{benchmark_id}   time:   [1.00 s {elapsed_seconds} s 3.00 s]\n"
+        );
+        for proof in proofs {
+            raw_output.push_str(IBD_COMPLETION_PROOF_PREFIX);
+            raw_output.push_str(
+                &serde_json::to_string(proof)
+                    .unwrap_or_else(|error| panic!("serialize completion proof failed: {error}")),
+            );
+            raw_output.push('\n');
+        }
+        raw_output
+    }
+
+    fn completion_proof_value(context: IbdCompletionProofContext<'_>) -> Value {
+        json!({
+            "schema": IBD_COMPLETION_PROOF_SCHEMA,
+            "benchmark_id": context.benchmark_id,
+            "benchmark_run_id": context.benchmark_run_id,
+            "benchmark_host_id": context.benchmark_host_id,
+            "ibd_start_height": context.start_height,
+            "ibd_start_hash": context.start_hash,
+            "ibd_stop_height": context.stop_height,
+            "ibd_stop_hash": context.stop_hash,
+            "ibd_blocks": context.stop_height - context.start_height + 1,
+            "command_sha256": context.command_sha256,
+            "config_sha256": context.config_sha256,
+        })
+    }
+
+    fn test_completion_context(benchmark_id: &str) -> IbdCompletionProofContext<'_> {
+        let (command_sha256, config_sha256) = if benchmark_id == BITCOIN_CORE_CRITERION_BENCHMARK_ID
+        {
+            (TEST_CORE_COMMAND_SHA256, TEST_CORE_CONFIG_SHA256)
+        } else {
+            (TEST_RS_COMMAND_SHA256, TEST_RS_CONFIG_SHA256)
+        };
+        IbdCompletionProofContext {
+            benchmark_id,
+            benchmark_run_id: TEST_RUN_ID,
+            benchmark_host_id: "g14-test-host",
+            start_height: 0,
+            start_hash: TEST_START_HASH,
+            stop_height: 10,
+            stop_hash: TEST_TIP_HASH,
+            command_sha256,
+            config_sha256,
+        }
     }
 }

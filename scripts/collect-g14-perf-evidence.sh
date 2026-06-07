@@ -125,6 +125,8 @@ import sys
 
 EVIDENCE_HELP = "collect-g14-perf-evidence.sh requires the JSON keys listed in --help"
 CRITERION_ARTIFACT_SCHEMA = "g14-criterion-artifact-v1"
+IBD_COMPLETION_PROOF_SCHEMA = "g14-ibd-completion-proof-v1"
+IBD_COMPLETION_PROOF_PREFIX = "G14_IBD_COMPLETION_PROOF "
 ELECTRUM_RSS_MEASUREMENT_SCHEMA = "g14-electrum-rss-measurement-v1"
 ELECTRUM_HISTORY_METHOD = "blockchain.scripthash.get_history"
 ELECTRUM_SAMPLE_SIZE = 10_000
@@ -343,23 +345,100 @@ def read_raw_output(path: Path, source: str) -> str:
     return value
 
 
+def require_proof_text(data: dict, key: str, expected: str, source: str) -> None:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        die(f"{source} {key} must be a non-empty string")
+    if value != expected:
+        die(f"{source} {key} must be {expected!r}")
+
+
+def require_proof_int(data: dict, key: str, expected: int, source: str) -> None:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        die(f"{source} {key} must be an integer")
+    if value != expected:
+        die(f"{source} {key} must be {expected}")
+
+
+def require_ibd_completion_proof(
+    raw_output: str,
+    benchmark_id: str,
+    benchmark_run_id: str,
+    benchmark_host_id: str,
+    start_height: int,
+    start_hash: str,
+    stop_height: int,
+    stop_hash: str,
+    command_sha256: str,
+    config_sha256: str,
+    source: str,
+) -> None:
+    payloads = [
+        line.removeprefix(IBD_COMPLETION_PROOF_PREFIX).strip()
+        for line in raw_output.splitlines()
+        if line.startswith(IBD_COMPLETION_PROOF_PREFIX)
+    ]
+    if len(payloads) != 1:
+        die(f"{source} must contain exactly one {IBD_COMPLETION_PROOF_PREFIX.strip()} line")
+    try:
+        proof = json.loads(payloads[0])
+    except json.JSONDecodeError as error:
+        die(f"{source} IBD completion proof must be JSON: {error}")
+    if not isinstance(proof, dict):
+        die(f"{source} IBD completion proof must be a JSON object")
+    require_proof_text(proof, "schema", IBD_COMPLETION_PROOF_SCHEMA, source)
+    require_proof_text(proof, "benchmark_id", benchmark_id, source)
+    require_proof_text(proof, "benchmark_run_id", benchmark_run_id, source)
+    require_proof_text(proof, "benchmark_host_id", benchmark_host_id, source)
+    require_proof_int(proof, "ibd_start_height", start_height, source)
+    require_proof_text(proof, "ibd_start_hash", start_hash, source)
+    require_proof_int(proof, "ibd_stop_height", stop_height, source)
+    require_proof_text(proof, "ibd_stop_hash", stop_hash, source)
+    require_proof_int(proof, "ibd_blocks", stop_height - start_height + 1, source)
+    require_proof_text(proof, "command_sha256", command_sha256, source)
+    require_proof_text(proof, "config_sha256", config_sha256, source)
+
+
 def require_raw_output_binding(
     entry: dict,
     benchmark_id: str,
     elapsed_seconds: float,
+    benchmark_run_id: str,
+    benchmark_host_id: str,
+    start_height: int,
+    start_hash: str,
+    stop_height: int,
+    stop_hash: str,
+    command_sha256: str,
+    config_sha256: str,
     source: str,
 ) -> tuple[str, str]:
     raw_output_path = require_raw_output_path(entry, source)
     raw_output_sha256 = require_raw_output_sha256(entry, source)
     if sha256_file(raw_output_path) != raw_output_sha256:
         die(f"{source} raw_output_sha256 must match raw_output_path")
+    raw_output = read_raw_output(raw_output_path, source)
     parsed_seconds = criterion_elapsed_seconds(
-        read_raw_output(raw_output_path, source),
+        raw_output,
         benchmark_id,
         source,
     )
     if not math.isclose(elapsed_seconds, parsed_seconds, rel_tol=0.0, abs_tol=1e-12):
         die(f"{source} elapsed_seconds must match raw_output_path Criterion output")
+    require_ibd_completion_proof(
+        raw_output,
+        benchmark_id,
+        benchmark_run_id,
+        benchmark_host_id,
+        start_height,
+        start_hash,
+        stop_height,
+        stop_hash,
+        command_sha256,
+        config_sha256,
+        source,
+    )
     return str(raw_output_path.resolve()), raw_output_sha256
 
 
@@ -446,6 +525,18 @@ def read_criterion_artifact(
             entry,
             benchmark_id,
             elapsed,
+            benchmark_run_id,
+            benchmark_host_id,
+            start_height,
+            start_hash,
+            stop_height,
+            stop_hash,
+            command_config_hashes["bitcoin_rs_command_sha256"]
+            if benchmark_id.startswith("bitcoin-rs/")
+            else command_config_hashes["bitcoin_core_command_sha256"],
+            command_config_hashes["bitcoin_rs_config_sha256"]
+            if benchmark_id.startswith("bitcoin-rs/")
+            else command_config_hashes["bitcoin_core_config_sha256"],
             f"benchmark_artifact_path benchmarks[{index}]",
         )
         elapsed_by_id[benchmark_id] = elapsed
