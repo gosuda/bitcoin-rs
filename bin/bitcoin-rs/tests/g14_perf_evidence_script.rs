@@ -1506,6 +1506,85 @@ fn bitcoin_core_mainnet_ibd_wrapper_emits_canonical_criterion_output()
 }
 
 #[test]
+fn bitcoin_core_mainnet_ibd_wrapper_help_shows_ibd_timeout_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .arg("--help")
+        .output()?;
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("--ibd-timeout-seconds"), "stdout: {stdout}");
+    assert!(stdout.contains("86400"), "stdout: {stdout}");
+    Ok(())
+}
+
+#[test]
+fn bitcoin_core_mainnet_ibd_wrapper_shutdown_wait_is_not_startup_timeout()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command_with_shutdown_delay(
+        temp.path(),
+        "bitcoind",
+        &stop_file,
+        Duration::from_millis(600),
+    )?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::Mainnet,
+        &stop_file,
+    )?;
+
+    let started = Instant::now();
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "0.2",
+            "--ibd-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+    let elapsed = started.elapsed();
+
+    assert_success(&output);
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "expected shutdown wait to exceed startup timeout, elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "wrapper should use bounded shutdown wait, elapsed={elapsed:?}"
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
 fn bitcoin_core_mainnet_ibd_wrapper_retries_rpc_startup() -> Result<(), Box<dyn std::error::Error>>
 {
     let temp = tempfile::tempdir()?;
@@ -1550,6 +1629,136 @@ fn bitcoin_core_mainnet_ibd_wrapper_retries_rpc_startup() -> Result<(), Box<dyn 
     assert_success(&output);
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("Benchmarking bitcoin-core/mainnet-ibd\n"));
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_core_mainnet_ibd_wrapper_uses_ibd_timeout_after_rpc_start()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "bitcoind", &stop_file)?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::SlowIbdProgress,
+        &stop_file,
+    )?;
+
+    let started = Instant::now();
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "0.2",
+            "--ibd-timeout-seconds",
+            "0.6",
+        ])
+        .output()?;
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reach stop height"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("RPC startup"),
+        "must not fail on startup timeout once RPC is live: {stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "expected IBD timeout to govern wait time, elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "wrapper should not wait for default IBD timeout, elapsed={elapsed:?}"
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_core_mainnet_ibd_wrapper_uses_ibd_timeout_after_rpc_drop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(temp.path(), "bitcoin.conf", "chain=main\n")?;
+    let datadir = temp.path().join("core-datadir");
+    fs::create_dir(&datadir)?;
+    let stop_file = temp.path().join("fake-bitcoind.stop");
+    let bitcoind = fake_bitcoind_command(temp.path(), "bitcoind", &stop_file)?;
+    let bitcoin_cli = fake_measured_bitcoin_core_cli(
+        temp.path(),
+        "bitcoin-cli",
+        FakeBitcoinCliMode::PostStartRpcDrop,
+        &stop_file,
+    )?;
+
+    let started = Instant::now();
+    let output = Command::new("bash")
+        .arg(bitcoin_core_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-core-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoind-command",
+            bitcoind.to_str().ok_or("non-UTF-8 bitcoind path")?,
+            "--bitcoin-cli-command",
+            bitcoin_cli.to_str().ok_or("non-UTF-8 bitcoin-cli path")?,
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "0.2",
+            "--ibd-timeout-seconds",
+            "0.6",
+        ])
+        .output()?;
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reach stop height"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("RPC startup"),
+        "post-start RPC drop must not be classified as startup failure: {stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "expected IBD timeout to govern post-start RPC drop, elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "wrapper should not wait for default IBD timeout, elapsed={elapsed:?}"
+    );
     assert!(stop_file.exists());
     Ok(())
 }
@@ -5095,7 +5304,17 @@ fn fake_bitcoind_command(
     name: &str,
     stop_file: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fake_bitcoind_command_with_shutdown_delay(dir, name, stop_file, Duration::ZERO)
+}
+
+fn fake_bitcoind_command_with_shutdown_delay(
+    dir: &Path,
+    name: &str,
+    stop_file: &Path,
+    shutdown_delay: Duration,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join(name);
+    let shutdown_delay_seconds = shutdown_delay.as_secs_f64();
     fs::write(
         &path,
         format!(
@@ -5109,8 +5328,9 @@ while not stop_file.exists():
     if time.monotonic() >= deadline:
         raise SystemExit("fake bitcoind stop timeout")
     time.sleep(0.01)
+time.sleep({shutdown_delay_seconds})
 "#,
-            stop_file = stop_file.display().to_string()
+            stop_file = stop_file.display().to_string(),
         ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
@@ -6064,6 +6284,78 @@ enum FakeBitcoinCliMode {
     ShortHeaders,
     AlreadySynced,
     RpcWarmup,
+    SlowIbdProgress,
+    PostStartRpcDrop,
+}
+
+impl FakeBitcoinCliMode {
+    fn hash_expr(self) -> &'static str {
+        match self {
+            Self::MalformedHash => r#""not-a-hash""#,
+            Self::Mainnet
+            | Self::WrongChain
+            | Self::ShortBlocks
+            | Self::ShortHeaders
+            | Self::AlreadySynced
+            | Self::RpcWarmup
+            | Self::SlowIbdProgress
+            | Self::PostStartRpcDrop => r#"f"{height:064x}""#,
+        }
+    }
+
+    fn chain(self) -> &'static str {
+        match self {
+            Self::WrongChain => "regtest",
+            Self::Mainnet
+            | Self::MalformedHash
+            | Self::ShortBlocks
+            | Self::ShortHeaders
+            | Self::AlreadySynced
+            | Self::RpcWarmup
+            | Self::SlowIbdProgress
+            | Self::PostStartRpcDrop => "main",
+        }
+    }
+
+    fn static_blocks_headers(self) -> (u32, u32) {
+        let blocks = if matches!(self, Self::ShortBlocks) {
+            9
+        } else {
+            10
+        };
+        let headers = if matches!(self, Self::ShortHeaders) {
+            9
+        } else {
+            10
+        };
+        (blocks, headers)
+    }
+
+    fn measured_initial_blocks_headers(self) -> (u32, u32) {
+        if matches!(self, Self::AlreadySynced) {
+            return (10, 10);
+        }
+        (0, 0)
+    }
+
+    fn measured_blocks_headers(self) -> (u32, u32) {
+        let blocks = match self {
+            Self::ShortBlocks => 9,
+            Self::SlowIbdProgress | Self::PostStartRpcDrop => 0,
+            Self::Mainnet
+            | Self::MalformedHash
+            | Self::WrongChain
+            | Self::ShortHeaders
+            | Self::AlreadySynced
+            | Self::RpcWarmup => 10,
+        };
+        let headers = if matches!(self, Self::ShortHeaders) {
+            9
+        } else {
+            10
+        };
+        (blocks, headers)
+    }
 }
 
 fn fake_bitcoin_cli(
@@ -6071,42 +6363,9 @@ fn fake_bitcoin_cli(
     mode: FakeBitcoinCliMode,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join("bitcoin-cli");
-    let hash_expr = match mode {
-        FakeBitcoinCliMode::MalformedHash => r#""not-a-hash""#,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => r#"f"{height:064x}""#,
-    };
-    let chain = match mode {
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => "main",
-        FakeBitcoinCliMode::WrongChain => "regtest",
-    };
-    let blocks = match mode {
-        FakeBitcoinCliMode::ShortBlocks => 9,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => 10,
-    };
-    let headers = match mode {
-        FakeBitcoinCliMode::ShortHeaders => 9,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => 10,
-    };
+    let hash_expr = mode.hash_expr();
+    let chain = mode.chain();
+    let (blocks, headers) = mode.static_blocks_headers();
     fs::write(
         &path,
         format!(
@@ -6142,61 +6401,16 @@ fn fake_measured_bitcoin_core_cli(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join(name);
     let state_file = dir.join(format!("{name}.chaininfo-calls"));
-    let hash_expr = match mode {
-        FakeBitcoinCliMode::MalformedHash => r#""not-a-hash""#,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => r#"f"{height:064x}""#,
-    };
-    let chain = match mode {
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => "main",
-        FakeBitcoinCliMode::WrongChain => "regtest",
-    };
-    let initial_blocks = match mode {
-        FakeBitcoinCliMode::AlreadySynced => 10,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::RpcWarmup => 0,
-    };
-    let initial_headers = match mode {
-        FakeBitcoinCliMode::AlreadySynced => 10,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::RpcWarmup => 0,
-    };
-    let blocks = match mode {
-        FakeBitcoinCliMode::ShortBlocks => 9,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortHeaders
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => 10,
-    };
-    let headers = match mode {
-        FakeBitcoinCliMode::ShortHeaders => 9,
-        FakeBitcoinCliMode::Mainnet
-        | FakeBitcoinCliMode::MalformedHash
-        | FakeBitcoinCliMode::WrongChain
-        | FakeBitcoinCliMode::ShortBlocks
-        | FakeBitcoinCliMode::AlreadySynced
-        | FakeBitcoinCliMode::RpcWarmup => 10,
-    };
+    let hash_expr = mode.hash_expr();
+    let chain = mode.chain();
+    let (initial_blocks, initial_headers) = mode.measured_initial_blocks_headers();
+    let (blocks, headers) = mode.measured_blocks_headers();
     let rpc_warmup = if matches!(mode, FakeBitcoinCliMode::RpcWarmup) {
+        "True"
+    } else {
+        "False"
+    };
+    let rpc_drop_after_start = if matches!(mode, FakeBitcoinCliMode::PostStartRpcDrop) {
         "True"
     } else {
         "False"
@@ -6210,6 +6424,8 @@ import pathlib
 import sys
 
 args = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
+RPC_DROP_AFTER_START = {rpc_drop_after_start}
+
 
 if len(args) == 1 and args[0] == "stop":
     pathlib.Path({stop_file:?}).write_text("stop\n", encoding="utf-8")
@@ -6222,6 +6438,8 @@ if len(args) == 1 and args[0] == "getblockchaininfo":
     if {rpc_warmup} and not state_file.exists():
         state_file.write_text("-1", encoding="utf-8")
         raise SystemExit("RPC server not ready")
+    if RPC_DROP_AFTER_START and call_count > 0:
+        raise SystemExit("RPC dropped after start")
     state_file.write_text(str(call_count + 1), encoding="utf-8")
     blocks = {initial_blocks} if call_count <= 0 else {blocks}
     headers = {initial_headers} if call_count <= 0 else {headers}
@@ -6235,7 +6453,8 @@ height = int(args[1])
 print({hash_expr})
 "#,
             stop_file = stop_file.display().to_string(),
-            state_file = state_file.display().to_string()
+            state_file = state_file.display().to_string(),
+            rpc_drop_after_start = rpc_drop_after_start,
         ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();

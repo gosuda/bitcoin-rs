@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: run-g14-bitcoin-core-mainnet-ibd.sh --ibd-start-height <height> --ibd-stop-height <height> --ibd-start-hash <hash> --ibd-stop-hash <hash> --datadir <path> --bitcoin-core-config <path> [--bitcoind-command <command>] [--bitcoin-cli-command <command>] [--command-output <path>] [--poll-interval-seconds <seconds>] [--startup-timeout-seconds <seconds>] [--force] [-- <bitcoind-arg>...]' \
+    'usage: run-g14-bitcoin-core-mainnet-ibd.sh --ibd-start-height <height> --ibd-stop-height <height> --ibd-start-hash <hash> --ibd-stop-hash <hash> --datadir <path> --bitcoin-core-config <path> [--bitcoind-command <command>] [--bitcoin-cli-command <command>] [--command-output <path>] [--poll-interval-seconds <seconds>] [--startup-timeout-seconds <seconds>] [--ibd-timeout-seconds <seconds> (default: 86400)] [--force] [-- <bitcoind-arg>...]' \
     '' \
     'Runs a Bitcoin Core mainnet IBD command, validates the measured Core node reaches the requested window, then emits canonical Criterion-style bitcoin-core/mainnet-ibd timing for G14 evidence capture.'
 }
@@ -204,6 +204,9 @@ def require_hash(
         die(f"measured Bitcoin Core {name} hash must be {expected_hash!r}")
 
 
+SHUTDOWN_TIMEOUT_SECONDS = 30.0
+
+
 def wait_for_stop(process: subprocess.Popen, timeout_seconds: float) -> None:
     try:
         process.wait(timeout=timeout_seconds)
@@ -251,6 +254,7 @@ parser.add_argument("--bitcoin-cli-command", default="bitcoin-cli")
 parser.add_argument("--command-output")
 parser.add_argument("--poll-interval-seconds", default="1.0")
 parser.add_argument("--startup-timeout-seconds", default="900.0")
+parser.add_argument("--ibd-timeout-seconds", default="86400.0")
 parser.add_argument("--force", action="store_true")
 parser.add_argument("bitcoind_args", nargs=argparse.REMAINDER)
 args = parser.parse_args()
@@ -262,7 +266,8 @@ if args.help:
         "--datadir <path> --bitcoin-core-config <path> "
         "[--bitcoind-command <command>] [--bitcoin-cli-command <command>] "
         "[--command-output <path>] [--poll-interval-seconds <seconds>] "
-        "[--startup-timeout-seconds <seconds>] [--force] [-- <bitcoind-arg>...]"
+        "[--startup-timeout-seconds <seconds>] [--ibd-timeout-seconds <seconds> (default: 86400)] "
+        "[--force] [-- <bitcoind-arg>...]"
     )
     print(usage)
     raise SystemExit(0)
@@ -279,6 +284,7 @@ bitcoind_command = non_empty(args.bitcoind_command, "--bitcoind-command")
 bitcoin_cli_command = non_empty(args.bitcoin_cli_command, "--bitcoin-cli-command")
 poll_interval = positive_float(args.poll_interval_seconds, "--poll-interval-seconds")
 startup_timeout = positive_float(args.startup_timeout_seconds, "--startup-timeout-seconds")
+ibd_timeout = positive_float(args.ibd_timeout_seconds, "--ibd-timeout-seconds")
 bitcoind_args = args.bitcoind_args
 if bitcoind_args and bitcoind_args[0] == "--":
     bitcoind_args = bitcoind_args[1:]
@@ -304,23 +310,28 @@ with command_output.open("w", encoding="utf-8") as output:
 
 stopped = False
 try:
-    deadline = started + startup_timeout
+    startup_deadline = started + startup_timeout
+    ibd_deadline: float | None = None
     observed_start = False
     while True:
         if process.poll() is not None:
             die(f"bitcoind exited before reaching stop height with status {process.returncode}")
         info = try_read_chain_info(bitcoin_cli_command, datadir, config)
         if info is None:
-            if time.monotonic() >= deadline:
-                die("timed out waiting for measured Bitcoin Core RPC startup")
+            if not observed_start:
+                if time.monotonic() >= startup_deadline:
+                    die("timed out waiting for measured Bitcoin Core RPC startup")
+            elif ibd_deadline is not None and time.monotonic() >= ibd_deadline:
+                die("timed out waiting for measured Bitcoin Core node to reach stop height")
             time.sleep(poll_interval)
             continue
         if not observed_start:
             require_chain_start(info, start_height)
             observed_start = True
+            ibd_deadline = time.monotonic() + ibd_timeout
         if require_chain_tip(info, stop_height):
             break
-        if time.monotonic() >= deadline:
+        if ibd_deadline is not None and time.monotonic() >= ibd_deadline:
             die("timed out waiting for measured Bitcoin Core node to reach stop height")
         time.sleep(poll_interval)
 
@@ -329,7 +340,7 @@ try:
     elapsed = time.monotonic() - started
     run_cli(bitcoin_cli_command, datadir, config, ["stop"])
     stopped = True
-    wait_for_stop(process, startup_timeout)
+    wait_for_stop(process, SHUTDOWN_TIMEOUT_SECONDS)
 finally:
     if not stopped and process.poll() is None:
         cleanup_after_failure(process, bitcoin_cli_command, datadir, config)
