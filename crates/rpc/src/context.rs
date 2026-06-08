@@ -544,6 +544,17 @@ impl Context {
                     }
                 })
             })
+            .or_else(|| {
+                if height == 0 {
+                    let genesis_hash = bitcoin::blockdata::constants::genesis_block(
+                        bitcoin_network(self.chain_network),
+                    )
+                    .block_hash();
+                    Some(Hash256::from_le_bytes(genesis_hash.as_byte_array()))
+                } else {
+                    None
+                }
+            })
     }
 
     /// Returns a known block by hash.

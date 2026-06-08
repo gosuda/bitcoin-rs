@@ -114,6 +114,22 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(ctx);
+    let response = handler.dispatch("getblockhash", &json!([0]))?;
+    let actual = response
+        .as_str()
+        .ok_or("getblockhash response must be a string")?;
+    let expected = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin)
+        .block_hash()
+        .to_string();
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
 fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let mut chainwork = [0_u8; 32];
