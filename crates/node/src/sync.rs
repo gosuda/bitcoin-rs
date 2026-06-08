@@ -39,6 +39,8 @@ const PROTOCOL_VERSION: u32 = 70_016;
 /// fill it in one tick; `DownloadWindow` still caps requests by pending bytes,
 /// block budget, and per-peer inflight budget.
 const GETDATA_BATCH_SIZE: usize = PENDING_BUDGET;
+/// Time after which an unanswered `getheaders` request may be retried.
+const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Time after which a pending getdata is considered stuck and re-requestable.
 const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
@@ -78,6 +80,7 @@ pub struct BlockSync {
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
     download_window: Arc<Mutex<DownloadWindow>>,
     block_stager: Arc<Mutex<BlockStager>>,
+    pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
 }
 
@@ -93,6 +96,13 @@ struct SyncPeerSelection {
     request_peers: Vec<SyncPeer>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PendingHeaderRequest {
+    peer_addr: SocketAddr,
+    locator_tip_hash: Hash256,
+    target_height: u32,
+    requested_at: Instant,
+}
 #[derive(Clone, Debug)]
 struct ExpectedApplyCache {
     chain_tip_hash: Hash256,
@@ -126,6 +136,7 @@ impl BlockSync {
             inbound_blocks_rx,
             download_window: Arc::new(Mutex::new(DownloadWindow::new(default_sync_budget()))),
             block_stager: Arc::new(Mutex::new(BlockStager::new(default_sync_budget()))),
+            pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -674,6 +685,20 @@ impl BlockSync {
 
     fn send_getheaders(&self, sync_peer_addr: SocketAddr, our_height: u32, target_height: i32) {
         let locator = self.build_locator();
+        let Some(locator_tip_hash) = locator.first().copied() else {
+            return;
+        };
+        let target_height = u32::try_from(target_height).unwrap_or(0);
+        let now = Instant::now();
+        if self.has_pending_getheaders(sync_peer_addr, locator_tip_hash, target_height, now) {
+            tracing::trace!(
+                peer_addr = %sync_peer_addr,
+                our_height,
+                target_height,
+                "block sync: getheaders already pending",
+            );
+            return;
+        }
         let locator_hashes: Vec<BlockHash> = locator
             .into_iter()
             .map(|hash| BlockHash::from_byte_array(hash.to_le_bytes()))
@@ -700,6 +725,12 @@ impl BlockSync {
             );
             return;
         }
+        *self.pending_getheaders.lock() = Some(PendingHeaderRequest {
+            peer_addr: sync_peer_addr,
+            locator_tip_hash,
+            target_height,
+            requested_at: now,
+        });
         tracing::debug!(
             peer_addr = %sync_peer_addr,
             our_height,
@@ -707,6 +738,23 @@ impl BlockSync {
             protocol_version = PROTOCOL_VERSION,
             "block sync: sent getheaders"
         );
+    }
+
+    fn has_pending_getheaders(
+        &self,
+        peer_addr: SocketAddr,
+        locator_tip_hash: Hash256,
+        target_height: u32,
+        now: Instant,
+    ) -> bool {
+        let pending = *self.pending_getheaders.lock();
+        let Some(pending) = pending else {
+            return false;
+        };
+        pending.peer_addr == peer_addr
+            && pending.locator_tip_hash == locator_tip_hash
+            && pending.target_height == target_height
+            && now.duration_since(pending.requested_at) < HEADER_REQUEST_TIMEOUT
     }
 
     fn build_locator(&self) -> Vec<Hash256> {
@@ -964,6 +1012,157 @@ mod tests {
     }
 
     #[test]
+    fn tick_does_not_resend_same_getheaders_while_pending() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sync, peers, peer_outbound, _block_tree, _applied_tip, _expected) =
+            sync_with_header_chain(3)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 0,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 8));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+        let first = rx.try_recv()?;
+        if !matches!(first, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first getheaders").into());
+        }
+
+        sync.tick();
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 0,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 8));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+        let first = rx.try_recv()?;
+        if !matches!(first, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first getheaders").into());
+        }
+
+        let header = test_header(genesis.block_hash(), 1);
+        inbound_headers_tx.send(vec![header])?;
+        sync.tick();
+        let second = rx.try_recv()?;
+        if !matches!(second, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected second getheaders after response").into());
+        }
+        let accepted_tip = chain_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing accepted header tip"))?;
+        assert_eq!(accepted_tip.height, 1);
+        assert_ne!(accepted_tip.tip_id, genesis_id);
+        Ok(())
+    }
+
+    #[test]
+    fn stale_inbound_headers_keep_getheaders_gate_pending() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 0,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 8));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+        let first = rx.try_recv()?;
+        if !matches!(first, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected first getheaders").into());
+        }
+
+        // An orphan header from any peer that does not connect to our tip must
+        // not advance the header chain, so the gate stays pending and no
+        // duplicate getheaders is sent before the request times out.
+        let orphan_prev = BlockHash::from_byte_array([0x11; 32]);
+        let orphan = test_header(orphan_prev, 5);
+        inbound_headers_tx.send(vec![orphan])?;
+        sync.tick();
+        assert!(
+            rx.try_recv().is_err(),
+            "stale inbound headers must not release the getheaders gate"
+        );
+        let tip = chain_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing header tip"))?;
+        assert_eq!(tip.tip_id, genesis_id, "orphan header must not advance tip");
+        Ok(())
+    }
+
+    #[test]
     fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero()
     -> Result<(), Box<dyn std::error::Error>> {
         let (sync, peers, peer_outbound, _block_tree, _applied_tip, _expected) =
@@ -1073,10 +1272,8 @@ mod tests {
         };
         assert_eq!(witness_block_inventory(second_inventory)?, expected[2..4]);
         assert!(second_rx.try_recv().is_err());
-        let second_headers = first_rx.try_recv()?;
-        if !matches!(second_headers, NetworkMessage::GetHeaders(_)) {
-            return Err(std::io::Error::other("expected header refresh on first peer").into());
-        }
+        // The in-flight getheaders gate suppresses a duplicate header request to
+        // the original sync peer, so it receives no further messages.
         assert!(first_rx.try_recv().is_err());
         Ok(())
     }
@@ -1367,13 +1564,15 @@ mod tests {
 
         sync.tick();
 
-        let third = rx.try_recv()?;
-        if !matches!(third, NetworkMessage::GetHeaders(_)) {
-            return Err(std::io::Error::other("expected second tick getheaders only").into());
-        }
+        // The in-flight getheaders gate suppresses a duplicate header request,
+        // and already-pending blocks are not re-requested, so the second tick
+        // emits no outbound messages.
         match rx.try_recv() {
             Ok(NetworkMessage::GetData(_)) => {
                 Err(std::io::Error::other("second tick re-requested pending blocks").into())
+            }
+            Ok(NetworkMessage::GetHeaders(_)) => {
+                Err(std::io::Error::other("second tick resent in-flight getheaders").into())
             }
             Ok(_) => {
                 Err(std::io::Error::other("unexpected extra message after second tick").into())
@@ -1621,10 +1820,8 @@ mod tests {
 
         sync.tick();
 
-        let second_tick = rx.try_recv()?;
-        if !matches!(second_tick, NetworkMessage::GetHeaders(_)) {
-            return Err(std::io::Error::other("expected second tick getheaders only").into());
-        }
+        // Peer inflight budget is saturated and the in-flight getheaders gate
+        // suppresses a duplicate header request, so the second tick is silent.
         assert!(rx.try_recv().is_err());
         Ok(())
     }
