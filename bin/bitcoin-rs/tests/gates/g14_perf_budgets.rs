@@ -1079,11 +1079,58 @@ fn qualifying_utxo_commit_samples_ms(
         .collect()
 }
 
+fn utxo_sample_hash_at_height(samples: &[Value], height: u64, source: &str) -> String {
+    let mut matched: Option<String> = None;
+    for (index, sample) in samples.iter().enumerate() {
+        let object = sample.as_object().unwrap_or_else(|| {
+            panic!("{source}[{index}] must be an object");
+        });
+        let sample_height = utxo_sample_height(object.get("height"), index);
+        if sample_height != height {
+            continue;
+        }
+        let block_hash = require_json_hex(sample, "block_hash", 64, &format!("{source}[{index}]"));
+        if let Some(existing) = &matched {
+            assert_eq!(
+                existing, &block_hash,
+                "{source} contains conflicting block_hash values for height {height}"
+            );
+        }
+        matched = Some(block_hash);
+    }
+    matched.unwrap_or_else(|| panic!("{source} must include a sample at height {height}"))
+}
+
+#[derive(Copy, Clone)]
+struct UtxoIbdWindow<'a> {
+    start_height: u64,
+    start_hash: &'a str,
+    stop_height: u64,
+    stop_hash: &'a str,
+}
+
+fn verify_utxo_boundary_sample_hashes(
+    samples_path: &Path,
+    source: &str,
+    window: UtxoIbdWindow<'_>,
+) {
+    let samples = read_utxo_samples_from_path(samples_path, source);
+    let start_sample_hash = utxo_sample_hash_at_height(&samples, window.start_height, source);
+    assert_eq!(
+        start_sample_hash, window.start_hash,
+        "{source} block_hash at ibd_start_height must match expected start hash"
+    );
+    let stop_sample_hash = utxo_sample_hash_at_height(&samples, window.stop_height, source);
+    assert_eq!(
+        stop_sample_hash, window.stop_hash,
+        "{source} block_hash at ibd_stop_height must match expected stop hash"
+    );
+}
+
 fn verify_utxo_commit_sample_custody(
     data: &Value,
     source: &str,
-    start_height: u64,
-    stop_height: u64,
+    window: UtxoIbdWindow<'_>,
     threshold_bytes: u64,
     expected_sample_count: u64,
     expected_p95_ms: f64,
@@ -1104,9 +1151,15 @@ fn verify_utxo_commit_sample_custody(
         actual_sample_sha, expected_sample_sha,
         "{source} sample_source_sha256 must match sample_source_path"
     );
+    verify_utxo_boundary_sample_hashes(path, source, window);
     require_json_exact_u64(data, "sample_count", expected_sample_count, source);
-    let qualifying_ms =
-        qualifying_utxo_commit_samples_ms(path, source, start_height, stop_height, threshold_bytes);
+    let qualifying_ms = qualifying_utxo_commit_samples_ms(
+        path,
+        source,
+        window.start_height,
+        window.stop_height,
+        threshold_bytes,
+    );
     let qualifying_count = u64::try_from(qualifying_ms.len())
         .unwrap_or_else(|_| panic!("{source} sample_count exceeds u64::MAX"));
     assert_eq!(
@@ -1254,8 +1307,12 @@ fn verify_utxo_commit_measurement_json(
     verify_utxo_commit_sample_custody(
         &data,
         "G14_UTXO_COMMIT_MEASUREMENT_PATH",
-        start_height,
-        stop_height,
+        UtxoIbdWindow {
+            start_height,
+            start_hash,
+            stop_height,
+            stop_hash,
+        },
         FOUR_MIB_BYTES,
         expected_sample_count,
         utxo_commit_p95_ms,
@@ -1999,19 +2056,36 @@ mod tests {
         start_height: u64,
         stop_height: u64,
         p95_ms: f64,
+        start_hash: &str,
         stop_hash: &str,
     ) -> std::path::PathBuf {
         let span = stop_height - start_height + 1;
+        let mut heights = Vec::with_capacity(20);
+        heights.push(start_height);
+        if stop_height != start_height {
+            heights.push(stop_height);
+        }
+        let mut cursor = 0u64;
+        while heights.len() < 20 {
+            heights.push(start_height + (cursor % span));
+            cursor += 1;
+        }
         let mut samples = Vec::new();
-        for index in 0..20 {
-            let height = start_height + (index % span);
+        for (index, height) in heights.iter().copied().enumerate() {
+            let block_hash = if height == start_height {
+                start_hash.to_owned()
+            } else if height == stop_height {
+                stop_hash.to_owned()
+            } else {
+                format!("{height:064x}")
+            };
             let commit_ms = match index {
                 18 => p95_ms,
                 19 => p95_ms + 7.5,
                 _ => 10.0,
             };
             samples.push(format!(
-                r#"{{"height": {height}, "block_hash": "{stop_hash}", "block_size_bytes": 4194304, "utxo_commit_ms": {commit_ms}}}"#
+                r#"{{"height": {height}, "block_hash": "{block_hash}", "block_size_bytes": 4194304, "utxo_commit_ms": {commit_ms}}}"#
             ));
         }
         let samples_path = dir.join("utxo-commit-samples.json");
@@ -2029,8 +2103,14 @@ mod tests {
         stop_hash: &str,
         p95_ms: f64,
     ) -> std::path::PathBuf {
-        let samples_path =
-            write_utxo_commit_samples(dir, start_height, stop_height, p95_ms, stop_hash);
+        let samples_path = write_utxo_commit_samples(
+            dir,
+            start_height,
+            stop_height,
+            p95_ms,
+            start_hash,
+            stop_hash,
+        );
         let sample_source_sha256 = sha256_file(
             &samples_path.display().to_string(),
             "utxo commit sample source",
@@ -2061,6 +2141,63 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
         measurement
+    }
+
+    #[test]
+    fn utxo_commit_measurement_rejects_mismatched_boundary_sample_hashes() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let commit_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let start_height = 0;
+        let stop_height = 10;
+        let start_hash = format!("{start_height:064x}");
+        let stop_hash = format!("{stop_height:064x}");
+        let measurement = write_utxo_commit_measurement_fixture(
+            dir.path(),
+            commit_sha,
+            start_height,
+            stop_height,
+            &start_hash,
+            &stop_hash,
+            12.5,
+        );
+        let measurement_text = fs::read_to_string(&measurement)
+            .unwrap_or_else(|error| panic!("read measurement failed: {error}"));
+        let mut measurement_json: serde_json::Value = serde_json::from_str(&measurement_text)
+            .unwrap_or_else(|error| panic!("parse measurement failed: {error}"));
+        let samples_path = std::path::PathBuf::from(
+            measurement_json["sample_source_path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("sample_source_path must be a string")),
+        );
+        fs::write(
+            &samples_path,
+            r#"[{"height":0,"block_hash":"000000000000000000000000000000000000000000000000000000000000000a","block_size_bytes":4194304,"utxo_commit_ms":12.5}]"#,
+        )
+        .unwrap_or_else(|error| panic!("write tampered samples failed: {error}"));
+        let tampered_sha = sha256_file(
+            &samples_path.display().to_string(),
+            "tampered utxo commit sample source",
+        );
+        measurement_json["sample_source_sha256"] = serde_json::Value::String(tampered_sha);
+        fs::write(
+            &measurement,
+            serde_json::to_string_pretty(&measurement_json)
+                .unwrap_or_else(|error| panic!("encode measurement failed: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("write measurement failed: {error}"));
+        let result = panic::catch_unwind(|| {
+            verify_utxo_commit_measurement_json(
+                &measurement.display().to_string(),
+                commit_sha,
+                20,
+                start_height,
+                &start_hash,
+                stop_height,
+                &stop_hash,
+                12.5,
+            );
+        });
+        assert!(result.is_err());
     }
 
     fn utxo_commit_measurement_json(p95_ms: f64, start_hash: &str, stop_hash: &str) -> String {

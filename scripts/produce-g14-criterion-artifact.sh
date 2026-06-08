@@ -78,6 +78,83 @@ def validate_bitcoin_rs_ibd_command(command: str, name: str = "--bitcoin-rs-comm
             f"{name} must start with the bitcoin-rs daemon IBD adapter "
             f"{BITCOIN_RS_DAEMON_ADAPTER_BASENAME!r}, got {basenames[0]!r}"
         )
+def parse_cli_flag_values(tokens: list[str], flag: str, name: str) -> list[str]:
+    values: list[str] = []
+    index = 0
+    equals_prefix = f"{flag}="
+    while index < len(tokens):
+        token = tokens[index]
+        if token == flag:
+            if index + 1 >= len(tokens):
+                die(f"{name} has {flag} without a value")
+            values.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith(equals_prefix):
+            values.append(token[len(equals_prefix) :])
+            index += 1
+            continue
+        index += 1
+    return values
+
+
+def require_single_cli_flag_value(tokens: list[str], flag: str, name: str) -> str:
+    values = parse_cli_flag_values(tokens, flag, name)
+    if not values:
+        die(f"{name} must include {flag}")
+    if len(values) > 1:
+        die(f"{name} must not repeat {flag}")
+    return values[0]
+
+
+def require_cli_height_flag(tokens: list[str], flag: str, name: str) -> int:
+    raw = require_single_cli_flag_value(tokens, flag, name)
+    try:
+        height = int(raw)
+    except ValueError as error:
+        die(f"{name} {flag} must be a non-negative integer: {error}")
+    if height < 0:
+        die(f"{name} {flag} must be non-negative")
+    return height
+
+
+def require_cli_hash_flag(tokens: list[str], flag: str, name: str) -> str:
+    raw = require_single_cli_flag_value(tokens, flag, name)
+    block_hash = raw.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+        die(f"{name} {flag} must be 64 lowercase hex characters")
+    return block_hash
+
+
+def validate_bitcoin_rs_ibd_window_binding(
+    command: str,
+    name: str,
+    start_height: int,
+    stop_height: int,
+    start_hash: str,
+    stop_hash: str,
+) -> None:
+    validate_bitcoin_rs_ibd_command(command, name)
+    tokens = bitcoin_rs_command_argv(command, name)
+    command_start_height = require_cli_height_flag(tokens, "--ibd-start-height", name)
+    command_stop_height = require_cli_height_flag(tokens, "--ibd-stop-height", name)
+    command_start_hash = require_cli_hash_flag(tokens, "--ibd-start-hash", name)
+    command_stop_hash = require_cli_hash_flag(tokens, "--ibd-stop-hash", name)
+    if command_start_height != start_height:
+        die(
+            f"{name} --ibd-start-height must match outer G14 window "
+            f"({command_start_height} != {start_height})"
+        )
+    if command_stop_height != stop_height:
+        die(
+            f"{name} --ibd-stop-height must match outer G14 window "
+            f"({command_stop_height} != {stop_height})"
+        )
+    if command_start_hash != start_hash:
+        die(f"{name} --ibd-start-hash must match outer G14 window")
+    if command_stop_hash != stop_hash:
+        die(f"{name} --ibd-stop-hash must match outer G14 window")
+
 
 
 def die(message: str) -> None:
@@ -403,7 +480,6 @@ require_elapsed_matches_raw(
     "--criterion-bitcoin-core-raw-output",
 )
 bitcoin_rs_command = non_empty_text(args.bitcoin_rs_command, "--bitcoin-rs-command")
-validate_bitcoin_rs_ibd_command(bitcoin_rs_command)
 bitcoin_core_command = non_empty_text(args.bitcoin_core_command, "--bitcoin-core-command")
 bitcoin_rs_config = read_text(require_file(args.bitcoin_rs_config, "--bitcoin-rs-config"), "--bitcoin-rs-config")
 bitcoin_core_config = read_text(require_file(args.bitcoin_core_config, "--bitcoin-core-config"), "--bitcoin-core-config")
@@ -423,6 +499,14 @@ start_hash = require_live_hash(
 stop_hash = require_live_hash(
     run_bitcoin_cli(bitcoin_cli, bitcoin_cli_args, "getblockhash", str(stop_height)),
     "bitcoin-cli stop hash",
+)
+validate_bitcoin_rs_ibd_window_binding(
+    bitcoin_rs_command,
+    "--bitcoin-rs-command",
+    start_height,
+    stop_height,
+    start_hash,
+    stop_hash,
 )
 require_mainnet_chain_info(
     run_bitcoin_cli(bitcoin_cli, bitcoin_cli_args, "getblockchaininfo"),

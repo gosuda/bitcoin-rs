@@ -134,6 +134,43 @@ def parse_sample(sample, index: int, start_height: int, stop_height: int, thresh
     return sample_commit_ms(sample, index)
 
 
+
+def utxo_sample_hash_at_height(samples: list, height: int, source: str) -> str:
+    matched: str | None = None
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            die(f"{source}[{index}] must be an object")
+        sample_height = sample.get("height")
+        if not isinstance(sample_height, int) or isinstance(sample_height, bool):
+            die(f"{source}[{index}].height must be an integer")
+        if sample_height != height:
+            continue
+        block_hash = sample.get("block_hash")
+        if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+            die(f"{source}[{index}].block_hash must be 64 lowercase hex characters")
+        if matched is not None and matched != block_hash:
+            die(f"{source} contains conflicting block_hash values for height {height}")
+        matched = block_hash
+    if matched is None:
+        die(f"{source} must include a sample at height {height}")
+    return matched
+
+
+def verify_utxo_boundary_sample_hashes(
+    samples_path: Path,
+    start_height: int,
+    start_hash: str,
+    stop_height: int,
+    stop_hash: str,
+) -> None:
+    samples = read_samples(samples_path)
+    start_sample_hash = utxo_sample_hash_at_height(samples, start_height, "sample source")
+    if start_sample_hash != start_hash:
+        die("sample source block_hash at ibd_start_height must match --ibd-start-hash")
+    stop_sample_hash = utxo_sample_hash_at_height(samples, stop_height, "sample source")
+    if stop_sample_hash != stop_hash:
+        die("sample source block_hash at ibd_stop_height must match --ibd-stop-hash")
+
 def write_json(path: str, data: dict) -> None:
     encoded = json.dumps(data, indent=2, sort_keys=True) + "\n"
     if path == "-":
@@ -172,6 +209,14 @@ threshold_bytes = positive_int(args.block_size_threshold_bytes, "--block-size-th
 samples_path = Path(args.samples)
 if not samples_path.is_file():
     die(f"--samples is not a readable file: {samples_path}")
+
+verify_utxo_boundary_sample_hashes(
+    samples_path,
+    start_height,
+    start_hash,
+    stop_height,
+    stop_hash,
+)
 
 qualifying_ms: list[float] = []
 for index, sample in enumerate(read_samples(samples_path)):

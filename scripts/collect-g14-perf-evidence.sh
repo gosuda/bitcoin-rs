@@ -179,6 +179,83 @@ def validate_bitcoin_rs_ibd_command(command: str, name: str = "--bitcoin-rs-comm
             f"{name} must start with the bitcoin-rs daemon IBD adapter "
             f"{BITCOIN_RS_DAEMON_ADAPTER_BASENAME!r}, got {basenames[0]!r}"
         )
+def parse_cli_flag_values(tokens: list[str], flag: str, name: str) -> list[str]:
+    values: list[str] = []
+    index = 0
+    equals_prefix = f"{flag}="
+    while index < len(tokens):
+        token = tokens[index]
+        if token == flag:
+            if index + 1 >= len(tokens):
+                die(f"{name} has {flag} without a value")
+            values.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith(equals_prefix):
+            values.append(token[len(equals_prefix) :])
+            index += 1
+            continue
+        index += 1
+    return values
+
+
+def require_single_cli_flag_value(tokens: list[str], flag: str, name: str) -> str:
+    values = parse_cli_flag_values(tokens, flag, name)
+    if not values:
+        die(f"{name} must include {flag}")
+    if len(values) > 1:
+        die(f"{name} must not repeat {flag}")
+    return values[0]
+
+
+def require_cli_height_flag(tokens: list[str], flag: str, name: str) -> int:
+    raw = require_single_cli_flag_value(tokens, flag, name)
+    try:
+        height = int(raw)
+    except ValueError as error:
+        die(f"{name} {flag} must be a non-negative integer: {error}")
+    if height < 0:
+        die(f"{name} {flag} must be non-negative")
+    return height
+
+
+def require_cli_hash_flag(tokens: list[str], flag: str, name: str) -> str:
+    raw = require_single_cli_flag_value(tokens, flag, name)
+    block_hash = raw.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+        die(f"{name} {flag} must be 64 lowercase hex characters")
+    return block_hash
+
+
+def validate_bitcoin_rs_ibd_window_binding(
+    command: str,
+    name: str,
+    start_height: int,
+    stop_height: int,
+    start_hash: str,
+    stop_hash: str,
+) -> None:
+    validate_bitcoin_rs_ibd_command(command, name)
+    tokens = bitcoin_rs_command_argv(command, name)
+    command_start_height = require_cli_height_flag(tokens, "--ibd-start-height", name)
+    command_stop_height = require_cli_height_flag(tokens, "--ibd-stop-height", name)
+    command_start_hash = require_cli_hash_flag(tokens, "--ibd-start-hash", name)
+    command_stop_hash = require_cli_hash_flag(tokens, "--ibd-stop-hash", name)
+    if command_start_height != start_height:
+        die(
+            f"{name} --ibd-start-height must match outer G14 window "
+            f"({command_start_height} != {start_height})"
+        )
+    if command_stop_height != stop_height:
+        die(
+            f"{name} --ibd-stop-height must match outer G14 window "
+            f"({command_stop_height} != {stop_height})"
+        )
+    if command_start_hash != start_hash:
+        die(f"{name} --ibd-start-hash must match outer G14 window")
+    if command_stop_hash != stop_hash:
+        die(f"{name} --ibd-stop-hash must match outer G14 window")
+
 
 
 def die(message: str) -> None:
@@ -764,11 +841,50 @@ def qualifying_utxo_commit_samples_ms(
     return qualifying_ms
 
 
+
+def utxo_sample_hash_at_height(samples: list, height: int, source: str) -> str:
+    matched: str | None = None
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            die(f"{source}[{index}] must be an object")
+        sample_height = sample.get("height")
+        if not isinstance(sample_height, int) or isinstance(sample_height, bool):
+            die(f"{source}[{index}].height must be an integer")
+        if sample_height != height:
+            continue
+        block_hash = sample.get("block_hash")
+        if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+            die(f"{source}[{index}].block_hash must be 64 lowercase hex characters")
+        if matched is not None and matched != block_hash:
+            die(f"{source} contains conflicting block_hash values for height {height}")
+        matched = block_hash
+    if matched is None:
+        die(f"{source} must include a sample at height {height}")
+    return matched
+
+
+def verify_utxo_boundary_sample_hashes(
+    samples_path: Path,
+    start_height: int,
+    start_hash: str,
+    stop_height: int,
+    stop_hash: str,
+) -> None:
+    samples = read_utxo_samples(samples_path)
+    start_sample_hash = utxo_sample_hash_at_height(samples, start_height, "sample source")
+    if start_sample_hash != start_hash:
+        die("sample source block_hash at ibd_start_height must match --ibd-start-hash")
+    stop_sample_hash = utxo_sample_hash_at_height(samples, stop_height, "sample source")
+    if stop_sample_hash != stop_hash:
+        die("sample source block_hash at ibd_stop_height must match --ibd-stop-hash")
+
 def verify_utxo_commit_sample_custody(
     data: dict,
     source: str,
     start_height: int,
+    start_hash: str,
     stop_height: int,
+    stop_hash: str,
     threshold_bytes: int,
 ) -> None:
     sample_source_path_value = data.get("sample_source_path")
@@ -780,6 +896,13 @@ def verify_utxo_commit_sample_custody(
     expected_sample_sha = require_hex_field(data, "sample_source_sha256", 64, source)
     if sha256_file(sample_source_path) != expected_sample_sha:
         die(f"{source} sample_source_sha256 must match sample_source_path")
+    verify_utxo_boundary_sample_hashes(
+        sample_source_path,
+        start_height,
+        start_hash,
+        stop_height,
+        stop_hash,
+    )
     expected_sample_count = data.get("sample_count")
     if not isinstance(expected_sample_count, int) or isinstance(expected_sample_count, bool):
         die(f"{source} sample_count must be an integer")
@@ -885,7 +1008,9 @@ def validate_utxo_commit_measurement(
         data,
         "utxo_commit_measurement_path",
         start_height,
+        start_hash,
         stop_height,
+        stop_hash,
         UTXO_BLOCK_SIZE_THRESHOLD_BYTES,
     )
 
@@ -949,7 +1074,14 @@ core_commit = require_hex(require_text(data, "bitcoin_core_commit"), 40, "bitcoi
 bench_tool = require_literal_value(data, "bench_tool", "criterion")
 require_literal_value(data, "elapsed_seconds_source", "criterion")
 rs_command = require_text(data, "bitcoin_rs_command")
-validate_bitcoin_rs_ibd_command(rs_command, "bitcoin_rs_command")
+validate_bitcoin_rs_ibd_window_binding(
+    rs_command,
+    "bitcoin_rs_command",
+    start_height,
+    stop_height,
+    start_hash,
+    stop_hash,
+)
 core_command = require_text(data, "bitcoin_core_command")
 rs_config = require_text(data, "bitcoin_rs_config")
 core_config = require_text(data, "bitcoin_core_config")

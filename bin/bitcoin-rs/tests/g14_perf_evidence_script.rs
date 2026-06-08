@@ -35,7 +35,7 @@ impl Drop for FakeBitcoinRsProcess {
 
 const DIRECT_BITCOIN_RS_COMMAND: &str = "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh";
 const DIRECT_BITCOIN_RS_COMMAND_SHA256: &str =
-    "37dd3a598f0a88a0143042ee21c82af187aff2f0427d432a37549c16f7b9178c";
+    "b8ffdcf8b40352fb7aec7780c4fd8369c9895bbe88e665aea59f4c383ab865e1";
 const DIRECT_BITCOIN_CORE_COMMAND_SHA256: &str =
     "022e36196e1baa86c9f90b731e17f501823bc65a65603e64876cb970cb7a5193";
 const DIRECT_BITCOIN_RS_CONFIG_SHA256: &str =
@@ -47,6 +47,20 @@ const PRODUCER_BITCOIN_RS_CONFIG_SHA256: &str =
 const PRODUCER_BITCOIN_CORE_CONFIG_SHA256: &str =
     "fa2075ea5013454e21228fa9261aa51a36a3ac196892af528829dc0a3ebac1c1";
 const BENCHMARK_HOST_ID: &str = "g14-test-host";
+
+fn g14_daemon_adapter_command(adapter: &Path, start_height: u32, stop_height: u32) -> String {
+    format!(
+        "{} --ibd-start-height {start_height} --ibd-stop-height {stop_height} --ibd-start-hash {:064x} --ibd-stop-hash {:064x}",
+        adapter.display(),
+        start_height,
+        stop_height,
+    )
+}
+
+fn g14_default_daemon_adapter_command(adapter: &Path) -> String {
+    g14_daemon_adapter_command(adapter, 0, 10)
+}
+
 const BITCOIN_RS_IBD_ADAPTER: &str = "bitcoin-rs-daemon-mainnet-ibd-v1";
 
 #[derive(Clone, Copy)]
@@ -94,9 +108,10 @@ fn script_normalizes_g14_perf_evidence() -> Result<(), Box<dyn std::error::Error
     assert!(stdout.contains("export G14_BENCHMARK_HOST_ID=g14-test-host\n"));
     assert!(stdout.contains("export G14_IBD_START_HASH=0000000000000000000000000000000000000000000000000000000000000000\n"));
     assert!(stdout.contains("export G14_IBD_STOP_HASH=000000000000000000000000000000000000000000000000000000000000000a\n"));
-    assert!(stdout.contains(&format!(
-        "export G14_BITCOIN_RS_COMMAND={DIRECT_BITCOIN_RS_COMMAND}\n"
-    )));
+    let expected_bitcoin_rs_command =
+        g14_default_daemon_adapter_command(Path::new(DIRECT_BITCOIN_RS_COMMAND));
+    assert!(stdout.contains("export G14_BITCOIN_RS_COMMAND="));
+    assert!(stdout.contains(&expected_bitcoin_rs_command));
     assert_64_hex_export(&stdout, "G14_BITCOIN_RS_COMMAND_SHA256");
     assert_64_hex_export(&stdout, "G14_BITCOIN_CORE_COMMAND_SHA256");
     assert_64_hex_export(&stdout, "G14_BITCOIN_RS_CONFIG_SHA256");
@@ -139,9 +154,7 @@ fn producer_marks_command_wrapper_manifest_as_non_criterion()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            bitcoin_rs_command
-                .to_str()
-                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            &g14_default_daemon_adapter_command(&bitcoin_rs_command),
             "--bitcoin-core-command",
             bitcoin_core_command
                 .to_str()
@@ -195,10 +208,8 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -232,7 +243,7 @@ fn producer_emits_collectable_manifest_with_artifact_bound_criterion_elapsed_sec
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
@@ -301,10 +312,8 @@ fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -338,7 +347,7 @@ fn producer_emits_collectable_manifest_with_electrum_rss_measurement()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
@@ -394,10 +403,8 @@ fn producer_rejects_criterion_manifest_without_utxo_commit_measurement()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -428,7 +435,7 @@ fn producer_rejects_criterion_manifest_without_utxo_commit_measurement()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
@@ -464,10 +471,8 @@ fn producer_rejects_criterion_manifest_without_utxo_commit_measurement()
 fn producer_rejects_smoke_utxo_commit_measurement() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -507,7 +512,7 @@ fn producer_rejects_smoke_utxo_commit_measurement() -> Result<(), Box<dyn std::e
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
@@ -578,10 +583,8 @@ fn utxo_commit_measurement_rejects_sub_threshold_block_size()
 fn producer_rejects_smoke_electrum_rss_measurement() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -616,7 +619,7 @@ fn producer_rejects_smoke_electrum_rss_measurement() -> Result<(), Box<dyn std::
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
@@ -663,9 +666,7 @@ fn artifact_producer_emits_collectable_same_window_criterion_artifact()
         "0.01",
     )?;
     let bitcoin_core_command = fake_ibd_command(temp.path(), "bitcoin-core-live-ibd", "0.05")?;
-    let bitcoin_rs_command = bitcoin_rs_command
-        .to_str()
-        .ok_or("non-UTF-8 bitcoin-rs command")?;
+    let bitcoin_rs_command = &g14_default_daemon_adapter_command(&bitcoin_rs_command);
     let bitcoin_core_command = bitcoin_core_command
         .to_str()
         .ok_or("non-UTF-8 Bitcoin Core command")?;
@@ -1010,7 +1011,7 @@ fn artifact_producer_rejects_invalid_elapsed_seconds() -> Result<(), Box<dyn std
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            DIRECT_BITCOIN_RS_COMMAND,
+            &g14_default_daemon_adapter_command(Path::new(DIRECT_BITCOIN_RS_COMMAND)),
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -1083,7 +1084,7 @@ fn artifact_producer_rejects_elapsed_seconds_not_in_raw_output()
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            DIRECT_BITCOIN_RS_COMMAND,
+            &g14_default_daemon_adapter_command(Path::new(DIRECT_BITCOIN_RS_COMMAND)),
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -1155,7 +1156,7 @@ fn artifact_producer_rejects_non_exact_raw_output_benchmark_id()
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            DIRECT_BITCOIN_RS_COMMAND,
+            &g14_default_daemon_adapter_command(Path::new(DIRECT_BITCOIN_RS_COMMAND)),
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -1226,7 +1227,7 @@ fn artifact_producer_rejects_unlabeled_raw_output_time() -> Result<(), Box<dyn s
                 .to_str()
                 .ok_or("non-UTF-8 Bitcoin Core raw output")?,
             "--bitcoin-rs-command",
-            DIRECT_BITCOIN_RS_COMMAND,
+            &g14_default_daemon_adapter_command(Path::new(DIRECT_BITCOIN_RS_COMMAND)),
             "--bitcoin-core-command",
             "bitcoind -chain=main",
             "--bitcoin-rs-config",
@@ -1289,9 +1290,7 @@ fn criterion_runner_emits_artifact_with_canonical_raw_outputs()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            bitcoin_rs_command
-                .to_str()
-                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            &g14_default_daemon_adapter_command(&bitcoin_rs_command),
             "--bitcoin-core-command",
             bitcoin_core_command
                 .to_str()
@@ -2915,9 +2914,7 @@ fn criterion_runner_accepts_bitcoin_core_mainnet_ibd_wrapper()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            bitcoin_rs_command
-                .to_str()
-                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            &g14_default_daemon_adapter_command(&bitcoin_rs_command),
             "--bitcoin-core-command",
             &bitcoin_core_command,
             "--bitcoin-rs-config",
@@ -2988,9 +2985,7 @@ fn criterion_runner_removes_partial_outputs_when_command_fails()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            bitcoin_rs_command
-                .to_str()
-                .ok_or("non-UTF-8 bitcoin-rs command")?,
+            &g14_default_daemon_adapter_command(&bitcoin_rs_command),
             "--bitcoin-core-command",
             bitcoin_core_command
                 .to_str()
@@ -3027,10 +3022,8 @@ fn criterion_runner_removes_partial_outputs_when_command_fails()
 fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -3054,7 +3047,7 @@ fn producer_rejects_partial_criterion_elapsed_seconds() -> Result<(), Box<dyn st
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-elapsed-seconds",
@@ -3093,10 +3086,8 @@ fn producer_rejects_criterion_elapsed_seconds_not_bound_to_artifact()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -3120,7 +3111,7 @@ fn producer_rejects_criterion_elapsed_seconds_not_bound_to_artifact()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-elapsed-seconds",
@@ -3168,10 +3159,8 @@ fn producer_rejects_criterion_artifact_for_different_ibd_window()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -3202,7 +3191,7 @@ fn producer_rejects_criterion_artifact_for_different_ibd_window()
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
@@ -3436,10 +3425,8 @@ fn producer_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn
 {
     let temp = tempfile::tempdir()?;
     let producer_fixture_commands = install_producer_fixture_ibd_commands(temp.path())?;
-    let producer_bitcoin_rs_command = producer_fixture_commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let producer_bitcoin_rs_command =
+        producer_fixture_bitcoin_rs_command(&producer_fixture_commands);
     let producer_bitcoin_core_command = producer_fixture_commands
         .bitcoin_core
         .to_str()
@@ -3463,7 +3450,7 @@ fn producer_rejects_renamed_criterion_benchmark_identity() -> Result<(), Box<dyn
             "--ibd-stop-height",
             "10",
             "--bitcoin-rs-command",
-            producer_bitcoin_rs_command,
+            &producer_bitcoin_rs_command,
             "--bitcoin-core-command",
             producer_bitcoin_core_command,
             "--criterion-bitcoin-rs-benchmark-id",
@@ -4027,18 +4014,18 @@ fn utxo_commit_samples_json(
     stop_height: u32,
     p95_ms: f64,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let stop_hash = format!("{stop_height:064x}");
     let span = stop_height - start_height + 1;
     let mut samples = Vec::new();
     for index in 0..20 {
         let height = start_height + (index % span);
+        let block_hash = format!("{height:064x}");
         let commit_ms = match index {
             18 => p95_ms,
             19 => p95_ms + 7.5,
             _ => 10.0,
         };
         samples.push(format!(
-            r#"{{"height": {height}, "block_hash": "{stop_hash}", "block_size_bytes": 4194304, "utxo_commit_ms": {commit_ms}}}"#
+            r#"{{"height": {height}, "block_hash": "{block_hash}", "block_size_bytes": 4194304, "utxo_commit_ms": {commit_ms}}}"#
         ));
     }
     write_text(
@@ -4172,7 +4159,7 @@ fn evidence_json_with_utxo_measurement(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4572,6 +4559,10 @@ exit 0
     })
 }
 
+fn producer_fixture_bitcoin_rs_command(commands: &ProducerFixtureIbdCommands) -> String {
+    g14_default_daemon_adapter_command(&commands.bitcoin_rs)
+}
+
 fn producer_criterion_artifact_json(
     dir: &Path,
     name: &str,
@@ -4597,15 +4588,12 @@ fn producer_criterion_artifact_json_with_window(
     stop_height: u32,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let commands = install_producer_fixture_ibd_commands(dir)?;
-    let bitcoin_rs_command = commands
-        .bitcoin_rs
-        .to_str()
-        .ok_or("non-UTF-8 producer fixture bitcoin-rs command")?;
+    let bitcoin_rs_command = producer_fixture_bitcoin_rs_command(&commands);
     let bitcoin_core_command = commands
         .bitcoin_core
         .to_str()
         .ok_or("non-UTF-8 producer fixture bitcoin-core command")?;
-    let bitcoin_rs_command_sha256 = sha256_text(bitcoin_rs_command);
+    let bitcoin_rs_command_sha256 = sha256_text(&bitcoin_rs_command);
     let bitcoin_core_command_sha256 = sha256_text(bitcoin_core_command);
     let start_hash = format!("{start_height:064x}");
     let stop_hash = format!("{stop_height:064x}");
@@ -4842,7 +4830,7 @@ fn evidence_json_with_artifact_binding(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -4887,6 +4875,141 @@ fn current_head() -> Result<String, Box<dyn std::error::Error>> {
         .output()?;
     assert_success(&output);
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+#[test]
+fn criterion_runner_rejects_daemon_adapter_window_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let adapter = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
+        temp.path(),
+        "bitcoin-rs-runner-window-mismatch",
+        "1.25",
+    )?;
+    let bitcoin_rs_command = g14_daemon_adapter_command(&adapter, 1, 10);
+    let bitcoin_core_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-core-runner-window-mismatch",
+        "bitcoin-core/mainnet-ibd",
+        "2.50",
+    )?;
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = temp.path().join("g14-runner-window-mismatch.json");
+    let output = Command::new("bash")
+        .arg(criterion_runner_script_path())
+        .args([
+            "--output",
+            artifact.to_str().ok_or("non-UTF-8 artifact path")?,
+            "--benchmark-run-id",
+            "g14-mainnet-window-mismatch-runner",
+            "--benchmark-host-id",
+            BENCHMARK_HOST_ID,
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--bitcoin-rs-command",
+            &bitcoin_rs_command,
+            "--bitcoin-core-command",
+            bitcoin_core_command
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core command")?,
+            "--bitcoin-rs-config",
+            bitcoin_rs_config
+                .to_str()
+                .ok_or("non-UTF-8 bitcoin-rs config")?,
+            "--bitcoin-core-config",
+            bitcoin_core_config
+                .to_str()
+                .ok_or("non-UTF-8 Bitcoin Core config")?,
+            "--force",
+        ])
+        .env("BITCOIN_CLI", bitcoin_cli)
+        .output()?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--ibd-start-height"));
+    assert!(stderr.contains("outer G14 window"));
+    Ok(())
+}
+
+#[test]
+fn artifact_producer_rejects_daemon_adapter_window_mismatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let bitcoin_cli = fake_bitcoin_cli(temp.path(), FakeBitcoinCliMode::Mainnet)?;
+    let adapter = fake_bitcoin_rs_criterion_command_with_daemon_adapter(
+        temp.path(),
+        "bitcoin-rs-producer-window-mismatch",
+        "1.25",
+    )?;
+    let bitcoin_rs_command = g14_daemon_adapter_command(&adapter, 1, 10);
+    let bitcoin_core_command = fake_criterion_command(
+        temp.path(),
+        "bitcoin-core-producer-window-mismatch",
+        "bitcoin-core/mainnet-ibd",
+        "2.50",
+    )?
+    .to_str()
+    .ok_or("non-UTF-8 Bitcoin Core command")?
+    .to_owned();
+    let bitcoin_rs_config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let bitcoin_core_config = write_text(temp.path(), "bitcoin.conf", "chain=main\ndbcache=450\n")?;
+    let artifact = temp.path().join("g14-artifact-window-mismatch.json");
+    let output = produce_g14_criterion_artifact(
+        &artifact,
+        &bitcoin_rs_command,
+        &bitcoin_core_command,
+        &bitcoin_rs_config,
+        &bitcoin_core_config,
+        &bitcoin_cli,
+    )?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--ibd-start-height"));
+    assert!(stderr.contains("outer G14 window"));
+    Ok(())
+}
+
+#[test]
+fn utxo_commit_measurement_rejects_mismatched_boundary_sample_hash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let samples = write_text(
+        temp.path(),
+        "utxo-boundary-mismatch-samples.json",
+        r#"[{"height": 0, "block_hash": "000000000000000000000000000000000000000000000000000000000000000a", "block_size_bytes": 4194304, "utxo_commit_ms": 12.5}]"#,
+    )?;
+    let output = temp.path().join("utxo-boundary-mismatch-measurement.json");
+    let status = Command::new("bash")
+        .arg(utxo_commit_script_path())
+        .args([
+            "--output",
+            output.to_str().ok_or("non-UTF-8 output")?,
+            "--samples",
+            samples.to_str().ok_or("non-UTF-8 samples")?,
+            "--ibd-start-height",
+            "0",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-height",
+            "0",
+            "--ibd-stop-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ])
+        .status()?;
+    assert!(!status.success());
+    Ok(())
 }
 
 fn fake_ibd_command(
@@ -5145,7 +5268,7 @@ fn evidence_json_with_artifact_window(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -5188,7 +5311,7 @@ fn evidence_json_with_mixed_benchmark_run_ids(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -5321,7 +5444,7 @@ fn evidence_json_with_missing_raw_output_sha256(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -5403,7 +5526,7 @@ fn evidence_json_for_artifact(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -5472,7 +5595,7 @@ fn evidence_json_with_binding_fields(
   "storage_backend": "{storage_backend}",
   "indexes": "{indexes}",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -5566,7 +5689,7 @@ fn evidence_json_with_benchmark_ids(
   "storage_backend": "fjall",
   "indexes": "all",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
@@ -5626,7 +5749,7 @@ fn offline_evidence_json_with_elapsed(
   "bitcoin_core_elapsed_seconds": {bitcoin_core_elapsed_seconds},
   "bitcoin_core_version": "v27.0.0",
   "bitcoin_core_commit": "1111111111111111111111111111111111111111",
-  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh",
+  "bitcoin_rs_command": "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash 0000000000000000000000000000000000000000000000000000000000000000 --ibd-stop-hash 000000000000000000000000000000000000000000000000000000000000000a",
   "bitcoin_core_command": "bitcoind -chain=main",
   "bitcoin_rs_config": "storage_backend=fjall\nindexes=all",
   "bitcoin_core_config": "dbcache=450\ncoinstatsindex=1",
