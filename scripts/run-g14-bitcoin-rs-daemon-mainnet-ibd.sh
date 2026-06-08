@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height <height> --ibd-stop-height <height> --ibd-start-hash <hash> --ibd-stop-hash <hash> --datadir <path> --bitcoin-rs-config <path> --rpc-url <url> --rpc-user <user> --rpc-password <password> [--bitcoin-rs-command <command>] [--command-output <path>] [--poll-interval-seconds <seconds>] [--startup-timeout-seconds <seconds>] [--force] [-- <bitcoin-rs-arg>...]' \
+    'usage: run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height <height> --ibd-stop-height <height> --ibd-start-hash <hash> --ibd-stop-hash <hash> --datadir <path> --bitcoin-rs-config <path> --rpc-url <url> --rpc-user <user> --rpc-password <password> [--bitcoin-rs-command <command>] [--command-output <path>] [--poll-interval-seconds <seconds>] [--startup-timeout-seconds <seconds>] [--ibd-timeout-seconds <seconds>] [--utxo-commit-samples-output <path>] [--utxo-commit-measurement-output <path>] [--force] [-- <bitcoin-rs-arg>...]' \
     '' \
     'Runs a bitcoin-rs mainnet daemon, polls JSON-RPC until applied blocks reach the requested window, validates start/stop block hashes, then emits canonical Criterion-style bitcoin-rs/mainnet-ibd timing for G14 evidence capture.'
 }
@@ -12,6 +12,9 @@ if (($# == 0)); then
   usage >&2
   exit 2
 fi
+
+G14_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export G14_SCRIPT_DIR
 
 python3 - "$@" <<'PY'
 import argparse
@@ -33,6 +36,11 @@ from urllib.parse import urlparse
 
 BENCHMARK_ID = "bitcoin-rs/mainnet-ibd"
 RESERVED_BITCOIN_RS_ARGS = (
+    "--g14-utxo-commit-samples",
+    "--g14-utxo-commit-ibd-start-height",
+    "--g14-utxo-commit-ibd-stop-height",
+    "--g14-utxo-commit-ibd-start-hash",
+    "--g14-utxo-commit-ibd-stop-hash",
     "--config",
     "--bitcoin-conf",
     "--data-dir",
@@ -89,6 +97,52 @@ def file_path(value: str | None, name: str) -> Path:
     if not path.is_file():
         die(f"{name} is not a readable file: {path}")
     return path
+
+
+def output_file(value: str | None, name: str, force: bool) -> Path:
+    if value is None:
+        die(f"{name} is required")
+    path = Path(value)
+    if path.exists() and path.is_dir():
+        die(f"{name} must be a file path, got directory: {path}")
+    if path.exists() and not force:
+        die(f"{name} already exists; pass --force to replace it: {path}")
+    if path.parent and not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def run_utxo_commit_measurement(
+    script_dir: Path,
+    measurement_output: Path,
+    samples_output: Path,
+    start_height: int,
+    stop_height: int,
+    start_hash: str,
+    stop_hash: str,
+) -> None:
+    measure_script = script_dir / "measure-g14-utxo-commit-p95.sh"
+    if not measure_script.is_file():
+        die(f"missing measurement script: {measure_script}")
+    subprocess.run(
+        [
+            "bash",
+            str(measure_script),
+            "--output",
+            str(measurement_output),
+            "--samples",
+            str(samples_output),
+            "--ibd-start-height",
+            str(start_height),
+            "--ibd-start-hash",
+            start_hash,
+            "--ibd-stop-height",
+            str(stop_height),
+            "--ibd-stop-hash",
+            stop_hash,
+        ],
+        check=True,
+    )
 
 
 def output_path(value: str | None, force: bool) -> tuple[Path, bool]:
@@ -333,6 +387,9 @@ parser.add_argument("--rpc-password")
 parser.add_argument("--command-output")
 parser.add_argument("--poll-interval-seconds", default="1.0")
 parser.add_argument("--startup-timeout-seconds", default="900.0")
+parser.add_argument("--ibd-timeout-seconds", default="86400.0")
+parser.add_argument("--utxo-commit-samples-output")
+parser.add_argument("--utxo-commit-measurement-output")
 parser.add_argument("--force", action="store_true")
 parser.add_argument("bitcoin_rs_args", nargs=argparse.REMAINDER)
 args = parser.parse_args()
@@ -344,7 +401,7 @@ if args.help:
         "--datadir <path> --bitcoin-rs-config <path> --rpc-url <url> --rpc-user <user> "
         "--rpc-password <password> [--bitcoin-rs-command <command>] "
         "[--command-output <path>] [--poll-interval-seconds <seconds>] "
-        "[--startup-timeout-seconds <seconds>] [--force] "
+        "[--utxo-commit-samples-output <path>] [--utxo-commit-measurement-output <path>] [--force] "
         "[-- <bitcoin-rs-arg>...]"
     )
     raise SystemExit(0)
@@ -363,6 +420,7 @@ rpc_user = non_empty(args.rpc_user, "--rpc-user")
 rpc_password = non_empty(args.rpc_password, "--rpc-password")
 poll_interval = positive_float(args.poll_interval_seconds, "--poll-interval-seconds")
 startup_timeout = positive_float(args.startup_timeout_seconds, "--startup-timeout-seconds")
+ibd_timeout = positive_float(args.ibd_timeout_seconds, "--ibd-timeout-seconds")
 
 bitcoin_rs_args = args.bitcoin_rs_args
 if bitcoin_rs_args and bitcoin_rs_args[0] == "--":
@@ -374,6 +432,31 @@ command_output, remove_command_output = output_path(args.command_output, args.fo
 if command_output.exists():
     command_output.unlink()
 
+utxo_samples_output = (
+    Path(args.utxo_commit_samples_output)
+    if args.utxo_commit_samples_output
+    else None
+)
+utxo_measurement_output = (
+    Path(args.utxo_commit_measurement_output)
+    if args.utxo_commit_measurement_output
+    else None
+)
+if utxo_measurement_output is not None and utxo_samples_output is None:
+    die("--utxo-commit-measurement-output requires --utxo-commit-samples-output")
+if utxo_samples_output is not None:
+    utxo_samples_output = output_file(
+        str(utxo_samples_output), "--utxo-commit-samples-output", args.force
+    )
+    if utxo_samples_output.exists():
+        utxo_samples_output.unlink()
+if utxo_measurement_output is not None:
+    utxo_measurement_output = output_file(
+        str(utxo_measurement_output),
+        "--utxo-commit-measurement-output",
+        args.force,
+    )
+
 command = (
     shlex.split(bitcoin_rs_command)
     + [
@@ -383,6 +466,17 @@ command = (
         f"--rpc-bind={rpc_bind}",
         f"--rpc-user={rpc_user}",
         f"--rpc-password={rpc_password}",
+        *(
+            [
+                f"--g14-utxo-commit-samples={utxo_samples_output}",
+                f"--g14-utxo-commit-ibd-start-height={start_height}",
+                f"--g14-utxo-commit-ibd-stop-height={stop_height}",
+                f"--g14-utxo-commit-ibd-start-hash={start_hash}",
+                f"--g14-utxo-commit-ibd-stop-hash={stop_hash}",
+            ]
+            if utxo_samples_output is not None
+            else []
+        ),
         *bitcoin_rs_args,
     ]
 )
@@ -399,7 +493,8 @@ try:
             start_new_session=True,
         )
     pgid = process.pid
-    deadline = started + startup_timeout
+    startup_deadline = started + startup_timeout
+    ibd_deadline: float | None = None
     observed_start = False
     while True:
         if process.poll() is not None:
@@ -409,7 +504,7 @@ try:
             )
         info_result = try_rpc_call(rpc_url, rpc_user, rpc_password, "getblockchaininfo", [])
         if info_result is None:
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= startup_deadline:
                 die("timed out waiting for measured bitcoin-rs RPC startup")
             time.sleep(poll_interval)
             continue
@@ -417,9 +512,10 @@ try:
         if not observed_start:
             require_chain_start(info, start_height)
             observed_start = True
+            ibd_deadline = time.monotonic() + ibd_timeout
         if require_chain_tip(info, stop_height):
             break
-        if time.monotonic() >= deadline:
+        if ibd_deadline is not None and time.monotonic() >= ibd_deadline:
             die("timed out waiting for measured bitcoin-rs node to reach stop height")
         time.sleep(poll_interval)
 
@@ -436,4 +532,14 @@ print(f"Benchmarking {BENCHMARK_ID}")
 print(f"Benchmarking {BENCHMARK_ID}: Collecting 1 sample from bitcoin-rs")
 print(f"Benchmarking {BENCHMARK_ID}: Analyzing")
 print(f"{BENCHMARK_ID}   time:   [{elapsed:.12g} s {elapsed:.12g} s {elapsed:.12g} s]")
+if utxo_measurement_output is not None:
+    run_utxo_commit_measurement(
+        Path(os.environ["G14_SCRIPT_DIR"]),
+        utxo_measurement_output,
+        utxo_samples_output,
+        start_height,
+        stop_height,
+        start_hash,
+        stop_hash,
+    )
 PY

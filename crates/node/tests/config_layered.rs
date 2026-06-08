@@ -355,3 +355,25 @@ fn assert_auth_user(auth: &Auth, expected: &str) {
         Auth::Cookie { .. } => panic!("expected basic auth"),
     }
 }
+
+#[test]
+fn g14_utxo_commit_sample_path_requires_window_fields() {
+    let result = Config::from_layered_sources(
+        None,
+        None,
+        [] as [(&str, &str); 0],
+        [
+            "bitcoin-rs-node",
+            "--g14-utxo-commit-samples",
+            "utxo.samples.json",
+        ],
+    );
+    let Err(error) = result else {
+        panic!("g14 sample path without window fields must be rejected");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("g14_utxo_commit_samples requires")
+    );
+}

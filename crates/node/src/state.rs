@@ -730,6 +730,34 @@ impl NodeState {
             .transpose()
             .context("open G2 MuHash sample writer")?
             .map(Arc::new);
+        let g14_utxo_commit_sampler = match (
+            config.g14_utxo_commit_samples.as_ref(),
+            config.g14_utxo_commit_ibd_start_height,
+            config.g14_utxo_commit_ibd_stop_height,
+            config.g14_utxo_commit_ibd_start_hash.as_ref(),
+            config.g14_utxo_commit_ibd_stop_hash.as_ref(),
+        ) {
+            (None, None, None, None, None) => None,
+            (
+                Some(path),
+                Some(start_height),
+                Some(stop_height),
+                Some(start_hash),
+                Some(stop_hash),
+            ) => Some(Arc::new(
+                crate::g14_utxo_commit::G14UtxoCommitSampler::open(
+                    path.clone(),
+                    start_height,
+                    stop_height,
+                    start_hash.clone(),
+                    stop_hash.clone(),
+                )
+                .context("open G14 UTXO commit sample writer")?,
+            )),
+            _ => {
+                bail!("g14_utxo_commit_samples requires complete G14 UTXO commit IBD window fields")
+            }
+        };
         let storage = NodeStorage::open(&config)?;
         let tx_index_pair = open_tx_index(&config)?;
         let (tx_index, tx_index_storage) = tx_index_pair
@@ -797,6 +825,7 @@ impl NodeState {
             cache_block_bodies_in_memory: false,
             block_body_store: Some(storage.block_body_store()),
             g2_muhash_sampler,
+            g14_utxo_commit_sampler,
             assume_valid_height: config.assume_valid_height,
         };
         let sync = Arc::new(crate::BlockSync::new(

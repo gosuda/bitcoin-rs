@@ -24,6 +24,7 @@ pub mod config;
 pub mod crash_recovery;
 /// Central synchronous event loop.
 pub mod event_loop;
+mod g14_utxo_commit;
 mod g2_muhash;
 /// Block import pipeline.
 pub mod import;

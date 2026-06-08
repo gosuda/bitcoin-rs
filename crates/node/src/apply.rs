@@ -130,6 +130,7 @@ pub struct ApplyHandles {
     pub(crate) cache_block_bodies_in_memory: bool,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) g2_muhash_sampler: Option<Arc<crate::g2_muhash::G2MuhashSampler>>,
+    pub(crate) g14_utxo_commit_sampler: Option<Arc<crate::g14_utxo_commit::G14UtxoCommitSampler>>,
     /// Block height at or below which interpreter / `bitcoinconsensus` script execution is skipped during block apply.
     /// Non-script transaction checks still run. Zero disables the shortcut (full script checks on every block).
     pub assume_valid_height: u32,
@@ -170,6 +171,7 @@ impl ApplyHandles {
             cache_block_bodies_in_memory: true,
             block_body_store: None,
             g2_muhash_sampler: None,
+            g14_utxo_commit_sampler: None,
             assume_valid_height: 0,
         }
     }
@@ -322,6 +324,10 @@ pub fn apply_block(
     let wants_rawtx = handles.zmq_publisher.wants_rawtx();
     let wants_rawblock = handles.zmq_publisher.wants_rawblock();
     let wants_filters = handles.filter_index.wants_filters();
+    let needs_g14_sample = handles
+        .g14_utxo_commit_sampler
+        .as_ref()
+        .is_some_and(|sampler| sampler.wants_height(height));
     let (txids, scratch_capacities, same_block_spent, same_block_spent_input_count) =
         tx_plan.into_scratch_parts();
     let scratch = ApplyScratch::from_prepared_parts(
@@ -357,7 +363,8 @@ pub fn apply_block(
         let needs_body = handles.block_body_store.is_some()
             || handles.tx_index.is_some()
             || handles.cache_block_bodies_in_memory
-            || wants_rawblock;
+            || wants_rawblock
+            || needs_g14_sample;
         if needs_body {
             bytes::Bytes::from(bitcoin::consensus::encode::serialize(block))
         } else {
@@ -536,6 +543,20 @@ pub fn apply_block(
                 %error,
                 "G2 MuHash sample emission failed after tip publication; evidence file incomplete"
             );
+        }
+    }
+    if needs_g14_sample {
+        if let Some(sampler) = &handles.g14_utxo_commit_sampler {
+            if let Err(error) =
+                sampler.record(height, block_hash, block_bytes.len(), utxo_commit_dur)
+            {
+                metrics::counter!("node.apply_block.g14_utxo_commit_sample_errors").increment(1);
+                tracing::warn!(
+                    height,
+                    %error,
+                    "G14 UTXO commit sample emission failed after tip publication; evidence file incomplete"
+                );
+            }
         }
     }
     Ok(tip)

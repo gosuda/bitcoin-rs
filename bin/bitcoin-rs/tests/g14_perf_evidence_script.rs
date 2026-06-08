@@ -1784,6 +1784,271 @@ fn bitcoin_rs_daemon_mainnet_ibd_wrapper_emits_canonical_criterion_output()
 }
 
 #[test]
+fn bitcoin_rs_daemon_mainnet_ibd_wrapper_produces_utxo_commit_measurement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let datadir = temp.path().join("bitcoin-rs-datadir");
+    fs::create_dir(&datadir)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let rpc_port = listener.local_addr()?.port();
+    drop(listener);
+    let stop_file = temp.path().join("fake-bitcoin-rs.stop");
+    let bitcoin_rs = fake_bitcoin_rs_daemon_command(
+        temp.path(),
+        "bitcoin-rs",
+        rpc_port,
+        "g14-user",
+        "g14-pass",
+        FakeBitcoinRsRpcMode::Mainnet,
+        &stop_file,
+    )?;
+    let command_output = temp.path().join("bitcoin-rs.log");
+    let samples_output = temp.path().join("utxo-samples.json");
+    let measurement_output = temp.path().join("utxo-measurement.json");
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}/");
+
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_daemon_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-rs-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoin-rs-command",
+            bitcoin_rs.to_str().ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--rpc-url",
+            &rpc_url,
+            "--rpc-user",
+            "g14-user",
+            "--rpc-password",
+            "g14-pass",
+            "--command-output",
+            command_output.to_str().ok_or("non-UTF-8 command output")?,
+            "--utxo-commit-samples-output",
+            samples_output.to_str().ok_or("non-UTF-8 samples output")?,
+            "--utxo-commit-measurement-output",
+            measurement_output
+                .to_str()
+                .ok_or("non-UTF-8 measurement output")?,
+            "--force",
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert_success(&output);
+    assert!(samples_output.is_file());
+    assert!(measurement_output.is_file());
+    let measurement: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&measurement_output)?)?;
+    assert_eq!(
+        measurement
+            .get("schema")
+            .and_then(serde_json::Value::as_str),
+        Some("g14-utxo-commit-measurement-v1")
+    );
+    assert!(
+        measurement
+            .get("sample_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            > 0
+    );
+    Ok(())
+}
+
+#[test]
+fn bitcoin_rs_daemon_mainnet_ibd_wrapper_force_discards_stale_utxo_samples()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let datadir = temp.path().join("bitcoin-rs-datadir");
+    fs::create_dir(&datadir)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let rpc_port = listener.local_addr()?.port();
+    drop(listener);
+    let stop_file = temp.path().join("fake-bitcoin-rs-stale-samples.stop");
+    let bitcoin_rs = fake_bitcoin_rs_daemon_command(
+        temp.path(),
+        "bitcoin-rs-stale-samples",
+        rpc_port,
+        "g14-user",
+        "g14-pass",
+        FakeBitcoinRsRpcMode::Mainnet,
+        &stop_file,
+    )?;
+    let command_output = temp.path().join("bitcoin-rs-stale-samples.log");
+    let samples_output = temp.path().join("utxo-samples-stale.json");
+    let measurement_output = temp.path().join("utxo-measurement-stale.json");
+    let stale_samples = utxo_commit_samples_json(temp.path(), 0, 10, 999.0)?;
+    fs::copy(&stale_samples, &samples_output)?;
+    let stale_sha256 = sha256_file(&samples_output)?;
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}/");
+
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_daemon_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-rs-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoin-rs-command",
+            bitcoin_rs.to_str().ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--rpc-url",
+            &rpc_url,
+            "--rpc-user",
+            "g14-user",
+            "--rpc-password",
+            "g14-pass",
+            "--command-output",
+            command_output.to_str().ok_or("non-UTF-8 command output")?,
+            "--utxo-commit-samples-output",
+            samples_output.to_str().ok_or("non-UTF-8 samples output")?,
+            "--utxo-commit-measurement-output",
+            measurement_output
+                .to_str()
+                .ok_or("non-UTF-8 measurement output")?,
+            "--force",
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert_success(&output);
+    assert!(samples_output.is_file());
+    assert!(measurement_output.is_file());
+    let measurement: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&measurement_output)?)?;
+    assert_eq!(
+        measurement
+            .get("utxo_commit_p95_ms")
+            .and_then(serde_json::Value::as_f64),
+        Some(12.5)
+    );
+    assert_ne!(
+        measurement
+            .get("sample_source_sha256")
+            .and_then(serde_json::Value::as_str),
+        Some(stale_sha256.as_str())
+    );
+    assert_eq!(
+        measurement
+            .get("sample_source_sha256")
+            .and_then(serde_json::Value::as_str),
+        Some(sha256_file(&samples_output)?.as_str())
+    );
+    Ok(())
+}
+
+#[test]
+fn bitcoin_rs_daemon_mainnet_ibd_wrapper_fails_without_qualifying_utxo_samples()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let datadir = temp.path().join("bitcoin-rs-datadir");
+    fs::create_dir(&datadir)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let rpc_port = listener.local_addr()?.port();
+    drop(listener);
+    let stop_file = temp.path().join("fake-bitcoin-rs-sub-threshold.stop");
+    let bitcoin_rs = fake_bitcoin_rs_daemon_command(
+        temp.path(),
+        "bitcoin-rs-sub-threshold",
+        rpc_port,
+        "g14-user",
+        "g14-pass",
+        FakeBitcoinRsRpcMode::Mainnet,
+        &stop_file,
+    )?;
+    let command_output = temp.path().join("bitcoin-rs-sub-threshold.log");
+    let samples_output = temp.path().join("utxo-samples-sub-threshold.json");
+    let measurement_output = temp.path().join("utxo-measurement-sub-threshold.json");
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}/");
+
+    let output = Command::new("bash")
+        .env("G14_FAKE_SUB_THRESHOLD_UTXO_SAMPLES", "1")
+        .arg(bitcoin_rs_daemon_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-rs-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoin-rs-command",
+            bitcoin_rs.to_str().ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--rpc-url",
+            &rpc_url,
+            "--rpc-user",
+            "g14-user",
+            "--rpc-password",
+            "g14-pass",
+            "--command-output",
+            command_output.to_str().ok_or("non-UTF-8 command output")?,
+            "--utxo-commit-samples-output",
+            samples_output.to_str().ok_or("non-UTF-8 samples output")?,
+            "--utxo-commit-measurement-output",
+            measurement_output
+                .to_str()
+                .ok_or("non-UTF-8 measurement output")?,
+            "--force",
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "5",
+        ])
+        .output()?;
+
+    assert!(!output.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(combined.contains("no qualifying UTXO commit samples"));
+    Ok(())
+}
+
+#[test]
 fn bitcoin_rs_daemon_mainnet_ibd_wrapper_removes_auto_command_output_on_success()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -5376,33 +5641,172 @@ fn offline_evidence_json_with_elapsed(
     Ok(path)
 }
 
+#[test]
+fn bitcoin_rs_daemon_mainnet_ibd_wrapper_uses_ibd_timeout_after_rpc_startup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let datadir = temp.path().join("bitcoin-rs-datadir");
+    fs::create_dir(&datadir)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let rpc_port = listener.local_addr()?.port();
+    drop(listener);
+    let stop_file = temp.path().join("fake-bitcoin-rs.stop");
+    let bitcoin_rs = fake_bitcoin_rs_daemon_command(
+        temp.path(),
+        "bitcoin-rs-slow-ibd",
+        rpc_port,
+        "g14-user",
+        "g14-pass",
+        FakeBitcoinRsRpcMode::SlowIbdProgress,
+        &stop_file,
+    )?;
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}/");
+
+    let started = Instant::now();
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_daemon_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-rs-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoin-rs-command",
+            bitcoin_rs.to_str().ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--rpc-url",
+            &rpc_url,
+            "--rpc-user",
+            "g14-user",
+            "--rpc-password",
+            "g14-pass",
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "0.2",
+            "--ibd-timeout-seconds",
+            "0.6",
+        ])
+        .output()?;
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reach stop height"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("RPC startup"),
+        "must not fail on startup timeout once RPC is live: {stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "expected IBD timeout to govern wait time, elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "wrapper should not wait for default IBD timeout, elapsed={elapsed:?}"
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum FakeBitcoinRsRpcMode {
     Mainnet,
     RpcStartupTimeout,
+    SlowIbdProgress,
 }
 
-fn fake_bitcoin_rs_daemon_command(
-    dir: &Path,
-    name: &str,
+const FAKE_BITCOIN_RS_DAEMON_SCRIPT_TAIL: &str = r#"
+
+
+def g14_arg(prefix: str) -> str | None:
+    for arg in sys.argv[1:]:
+        if arg.startswith(prefix):
+            return arg[len(prefix):]
+    return None
+
+
+def write_g14_utxo_samples(path: pathlib.Path) -> None:
+    if path.exists():
+        return
+    start = int(g14_arg("--g14-utxo-commit-ibd-start-height=") or "0")
+    stop = int(g14_arg("--g14-utxo-commit-ibd-stop-height=") or "10")
+    samples = []
+    block_size = 1 if os.environ.get("G14_FAKE_SUB_THRESHOLD_UTXO_SAMPLES") == "1" else 4194304
+    for height in range(start, stop + 1):
+        samples.append(
+            {
+                "height": height,
+                "block_hash": f"{height:064x}",
+                "block_size_bytes": block_size,
+                "utxo_commit_ms": 12.5,
+            }
+        )
+    path.write_text(json.dumps(samples), encoding="utf-8")
+
+
+def maybe_write_g14_utxo_samples(blocks: int) -> None:
+    global G14_SAMPLES_WRITTEN
+    if G14_SAMPLES_WRITTEN:
+        return
+    samples_arg = g14_arg("--g14-utxo-commit-samples=")
+    if not samples_arg:
+        return
+    stop = int(g14_arg("--g14-utxo-commit-ibd-stop-height=") or str(TARGET_BLOCKS))
+    if blocks < stop:
+        return
+    write_g14_utxo_samples(pathlib.Path(samples_arg))
+    G14_SAMPLES_WRITTEN = True
+
+
+def shutdown_handler(signum, frame):
+    maybe_write_g14_utxo_samples(TARGET_BLOCKS)
+    STOP_FILE.write_text("stop\n", encoding="utf-8")
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, shutdown_handler)
+signal.signal(signal.SIGINT, shutdown_handler)
+
+if RPC_STARTUP_TIMEOUT:
+    while True:
+        time.sleep(1)
+
+server = HTTPServer(("127.0.0.1", PORT), RpcHandler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+while True:
+    time.sleep(1)
+"#;
+
+fn fake_bitcoin_rs_daemon_script_head(
     rpc_port: u16,
     rpc_user: &str,
     rpc_password: &str,
-    mode: FakeBitcoinRsRpcMode,
-    stop_file: &Path,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let path = dir.join(name);
-    let state_file = dir.join(format!("{name}.chaininfo-calls"));
+    rpc_startup_timeout: bool,
+    slow_ibd_progress: bool,
+    stop_file: &str,
+    state_file: &str,
+) -> String {
     let chain = "main";
     let initial_blocks = 0;
     let target_blocks = 10;
-    let rpc_startup_timeout = matches!(mode, FakeBitcoinRsRpcMode::RpcStartupTimeout);
-    fs::write(
-        &path,
-        format!(
-            r#"#!/usr/bin/env python3
+    format!(
+        r#"#!/usr/bin/env python3
 import base64
 import json
+import os
 import pathlib
 import signal
 import sys
@@ -5417,8 +5821,10 @@ CHAIN = {chain:?}
 INITIAL_BLOCKS = {initial_blocks}
 TARGET_BLOCKS = {target_blocks}
 RPC_STARTUP_TIMEOUT = {rpc_startup_timeout}
+SLOW_IBD_PROGRESS = {slow_ibd_progress}
 STOP_FILE = pathlib.Path({stop_file:?})
 STATE_FILE = pathlib.Path({state_file:?})
+G14_SAMPLES_WRITTEN = False
 
 
 def authorized(header: str) -> bool:
@@ -5449,7 +5855,11 @@ class RpcHandler(BaseHTTPRequestHandler):
         if method == "getblockchaininfo":
             call_count = int(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else 0
             STATE_FILE.write_text(str(call_count + 1), encoding="utf-8")
-            blocks = INITIAL_BLOCKS if call_count <= 0 else TARGET_BLOCKS
+            if SLOW_IBD_PROGRESS:
+                blocks = INITIAL_BLOCKS
+            else:
+                blocks = INITIAL_BLOCKS if call_count <= 0 else TARGET_BLOCKS
+            maybe_write_g14_utxo_samples(blocks)
             result = {{"chain": CHAIN, "blocks": blocks, "headers": TARGET_BLOCKS}}
         elif method == "getblockhash":
             height = int(params[0])
@@ -5463,29 +5873,57 @@ class RpcHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(payload.encode("utf-8"))
-
-
-def shutdown_handler(signum, frame):
-    STOP_FILE.write_text("stop\n", encoding="utf-8")
-    raise SystemExit(0)
-
-
-signal.signal(signal.SIGTERM, shutdown_handler)
-signal.signal(signal.SIGINT, shutdown_handler)
-
-if RPC_STARTUP_TIMEOUT:
-    while True:
-        time.sleep(1)
-
-server = HTTPServer(("127.0.0.1", PORT), RpcHandler)
-thread = threading.Thread(target=server.serve_forever, daemon=True)
-thread.start()
-while True:
-    time.sleep(1)
 "#,
-            stop_file = stop_file.display().to_string(),
-            state_file = state_file.display().to_string(),
-            rpc_startup_timeout = if rpc_startup_timeout { "True" } else { "False" },
+        rpc_startup_timeout = if rpc_startup_timeout { "True" } else { "False" },
+        slow_ibd_progress = if slow_ibd_progress { "True" } else { "False" },
+    )
+}
+
+fn fake_bitcoin_rs_daemon_script(
+    rpc_port: u16,
+    rpc_user: &str,
+    rpc_password: &str,
+    rpc_startup_timeout: bool,
+    slow_ibd_progress: bool,
+    stop_file: &str,
+    state_file: &str,
+) -> String {
+    let mut script = fake_bitcoin_rs_daemon_script_head(
+        rpc_port,
+        rpc_user,
+        rpc_password,
+        rpc_startup_timeout,
+        slow_ibd_progress,
+        stop_file,
+        state_file,
+    );
+    script.push_str(FAKE_BITCOIN_RS_DAEMON_SCRIPT_TAIL);
+    script
+}
+
+fn fake_bitcoin_rs_daemon_command(
+    dir: &Path,
+    name: &str,
+    rpc_port: u16,
+    rpc_user: &str,
+    rpc_password: &str,
+    mode: FakeBitcoinRsRpcMode,
+    stop_file: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = dir.join(name);
+    let state_file = dir.join(format!("{name}.chaininfo-calls"));
+    let rpc_startup_timeout = matches!(mode, FakeBitcoinRsRpcMode::RpcStartupTimeout);
+    let slow_ibd_progress = matches!(mode, FakeBitcoinRsRpcMode::SlowIbdProgress);
+    fs::write(
+        &path,
+        fake_bitcoin_rs_daemon_script(
+            rpc_port,
+            rpc_user,
+            rpc_password,
+            rpc_startup_timeout,
+            slow_ibd_progress,
+            &stop_file.display().to_string(),
+            &state_file.display().to_string(),
         ),
     )?;
     let mut permissions = fs::metadata(&path)?.permissions();
