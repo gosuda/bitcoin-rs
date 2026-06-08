@@ -556,6 +556,8 @@ fn apply_block_inner(
         coinbase_maturity_us = coinbase_maturity_dur.as_micros(),
         bip68_us = bip68_dur.as_micros(),
         utxo_commit_us = utxo_commit_dur.as_micros(),
+        block_body_persist_us = block_body_persist_dur.as_micros(),
+        block_record_us = block_record_dur.as_micros(),
         block_tree_insert_us = block_tree_insert_dur.as_micros(),
         mempool_evict_us = mempool_evict_dur.as_micros(),
         tx_index_ingest_us = tx_index_ingest_dur.as_micros(),
