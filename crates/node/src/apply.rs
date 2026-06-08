@@ -1883,6 +1883,39 @@ mod consensus_rule_tests {
     }
 
     #[test]
+    fn verify_block_transactions_rejects_excess_output_value_under_assume_valid_height()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Skipping script checks must NOT skip the input/output value-balance check:
+        // a transaction whose outputs exceed its inputs is rejected even within
+        // assume_valid_height.
+        let (block, plan, utxo) = excess_value_spend_block()?;
+        let handles = apply_handles_with_assume_valid(utxo, 2);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ) {
+            Ok(()) => panic!("outputs exceeding inputs must fail even under assume_valid_height"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::InputsLessThanOutputs {
+                    input_value: 1_000,
+                    output_value: 2_000,
+                }
+            )
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn verify_block_transactions_still_checks_coinbase_script_sig_under_assume_valid_height() {
         let mut coinbase = coinbase_transaction(0x63);
         coinbase.input[0].script_sig = ScriptBuf::from_bytes(vec![0x63]);
@@ -4019,6 +4052,36 @@ mod consensus_rule_tests {
             }],
             output: vec![TxOut {
                 value: Amount::from_sat(1),
+                script_pubkey: op_true_script(),
+            }],
+        };
+        let block = block_with_transaction(spend);
+        let plan = tx_plan(&block);
+        Ok((block, plan, utxo))
+    }
+
+    fn excess_value_spend_block()
+    -> Result<(bitcoin::Block, BlockTxPlan, Arc<UtxoSet>), Box<dyn std::error::Error>> {
+        // `utxo_with_output` funds the prevout with 1_000 sats (its second arg `1` is
+        // the coinbase height, not a value); the spend creates 2_000 sats of outputs,
+        // so outputs exceed inputs — a NON-script consensus violation that must be
+        // caught even when script checks are skipped.
+        let base_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x66; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(base_prevout, 1)?;
+        let spend = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: base_prevout,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(2_000),
                 script_pubkey: op_true_script(),
             }],
         };
