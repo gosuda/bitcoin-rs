@@ -69,3 +69,10 @@ These deviate from std defaults. Don't reach for the std equivalents:
 
 Conventional commits: `type(scope): message` (e.g. `fix(node):`, `feat(consensus):`). One logical change
 per commit.
+
+## Documented solutions
+
+Past problems (bugs, best practices, architecture patterns) are documented under `docs/solutions/`,
+organized by category with YAML frontmatter (`module`, `tags`, `problem_type`); search it before
+debugging a recurring issue or designing in an already-touched area. Project-specific vocabulary lives
+in `CONCEPTS.md` at the repo root.
