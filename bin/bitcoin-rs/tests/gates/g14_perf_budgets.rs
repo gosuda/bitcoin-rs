@@ -293,21 +293,20 @@ impl G14Evidence {
         let benchmark_host_id = required_env("G14_BENCHMARK_HOST_ID");
         let bitcoin_core_version = required_env("G14_BITCOIN_CORE_VERSION");
         let bitcoin_core_commit = required_hex("G14_BITCOIN_CORE_COMMIT", 40);
-        let bitcoin_rs_command = required_env("G14_BITCOIN_RS_COMMAND");
-        let bitcoin_rs_command_sha256 = required_hex("G14_BITCOIN_RS_COMMAND_SHA256", 64);
-        verify_bitcoin_rs_command_sha_binding(&bitcoin_rs_command, &bitcoin_rs_command_sha256);
+        let bitcoin_rs_command_sha256 =
+            bitcoin_rs_command_custody_from_env(start_height, stop_height, &start_hash, &stop_hash);
         let bitcoin_core_command_sha256 = required_hex("G14_BITCOIN_CORE_COMMAND_SHA256", 64);
         let bitcoin_rs_config_sha256 = required_hex("G14_BITCOIN_RS_CONFIG_SHA256", 64);
         let bitcoin_core_config_sha256 = required_hex("G14_BITCOIN_CORE_CONFIG_SHA256", 64);
-        let proof_env = IbdCompletionProofEnv::new(
-            &benchmark_run_id,
-            &benchmark_host_id,
-            start_height,
-            &start_hash,
-            stop_height,
-            &stop_hash,
-        );
-        let criterion_raw_output = proof_env.raw_output_from_env(
+        let criterion_raw_output = criterion_raw_output_custody_from_env(
+            IbdCompletionProofEnv::new(
+                &benchmark_run_id,
+                &benchmark_host_id,
+                start_height,
+                &start_hash,
+                stop_height,
+                &stop_hash,
+            ),
             IbdCompletionProofEntry::new(
                 &bitcoin_rs_criterion_benchmark_id,
                 &bitcoin_rs_command_sha256,
@@ -628,6 +627,119 @@ fn validate_bitcoin_rs_ibd_command(command: &str, name: &str) {
         "{name} must start with the bitcoin-rs daemon IBD adapter {BITCOIN_RS_DAEMON_ADAPTER_BASENAME:?}, got {:?}",
         basenames[0]
     );
+}
+
+fn parse_cli_flag_values(tokens: &[String], flag: &str, name: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let equals_prefix = format!("{flag}=");
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if token == flag {
+            let next_index = index + 1;
+            assert!(
+                next_index < tokens.len(),
+                "{name} has {flag} without a value"
+            );
+            values.push(tokens[next_index].clone());
+            index = next_index + 1;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix(&equals_prefix) {
+            values.push(value.to_owned());
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    values
+}
+
+fn require_single_cli_flag_value(tokens: &[String], flag: &str, name: &str) -> String {
+    let values = parse_cli_flag_values(tokens, flag, name);
+    assert!(!values.is_empty(), "{name} must include {flag}");
+    assert!(values.len() <= 1, "{name} must not repeat {flag}");
+    values[0].clone()
+}
+
+fn require_cli_height_flag(tokens: &[String], flag: &str, name: &str) -> u64 {
+    let raw = require_single_cli_flag_value(tokens, flag, name);
+    match raw.parse::<u64>() {
+        Ok(height) => height,
+        Err(error) => panic!("{name} {flag} must be a non-negative integer: {error}"),
+    }
+}
+
+fn require_cli_hash_flag(tokens: &[String], flag: &str, name: &str) -> String {
+    let block_hash = require_single_cli_flag_value(tokens, flag, name);
+    assert!(
+        is_lower_hex_len(&block_hash, 64),
+        "{name} {flag} must be 64 lowercase hex characters"
+    );
+    block_hash
+}
+
+fn validate_bitcoin_rs_ibd_window_binding(
+    command: &str,
+    name: &str,
+    start_height: u64,
+    stop_height: u64,
+    start_hash: &str,
+    stop_hash: &str,
+) {
+    validate_bitcoin_rs_ibd_command(command, name);
+    let tokens = match shell_split(command.trim()) {
+        Ok(tokens) => tokens,
+        Err(message) => panic!("{name} {message}"),
+    };
+    let command_start_height = require_cli_height_flag(&tokens, "--ibd-start-height", name);
+    let command_stop_height = require_cli_height_flag(&tokens, "--ibd-stop-height", name);
+    let command_start_hash = require_cli_hash_flag(&tokens, "--ibd-start-hash", name);
+    let command_stop_hash = require_cli_hash_flag(&tokens, "--ibd-stop-hash", name);
+    assert_eq!(
+        command_start_height, start_height,
+        "{name} --ibd-start-height must match outer G14 window ({command_start_height} != {start_height})"
+    );
+    assert_eq!(
+        command_stop_height, stop_height,
+        "{name} --ibd-stop-height must match outer G14 window ({command_stop_height} != {stop_height})"
+    );
+    assert_eq!(
+        command_start_hash, start_hash,
+        "{name} --ibd-start-hash must match outer G14 window"
+    );
+    assert_eq!(
+        command_stop_hash, stop_hash,
+        "{name} --ibd-stop-hash must match outer G14 window"
+    );
+}
+
+fn bitcoin_rs_command_custody_from_env(
+    start_height: u64,
+    stop_height: u64,
+    start_hash: &str,
+    stop_hash: &str,
+) -> String {
+    let bitcoin_rs_command = required_env("G14_BITCOIN_RS_COMMAND");
+    let bitcoin_rs_command_sha256 = required_hex("G14_BITCOIN_RS_COMMAND_SHA256", 64);
+    verify_bitcoin_rs_command_sha_binding(&bitcoin_rs_command, &bitcoin_rs_command_sha256);
+    validate_bitcoin_rs_ibd_window_binding(
+        &bitcoin_rs_command,
+        "G14_BITCOIN_RS_COMMAND",
+        start_height,
+        stop_height,
+        start_hash,
+        stop_hash,
+    );
+    bitcoin_rs_command_sha256
+}
+
+fn criterion_raw_output_custody_from_env(
+    proof_env: IbdCompletionProofEnv<'_>,
+    bitcoin_rs: IbdCompletionProofEntry<'_>,
+    bitcoin_core: IbdCompletionProofEntry<'_>,
+) -> CriterionRawOutputCustody {
+    proof_env.raw_output_from_env(bitcoin_rs, bitcoin_core)
 }
 
 fn sha256_text(value: &str) -> String {
@@ -2408,6 +2520,50 @@ mod tests {
     fn final_gate_accepts_daemon_argv0_bitcoin_rs_command_sha_binding() {
         let command = "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh";
         verify_bitcoin_rs_command_sha_binding(command, &sha256_text(command));
+    }
+
+    #[test]
+    fn final_gate_rejects_daemon_adapter_window_mismatch() {
+        let command = format!(
+            "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 1 --ibd-stop-height 10 --ibd-start-hash {TEST_START_HASH} --ibd-stop-hash {TEST_TIP_HASH}"
+        );
+        verify_bitcoin_rs_command_sha_binding(&command, &sha256_text(&command));
+        let result = panic::catch_unwind(|| {
+            validate_bitcoin_rs_ibd_window_binding(
+                &command,
+                "G14_BITCOIN_RS_COMMAND",
+                0,
+                10,
+                TEST_START_HASH,
+                TEST_TIP_HASH,
+            );
+        });
+        assert!(
+            result.is_err(),
+            "daemon adapter inner window mismatch must be rejected"
+        );
+    }
+
+    #[test]
+    fn final_gate_rejects_daemon_adapter_hash_whitespace_mismatch() {
+        let command = format!(
+            "/tmp/g14-fixture/run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height 0 --ibd-stop-height 10 --ibd-start-hash '{TEST_START_HASH} ' --ibd-stop-hash {TEST_TIP_HASH}"
+        );
+        verify_bitcoin_rs_command_sha_binding(&command, &sha256_text(&command));
+        let result = panic::catch_unwind(|| {
+            validate_bitcoin_rs_ibd_window_binding(
+                &command,
+                "G14_BITCOIN_RS_COMMAND",
+                0,
+                10,
+                TEST_START_HASH,
+                TEST_TIP_HASH,
+            );
+        });
+        assert!(
+            result.is_err(),
+            "daemon adapter hash token must match without trimming whitespace"
+        );
     }
 
     fn test_completion_context(benchmark_id: &str) -> IbdCompletionProofContext<'_> {
