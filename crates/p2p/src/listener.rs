@@ -325,8 +325,14 @@ fn run_outbound_connection(
     let info = crate::PeerInfo::outbound_from_version(addr, remote_version, conn_time);
     peer_registry.write().push(info);
 
+    let writer_stream = peer
+        .stream
+        .try_clone()
+        .map_err(crate::wire::PeerError::Io)?;
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
-    peer_outbound.write().insert(addr, outbound_tx);
+    let writer = spawn_connection_writer(writer_stream, magic, outbound_rx, addr)
+        .map_err(crate::wire::PeerError::Io)?;
+    peer_outbound.write().insert(addr, outbound_tx.clone());
 
     tracing::info!(
         peer_addr = %addr,
@@ -340,7 +346,7 @@ fn run_outbound_connection(
         run_message_loop(
             &mut peer,
             addr,
-            &outbound_rx,
+            &outbound_tx,
             inbound_sync_sinks,
             chain_query.as_deref(),
         )
@@ -348,6 +354,9 @@ fn run_outbound_connection(
 
     peer_outbound.write().remove(&addr);
     peer_registry.write().retain(|p| p.addr != addr);
+    let _ = peer.stream.shutdown(std::net::Shutdown::Both);
+    drop(outbound_tx);
+    let _ = writer.join();
     if let Err(error) = &loop_result {
         tracing::warn!(peer_addr = %addr, %error, "p2p outbound peer disconnected with error");
     } else {
@@ -452,8 +461,14 @@ fn run_handshake(
     let info = crate::PeerInfo::inbound_from_version(peer_addr, remote_version, conn_time);
     registry.write().push(info);
 
+    let writer_stream = peer
+        .stream
+        .try_clone()
+        .map_err(crate::wire::PeerError::Io)?;
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
-    peer_outbound.write().insert(peer_addr, outbound_tx);
+    let writer = spawn_connection_writer(writer_stream, magic, outbound_rx, peer_addr)
+        .map_err(crate::wire::PeerError::Io)?;
+    peer_outbound.write().insert(peer_addr, outbound_tx.clone());
 
     tracing::info!(
         peer_addr = %peer_addr,
@@ -467,7 +482,7 @@ fn run_handshake(
         run_message_loop(
             &mut peer,
             peer_addr,
-            &outbound_rx,
+            &outbound_tx,
             inbound_sync_sinks,
             chain_query.as_deref(),
         )
@@ -475,6 +490,9 @@ fn run_handshake(
 
     peer_outbound.write().remove(&peer_addr);
     registry.write().retain(|p| p.addr != peer_addr);
+    let _ = peer.stream.shutdown(std::net::Shutdown::Both);
+    drop(outbound_tx);
+    let _ = writer.join();
     if let Err(error) = &loop_result {
         tracing::warn!(peer_addr = %peer_addr, %error, "p2p peer disconnected with error");
     } else {
@@ -486,7 +504,7 @@ fn run_handshake(
 fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
-    outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
+    outbound_tx: &Sender<crate::Message>,
     inbound_sync_sinks: &InboundSyncSinks,
     chain_query: Option<&dyn crate::dispatch::ChainQuery>,
 ) -> Result<(), crate::wire::PeerError> {
@@ -500,10 +518,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     loop {
         if peer.state == PeerState::Disconnecting {
             return Ok(());
-        }
-
-        while let Ok(message) = outbound_rx.try_recv() {
-            peer.send(&message)?;
         }
 
         if last_inbound.elapsed() >= IDLE_DISCONNECT {
@@ -531,7 +545,11 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     _ => {}
                 }
                 for response in responses {
-                    peer.send(&response)?;
+                    if outbound_tx.send(response).is_err() {
+                        return Err(crate::wire::PeerError::Protocol(
+                            "outbound writer disconnected",
+                        ));
+                    }
                 }
             }
             Err(crate::wire::PeerError::Io(error))
@@ -545,6 +563,28 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Spawns a per-connection writer thread that drains queued outbound messages
+/// and writes them to the peer. Decoupling writes from the blocking inbound
+/// read ensures a momentarily silent peer can never delay outbound sends (the
+/// next `getdata` during IBD). Exits when every sender drops or a write fails.
+fn spawn_connection_writer(
+    mut stream: TcpStream,
+    magic: Magic,
+    outbound_rx: crossbeam_channel::Receiver<crate::Message>,
+    peer_addr: SocketAddr,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
+        .spawn(move || {
+            while let Ok(message) = outbound_rx.recv() {
+                if let Err(error) = crate::wire::write_message(&mut stream, magic, &message) {
+                    tracing::debug!(peer_addr = %peer_addr, %error, "p2p writer thread exiting");
+                    break;
+                }
+            }
+        })
 }
 
 fn wake_sync(sync_wake_tx: Option<&Sender<()>>) {
