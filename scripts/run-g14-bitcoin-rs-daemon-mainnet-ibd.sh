@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   printf '%s\n' \
-    'usage: run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height <height> --ibd-stop-height <height> --ibd-start-hash <hash> --ibd-stop-hash <hash> --datadir <path> --bitcoin-rs-config <path> --rpc-url <url> --rpc-user <user> --rpc-password <password> [--bitcoin-rs-command <command>] [--command-output <path>] [--poll-interval-seconds <seconds>] [--startup-timeout-seconds <seconds>] [--ibd-timeout-seconds <seconds>] [--utxo-commit-samples-output <path>] [--utxo-commit-measurement-output <path>] [--force] [-- <bitcoin-rs-arg>...]' \
+    'usage: run-g14-bitcoin-rs-daemon-mainnet-ibd.sh --ibd-start-height <height> --ibd-stop-height <height> --ibd-start-hash <hash> --ibd-stop-hash <hash> --datadir <path> --bitcoin-rs-config <path> --rpc-url <url> --rpc-user <user> --rpc-password <password> [--bitcoin-rs-command <command>] [--command-output <path>] [--poll-interval-seconds <seconds>] [--startup-timeout-seconds <seconds>] [--ibd-timeout-seconds <seconds> (default: 86400)] [--utxo-commit-samples-output <path>] [--utxo-commit-measurement-output <path>] [--force] [-- <bitcoin-rs-arg>...]' \
     '' \
     'Runs a bitcoin-rs mainnet daemon, polls JSON-RPC until applied blocks reach the requested window, validates start/stop block hashes, then emits canonical Criterion-style bitcoin-rs/mainnet-ibd timing for G14 evidence capture.'
 }
@@ -258,7 +258,12 @@ def rpc_call(url: str, user: str, password: str, method: str, params: list) -> o
 
 
 def try_rpc_call(
-    url: str, user: str, password: str, method: str, params: list
+    url: str,
+    user: str,
+    password: str,
+    method: str,
+    params: list,
+    timeout_seconds: float,
 ) -> object | None:
     request = urllib.request.Request(
         url,
@@ -267,7 +272,7 @@ def try_rpc_call(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30.0) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
         return None
@@ -275,6 +280,14 @@ def try_rpc_call(
         return parse_rpc_result(raw, method)
     except SystemExit:
         return None
+
+
+def remaining_timeout(deadline: float, failure_message: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.0:
+        die(failure_message)
+    return max(0.001, min(30.0, remaining))
+
 
 
 def parse_chain_info(result: object) -> dict:
@@ -401,6 +414,7 @@ if args.help:
         "--datadir <path> --bitcoin-rs-config <path> --rpc-url <url> --rpc-user <user> "
         "--rpc-password <password> [--bitcoin-rs-command <command>] "
         "[--command-output <path>] [--poll-interval-seconds <seconds>] "
+        "[--startup-timeout-seconds <seconds>] [--ibd-timeout-seconds <seconds> (default: 86400)] "
         "[--utxo-commit-samples-output <path>] [--utxo-commit-measurement-output <path>] [--force] "
         "[-- <bitcoin-rs-arg>...]"
     )
@@ -502,10 +516,32 @@ try:
                 "bitcoin-rs exited before reaching stop height with status "
                 f"{process.returncode}"
             )
-        info_result = try_rpc_call(rpc_url, rpc_user, rpc_password, "getblockchaininfo", [])
+        if observed_start:
+            assert ibd_deadline is not None
+            timeout_seconds = remaining_timeout(
+                ibd_deadline,
+                "timed out waiting for measured bitcoin-rs node to reach stop height",
+            )
+        else:
+            timeout_seconds = remaining_timeout(
+                startup_deadline,
+                "timed out waiting for measured bitcoin-rs RPC startup",
+            )
+        info_result = try_rpc_call(
+            rpc_url, rpc_user, rpc_password, "getblockchaininfo", [], timeout_seconds
+        )
         if info_result is None:
-            if time.monotonic() >= startup_deadline:
-                die("timed out waiting for measured bitcoin-rs RPC startup")
+            if observed_start:
+                assert ibd_deadline is not None
+                remaining_timeout(
+                    ibd_deadline,
+                    "timed out waiting for measured bitcoin-rs node to reach stop height",
+                )
+            else:
+                remaining_timeout(
+                    startup_deadline,
+                    "timed out waiting for measured bitcoin-rs RPC startup",
+                )
             time.sleep(poll_interval)
             continue
         info = parse_chain_info(info_result)

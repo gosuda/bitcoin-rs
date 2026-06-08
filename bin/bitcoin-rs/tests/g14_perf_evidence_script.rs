@@ -2477,6 +2477,21 @@ fn bitcoin_rs_daemon_mainnet_ibd_wrapper_rejects_wrong_stop_hash()
 }
 
 #[test]
+fn bitcoin_rs_daemon_mainnet_ibd_wrapper_help_shows_ibd_timeout_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_daemon_mainnet_ibd_script_path())
+        .arg("--help")
+        .output()?;
+
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("--ibd-timeout-seconds"), "stdout: {stdout}");
+    assert!(stdout.contains("86400"), "stdout: {stdout}");
+    Ok(())
+}
+
+#[test]
 fn bitcoin_rs_daemon_mainnet_ibd_wrapper_rejects_rpc_startup_timeout()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -6063,11 +6078,171 @@ fn bitcoin_rs_daemon_mainnet_ibd_wrapper_uses_ibd_timeout_after_rpc_startup()
     Ok(())
 }
 
+#[test]
+fn bitcoin_rs_daemon_mainnet_ibd_wrapper_uses_ibd_timeout_after_rpc_drop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let datadir = temp.path().join("bitcoin-rs-datadir");
+    fs::create_dir(&datadir)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let rpc_port = listener.local_addr()?.port();
+    drop(listener);
+    let stop_file = temp.path().join("fake-bitcoin-rs.stop");
+    let bitcoin_rs = fake_bitcoin_rs_daemon_command(
+        temp.path(),
+        "bitcoin-rs-rpc-drop",
+        rpc_port,
+        "g14-user",
+        "g14-pass",
+        FakeBitcoinRsRpcMode::PostStartRpcDrop,
+        &stop_file,
+    )?;
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}/");
+
+    let started = Instant::now();
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_daemon_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-rs-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoin-rs-command",
+            bitcoin_rs.to_str().ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--rpc-url",
+            &rpc_url,
+            "--rpc-user",
+            "g14-user",
+            "--rpc-password",
+            "g14-pass",
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "0.2",
+            "--ibd-timeout-seconds",
+            "0.6",
+        ])
+        .output()?;
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reach stop height"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("RPC startup"),
+        "post-start RPC drop must not be classified as startup failure: {stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "expected IBD timeout to govern post-start RPC drop, elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "wrapper should not wait for default IBD timeout, elapsed={elapsed:?}"
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_rs_daemon_mainnet_ibd_wrapper_uses_ibd_timeout_after_rpc_hang()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let config = write_text(
+        temp.path(),
+        "bitcoin-rs.toml",
+        "storage_backend=fjall\nindexes=all\n",
+    )?;
+    let datadir = temp.path().join("bitcoin-rs-datadir");
+    fs::create_dir(&datadir)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let rpc_port = listener.local_addr()?.port();
+    drop(listener);
+    let stop_file = temp.path().join("fake-bitcoin-rs.stop");
+    let bitcoin_rs = fake_bitcoin_rs_daemon_command(
+        temp.path(),
+        "bitcoin-rs-rpc-hang",
+        rpc_port,
+        "g14-user",
+        "g14-pass",
+        FakeBitcoinRsRpcMode::PostStartRpcHang,
+        &stop_file,
+    )?;
+    let rpc_url = format!("http://127.0.0.1:{rpc_port}/");
+
+    let started = Instant::now();
+    let output = Command::new("bash")
+        .arg(bitcoin_rs_daemon_mainnet_ibd_script_path())
+        .args([
+            "--ibd-start-height",
+            "0",
+            "--ibd-stop-height",
+            "10",
+            "--ibd-start-hash",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--ibd-stop-hash",
+            "000000000000000000000000000000000000000000000000000000000000000a",
+            "--datadir",
+            datadir.to_str().ok_or("non-UTF-8 datadir path")?,
+            "--bitcoin-rs-config",
+            config.to_str().ok_or("non-UTF-8 config path")?,
+            "--bitcoin-rs-command",
+            bitcoin_rs.to_str().ok_or("non-UTF-8 bitcoin-rs command")?,
+            "--rpc-url",
+            &rpc_url,
+            "--rpc-user",
+            "g14-user",
+            "--rpc-password",
+            "g14-pass",
+            "--poll-interval-seconds",
+            "0.01",
+            "--startup-timeout-seconds",
+            "0.2",
+            "--ibd-timeout-seconds",
+            "0.6",
+        ])
+        .output()?;
+    let elapsed = started.elapsed();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("reach stop height"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("RPC startup"),
+        "post-start RPC hang must not be classified as startup failure: {stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "expected IBD timeout to govern post-start RPC hang, elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "wrapper must not wait for urllib's 30s timeout, elapsed={elapsed:?}"
+    );
+    assert!(stop_file.exists());
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum FakeBitcoinRsRpcMode {
     Mainnet,
     RpcStartupTimeout,
     SlowIbdProgress,
+    PostStartRpcDrop,
+    PostStartRpcHang,
 }
 
 const FAKE_BITCOIN_RS_DAEMON_SCRIPT_TAIL: &str = r#"
@@ -6137,14 +6312,17 @@ fn fake_bitcoin_rs_daemon_script_head(
     rpc_port: u16,
     rpc_user: &str,
     rpc_password: &str,
-    rpc_startup_timeout: bool,
-    slow_ibd_progress: bool,
+    mode: FakeBitcoinRsRpcMode,
     stop_file: &str,
     state_file: &str,
 ) -> String {
     let chain = "main";
     let initial_blocks = 0;
     let target_blocks = 10;
+    let rpc_startup_timeout = matches!(mode, FakeBitcoinRsRpcMode::RpcStartupTimeout);
+    let slow_ibd_progress = matches!(mode, FakeBitcoinRsRpcMode::SlowIbdProgress);
+    let post_start_rpc_drop = matches!(mode, FakeBitcoinRsRpcMode::PostStartRpcDrop);
+    let post_start_rpc_hang = matches!(mode, FakeBitcoinRsRpcMode::PostStartRpcHang);
     format!(
         r#"#!/usr/bin/env python3
 import base64
@@ -6165,6 +6343,8 @@ INITIAL_BLOCKS = {initial_blocks}
 TARGET_BLOCKS = {target_blocks}
 RPC_STARTUP_TIMEOUT = {rpc_startup_timeout}
 SLOW_IBD_PROGRESS = {slow_ibd_progress}
+POST_START_RPC_DROP = {post_start_rpc_drop}
+POST_START_RPC_HANG = {post_start_rpc_hang}
 STOP_FILE = pathlib.Path({stop_file:?})
 STATE_FILE = pathlib.Path({state_file:?})
 G14_SAMPLES_WRITTEN = False
@@ -6197,6 +6377,13 @@ class RpcHandler(BaseHTTPRequestHandler):
         params = body.get("params", [])
         if method == "getblockchaininfo":
             call_count = int(STATE_FILE.read_text(encoding="utf-8")) if STATE_FILE.exists() else 0
+            if POST_START_RPC_DROP and call_count > 0:
+                self.send_response(500)
+                self.end_headers()
+                return
+            if POST_START_RPC_HANG and call_count > 0:
+                time.sleep(35.0)
+                return
             STATE_FILE.write_text(str(call_count + 1), encoding="utf-8")
             if SLOW_IBD_PROGRESS:
                 blocks = INITIAL_BLOCKS
@@ -6219,6 +6406,8 @@ class RpcHandler(BaseHTTPRequestHandler):
 "#,
         rpc_startup_timeout = if rpc_startup_timeout { "True" } else { "False" },
         slow_ibd_progress = if slow_ibd_progress { "True" } else { "False" },
+        post_start_rpc_drop = if post_start_rpc_drop { "True" } else { "False" },
+        post_start_rpc_hang = if post_start_rpc_hang { "True" } else { "False" },
     )
 }
 
@@ -6226,8 +6415,7 @@ fn fake_bitcoin_rs_daemon_script(
     rpc_port: u16,
     rpc_user: &str,
     rpc_password: &str,
-    rpc_startup_timeout: bool,
-    slow_ibd_progress: bool,
+    mode: FakeBitcoinRsRpcMode,
     stop_file: &str,
     state_file: &str,
 ) -> String {
@@ -6235,8 +6423,7 @@ fn fake_bitcoin_rs_daemon_script(
         rpc_port,
         rpc_user,
         rpc_password,
-        rpc_startup_timeout,
-        slow_ibd_progress,
+        mode,
         stop_file,
         state_file,
     );
@@ -6255,16 +6442,14 @@ fn fake_bitcoin_rs_daemon_command(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = dir.join(name);
     let state_file = dir.join(format!("{name}.chaininfo-calls"));
-    let rpc_startup_timeout = matches!(mode, FakeBitcoinRsRpcMode::RpcStartupTimeout);
-    let slow_ibd_progress = matches!(mode, FakeBitcoinRsRpcMode::SlowIbdProgress);
+
     fs::write(
         &path,
         fake_bitcoin_rs_daemon_script(
             rpc_port,
             rpc_user,
             rpc_password,
-            rpc_startup_timeout,
-            slow_ibd_progress,
+            mode,
             &stop_file.display().to_string(),
             &state_file.display().to_string(),
         ),
