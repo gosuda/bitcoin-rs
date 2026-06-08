@@ -19,6 +19,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_p2p::InboundBlock;
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::{Receiver, Sender};
@@ -77,7 +78,7 @@ pub struct BlockSync {
     peers: Arc<RwLock<Vec<PeerInfo>>>,
     peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
+    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
     download_window: Arc<Mutex<DownloadWindow>>,
     block_stager: Arc<Mutex<BlockStager>>,
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
@@ -126,7 +127,7 @@ impl BlockSync {
         peers: Arc<RwLock<Vec<PeerInfo>>>,
         peer_outbound: Arc<RwLock<HashMap<SocketAddr, Sender<Message>>>>,
         inbound_headers_rx: Arc<Mutex<Receiver<Vec<bitcoin::block::Header>>>>,
-        inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
+        inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
     ) -> Self {
         Self {
             handles,
@@ -283,40 +284,46 @@ impl BlockSync {
 
     fn fill_inbound_block_chunk(
         &self,
-        blocks: &mut Vec<bitcoin::Block>,
+        blocks: &mut Vec<InboundBlock>,
         saw_block: &mut bool,
         next_expected_hash: &mut Option<Hash256>,
         apply_head_check: &mut Option<Hash256>,
     ) -> bool {
         let receiver = self.inbound_blocks_rx.lock();
         while blocks.len() < INBOUND_BLOCK_STAGE_CHUNK {
-            let Ok(block) = receiver.try_recv() else {
+            let Ok(inbound) = receiver.try_recv() else {
                 return true;
             };
             if !*saw_block {
                 *next_expected_hash = self.next_expected_block_hash();
                 *apply_head_check = next_expected_hash.as_ref().copied().filter(|hash| {
-                    *hash != Hash256::from_le_bytes(block.block_hash().as_byte_array())
+                    *hash != Hash256::from_le_bytes(inbound.block.block_hash().as_byte_array())
                 });
                 *saw_block = true;
             }
-            blocks.push(block);
+            blocks.push(inbound);
         }
         false
     }
 
     fn buffer_received_block_chunk(
         &self,
-        blocks: &mut Vec<bitcoin::Block>,
+        blocks: &mut Vec<InboundBlock>,
         next_expected_hash: Option<Hash256>,
     ) -> usize {
         let mut staged_blocks = Vec::with_capacity(blocks.len());
         {
             let mut stager = self.block_stager.lock();
             let now = Instant::now();
-            for block in blocks.drain(..) {
-                let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
-                let staged = stager.insert(hash, next_expected_hash, block, now);
+            for inbound in blocks.drain(..) {
+                let hash = Hash256::from_le_bytes(inbound.block.block_hash().as_byte_array());
+                let staged = stager.insert(
+                    hash,
+                    next_expected_hash,
+                    inbound.block,
+                    inbound.serialized,
+                    now,
+                );
                 staged_blocks.push((hash, staged));
             }
         }
@@ -375,7 +382,11 @@ impl BlockSync {
         let mut failed_hash = None;
         let mut drained = drained.into_iter();
         while let Some(drained_block) = drained.next() {
-            match crate::apply::apply_block(&self.handles, &drained_block.block) {
+            match crate::apply::apply_block_with_serialized(
+                &self.handles,
+                &drained_block.block,
+                drained_block.serialized.clone(),
+            ) {
                 Ok(tip) => {
                     applied = applied.saturating_add(1);
                     tracing::debug!(
@@ -896,7 +907,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -1052,7 +1064,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -1112,7 +1125,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -1466,7 +1480,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -1531,7 +1546,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -1669,10 +1685,11 @@ mod tests {
         let received_at = Instant::now()
             .checked_sub(super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
             .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
+        let serialized = bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block));
         let staged = sync
             .block_stager
             .lock()
-            .insert(hash, None, block, received_at);
+            .insert(hash, None, block, serialized, received_at);
         let super::StagedBlock::Memory { bytes, .. } = staged else {
             return Err(std::io::Error::other("test block should stage in memory").into());
         };
@@ -1707,7 +1724,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -1751,7 +1769,7 @@ mod tests {
             window.mark_applied(&Hash256::from_le_bytes(expected_hash.as_byte_array()));
         }
 
-        inbound_blocks_tx.send(block2)?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2))?;
         sync.drain_inbound_blocks();
 
         assert_eq!(sync.block_stager.lock().received_len(), 0);
@@ -2152,7 +2170,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -2170,7 +2189,7 @@ mod tests {
         peers.write().push(synthetic_peer(addr, 100));
         let (tx, rx) = unbounded::<Message>();
         peer_outbound.write().insert(addr, tx);
-        inbound_blocks_tx.send(genesis)?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(genesis))?;
 
         sync.tick();
 
@@ -2194,16 +2213,21 @@ mod tests {
         });
         let now = Instant::now();
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block));
 
-        let super::StagedBlock::Memory { dropped, .. } =
-            stager.insert(fork_hash, Some(expected_hash), block.clone(), now)
-        else {
+        let super::StagedBlock::Memory { dropped, .. } = stager.insert(
+            fork_hash,
+            Some(expected_hash),
+            block.clone(),
+            serialized.clone(),
+            now,
+        ) else {
             return Err(std::io::Error::other("fork block should stage").into());
         };
         assert!(dropped.is_empty());
 
         let super::StagedBlock::Memory { dropped, .. } =
-            stager.insert(expected_hash, Some(expected_hash), block, now)
+            stager.insert(expected_hash, Some(expected_hash), block, serialized, now)
         else {
             return Err(std::io::Error::other("expected block should stage").into());
         };
@@ -2235,7 +2259,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -2276,7 +2301,7 @@ mod tests {
         let _headers = rx.try_recv()?;
         assert_eq!(sync.download_window.lock().pending_len(), 1);
 
-        inbound_blocks_tx.send(block)?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block))?;
         sync.drain_inbound_blocks();
 
         {
@@ -2302,7 +2327,7 @@ mod tests {
         sync: BlockSync,
         applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
-        inbound_blocks_tx: crossbeam_channel::Sender<bitcoin::Block>,
+        inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
         outbound_rx: crossbeam_channel::Receiver<Message>,
         blocks: Vec<bitcoin::Block>,
     }
@@ -2336,7 +2361,8 @@ mod tests {
             let _headers = outbound_rx.try_recv()?;
 
             for block in blocks[1..].iter().rev() {
-                inbound_blocks_tx.send(block.clone())?;
+                inbound_blocks_tx
+                    .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))?;
             }
             sync.drain_inbound_blocks();
             let (received_count, peak_staged_bytes) = {
@@ -2348,7 +2374,9 @@ mod tests {
             assert_gauge(&recorder, "node.sync.received_blocks", received_count);
             assert_gauge(&recorder, "node.sync.received_bytes", peak_staged_bytes);
 
-            inbound_blocks_tx.send(blocks[0].clone())?;
+            inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                blocks[0].clone(),
+            ))?;
             let apply_started = quanta::Instant::now();
             sync.drain_inbound_blocks();
             let apply_elapsed = apply_started.elapsed();
@@ -2400,7 +2428,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -2470,7 +2499,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let mut handles = apply_handles(
             Arc::clone(&chain_tip),
@@ -2487,9 +2517,9 @@ mod tests {
             inbound_blocks_rx,
         );
 
-        inbound_blocks_tx.send(block3)?;
-        inbound_blocks_tx.send(block2.clone())?;
-        inbound_blocks_tx.send(block1)?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block3))?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2.clone()))?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block1))?;
         sync.tick();
 
         assert_eq!(
@@ -2508,7 +2538,7 @@ mod tests {
             "tail block must be restored after the mid-batch failure"
         );
 
-        inbound_blocks_tx.send(block2)?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2))?;
         sync.tick();
 
         assert_eq!(
@@ -2547,7 +2577,9 @@ mod tests {
         );
 
         for block in fixture.blocks[1..6].iter().rev() {
-            fixture.inbound_blocks_tx.send(block.clone())?;
+            fixture
+                .inbound_blocks_tx
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))?;
         }
 
         fixture.sync.drain_inbound_blocks();
@@ -2599,7 +2631,8 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin::Block>();
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
             Arc::clone(&chain_tip),

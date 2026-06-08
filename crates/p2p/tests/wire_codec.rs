@@ -46,7 +46,7 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
         let mut cursor = Cursor::new(Vec::new());
         write_message(&mut cursor, Magic::BITCOIN, &message)?;
         cursor.set_position(0);
-        let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+        let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
         assert_eq!(decoded, message);
     }
 
@@ -58,7 +58,7 @@ fn rejects_inv_message_with_more_than_max_vectors() -> Result<(), PeerError> {
     let frame = inventory_frame(b"inv", MAX_INV_PER_MSG + 1)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("inv count must be capped"),
         Err(error) => error,
     };
@@ -75,7 +75,7 @@ fn rejects_getdata_message_with_more_than_max_vectors() -> Result<(), PeerError>
     let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG + 1)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("getdata count must be capped"),
         Err(error) => error,
     };
@@ -92,7 +92,7 @@ fn rejects_notfound_message_with_more_than_max_vectors() -> Result<(), PeerError
     let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG + 1)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("notfound count must be capped"),
         Err(error) => error,
     };
@@ -109,7 +109,7 @@ fn accepts_inv_message_with_max_vectors() -> Result<(), PeerError> {
     let frame = inventory_frame(b"inv", MAX_INV_PER_MSG)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(
         matches!(decoded, NetworkMessage::Inv(inventory) if inventory.len() == MAX_INV_PER_MSG)
@@ -122,7 +122,7 @@ fn accepts_getdata_message_with_max_vectors() -> Result<(), PeerError> {
     let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(
         matches!(decoded, NetworkMessage::GetData(inventory) if inventory.len() == MAX_INV_PER_MSG)
@@ -135,7 +135,7 @@ fn accepts_notfound_message_with_max_vectors() -> Result<(), PeerError> {
     let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(
         matches!(decoded, NetworkMessage::NotFound(inventory) if inventory.len() == MAX_INV_PER_MSG)
@@ -148,7 +148,7 @@ fn rejects_addr_message_with_more_than_max_addresses() -> Result<(), PeerError> 
     let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("addr count must be capped"),
         Err(error) => error,
     };
@@ -162,7 +162,7 @@ fn accepts_addr_message_with_max_addresses() -> Result<(), PeerError> {
     let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(
         matches!(decoded, NetworkMessage::Addr(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
@@ -175,7 +175,7 @@ fn rejects_addrv2_message_with_more_than_max_addresses() -> Result<(), PeerError
     let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("addrv2 count must be capped"),
         Err(error) => error,
     };
@@ -192,7 +192,7 @@ fn accepts_addrv2_message_with_max_addresses() -> Result<(), PeerError> {
     let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(
         matches!(decoded, NetworkMessage::AddrV2(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
@@ -205,7 +205,7 @@ fn rejects_getheaders_message_with_more_than_max_locator_hashes() -> Result<(), 
     let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES + 1)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("getheaders locator hash count must be capped"),
         Err(error) => error,
     };
@@ -222,7 +222,7 @@ fn rejects_getblocks_message_with_more_than_max_locator_hashes() -> Result<(), P
     let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES + 1)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("getblocks locator hash count must be capped"),
         Err(error) => error,
     };
@@ -239,7 +239,7 @@ fn accepts_getheaders_message_with_max_locator_hashes() -> Result<(), PeerError>
     let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(
         matches!(decoded, NetworkMessage::GetHeaders(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
@@ -252,7 +252,7 @@ fn accepts_getblocks_message_with_max_locator_hashes() -> Result<(), PeerError> 
     let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(
         matches!(decoded, NetworkMessage::GetBlocks(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
@@ -265,7 +265,7 @@ fn rejects_headers_message_with_more_than_2000_headers() -> Result<(), PeerError
     let frame = headers_frame(2_001)?;
     let mut cursor = Cursor::new(frame);
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN) {
+    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
         Ok(_) => panic!("headers count must be capped"),
         Err(error) => error,
     };
@@ -282,7 +282,7 @@ fn accepts_headers_message_with_2000_headers() -> Result<(), PeerError> {
     let frame = headers_frame(2_000)?;
     let mut cursor = Cursor::new(frame);
 
-    let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
 
     assert!(matches!(decoded, NetworkMessage::Headers(headers) if headers.len() == 2_000));
     Ok(())
@@ -330,7 +330,7 @@ fn round_trips_compact_block_messages() -> Result<(), PeerError> {
         let mut cursor = Cursor::new(Vec::new());
         write_message(&mut cursor, Magic::BITCOIN, &message)?;
         cursor.set_position(0);
-        let decoded = read_message(&mut cursor, Magic::BITCOIN)?;
+        let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
         assert_eq!(decoded, message);
     }
 

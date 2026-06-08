@@ -21,6 +21,7 @@ redb = ["bitcoin-rs-storage/redb"]
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin.workspace = true
+bytes.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 arc-swap.workspace = true

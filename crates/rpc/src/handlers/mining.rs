@@ -153,7 +153,10 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         return Ok(json!("high-hash"));
     }
     if let Some(sender) = &ctx.inbound_blocks_sender {
-        if sender.send(block).is_err() {
+        if sender
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block))
+            .is_err()
+        {
             return Ok(json!("channel-closed"));
         }
     }
@@ -201,7 +204,7 @@ mod submitblock_tests {
 
     #[test]
     fn submitblock_pushes_to_channel_when_present() {
-        let (tx, rx) = crossbeam_channel::unbounded::<bitcoin::Block>();
+        let (tx, rx) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let mut ctx = Context::new();
         ctx.inbound_blocks_sender = Some(tx);
         let ctx = Arc::new(ctx);

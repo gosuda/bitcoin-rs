@@ -440,7 +440,7 @@ fn open_pruned_regtest_state() -> (TempDir, NodeState) {
 
 struct SyncFixture {
     sync: BlockSync,
-    inbound_blocks_tx: crossbeam_channel::Sender<Block>,
+    inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
     outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
     peers: Arc<RwLock<Vec<PeerInfo>>>,
     peer_outbound: Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
@@ -482,7 +482,8 @@ impl SyncFixture {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<Header>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<Block>();
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let (tx_index, tx_index_dir) = tx_index_for_mode(tx_index_mode);
         let handles = apply_handles(
@@ -528,7 +529,7 @@ impl SyncFixture {
         {
             fixture
                 .inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send staged overflow block failed: {error}"));
         }
         fixture.sync.tick();
@@ -564,12 +565,14 @@ impl SyncFixture {
 
         for block in self.blocks[1..].iter().rev() {
             self.inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send staged block failed: {error}"));
         }
         self.sync.tick();
         self.inbound_blocks_tx
-            .send(self.blocks[0].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[0].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send contiguous block failed: {error}"));
         self.sync.tick();
 
@@ -595,7 +598,9 @@ impl SyncFixture {
 
     fn request_after_unsolicited_received(self) -> usize {
         self.inbound_blocks_tx
-            .send(self.blocks[1].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[1].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send unsolicited staged block failed: {error}"));
         self.sync.tick();
         let requested = match self
@@ -660,7 +665,7 @@ impl SyncFixture {
 
         for block in &self.blocks {
             self.inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send in-order block failed: {error}"));
         }
         self.sync.tick();
@@ -675,7 +680,7 @@ impl SyncFixture {
         self.sync.tick();
         for block in self.blocks[1..].iter().rev() {
             self.inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send oversized burst block failed: {error}"));
         }
         self.sync.tick();
@@ -773,12 +778,14 @@ impl ProductionStateSyncFixture {
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
         for block in self.blocks[1..].iter().rev() {
             inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(self.blocks[0].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[0].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
         sync.tick();
         self.state
@@ -795,12 +802,14 @@ impl ProductionStateSyncFixture {
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
         for block in self.blocks[1..].iter().rev() {
             inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(self.blocks[0].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[0].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
         self
     }
@@ -814,23 +823,27 @@ impl ProductionStateSyncFixture {
 
         for block in self.blocks[1..split].iter().rev() {
             inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send first partial staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(self.blocks[0].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[0].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send first partial contiguous block failed: {error}"));
         sync.tick();
 
         for block in self.blocks[split + 1..].iter().rev() {
             inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send second partial staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(self.blocks[split].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[split].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send second partial contiguous block failed: {error}"));
         self
     }

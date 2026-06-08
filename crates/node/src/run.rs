@@ -99,7 +99,7 @@ fn spawn_p2p_listeners(
     peer_outbound: &PeerOutboundMap,
     banned: BannedSubnets,
     inbound_headers_tx: crossbeam_channel::Sender<Vec<bitcoin::block::Header>>,
-    inbound_blocks_tx: crossbeam_channel::Sender<bitcoin::Block>,
+    inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
     sync_wake_tx: crossbeam_channel::Sender<()>,
     chain_query: P2pChainQuery,
 ) -> anyhow::Result<Vec<std::thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>>>

@@ -706,8 +706,8 @@ pub struct NodeState {
     p2p_outbound_rx: Arc<Mutex<crossbeam_channel::Receiver<std::net::SocketAddr>>>,
     inbound_headers_tx: Sender<Vec<Header>>,
     inbound_headers_rx: Arc<Mutex<Receiver<Vec<Header>>>>,
-    inbound_blocks_tx: Sender<bitcoin::Block>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin::Block>>>,
+    inbound_blocks_tx: Sender<bitcoin_rs_p2p::InboundBlock>,
+    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
     apply_handles: crate::apply::ApplyHandles,
     sync: Arc<crate::BlockSync>,
     mining_template_id: Arc<ArcSwap<CompactString>>,
@@ -806,7 +806,7 @@ impl NodeState {
             crossbeam_channel::unbounded::<Vec<Header>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
         let (inbound_blocks_tx, inbound_blocks_rx_raw) =
-            crossbeam_channel::unbounded::<bitcoin::Block>();
+            crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let apply_handles = crate::apply::ApplyHandles {
             network: config.network,
@@ -1079,7 +1079,7 @@ impl NodeState {
     /// `Block` messages into. The matching `Receiver` is consumed by
     /// `BlockSync::tick` to apply downloaded blocks.
     #[must_use]
-    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin::Block> {
+    pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBlock> {
         self.inbound_blocks_tx.clone()
     }
 
@@ -1088,7 +1088,7 @@ impl NodeState {
     /// Exposed so tests and `BlockSync::new` can wire the channel; production
     /// code calls `state.sync()` and lets the orchestrator own the drain.
     #[must_use]
-    pub fn inbound_blocks_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin::Block>>> {
+    pub fn inbound_blocks_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>> {
         Arc::clone(&self.inbound_blocks_rx)
     }
 
@@ -1539,6 +1539,45 @@ mod tests {
             state.storage.stored_prune_body(0, hash)?.as_deref(),
             Some(serialize(&block).as_slice())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_block_with_serialized_persists_same_body_as_apply_block() -> anyhow::Result<()> {
+        use bitcoin::blockdata::constants::genesis_block;
+        use bitcoin::consensus::encode::serialize;
+        use bitcoin::hashes::Hash as _;
+
+        let block = genesis_block(bitcoin::Network::Regtest);
+        let hash =
+            bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let serialized = bytes::Bytes::from(serialize(&block));
+
+        let dir_a = tempfile::tempdir()?;
+        let mut config_a = crate::Config::default_for_network(crate::Network::Regtest);
+        config_a.data_dir = dir_a.path().join("node-a");
+        config_a.p2p_listen.clear();
+        config_a.prune_target_mb = 0;
+        let state_a = NodeState::open(config_a)?;
+        state_a.apply_block(&block)?;
+
+        let dir_b = tempfile::tempdir()?;
+        let mut config_b = crate::Config::default_for_network(crate::Network::Regtest);
+        config_b.data_dir = dir_b.path().join("node-b");
+        config_b.p2p_listen.clear();
+        config_b.prune_target_mb = 0;
+        let state_b = NodeState::open(config_b)?;
+        crate::apply::apply_block_with_serialized(&state_b.apply_handles(), &block, serialized)?;
+
+        let body_a = state_a
+            .storage
+            .stored_prune_body(0, hash)?
+            .ok_or_else(|| anyhow::anyhow!("apply_block body missing"))?;
+        let body_b = state_b
+            .storage
+            .stored_prune_body(0, hash)?
+            .ok_or_else(|| anyhow::anyhow!("apply_block_with_serialized body missing"))?;
+        assert_eq!(body_a, body_b);
         Ok(())
     }
 

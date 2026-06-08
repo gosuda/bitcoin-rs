@@ -189,10 +189,27 @@ impl ApplyHandles {
 }
 
 /// Synthetically applies `block` as the next tip after consensus checks.
-#[allow(clippy::too_many_lines)]
 pub fn apply_block(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
+) -> core::result::Result<TipSnapshot, ApplyError> {
+    apply_block_inner(handles, block, None)
+}
+
+/// Applies `block` reusing preserved wire-format bytes for body persistence and indexing.
+pub fn apply_block_with_serialized(
+    handles: &ApplyHandles,
+    block: &bitcoin::Block,
+    serialized: bytes::Bytes,
+) -> core::result::Result<TipSnapshot, ApplyError> {
+    apply_block_inner(handles, block, Some(serialized))
+}
+
+#[allow(clippy::too_many_lines)]
+fn apply_block_inner(
+    handles: &ApplyHandles,
+    block: &bitcoin::Block,
+    provided_serialized: Option<bytes::Bytes>,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
@@ -366,7 +383,26 @@ pub fn apply_block(
             || wants_rawblock
             || needs_g14_sample;
         if needs_body {
-            bytes::Bytes::from(bitcoin::consensus::encode::serialize(block))
+            // The preserved P2P wire payload is byte-identical to the canonical
+            // block serialization: the decoder rejects every non-canonical
+            // encoding, so a decoded block always re-serializes to its wire
+            // bytes. The length guard keeps that invariant release-observable and
+            // self-heals to a fresh serialize if it ever fails to hold, so a
+            // future decoder change can never admit non-canonical bytes into the
+            // block body store.
+            match provided_serialized {
+                Some(provided) if provided.len() == block.total_size() => {
+                    #[cfg(debug_assertions)]
+                    {
+                        debug_assert_eq!(
+                            provided.as_ref(),
+                            bitcoin::consensus::encode::serialize(block).as_slice(),
+                        );
+                    }
+                    provided
+                }
+                _ => bytes::Bytes::from(bitcoin::consensus::encode::serialize(block)),
+            }
         } else {
             // Header-only: 80 bytes is enough for the block record.
             bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block.header))

@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 
+use bytes;
+
 use bitcoin::consensus::encode::{self, Decodable, Encodable};
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::address::AddrV2Message;
@@ -92,7 +94,12 @@ pub fn write_message<W: Write>(
 }
 
 /// Read and validate a Bitcoin v1 network message.
-pub fn read_message<R: Read>(reader: &mut R, expected_magic: Magic) -> Result<Message, PeerError> {
+///
+/// Returns the decoded message and the raw payload bytes (checksum-validated).
+pub fn read_message<R: Read>(
+    reader: &mut R,
+    expected_magic: Magic,
+) -> Result<(Message, bytes::Bytes), PeerError> {
     let mut header = [0u8; HEADER_LEN];
     reader.read_exact(&mut header)?;
 
@@ -120,7 +127,8 @@ pub fn read_message<R: Read>(reader: &mut R, expected_magic: Magic) -> Result<Me
         return Err(PeerError::BadChecksum);
     }
 
-    decode_payload(&command, &payload)
+    let message = decode_payload(&command, &payload)?;
+    Ok((message, bytes::Bytes::from(payload)))
 }
 
 /// Encode only a message payload.
@@ -349,4 +357,41 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
     let first = Sha256::digest(payload);
     let second = Sha256::digest(first);
     [second[0], second[1], second[2], second[3]]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::p2p::Magic;
+    use bitcoin::p2p::message::NetworkMessage;
+
+    use super::{encode_payload, read_message, write_message};
+
+    #[test]
+    fn block_message_roundtrip_preserves_wire_payload() -> Result<(), super::PeerError> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let message = NetworkMessage::Block(block.clone());
+        let payload = encode_payload(&message)?;
+        let expected_hash = block.block_hash();
+
+        let mut wire = Vec::new();
+        write_message(&mut wire, Magic::REGTEST, &message)?;
+
+        let mut cursor = Cursor::new(wire);
+        let (decoded, raw) = read_message(&mut cursor, Magic::REGTEST)?;
+
+        let NetworkMessage::Block(decoded_block) = decoded else {
+            return Err(super::PeerError::Protocol(
+                "expected block message in roundtrip test",
+            ));
+        };
+
+        assert_eq!(raw.as_ref(), serialize(&decoded_block).as_slice());
+        assert_eq!(raw.as_ref(), payload.as_slice());
+        assert_eq!(decoded_block.block_hash(), expected_hash);
+
+        Ok(())
+    }
 }

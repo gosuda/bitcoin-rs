@@ -278,7 +278,7 @@ pub struct Context {
     /// Optional outbound channel that submits decoded blocks back to the node's
     /// `BlockSync::tick` for the canonical apply path. `None` when no node is
     /// wired (tests, embedded callers).
-    pub inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
+    pub inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>>,
     /// Optional outbound channel for `addnode` to request new P2P connections.
     /// `None` for embedded/test callers without a live P2P listener.
     pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
@@ -373,7 +373,7 @@ impl Context {
         peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
         block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
         chain_network: Network,
-        inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin::Block>>,
+        inbound_blocks_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>>,
         p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
         banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
         added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,

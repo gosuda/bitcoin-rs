@@ -26,7 +26,8 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let outbound = Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
     let (inbound_headers_tx, _inbound_headers_rx) =
         crossbeam_channel::unbounded::<Vec<bitcoin::block::Header>>();
-    let (inbound_blocks_tx, _inbound_blocks_rx) = crossbeam_channel::unbounded::<bitcoin::Block>();
+    let (inbound_blocks_tx, _inbound_blocks_rx) =
+        crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let banned = Arc::new(parking_lot::RwLock::new(Vec::new()));
 
     let listener_outbound = Arc::clone(&outbound);

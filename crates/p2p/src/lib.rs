@@ -11,6 +11,8 @@ pub mod dispatch;
 pub mod fsm;
 /// Version/verack negotiation helpers.
 pub mod handshake;
+/// Inbound block payloads with preserved wire bytes.
+pub mod inbound;
 /// Inventory relay helpers.
 pub mod inv;
 /// TCP listener skeleton with graceful shutdown.
@@ -27,6 +29,7 @@ pub mod wire;
 pub mod wtxid;
 
 pub use dispatch::{ChainQuery, InventoryResponse};
+pub use inbound::InboundBlock;
 pub use listener::spawn_outbound_connection;
 pub use peer::{DnsResolver, Peer, PeerManager, PeerState, SystemDnsResolver};
 pub use peer_info::PeerInfo;

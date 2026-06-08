@@ -75,7 +75,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
     our_nonce: u64,
     our_start_height: i32,
 ) -> Result<(), PeerError> {
-    let remote_version = read_message(&mut peer.stream, peer.magic)?;
+    let (remote_version, _) = read_message(&mut peer.stream, peer.magic)?;
     let responses = dispatch_inbound(peer, &remote_version)?;
 
     peer.state = PeerState::VersionExchange;
@@ -88,7 +88,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
     }
 
     while peer.state != PeerState::Ready {
-        let inbound = read_message(&mut peer.stream, peer.magic)?;
+        let (inbound, _) = read_message(&mut peer.stream, peer.magic)?;
         let responses = dispatch_inbound(peer, &inbound)?;
         for response in responses {
             peer.send(&response)?;

@@ -20,6 +20,13 @@ pub(super) struct BlockStager {
 #[derive(Debug)]
 struct ReceivedBlock {
     block: bitcoin::Block,
+    // Preserved P2P wire payload, reused by `apply_block_with_serialized` to
+    // skip reserialization. This is a second buffer (~block size) held next to
+    // the decoded `block` while it waits for its predecessor, so a fully
+    // out-of-order staging window holds roughly twice `bytes` per entry; both
+    // are still bounded by the received-block budget (max_received_blocks /
+    // max_received_bytes).
+    serialized: bytes::Bytes,
     received_at: Instant,
     bytes: usize,
 }
@@ -28,6 +35,7 @@ struct ReceivedBlock {
 pub(super) struct DrainedBlock {
     pub(super) hash: Hash256,
     pub(super) block: bitcoin::Block,
+    pub(super) serialized: bytes::Bytes,
     received_at: Instant,
     bytes: usize,
 }
@@ -86,6 +94,7 @@ impl BlockStager {
         hash: Hash256,
         next_expected_hash: Option<Hash256>,
         block: bitcoin::Block,
+        serialized: bytes::Bytes,
         now: Instant,
     ) -> StagedBlock {
         let entry = match self.received.entry(hash) {
@@ -101,6 +110,7 @@ impl BlockStager {
 
         entry.insert(ReceivedBlock {
             block,
+            serialized,
             received_at: now,
             bytes,
         });
@@ -150,6 +160,7 @@ impl BlockStager {
                 drained.hash,
                 ReceivedBlock {
                     block: drained.block,
+                    serialized: drained.serialized,
                     received_at: drained.received_at,
                     bytes: drained.bytes,
                 },
@@ -171,6 +182,7 @@ impl BlockStager {
         Some(DrainedBlock {
             hash: *hash,
             block: entry.block,
+            serialized: entry.serialized,
             received_at: entry.received_at,
             bytes: entry.bytes,
         })
@@ -325,6 +337,7 @@ mod tests {
     #[test]
     fn drain_expected_prefix_stops_at_first_missing_hash() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let block_bytes = block_size(&block);
         let mut stager = BlockStager::new(default_sync_budget());
         let now = std::time::Instant::now();
@@ -333,9 +346,9 @@ mod tests {
         let third = Hash256::from_le_bytes(&[0x03; 32]);
         let fourth = Hash256::from_le_bytes(&[0x04; 32]);
 
-        stager.insert(first, None, block.clone(), now);
-        stager.insert(third, None, block.clone(), now);
-        stager.insert(fourth, None, block, now);
+        stager.insert(first, None, block.clone(), serialized.clone(), now);
+        stager.insert(third, None, block.clone(), serialized.clone(), now);
+        stager.insert(fourth, None, block, serialized.clone(), now);
 
         let drained = stager.drain_expected_prefix(&[first, missing, third, fourth]);
 
@@ -350,6 +363,7 @@ mod tests {
     #[test]
     fn restore_many_restores_tail_byte_accounting() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let block_bytes = block_size(&block);
         let mut stager = BlockStager::new(default_sync_budget());
         let now = std::time::Instant::now();
@@ -357,9 +371,9 @@ mod tests {
         let second = Hash256::from_le_bytes(&[0x22; 32]);
         let third = Hash256::from_le_bytes(&[0x33; 32]);
 
-        stager.insert(first, None, block.clone(), now);
-        stager.insert(second, None, block.clone(), now);
-        stager.insert(third, None, block, now);
+        stager.insert(first, None, block.clone(), serialized.clone(), now);
+        stager.insert(second, None, block.clone(), serialized.clone(), now);
+        stager.insert(third, None, block, serialized.clone(), now);
         let mut drained = stager.drain_expected_prefix(&[first, second, third]);
         assert_eq!(stager.received_order_len(), 0);
         assert_eq!(stager.next_received_deadline, None);
@@ -378,6 +392,7 @@ mod tests {
     #[test]
     fn ready_received_len_requires_next_expected_hash_when_provided() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let mut stager = BlockStager::new(default_sync_budget());
         let now = std::time::Instant::now();
         let staged = Hash256::from_le_bytes(&[0x31; 32]);
@@ -385,7 +400,7 @@ mod tests {
 
         assert_eq!(stager.ready_received_len(None), None);
 
-        stager.insert(staged, None, block, now);
+        stager.insert(staged, None, block, serialized.clone(), now);
 
         assert_eq!(stager.ready_received_len(None), Some(1));
         assert_eq!(stager.ready_received_len(Some(staged)), Some(1));
@@ -395,6 +410,7 @@ mod tests {
     #[test]
     fn prune_expired_recomputes_deadline_after_dropping_oldest() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let mut budget = default_sync_budget();
         budget.received_timeout = Duration::from_secs(10);
         let mut stager = BlockStager::new(budget);
@@ -408,8 +424,14 @@ mod tests {
         let old = Hash256::from_le_bytes(&[0x41; 32]);
         let fresh = Hash256::from_le_bytes(&[0x42; 32]);
 
-        stager.insert(old, None, block.clone(), old_received_at);
-        stager.insert(fresh, None, block, fresh_received_at);
+        stager.insert(
+            old,
+            None,
+            block.clone(),
+            serialized.clone(),
+            old_received_at,
+        );
+        stager.insert(fresh, None, block, serialized.clone(), fresh_received_at);
 
         let first_drop = stager.prune_expired(now);
 
@@ -433,6 +455,7 @@ mod tests {
     #[test]
     fn duplicate_insert_keeps_original_staged_deadline() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let block_bytes = block_size(&block);
         let mut budget = default_sync_budget();
         budget.received_timeout = Duration::from_secs(10);
@@ -440,8 +463,14 @@ mod tests {
         let now = Instant::now();
         let hash = Hash256::from_le_bytes(&[0x43; 32]);
 
-        stager.insert(hash, None, block.clone(), now);
-        stager.insert(hash, None, block, now + Duration::from_secs(5));
+        stager.insert(hash, None, block.clone(), serialized.clone(), now);
+        stager.insert(
+            hash,
+            None,
+            block,
+            serialized.clone(),
+            now + Duration::from_secs(5),
+        );
 
         assert_eq!(stager.received_len(), 1);
         assert_eq!(stager.received_bytes(), block_bytes);
@@ -457,6 +486,7 @@ mod tests {
     #[test]
     fn insert_eviction_drops_oldest_unprotected_until_budget_fits() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let block_bytes = block_size(&block);
         let mut stager = BlockStager::new(default_sync_budget());
         let now = Instant::now();
@@ -466,16 +496,35 @@ mod tests {
         let third = Hash256::from_le_bytes(&[0x54; 32]);
         let incoming = Hash256::from_le_bytes(&[0x55; 32]);
 
-        stager.insert(protected, None, block.clone(), now);
-        stager.insert(first, None, block.clone(), now + Duration::from_secs(1));
-        stager.insert(second, None, block.clone(), now + Duration::from_secs(2));
-        stager.insert(third, None, block.clone(), now + Duration::from_secs(3));
+        stager.insert(protected, None, block.clone(), serialized.clone(), now);
+        stager.insert(
+            first,
+            None,
+            block.clone(),
+            serialized.clone(),
+            now + Duration::from_secs(1),
+        );
+        stager.insert(
+            second,
+            None,
+            block.clone(),
+            serialized.clone(),
+            now + Duration::from_secs(2),
+        );
+        stager.insert(
+            third,
+            None,
+            block.clone(),
+            serialized.clone(),
+            now + Duration::from_secs(3),
+        );
         stager.budget.max_received_blocks = 2;
 
         let dropped = match stager.insert(
             incoming,
             Some(protected),
             block,
+            serialized.clone(),
             now + Duration::from_secs(4),
         ) {
             super::StagedBlock::AlreadyStaged => {
@@ -500,6 +549,7 @@ mod tests {
     #[test]
     fn insert_eviction_uses_fifo_order_for_same_instant_blocks() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let mut stager = BlockStager::new(default_sync_budget());
         let now = Instant::now();
         let first = Hash256::from_le_bytes(&[0x61; 32]);
@@ -507,12 +557,12 @@ mod tests {
         let third = Hash256::from_le_bytes(&[0x63; 32]);
         let incoming = Hash256::from_le_bytes(&[0x64; 32]);
 
-        stager.insert(first, None, block.clone(), now);
-        stager.insert(second, None, block.clone(), now);
-        stager.insert(third, None, block.clone(), now);
+        stager.insert(first, None, block.clone(), serialized.clone(), now);
+        stager.insert(second, None, block.clone(), serialized.clone(), now);
+        stager.insert(third, None, block.clone(), serialized.clone(), now);
         stager.budget.max_received_blocks = 2;
 
-        let dropped = match stager.insert(incoming, None, block, now) {
+        let dropped = match stager.insert(incoming, None, block, serialized.clone(), now) {
             super::StagedBlock::AlreadyStaged => {
                 panic!("incoming block should not already be staged")
             }
@@ -534,6 +584,7 @@ mod tests {
     #[test]
     fn insert_eviction_refreshes_received_deadline() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let mut budget = default_sync_budget();
         budget.max_received_blocks = 1;
         budget.received_timeout = Duration::from_secs(10);
@@ -542,8 +593,14 @@ mod tests {
         let old = Hash256::from_le_bytes(&[0x65; 32]);
         let fresh = Hash256::from_le_bytes(&[0x66; 32]);
 
-        stager.insert(old, None, block.clone(), now);
-        stager.insert(fresh, None, block, now + Duration::from_secs(5));
+        stager.insert(old, None, block.clone(), serialized.clone(), now);
+        stager.insert(
+            fresh,
+            None,
+            block,
+            serialized.clone(),
+            now + Duration::from_secs(5),
+        );
 
         assert_eq!(
             stager.next_received_deadline,
@@ -558,6 +615,7 @@ mod tests {
     #[test]
     fn insert_eviction_skips_stale_order_entries_after_drain() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let mut stager = BlockStager::new(default_sync_budget());
         let now = Instant::now();
         let first = Hash256::from_le_bytes(&[0x71; 32]);
@@ -565,14 +623,14 @@ mod tests {
         let third = Hash256::from_le_bytes(&[0x73; 32]);
         let incoming = Hash256::from_le_bytes(&[0x74; 32]);
 
-        stager.insert(first, None, block.clone(), now);
-        stager.insert(second, None, block.clone(), now);
-        stager.insert(third, None, block.clone(), now);
+        stager.insert(first, None, block.clone(), serialized.clone(), now);
+        stager.insert(second, None, block.clone(), serialized.clone(), now);
+        stager.insert(third, None, block.clone(), serialized.clone(), now);
         let drained = stager.drain_expected_prefix(&[first]);
         assert_eq!(drained.len(), 1);
         stager.budget.max_received_blocks = 2;
 
-        let dropped = match stager.insert(incoming, None, block, now) {
+        let dropped = match stager.insert(incoming, None, block, serialized.clone(), now) {
             super::StagedBlock::AlreadyStaged => {
                 panic!("incoming block should not already be staged")
             }
@@ -593,6 +651,7 @@ mod tests {
     #[test]
     fn received_order_compaction_bounds_stale_applied_entries() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
         let mut budget = default_sync_budget();
         budget.max_received_blocks = 1;
         let mut stager = BlockStager::new(budget);
@@ -600,7 +659,7 @@ mod tests {
 
         for byte in 0x01_u8..0x60 {
             let hash = Hash256::from_le_bytes(&[byte; 32]);
-            stager.insert(hash, None, block.clone(), now);
+            stager.insert(hash, None, block.clone(), serialized.clone(), now);
             let drained = stager.drain_expected_prefix(&[hash]);
             assert_eq!(drained.len(), 1);
         }
@@ -610,8 +669,8 @@ mod tests {
 
         let first = Hash256::from_le_bytes(&[0xa1; 32]);
         let second = Hash256::from_le_bytes(&[0xa2; 32]);
-        stager.insert(first, None, block.clone(), now);
-        let dropped = match stager.insert(second, None, block, now) {
+        stager.insert(first, None, block.clone(), serialized.clone(), now);
+        let dropped = match stager.insert(second, None, block, serialized.clone(), now) {
             super::StagedBlock::AlreadyStaged => {
                 panic!("incoming block should not already be staged")
             }

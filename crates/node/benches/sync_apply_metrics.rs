@@ -365,12 +365,14 @@ impl StagedSyncApplyFixture {
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
         for block in self.blocks[1..].iter().rev() {
             inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(self.blocks[0].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[0].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
         self
     }
@@ -384,23 +386,27 @@ impl StagedSyncApplyFixture {
 
         for block in self.blocks[1..split].iter().rev() {
             inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send first partial staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(self.blocks[0].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[0].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send first partial contiguous block failed: {error}"));
         sync.tick();
 
         for block in self.blocks[split + 1..].iter().rev() {
             inbound_blocks_tx
-                .send(block.clone())
+                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
                 .unwrap_or_else(|error| panic!("send second partial staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(self.blocks[split].clone())
+            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                self.blocks[split].clone(),
+            ))
             .unwrap_or_else(|error| panic!("send second partial contiguous block failed: {error}"));
         self
     }
