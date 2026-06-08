@@ -133,6 +133,39 @@ impl Default for CoinStats {
     }
 }
 
+/// Computes UTXO-set statistics by scanning a stable view.
+///
+/// Matches Bitcoin Core's on-demand model (no rolling listener required).
+/// `want_muhash` controls the expensive per-coin `MuHash` pass; callers needing
+/// only `total_amount`/`bogo_size`/`utxo_count` pass `false`.
+pub fn scan_coin_stats(
+    view: &bitcoin_rs_utxo::UtxoSetView<'_>,
+    height: u32,
+    want_muhash: bool,
+) -> Result<CoinStats, bitcoin_rs_utxo::UtxoError> {
+    let mut stats = CoinStats::new();
+    let mut scratch = Vec::new();
+    view.for_each_coin(|txid, vout, value, script, coin_height, coinbase| {
+        stats.total_amount = stats.total_amount.saturating_add(value);
+        let script_len = u64::try_from(script.len()).unwrap_or(u64::MAX);
+        stats.bogo_size = stats
+            .bogo_size
+            .saturating_add(FIXED_BOGO_SIZE.saturating_add(script_len));
+        stats.utxo_count = stats.utxo_count.saturating_add(1);
+        if want_muhash {
+            let op = OutPoint::new(txid, vout);
+            let txout = TxOut {
+                value: bitcoin::Amount::from_sat(value),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(script.to_vec()),
+            };
+            coin_hash_bytes_into(&mut scratch, &op, &txout, coin_height, coinbase);
+            stats.muhash.insert(&scratch);
+        }
+    })?;
+    stats.height = height;
+    Ok(stats)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CoinStatsDelta {
     muhash: MuHash3072,
@@ -624,5 +657,41 @@ mod tests {
             let consensus = bitcoin::consensus::encode::serialize(&txout);
             assert_eq!(manual, consensus, "script len {len}");
         }
+    }
+
+    #[test]
+    fn scan_coin_stats_matches_rolling_listener() {
+        use bitcoin_rs_primitives::{Hash256, OutPoint};
+        use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
+
+        let mut utxo = UtxoSet::new();
+        let listener = super::CoinStatsListener::new(super::CoinStats::new());
+        utxo.set_listener(Box::new(listener.clone()));
+
+        let mut changes = BlockChanges::default();
+        for i in 1_u8..=6 {
+            let outpoint = OutPoint::new(Hash256::from_le_bytes(&[i; 32]), u32::from(i % 3));
+            let txout = TxOut {
+                value: Amount::from_sat(u64::from(i) * 100_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51; usize::from(i)]),
+            };
+            changes.add(UtxoAdd::new(outpoint, txout, i == 1, u32::from(i)));
+        }
+        utxo.commit_block(&changes, &Hash256::default())
+            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+
+        let rolling = listener.snapshot();
+        let scanned = utxo
+            .with_stable_view(|view| super::scan_coin_stats(view, rolling.height, true))
+            .unwrap_or_else(|err| panic!("scan_coin_stats failed: {err}"));
+
+        assert_eq!(scanned.utxo_count, rolling.utxo_count, "utxo_count");
+        assert_eq!(scanned.total_amount, rolling.total_amount, "total_amount");
+        assert_eq!(scanned.bogo_size, rolling.bogo_size, "bogo_size");
+        assert_eq!(
+            scanned.muhash.finalize_hash(),
+            rolling.muhash.finalize_hash(),
+            "scan muhash must match the rolling listener"
+        );
     }
 }

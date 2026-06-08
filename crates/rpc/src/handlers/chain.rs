@@ -636,8 +636,10 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             None => "hash_serialized_3",
         }
     };
-    let (snapshot, txouts, transactions, set_hash) = ctx.utxo.with_stable_view(|view| {
-        let snapshot = ctx.coin_stats.snapshot();
+    let want_muhash = hash_type == "muhash";
+    let (stats, txouts, transactions, set_hash) = ctx.utxo.with_stable_view(|view| {
+        let stats = bitcoin_rs_coinstats::scan_coin_stats(view, ctx.applied_height(), want_muhash)
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
         let set_hash = match hash_type {
             "hash_serialized_3" => Some((
                 "hash_serialized_3",
@@ -645,7 +647,7 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                     .map_err(|err| RpcError::Internal(err.to_string()))?
                     .to_string_be(),
             )),
-            "muhash" => Some(("muhash", snapshot.muhash.finalize_hash().to_string_be())),
+            "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
             "none" => None,
             _ => {
                 return Err(RpcError::InvalidParams(
@@ -653,16 +655,16 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                 ));
             }
         };
-        Ok::<_, RpcError>((snapshot, view.len(), view.record_count(), set_hash))
+        Ok::<_, RpcError>((stats, view.len(), view.record_count(), set_hash))
     })?;
-    let total_amount_btc = bitcoin::Amount::from_sat(snapshot.total_amount).to_btc();
+    let total_amount_btc = bitcoin::Amount::from_sat(stats.total_amount).to_btc();
 
     let bestblock = ctx.applied_hash().to_string_be();
     let mut response = sonic_rs::Object::new();
     let _ = response.insert(&"height", ctx.applied_height());
     let _ = response.insert(&"bestblock", bestblock.as_str());
     let _ = response.insert(&"txouts", txouts);
-    let _ = response.insert(&"bogosize", snapshot.bogo_size);
+    let _ = response.insert(&"bogosize", stats.bogo_size);
     let _ = response.insert(&"total_amount", json!(total_amount_btc));
     let _ = response.insert(&"transactions", transactions);
     let _ = response.insert(&"disk_size", 0_u64);

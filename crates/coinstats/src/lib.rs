@@ -12,4 +12,4 @@ pub mod stats;
 
 pub use muhash3072::MuHash3072;
 pub use persist::{CoinStatsPersistError, load_coin_stats, store_coin_stats};
-pub use stats::{CoinStats, CoinStatsDecodeError, CoinStatsListener};
+pub use stats::{CoinStats, CoinStatsDecodeError, CoinStatsListener, scan_coin_stats};

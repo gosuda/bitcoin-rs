@@ -317,6 +317,39 @@ pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256
     Ok(Hash256::from_le_bytes(&bytes))
 }
 
+impl UtxoSetView<'_> {
+    /// Invokes `f` once per live coin in the stable view, passing
+    /// `(txid, vout, value, script_pubkey, height, coinbase)`. The script slice
+    /// borrows arena memory valid only for the duration of the call.
+    ///
+    /// On-demand scan helper (e.g. `gettxoutsetinfo`); not on any hot path.
+    pub fn for_each_coin<F>(&self, mut f: F) -> Result<(), UtxoError>
+    where
+        F: FnMut(Hash256, u32, u64, &[u8], u32, bool),
+    {
+        for shard_idx in 0_u8..=u8::MAX {
+            self.shard(usize::from(shard_idx)).with_table(|table| {
+                for record in &table.table {
+                    let txid = record.txid();
+                    for output in record.iter_outputs() {
+                        let script = script_slice(table, output).ok_or(UtxoError::CorruptArena)?;
+                        f(
+                            txid,
+                            output.vout,
+                            output.value,
+                            script,
+                            output.height,
+                            output.coinbase,
+                        );
+                    }
+                }
+                Ok::<(), UtxoError>(())
+            })?;
+        }
+        Ok(())
+    }
+}
+
 /// Computes a deterministic aggregate hash over sorted live UTXO entries.
 pub fn aggregate_hash(set: &UtxoSet) -> Result<Hash256, UtxoError> {
     hash_serialized_3(set)

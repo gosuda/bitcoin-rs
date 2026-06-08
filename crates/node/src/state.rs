@@ -796,7 +796,14 @@ impl NodeState {
         let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
             bitcoin_rs_coinstats::CoinStats::default(),
         );
-        utxo_set.set_listener(Box::new(coin_stats_listener.clone()));
+        // The rolling coin-stats listener does per-coin MuHash + event work on
+        // the block-apply hot path. Bitcoin Core does not maintain rolling UTXO
+        // stats during IBD by default; gettxoutsetinfo scans on demand instead
+        // (see scan_coin_stats). Only register the listener when G2 MuHash
+        // sampling needs the rolling accumulator.
+        if config.g2_muhash_samples.is_some() {
+            utxo_set.set_listener(Box::new(coin_stats_listener.clone()));
+        }
         let utxo = Arc::new(utxo_set);
         let coin_stats = Arc::new(coin_stats_listener);
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
