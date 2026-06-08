@@ -13,9 +13,11 @@ use thiserror::Error;
 
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
-/// Lowered from 3: most IBD blocks touch 2+ shards; parallel commit
-/// is worthwhile whenever we have more than one active shard.
-const PARALLEL_NO_LISTENER_SHARD_THRESHOLD: usize = 2;
+/// Below this many combined add+remove operations, a multi-shard no-listener
+/// commit runs serially: a `rayon` scope plus per-shard task dispatch costs
+/// more than the handful of hash-table ops a small block touches. Larger
+/// blocks still fan out across shards.
+const PARALLEL_NO_LISTENER_OP_THRESHOLD: usize = 2048;
 /// Lowered from 16: listener event collection overhead is modest
 /// compared to the shard commit work itself.
 const PARALLEL_LISTENER_SHARD_THRESHOLD: usize = 8;
@@ -883,7 +885,8 @@ impl UtxoSet {
             );
         }
 
-        if active_shard_count < PARALLEL_NO_LISTENER_SHARD_THRESHOLD {
+        let total_ops = adds.len().saturating_add(removes.len());
+        if total_ops < PARALLEL_NO_LISTENER_OP_THRESHOLD {
             for &shard_idx in &active_shards[..active_shard_count] {
                 let shard_adds = buckets.adds(shard_idx);
                 let shard_removes = buckets.removes(shard_idx);
