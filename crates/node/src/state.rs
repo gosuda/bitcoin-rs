@@ -67,6 +67,17 @@ impl bitcoin_rs_filters::FilterIndexLike for DisabledFilterIndex {
 // extra backlog is overload and must fail fast at producers.
 pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
 
+// Bounds transient inbound-block buffering between the per-peer listener
+// threads and the single-threaded `BlockSync::tick` drain. Decoded inbound
+// blocks carry the full `Block` plus preserved wire bytes (up to ~4 MiB each),
+// so an unbounded channel lets a fast or flooding peer accumulate blocks faster
+// than they drain — an OOM vector. A full channel applies TCP backpressure to
+// the sending peer's listener thread; `tick` drains independently and holds no
+// lock a listener needs, so the bound cannot deadlock. Sized well above the
+// in-flight request window (`PENDING_BUDGET` = 128) so honest delivery, which
+// wakes the drain on every block, is never throttled.
+pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 256;
+
 /// Errors produced when applying a block to the node state.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -806,7 +817,7 @@ impl NodeState {
             crossbeam_channel::unbounded::<Vec<Header>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
         let (inbound_blocks_tx, inbound_blocks_rx_raw) =
-            crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundBlock>();
+            crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundBlock>(INBOUND_BLOCK_CHANNEL_LIMIT);
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let apply_handles = crate::apply::ApplyHandles {
             network: config.network,
@@ -1443,6 +1454,30 @@ mod tests {
         let state = NodeState::open(config)?;
         let _tx1 = state.inbound_blocks_sender();
         let _tx2 = state.inbound_blocks_sender();
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_blocks_channel_is_bounded_against_flood() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let state = NodeState::open(config)?;
+        let tx = state.inbound_blocks_sender();
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        // No `tick` drains the channel in this unit test, so it fills to the
+        // bound; the block past the limit must be rejected rather than queued
+        // (the OOM-flood guard), proving backpressure engages at the producer.
+        for _ in 0..super::INBOUND_BLOCK_CHANNEL_LIMIT {
+            tx.try_send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .expect("send within the bound must succeed");
+        }
+        let overflow = tx.try_send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()));
+        assert!(
+            matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
+            "channel must reject blocks past INBOUND_BLOCK_CHANNEL_LIMIT, got {overflow:?}",
+        );
         Ok(())
     }
 
