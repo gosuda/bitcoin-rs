@@ -425,6 +425,21 @@ pub fn apply_block(
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
 
+    if needs_g14_sample {
+        if let Some(sampler) = &handles.g14_utxo_commit_sampler {
+            if let Err(error) =
+                sampler.record(height, block_hash, block_bytes.len(), utxo_commit_dur)
+            {
+                metrics::counter!("node.apply_block.g14_utxo_commit_sample_errors").increment(1);
+                tracing::warn!(
+                    height,
+                    %error,
+                    "G14 UTXO commit sample emission failed; evidence file incomplete"
+                );
+            }
+        }
+    }
+
     // Resolve the applied header after validation and UTXO commit have
     // succeeded. Header-first sync may already have inserted this header.
     let block_tree_insert_started = quanta::Instant::now();
@@ -543,20 +558,6 @@ pub fn apply_block(
                 %error,
                 "G2 MuHash sample emission failed after tip publication; evidence file incomplete"
             );
-        }
-    }
-    if needs_g14_sample {
-        if let Some(sampler) = &handles.g14_utxo_commit_sampler {
-            if let Err(error) =
-                sampler.record(height, block_hash, block_bytes.len(), utxo_commit_dur)
-            {
-                metrics::counter!("node.apply_block.g14_utxo_commit_sample_errors").increment(1);
-                tracing::warn!(
-                    height,
-                    %error,
-                    "G14 UTXO commit sample emission failed after tip publication; evidence file incomplete"
-                );
-            }
         }
     }
     Ok(tip)

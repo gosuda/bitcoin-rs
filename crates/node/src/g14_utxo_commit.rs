@@ -128,17 +128,24 @@ impl G14UtxoCommitSampler {
             );
             return Ok(());
         }
-        let mut samples = state.samples.clone();
-        samples.insert(height, sample);
-        validate_samples(
-            &samples,
+        validate_sample(
+            &sample,
             self.ibd_start_height,
             self.ibd_stop_height,
             &self.ibd_start_hash,
             &self.ibd_stop_hash,
         )?;
-        write_samples(&self.path, &samples)?;
-        state.samples = samples;
+        state.samples.insert(height, sample);
+        if height == self.ibd_stop_height {
+            validate_samples(
+                &state.samples,
+                self.ibd_start_height,
+                self.ibd_stop_height,
+                &self.ibd_start_hash,
+                &self.ibd_stop_hash,
+            )?;
+            write_samples(&self.path, &state.samples)?;
+        }
         Ok(())
     }
 }
@@ -160,43 +167,66 @@ fn validate_samples(
 ) -> Result<()> {
     for (height, sample) in samples {
         ensure!(
-            (*height >= ibd_start_height) && (*height <= ibd_stop_height),
-            "G14 UTXO commit sample height {height} is outside configured IBD window [{ibd_start_height}, {ibd_stop_height}]"
+            *height == sample.height,
+            "G14 UTXO commit sample map key {height} must match sample height {}",
+            sample.height
         );
-        validate_block_hash(&sample.block_hash, "sample block_hash")?;
-        if *height == ibd_start_height {
-            ensure!(
-                sample.block_hash == ibd_start_hash,
-                "G14 UTXO commit sample at start height {height} has hash {}, expected {ibd_start_hash}",
-                sample.block_hash
-            );
-        }
-        if *height == ibd_stop_height {
-            ensure!(
-                sample.block_hash == ibd_stop_hash,
-                "G14 UTXO commit sample at stop height {height} has hash {}, expected {ibd_stop_hash}",
-                sample.block_hash
-            );
-        }
-        if sample.utxo_commit_us.is_some() && sample.utxo_commit_ms.is_some() {
-            bail!(
-                "G14 UTXO commit sample at height {height} must not include both utxo_commit_us and utxo_commit_ms"
-            );
-        }
-        if let Some(us) = sample.utxo_commit_us {
-            ensure!(us > 0, "utxo_commit_us must be positive at height {height}");
-        }
-        if let Some(ms) = sample.utxo_commit_ms {
-            ensure!(
-                ms.is_finite() && ms > 0.0,
-                "utxo_commit_ms must be finite and positive at height {height}"
-            );
-        }
-        if sample.utxo_commit_us.is_none() && sample.utxo_commit_ms.is_none() {
-            bail!(
-                "G14 UTXO commit sample at height {height} must include utxo_commit_us or utxo_commit_ms"
-            );
-        }
+        validate_sample(
+            sample,
+            ibd_start_height,
+            ibd_stop_height,
+            ibd_start_hash,
+            ibd_stop_hash,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_sample(
+    sample: &G14UtxoCommitSample,
+    ibd_start_height: u32,
+    ibd_stop_height: u32,
+    ibd_start_hash: &str,
+    ibd_stop_hash: &str,
+) -> Result<()> {
+    let height = sample.height;
+    ensure!(
+        height >= ibd_start_height && height <= ibd_stop_height,
+        "G14 UTXO commit sample height {height} is outside configured IBD window [{ibd_start_height}, {ibd_stop_height}]"
+    );
+    validate_block_hash(&sample.block_hash, "sample block_hash")?;
+    if height == ibd_start_height {
+        ensure!(
+            sample.block_hash == ibd_start_hash,
+            "G14 UTXO commit sample at start height {height} has hash {}, expected {ibd_start_hash}",
+            sample.block_hash
+        );
+    }
+    if height == ibd_stop_height {
+        ensure!(
+            sample.block_hash == ibd_stop_hash,
+            "G14 UTXO commit sample at stop height {height} has hash {}, expected {ibd_stop_hash}",
+            sample.block_hash
+        );
+    }
+    if sample.utxo_commit_us.is_some() && sample.utxo_commit_ms.is_some() {
+        bail!(
+            "G14 UTXO commit sample at height {height} must not include both utxo_commit_us and utxo_commit_ms"
+        );
+    }
+    if let Some(us) = sample.utxo_commit_us {
+        ensure!(us > 0, "utxo_commit_us must be positive at height {height}");
+    }
+    if let Some(ms) = sample.utxo_commit_ms {
+        ensure!(
+            ms.is_finite() && ms > 0.0,
+            "utxo_commit_ms must be finite and positive at height {height}"
+        );
+    }
+    if sample.utxo_commit_us.is_none() && sample.utxo_commit_ms.is_none() {
+        bail!(
+            "G14 UTXO commit sample at height {height} must include utxo_commit_us or utxo_commit_ms"
+        );
     }
     Ok(())
 }
@@ -342,19 +372,46 @@ mod tests {
     fn writes_measurement_compatible_json() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("utxo.samples.json");
-        let sampler = open_sampler(&path)?;
+        let sampler =
+            G14UtxoCommitSampler::open(&path, 0, 2, START_HASH.to_owned(), STOP_HASH.to_owned())?;
         sampler.record(
-            5,
-            Hash256::from_le_bytes(&[5; 32]),
+            0,
+            Hash256::from_le_bytes(&[0; 32]),
             4 * 1024 * 1024,
-            Duration::from_micros(12_500),
+            Duration::from_micros(10),
         )?;
+        assert!(
+            !path.exists(),
+            "sample file must not exist before stop height"
+        );
+        sampler.record(
+            1,
+            Hash256::from_le_bytes(&[1; 32]),
+            4 * 1024 * 1024,
+            Duration::from_micros(11),
+        )?;
+        assert!(
+            !path.exists(),
+            "sample file must not exist before stop height"
+        );
+        {
+            let mut stop_bytes = [0_u8; 32];
+            stop_bytes[0] = 0x0a;
+            sampler.record(
+                2,
+                Hash256::from_le_bytes(&stop_bytes),
+                4 * 1024 * 1024,
+                Duration::from_micros(12_500),
+            )?;
+        }
 
         let payload: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
         let samples = payload.as_array().expect("samples array");
-        assert_eq!(samples.len(), 1);
-        let sample = &samples[0];
-        assert_eq!(sample["height"], 5);
+        assert_eq!(samples.len(), 3);
+        let sample = samples
+            .iter()
+            .find(|entry| entry["height"] == 2)
+            .expect("stop-height sample");
         assert_eq!(sample["block_size_bytes"], 4 * 1024 * 1024);
         assert_eq!(sample["utxo_commit_us"], 12_500);
         Ok(())

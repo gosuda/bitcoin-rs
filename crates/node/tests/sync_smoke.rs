@@ -754,6 +754,7 @@ fn tick_writes_g14_utxo_commit_sample_for_applied_genesis() -> Result<(), Box<dy
     config.g14_utxo_commit_ibd_start_hash = Some(genesis_hash.clone());
     config.g14_utxo_commit_ibd_stop_hash = Some(genesis_hash);
     let state = NodeState::open(config)?;
+    assert!(!samples_path.exists());
 
     state.sync().tick();
 
@@ -796,6 +797,54 @@ fn tick_skips_g14_utxo_commit_samples_outside_window() -> Result<(), Box<dyn std
     state.sync().tick();
 
     assert!(!samples_path.exists());
+    Ok(())
+}
+
+#[test]
+fn apply_buffers_g14_utxo_commit_samples_until_stop_height()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let samples_path = temp.path().join("g14-utxo.samples.json");
+    let genesis = regtest_genesis_block()?;
+    let block1 = child_coinbase_block(&genesis, 1)?;
+    let start_hash = Network::Regtest.genesis_block_hash().to_string_be();
+    let stop_hash =
+        bitcoin_rs_primitives::Hash256::from_le_bytes(block1.block_hash().as_byte_array())
+            .to_string_be();
+    let mut config = Config::default_for_network(Network::Regtest);
+    config.data_dir = temp.path().join("node");
+    config.storage_backend = "redb".to_owned();
+    config.p2p_listen.clear();
+    config.g14_utxo_commit_samples = Some(samples_path.clone());
+    config.g14_utxo_commit_ibd_start_height = Some(0);
+    config.g14_utxo_commit_ibd_stop_height = Some(1);
+    config.g14_utxo_commit_ibd_start_hash = Some(start_hash);
+    config.g14_utxo_commit_ibd_stop_hash = Some(stop_hash);
+    let state = NodeState::open(config)?;
+    assert!(!samples_path.exists());
+
+    state.apply_block(&genesis)?;
+    assert!(
+        !samples_path.exists(),
+        "sample file must not exist before stop height"
+    );
+
+    state.apply_block(&block1)?;
+
+    let samples: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&samples_path)?)?;
+    let entries = samples
+        .as_array()
+        .ok_or("expected G14 UTXO samples array")?;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries[0].get("height").and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        entries[1].get("height").and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
     Ok(())
 }
 
