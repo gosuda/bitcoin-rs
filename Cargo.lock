@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bitcoin-rs-node",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-chain"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-coinstats"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-consensus"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-electrum"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-filters"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-index"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mempool"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mining"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-chain",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-node"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-p2p"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-primitives"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes 0.14.100",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-pruning"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-chain",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-rpc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-script"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-storage"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-utreexo"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-consensus-encoding 1.0.0-rc.3",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-utxo"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-wallet"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "arc-swap",
  "bdk_coin_select",
