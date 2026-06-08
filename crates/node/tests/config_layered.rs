@@ -349,6 +349,43 @@ assume_valid_height = 10000
     Ok(())
 }
 
+#[test]
+fn connect_layers_parse_cli_and_env_peer_lists() -> Result<()> {
+    let cli_config = Config::from_layered_sources(
+        None,
+        None,
+        [] as [(&str, &str); 0],
+        [
+            "bitcoin-rs-node",
+            "--connect",
+            "127.0.0.1:8333,10.0.0.2:8333",
+        ],
+    )?;
+    assert_eq!(
+        cli_config.connect,
+        vec![
+            "127.0.0.1:8333".parse::<SocketAddr>()?,
+            "10.0.0.2:8333".parse::<SocketAddr>()?,
+        ]
+    );
+
+    let env_config = Config::from_layered_sources(
+        None,
+        None,
+        [("BITCOIN_RS_CONNECT", "192.0.2.5:8333")],
+        ["bitcoin-rs-node"],
+    )?;
+    assert_eq!(
+        env_config.connect,
+        vec!["192.0.2.5:8333".parse::<SocketAddr>()?]
+    );
+
+    let default_config =
+        Config::from_layered_sources(None, None, [] as [(&str, &str); 0], ["bitcoin-rs-node"])?;
+    assert!(default_config.connect.is_empty());
+    Ok(())
+}
+
 fn assert_auth_user(auth: &Auth, expected: &str) {
     match auth {
         Auth::Basic { user, .. } => assert_eq!(user, expected),

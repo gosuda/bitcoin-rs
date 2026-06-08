@@ -104,6 +104,9 @@ pub struct Config {
     pub p2p_listen: Vec<SocketAddr>,
     /// Whether DNS seeds are used for peer bootstrap.
     pub dns_seeds_enabled: bool,
+    /// Fixed outbound peers to connect to. When non-empty, DNS seed bootstrap is
+    /// disabled and the node dials only these addresses (Bitcoin Core `-connect`).
+    pub connect: Vec<SocketAddr>,
     /// Pruning target in MiB. Zero disables pruning.
     pub prune_target_mb: u64,
     /// Whether utreexo mode is enabled.
@@ -170,6 +173,7 @@ impl fmt::Debug for Config {
             .field("electrum_tls_cert", &self.electrum_tls_cert)
             .field("p2p_listen", &self.p2p_listen)
             .field("dns_seeds_enabled", &self.dns_seeds_enabled)
+            .field("connect", &self.connect)
             .field("prune_target_mb", &self.prune_target_mb)
             .field("utreexo_mode", &self.utreexo_mode)
             .field("txindex", &self.txindex)
@@ -229,6 +233,7 @@ impl Config {
             electrum_tls_cert: None,
             p2p_listen: vec![SocketAddr::from(([0, 0, 0, 0], network.default_p2p_port()))],
             dns_seeds_enabled: true,
+            connect: Vec::new(),
             prune_target_mb: 0,
             utreexo_mode: false,
             txindex: false,
@@ -457,6 +462,9 @@ impl Config {
         if let Some(dns_seeds_enabled) = layer.dns_seeds_enabled {
             self.dns_seeds_enabled = dns_seeds_enabled;
         }
+        if let Some(connect) = &layer.connect {
+            self.connect.clone_from(connect);
+        }
         if let Some(prune_target_mb) = layer.prune_target_mb {
             self.prune_target_mb = prune_target_mb;
         }
@@ -571,6 +579,8 @@ pub(crate) struct ConfigLayer {
     pub(crate) p2p_listen: Option<Vec<SocketAddr>>,
     #[arg(long = "dns-seeds-enabled")]
     pub(crate) dns_seeds_enabled: Option<bool>,
+    #[arg(long = "connect", value_delimiter = ',')]
+    pub(crate) connect: Option<Vec<SocketAddr>>,
     #[arg(long = "prune-target-mb")]
     pub(crate) prune_target_mb: Option<u64>,
     #[arg(long = "utreexo-mode")]
@@ -652,6 +662,7 @@ impl ConfigLayer {
                 "BITCOIN_RS_DNS_SEEDS_ENABLED" => {
                     layer.dns_seeds_enabled = Some(parse_bool(value)?);
                 }
+                "BITCOIN_RS_CONNECT" => layer.connect = Some(parse_socket_list(value)?),
                 "BITCOIN_RS_PRUNE_TARGET_MB" => layer.prune_target_mb = Some(value.parse()?),
                 "BITCOIN_RS_UTREEXO_MODE" => layer.utreexo_mode = Some(parse_bool(value)?),
                 "BITCOIN_RS_TXINDEX" => layer.txindex = Some(parse_bool(value)?),

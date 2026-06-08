@@ -328,6 +328,45 @@ where
     Ok(queued.len())
 }
 
+/// Maintains outbound connections to the fixed peers from `--connect`.
+///
+/// When `connect` is configured, DNS bootstrap is disabled and the node dials
+/// only these addresses, re-queueing any that are not currently connected so a
+/// dropped link is re-established (Bitcoin Core `-connect` semantics).
+fn spawn_fixed_peer_bootstrap(
+    state: &NodeState,
+    shutdown: &Arc<AtomicBool>,
+) -> anyhow::Result<Option<std::thread::JoinHandle<()>>> {
+    let connect = state.config().connect.clone();
+    if connect.is_empty() {
+        return Ok(None);
+    }
+    let outbound_tx = state.p2p_outbound_sender();
+    let peers = state.peers();
+    let peer_outbound = state.peer_outbound();
+    let bootstrap_shutdown = Arc::clone(shutdown);
+    Ok(Some(
+        std::thread::Builder::new()
+            .name("bitcoin-rs-fixed-peer-bootstrap".to_owned())
+            .spawn(move || {
+                while !bootstrap_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    for addr in &connect {
+                        if peer_outbound.read().contains_key(addr)
+                            || peers.read().iter().any(|peer| peer.addr == *addr)
+                        {
+                            continue;
+                        }
+                        if outbound_tx.try_send(*addr).is_err() {
+                            // Queue full or closed; retry on the next tick.
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            })?,
+    ))
+}
+
 /// Boots the node from a resolved [`Config`] and runs until shutdown.
 ///
 /// Flow:
@@ -437,8 +476,11 @@ pub fn run(mut config: Config) -> Result<()> {
         sync_wake_tx,
         Arc::clone(&p2p_chain_query),
     )?;
-    let _bootstrap_worker =
-        spawn_dns_seed_bootstrap(state.config().clone(), state.p2p_outbound_sender())?;
+    let _bootstrap_worker = if state.config().connect.is_empty() {
+        spawn_dns_seed_bootstrap(state.config().clone(), state.p2p_outbound_sender())?
+    } else {
+        spawn_fixed_peer_bootstrap(&state, &shutdown)?
+    };
     loop_handle.spin(&shutdown)?;
     if let Some(handle) = electrum_thread {
         match handle.join() {
