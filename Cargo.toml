@@ -95,6 +95,12 @@ miniscript = { version = ">=13, <14", default-features = false, features = [
 ] }
 
 # rustreexo 0.5 line. `with-serde` is the alias that enables `serde`.
+# rustreexo 0.5 pulls a second rust-bitcoin stack (bitcoin-io 0.3, bitcoin_hashes
+# 0.20, bitcoin-consensus-encoding). bitcoin-io 0.3.0 requires `encoding ^1.0.0-rc.2`,
+# but that range wrongly admits encoding 1.0.0, whose `Decode`/`Encode` trait rename
+# bitcoin-io 0.3.0 never adopted. Cargo.lock pins bitcoin-consensus-encoding to
+# 1.0.0-rc.3; do not float it to 1.0.0 (build break) until rustreexo/bitcoin-io ship
+# a 0.3.x compatible with encoding 1.0.0.
 rustreexo = { version = ">=0.5, <0.6", default-features = false, features = [
     "std", "with-serde",
 ] }
