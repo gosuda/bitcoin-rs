@@ -37,8 +37,24 @@ cargo test -p bitcoin-rs --no-fail-fast --no-default-features --features "$FEATU
   ```sh
   cargo test -p bitcoin-rs-consensus --no-default-features --features kernel -- --include-ignored
   ```
-- Gate tests live in `bin/bitcoin-rs/tests/gates/` (`g01_*`..`g14_*`). Ones marked `#[ignore]` need live
+- Gate tests live in `bin/bitcoin-rs/tests/gates/` (`g01_*`..`g15_*`). Ones marked `#[ignore]` need live
   infrastructure; run with `-- --include-ignored`.
+
+## Workspace metadata
+
+Every member under `crates/` and `bin/bitcoin-rs` inherits shared package fields from
+`[workspace.package]` via `{field}.workspace = true`: `edition`, `rust-version`, `license`,
+`version`, `authors`, and `repository`. Only `name` and `description` stay per-crate.
+
+Internal path dependencies in root `[workspace.dependencies]` (`bitcoin-rs-*`) must repeat the
+same semver string as `[workspace.package].version` — Cargo cannot inherit `version` into that
+table, and `cargo publish` requires it on path deps. Gate **g15** fails if they drift; bump both
+when releasing.
+
+Wire/RPC version strings must not be hardcoded: use `bitcoin_rs_primitives::USER_AGENT` for P2P
+and `getnetworkinfo` subversion, and `env!("CARGO_PKG_VERSION")` (or `PKG_VERSION`) elsewhere.
+All workspace members share one release version, so `CARGO_PKG_VERSION` tracks the parent
+`bitcoin-rs` release.
 
 ## Lint rules (clippy-enforced at workspace level — these fail CI)
 

@@ -90,3 +90,7 @@ path = "tests/gates/g13_lints_clean.rs"
 [[test]]
 name = "g14_perf_budgets"
 path = "tests/gates/g14_perf_budgets.rs"
+
+[[test]]
+name = "g15_workspace_version_sync"
+path = "tests/gates/g15_workspace_version_sync.rs"

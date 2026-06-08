@@ -39,7 +39,8 @@ authors      = ["metaphorics"]
 # ============================================================================
 [workspace.dependencies]
 
-# Internal crates
+# Internal crates — `version` must match `[workspace.package].version` (gate g15).
+# Cargo cannot inherit `version` into `[workspace.dependencies]`; bump both together.
 bitcoin-rs-primitives = { path = "crates/primitives", version = "0.3.0" }
 bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.3.0", default-features = false }
 bitcoin-rs-script     = { path = "crates/script",     version = "0.3.0", default-features = false }
