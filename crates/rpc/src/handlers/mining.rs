@@ -153,11 +153,22 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         return Ok(json!("high-hash"));
     }
     if let Some(sender) = &ctx.inbound_blocks_sender {
-        if sender
-            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block))
-            .is_err()
-        {
-            return Ok(json!("channel-closed"));
+        // The inbound-block channel is bounded, so a sustained peer-driven flood
+        // could park this RPC worker on a blocking send. Wait briefly for a slot
+        // (the drain frees one within a tick under normal load) so a locally
+        // submitted block is not dropped, then report busy rather than blocking
+        // the connection indefinitely.
+        match sender.send_timeout(
+            bitcoin_rs_p2p::InboundBlock::from_decoded(block),
+            core::time::Duration::from_secs(2),
+        ) {
+            Ok(()) => {}
+            Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => {
+                return Ok(json!("inbound-busy"));
+            }
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                return Ok(json!("channel-closed"));
+            }
         }
     }
     // Successful enqueue (or no-sender accept path) returns null.
@@ -216,7 +227,7 @@ mod submitblock_tests {
         let received = rx
             .try_recv()
             .unwrap_or_else(|err| panic!("channel did not receive block: {err}"));
-        assert_eq!(received.block_hash(), genesis.block_hash());
+        assert_eq!(received.block.block_hash(), genesis.block_hash());
     }
 
     #[test]
