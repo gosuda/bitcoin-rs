@@ -114,7 +114,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let outbound = total.saturating_sub(inbound);
     Ok(json!({
         "version": 10000,
-        "subversion": "/bitcoin-rs:0.1.0/",
+        "subversion": "/bitcoin-rs:0.3.0/",
         "protocolversion": 70016_i64,
         "localservices": LOCAL_SERVICES_HEX,
         "localservicesnames": services_names_from_flags(LOCAL_SERVICES_FLAGS),

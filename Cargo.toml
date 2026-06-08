@@ -26,9 +26,9 @@ members = [
 edition      = "2024"
 rust-version = "1.95.0"
 license      = "MIT OR Apache-2.0"
-repository   = "https://github.com/bitcoin-rs/bitcoin-rs"
-version      = "0.1.0"
-authors      = ["bitcoin-rs contributors"]
+repository   = "https://github.com/gosuda/bitcoin-rs"
+version      = "0.3.0"
+authors      = ["metaphorics"]
 
 # ============================================================================
 # Workspace dependencies.
@@ -40,24 +40,24 @@ authors      = ["bitcoin-rs contributors"]
 [workspace.dependencies]
 
 # Internal crates
-bitcoin-rs-primitives = { path = "crates/primitives", version = "0.1.0" }
-bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.1.0", default-features = false }
-bitcoin-rs-script     = { path = "crates/script",     version = "0.1.0", default-features = false }
-bitcoin-rs-storage    = { path = "crates/storage",    version = "0.1.0", default-features = false }
-bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.1.0" }
-bitcoin-rs-utreexo    = { path = "crates/utreexo",    version = "0.1.0" }
-bitcoin-rs-chain      = { path = "crates/chain",      version = "0.1.0" }
-bitcoin-rs-index      = { path = "crates/index",      version = "0.1.0" }
-bitcoin-rs-filters    = { path = "crates/filters",    version = "0.1.0" }
-bitcoin-rs-coinstats  = { path = "crates/coinstats",  version = "0.1.0" }
-bitcoin-rs-pruning    = { path = "crates/pruning",    version = "0.1.0" }
-bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.1.0" }
-bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.1.1" }
-bitcoin-rs-wallet     = { path = "crates/wallet",     version = "0.1.0" }
-bitcoin-rs-mining     = { path = "crates/mining",     version = "0.1.0" }
-bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.1.0" }
-bitcoin-rs-electrum   = { path = "crates/electrum",   version = "0.1.0" }
-bitcoin-rs-node       = { path = "crates/node",       version = "0.1.0", default-features = false }
+bitcoin-rs-primitives = { path = "crates/primitives", version = "0.3.0" }
+bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.3.0", default-features = false }
+bitcoin-rs-script     = { path = "crates/script",     version = "0.3.0", default-features = false }
+bitcoin-rs-storage    = { path = "crates/storage",    version = "0.3.0", default-features = false }
+bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.3.0" }
+bitcoin-rs-utreexo    = { path = "crates/utreexo",    version = "0.3.0" }
+bitcoin-rs-chain      = { path = "crates/chain",      version = "0.3.0" }
+bitcoin-rs-index      = { path = "crates/index",      version = "0.3.0" }
+bitcoin-rs-filters    = { path = "crates/filters",    version = "0.3.0" }
+bitcoin-rs-coinstats  = { path = "crates/coinstats",  version = "0.3.0" }
+bitcoin-rs-pruning    = { path = "crates/pruning",    version = "0.3.0" }
+bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.3.0" }
+bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.3.0" }
+bitcoin-rs-wallet     = { path = "crates/wallet",     version = "0.3.0" }
+bitcoin-rs-mining     = { path = "crates/mining",     version = "0.3.0" }
+bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.3.0" }
+bitcoin-rs-electrum   = { path = "crates/electrum",   version = "0.3.0" }
+bitcoin-rs-node       = { path = "crates/node",       version = "0.3.0", default-features = false }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
@@ -98,9 +98,9 @@ miniscript = { version = ">=13, <14", default-features = false, features = [
 # rustreexo 0.5 pulls a second rust-bitcoin stack (bitcoin-io 0.3, bitcoin_hashes
 # 0.20, bitcoin-consensus-encoding). bitcoin-io 0.3.0 requires `encoding ^1.0.0-rc.2`,
 # but that range wrongly admits encoding 1.0.0, whose `Decode`/`Encode` trait rename
-# bitcoin-io 0.3.0 never adopted. Cargo.lock pins bitcoin-consensus-encoding to
-# 1.0.0-rc.3; do not float it to 1.0.0 (build break) until rustreexo/bitcoin-io ship
-# a 0.3.x compatible with encoding 1.0.0.
+# bitcoin-io 0.3.0 never adopted. Pin rc.3 explicitly (via utreexo) until rustreexo/
+# bitcoin-io ship a 0.3.x compatible with encoding 1.0.0.
+bitcoin-consensus-encoding = { version = "=1.0.0-rc.3" }
 rustreexo = { version = ">=0.5, <0.6", default-features = false, features = [
     "std", "with-serde",
 ] }

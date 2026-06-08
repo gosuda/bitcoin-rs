@@ -20,6 +20,8 @@ redb = []
 [dependencies]
 bitcoin-rs-primitives.workspace = true
 bitcoin.workspace = true
+# Pins the rustreexo transitive stack off encoding 1.0.0 (bitcoin-io 0.3 break).
+bitcoin-consensus-encoding.workspace = true
 rustreexo.workspace = true
 serde.workspace = true
 sha2.workspace = true

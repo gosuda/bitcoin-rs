@@ -22,7 +22,7 @@ pub fn version_message(nonce: u64, start_height: i32) -> VersionMessage {
         receiver: address.clone(),
         sender: address,
         nonce,
-        user_agent: "/bitcoin-rs:0.1.0/".to_owned(),
+        user_agent: "/bitcoin-rs:0.3.0/".to_owned(),
         start_height,
         relay: true,
     }
