@@ -15,7 +15,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 use thiserror::Error;
 
 const PROTOCOL_VERSION: &str = "1.4";
-const SERVER_VERSION: &str = "bitcoin-rs-electrum/0.3.0";
+const SERVER_VERSION: &str = concat!("bitcoin-rs-electrum/", env!("CARGO_PKG_VERSION"));
 const MAX_HEADERS: usize = 2_016;
 const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 

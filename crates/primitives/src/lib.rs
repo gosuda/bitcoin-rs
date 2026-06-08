@@ -19,6 +19,8 @@ pub mod sighash;
 pub mod tx;
 /// Bitcoin compact-size integer codec.
 pub mod varint;
+/// Workspace release version constants for wire/RPC user-agent strings.
+pub mod version;
 
 pub use block::Block;
 pub use hash::{Hash256, HashError};
@@ -27,3 +29,4 @@ pub use network::Network;
 pub use outpoint::OutPoint;
 pub use sighash::{Sighash, SighashError};
 pub use tx::{Tx, TxIn, TxOut};
+pub use version::{PKG_VERSION, USER_AGENT};

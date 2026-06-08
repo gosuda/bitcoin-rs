@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::Address;
 use bitcoin::p2p::message_network::VersionMessage;
+use bitcoin_rs_primitives::USER_AGENT;
 
 use crate::dispatch::dispatch_inbound;
 use crate::peer::{Peer, PeerState};
@@ -22,7 +23,7 @@ pub fn version_message(nonce: u64, start_height: i32) -> VersionMessage {
         receiver: address.clone(),
         sender: address,
         nonce,
-        user_agent: "/bitcoin-rs:0.3.0/".to_owned(),
+        user_agent: USER_AGENT.to_owned(),
         start_height,
         relay: true,
     }

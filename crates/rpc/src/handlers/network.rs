@@ -5,6 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
+use bitcoin_rs_primitives::USER_AGENT;
 use crossbeam_channel::TrySendError;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
@@ -114,7 +115,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let outbound = total.saturating_sub(inbound);
     Ok(json!({
         "version": 10000,
-        "subversion": "/bitcoin-rs:0.3.0/",
+        "subversion": USER_AGENT,
         "protocolversion": 70016_i64,
         "localservices": LOCAL_SERVICES_HEX,
         "localservicesnames": services_names_from_flags(LOCAL_SERVICES_FLAGS),
