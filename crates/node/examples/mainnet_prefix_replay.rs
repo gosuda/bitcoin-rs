@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     let mut stop_hash = None;
 
     let mut source = match &args.rest_url {
-        Some(host) => BlockSource::Rest(RestClient::connect(host)?),
+        Some(host) => BlockSource::Rest(spawn_prefetch(host, args.start_height, args.stop_height)?),
         None => BlockSource::Cli(&args),
     };
     for height in args.start_height..=args.stop_height {
@@ -313,15 +313,19 @@ impl RestClient {
     }
 }
 
-/// Where replay blocks come from: per-call `bitcoin-cli` spawns or a persistent REST socket.
+/// A fetched block: `(block_hash_hex, raw_block_bytes)`.
+type FetchedBlock = (String, Vec<u8>);
+
+/// Where replay blocks come from: per-call `bitcoin-cli` spawns or a prefetch
+/// thread reading ahead over a persistent REST socket.
 enum BlockSource<'a> {
     Cli(&'a Args),
-    Rest(RestClient),
+    Rest(crossbeam_channel::Receiver<Result<FetchedBlock>>),
 }
 
 impl BlockSource<'_> {
     /// Returns `(block_hash_hex, raw_block_bytes)` for `height`.
-    fn fetch(&mut self, height: u32) -> Result<(String, Vec<u8>)> {
+    fn fetch(&mut self, height: u32) -> Result<FetchedBlock> {
         match self {
             Self::Cli(args) => {
                 let hash = bitcoin_cli(args, ["getblockhash".to_owned(), height.to_string()])
@@ -333,21 +337,49 @@ impl BlockSource<'_> {
                     .with_context(|| format!("decode block hex at height {height}"))?;
                 Ok((hash, bytes))
             }
-            Self::Rest(client) => {
-                let hash_bytes = client
-                    .get(&format!("/rest/blockhashbyheight/{height}.hex"))
-                    .with_context(|| format!("get block hash at height {height}"))?;
-                let hash = String::from_utf8(hash_bytes)
-                    .context("block hash response is not UTF-8")?
-                    .trim()
-                    .to_owned();
-                let bytes = client
-                    .get(&format!("/rest/block/{hash}.bin"))
-                    .with_context(|| format!("get block {hash} at height {height}"))?;
-                Ok((hash, bytes))
-            }
+            Self::Rest(receiver) => receiver
+                .recv()
+                .with_context(|| format!("prefetch thread gone before height {height}"))?,
         }
     }
+}
+
+/// Reads blocks ahead of the apply loop so fetch latency overlaps validation —
+/// the serial round-trip-per-block fetch otherwise accounts for ~24% of replay
+/// wall-clock (96s of 397s over 0..150k), time a real node spends overlapped
+/// with download or disk reads on other threads.
+fn spawn_prefetch(
+    host: &str,
+    start_height: u32,
+    stop_height: u32,
+) -> Result<crossbeam_channel::Receiver<Result<FetchedBlock>>> {
+    let mut client = RestClient::connect(host)?;
+    let (sender, receiver) = crossbeam_channel::bounded(32);
+    std::thread::spawn(move || {
+        for height in start_height..=stop_height {
+            let item = fetch_rest_block(&mut client, height);
+            let failed = item.is_err();
+            // A send error means the apply loop dropped the receiver; stop.
+            if sender.send(item).is_err() || failed {
+                return;
+            }
+        }
+    });
+    Ok(receiver)
+}
+
+fn fetch_rest_block(client: &mut RestClient, height: u32) -> Result<FetchedBlock> {
+    let hash_bytes = client
+        .get(&format!("/rest/blockhashbyheight/{height}.hex"))
+        .with_context(|| format!("get block hash at height {height}"))?;
+    let hash = String::from_utf8(hash_bytes)
+        .context("block hash response is not UTF-8")?
+        .trim()
+        .to_owned();
+    let bytes = client
+        .get(&format!("/rest/block/{hash}.bin"))
+        .with_context(|| format!("get block {hash} at height {height}"))?;
+    Ok((hash, bytes))
 }
 
 fn bitcoin_cli(args: &Args, command_args: impl IntoIterator<Item = String>) -> Result<String> {
