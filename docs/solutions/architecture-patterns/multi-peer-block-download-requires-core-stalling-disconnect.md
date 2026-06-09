@@ -161,6 +161,10 @@ Scheduler entry points: `BlockSync` (sync.rs), `DownloadWindow::next_peer_reques
   `e95eb58` (bound submitblock inbound-channel send).
 - Reverted experiment: `5608279` (opt-in parallel download) — recoverable via git history; do not
   restack speculatively.
+- Sibling learning, same "optimize the path with headroom" principle applied to script verification:
+  `script-verification-delegated-to-core-c-no-rust-headroom.md` — the default `bitcoinconsensus` path is
+  Core's own C engine (no Rust headroom); speed must come from non-script paths. Guidance point 1 here
+  makes the identical argument for the apply/UTXO/wire path.
 - Investigation residue (gitignored scratch): `.outline/sim/agg_sim.rs`,
   `.outline/live-smoke/criterion-1000/`.
 - Prior-session planning evidence (Codex memory): `~/.codex/memories/MEMORY.md` task group

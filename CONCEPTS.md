@@ -22,3 +22,14 @@ Stalling detection is the mechanism that identifies the staller and, in the refe
 
 ### assumevalid
 A validation mode that skips script-signature verification for blocks at or below a configured trusted height while still performing every other consensus check, used to accelerate IBD without abandoning validation; blocks above the height are fully verified.
+
+## Consensus validation
+
+### bitcoinconsensus
+Bitcoin Core's script-verification engine, extracted as a C library and linked into bitcoin-rs as the default backend for **non-taproot** script verification; it performs the per-input signature and script checks (for non-taproot inputs) that assumevalid skips below the trusted height. Because it is Core's own compiled code, that path is byte-identical to Core and runs at Core's speed — so it is not a path on which bitcoin-rs can be faster than Core. Taproot inputs instead run the parallel Rust validation path's interpreter even on the default build, and any speed advantage over Core must come from non-script paths.
+
+### bitcoinkernel
+Bitcoin Core's consensus engine exposed as a fuller library than bitcoinconsensus, treated here as the consensus source of truth: when the parallel Rust validation path and the kernel disagree on whether a block or transaction is valid, the kernel wins. Built only in isolation — it cannot coexist with bitcoinconsensus in a single binary because their native Core symbols overlap.
+
+### Parallel Rust validation path
+bitcoin-rs's own Rust implementation of block and transaction validation, including a script interpreter, maintained alongside the C engines. Its binding invariant is byte-identical accept/reject decisions versus bitcoinkernel. It exists so the node is not wholly dependent on Core's C code, and it is where Rust-side script-path optimization actually has headroom — unlike the default bitcoinconsensus path.
