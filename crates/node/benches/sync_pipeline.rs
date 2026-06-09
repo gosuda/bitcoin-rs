@@ -160,7 +160,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_pure_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Disabled),
+                || SyncFixture::new(TxIndexMode::Disabled).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -170,7 +170,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_indexed_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Noop),
+                || SyncFixture::new(TxIndexMode::Noop).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -180,7 +180,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_received_scan_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Disabled),
+                || SyncFixture::new(TxIndexMode::Disabled).prebuild_unsolicited(),
                 |fixture| black_box(fixture.request_after_unsolicited_received()),
                 BatchSize::SmallInput,
             );
@@ -200,7 +200,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_in_order_inbound_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Disabled),
+                || SyncFixture::new(TxIndexMode::Disabled).prebuild_in_order(),
                 |fixture| black_box(fixture.run_in_order_inbound()),
                 BatchSize::SmallInput,
             );
@@ -224,6 +224,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
                         1,
                         SYNC_OVERSIZED_BURST_BLOCKS,
                     )
+                    .prebuild_oversized_burst()
                 },
                 |fixture| black_box(fixture.run_oversized_inbound_burst()),
                 BatchSize::SmallInput,
@@ -235,7 +236,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_txindex_rocksdb_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::RocksDb),
+                || SyncFixture::new(TxIndexMode::RocksDb).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -248,7 +249,7 @@ fn bench_production_state_sync(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_production_state_128_blocks",
         |b| {
             b.iter_batched(
-                || ProductionStateSyncFixture::new(1),
+                || ProductionStateSyncFixture::new(1).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -259,7 +260,7 @@ fn bench_production_state_sync(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_production_state_fjall_all_indexes_128_blocks",
         |b| {
             b.iter_batched(
-                || ProductionStateSyncFixture::new_fjall_all_indexes(1),
+                || ProductionStateSyncFixture::new_fjall_all_indexes(1).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -270,7 +271,7 @@ fn bench_production_state_sync(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_production_state_fjall_all_indexes_spend_heavy",
         |b| {
             b.iter_batched(
-                ProductionStateSyncFixture::new_fjall_all_indexes_spend_heavy,
+                || ProductionStateSyncFixture::new_fjall_all_indexes_spend_heavy().prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -446,6 +447,10 @@ struct SyncFixture {
     peer_outbound: Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
+    /// Inbound payloads pre-cloned and pre-serialized during (untimed) setup, in
+    /// the exact order the timed scenario sends them. Built off the production
+    /// path so the timed region measures only the channel handoff plus `tick`.
+    prebuilt_inbound: Vec<bitcoin_rs_p2p::InboundBlock>,
     received_scan_expected: Vec<BlockHash>,
     _tx_index_dir: Option<TempDir>,
 }
@@ -510,9 +515,53 @@ impl SyncFixture {
             peer_outbound,
             applied_tip,
             blocks,
+            prebuilt_inbound: Vec::new(),
             received_scan_expected,
             _tx_index_dir: tx_index_dir,
         }
+    }
+
+    /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
+    /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
+    fn prebuild_run(mut self) -> Self {
+        self.prebuilt_inbound = self.blocks[1..]
+            .iter()
+            .rev()
+            .chain(std::iter::once(&self.blocks[0]))
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .collect();
+        self
+    }
+
+    /// Pre-builds the single unsolicited payload `request_after_unsolicited_received`
+    /// stages (block height 2).
+    fn prebuild_unsolicited(mut self) -> Self {
+        self.prebuilt_inbound = vec![bitcoin_rs_p2p::InboundBlock::from_decoded(
+            self.blocks[1].clone(),
+        )];
+        self
+    }
+
+    /// Pre-builds the in-order inbound payloads (`run_in_order_inbound`): every
+    /// block in ascending height order.
+    fn prebuild_in_order(mut self) -> Self {
+        self.prebuilt_inbound = self
+            .blocks
+            .iter()
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .collect();
+        self
+    }
+
+    /// Pre-builds the oversized burst payloads (`run_oversized_inbound_burst`):
+    /// heights `2..=N` reversed.
+    fn prebuild_oversized_burst(mut self) -> Self {
+        self.prebuilt_inbound = self.blocks[1..]
+            .iter()
+            .rev()
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .collect();
+        self
     }
 
     fn new_reverse_scan_overflow(tx_index_mode: TxIndexMode) -> Self {
@@ -537,7 +586,7 @@ impl SyncFixture {
         fixture
     }
 
-    fn run(self) -> u32 {
+    fn run(mut self) -> u32 {
         self.sync.tick();
         let getdata_count = match self
             .outbound_rxs
@@ -563,16 +612,22 @@ impl SyncFixture {
             }
         }
 
-        for block in self.blocks[1..].iter().rev() {
+        // prebuilt_inbound holds heights 2..=N reversed, then height 1 last.
+        // Send the out-of-order tail, tick, then deliver the contiguous head and
+        // tick again — same send order and tick interleaving as before, but the
+        // clone+serialize now happens in setup, not the timed region.
+        let mut prebuilt = std::mem::take(&mut self.prebuilt_inbound).into_iter();
+        let contiguous = prebuilt
+            .next_back()
+            .unwrap_or_else(|| panic!("missing prebuilt contiguous block"));
+        for inbound in prebuilt {
             self.inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(inbound)
                 .unwrap_or_else(|error| panic!("send staged block failed: {error}"));
         }
         self.sync.tick();
         self.inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-                self.blocks[0].clone(),
-            ))
+            .send(contiguous)
             .unwrap_or_else(|error| panic!("send contiguous block failed: {error}"));
         self.sync.tick();
 
@@ -596,11 +651,13 @@ impl SyncFixture {
             .sum()
     }
 
-    fn request_after_unsolicited_received(self) -> usize {
+    fn request_after_unsolicited_received(mut self) -> usize {
+        let unsolicited = std::mem::take(&mut self.prebuilt_inbound)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("missing prebuilt unsolicited block"));
         self.inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-                self.blocks[1].clone(),
-            ))
+            .send(unsolicited)
             .unwrap_or_else(|error| panic!("send unsolicited staged block failed: {error}"));
         self.sync.tick();
         let requested = match self
@@ -649,7 +706,7 @@ impl SyncFixture {
         requested.len()
     }
 
-    fn run_in_order_inbound(self) -> u32 {
+    fn run_in_order_inbound(mut self) -> u32 {
         self.sync.tick();
         let getdata_count = match self
             .outbound_rxs
@@ -663,9 +720,9 @@ impl SyncFixture {
         };
         assert_eq!(getdata_count, SYNC_PROXY_BLOCKS_USIZE);
 
-        for block in &self.blocks {
+        for inbound in std::mem::take(&mut self.prebuilt_inbound) {
             self.inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(inbound)
                 .unwrap_or_else(|error| panic!("send in-order block failed: {error}"));
         }
         self.sync.tick();
@@ -676,11 +733,11 @@ impl SyncFixture {
             .height
     }
 
-    fn run_oversized_inbound_burst(self) -> usize {
+    fn run_oversized_inbound_burst(mut self) -> usize {
         self.sync.tick();
-        for block in self.blocks[1..].iter().rev() {
+        for inbound in std::mem::take(&mut self.prebuilt_inbound) {
             self.inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(inbound)
                 .unwrap_or_else(|error| panic!("send oversized burst block failed: {error}"));
         }
         self.sync.tick();
@@ -693,6 +750,10 @@ struct ProductionStateSyncFixture {
     state: NodeState,
     outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
     blocks: Vec<Block>,
+    /// Inbound payloads pre-cloned and pre-serialized during (untimed) setup for
+    /// the `run` scenario, in send order (heights `2..=N` reversed, then height
+    /// 1 last). Left empty for the apply-tick scenarios, which stage in setup.
+    prebuilt_inbound: Vec<bitcoin_rs_p2p::InboundBlock>,
     expected_getdata_count: usize,
 }
 
@@ -767,25 +828,44 @@ impl ProductionStateSyncFixture {
             state,
             outbound_rxs,
             blocks,
+            prebuilt_inbound: Vec::new(),
             expected_getdata_count,
         }
     }
 
-    fn run(self) -> u32 {
+    /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
+    /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
+    fn prebuild_run(mut self) -> Self {
+        self.prebuilt_inbound = self.blocks[1..]
+            .iter()
+            .rev()
+            .chain(std::iter::once(&self.blocks[0]))
+            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+            .collect();
+        self
+    }
+
+    fn run(mut self) -> u32 {
         let sync = self.state.sync();
         sync.tick();
         self.assert_getdata_batch();
         let inbound_blocks_tx = self.state.inbound_blocks_sender();
-        for block in self.blocks[1..].iter().rev() {
+        // prebuilt_inbound holds heights 2..=N reversed, then height 1 last.
+        // Send the out-of-order tail, tick, then deliver the contiguous head and
+        // tick again — same send order and tick interleaving, with clone+serialize
+        // moved to setup.
+        let mut prebuilt = std::mem::take(&mut self.prebuilt_inbound).into_iter();
+        let contiguous = prebuilt
+            .next_back()
+            .unwrap_or_else(|| panic!("missing prebuilt contiguous block"));
+        for inbound in prebuilt {
             inbound_blocks_tx
-                .send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+                .send(inbound)
                 .unwrap_or_else(|error| panic!("send production staged block failed: {error}"));
         }
         sync.tick();
         inbound_blocks_tx
-            .send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-                self.blocks[0].clone(),
-            ))
+            .send(contiguous)
             .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
         sync.tick();
         self.state
