@@ -314,6 +314,16 @@ fn apply_block_inner(
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
         .record(script_verify_dur.as_secs_f64());
+    // Same duration split by dispatch path, so replay decompositions can
+    // attribute time to the serial overlay walk vs the rayon fan-out.
+    let script_verify_path = if tx_plan.only_coinbase {
+        "node.apply_block.script_verify_coinbase_only_seconds"
+    } else if tx_plan.needs_local_utxo_overlay {
+        "node.apply_block.script_verify_serial_overlay_seconds"
+    } else {
+        "node.apply_block.script_verify_parallel_seconds"
+    };
+    metrics::histogram!(script_verify_path).record(script_verify_dur.as_secs_f64());
     script_verify_result?;
 
     let coinbase_maturity_started = quanta::Instant::now();
@@ -932,23 +942,44 @@ fn verify_block_transactions(
     // spend an output created earlier in the same block. Coinbase outputs enter
     // this view too, so maturity failures stay in the maturity pass instead of
     // degrading into bogus missing-prevout script checks.
+    //
+    // Resolution is order-sensitive; script verification is not. Walk the block
+    // serially resolving each transaction's prevouts against the overlay frozen
+    // at its position (cheap map reads), then run the expensive script checks in
+    // parallel against the per-transaction snapshots. Each transaction sees
+    // byte-identical prevouts to the old interleaved serial loop; a prevout
+    // created later in the block (or already spent) is absent from its snapshot
+    // and fails verification exactly as before.
     let mut view = BlockLocalUtxoView::new(Arc::clone(&handles.utxo), tx_plan.overlay_capacity);
-    for (tx, txid) in block.txdata.iter().zip(txids) {
+    let mut resolved: Vec<(
+        usize,
+        std::collections::BTreeMap<bitcoin::OutPoint, bitcoin::TxOut>,
+    )> = Vec::with_capacity(block.txdata.len());
+    for (index, (tx, txid)) in block.txdata.iter().zip(txids).enumerate() {
         if tx.is_coinbase() {
             bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
             view.add_outputs(tx, *txid, height)?;
             continue;
         }
-        bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
-            tx,
-            &view,
-            height,
-            locktime_cutoff,
-            flags,
-        )?;
+        let mut prevouts = std::collections::BTreeMap::new();
+        for input in &tx.input {
+            if let Some(txout) = view.lookup(&input.previous_output) {
+                prevouts.insert(input.previous_output, txout);
+            }
+        }
+        resolved.push((index, prevouts));
         view.spend_inputs(tx);
         view.add_outputs(tx, *txid, height)?;
     }
+    resolved.par_iter().try_for_each(|(index, prevouts)| {
+        bitcoin_rs_consensus::verify_tx::verify_transaction_borrowed_with_mtp(
+            &block.txdata[*index],
+            prevouts,
+            height,
+            locktime_cutoff,
+            flags,
+        )
+    })?;
     Ok(())
 }
 
