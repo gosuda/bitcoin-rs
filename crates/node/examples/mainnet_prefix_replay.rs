@@ -6,7 +6,7 @@ use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use bitcoin::Block;
@@ -33,6 +33,7 @@ fn main() -> Result<()> {
     config.dns_seeds_enabled = false;
     config.txindex = args.txindex;
     config.blockfilterindex = args.blockfilterindex;
+    config.assume_valid_height = args.assume_valid_height;
 
     let state = NodeState::open(config).context("open node state")?;
     let mut tx_count = 0_usize;
@@ -75,6 +76,7 @@ fn main() -> Result<()> {
         "storage_backend": args.storage_backend,
         "txindex": args.txindex,
         "blockfilterindex": args.blockfilterindex,
+        "assume_valid_height": args.assume_valid_height,
         "start_height": args.start_height,
         "start_hash": start_hash,
         "stop_height": args.stop_height,
@@ -106,6 +108,7 @@ struct Args {
     bitcoin_cli: String,
     bitcoin_cli_args: Vec<String>,
     rest_url: Option<String>,
+    assume_valid_height: u32,
     data_dir: PathBuf,
     output: Option<PathBuf>,
     start_height: u32,
@@ -121,6 +124,7 @@ impl Args {
             bitcoin_cli: "bitcoin-cli".to_owned(),
             bitcoin_cli_args: Vec::new(),
             rest_url: None,
+            assume_valid_height: 0,
             data_dir: PathBuf::from(".bitcoin-rs-mainnet-prefix-replay"),
             output: None,
             start_height: 0,
@@ -141,6 +145,10 @@ impl Args {
                 }
                 "--bitcoin-cli" => parsed.bitcoin_cli = next_arg(&mut args, "--bitcoin-cli")?,
                 "--rest-url" => parsed.rest_url = Some(next_arg(&mut args, "--rest-url")?),
+                "--assume-valid-height" => {
+                    parsed.assume_valid_height =
+                        parse_height(&next_arg(&mut args, "--assume-valid-height")?)?;
+                }
                 "--bitcoin-cli-arg" => {
                     parsed
                         .bitcoin_cli_args
@@ -190,8 +198,17 @@ struct RestClient {
 }
 
 impl RestClient {
+    /// Upper bound on an accepted response body. The largest legitimate body is
+    /// one serialized block (≤4 MB by consensus weight); anything bigger means
+    /// the URL points at something that is not a bitcoind REST endpoint.
+    const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
     fn connect(host: &str) -> Result<Self> {
         let stream = TcpStream::connect(host).with_context(|| format!("connect to {host}"))?;
+        // A stalled server must fail the replay loudly, not freeze a
+        // multi-hour run inside a blocking read.
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(30)))?;
         Ok(Self {
             host: host.to_owned(),
             stream: BufReader::new(stream),
@@ -199,13 +216,16 @@ impl RestClient {
     }
 
     fn get(&mut self, path: &str) -> Result<Vec<u8>> {
-        if let Ok(body) = self.request(path) {
-            return Ok(body);
-        }
+        let first_err = match self.request(path) {
+            Ok(body) => return Ok(body),
+            Err(err) => err,
+        };
         // The server may close a kept-alive connection between requests;
-        // reconnect once before giving up.
-        *self = Self::connect(&self.host)?;
+        // reconnect once before giving up, keeping the first failure's cause.
+        *self =
+            Self::connect(&self.host).with_context(|| format!("reconnect after: {first_err:#}"))?;
         self.request(path)
+            .with_context(|| format!("retry after: {first_err:#}"))
     }
 
     fn request(&mut self, path: &str) -> Result<Vec<u8>> {
@@ -233,10 +253,17 @@ impl RestClient {
                 content_length = Some(value.parse().context("parse Content-Length")?);
             }
         }
-        let length = content_length.context("REST response without Content-Length")?;
+        let length = content_length
+            .with_context(|| format!("REST response without Content-Length: {status}"))?;
+        if length > Self::MAX_BODY_BYTES {
+            bail!("REST GET {path}: Content-Length {length} exceeds sane bound ({status})");
+        }
         let mut body = vec![0_u8; length];
+        // Drain the body before judging the status so a kept-alive connection
+        // stays in sync after an HTTP error response.
         self.stream.read_exact(&mut body)?;
-        if !status.contains(" 200 ") {
+        let status_code = status.split_whitespace().nth(1);
+        if status_code != Some("200") {
             bail!("REST GET {path} failed: {status}");
         }
         Ok(body)
@@ -325,6 +352,6 @@ fn rss_high_water_bytes() -> Option<u64> {
 
 fn print_usage() {
     println!(
-        "usage: cargo run -p bitcoin-rs-node --example mainnet_prefix_replay --no-default-features --features fjall -- --stop-height <height> [--rest-url <host:port>] [--bitcoin-cli <path>] [--bitcoin-cli-arg <arg>]... [--data-dir <path>] [--output <path>] [--txindex] [--blockfilterindex]"
+        "usage: cargo run -p bitcoin-rs-node --example mainnet_prefix_replay --no-default-features --features fjall -- --stop-height <height> [--rest-url <host:port>] [--assume-valid-height <height>] [--bitcoin-cli <path>] [--bitcoin-cli-arg <arg>]... [--data-dir <path>] [--output <path>] [--txindex] [--blockfilterindex]"
     );
 }

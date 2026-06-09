@@ -454,8 +454,9 @@ impl BlockSync {
         (applied, failed)
     }
 
-    /// Horizon for an apply-cache repopulation: at least `staged_count`, but no
-    /// more than the download window's pending-block budget.
+    /// Horizon for an apply-cache repopulation: the larger of `staged_count`
+    /// (the run must cover this round's drain) and the download window's
+    /// pending-block budget (so later rounds hit the cache).
     ///
     /// `staged_count` covers the blocks already ready to apply this round.
     /// Extending up to `max_pending_blocks` lets later rounds — which apply the
@@ -2941,15 +2942,24 @@ mod tests {
             "chain tip must move for this test to be meaningful"
         );
 
-        // Round 2: stage the next body. The stale cache's chain-tip key no longer
-        // matches, so drain_cached_expected_blocks misses; the run is recomputed
-        // against the new tip (or yields nothing if the fork shortened the chain).
+        // The decisive probe: with the tip moved, the stale entry must be
+        // rejected by its validity keys BEFORE any repopulation can mask a
+        // broken eviction (a later apply round always rekeys the cache, so
+        // asserting on the post-apply snapshot alone is vacuous).
+        assert!(
+            fixture.sync.drain_cached_expected_blocks(1).is_none(),
+            "stale cache keyed to the old chain tip must not serve a drain"
+        );
+
+        // Round 2: stage the next body. The miss recomputes the run against the
+        // new tip and repopulates the cache keyed to the moved tip's hash.
         stage_body(&fixture.sync, &fixture.blocks[1]);
         let _ = fixture.sync.apply_buffered_blocks(None);
-        let after = cache_snapshot(&fixture.sync);
-        assert!(
-            after.is_none_or(|cache| cache.chain_tip_hash != original_chain_tip_hash),
-            "stale cache keyed to the old chain tip must not survive the move"
+        let after = cache_snapshot(&fixture.sync)
+            .ok_or_else(|| std::io::Error::other("miss did not repopulate apply cache"))?;
+        assert_ne!(
+            after.chain_tip_hash, original_chain_tip_hash,
+            "repopulated cache must be keyed to the moved tip"
         );
         Ok(())
     }

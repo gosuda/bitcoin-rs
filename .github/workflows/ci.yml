@@ -70,6 +70,13 @@ jobs:
       - run: |
           cargo bench -p bitcoin-rs --no-run \
             --no-default-features --features "${PORTABLE_FEATURES}"
+      # Crate-level bench targets are unreachable from -p bitcoin-rs; compile
+      # them in both allocator configurations so bench-mimalloc breakage is
+      # visible to CI.
+      - run: cargo bench -p bitcoin-rs-coinstats -p bitcoin-rs-utxo --no-run
+      - run: |
+          cargo bench -p bitcoin-rs-coinstats -p bitcoin-rs-utxo --no-run \
+            --features bench-mimalloc
 
   deny:
     runs-on: ubuntu-latest
