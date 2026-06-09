@@ -66,6 +66,11 @@ const INBOUND_BLOCK_STAGE_CHUNK: usize =
 /// scheduler normally needs only one healthy peer to fill the whole window.
 const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 
+// The apply-side cache horizon (`expected_apply_horizon`) stays within the
+// inline capacity below only because the staging budget equals the in-flight
+// budget; a drift would silently spill every cached run to the heap.
+const _: () = assert!(PENDING_BUDGET == RECEIVED_BLOCK_BUDGET);
+
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 const fn at_least_one(value: usize) -> usize {
@@ -110,6 +115,21 @@ struct ExpectedApplyCache {
     applied_tip_hash: Hash256,
     applied_tip_height: u32,
     offset: usize,
+    hashes: ExpectedBlockHashes,
+}
+
+/// A contiguous run of expected apply hashes together with the chain/applied
+/// tip snapshot it was computed against.
+///
+/// The validity keys are captured at the moment the parent-walk reads the
+/// block tree, so a cache built from this run is coherent with the hashes it
+/// holds — no second `load_full` is taken (which would reopen a TOCTOU gap
+/// between the hashes and the keys that guard them).
+#[derive(Clone, Debug)]
+struct ExpectedRun {
+    chain_tip_hash: Hash256,
+    applied_tip_hash: Hash256,
+    applied_tip_height: u32,
     hashes: ExpectedBlockHashes,
 }
 
@@ -370,12 +390,20 @@ impl BlockSync {
         let (drained, expected_len) = self
             .drain_cached_expected_blocks(staged_count)
             .unwrap_or_else(|| {
-                let expected_hashes = self.expected_block_hashes(staged_count);
-                let expected_len = expected_hashes.len();
-                let drained = self
-                    .block_stager
-                    .lock()
-                    .drain_expected_prefix(&expected_hashes);
+                // Cache miss: walk the block tree once for the expected run, drain
+                // the staged prefix, and repopulate the cache from the freshly
+                // computed hashes so subsequent rounds (as more blocks stage under
+                // the same chain/applied tip) hit instead of re-walking.
+                let horizon = self.expected_apply_horizon(staged_count);
+                let run = self.expected_block_hashes(horizon);
+                let expected_len = run.as_ref().map_or(0, |run| run.hashes.len());
+                let drained = match run.as_ref() {
+                    Some(run) => self.block_stager.lock().drain_expected_prefix(&run.hashes),
+                    None => Vec::new(),
+                };
+                if let Some(run) = run {
+                    self.populate_expected_apply_cache(run);
+                }
                 (drained, expected_len)
             });
         let mut applied_hashes = ExpectedBlockHashes::with_capacity(expected_len);
@@ -426,21 +454,39 @@ impl BlockSync {
         (applied, failed)
     }
 
-    fn expected_block_hashes(&self, max_count: usize) -> ExpectedBlockHashes {
+    /// Horizon for an apply-cache repopulation: at least `staged_count`, but no
+    /// more than the download window's pending-block budget.
+    ///
+    /// `staged_count` covers the blocks already ready to apply this round.
+    /// Extending up to `max_pending_blocks` lets later rounds — which apply the
+    /// blocks that were merely in flight when this run was computed — hit the
+    /// cache instead of re-walking. The result is bounded by the larger of the
+    /// two budgets: `staged_count` never exceeds the stager's
+    /// `RECEIVED_BLOCK_BUDGET`, and the const assertion next to
+    /// `ExpectedBlockHashes` pins that equal to `PENDING_BUDGET`, so the run
+    /// always fits the inline `SmallVec` capacity.
+    fn expected_apply_horizon(&self, staged_count: usize) -> usize {
+        // Snapshot the cap and release the window lock before any tree read so we
+        // never invert the tree -> window lock order used elsewhere.
+        let max_pending_blocks = self.download_window.lock().max_pending_blocks();
+        staged_count.max(max_pending_blocks)
+    }
+
+    /// Walks the active header chain from `applied_tip + 1` up to `max_count`
+    /// blocks, snapshotting the chain/applied tip it walked against.
+    ///
+    /// Returns `None` unless the run reaches `start_height` contiguously (the
+    /// reorg / pruning guard); a partial run is never returned so the caller
+    /// cannot apply or cache a non-contiguous prefix.
+    fn expected_block_hashes(&self, max_count: usize) -> Option<ExpectedRun> {
         if max_count == 0 {
-            return ExpectedBlockHashes::new();
+            return None;
         }
-        let Some(chain_tip) = self.handles.chain_tip.load_full() else {
-            return ExpectedBlockHashes::new();
-        };
-        let Some(applied_tip) = self.handles.applied_tip.load_full() else {
-            return ExpectedBlockHashes::new();
-        };
-        let Some(start_height) = applied_tip.height.checked_add(1) else {
-            return ExpectedBlockHashes::new();
-        };
+        let chain_tip = self.handles.chain_tip.load_full()?;
+        let applied_tip = self.handles.applied_tip.load_full()?;
+        let start_height = applied_tip.height.checked_add(1)?;
         if start_height > chain_tip.height {
-            return ExpectedBlockHashes::new();
+            return None;
         }
 
         let max_offset = u32::try_from(max_count.saturating_sub(1)).unwrap_or(u32::MAX);
@@ -450,9 +496,7 @@ impl BlockSync {
         let capacity = usize::try_from(end_height.saturating_sub(start_height).saturating_add(1))
             .unwrap_or(max_count);
         let tree = self.handles.block_tree.read();
-        let Some(mut cursor) = tree.node_at_height_from(chain_tip.tip_id, end_height) else {
-            return ExpectedBlockHashes::new();
-        };
+        let mut cursor = tree.node_at_height_from(chain_tip.tip_id, end_height)?;
         let mut hashes = ExpectedBlockHashes::with_capacity(capacity);
         let mut reached_start = false;
         while let Ok(node) = tree.node(cursor) {
@@ -470,10 +514,35 @@ impl BlockSync {
             cursor = parent;
         }
         if !reached_start {
-            return ExpectedBlockHashes::new();
+            return None;
         }
         hashes.reverse();
-        hashes
+        Some(ExpectedRun {
+            chain_tip_hash: chain_tip.hash,
+            applied_tip_hash: applied_tip.hash,
+            applied_tip_height: applied_tip.height,
+            hashes,
+        })
+    }
+
+    /// Repopulates the apply cache from a freshly computed expected run.
+    ///
+    /// Stores the full horizon at `offset: 0` keyed by the snapshot the run was
+    /// computed against. `advance_expected_apply_cache` then advances `offset`
+    /// past the blocks applied this round, so the next round drains the
+    /// remaining suffix on a cache hit. The run is empty only when there is
+    /// nothing to apply, in which case caching would be a no-op.
+    fn populate_expected_apply_cache(&self, run: ExpectedRun) {
+        if run.hashes.is_empty() {
+            return;
+        }
+        *self.expected_apply_cache.lock() = Some(ExpectedApplyCache {
+            chain_tip_hash: run.chain_tip_hash,
+            applied_tip_hash: run.applied_tip_hash,
+            applied_tip_height: run.applied_tip_height,
+            offset: 0,
+            hashes: run.hashes,
+        });
     }
 
     fn drain_cached_expected_blocks(&self, max_count: usize) -> Option<(Vec<DrainedBlock>, usize)> {
@@ -2595,6 +2664,332 @@ mod tests {
         assert!(
             fixture.applied_tip.load_full().is_none(),
             "missing next expected block should prevent out-of-order apply"
+        );
+        Ok(())
+    }
+
+    struct ApplyCacheFixture {
+        sync: BlockSync,
+        blocks: Vec<bitcoin::Block>,
+        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    }
+
+    /// Builds a regtest chain with `body_height` mined block bodies followed by
+    /// `header_only` header-only blocks, applies genesis, and returns a fixture
+    /// whose stager is empty so individual rounds can stage bodies directly and
+    /// exercise the apply-side cache miss/hit transitions.
+    fn apply_cache_fixture(
+        body_height: u32,
+        header_only: u32,
+    ) -> Result<ApplyCacheFixture, Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        let mut prev_hash = genesis.block_hash();
+        let mut blocks = Vec::with_capacity(usize::try_from(body_height)?);
+
+        for height in 1..=body_height {
+            let block =
+                mined_block_with_prev_hash(prev_hash, height, vec![coinbase_transaction(height)]);
+            tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
+            prev_hash = block.block_hash();
+            blocks.push(block);
+        }
+        for height in body_height.saturating_add(1)..=body_height.saturating_add(header_only) {
+            let header = test_header(prev_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            prev_hash = header.block_hash();
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(Arc::clone(&chain_tip), Arc::clone(&applied_tip), block_tree);
+        let sync = BlockSync::new(
+            handles,
+            peers,
+            peer_outbound,
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // Apply genesis so the applied tip starts at height 0; no block bodies
+        // are staged yet, leaving every round below to drive cache state.
+        sync.ensure_genesis_tip();
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.height),
+            Some(0),
+            "fixture must apply genesis before staging bodies"
+        );
+
+        Ok(ApplyCacheFixture {
+            sync,
+            blocks,
+            applied_tip,
+            chain_tip,
+        })
+    }
+
+    fn stage_body(sync: &BlockSync, block: &bitcoin::Block) {
+        let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let serialized = bytes::Bytes::from(bitcoin::consensus::encode::serialize(block));
+        sync.block_stager
+            .lock()
+            .insert(hash, None, block.clone(), serialized, Instant::now());
+    }
+
+    fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
+        sync.expected_apply_cache.lock().clone()
+    }
+
+    #[test]
+    fn apply_cache_miss_populates_and_then_hits() -> Result<(), Box<dyn std::error::Error>> {
+        // 8 block bodies available as headers, but only the first three staged
+        // this round. A small pending budget caps the cached horizon at 5.
+        let fixture = apply_cache_fixture(8, 0)?;
+        install_budget(
+            &fixture.sync,
+            super::SyncBudget {
+                max_pending_blocks: 5,
+                max_pending_bytes: usize::MAX,
+                max_received_blocks: 64,
+                max_received_bytes: usize::MAX,
+                ..super::default_sync_budget()
+            },
+        );
+        assert!(
+            cache_snapshot(&fixture.sync).is_none(),
+            "cache starts empty so the first apply round is a miss"
+        );
+
+        for block in &fixture.blocks[..3] {
+            stage_body(&fixture.sync, block);
+        }
+        let (applied, failed) = fixture.sync.apply_buffered_blocks(None);
+        assert_eq!((applied, failed), (3, 0), "three staged bodies apply");
+        assert_eq!(
+            fixture.applied_tip.load_full().map(|tip| tip.height),
+            Some(3)
+        );
+
+        // Miss path populated the cache with the full 5-block horizon, then the
+        // post-apply advance moved the offset past the three applied blocks.
+        let cache = cache_snapshot(&fixture.sync)
+            .ok_or_else(|| std::io::Error::other("miss did not populate apply cache"))?;
+        assert_eq!(
+            cache.hashes.len(),
+            5,
+            "horizon capped at max_pending_blocks"
+        );
+        assert_eq!(cache.offset, 3, "advance moved offset past applied blocks");
+        assert_eq!(cache.applied_tip_height, 3);
+        assert_eq!(
+            cache.applied_tip_hash,
+            Hash256::from_le_bytes(fixture.blocks[2].block_hash().as_byte_array())
+        );
+        assert_eq!(
+            cache.chain_tip_hash,
+            fixture
+                .chain_tip
+                .load_full()
+                .ok_or_else(|| std::io::Error::other("missing chain tip"))?
+                .hash
+        );
+        let cached_suffix = cache.hashes[cache.offset..].to_vec();
+
+        // Stage block #4: this round must be a cache HIT (validity keys match the
+        // advanced cache), draining from the retained suffix rather than re-walking.
+        stage_body(&fixture.sync, &fixture.blocks[3]);
+        let (applied, failed) = fixture.sync.apply_buffered_blocks(None);
+        assert_eq!(
+            (applied, failed),
+            (1, 0),
+            "fourth body applies on the hit path"
+        );
+        assert_eq!(
+            fixture.applied_tip.load_full().map(|tip| tip.height),
+            Some(4)
+        );
+        let cache = cache_snapshot(&fixture.sync)
+            .ok_or_else(|| std::io::Error::other("hit path dropped the apply cache"))?;
+        assert_eq!(
+            cache.offset, 4,
+            "hit path advanced offset within the same run"
+        );
+        assert_eq!(
+            cached_suffix.first().copied(),
+            Some(Hash256::from_le_bytes(
+                fixture.blocks[3].block_hash().as_byte_array()
+            )),
+            "fourth applied block was already present in the populated horizon"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_cache_invalidated_on_failed_apply() -> Result<(), Box<dyn std::error::Error>> {
+        // Fail persisting height 2 so the second apply in the batch fails after
+        // the first succeeds, exercising the failed-apply invalidation branch.
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block1 =
+            mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
+        let block2 =
+            mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+        let block3 =
+            mined_block_with_prev_hash(block2.block_hash(), 3, vec![coinbase_transaction(3)]);
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let block1_id =
+            tree.insert_node(Some(genesis_id), block1.header, NodeStatus::HeaderValid)?;
+        let block2_id =
+            tree.insert_node(Some(block1_id), block2.header, NodeStatus::HeaderValid)?;
+        tree.insert_node(Some(block2_id), block3.header, NodeStatus::HeaderValid)?;
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let mut handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        handles.block_body_store = Some(Arc::new(FailOnceBodyStore::new(2)));
+        let sync = BlockSync::new(
+            handles,
+            peers,
+            peer_outbound,
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        sync.ensure_genesis_tip();
+
+        for block in [&block1, &block2, &block3] {
+            stage_body(&sync, block);
+        }
+        let (applied, failed) = sync.apply_buffered_blocks(None);
+        assert_eq!(applied, 1, "height 1 applies before the height 2 failure");
+        assert_eq!(failed, 1, "height 2 persistence failure aborts the batch");
+        assert!(
+            cache_snapshot(&sync).is_none(),
+            "a failed apply must invalidate the populated cache"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_cache_invalidated_on_chain_tip_move() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = apply_cache_fixture(4, 0)?;
+        install_budget(
+            &fixture.sync,
+            super::SyncBudget {
+                max_pending_blocks: 4,
+                max_pending_bytes: usize::MAX,
+                max_received_blocks: 64,
+                max_received_bytes: usize::MAX,
+                ..super::default_sync_budget()
+            },
+        );
+
+        // Round 1: stage one body, miss populates the cache, advance retains it
+        // with the original chain-tip hash as a validity key.
+        stage_body(&fixture.sync, &fixture.blocks[0]);
+        let (applied, _failed) = fixture.sync.apply_buffered_blocks(None);
+        assert_eq!(applied, 1);
+        let cache = cache_snapshot(&fixture.sync)
+            .ok_or_else(|| std::io::Error::other("miss did not populate apply cache"))?;
+        let original_chain_tip_hash = cache.chain_tip_hash;
+        assert_eq!(cache.offset, 1);
+
+        // Move the chain tip: publish a snapshot whose hash differs from the one
+        // the cache was keyed against (a reorg replaces the active-chain tip).
+        let moved_tip = {
+            let current = fixture
+                .chain_tip
+                .load_full()
+                .ok_or_else(|| std::io::Error::other("missing chain tip"))?;
+            let mut hash_bytes = current.hash.to_le_bytes();
+            hash_bytes[0] ^= 0xff;
+            TipSnapshot {
+                tip_id: current.tip_id,
+                height: current.height,
+                chainwork: current.chainwork,
+                hash: Hash256::from_le_bytes(&hash_bytes),
+            }
+        };
+        fixture.chain_tip.store(Some(Arc::new(moved_tip)));
+        assert_ne!(
+            fixture
+                .chain_tip
+                .load_full()
+                .ok_or_else(|| std::io::Error::other("missing chain tip"))?
+                .hash,
+            original_chain_tip_hash,
+            "chain tip must move for this test to be meaningful"
+        );
+
+        // Round 2: stage the next body. The stale cache's chain-tip key no longer
+        // matches, so drain_cached_expected_blocks misses; the run is recomputed
+        // against the new tip (or yields nothing if the fork shortened the chain).
+        stage_body(&fixture.sync, &fixture.blocks[1]);
+        let _ = fixture.sync.apply_buffered_blocks(None);
+        let after = cache_snapshot(&fixture.sync);
+        assert!(
+            after.is_none_or(|cache| cache.chain_tip_hash != original_chain_tip_hash),
+            "stale cache keyed to the old chain tip must not survive the move"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn apply_cache_horizon_capped_by_pending_budget() -> Result<(), Box<dyn std::error::Error>> {
+        // 12 header-backed bodies available, pending budget capped at 4. Stage a
+        // single body: the populated horizon must not exceed the budget even
+        // though far more headers are available above the applied tip.
+        let fixture = apply_cache_fixture(12, 0)?;
+        let cap = 4;
+        install_budget(
+            &fixture.sync,
+            super::SyncBudget {
+                max_pending_blocks: cap,
+                max_pending_bytes: usize::MAX,
+                max_received_blocks: 64,
+                max_received_bytes: usize::MAX,
+                ..super::default_sync_budget()
+            },
+        );
+
+        stage_body(&fixture.sync, &fixture.blocks[0]);
+        let (applied, failed) = fixture.sync.apply_buffered_blocks(None);
+        assert_eq!((applied, failed), (1, 0));
+        let cache = cache_snapshot(&fixture.sync)
+            .ok_or_else(|| std::io::Error::other("miss did not populate apply cache"))?;
+        assert_eq!(
+            cache.hashes.len(),
+            cap,
+            "horizon must be capped at max_pending_blocks even with more headers available"
+        );
+        // The cached run begins at applied_tip + 1 (height 1) and stays contiguous.
+        assert_eq!(
+            cache.hashes[0],
+            Hash256::from_le_bytes(fixture.blocks[0].block_hash().as_byte_array())
+        );
+        assert_eq!(
+            cache.hashes[cap - 1],
+            Hash256::from_le_bytes(fixture.blocks[cap - 1].block_hash().as_byte_array())
         );
         Ok(())
     }

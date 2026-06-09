@@ -141,6 +141,15 @@ impl DownloadWindow {
         self.pending.len()
     }
 
+    /// Maximum number of blocks the download window will keep pending at once.
+    ///
+    /// Used as the horizon cap when the apply-side cache is repopulated on a
+    /// miss: at most this many blocks can be in flight (and therefore stage)
+    /// before the cache's validity keys change and force a refresh.
+    pub(super) const fn max_pending_blocks(&self) -> usize {
+        self.budget.max_pending_blocks
+    }
+
     pub(super) const fn pending_bytes(&self) -> usize {
         self.pending_bytes
     }
