@@ -175,5 +175,3 @@ path it cannot influence — pure downside. Outcome: reverted.
   **default script-verify** path (no Rust headroom — it is Core's own C via the default
   `bitcoinconsensus` feature). See its guidance point 1, which makes the identical argument for the
   apply/UTXO/wire path.
-</content>
-</invoke>
