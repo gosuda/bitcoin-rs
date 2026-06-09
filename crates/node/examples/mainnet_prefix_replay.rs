@@ -2,6 +2,8 @@
 #![allow(clippy::print_stdout)]
 
 use std::ffi::OsString;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
@@ -39,19 +41,18 @@ fn main() -> Result<()> {
     let mut start_hash = None;
     let mut stop_hash = None;
 
+    let mut source = match &args.rest_url {
+        Some(host) => BlockSource::Rest(RestClient::connect(host)?),
+        None => BlockSource::Cli(&args),
+    };
     for height in args.start_height..=args.stop_height {
-        let hash = bitcoin_cli(&args, ["getblockhash".to_owned(), height.to_string()])
-            .with_context(|| format!("get block hash at height {height}"))?;
+        let (hash, bytes) = source.fetch(height)?;
         if height == args.start_height {
             start_hash = Some(hash.clone());
         }
         if height == args.stop_height {
             stop_hash = Some(hash.clone());
         }
-        let block_hex = bitcoin_cli(&args, ["getblock".to_owned(), hash.clone(), "0".to_owned()])
-            .with_context(|| format!("get block {hash} at height {height}"))?;
-        let bytes = Vec::<u8>::from_hex(block_hex.trim())
-            .with_context(|| format!("decode block hex at height {height}"))?;
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
         let block = Block::consensus_decode(&mut cursor)
             .with_context(|| format!("decode block bytes at height {height}"))?;
@@ -86,6 +87,8 @@ fn main() -> Result<()> {
         "rss_high_water_bytes": rss_high_water_bytes(),
         "bitcoin_cli": args.bitcoin_cli,
         "bitcoin_cli_args": args.bitcoin_cli_args,
+        "block_source": args.rest_url.as_ref().map_or("bitcoin-cli", |_| "rest"),
+        "rest_url": args.rest_url,
         "data_dir": args.data_dir,
     });
     let rendered = serde_json::to_string_pretty(&artifact).context("render artifact JSON")?;
@@ -102,6 +105,7 @@ fn main() -> Result<()> {
 struct Args {
     bitcoin_cli: String,
     bitcoin_cli_args: Vec<String>,
+    rest_url: Option<String>,
     data_dir: PathBuf,
     output: Option<PathBuf>,
     start_height: u32,
@@ -116,6 +120,7 @@ impl Args {
         let mut parsed = Self {
             bitcoin_cli: "bitcoin-cli".to_owned(),
             bitcoin_cli_args: Vec::new(),
+            rest_url: None,
             data_dir: PathBuf::from(".bitcoin-rs-mainnet-prefix-replay"),
             output: None,
             start_height: 0,
@@ -135,6 +140,7 @@ impl Args {
                     std::process::exit(0);
                 }
                 "--bitcoin-cli" => parsed.bitcoin_cli = next_arg(&mut args, "--bitcoin-cli")?,
+                "--rest-url" => parsed.rest_url = Some(next_arg(&mut args, "--rest-url")?),
                 "--bitcoin-cli-arg" => {
                     parsed
                         .bitcoin_cli_args
@@ -171,6 +177,107 @@ fn parse_height(value: &str) -> Result<u32> {
     value
         .parse()
         .with_context(|| format!("parse height {value:?}"))
+}
+
+/// Minimal keep-alive HTTP/1.1 client for the local `bitcoind -rest` interface.
+///
+/// Exists because spawning `bitcoin-cli` per block costs ~11 ms/call — 28 minutes of
+/// pure harness overhead over a 150k-block replay window, drowning the measurement.
+/// One persistent localhost connection brings the fetch cost below a millisecond.
+struct RestClient {
+    host: String,
+    stream: BufReader<TcpStream>,
+}
+
+impl RestClient {
+    fn connect(host: &str) -> Result<Self> {
+        let stream = TcpStream::connect(host).with_context(|| format!("connect to {host}"))?;
+        Ok(Self {
+            host: host.to_owned(),
+            stream: BufReader::new(stream),
+        })
+    }
+
+    fn get(&mut self, path: &str) -> Result<Vec<u8>> {
+        if let Ok(body) = self.request(path) {
+            return Ok(body);
+        }
+        // The server may close a kept-alive connection between requests;
+        // reconnect once before giving up.
+        *self = Self::connect(&self.host)?;
+        self.request(path)
+    }
+
+    fn request(&mut self, path: &str) -> Result<Vec<u8>> {
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n",
+            self.host
+        );
+        self.stream.get_mut().write_all(request.as_bytes())?;
+        let mut line = String::new();
+        self.stream.read_line(&mut line)?;
+        let status = line.trim_end().to_owned();
+        let mut content_length: Option<usize> = None;
+        loop {
+            line.clear();
+            self.stream.read_line(&mut line)?;
+            let header = line.trim_end();
+            if header.is_empty() {
+                break;
+            }
+            if let Some(value) = header
+                .to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(str::trim)
+            {
+                content_length = Some(value.parse().context("parse Content-Length")?);
+            }
+        }
+        let length = content_length.context("REST response without Content-Length")?;
+        let mut body = vec![0_u8; length];
+        self.stream.read_exact(&mut body)?;
+        if !status.contains(" 200 ") {
+            bail!("REST GET {path} failed: {status}");
+        }
+        Ok(body)
+    }
+}
+
+/// Where replay blocks come from: per-call `bitcoin-cli` spawns or a persistent REST socket.
+enum BlockSource<'a> {
+    Cli(&'a Args),
+    Rest(RestClient),
+}
+
+impl BlockSource<'_> {
+    /// Returns `(block_hash_hex, raw_block_bytes)` for `height`.
+    fn fetch(&mut self, height: u32) -> Result<(String, Vec<u8>)> {
+        match self {
+            Self::Cli(args) => {
+                let hash = bitcoin_cli(args, ["getblockhash".to_owned(), height.to_string()])
+                    .with_context(|| format!("get block hash at height {height}"))?;
+                let block_hex =
+                    bitcoin_cli(args, ["getblock".to_owned(), hash.clone(), "0".to_owned()])
+                        .with_context(|| format!("get block {hash} at height {height}"))?;
+                let bytes = Vec::<u8>::from_hex(block_hex.trim())
+                    .with_context(|| format!("decode block hex at height {height}"))?;
+                Ok((hash, bytes))
+            }
+            Self::Rest(client) => {
+                let hash_bytes = client
+                    .get(&format!("/rest/blockhashbyheight/{height}.hex"))
+                    .with_context(|| format!("get block hash at height {height}"))?;
+                let hash = String::from_utf8(hash_bytes)
+                    .context("block hash response is not UTF-8")?
+                    .trim()
+                    .to_owned();
+                let bytes = client
+                    .get(&format!("/rest/block/{hash}.bin"))
+                    .with_context(|| format!("get block {hash} at height {height}"))?;
+                Ok((hash, bytes))
+            }
+        }
+    }
 }
 
 fn bitcoin_cli(args: &Args, command_args: impl IntoIterator<Item = String>) -> Result<String> {
@@ -218,6 +325,6 @@ fn rss_high_water_bytes() -> Option<u64> {
 
 fn print_usage() {
     println!(
-        "usage: cargo run -p bitcoin-rs-node --example mainnet_prefix_replay --no-default-features --features fjall -- --stop-height <height> [--bitcoin-cli <path>] [--bitcoin-cli-arg <arg>]... [--data-dir <path>] [--output <path>] [--txindex] [--blockfilterindex]"
+        "usage: cargo run -p bitcoin-rs-node --example mainnet_prefix_replay --no-default-features --features fjall -- --stop-height <height> [--rest-url <host:port>] [--bitcoin-cli <path>] [--bitcoin-cli-arg <arg>]... [--data-dir <path>] [--output <path>] [--txindex] [--blockfilterindex]"
     );
 }
