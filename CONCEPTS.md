@@ -23,6 +23,9 @@ Stalling detection is the mechanism that identifies the staller and, in the refe
 ### assumevalid
 A validation mode that skips script-signature verification for blocks at or below a configured trusted height while still performing every other consensus check, used to accelerate IBD without abandoning validation; blocks above the height are fully verified.
 
+### Sync regimes (download-bound vs processing-bound)
+The two distinct cost regimes any sync measurement must name before its numbers mean anything. **Download-bound:** wall-clock is decided by the network path (peer scheduling, per-peer bandwidth, staller handling) — the regime of live IBD. **Processing-bound:** blocks are already local and wall-clock is decided by validation plus storage commit — the regime of reindex and offline replay. A node can rank differently in the two regimes, so a faster-than-X claim is meaningless without stating which regime was measured and with what validation posture.
+
 ## Consensus validation
 
 ### bitcoinconsensus
