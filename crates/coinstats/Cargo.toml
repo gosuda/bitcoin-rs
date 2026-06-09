@@ -28,6 +28,13 @@ tracing.workspace = true
 
 [features]
 default = []
+# Bench-only A/B allocator toggle (measurement experiment). The `mimalloc`
+# dev-dependency compiles for every test/bench build of this crate regardless
+# of this flag (cargo cannot prune a dev-dep by feature); the flag only gates
+# the `#[global_allocator]` registration in `benches/coinstats_hotpath.rs`.
+# Default OFF. Dev-deps cannot be optional, so this feature pulls nothing
+# (`dep:` would require an optional dep, which cargo rejects for dev-deps).
+bench-mimalloc = []
 rocksdb = ["bitcoin-rs-storage/rocksdb"]
 fjall = ["bitcoin-rs-storage/fjall"]
 redb = ["bitcoin-rs-storage/redb"]
@@ -38,6 +45,10 @@ criterion.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 tempfile = "3"
+# Plain (non-optional) dev-dep: cargo forbids optional dev-dependencies, so the
+# `bench-mimalloc` feature gates only the `#[global_allocator]` static, not this
+# compilation. Inherits `default-features = false`, matching `bin/bitcoin-rs`.
+mimalloc.workspace = true
 
 [[bench]]
 name = "coinstats_hotpath"

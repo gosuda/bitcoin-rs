@@ -2,6 +2,14 @@
 // PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
 
+// PERF: A/B allocator experiment. With `--features bench-mimalloc` the whole
+// bench binary (criterion harness + workload) allocates through mimalloc; with
+// the feature off it uses the system allocator. This is the only delta between
+// the A and B runs — workloads, scenarios, and sample counts are unchanged.
+#[cfg(feature = "bench-mimalloc")]
+#[global_allocator]
+static GLOBAL_MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{
     hint::black_box,
     time::{Duration, Instant},
