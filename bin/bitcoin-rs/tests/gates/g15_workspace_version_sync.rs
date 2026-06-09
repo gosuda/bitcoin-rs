@@ -2,14 +2,16 @@
 //! Internal `[workspace.dependencies]` path crates must declare the same `version`
 //! as `[workspace.package].version` (Cargo cannot inherit version into that table).
 
+#![allow(clippy::expect_used)]
+
 use core::str::FromStr;
 use std::path::Path;
 
 /// Gate G15: `[workspace.package].version` equals every internal path-dep version.
 #[test]
 fn workspace_internal_dep_versions_match_package_version() {
-    let root_toml = std::fs::read_to_string(root_cargo_toml_path())
-        .expect("read workspace root Cargo.toml");
+    let root_toml =
+        std::fs::read_to_string(root_cargo_toml_path()).expect("read workspace root Cargo.toml");
 
     let workspace_version =
         parse_workspace_package_version(&root_toml).expect("parse [workspace.package].version");
@@ -105,8 +107,7 @@ fn extract_version_requirement(value: &str) -> Option<String> {
 }
 
 fn parse_toml_string_assignment(line: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}");
-    let rest = line.strip_prefix(&prefix)?.trim();
+    let rest = line.strip_prefix(key)?.trim();
     let rest = rest.strip_prefix('=')?.trim();
     parse_toml_string_value(rest)
 }
@@ -153,14 +154,18 @@ bitcoin-rs-node       = { path = "crates/node", version = "0.3.1", default-featu
 "#;
         let deps = parse_internal_workspace_dep_versions(sample);
         assert_eq!(deps.len(), 2);
-        assert_eq!(deps[0], ("bitcoin-rs-primitives".to_owned(), "0.3.1".to_owned()));
+        assert_eq!(
+            deps[0],
+            ("bitcoin-rs-primitives".to_owned(), "0.3.1".to_owned())
+        );
     }
 
     #[test]
     fn parse_internal_dep_line_handles_spacing() {
-        let (name, version) =
-            parse_internal_dep_line("bitcoin-rs-rpc        = { path = \"crates/rpc\", version = \"0.3.0\" }")
-                .expect("parse line");
+        let (name, version) = parse_internal_dep_line(
+            "bitcoin-rs-rpc        = { path = \"crates/rpc\", version = \"0.3.0\" }",
+        )
+        .expect("parse line");
         assert_eq!(name, "bitcoin-rs-rpc");
         assert_eq!(version, "0.3.0");
     }
