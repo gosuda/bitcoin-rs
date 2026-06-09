@@ -134,20 +134,76 @@ impl Num3072 {
             let mut d1 = 0_u64;
             let mut d2 = 0_u64;
             mul_limb(&mut d0, &mut d1, left[j + 1], right[LIMBS - 1]);
-            for i in j + 2..LIMBS {
+            // PERF: split the high-column accumulation into two independent
+            // triple-carry chains so the 128-bit multiplies issue without
+            // waiting on the carry chain of the previous `muladd3`. Both chains
+            // sum a disjoint subset of the same products and are merged before
+            // the column total is consumed, so the 192-bit column value is
+            // byte-identical to the serial accumulation: integer addition is
+            // associative/commutative and every partial sum is bounded by the
+            // full column total, which the original algorithm keeps < 2^192.
+            let mut e0 = 0_u64;
+            let mut e1 = 0_u64;
+            let mut e2 = 0_u64;
+            let mut i = j + 2;
+            while i + 1 < LIMBS {
+                muladd3(&mut d0, &mut d1, &mut d2, left[i], right[LIMBS + j - i]);
+                muladd3(
+                    &mut e0,
+                    &mut e1,
+                    &mut e2,
+                    left[i + 1],
+                    right[LIMBS + j - i - 1],
+                );
+                i += 2;
+            }
+            if i < LIMBS {
                 muladd3(&mut d0, &mut d1, &mut d2, left[i], right[LIMBS + j - i]);
             }
+            add3(&mut d0, &mut d1, &mut d2, e0, e1, e2);
             mulnadd3(&mut c0, &mut c1, &mut c2, d0, d1, d2, MAX_PRIME_DIFF);
-            for i in 0..=j {
-                muladd3(&mut c0, &mut c1, &mut c2, left[i], right[j - i]);
+
+            // PERF: same split for the low-column accumulation. The seed
+            // (carry-in plus the `mulnadd3` fold above) stays in the (c0,c1,c2)
+            // chain; the second chain (f0,f1,f2) starts at zero and collects the
+            // odd-offset products. Merging before `extract3` preserves the exact
+            // column total and therefore the emitted limb and carry-out.
+            let mut f0 = 0_u64;
+            let mut f1 = 0_u64;
+            let mut f2 = 0_u64;
+            let mut k = 0;
+            while k < j {
+                muladd3(&mut c0, &mut c1, &mut c2, left[k], right[j - k]);
+                muladd3(&mut f0, &mut f1, &mut f2, left[k + 1], right[j - k - 1]);
+                k += 2;
             }
+            if k <= j {
+                muladd3(&mut c0, &mut c1, &mut c2, left[k], right[j - k]);
+            }
+            add3(&mut c0, &mut c1, &mut c2, f0, f1, f2);
             tmp[j] = extract3(&mut c0, &mut c1, &mut c2);
         }
 
         debug_assert_eq!(c2, 0);
-        for i in 0..LIMBS {
+        let mut g0 = 0_u64;
+        let mut g1 = 0_u64;
+        let mut g2 = 0_u64;
+        let mut i = 0;
+        while i + 1 < LIMBS {
+            muladd3(&mut c0, &mut c1, &mut c2, left[i], right[LIMBS - 1 - i]);
+            muladd3(
+                &mut g0,
+                &mut g1,
+                &mut g2,
+                left[i + 1],
+                right[LIMBS - 1 - (i + 1)],
+            );
+            i += 2;
+        }
+        if i < LIMBS {
             muladd3(&mut c0, &mut c1, &mut c2, left[i], right[LIMBS - 1 - i]);
         }
+        add3(&mut c0, &mut c1, &mut c2, g0, g1, g2);
         tmp[LIMBS - 1] = extract3(&mut c0, &mut c1, &mut c2);
 
         muln2(&mut c0, &mut c1, MAX_PRIME_DIFF);
@@ -364,6 +420,19 @@ fn muln2(c0: &mut u64, c1: &mut u64, n: u64) {
 }
 
 #[inline(always)]
+fn add3(c0: &mut u64, c1: &mut u64, c2: &mut u64, b0: u64, b1: u64, b2: u64) {
+    let (new_c0, carry0) = c0.overflowing_add(b0);
+    *c0 = new_c0;
+    let (sum1, carry1a) = c1.overflowing_add(b1);
+    let (new_c1, carry1b) = sum1.overflowing_add(u64::from(carry0));
+    *c1 = new_c1;
+    *c2 = c2
+        .wrapping_add(b2)
+        .wrapping_add(u64::from(carry1a))
+        .wrapping_add(u64::from(carry1b));
+}
+
+#[inline(always)]
 fn muladd3(c0: &mut u64, c1: &mut u64, c2: &mut u64, left: u64, right: u64) {
     let product = u128::from(left) * u128::from(right);
     let low = low_u64(product);
@@ -501,6 +570,208 @@ const fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: u
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Frozen byte-for-byte copy of the ORIGINAL serial `Num3072::multiply`
+    /// (single triple-carry accumulator, no chain splitting). Reuses the
+    /// unchanged column helpers (`mul_limb`, `muladd3`, `mulnadd3`, `extract3`,
+    /// `muln2`, `addnextract2`, `is_overflow`, `full_reduce`) so it is a genuine
+    /// reference for the optimized implementation, not a transform of it.
+    fn reference_multiply_into(target: &mut Num3072, other: &Num3072) {
+        let left = target.limbs;
+        let right = &other.limbs;
+        let mut tmp = [0_u64; LIMBS];
+        let mut c0 = 0_u64;
+        let mut c1 = 0_u64;
+        let mut c2 = 0_u64;
+
+        for j in 0..LIMBS - 1 {
+            let mut d0 = 0_u64;
+            let mut d1 = 0_u64;
+            let mut d2 = 0_u64;
+            mul_limb(&mut d0, &mut d1, left[j + 1], right[LIMBS - 1]);
+            for i in j + 2..LIMBS {
+                muladd3(&mut d0, &mut d1, &mut d2, left[i], right[LIMBS + j - i]);
+            }
+            mulnadd3(&mut c0, &mut c1, &mut c2, d0, d1, d2, MAX_PRIME_DIFF);
+            for i in 0..=j {
+                muladd3(&mut c0, &mut c1, &mut c2, left[i], right[j - i]);
+            }
+            tmp[j] = extract3(&mut c0, &mut c1, &mut c2);
+        }
+
+        assert_eq!(c2, 0);
+        for i in 0..LIMBS {
+            muladd3(&mut c0, &mut c1, &mut c2, left[i], right[LIMBS - 1 - i]);
+        }
+        tmp[LIMBS - 1] = extract3(&mut c0, &mut c1, &mut c2);
+
+        muln2(&mut c0, &mut c1, MAX_PRIME_DIFF);
+        for (idx, limb) in tmp.into_iter().enumerate() {
+            target.limbs[idx] = addnextract2(&mut c0, &mut c1, limb);
+        }
+
+        assert_eq!(c1, 0);
+        assert!(c0 == 0 || c0 == 1);
+
+        if target.is_overflow() {
+            target.full_reduce();
+        }
+        if c0 != 0 {
+            target.full_reduce();
+        }
+    }
+
+    /// Deterministic 64-bit splitmix PRNG: zero-dependency, reproducible seed
+    /// expansion for the `>=100_000` random differential vectors.
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        const fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+
+        fn fill_limbs(&mut self) -> [u64; LIMBS] {
+            core::array::from_fn(|_| self.next_u64())
+        }
+    }
+
+    /// Adversarial single-limb fillers for carry/boundary coverage.
+    fn boundary_limb_patterns() -> Vec<[u64; LIMBS]> {
+        let all_max = [u64::MAX; LIMBS];
+        let all_zero = [0_u64; LIMBS];
+        let all_one = [1_u64; LIMBS];
+        let alternating_hi = core::array::from_fn(|i| if i % 2 == 0 { u64::MAX } else { 0 });
+        let alternating_lo = core::array::from_fn(|i| if i % 2 == 0 { 0 } else { u64::MAX });
+
+        let mut modulus_low = [u64::MAX; LIMBS];
+        modulus_low[0] = u64::MAX - MAX_PRIME_DIFF;
+        let mut modulus_minus_one = [u64::MAX; LIMBS];
+        modulus_minus_one[0] = u64::MAX - MAX_PRIME_DIFF - 1;
+        let mut modulus_plus_one = [u64::MAX; LIMBS];
+        modulus_plus_one[0] = u64::MAX - MAX_PRIME_DIFF + 1;
+
+        let single_high = core::array::from_fn(|i| if i == LIMBS - 1 { u64::MAX } else { 0 });
+        let single_low_bit = {
+            let mut limbs = [0_u64; LIMBS];
+            limbs[0] = 1;
+            limbs
+        };
+        let single_high_bit = {
+            let mut limbs = [0_u64; LIMBS];
+            limbs[LIMBS - 1] = 1 << 63;
+            limbs
+        };
+        let carry_chain = core::array::from_fn(|i| if i == 0 { u64::MAX } else { 1 });
+
+        vec![
+            all_max,
+            all_zero,
+            all_one,
+            alternating_hi,
+            alternating_lo,
+            modulus_low,
+            modulus_minus_one,
+            modulus_plus_one,
+            single_high,
+            single_low_bit,
+            single_high_bit,
+            carry_chain,
+        ]
+    }
+
+    /// Asserts the optimized `multiply` produces RAW limbs (pre-`to_reduced_ruint`)
+    /// byte-identical to the frozen serial reference for one input pair.
+    fn assert_multiply_byte_identical(left: &[u64; LIMBS], right: &[u64; LIMBS]) {
+        let mut optimized = Num3072 { limbs: *left };
+        optimized.multiply(&Num3072 { limbs: *right });
+
+        let mut reference = Num3072 { limbs: *left };
+        reference_multiply_into(&mut reference, &Num3072 { limbs: *right });
+
+        assert_eq!(
+            optimized.limbs, reference.limbs,
+            "raw limbs diverged for left={left:?} right={right:?}"
+        );
+    }
+
+    #[test]
+    fn multiply_byte_identical_on_boundary_patterns() {
+        let patterns = boundary_limb_patterns();
+        for left in &patterns {
+            for right in &patterns {
+                assert_multiply_byte_identical(left, right);
+            }
+        }
+    }
+
+    #[test]
+    fn multiply_byte_identical_on_seeded_random_inputs() {
+        const ITERATIONS: usize = 120_000;
+        let mut rng = SplitMix64::new(0x6d75_6861_7368_3372);
+        for _ in 0..ITERATIONS {
+            let left = rng.fill_limbs();
+            let right = rng.fill_limbs();
+            assert_multiply_byte_identical(&left, &right);
+        }
+    }
+
+    #[test]
+    fn multiply_byte_identical_on_random_chains() {
+        // Exercises the unreduced-state propagation the bench hot loop relies on:
+        // repeated multiply without an intervening normalization. 4_000 chains of
+        // length 8 = 32_000 chained multiplies compared limb-for-limb.
+        const CHAINS: usize = 4_000;
+        const CHAIN_LEN: usize = 8;
+        let mut rng = SplitMix64::new(0x4d75_4861_7368_4368);
+        for _ in 0..CHAINS {
+            let start = rng.fill_limbs();
+            let mut optimized = Num3072 { limbs: start };
+            let mut reference = Num3072 { limbs: start };
+            for _ in 0..CHAIN_LEN {
+                let factor = rng.fill_limbs();
+                optimized.multiply(&Num3072 { limbs: factor });
+                reference_multiply_into(&mut reference, &Num3072 { limbs: factor });
+                assert_eq!(
+                    optimized.limbs, reference.limbs,
+                    "raw limbs diverged mid-chain for factor={factor:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finalize_byte_identical_after_optimized_multiply_chain() {
+        // Confirms the optimized path also matches the ruint oracle through
+        // finalize() across a seeded operation chain.
+        let mut rng = SplitMix64::new(0xf1_0a11_2e57_3072);
+        for _ in 0..2_000 {
+            let mut candidate = MuHash3072::new();
+            let mut reference = ReferenceMuHash3072::new();
+            for _ in 0..6 {
+                let len = usize::try_from(rng.next_u64() % 48).unwrap_or(0);
+                let data: Vec<u8> = (0..len)
+                    .map(|_| u8::try_from(rng.next_u64() & 0xff).unwrap_or(0))
+                    .collect();
+                if rng.next_u64() & 1 == 0 {
+                    candidate.insert(&data);
+                    reference.insert(&data);
+                } else {
+                    candidate.remove(&data);
+                    reference.remove(&data);
+                }
+            }
+            assert_eq!(candidate.finalize(), reference.finalize());
+            assert_eq!(candidate.finalize_hash(), reference.finalize_hash());
+        }
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ReferenceMuHash3072 {
