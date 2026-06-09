@@ -35,9 +35,17 @@ fn main() -> Result<()> {
     config.blockfilterindex = args.blockfilterindex;
     config.assume_valid_height = args.assume_valid_height;
 
+    // In-memory recorder for the apply path's per-stage histograms; the bind
+    // address only names the future exporter endpoint and is never served.
+    let metrics_handle =
+        bitcoin_rs_node::metrics::install_metrics(Some(([127, 0, 0, 1], 0).into()))
+            .context("install metrics recorder")?;
+
     let state = NodeState::open(config).context("open node state")?;
     let mut tx_count = 0_usize;
     let mut block_bytes = 0_usize;
+    let mut fetch_time = Duration::ZERO;
+    let mut decode_time = Duration::ZERO;
     let started = Instant::now();
     let mut start_hash = None;
     let mut stop_hash = None;
@@ -47,16 +55,20 @@ fn main() -> Result<()> {
         None => BlockSource::Cli(&args),
     };
     for height in args.start_height..=args.stop_height {
+        let fetch_started = Instant::now();
         let (hash, bytes) = source.fetch(height)?;
+        fetch_time += fetch_started.elapsed();
         if height == args.start_height {
             start_hash = Some(hash.clone());
         }
         if height == args.stop_height {
             stop_hash = Some(hash.clone());
         }
+        let decode_started = Instant::now();
         let mut cursor = std::io::Cursor::new(bytes.as_slice());
         let block = Block::consensus_decode(&mut cursor)
             .with_context(|| format!("decode block bytes at height {height}"))?;
+        decode_time += decode_started.elapsed();
         tx_count = tx_count.saturating_add(block.txdata.len());
         block_bytes = block_bytes.saturating_add(bytes.len());
         state
@@ -69,6 +81,7 @@ fn main() -> Result<()> {
         .stop_height
         .saturating_sub(args.start_height)
         .saturating_add(1);
+    let stage_seconds = stage_decomposition(metrics_handle);
     let artifact = json!({
         "schema": "mainnet-prefix-replay-v1",
         "measurement_target": "mainnet-prefix-replay",
@@ -86,6 +99,9 @@ fn main() -> Result<()> {
         "block_bytes": block_bytes,
         "elapsed_seconds": elapsed.as_secs_f64(),
         "blocks_per_second": f64::from(block_count) / elapsed.as_secs_f64(),
+        "fetch_seconds": fetch_time.as_secs_f64(),
+        "decode_seconds": decode_time.as_secs_f64(),
+        "stage_seconds": stage_seconds,
         "rss_high_water_bytes": rss_high_water_bytes(),
         "bitcoin_cli": args.bitcoin_cli,
         "bitcoin_cli_args": args.bitcoin_cli_args,
@@ -172,6 +188,33 @@ impl Args {
         }
         Ok(parsed)
     }
+}
+
+/// Every histogram the node recorded during the replay (apply stages, storage,
+/// utxo — and anything added later), sorted by total time descending.
+/// Deliberately unfiltered: a surprise entry in this list is diagnostic
+/// signal, not noise.
+fn stage_decomposition(
+    handle: Option<bitcoin_rs_node::metrics::MetricsHandle>,
+) -> Vec<serde_json::Value> {
+    let Some(handle) = handle else {
+        return Vec::new();
+    };
+    let mut stages: Vec<(String, u64, f64)> = handle
+        .snapshot()
+        .into_iter()
+        .filter_map(|(name, value)| match value {
+            bitcoin_rs_node::metrics::MetricValue::Histogram { count, sum } => {
+                Some((name, count, sum))
+            }
+            _ => None,
+        })
+        .collect();
+    stages.sort_by(|a, b| b.2.total_cmp(&a.2));
+    stages
+        .into_iter()
+        .map(|(name, count, sum)| json!({"stage": name, "count": count, "sum_seconds": sum}))
+        .collect()
 }
 
 fn next_arg(args: &mut impl Iterator<Item = OsString>, name: &str) -> Result<String> {
