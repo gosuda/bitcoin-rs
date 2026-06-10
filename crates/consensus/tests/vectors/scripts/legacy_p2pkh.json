@@ -1,0 +1,17 @@
+{
+ "name": "p2pkh-first-local-spend",
+ "class": "p2pkh",
+ "txid": "74c1a6dd6e88f73035143f8fc7420b5c395d28300a70bb35b943f7f2eddc656d",
+ "wtxid": "74c1a6dd6e88f73035143f8fc7420b5c395d28300a70bb35b943f7f2eddc656d",
+ "height": 2812,
+ "source": "local bitcoind REST /rest/block/0000000049a63b4dda3a43450c19d085d6c28bfb4cbb2e0576815d7f31919c5d.json (mainnet datadir)",
+ "flags": "P2SH",
+ "interpreter_parity": false,
+ "tx_hex": "0100000001944badc33f9a723eb1c85dde24374e6dee9259ef4cfa6a10b2fd05b6e55be400000000008c4930460221009f8aef83489d5c3524b68ddf77e8af8ceb5cba89790d31d2d2db0c80b9cbfd26022100bb2c13e15bb356a4accdd55288e8b2fd39e204a93d849ccf749eaef9d8162787014104f9804cfb86fb17441a6562b07c4ee8f012bdb2da5be022032e4b87100350ccc7c0f4d47078b06c9d22b0ec10bdce4c590e0d01aed618987a6caa8c94d74ee6dcffffffff0100f2052a010000001976a9146934efcef36903b5b45ebd1e5f862d1b63a99fa588ac00000000",
+ "prevouts": [
+  {
+   "script_hex": "76a9146934efcef36903b5b45ebd1e5f862d1b63a99fa588ac",
+   "amount_sat": 5000000000
+  }
+ ]
+}
