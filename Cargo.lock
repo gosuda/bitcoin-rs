@@ -304,11 +304,14 @@ dependencies = [
 name = "bitcoin-rs-consensus"
 version = "0.3.1"
 dependencies = [
+ "anyhow",
  "bitcoin",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bitcoinkernel",
  "criterion",
+ "hashbrown 0.17.1",
+ "rayon",
  "secp256k1 0.31.1",
  "serde",
  "serde_json",

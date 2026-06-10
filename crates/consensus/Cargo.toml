@@ -33,7 +33,14 @@ bitcoinkernel = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
+anyhow.workspace = true
+hashbrown.workspace = true
+rayon.workspace = true
 
 [[bench]]
 name = "verify_tx"
 harness = false
+
+[[example]]
+name = "kernel_verify_spike"
+required-features = ["kernel"]
