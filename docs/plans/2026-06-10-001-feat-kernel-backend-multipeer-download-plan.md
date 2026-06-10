@@ -1,7 +1,7 @@
 ---
 title: Kernel-backed script verification and Core-faithful multi-peer download
 type: feat
-status: active
+status: completed
 date: 2026-06-10
 ---
 
