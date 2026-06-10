@@ -66,11 +66,29 @@ const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
 /// sized from the same byte budget that bounds retained staged blocks.
 const INBOUND_BLOCK_STAGE_CHUNK: usize =
     at_least_one(RECEIVED_BLOCK_BYTE_BUDGET / PENDING_BLOCK_BYTE_ESTIMATE);
-/// Maximum block requests one peer may own at once.
+/// Maximum block requests one peer may own at once outside fan-out.
 ///
-/// Keep the default per-peer cap equal to the global cap so the bounded
-/// scheduler normally needs only one healthy peer to fill the whole window.
+/// Keep the fallback per-peer cap equal to the global cap so the bounded
+/// scheduler needs only one healthy peer to fill the whole window — this IS
+/// the shipped single-peer behavior and stays bit-identical when fewer than
+/// [`MIN_PEERS_FOR_FANOUT`] eligible peers exist.
 const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
+/// Per-peer in-flight cap while fan-out is active, mirroring Bitcoin Core's
+/// `MAX_BLOCKS_IN_TRANSIT_PER_PEER` (16, `net_processing.cpp`). A deep
+/// per-peer pipeline under fan-out reproduces the recorded head-of-line
+/// collapse; a shallow stripe without the fallback reproduces the early-height
+/// under-fill regression — both are pinned in
+/// `docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md`.
+const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
+/// Minimum fan-out-eligible peers before block requests fan out: exactly
+/// enough peers to fill the deep window at the shallow fan-out cap
+/// (128 / 16 = 8). Below this, fan-out would under-fill the window versus the
+/// single-peer-deep fallback, so the fallback wins. This equals the outbound
+/// connection budget, leaving zero slack: a single transient soft-demotion
+/// sits exactly at the boundary, which is why engagement carries one-peer
+/// hysteresis in [`DownloadWindow::set_fanout_eligible_peers`] instead of
+/// being re-derived from the raw count each tick.
+const MIN_PEERS_FOR_FANOUT: usize = PENDING_BUDGET / MAX_BLOCKS_IN_TRANSIT_PER_PEER;
 
 // The apply-side cache horizon (`expected_apply_horizon`) stays within the
 // inline capacity below only because the staging budget equals the in-flight
@@ -108,6 +126,27 @@ struct SyncPeer {
 struct SyncPeerSelection {
     header_peer: Option<SyncPeer>,
     request_peers: Vec<SyncPeer>,
+}
+
+/// A height-eligible sync candidate annotated with its fan-out eligibility
+/// (KTD6 predicate, finalized across `statically_fanout_eligible` and the
+/// window's soft-demotion check).
+#[derive(Clone, Copy, Debug)]
+struct FanoutCandidate {
+    peer: SyncPeer,
+    fanout_eligible: bool,
+}
+
+/// Connection-level clauses of the fan-out eligibility predicate (KTD6):
+/// outbound and witness-serving (`NODE_WITNESS`), per Bitcoin Core's
+/// block-download peer criteria in `net_processing.cpp` (Core requests blocks
+/// only from witness peers post-segwit, and inbound peers are
+/// attacker-chosen — counting them toward fan-out is the recorded under-fill
+/// regression). The height clause lives in the candidate filter and the
+/// soft-demotion clause in [`DownloadWindow::peer_has_expired_pending`].
+fn statically_fanout_eligible(peer: &PeerInfo) -> bool {
+    let witness = bitcoin::p2p::ServiceFlags::WITNESS.to_u64();
+    !peer.inbound && peer.services & witness != 0
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -640,38 +679,80 @@ impl BlockSync {
     }
 
     fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
-        let request_peer_limit = self.download_window.lock().request_peer_scan_limit(now);
-        let peers = self.peers.read();
-        let mut header_peer = None;
-        let mut request_peers = Vec::with_capacity(request_peer_limit.min(peers.len()));
-        for peer in peers.iter() {
-            if u32::try_from(peer.start_height)
-                .ok()
-                .is_none_or(|height| height <= our_height)
-            {
-                continue;
-            }
-            let sync_peer = SyncPeer {
-                addr: peer.addr,
-                start_height: peer.start_height,
-            };
-            if header_peer
-                .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
-            {
-                header_peer = Some(sync_peer);
-            }
-            if request_peer_limit > 1 {
-                request_peers.push(sync_peer);
+        let mut header_peer: Option<SyncPeer> = None;
+        let mut candidates: Vec<FanoutCandidate> = Vec::new();
+        {
+            let peers = self.peers.read();
+            candidates.reserve(peers.len());
+            for peer in peers.iter() {
+                // Height clause of the fan-out eligibility predicate (KTD6) and
+                // the pre-existing candidate filter: the peer's known chain must
+                // reach past our applied tip, i.e. cover the window front being
+                // requested. Delta vs Core: Core tracks a continuously updated
+                // per-peer best header (`pindexBestKnownBlock`, fed by headers/
+                // inv processing); this codebase only has the handshake-time
+                // `start_height`, so that is the proxy used — per-request
+                // truncation by `peer_best_height` bounds the damage of a stale
+                // value.
+                if u32::try_from(peer.start_height)
+                    .ok()
+                    .is_none_or(|height| height <= our_height)
+                {
+                    continue;
+                }
+                let sync_peer = SyncPeer {
+                    addr: peer.addr,
+                    start_height: peer.start_height,
+                };
+                if header_peer
+                    .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
+                {
+                    header_peer = Some(sync_peer);
+                }
+                candidates.push(FanoutCandidate {
+                    peer: sync_peer,
+                    fanout_eligible: statically_fanout_eligible(peer),
+                });
             }
         }
-        if request_peer_limit == 1 {
-            if let Some(peer) = header_peer {
-                request_peers.push(peer);
+        let (request_peer_limit, fanout_active) = {
+            let mut window = self.download_window.lock();
+            for candidate in &mut candidates {
+                // Final eligibility clause (KTD6): not currently soft-demoted
+                // for expired pendings. Counting a stalled peer toward fan-out
+                // would let one dead peer flip the mode and under-fill the
+                // window.
+                candidate.fanout_eligible = candidate.fanout_eligible
+                    && !window.peer_has_expired_pending(candidate.peer.addr, now);
             }
+            let eligible = candidates
+                .iter()
+                .filter(|candidate| candidate.fanout_eligible)
+                .count();
+            window.set_fanout_eligible_peers(eligible);
+            (window.request_peer_scan_limit(now), window.fanout_active())
+        };
+        let mut request_peers: Vec<SyncPeer> = if fanout_active {
+            // Fan-out: only eligible peers receive block requests; ineligible
+            // (inbound / non-witness / behind / demoted) peers neither count
+            // toward the threshold nor get getdata.
+            candidates
+                .iter()
+                .filter(|candidate| candidate.fanout_eligible)
+                .map(|candidate| candidate.peer)
+                .collect()
         } else if request_peer_limit > 1 {
+            // Fallback, multi-scan: the pre-fan-out shipped behavior — any
+            // candidate may serve (an inbound-only node must still sync).
+            candidates.iter().map(|candidate| candidate.peer).collect()
+        } else {
+            // Fallback, single deep peer: the highest peer fills the window.
+            header_peer.into_iter().take(request_peer_limit).collect()
+        };
+        if request_peers.len() > 1 {
             request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
-            request_peers.truncate(request_peer_limit);
         }
+        request_peers.truncate(request_peer_limit);
         SyncPeerSelection {
             header_peer,
             request_peers,
@@ -921,6 +1002,8 @@ const fn default_sync_budget() -> SyncBudget {
         max_received_blocks: RECEIVED_BLOCK_BUDGET,
         max_received_bytes: RECEIVED_BLOCK_BYTE_BUDGET,
         max_peer_inflight: PEER_INFLIGHT_BUDGET,
+        fanout_peer_inflight: MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+        min_peers_for_fanout: MIN_PEERS_FOR_FANOUT,
         getdata_batch_limit: GETDATA_BATCH_SIZE,
         pending_timeout: PENDING_TIMEOUT,
         received_timeout: RECEIVED_BLOCK_TIMEOUT,
@@ -1964,6 +2047,610 @@ mod tests {
         assert_eq!(second_requested, expected[2..4]);
         assert!(second_rx.try_recv().is_err());
         assert_eq!(sync.download_window.lock().pending_len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn tick_fanout_distributes_window_front_first_across_eligible_peers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT {
+            let addr = test_addr(9001, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        for (idx, rx) in rxs.iter().enumerate() {
+            let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+                return Err(
+                    std::io::Error::other("expected getdata for every eligible peer").into(),
+                );
+            };
+            // Window-front-first and capped: peers are scanned highest-first,
+            // each taking the next `cap` in-order heights — fan-out changes
+            // who is asked, never what order the window wants.
+            assert_eq!(
+                witness_block_inventory(inventory)?,
+                expected[idx * cap..(idx + 1) * cap]
+            );
+            if idx == 0 {
+                if !matches!(rx.try_recv()?, NetworkMessage::GetHeaders(_)) {
+                    return Err(std::io::Error::other("expected getheaders for header peer").into());
+                }
+            }
+            assert!(rx.try_recv().is_err(), "no peer may exceed the fan-out cap");
+        }
+        assert_eq!(
+            sync.download_window.lock().pending_len(),
+            super::PENDING_BUDGET,
+            "fan-out must fill the deep window"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tick_falls_back_to_single_deep_peer_below_fanout_threshold()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT - 1 {
+            let addr = test_addr(9021, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(inventory) = rxs[0].try_recv()? else {
+            return Err(std::io::Error::other("expected deep getdata for highest peer").into());
+        };
+        // Below the threshold the shipped single-peer behavior holds: the
+        // highest peer fills the entire deep window in one batch (no
+        // under-fill regression).
+        assert_eq!(witness_block_inventory(inventory)?, expected);
+        for rx in &rxs[1..] {
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(
+            sync.download_window.lock().pending_len(),
+            super::PENDING_BUDGET
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let ineligible = PeerInfo {
+            inbound: true,
+            ..eligible_peer(test_addr(9200, 0)?, 300)
+        };
+        assert_fallback_with_ineligible_candidate(ineligible, true)
+    }
+
+    #[test]
+    fn non_witness_peer_not_counted_toward_fanout_threshold()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ineligible = PeerInfo {
+            // NODE_NETWORK only — no NODE_WITNESS.
+            services: 1,
+            ..eligible_peer(test_addr(9210, 0)?, 300)
+        };
+        assert_fallback_with_ineligible_candidate(ineligible, true)
+    }
+
+    #[test]
+    fn low_chain_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Outbound + witness, but its known chain does not reach past our
+        // applied tip (genesis, height 0): fails the height clause outright.
+        let ineligible = eligible_peer(test_addr(9220, 0)?, 0);
+        assert_fallback_with_ineligible_candidate(ineligible, false)
+    }
+
+    /// Seven eligible peers plus one ineligible candidate: were the
+    /// ineligible peer counted, fan-out (many shallow getdatas) would engage;
+    /// instead the window collapses to one deep single-peer batch. When the
+    /// ineligible peer is the highest candidate (`serves_fallback`), it also
+    /// pins that the fallback still uses it — the pre-fan-out shipped
+    /// behavior (an inbound-only node must still sync).
+    fn assert_fallback_with_ineligible_candidate(
+        ineligible: PeerInfo,
+        serves_fallback: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+        let ineligible_rx = connect_peer(&peers, &peer_outbound, ineligible);
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT - 1 {
+            let addr = test_addr(9230, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let deep_rx = if serves_fallback {
+            &ineligible_rx
+        } else {
+            &rxs[0]
+        };
+        let NetworkMessage::GetData(inventory) = deep_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected one deep fallback getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected);
+        if !serves_fallback {
+            assert!(
+                ineligible_rx.try_recv().is_err(),
+                "ineligible peer must receive nothing"
+            );
+        }
+        for rx in &rxs[if serves_fallback { 0 } else { 1 }..] {
+            assert!(rx.try_recv().is_err(), "fallback is single-peer");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn demoted_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                pending_timeout: Duration::ZERO,
+                ..super::default_sync_budget()
+            },
+        );
+        // Phase 1: the lone peer takes the deep window; the zero timeout
+        // expires every pending immediately, soft-demoting it.
+        let demoted_rx = connect_peer(
+            &peers,
+            &peer_outbound,
+            eligible_peer(test_addr(9240, 0)?, 300),
+        );
+        sync.tick();
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(initial) = demoted_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected initial deep getdata").into());
+        };
+        assert_eq!(initial.len(), super::PENDING_BUDGET);
+        if !matches!(demoted_rx.try_recv()?, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected getheaders for lone peer").into());
+        }
+
+        // Phase 2: seven more eligible peers connect — eight eligible-shaped
+        // candidates, but the demoted one must not count (7 < threshold), so
+        // the expired blocks are re-issued as one deep fallback batch instead
+        // of fanning out.
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT - 1 {
+            let addr = test_addr(9241, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+        sync.tick();
+
+        let NetworkMessage::GetData(retry) = rxs[0].try_recv()? else {
+            return Err(std::io::Error::other("expected deep retry getdata").into());
+        };
+        assert_eq!(witness_block_inventory(retry)?, expected);
+        assert!(
+            demoted_rx.try_recv().is_err(),
+            "demoted peer must receive no new block requests"
+        );
+        for rx in &rxs[1..] {
+            assert!(rx.try_recv().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ineligible_peers_receive_no_block_requests_during_fanout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+        // A real (short) pending timeout: the lone peer's requests must be
+        // expired by the time the second tick runs, while the second tick's
+        // own fresh requests stay live across the request loop. (A zero
+        // timeout would re-expire each fan-out peer's requests for the next
+        // peer within the same tick.)
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                pending_timeout: Duration::from_millis(250),
+                ..super::default_sync_budget()
+            },
+        );
+        // Soft-demote one otherwise-eligible peer: it takes the deep window
+        // and never delivers.
+        let demoted_rx = connect_peer(
+            &peers,
+            &peer_outbound,
+            eligible_peer(test_addr(9250, 0)?, 290),
+        );
+        sync.tick();
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(initial) = demoted_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected initial deep getdata").into());
+        };
+        assert_eq!(initial.len(), super::PENDING_BUDGET);
+        if !matches!(demoted_rx.try_recv()?, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected getheaders for lone peer").into());
+        }
+
+        // One ineligible candidate per predicate clause, all at heights that
+        // would make them the most attractive picks were they eligible.
+        let inbound_rx = connect_peer(
+            &peers,
+            &peer_outbound,
+            PeerInfo {
+                inbound: true,
+                ..eligible_peer(test_addr(9251, 0)?, 310)
+            },
+        );
+        let non_witness_rx = connect_peer(
+            &peers,
+            &peer_outbound,
+            PeerInfo {
+                services: 1,
+                ..eligible_peer(test_addr(9252, 0)?, 305)
+            },
+        );
+        let low_chain_rx = connect_peer(
+            &peers,
+            &peer_outbound,
+            eligible_peer(test_addr(9253, 0)?, 0),
+        );
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT {
+            let addr = test_addr(9254, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+
+        // Let the lone peer's pendings expire (demoting it) before fanning out.
+        std::thread::sleep(Duration::from_millis(300));
+        sync.tick();
+
+        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        for (idx, rx) in rxs.iter().enumerate() {
+            let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+                return Err(std::io::Error::other("expected getdata for eligible peer").into());
+            };
+            assert_eq!(
+                witness_block_inventory(inventory)?,
+                expected[idx * cap..(idx + 1) * cap]
+            );
+            assert!(rx.try_recv().is_err());
+        }
+        // The header peer (highest candidate, inbound) may still receive
+        // getheaders — header sync is not block download.
+        if !matches!(inbound_rx.try_recv()?, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected getheaders to header peer").into());
+        }
+        assert!(inbound_rx.try_recv().is_err());
+        assert!(non_witness_rx.try_recv().is_err());
+        assert!(low_chain_rx.try_recv().is_err());
+        assert!(demoted_rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+        let mut rxs = Vec::new();
+        let mut addrs = Vec::new();
+        // One spare peer beyond the fan-out scan width: it gets nothing on
+        // the first tick and picks up the re-queued blocks on the second.
+        for idx in 0..=super::MIN_PEERS_FOR_FANOUT {
+            let addr = test_addr(9261, idx)?;
+            addrs.push(addr);
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        for (idx, rx) in rxs[..super::MIN_PEERS_FOR_FANOUT].iter().enumerate() {
+            let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+                return Err(std::io::Error::other("expected getdata for eligible peer").into());
+            };
+            assert_eq!(
+                witness_block_inventory(inventory)?,
+                expected[idx * cap..(idx + 1) * cap]
+            );
+        }
+        let _headers = rxs[0].try_recv()?;
+        let spare_rx = &rxs[super::MIN_PEERS_FOR_FANOUT];
+        assert!(spare_rx.try_recv().is_err());
+
+        // The second-highest peer disconnects mid-window, owning the second
+        // 16-block stripe.
+        let dropped = addrs[1];
+        peers.write().retain(|peer| peer.addr != dropped);
+        peer_outbound.write().remove(&dropped);
+
+        sync.tick();
+
+        // Its in-flight blocks are released and picked up by the remaining
+        // eligible peers — the saturated ones have no capacity, so the spare
+        // takes the whole stripe.
+        let NetworkMessage::GetData(requeued) = spare_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected re-queued getdata for spare peer").into());
+        };
+        assert_eq!(witness_block_inventory(requeued)?, expected[cap..2 * cap]);
+        assert_eq!(
+            sync.download_window.lock().pending_len(),
+            super::PENDING_BUDGET
+        );
+        for rx in &rxs[..super::MIN_PEERS_FOR_FANOUT] {
+            assert!(rx.try_recv().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(8)?;
+        let slot = 256 * 1024;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_received_bytes: 3 * slot,
+                ..super::default_sync_budget()
+            },
+        );
+        // Two of three staging slots already occupied: the staged-byte gate is
+        // still open, but only one more estimated block fits.
+        {
+            let mut window = sync.download_window.lock();
+            window.mark_received(Hash256::from_le_bytes(&[0xEE; 32]), slot);
+            window.mark_received(Hash256::from_le_bytes(&[0xEF; 32]), slot);
+        }
+        let addr = test_addr(9270, 0)?;
+        let rx = connect_peer(&peers, &peer_outbound, eligible_peer(addr, 200));
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected headroom-clamped getdata").into());
+        };
+        // A gate-open burst must not over-request past staging headroom.
+        assert_eq!(witness_block_inventory(inventory)?, expected[..1]);
+        if !matches!(rx.try_recv()?, NetworkMessage::GetHeaders(_)) {
+            return Err(std::io::Error::other("expected getheaders").into());
+        }
+
+        sync.tick();
+
+        // The in-flight request consumed the last slot: no further requests
+        // until staged blocks apply.
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The recorded live-collapse construction (scaled 8x down): the
+        // default one-minute timeouts never fire inside the test, so the only
+        // thing that can stop the second wave is the count clamp itself.
+        let (sync, _peers, _peer_outbound, expected, rxs, _blocks_tx) =
+            staged_count_wedge(super::PENDING_TIMEOUT)?;
+
+        // Tick 2: the healthy deliveries stage; staged (14) + pending (2) sit
+        // exactly at the count budget (16). The byte gates are unbounded here
+        // (KB-scale blocks), so requests stop only if count overflow is
+        // request backpressure.
+        sync.tick();
+
+        {
+            let window = sync.download_window.lock();
+            assert_eq!(window.received_len(), 14);
+            assert_eq!(window.pending_len(), 2);
+            for front in &expected[..2] {
+                assert!(
+                    window.contains_pending(&Hash256::from_le_bytes(&front.to_byte_array())),
+                    "stalled front stripe must stay pending, not churn through retry"
+                );
+            }
+        }
+
+        // Tick 3: stability. Pre-fix this is where the second wave was
+        // requested, delivered past RECEIVED_BLOCK_BUDGET, evicted the oldest
+        // staged blocks (nearest the frozen front) and snapped the window
+        // back into self-sustaining re-request churn.
+        sync.tick();
+
+        for rx in &rxs {
+            assert_no_getdata(rx)?;
+        }
+        let stager = sync.block_stager.lock();
+        assert_eq!(stager.received_len(), 14, "no evictions may occur");
+        for height in 3..=16_u32 {
+            let hash =
+                Hash256::from_le_bytes(&expected[usize::try_from(height)? - 1].to_byte_array());
+            assert!(
+                stager.contains(&hash),
+                "every delivered block must remain staged (height {height})"
+            );
+        }
+        assert_eq!(sync.download_window.lock().pending_len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn wedged_window_expires_stalled_front_and_rerequests_through_count_clamp()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _peer_outbound, expected, rxs, _blocks_tx) =
+            staged_count_wedge(Duration::from_millis(250))?;
+
+        // Tick 2: wedge — staged + pending at the count budget, scan limit
+        // zero, the stalled front still pending.
+        sync.tick();
+        assert_eq!(sync.download_window.lock().pending_len(), 2);
+
+        // Past the pending timeout the wedge must process its own deadlines:
+        // the expired front credits the scan-limit count headroom, the
+        // request path expires it (U5 chain through the new clamps' pending
+        // terms), soft demotion keeps the staller out, and a healthy peer is
+        // asked for the front stripe — all without the received-prune
+        // discarding a single staged block into re-download.
+        std::thread::sleep(Duration::from_millis(300));
+        sync.tick();
+
+        assert_no_getdata(&rxs[0])?;
+        let mut rerequested = Vec::new();
+        for rx in &rxs[1..] {
+            while let Ok(message) = rx.try_recv() {
+                if let NetworkMessage::GetData(inventory) = message {
+                    rerequested.extend(witness_block_inventory(inventory)?);
+                }
+            }
+        }
+        assert_eq!(
+            rerequested,
+            expected[..2],
+            "the stalled front stripe must be re-requested from a healthy peer"
+        );
+        assert_eq!(
+            sync.block_stager.lock().received_len(),
+            14,
+            "staged progress must survive the wedge"
+        );
+        {
+            let window = sync.download_window.lock();
+            assert_eq!(window.pending_len(), 2);
+            for front in &expected[..2] {
+                assert!(window.contains_pending(&Hash256::from_le_bytes(&front.to_byte_array())));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::error::Error>> {
+        let ((sync, peers, peer_outbound, block_tree, applied_tip, expected), blocks_tx) =
+            sync_with_header_chain_and_blocks(64)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 16,
+                max_pending_bytes: usize::MAX,
+                // Roomy count budget: the staging clamps must not bind, so
+                // any request change is attributable to the mode alone.
+                max_received_blocks: 64,
+                max_received_bytes: usize::MAX,
+                max_peer_inflight: 16,
+                fanout_peer_inflight: 2,
+                min_peers_for_fanout: 8,
+                getdata_batch_limit: 16,
+                pending_timeout: Duration::from_millis(250),
+                ..super::default_sync_budget()
+            },
+        );
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT {
+            let addr = test_addr(9340, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+
+        // Tick 1: eight eligible peers engage fan-out and stripe the window.
+        sync.tick();
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        assert!(sync.download_window.lock().fanout_active());
+        for (idx, rx) in rxs.iter().enumerate() {
+            let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+                return Err(std::io::Error::other("expected striped getdata").into());
+            };
+            assert_eq!(
+                witness_block_inventory(inventory)?,
+                expected[idx * 2..(idx + 1) * 2]
+            );
+        }
+
+        // The healthy peers deliver their stripes; the front-stripe owner
+        // stalls past the pending timeout — eligible peers dip 8 -> 7.
+        for height in 3..=16_u32 {
+            blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                header_chain_block(&expected, height)?,
+            ))?;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        sync.tick();
+
+        // Mode stability under the transient dip: hysteresis holds fan-out,
+        // so the stalled stripe is redistributed in cap-sized batches instead
+        // of re-concentrating the whole window on one deep peer.
+        assert!(
+            sync.download_window.lock().fanout_active(),
+            "one demotion below the threshold must not disengage fan-out"
+        );
+        assert_no_getdata(&rxs[0])?;
+        let mut redistributed = Vec::new();
+        for rx in &rxs[1..] {
+            while let Ok(message) = rx.try_recv() {
+                if let NetworkMessage::GetData(inventory) = message {
+                    let hashes = witness_block_inventory(inventory)?;
+                    assert!(
+                        hashes.len() <= 2,
+                        "per-peer batches must stay at the installed fan-out \
+                         cap (2); a deep batch is the mode-flap signature"
+                    );
+                    redistributed.extend(hashes);
+                }
+            }
+        }
+        assert!(
+            expected[..2]
+                .iter()
+                .all(|hash| redistributed.contains(hash)),
+            "the stalled front stripe must move to healthy peers under the cap"
+        );
+
+        // Tick 3: the dip heals (7 -> 8) and the mode is still fan-out — the
+        // window stayed in one mode across 8 -> 7 -> 8.
+        sync.tick();
+        assert!(sync.download_window.lock().fanout_active());
         Ok(())
     }
 
@@ -3267,7 +3954,18 @@ mod tests {
         Vec<BlockHash>,
     );
 
+    type InboundBlockSender = crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>;
+
     fn sync_with_header_chain(height: u32) -> Result<SyncFixture, Box<dyn std::error::Error>> {
+        // Dropping the sender mirrors the original fixture: a disconnected
+        // inbound-blocks channel that never yields a block.
+        let (fixture, _inbound_blocks_tx) = sync_with_header_chain_and_blocks(height)?;
+        Ok(fixture)
+    }
+
+    fn sync_with_header_chain_and_blocks(
+        height: u32,
+    ) -> Result<(SyncFixture, InboundBlockSender), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let genesis = genesis_header();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -3290,7 +3988,7 @@ mod tests {
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(
@@ -3307,13 +4005,120 @@ mod tests {
         );
 
         Ok((
-            sync,
-            peers,
-            peer_outbound,
-            block_tree,
-            applied_tip,
-            expected,
+            (
+                sync,
+                peers,
+                peer_outbound,
+                block_tree,
+                applied_tip,
+                expected,
+            ),
+            inbound_blocks_tx,
         ))
+    }
+
+    type WedgeFixture = (
+        BlockSync,
+        Arc<RwLock<Vec<PeerInfo>>>,
+        Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
+        Vec<BlockHash>,
+        Vec<crossbeam_channel::Receiver<Message>>,
+        InboundBlockSender,
+    );
+
+    /// The recorded-collapse construction at `install_budget` scale: eight
+    /// eligible peers stripe a 16-block window at per-peer fan-out cap 2
+    /// against a 64-block header chain; the front-stripe owner (the highest
+    /// peer, heights 1-2) stalls while the seven healthy peers deliver
+    /// heights 3..=16 into the inbound channel. After the caller's next tick
+    /// drains them, staged (14) + pending (2) sit exactly at the count
+    /// budget (16) with the apply frontier frozen behind the stall. Byte
+    /// budgets are unbounded so only count-denominated behavior is exercised.
+    fn staged_count_wedge(
+        pending_timeout: Duration,
+    ) -> Result<WedgeFixture, Box<dyn std::error::Error>> {
+        let ((sync, peers, peer_outbound, block_tree, applied_tip, expected), blocks_tx) =
+            sync_with_header_chain_and_blocks(64)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 16,
+                max_pending_bytes: usize::MAX,
+                max_received_blocks: 16,
+                max_received_bytes: usize::MAX,
+                max_peer_inflight: 16,
+                fanout_peer_inflight: 2,
+                min_peers_for_fanout: 8,
+                getdata_batch_limit: 16,
+                pending_timeout,
+                ..super::default_sync_budget()
+            },
+        );
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT {
+            let addr = test_addr(9320, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, 200 - i32::try_from(idx)?),
+            ));
+        }
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        for (idx, rx) in rxs.iter().enumerate() {
+            let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+                return Err(std::io::Error::other("expected a striped getdata per peer").into());
+            };
+            assert_eq!(
+                witness_block_inventory(inventory)?,
+                expected[idx * 2..(idx + 1) * 2]
+            );
+        }
+        for height in 3..=16_u32 {
+            blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                header_chain_block(&expected, height)?,
+            ))?;
+        }
+        Ok((sync, peers, peer_outbound, expected, rxs, blocks_tx))
+    }
+
+    /// Drains `rx`, failing on any `getdata` while ignoring header traffic.
+    fn assert_no_getdata(
+        rx: &crossbeam_channel::Receiver<Message>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        while let Ok(message) = rx.try_recv() {
+            if matches!(message, NetworkMessage::GetData(_)) {
+                return Err(std::io::Error::other("unexpected getdata").into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Reconstructs the deliverable block body (header-only, empty `txdata`)
+    /// for `height` of a [`sync_with_header_chain`] fixture: the block hash
+    /// is the header hash, so the delivery matches the fixture's tree node.
+    fn header_chain_block(
+        expected: &[BlockHash],
+        height: u32,
+    ) -> Result<bitcoin::Block, Box<dyn std::error::Error>> {
+        let index = usize::try_from(height.checked_sub(1).ok_or("height must be >= 1")?)?;
+        let prev_blockhash = if index == 0 {
+            genesis_header().block_hash()
+        } else {
+            expected[index - 1]
+        };
+        let block = bitcoin::Block {
+            header: test_header(prev_blockhash, height),
+            txdata: Vec::new(),
+        };
+        assert_eq!(
+            block.block_hash(),
+            expected[index],
+            "reconstructed block must hash to the fixture's header-chain node"
+        );
+        Ok(block)
     }
 
     fn install_budget(sync: &BlockSync, budget: super::SyncBudget) {
@@ -3729,5 +4534,34 @@ mod tests {
             conn_time: 0,
             inbound: true,
         }
+    }
+
+    /// A fan-out-eligible synthetic peer: outbound and witness-serving
+    /// (NODE_NETWORK | NODE_WITNESS), unlike [`synthetic_peer`] which models
+    /// the ineligible (inbound, flagless) shape.
+    fn eligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
+        PeerInfo {
+            services: bitcoin::p2p::ServiceFlags::WITNESS.to_u64() | 1,
+            inbound: false,
+            ..synthetic_peer(addr, start_height)
+        }
+    }
+
+    fn test_addr(base_port: usize, idx: usize) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+        Ok(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            u16::try_from(base_port + idx)?,
+        ))
+    }
+
+    fn connect_peer(
+        peers: &Arc<RwLock<Vec<PeerInfo>>>,
+        peer_outbound: &Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
+        info: PeerInfo,
+    ) -> crossbeam_channel::Receiver<Message> {
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(info.addr, tx);
+        peers.write().push(info);
+        rx
     }
 }

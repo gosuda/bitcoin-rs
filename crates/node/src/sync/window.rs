@@ -13,6 +13,8 @@ pub(super) struct SyncBudget {
     pub(super) max_received_blocks: usize,
     pub(super) max_received_bytes: usize,
     pub(super) max_peer_inflight: usize,
+    pub(super) fanout_peer_inflight: usize,
+    pub(super) min_peers_for_fanout: usize,
     pub(super) getdata_batch_limit: usize,
     pub(super) pending_timeout: Duration,
     pub(super) received_timeout: Duration,
@@ -112,6 +114,13 @@ pub(super) struct DownloadWindow {
     ewma_block_bytes: usize,
     next_request_height: u32,
     next_pending_deadline: Option<Instant>,
+    /// Whether block requests currently fan out across peers. Driven by the
+    /// sync layer's per-tick count of fan-out-eligible peers (KTD6 predicate:
+    /// outbound, witness-serving, header chain above ours, not soft-demoted)
+    /// through [`Self::set_fanout_eligible_peers`]'s one-peer hysteresis.
+    /// Starts disengaged so a fresh window always begins in single-peer
+    /// fallback.
+    fanout_engaged: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -134,6 +143,51 @@ impl DownloadWindow {
             ewma_block_bytes: 256 * 1024,
             next_request_height: 1,
             next_pending_deadline: None,
+            fanout_engaged: false,
+        }
+    }
+
+    /// Records how many peers currently satisfy the fan-out eligibility
+    /// predicate and updates the fan-out engagement with one-peer hysteresis:
+    /// engage at `min_peers_for_fanout`, hold at one below, disengage only
+    /// further down.
+    ///
+    /// The count keeps KTD6's demotion clause (a stalled peer must not count
+    /// toward fan-out), so without hysteresis a single transient soft-demotion
+    /// at the threshold would flap the mode tick-to-tick and re-concentrate
+    /// the whole window on one deep peer mid-stripe. Holding the mode one
+    /// peer below the threshold instead costs at most one undistributed
+    /// stripe (`fanout_peer_inflight` blocks) until the demotion clears or a
+    /// second peer drops out — at which point the drop is structural and the
+    /// single-peer fallback is the right mode.
+    pub(super) fn set_fanout_eligible_peers(&mut self, count: usize) {
+        if count >= self.budget.min_peers_for_fanout {
+            self.fanout_engaged = true;
+        } else if count.saturating_add(1) < self.budget.min_peers_for_fanout {
+            self.fanout_engaged = false;
+        }
+    }
+
+    /// Whether block requests fan out across peers (true) or collapse to the
+    /// single-peer deep window (false). Fan-out engages only when enough
+    /// eligible peers exist to fill the window at the shallow per-peer cap
+    /// (with [`Self::set_fanout_eligible_peers`]'s hysteresis); below that
+    /// the per-peer cap reverts to the deep fallback so one healthy peer can
+    /// fill the whole window (no under-fill regression).
+    pub(super) const fn fanout_active(&self) -> bool {
+        self.fanout_engaged
+    }
+
+    /// Per-peer in-flight cap for the current mode: the shallow fan-out cap
+    /// (Core's `MAX_BLOCKS_IN_TRANSIT_PER_PEER` shape) when fan-out is active,
+    /// the deep fallback cap otherwise. The fan-out cap never exceeds the
+    /// fallback cap, so injected shallow budgets stay binding in either mode.
+    const fn effective_peer_inflight(&self) -> usize {
+        if self.fanout_active() && self.budget.fanout_peer_inflight < self.budget.max_peer_inflight
+        {
+            self.budget.fanout_peer_inflight
+        } else {
+            self.budget.max_peer_inflight
         }
     }
 
@@ -155,10 +209,11 @@ impl DownloadWindow {
     }
 
     pub(super) fn has_request_capacity(&self) -> bool {
-        !self.staged_bytes_exhausted()
-            && self.pending.len() < self.budget.max_pending_blocks
+        self.pending.len() < self.budget.max_pending_blocks
             && self.pending_bytes.saturating_add(self.ewma_block_bytes)
                 <= self.budget.max_pending_bytes
+            && self.staged_byte_headroom() >= self.ewma_block_bytes
+            && self.staged_count_headroom(0) > 0
     }
 
     /// Staged-byte backpressure: once the blocks already received and waiting
@@ -170,6 +225,73 @@ impl DownloadWindow {
         self.received_bytes >= self.budget.max_received_bytes
     }
 
+    /// Staging bytes still free if every in-flight pending block arrives at
+    /// the current per-block estimate. Request sizing is clamped to this so a
+    /// gate-open burst cannot top a partially full stager over its budget and
+    /// trigger refuse/re-download churn in the high-height regime (the
+    /// staged-byte gate alone is headroom-blind: it only closes once staging
+    /// is already exhausted).
+    ///
+    /// The clamp engages only while blocks are actually staged. With an empty
+    /// stager liveness wins: the window-front request must stay issuable even
+    /// when one estimated block exceeds the staging budget (the stager's
+    /// expected-block exemption and drop-for-retry are the degrade path
+    /// there), and the default budget pair (`max_pending_bytes ==
+    /// max_received_bytes`) already bounds a from-empty burst to exactly the
+    /// staging budget.
+    const fn staged_byte_headroom(&self) -> usize {
+        if self.received_bytes == 0 {
+            return usize::MAX;
+        }
+        self.budget
+            .max_received_bytes
+            .saturating_sub(self.received_bytes)
+            .saturating_sub(self.pending_bytes)
+    }
+
+    /// Staging slots still free if every in-flight pending block arrives: the
+    /// count-denominated twin of [`Self::staged_byte_headroom`]. The twin is
+    /// load-bearing, not symmetry for its own sake: the stager enforces its
+    /// byte budget as admission backpressure but its count budget by
+    /// **evicting the oldest staged blocks** (`stage.rs`,
+    /// `evict_over_budget`) — the blocks nearest the apply frontier. A window
+    /// clamped on bytes alone keeps requesting while a stalled front-stripe
+    /// peer freezes the frontier, and the healthy peers' next wave pushes the
+    /// staged count over budget into evict → drop-for-retry → re-request →
+    /// evict churn (the recorded live-collapse signature). Clamping requests
+    /// so staged + pending never exceeds `max_received_blocks` turns count
+    /// overflow into request backpressure, exactly like the byte bound.
+    ///
+    /// Same from-empty engagement rule as the byte twin: with nothing staged
+    /// the clamp stands down for liveness, and the default budget pair
+    /// (`max_pending_blocks == max_received_blocks`) bounds a from-empty
+    /// burst at exactly the count budget — and the stager evicts only
+    /// strictly *above* `max_received_blocks`, so even a fully delivered
+    /// burst lands at the budget without eviction.
+    ///
+    /// `expired_pending_blocks` credits pendings past the re-request timeout
+    /// back to headroom. Unlike the byte clamp (which leaves expired bytes
+    /// uncredited and recovers through the staged-block prune, the tested U5
+    /// chain), the count clamp must credit them in the scan limit: a stalled
+    /// front whose pendings hold staged + pending at the budget would
+    /// otherwise pin the scan limit at zero — and expiry runs only inside
+    /// [`Self::next_peer_request`], so the wedge could not process its own
+    /// deadlines until the prune discarded every staged block into
+    /// re-download. With the credit, the scan limit reopens at the pending
+    /// timeout and the normal request path expires and re-requests the front
+    /// while the staged set survives intact. Late arrival of an expired
+    /// original deduplicates against its re-request by hash, so the credit
+    /// cannot double-fill staging.
+    fn staged_count_headroom(&self, expired_pending_blocks: usize) -> usize {
+        if self.received.is_empty() {
+            return usize::MAX;
+        }
+        self.budget
+            .max_received_blocks
+            .saturating_sub(self.received.len())
+            .saturating_sub(self.pending.len().saturating_sub(expired_pending_blocks))
+    }
+
     pub(super) fn request_peer_scan_limit(&self, now: Instant) -> usize {
         if self.staged_bytes_exhausted() {
             return 0;
@@ -177,7 +299,7 @@ impl DownloadWindow {
         let per_peer = self
             .budget
             .getdata_batch_limit
-            .min(self.budget.max_peer_inflight);
+            .min(self.effective_peer_inflight());
         if per_peer == 0 || self.ewma_block_bytes == 0 {
             return 0;
         }
@@ -185,11 +307,17 @@ impl DownloadWindow {
         let block_capacity = self
             .budget
             .max_pending_blocks
-            .saturating_sub(self.pending.len().saturating_sub(expired_blocks));
+            .saturating_sub(self.pending.len().saturating_sub(expired_blocks))
+            .min(self.staged_count_headroom(expired_blocks));
+        // Expired bytes are credited back to pending capacity (they will be
+        // re-requested) but not to staging byte headroom: a late arrival of
+        // the original request still stages. The count headroom does credit
+        // them — see `staged_count_headroom` for why the wedge needs it.
         let byte_capacity = self
             .budget
             .max_pending_bytes
             .saturating_sub(self.pending_bytes.saturating_sub(expired_bytes))
+            .min(self.staged_byte_headroom())
             / self.ewma_block_bytes;
         let request_blocks = block_capacity.min(byte_capacity);
         if request_blocks == 0 {
@@ -220,7 +348,11 @@ impl DownloadWindow {
             })
     }
 
-    fn peer_has_expired_pending(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+    /// Whether `peer_addr` owns a pending block past the re-request timeout —
+    /// the soft-demotion signal: such a peer gets no new front-of-window
+    /// requests unless it is the last-resort peer, and it does not count as
+    /// fan-out-eligible (KTD6's "not currently soft-demoted" clause).
+    pub(super) fn peer_has_expired_pending(&self, peer_addr: SocketAddr, now: Instant) -> bool {
         if self
             .next_pending_deadline
             .is_none_or(|deadline| now < deadline)
@@ -321,15 +453,19 @@ impl DownloadWindow {
             .peer_inflight
             .get(&peer_addr)
             .map_or(0, |inflight| inflight.blocks);
-        let peer_capacity = self.budget.max_peer_inflight.saturating_sub(peer_inflight);
+        let peer_capacity = self.effective_peer_inflight().saturating_sub(peer_inflight);
+        // Expiry already ran above, so the count headroom needs no expired
+        // credit here: `pending` reflects only live in-flight requests.
         let block_capacity = self
             .budget
             .max_pending_blocks
-            .saturating_sub(self.pending.len());
+            .saturating_sub(self.pending.len())
+            .min(self.staged_count_headroom(0));
         let mut byte_capacity = self
             .budget
             .max_pending_bytes
-            .saturating_sub(self.pending_bytes);
+            .saturating_sub(self.pending_bytes)
+            .min(self.staged_byte_headroom());
         let batch_limit = self
             .budget
             .getdata_batch_limit
@@ -879,6 +1015,153 @@ mod tests {
         assert_ne!(window.request_peer_scan_limit(Instant::now()), 0);
     }
 
+    #[test]
+    fn fanout_threshold_switches_effective_peer_cap() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_pending_blocks: 128,
+            max_peer_inflight: 128,
+            fanout_peer_inflight: 16,
+            min_peers_for_fanout: 8,
+            getdata_batch_limit: 128,
+            ..test_budget()
+        });
+        let now = Instant::now();
+
+        // Below the threshold: single-peer deep window — one peer can take
+        // the full 128, so only one peer needs scanning.
+        window.set_fanout_eligible_peers(7);
+        assert!(!window.fanout_active());
+        assert_eq!(window.request_peer_scan_limit(now), 1);
+
+        // At the threshold: shallow per-peer cap engages and the scan fans
+        // out to enough peers to fill the window (128 / 16 = 8).
+        window.set_fanout_eligible_peers(8);
+        assert!(window.fanout_active());
+        assert_eq!(window.request_peer_scan_limit(now), 8);
+    }
+
+    #[test]
+    fn request_sizing_clamped_to_staged_byte_headroom() {
+        // Staging budget of four estimated blocks with three already staged:
+        // the gate is still open, but only one more block fits — a gate-open
+        // burst must not over-request past that headroom.
+        let slot = 256 * 1024;
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_received_bytes: 4 * slot,
+            ..test_budget()
+        });
+        for byte in [0xc1, 0xc2, 0xc3] {
+            window.mark_received(hash(byte), slot);
+        }
+
+        assert!(window.has_request_capacity());
+        assert_eq!(window.request_peer_scan_limit(Instant::now()), 1);
+
+        // The fourth staged block consumes the last slot: headroom hits zero
+        // and request capacity closes before any eviction can happen.
+        window.mark_received(hash(0xc4), slot);
+        assert!(!window.has_request_capacity());
+        assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
+    }
+
+    #[test]
+    fn request_sizing_clamped_to_staged_count_headroom() {
+        // Count budget of four with three blocks already staged: the byte
+        // budgets are unbounded, so only the count clamp can stop a burst
+        // from over-requesting into the stager's eviction threshold.
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_received_blocks: 4,
+            ..test_budget()
+        });
+        for byte in [0xd1, 0xd2, 0xd3] {
+            window.mark_received(hash(byte), 80);
+        }
+
+        assert!(window.has_request_capacity());
+        assert_eq!(window.request_peer_scan_limit(Instant::now()), 1);
+
+        // The fourth staged block consumes the last slot: count headroom hits
+        // zero and requests stop — overflow becomes request backpressure
+        // before the stager's count budget could ever evict.
+        window.mark_received(hash(0xd4), 80);
+        assert!(!window.has_request_capacity());
+        assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
+    }
+
+    #[test]
+    fn expired_pendings_reopen_scan_limit_through_count_headroom() {
+        // Count wedge: staged (2) + pending (2) at the count budget (4), with
+        // the pendings held by a stalled peer. While the pendings are live
+        // the scan limit must be zero; once they pass the re-request timeout
+        // the credit must reopen the scan limit so the request path can
+        // expire and re-request the front (otherwise the wedge can only be
+        // broken by pruning every staged block into re-download).
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_pending_blocks: 4,
+            max_received_blocks: 4,
+            max_peer_inflight: 4,
+            getdata_batch_limit: 4,
+            pending_timeout: Duration::from_secs(10),
+            ..test_budget()
+        });
+        let now = Instant::now();
+        let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        for (byte, height) in [(0xe1, 1_u32), (0xe2, 2)] {
+            window.pending.insert(
+                hash(byte),
+                super::PendingBlock {
+                    peer_addr,
+                    requested_at: now,
+                    height,
+                    estimated_bytes: 256 * 1024,
+                },
+            );
+            window.pending_bytes = window.pending_bytes.saturating_add(256 * 1024);
+            window.record_pending_deadline(now);
+        }
+        window
+            .peer_inflight
+            .insert(peer_addr, super::PeerInflight { blocks: 2 });
+        for byte in [0xe3, 0xe4] {
+            window.mark_received(hash(byte), 80);
+        }
+
+        assert_eq!(window.request_peer_scan_limit(now), 0);
+
+        let after_timeout = now + Duration::from_secs(10);
+        assert_ne!(window.request_peer_scan_limit(after_timeout), 0);
+    }
+
+    #[test]
+    fn fanout_engagement_has_one_peer_hysteresis() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            min_peers_for_fanout: 8,
+            ..test_budget()
+        });
+
+        // Fresh window: disengaged until the threshold is reached.
+        assert!(!window.fanout_active());
+        window.set_fanout_eligible_peers(7);
+        assert!(!window.fanout_active());
+        window.set_fanout_eligible_peers(8);
+        assert!(window.fanout_active());
+
+        // One transient demotion at the threshold must not flap the mode.
+        window.set_fanout_eligible_peers(7);
+        assert!(window.fanout_active());
+        window.set_fanout_eligible_peers(8);
+        assert!(window.fanout_active());
+
+        // A second peer dropping out is structural: disengage, and stay
+        // disengaged at one-below until the full threshold returns.
+        window.set_fanout_eligible_peers(6);
+        assert!(!window.fanout_active());
+        window.set_fanout_eligible_peers(7);
+        assert!(!window.fanout_active());
+        window.set_fanout_eligible_peers(8);
+        assert!(window.fanout_active());
+    }
+
     fn test_budget() -> SyncBudget {
         SyncBudget {
             max_pending_blocks: 128,
@@ -886,6 +1169,10 @@ mod tests {
             max_received_blocks: 128,
             max_received_bytes: usize::MAX,
             max_peer_inflight: 128,
+            // Fan-out disengaged: these unit tests pin the legacy single-mode
+            // mechanics where `max_peer_inflight` is always the binding cap.
+            fanout_peer_inflight: 128,
+            min_peers_for_fanout: usize::MAX,
             getdata_batch_limit: 16,
             pending_timeout: Duration::from_secs(30),
             received_timeout: Duration::from_secs(30),
