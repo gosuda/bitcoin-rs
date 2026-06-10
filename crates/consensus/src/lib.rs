@@ -7,6 +7,15 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+#[cfg(all(feature = "kernel", feature = "bitcoinconsensus"))]
+compile_error!(
+    "features `kernel` and `bitcoinconsensus` are mutually exclusive: both statically link \
+     Bitcoin Core's native consensus symbols, and the overlapping archives would silently \
+     misroute between the two engines instead of failing cleanly at link time. Enable exactly \
+     one script-verification backend (`bitcoinconsensus` is a default feature — build kernel \
+     profiles with `--no-default-features`)."
+);
+
 /// BIP112 sequence-lock checks.
 pub mod bip112;
 /// BIP113 median-time-past checks.

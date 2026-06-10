@@ -33,6 +33,10 @@ redb = ["bitcoin-rs-node/redb"]
 mdbx = ["bitcoin-rs-node/mdbx"]
 bitcoinconsensus = ["bitcoin-rs-node/bitcoinconsensus"]
 kernel = ["bitcoin-rs-node/kernel"]
+# Full node on Core's bitcoinkernel engine: all storage backends + `kernel`,
+# excluding `bitcoinconsensus`. Mutually exclusive with the default feature
+# set — build with `--no-default-features --features kernel-node`.
+kernel-node = ["rocksdb", "fjall", "redb", "mdbx", "kernel"]
 utreexo = ["bitcoin-rs-node/utreexo"]
 
 [[test]]

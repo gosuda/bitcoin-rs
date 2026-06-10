@@ -1690,6 +1690,102 @@ mod consensus_rule_tests {
         Ok(())
     }
 
+    /// R2 pin (shared-view parallel path): under the kernel feature the script
+    /// verdict carries the kernel dispatch marker — the Rust interpreter did
+    /// not produce it.
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn verify_block_transactions_shared_view_path_uses_kernel_verdict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (block, plan, utxo) = bad_script_spend_block()?;
+        let handles = apply_handles(utxo);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ) {
+            Ok(()) => panic!("bad script must fail under the kernel build"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+                input_index: 0,
+                ref reason,
+            }) if reason.starts_with("kernel script verification failed:")
+        ));
+        Ok(())
+    }
+
+    /// R2 pin (overlay path): a same-block spend resolved against the frozen
+    /// per-tx snapshot view is also verdict-checked by the kernel.
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn verify_block_transactions_overlay_path_uses_kernel_verdict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin::opcodes::all::OP_EQUAL;
+        use bitcoin::script::Builder;
+
+        let base_prevout = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x67; 32]),
+            vout: 0,
+        };
+        let utxo = utxo_with_output(base_prevout, 1)?;
+        let handles = apply_handles(utxo);
+        let funding_tx = spending_transaction_to_script(
+            base_prevout,
+            Sequence::MAX.to_consensus_u32(),
+            Builder::new().push_opcode(OP_EQUAL).into_script(),
+        );
+        let funding_outpoint = bitcoin::OutPoint {
+            txid: funding_tx.compute_txid(),
+            vout: 0,
+        };
+        let bad_same_block_spend = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: funding_outpoint,
+                script_sig: Builder::new().push_int(7).push_int(8).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: op_true_script(),
+            }],
+        };
+        let block = block_with_transactions(vec![funding_tx, bad_same_block_spend]);
+        let plan = tx_plan(&block);
+        assert!(plan.needs_local_utxo_overlay);
+
+        let error = match verify_block_transactions(
+            &handles,
+            &block,
+            &plan,
+            2,
+            0,
+            bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ) {
+            Ok(()) => panic!("bad same-block spend must fail under the kernel build"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+                input_index: 0,
+                ref reason,
+            }) if reason.starts_with("kernel script verification failed:")
+        ));
+        Ok(())
+    }
+
     #[test]
     fn verify_block_transactions_rejects_cross_transaction_duplicate_spend()
     -> Result<(), Box<dyn std::error::Error>> {

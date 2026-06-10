@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 #[cfg(feature = "bitcoinconsensus")]
 use bitcoin::{Script, consensus::encode};
 use bitcoin_rs_primitives::Tx;
-use bitcoin_rs_script::{Interpreter, VerifyFlags};
+#[cfg(not(feature = "kernel"))]
+use bitcoin_rs_script::Interpreter;
+use bitcoin_rs_script::VerifyFlags;
 
 use crate::rust_path::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, MAX_MONEY};
@@ -188,7 +190,7 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
 
     let mut input_value = 0u64;
     let mut verified_prevouts = Vec::with_capacity(tx.input.len());
-    #[cfg(feature = "bitcoinconsensus")]
+    #[cfg(all(feature = "bitcoinconsensus", not(feature = "kernel")))]
     let mut serialized_tx = None;
     for (input_index, input) in tx.input.iter().enumerate() {
         let prevout = prevouts
@@ -198,6 +200,10 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
             .checked_add(prevout.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
 
+        // R2: in the kernel build the per-input interpreter/bitcoinconsensus
+        // dispatch is compiled out; script verdicts come from the batched
+        // kernel call after prevout resolution.
+        #[cfg(not(feature = "kernel"))]
         if !skip_scripts {
             #[cfg(feature = "bitcoinconsensus")]
             if verify_non_taproot_with_bitcoinconsensus(
@@ -228,6 +234,14 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
                 })?;
         }
         verified_prevouts.push((input.previous_output, prevout));
+    }
+
+    // KTD5: under the kernel feature every script class routes through Core's
+    // engine — one transaction parse plus one sighash precompute shared across
+    // inputs. When scripts are skipped (assume-valid), no kernel call happens.
+    #[cfg(feature = "kernel")]
+    if !skip_scripts {
+        crate::kernel::verify_tx_scripts(tx, &verified_prevouts, flags)?;
     }
 
     if input_value < output_value {
@@ -326,7 +340,7 @@ mod tests {
     use std::{cell::Cell, collections::BTreeMap};
 
     use bitcoin::hashes::Hash as _;
-    #[cfg(feature = "bitcoinconsensus")]
+    #[cfg(any(feature = "bitcoinconsensus", feature = "kernel"))]
     use bitcoin::opcodes::all::OP_EQUAL;
     use bitcoin::script::Builder;
     use bitcoin::{
@@ -632,6 +646,129 @@ mod tests {
                         .to_owned(),
             })
         );
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn kernel_accepts_non_taproot_spend_with_script_sig_data() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([7; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Builder::new().push_int(7).push_int(7).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_opcode(OP_EQUAL).into_script(),
+            },
+        );
+
+        assert_eq!(
+            verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
+            Ok(())
+        );
+    }
+
+    /// R2 pin: in the kernel build the script verdict carries the kernel
+    /// dispatch marker, proving the Rust interpreter (whose call site is
+    /// `cfg(not(feature = "kernel"))`) did not produce it.
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn kernel_rejects_script_sig_mismatch_with_kernel_verdict() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([8; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Builder::new().push_int(7).push_int(8).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_opcode(OP_EQUAL).into_script(),
+            },
+        );
+
+        let result = verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY);
+
+        assert!(matches!(
+            result,
+            Err(ConsensusError::Script {
+                input_index: 0,
+                reason
+            }) if reason.starts_with("kernel script verification failed:")
+        ));
+    }
+
+    /// Assume-valid semantics: the non-script entry must accept a transaction
+    /// whose script the kernel would reject — no kernel invocation when
+    /// scripts are skipped.
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn kernel_skip_scripts_entry_accepts_invalid_script() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([9; 32]),
+            vout: 0,
+        };
+        let tx = Tx(Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Builder::new().push_int(7).push_int(8).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        });
+        let mut utxos = BTreeMap::new();
+        utxos.insert(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(100),
+                script_pubkey: Builder::new().push_opcode(OP_EQUAL).into_script(),
+            },
+        );
+
+        assert_eq!(
+            super::verify_transaction_borrowed_non_script_with_mtp(&tx.0, &utxos, 0, 0),
+            Ok(())
+        );
+        assert!(matches!(
+            verify_transaction(&tx, &utxos, 0, VerifyFlags::MANDATORY),
+            Err(ConsensusError::Script { input_index: 0, .. })
+        ));
     }
 
     #[test]

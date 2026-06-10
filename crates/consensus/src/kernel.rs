@@ -1,12 +1,69 @@
 #[cfg(feature = "kernel")]
 mod enabled {
     use bitcoin::consensus::encode;
-    use bitcoin::{Network, TxOut};
+    use bitcoin::{Network, OutPoint, TxOut};
     use bitcoin_rs_primitives::{Block, Tx};
     use bitcoin_rs_script::VerifyFlags;
 
     use crate::ConsensusError;
     use crate::rust_path::{BlockState, TipState, UtxoView};
+
+    /// Verifies every input script of `tx` through bitcoinkernel.
+    ///
+    /// `spent_outputs` pairs each input's outpoint with the output it spends, in
+    /// input order — the shape the verify path already holds after prevout
+    /// resolution. One transaction serialization/parse and one
+    /// [`bitcoinkernel::PrecomputedTransactionData`] are shared across all inputs.
+    ///
+    /// Per-input verdict failures map to [`ConsensusError::Script`] (preserving
+    /// the verify entry's error contract); parse and precompute failures map to
+    /// [`ConsensusError::Kernel`]. A `spent_outputs` length that disagrees with
+    /// the input count is rejected outright: the loop below is driven by
+    /// `spent_outputs`, so a short slice would otherwise leave trailing inputs
+    /// silently unverified.
+    pub fn verify_tx_scripts(
+        tx: &bitcoin::Transaction,
+        spent_outputs: &[(OutPoint, TxOut)],
+        flags: VerifyFlags,
+    ) -> Result<(), ConsensusError> {
+        if spent_outputs.len() != tx.input.len() {
+            return Err(ConsensusError::Kernel(format!(
+                "prevout count {} does not match input count {}",
+                spent_outputs.len(),
+                tx.input.len()
+            )));
+        }
+        let tx_bytes = encode::serialize(tx);
+        let kernel_tx = bitcoinkernel::Transaction::new(&tx_bytes)
+            .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
+        let kernel_prevouts = spent_outputs
+            .iter()
+            .map(|(_, prevout)| kernel_txout(prevout))
+            .collect::<Result<Vec<_>, _>>()?;
+        let tx_data =
+            bitcoinkernel::PrecomputedTransactionData::new(&kernel_tx, kernel_prevouts.as_slice())
+                .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
+
+        for (input_index, (_, prevout)) in spent_outputs.iter().enumerate() {
+            let script = bitcoinkernel::ScriptPubkey::new(prevout.script_pubkey.as_bytes())
+                .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
+            let amount = i64::try_from(prevout.value.to_sat())
+                .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
+            bitcoinkernel::verify(
+                &script,
+                Some(amount),
+                &kernel_tx,
+                input_index,
+                Some(flags.kernel_bits()),
+                &tx_data,
+            )
+            .map_err(|error| ConsensusError::Script {
+                input_index,
+                reason: format!("kernel script verification failed: {error}"),
+            })?;
+        }
+        Ok(())
+    }
 
     /// Context for Core's bitcoinkernel consensus engine.
     pub struct KernelContext {
@@ -39,37 +96,8 @@ mod enabled {
             flags: VerifyFlags,
         ) -> Result<(), ConsensusError> {
             let _ = &self.ctx;
-            let tx_bytes = encode::serialize(&tx.0);
-            let kernel_tx = bitcoinkernel::Transaction::new(&tx_bytes)
-                .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
             let spent = collect_spent_outputs(tx, prevouts)?;
-            let kernel_prevouts = spent
-                .iter()
-                .map(kernel_txout)
-                .collect::<Result<Vec<_>, _>>()?;
-            let tx_data = bitcoinkernel::PrecomputedTransactionData::new(
-                &kernel_tx,
-                kernel_prevouts.as_slice(),
-            )
-            .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
-
-            for (input_index, prevout) in spent.iter().enumerate() {
-                let script = bitcoinkernel::ScriptPubkey::new(prevout.script_pubkey.as_bytes())
-                    .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
-                bitcoinkernel::verify(
-                    &script,
-                    Some(
-                        i64::try_from(prevout.value.to_sat())
-                            .map_err(|error| ConsensusError::Kernel(error.to_string()))?,
-                    ),
-                    &kernel_tx,
-                    input_index,
-                    Some(flags.kernel_bits()),
-                    &tx_data,
-                )
-                .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
-            }
-            Ok(())
+            verify_tx_scripts(&tx.0, &spent, flags)
         }
 
         /// Connects block-level rules through the kernel path shape.
@@ -90,13 +118,14 @@ mod enabled {
     fn collect_spent_outputs(
         tx: &Tx,
         prevouts: &impl UtxoView,
-    ) -> Result<Vec<TxOut>, ConsensusError> {
+    ) -> Result<Vec<(OutPoint, TxOut)>, ConsensusError> {
         tx.0.input
             .iter()
             .enumerate()
             .map(|(input_index, input)| {
                 prevouts
                     .lookup(&input.previous_output)
+                    .map(|txout| (input.previous_output, txout))
                     .ok_or(ConsensusError::MissingPrevout { input_index })
             })
             .collect()
@@ -112,7 +141,7 @@ mod enabled {
 }
 
 #[cfg(feature = "kernel")]
-pub use enabled::KernelContext;
+pub use enabled::{KernelContext, verify_tx_scripts};
 
 #[cfg(not(feature = "kernel"))]
 /// Stub kernel context available when the `kernel` feature is off.
