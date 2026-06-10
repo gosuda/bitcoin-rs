@@ -920,10 +920,13 @@ fn verify_block_transactions(
     }
     if !tx_plan.needs_local_utxo_overlay {
         let view = crate::UtxoSetView::new(Arc::clone(&handles.utxo));
-        // Parallel verification: when no same-block overlay is needed, all
-        // non-coinbase transactions read from the shared UTXO set independently.
-        // Rayon parallelizes across transactions for significant IBD speedup.
-        block.txdata.par_iter().try_for_each(|tx| {
+        // Serial verification: measured on the 0->150k replay (U4 candidate 1,
+        // kernel backend), per-tx rayon fan-out on this path costs more than it
+        // wins — width 1 ran 57.3s vs 66.3s at default width — because shared
+        // UTXO-set reads contend and typical blocks are small. The overlay path
+        // below keeps its parallel verify: per-tx snapshots are contention-free
+        // and measured faster wide (73.5s vs 101.1s).
+        block.txdata.iter().try_for_each(|tx| {
             if tx.is_coinbase() {
                 bitcoin_rs_consensus::verify_tx::verify_coinbase_script_sig_size(tx)?;
                 return Ok(());
