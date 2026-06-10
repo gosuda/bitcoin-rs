@@ -55,7 +55,13 @@ const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 /// Maximum estimated bytes in the in-flight request window.
 const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
 /// Maximum serialized bytes staged in memory while waiting for predecessors.
-const RECEIVED_BLOCK_BYTE_BUDGET: usize = 128 * 256 * 1024;
+///
+/// Defined as [`PENDING_BYTE_BUDGET`] so the in-flight and staged byte bounds
+/// stay one consistent pair: a full download window (`PENDING_BUDGET` blocks
+/// at the high-height `PENDING_BLOCK_BYTE_ESTIMATE`) always fits in staging
+/// without eviction. At the 150k acceptance window this bound rarely binds —
+/// blocks there are far below the per-slot estimate.
+const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
 /// Maximum decoded inbound blocks held before handing them to `BlockStager`,
 /// sized from the same byte budget that bounds retained staged blocks.
 const INBOUND_BLOCK_STAGE_CHUNK: usize =
@@ -68,7 +74,9 @@ const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 
 // The apply-side cache horizon (`expected_apply_horizon`) stays within the
 // inline capacity below only because the staging budget equals the in-flight
-// budget; a drift would silently spill every cached run to the heap.
+// budget; a drift would silently spill every cached run to the heap. The
+// byte-budget pair needs no twin assertion: `RECEIVED_BLOCK_BYTE_BUDGET` is
+// `PENDING_BYTE_BUDGET` by definition.
 const _: () = assert!(PENDING_BUDGET == RECEIVED_BLOCK_BUDGET);
 
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
@@ -2386,6 +2394,252 @@ mod tests {
             return Err(std::io::Error::other("expected retry getdata").into());
         };
         assert_eq!(witness_block_inventory(retry)?, alloc::vec![expected_hash]);
+        Ok(())
+    }
+
+    #[test]
+    fn staging_byte_exhaustion_backpressures_requests_then_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block1 =
+            mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
+        let block2 =
+            mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+        let block3 =
+            mined_block_with_prev_hash(block2.block_hash(), 3, vec![coinbase_transaction(3)]);
+        let block1_hash = block1.block_hash();
+        let block2_hash = block2.block_hash();
+        let block3_hash = block3.block_hash();
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let block1_id =
+            tree.insert_node(Some(genesis_id), block1.header, NodeStatus::HeaderValid)?;
+        let block2_id =
+            tree.insert_node(Some(block1_id), block2.header, NodeStatus::HeaderValid)?;
+        tree.insert_node(Some(block2_id), block3.header, NodeStatus::HeaderValid)?;
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // Staging byte budget that exactly one staged block exhausts.
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_received_bytes: block2.total_size(),
+                getdata_batch_limit: 2,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        peers.write().push(synthetic_peer(addr, 100));
+        let (tx, rx) = unbounded::<Message>();
+        peer_outbound.write().insert(addr, tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            alloc::vec![block1_hash, block2_hash]
+        );
+        let _headers = rx.try_recv()?;
+
+        // Deliver only the successor: it stages (waiting on block1) and
+        // exactly exhausts the staging byte budget.
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2.clone()))?;
+        sync.drain_inbound_blocks();
+        assert_eq!(
+            sync.block_stager.lock().received_bytes(),
+            block2.total_size()
+        );
+
+        // Exhausted staging degrades to backpressure: the next tick requests
+        // nothing further (block3 stays unrequested) and the staged block is
+        // not dropped for re-download.
+        sync.tick();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(sync.block_stager.lock().received_len(), 1);
+
+        // The window-front block arrives: the stager admits it past the
+        // exhausted budget (expected-block exemption), apply drains both, and
+        // request capacity returns for block3.
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block1))?;
+        sync.tick();
+
+        let applied_height = applied_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
+            .height;
+        assert_eq!(applied_height, 2);
+        assert_eq!(sync.block_stager.lock().received_len(), 0);
+        let NetworkMessage::GetData(recovered) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected recovery getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(recovered)?,
+            alloc::vec![block3_hash]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block1 =
+            mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
+        let block2 =
+            mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+        let block3 =
+            mined_block_with_prev_hash(block2.block_hash(), 3, vec![coinbase_transaction(3)]);
+        let block1_hash = block1.block_hash();
+        let block2_hash = block2.block_hash();
+        let mut tree = BlockTree::new();
+        let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let block1_id =
+            tree.insert_node(Some(genesis_id), block1.header, NodeStatus::HeaderValid)?;
+        let block2_id =
+            tree.insert_node(Some(block1_id), block2.header, NodeStatus::HeaderValid)?;
+        tree.insert_node(Some(block2_id), block3.header, NodeStatus::HeaderValid)?;
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // Staging byte budget that exactly one staged block exhausts. Unlike
+        // the arrival-recovery sibling above, the frontier block never shows
+        // up, so the only way back is timeout-driven: instantly-expirable
+        // pending entries and a short staged-block timeout.
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_received_bytes: block2.total_size(),
+                getdata_batch_limit: 2,
+                pending_timeout: Duration::ZERO,
+                received_timeout: Duration::from_millis(100),
+                ..super::default_sync_budget()
+            },
+        );
+        let stalled_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let healthy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        peers.write().push(synthetic_peer(stalled_addr, 100));
+        let (stalled_tx, stalled_rx) = unbounded::<Message>();
+        peer_outbound.write().insert(stalled_addr, stalled_tx);
+
+        sync.tick();
+
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        let NetworkMessage::GetData(inventory) = stalled_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            alloc::vec![block1_hash, block2_hash]
+        );
+        let _headers = stalled_rx.try_recv()?;
+
+        // Deliver only the successor: it stages (waiting on block1, which the
+        // stalled peer will never send) and exactly exhausts the staging byte
+        // budget, closing the request gate.
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2.clone()))?;
+        sync.drain_inbound_blocks();
+        assert_eq!(
+            sync.block_stager.lock().received_bytes(),
+            block2.total_size()
+        );
+        assert!(!sync.download_window.lock().has_request_capacity());
+
+        peers.write().push(synthetic_peer(healthy_addr, 100));
+        let (healthy_tx, healthy_rx) = unbounded::<Message>();
+        peer_outbound.write().insert(healthy_addr, healthy_tx);
+
+        // While the staged bytes are exhausted no getdata is issued at all —
+        // the gate is checked before expired-pending retry, so even though
+        // block1's pending entry is already expired (zero pending timeout)
+        // neither peer is asked for anything.
+        sync.tick();
+        while let Ok(message) = stalled_rx.try_recv() {
+            if matches!(message, NetworkMessage::GetData(_)) {
+                return Err(std::io::Error::other(
+                    "exhausted staging must not request from the stalled peer",
+                )
+                .into());
+            }
+        }
+        assert!(
+            healthy_rx.try_recv().is_err(),
+            "exhausted staging must not request from the healthy peer"
+        );
+        assert_eq!(sync.block_stager.lock().received_len(), 1);
+
+        // Let the staged successor outlive its received timeout, then tick:
+        // prune_expired drops it, drop_received_for_retry releases its bytes
+        // (gate reopens), and expire_pending re-queues the stalled frontier
+        // height-first toward the healthy peer.
+        std::thread::sleep(Duration::from_millis(125));
+        sync.tick();
+
+        assert_eq!(sync.block_stager.lock().received_len(), 0);
+        {
+            let window = sync.download_window.lock();
+            assert_eq!(window.received_len(), 0);
+            assert!(window.has_request_capacity());
+            assert!(window.contains_pending(&Hash256::from_le_bytes(block1_hash.as_byte_array())));
+        }
+        let NetworkMessage::GetData(retry) = healthy_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected healthy peer retry getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(retry)?,
+            alloc::vec![block1_hash, block2_hash]
+        );
+        while let Ok(message) = stalled_rx.try_recv() {
+            if matches!(message, NetworkMessage::GetData(_)) {
+                return Err(
+                    std::io::Error::other("stalled peer should not receive retry getdata").into(),
+                );
+            }
+        }
         Ok(())
     }
 

@@ -107,6 +107,19 @@ impl BlockStager {
                 dropped: DroppedBlock { hash },
             };
         }
+        // Byte-budget exhaustion is backpressure, not eviction: refuse the
+        // incoming block (it stays re-requestable through the window's
+        // drop-for-retry path) instead of evicting already-downloaded staged
+        // progress into re-download churn. The next expected block is exempt —
+        // it unblocks the apply frontier immediately, and refusing it while
+        // staged successors hold the budget would deadlock the window.
+        if Some(hash) != next_expected_hash
+            && self.received_bytes.saturating_add(bytes) > self.budget.max_received_bytes
+        {
+            return StagedBlock::DroppedForRetry {
+                dropped: DroppedBlock { hash },
+            };
+        }
 
         entry.insert(ReceivedBlock {
             block,
@@ -118,7 +131,7 @@ impl BlockStager {
         self.received_bytes = self.received_bytes.saturating_add(bytes);
         self.track_received_deadline(now);
 
-        let dropped = if self.is_over_budget() {
+        let dropped = if self.is_over_count_budget() {
             self.evict_over_budget(next_expected_hash)
         } else {
             Vec::new()
@@ -225,7 +238,7 @@ impl BlockStager {
 
     fn evict_over_budget(&mut self, next_expected_hash: Option<Hash256>) -> Vec<DroppedBlock> {
         let mut dropped = Vec::new();
-        while self.is_over_budget() {
+        while self.is_over_count_budget() {
             let Some(hash) = self.oldest_unprotected_candidate(next_expected_hash) else {
                 break;
             };
@@ -256,9 +269,12 @@ impl BlockStager {
         self.received_order.remove(candidate_index)
     }
 
-    fn is_over_budget(&self) -> bool {
+    /// Only the slot-count budget evicts staged blocks. The byte budget is
+    /// enforced as admission backpressure in [`Self::insert`] (with a bounded
+    /// overshoot for the next expected block), so byte exhaustion can never
+    /// trigger evict/re-download churn.
+    fn is_over_count_budget(&self) -> bool {
         self.received.len() > self.budget.max_received_blocks
-            || self.received_bytes > self.budget.max_received_bytes
     }
 
     fn remove(&mut self, hash: &Hash256) -> Option<DroppedBlock> {
@@ -646,6 +662,181 @@ mod tests {
         assert!(!stager.contains(&second));
         assert!(stager.contains(&third));
         assert!(stager.contains(&incoming));
+    }
+
+    /// Builds a block whose `total_size` is exactly `target` bytes by padding
+    /// a single transaction's `script_sig`. Two-pass: the probe build keeps the
+    /// script-length varint in the same width regime as the final build, so one
+    /// adjustment is exact (asserted).
+    fn block_with_total_size(target: usize) -> bitcoin::Block {
+        let probe = padded_block(target);
+        let probe_size = block_size(&probe);
+        let padding = target.saturating_mul(2).saturating_sub(probe_size);
+        let block = padded_block(padding);
+        assert_eq!(block_size(&block), target);
+        block
+    }
+
+    fn padded_block(script_len: usize) -> bitcoin::Block {
+        bitcoin::Block {
+            header: bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest).header,
+            txdata: vec![bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn {
+                    previous_output: bitcoin::OutPoint::null(),
+                    script_sig: bitcoin::ScriptBuf::from(vec![0_u8; script_len]),
+                    sequence: bitcoin::Sequence::MAX,
+                    witness: bitcoin::Witness::new(),
+                }],
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::ZERO,
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
+        let budget = default_sync_budget();
+        // Budget-pair consistency (R9): the staging byte budget admits a full
+        // download window of blocks at the high-height per-slot estimate.
+        assert_eq!(
+            budget.max_received_bytes,
+            budget
+                .max_received_blocks
+                .saturating_mul(crate::sync::PENDING_BLOCK_BYTE_ESTIMATE)
+        );
+        let block = block_with_total_size(crate::sync::PENDING_BLOCK_BYTE_ESTIMATE);
+        let serialized = bytes::Bytes::from(serialize(&block));
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let window_slots = budget.max_received_blocks;
+        assert!(window_slots <= usize::from(u8::MAX));
+
+        for index in 0..window_slots {
+            let mut raw = [0xee_u8; 32];
+            raw[0] = u8::try_from(index).unwrap_or_else(|_| panic!("window exceeds u8 range"));
+            let hash = Hash256::from_le_bytes(&raw);
+            match stager.insert(hash, None, block.clone(), serialized.clone(), now) {
+                super::StagedBlock::Memory { dropped, .. } => {
+                    assert!(
+                        dropped.is_empty(),
+                        "full window must stage without eviction"
+                    );
+                }
+                other => panic!("estimate-sized block should stage in memory: {other:?}"),
+            }
+        }
+
+        assert_eq!(stager.received_len(), window_slots);
+        assert_eq!(stager.received_bytes(), budget.max_received_bytes);
+    }
+
+    #[test]
+    fn byte_budget_exhaustion_rejects_incoming_without_evicting_staged() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
+        let block_bytes = block_size(&block);
+        let mut budget = default_sync_budget();
+        budget.max_received_bytes = block_bytes.saturating_mul(2);
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let expected = Hash256::from_le_bytes(&[0x01; 32]);
+        let successor = Hash256::from_le_bytes(&[0x02; 32]);
+
+        stager.insert(
+            expected,
+            Some(expected),
+            block.clone(),
+            serialized.clone(),
+            now,
+        );
+        stager.insert(
+            successor,
+            Some(expected),
+            block.clone(),
+            serialized.clone(),
+            now,
+        );
+        assert_eq!(stager.received_bytes(), budget.max_received_bytes);
+
+        // Exhausted: every further non-expected block is refused outright —
+        // backpressure, never evict/re-download churn of staged progress.
+        for byte in [0x03_u8, 0x04] {
+            let incoming = Hash256::from_le_bytes(&[byte; 32]);
+            match stager.insert(
+                incoming,
+                Some(expected),
+                block.clone(),
+                serialized.clone(),
+                now,
+            ) {
+                super::StagedBlock::DroppedForRetry { dropped } => {
+                    assert_eq!(dropped.hash, incoming);
+                }
+                other => panic!("exhausted stager should refuse incoming block: {other:?}"),
+            }
+            // Non-churn pin: zero staged blocks evicted while exhausted.
+            assert_eq!(stager.received_len(), 2);
+            assert!(stager.contains(&expected));
+            assert!(stager.contains(&successor));
+            assert_eq!(stager.received_bytes(), budget.max_received_bytes);
+        }
+    }
+
+    #[test]
+    fn byte_budget_exhaustion_still_accepts_next_expected_block() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let serialized = bytes::Bytes::from(serialize(&block));
+        let block_bytes = block_size(&block);
+        let mut budget = default_sync_budget();
+        budget.max_received_bytes = block_bytes.saturating_mul(2);
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let expected = Hash256::from_le_bytes(&[0x0a; 32]);
+        let successor_one = Hash256::from_le_bytes(&[0x0b; 32]);
+        let successor_two = Hash256::from_le_bytes(&[0x0c; 32]);
+
+        stager.insert(
+            successor_one,
+            Some(expected),
+            block.clone(),
+            serialized.clone(),
+            now,
+        );
+        stager.insert(
+            successor_two,
+            Some(expected),
+            block.clone(),
+            serialized.clone(),
+            now,
+        );
+        assert_eq!(stager.received_bytes(), budget.max_received_bytes);
+
+        // The next expected block must stage even at byte exhaustion (bounded
+        // overshoot) — refusing it would deadlock the apply frontier behind
+        // the staged successors that hold the budget.
+        match stager.insert(
+            expected,
+            Some(expected),
+            block.clone(),
+            serialized.clone(),
+            now,
+        ) {
+            super::StagedBlock::Memory { dropped, .. } => {
+                assert!(
+                    dropped.is_empty(),
+                    "expected block must not evict staged successors"
+                );
+            }
+            other => panic!("next expected block should stage at exhaustion: {other:?}"),
+        }
+        assert_eq!(stager.received_len(), 3);
+        assert!(stager.contains(&expected));
+        assert!(stager.contains(&successor_one));
+        assert!(stager.contains(&successor_two));
     }
 
     #[test]

@@ -155,12 +155,25 @@ impl DownloadWindow {
     }
 
     pub(super) fn has_request_capacity(&self) -> bool {
-        self.pending.len() < self.budget.max_pending_blocks
+        !self.staged_bytes_exhausted()
+            && self.pending.len() < self.budget.max_pending_blocks
             && self.pending_bytes.saturating_add(self.ewma_block_bytes)
                 <= self.budget.max_pending_bytes
     }
 
+    /// Staged-byte backpressure: once the blocks already received and waiting
+    /// to apply have consumed the staging byte budget, stop issuing new block
+    /// requests — arrivals would only be refused by the stager and
+    /// re-requested, churning bandwidth. Capacity returns as staged blocks are
+    /// applied (or expire) and their bytes are released.
+    const fn staged_bytes_exhausted(&self) -> bool {
+        self.received_bytes >= self.budget.max_received_bytes
+    }
+
     pub(super) fn request_peer_scan_limit(&self, now: Instant) -> usize {
+        if self.staged_bytes_exhausted() {
+            return 0;
+        }
         let per_peer = self
             .budget
             .getdata_batch_limit
@@ -295,6 +308,9 @@ impl DownloadWindow {
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
+        if self.staged_bytes_exhausted() {
+            return None;
+        }
         if !allow_expired_retry_from_peer && self.peer_has_expired_pending(peer_addr, now) {
             return None;
         }
@@ -837,6 +853,30 @@ mod tests {
         assert_eq!(window.pending_len(), 1);
         assert!(window.contains_pending(&pending));
         assert_eq!(window.pending_bytes(), pending_bytes);
+    }
+
+    #[test]
+    fn staged_byte_exhaustion_stops_new_requests_until_applied() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_received_bytes: 100,
+            ..test_budget()
+        });
+        let staged = hash(0xb1);
+        assert!(window.has_request_capacity());
+        assert_ne!(window.request_peer_scan_limit(Instant::now()), 0);
+
+        window.mark_received(staged, 100);
+
+        // Staged bytes at the budget: stop issuing new block requests instead
+        // of letting arrivals bounce off the exhausted stager.
+        assert!(!window.has_request_capacity());
+        assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
+
+        window.mark_received_applied(&staged);
+
+        // Applying the staged block releases its bytes and reopens the window.
+        assert!(window.has_request_capacity());
+        assert_ne!(window.request_peer_scan_limit(Instant::now()), 0);
     }
 
     fn test_budget() -> SyncBudget {
