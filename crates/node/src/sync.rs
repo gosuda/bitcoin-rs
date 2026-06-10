@@ -89,6 +89,25 @@ const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
 /// hysteresis in [`DownloadWindow::set_fanout_eligible_peers`] instead of
 /// being re-derived from the raw count each tick.
 const MIN_PEERS_FOR_FANOUT: usize = PENDING_BUDGET / MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+/// Initial window-blocked stalling threshold, mirroring Bitcoin Core's
+/// `BLOCK_STALLING_TIMEOUT_DEFAULT` (2s, `net_processing.cpp`): when the
+/// window front has been in flight to one peer this long with the apply
+/// frontier idle and no other download progress possible, that peer is
+/// disconnected and its blocks re-queued (R8).
+const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
+/// Adaptive ceiling for the stalling threshold, mirroring Core's
+/// `BLOCK_STALLING_TIMEOUT_MAX` (64s): the threshold doubles per staller
+/// disconnect so a sudden bandwidth drop cannot cascade into disconnecting
+/// every peer at the 2s floor, and decays by x0.85 per window-front arrival
+/// (never snapping back) so the elevation survives a peer rotation.
+const BLOCK_STALLING_TIMEOUT_MAX: Duration = Duration::from_secs(64);
+/// How long a disconnected staller stays excluded from fan-out eligibility
+/// and non-last-resort block requests. Sized to the threshold ceiling: a
+/// staller flapping through reconnects can capture the window front at most
+/// once per cooldown, and the (window-global) doubled threshold bounds each
+/// capture — Core has no equivalent only because its reconnecting peer
+/// cannot re-acquire in-flight assignments this cheaply.
+const STALLER_COOLDOWN: Duration = BLOCK_STALLING_TIMEOUT_MAX;
 
 // The apply-side cache horizon (`expected_apply_horizon`) stays within the
 // inline capacity below only because the staging budget equals the in-flight
@@ -130,11 +149,13 @@ struct SyncPeerSelection {
 
 /// A height-eligible sync candidate annotated with its fan-out eligibility
 /// (KTD6 predicate, finalized across `statically_fanout_eligible` and the
-/// window's soft-demotion check).
+/// window's soft-demotion check) and with whether the window currently
+/// soft-blocks it for block requests (expired pendings or staller cooldown).
 #[derive(Clone, Copy, Debug)]
 struct FanoutCandidate {
     peer: SyncPeer,
     fanout_eligible: bool,
+    soft_blocked: bool,
 }
 
 /// Connection-level clauses of the fan-out eligibility predicate (KTD6):
@@ -218,15 +239,19 @@ impl BlockSync {
 
         let applied_tip = self.handles.applied_tip.load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        self.release_disconnected_peer_budget();
+        let chain_tip = self.handles.chain_tip.load_full();
         let now = Instant::now();
+        // Staller detection runs after the apply drain (so it sees real
+        // frontier progress) and before peer release + selection, so a fired
+        // disconnect re-queues the staller's blocks and re-requests them from
+        // healthy peers within the same tick.
+        self.disconnect_window_staller(applied_tip.as_deref(), now);
+        self.release_disconnected_peer_budget();
         let sync_peer_selection = self.sync_peer_selection(applied_height, now);
         if sync_peer_selection.header_peer.is_none() {
             tracing::trace!(applied_height, "block sync: no peer above current height");
             return;
         }
-
-        let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
@@ -379,9 +404,9 @@ impl BlockSync {
         next_expected_hash: Option<Hash256>,
     ) -> usize {
         let mut staged_blocks = Vec::with_capacity(blocks.len());
+        let now = Instant::now();
         {
             let mut stager = self.block_stager.lock();
-            let now = Instant::now();
             for inbound in blocks.drain(..) {
                 let hash = Hash256::from_le_bytes(inbound.block.block_hash().as_byte_array());
                 let staged = stager.insert(
@@ -403,7 +428,7 @@ impl BlockSync {
                 match staged {
                     StagedBlock::AlreadyStaged => {}
                     StagedBlock::Memory { bytes, dropped } => {
-                        window.mark_received(hash, bytes);
+                        window.mark_received(hash, bytes, now);
                         for dropped in dropped {
                             window.drop_received_for_retry(&dropped.hash);
                             retry_count = retry_count.saturating_add(1);
@@ -712,18 +737,22 @@ impl BlockSync {
                 candidates.push(FanoutCandidate {
                     peer: sync_peer,
                     fanout_eligible: statically_fanout_eligible(peer),
+                    soft_blocked: false,
                 });
             }
         }
         let (request_peer_limit, fanout_active) = {
             let mut window = self.download_window.lock();
             for candidate in &mut candidates {
-                // Final eligibility clause (KTD6): not currently soft-demoted
-                // for expired pendings. Counting a stalled peer toward fan-out
-                // would let one dead peer flip the mode and under-fill the
-                // window.
-                candidate.fanout_eligible = candidate.fanout_eligible
-                    && !window.peer_has_expired_pending(candidate.peer.addr, now);
+                // Final eligibility clauses (KTD6): not currently soft-demoted
+                // for expired pendings, and not inside the staller cooldown.
+                // Counting a stalled peer toward fan-out would let one dead
+                // peer flip the mode and under-fill the window; counting a
+                // just-disconnected staller that reconnected would hand it the
+                // window front back (RE-ADV-2).
+                candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.addr, now)
+                    || window.peer_in_staller_cooldown(candidate.peer.addr, now);
+                candidate.fanout_eligible = candidate.fanout_eligible && !candidate.soft_blocked;
             }
             let eligible = candidates
                 .iter()
@@ -746,8 +775,30 @@ impl BlockSync {
             // candidate may serve (an inbound-only node must still sync).
             candidates.iter().map(|candidate| candidate.peer).collect()
         } else {
-            // Fallback, single deep peer: the highest peer fills the window.
-            header_peer.into_iter().take(request_peer_limit).collect()
+            // Fallback, single deep peer: the highest peer that the window
+            // does not currently soft-block (expired pendings / staller
+            // cooldown) fills the window; a soft-blocked peer serves only as
+            // the last resort when no alternative exists. Without the
+            // preference, a disconnected staller that reconnects with an
+            // inflated start_height would out-sort every honest peer and
+            // re-acquire the window front (RE-ADV-2 / first-audit ADV-2).
+            let mut preferred: Option<SyncPeer> = None;
+            for candidate in candidates
+                .iter()
+                .filter(|candidate| !candidate.soft_blocked)
+            {
+                // First-wins on equal heights, matching the header-peer fold.
+                if preferred
+                    .is_none_or(|current| current.start_height < candidate.peer.start_height)
+                {
+                    preferred = Some(candidate.peer);
+                }
+            }
+            preferred
+                .or(header_peer)
+                .into_iter()
+                .take(request_peer_limit)
+                .collect()
         };
         if request_peers.len() > 1 {
             request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
@@ -965,6 +1016,74 @@ impl BlockSync {
             .release_disconnected_peers(|peer| outbound.contains_key(peer));
     }
 
+    /// R8: window-blocked staller detection and disconnect.
+    ///
+    /// Computes the sync-layer terms of the stall predicate and advances the
+    /// window's stall state machine ([`DownloadWindow::observe_stall`] holds
+    /// the predicate itself):
+    /// - the no-blame guard: while the stager holds the next expected block
+    ///   the apply side owns the frontier, so the stall clock must not run —
+    ///   no peer is blamed for our own apply lag or a failed-apply restore.
+    ///
+    /// There is deliberately no chain-tail arm: a caught-up peer taking >2s
+    /// on one tip block is the normal tip regime, where Core's stalling
+    /// logic does not engage; the last <window blocks of IBD fall back to
+    /// the pre-existing 60s pending-timeout machinery instead.
+    ///
+    /// On fire the peer's outbound entry is removed. That entry is the
+    /// connection's lease: the p2p message loop observes the removal within
+    /// its 1s read-timeout poll and tears the connection down (thread exit
+    /// also clears the peer registry), and the same removal makes
+    /// [`Self::release_disconnected_peer_budget`] — which runs right after in
+    /// the tick — re-queue the staller's in-flight blocks for healthy peers.
+    /// Re-acquisition by an immediately-reconnecting staller is held off by
+    /// the window's staller cooldown (fan-out ineligible, no requests except
+    /// as last resort). Core-faithfully this fires regardless of how many
+    /// peers remain: a stalled-forever peer is worse than no peer, the
+    /// re-queue is what frees the wedge, and a reconnecting sole peer is
+    /// still usable through the last-resort exemption.
+    ///
+    /// Net-layer boundary, stated honestly: this node has no autonomous peer
+    /// rotation. `--connect` peers are re-dialed every 2s by the fixed-peer
+    /// bootstrap, so a disconnected sole staller reconnects promptly; under
+    /// DNS bootstrap (one-shot at startup) a disconnect is not followed by a
+    /// replacement dial, and sync waits for an inbound peer or the staller's
+    /// own reconnect. Reconnect handling itself lives in the p2p layer, out
+    /// of reach here — the cooldown keys on the socket address, stable for
+    /// outbound dials but rotating with the ephemeral port for inbound peers
+    /// (inbound peers are never fan-out eligible, so that exposure is limited
+    /// to the fallback last-resort path Core shares).
+    fn disconnect_window_staller(&self, applied_tip: Option<&TipSnapshot>, now: Instant) {
+        let Some(applied_tip) = applied_tip else {
+            return;
+        };
+        let Some(next_apply_height) = applied_tip.height.checked_add(1) else {
+            return;
+        };
+        let apply_side_busy = self
+            .next_expected_block_hash()
+            .is_some_and(|hash| self.block_stager.lock().contains(&hash));
+        let fired = {
+            let mut window = self.download_window.lock();
+            let fired = window.observe_stall(next_apply_height, apply_side_busy, now);
+            let stall_seconds = window
+                .stalling_peer()
+                .map_or(0.0, |(_, since)| now.duration_since(since).as_secs_f64());
+            metrics::gauge!("node.sync.stall_seconds").set(stall_seconds);
+            fired
+        };
+        let Some(peer_addr) = fired else {
+            return;
+        };
+        self.peer_outbound.write().remove(&peer_addr);
+        metrics::counter!("node.sync.staller_disconnects").increment(1);
+        tracing::warn!(
+            peer_addr = %peer_addr,
+            next_apply_height,
+            "block sync: peer is stalling the download window; disconnecting and re-queueing its blocks"
+        );
+    }
+
     fn record_sync_metrics(&self) {
         let window = self.download_window.lock();
         let stager = self.block_stager.lock();
@@ -1007,6 +1126,9 @@ const fn default_sync_budget() -> SyncBudget {
         getdata_batch_limit: GETDATA_BATCH_SIZE,
         pending_timeout: PENDING_TIMEOUT,
         received_timeout: RECEIVED_BLOCK_TIMEOUT,
+        stall_timeout_initial: BLOCK_STALLING_TIMEOUT,
+        stall_timeout_max: BLOCK_STALLING_TIMEOUT_MAX,
+        staller_cooldown: STALLER_COOLDOWN,
     }
 }
 
@@ -1854,7 +1976,9 @@ mod tests {
         let super::StagedBlock::Memory { bytes, .. } = staged else {
             return Err(std::io::Error::other("test block should stage in memory").into());
         };
-        sync.download_window.lock().mark_received(hash, bytes);
+        sync.download_window
+            .lock()
+            .mark_received(hash, bytes, Instant::now());
 
         sync.drain_inbound_blocks();
 
@@ -2438,8 +2562,9 @@ mod tests {
         // still open, but only one more estimated block fits.
         {
             let mut window = sync.download_window.lock();
-            window.mark_received(Hash256::from_le_bytes(&[0xEE; 32]), slot);
-            window.mark_received(Hash256::from_le_bytes(&[0xEF; 32]), slot);
+            let now = Instant::now();
+            window.mark_received(Hash256::from_le_bytes(&[0xEE; 32]), slot, now);
+            window.mark_received(Hash256::from_le_bytes(&[0xEF; 32]), slot, now);
         }
         let addr = test_addr(9270, 0)?;
         let rx = connect_peer(&peers, &peer_outbound, eligible_peer(addr, 200));
@@ -2471,7 +2596,7 @@ mod tests {
         // default one-minute timeouts never fire inside the test, so the only
         // thing that can stop the second wave is the count clamp itself.
         let (sync, _peers, _peer_outbound, expected, rxs, _blocks_tx) =
-            staged_count_wedge(super::PENDING_TIMEOUT)?;
+            staged_count_wedge(wedge_budget(super::PENDING_TIMEOUT))?;
 
         // Tick 2: the healthy deliveries stage; staged (14) + pending (2) sit
         // exactly at the count budget (16). The byte gates are unbounded here
@@ -2518,7 +2643,7 @@ mod tests {
     fn wedged_window_expires_stalled_front_and_rerequests_through_count_clamp()
     -> Result<(), Box<dyn std::error::Error>> {
         let (sync, _peers, _peer_outbound, expected, rxs, _blocks_tx) =
-            staged_count_wedge(Duration::from_millis(250))?;
+            staged_count_wedge(wedge_budget(Duration::from_millis(250)))?;
 
         // Tick 2: wedge — staged + pending at the count budget, scan limit
         // zero, the stalled front still pending.
@@ -2561,6 +2686,740 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // R8 core scenario and the terminator for the U6 wedge's bounded
+        // cycle (and the first-audit ADV-2 shape: the staller is the
+        // highest-advertising peer, holding the front on claimed height it
+        // never serves). The 1-minute pending timeout can never fire inside
+        // this test, so the staller disconnect is the ONLY recovery path.
+        let budget = super::SyncBudget {
+            stall_timeout_initial: Duration::from_millis(100),
+            ..wedge_budget(super::PENDING_TIMEOUT)
+        };
+        let (sync, _peers, peer_outbound, expected, rxs, _blocks_tx) = staged_count_wedge(budget)?;
+        let staller = test_addr(9320, 0)?;
+
+        // Cold-start disarm: the wedge fixture never advances the window
+        // front, so the cadence EWMA would stay unseeded and conviction
+        // would defer to the 60s pending-timeout fallback (the cold-start
+        // suppression, pinned at the window level). Seed it at 50ms — the
+        // decay floor stays max(2x50ms, 100ms) = the injected initial
+        // threshold — so this test keeps pinning the adaptive-timeout fire.
+        sync.download_window
+            .lock()
+            .seed_front_cadence_for_test(50, Instant::now());
+
+        // Tick 2: the wedge forms (staged 14 + pending 2 at the count
+        // budget) and the stall episode starts on the front-stripe owner.
+        sync.tick();
+        {
+            let window = sync.download_window.lock();
+            assert_eq!(window.received_len(), 14);
+            assert_eq!(window.pending_len(), 2);
+            assert_eq!(
+                window.stalling_peer().map(|(addr, _)| addr),
+                Some(staller),
+                "the front-stripe owner must be the observed staller"
+            );
+        }
+
+        // Past the adaptive threshold: the staller is disconnected, its
+        // front stripe re-queues, and a healthy peer is asked for it in the
+        // same tick — with the staged set intact (no prune involvement).
+        std::thread::sleep(Duration::from_millis(150));
+        sync.tick();
+
+        assert!(
+            !peer_outbound.read().contains_key(&staller),
+            "staller's outbound lease must be revoked"
+        );
+        assert!(
+            sync.download_window
+                .lock()
+                .peer_in_staller_cooldown(staller, Instant::now()),
+            "disconnected staller must enter the cooldown"
+        );
+        assert_no_getdata(&rxs[0])?;
+        let mut rerequested = Vec::new();
+        for rx in &rxs[1..] {
+            while let Ok(message) = rx.try_recv() {
+                if let NetworkMessage::GetData(inventory) = message {
+                    rerequested.extend(witness_block_inventory(inventory)?);
+                }
+            }
+        }
+        assert_eq!(
+            rerequested,
+            expected[..2],
+            "the stalled front stripe must be re-requested from a healthy peer"
+        );
+        assert_eq!(
+            sync.block_stager.lock().received_len(),
+            14,
+            "staged progress must survive the staller disconnect"
+        );
+        {
+            let window = sync.download_window.lock();
+            assert_eq!(window.pending_len(), 2);
+            for front in &expected[..2] {
+                assert!(window.contains_pending(&Hash256::from_le_bytes(&front.to_byte_array())));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reconnecting_staller_held_out_of_window_front_by_cooldown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // RE-ADV-2 terminator: previously a staller could re-acquire the
+        // front stripe across expiry-retry cycles; now it is disconnected,
+        // and after an immediate reconnect the cooldown keeps the window
+        // front on the honest peer even though the staller's inflated
+        // start_height (ADV-2's capture vector) out-sorts everyone.
+        //
+        // The staller first DELIVERS two front blocks >= 50ms apart — real
+        // end-to-end cadence samples seeding the interval EWMA through the
+        // chunk path — before wedging the window; an unseeded window would
+        // defer conviction to the 60s pending-timeout fallback (cold-start
+        // suppression) and nothing here would fire.
+        let (sync, peers, peer_outbound, applied_tip, blocks, blocks_tx) =
+            sync_with_mined_chain(5)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 2,
+                max_received_blocks: 2,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                stall_timeout_initial: Duration::from_millis(100),
+                ..super::default_sync_budget()
+            },
+        );
+        let staller = test_addr(9420, 0)?;
+        let honest = test_addr(9420, 1)?;
+        let staller_rx = connect_peer(&peers, &peer_outbound, synthetic_peer(staller, 10_000));
+        let honest_rx = connect_peer(&peers, &peer_outbound, synthetic_peer(honest, 100));
+
+        // Tick 1: the inflated height wins the deep fallback selection.
+        sync.tick();
+        let NetworkMessage::GetData(inventory) = staller_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected staller getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            alloc::vec![blocks[0].block_hash(), blocks[1].block_hash()]
+        );
+        assert!(honest_rx.try_recv().is_err());
+
+        // Seed: blocks 1 and 2 arrive as window fronts >= 60ms apart.
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[0].clone(),
+        ))?;
+        sync.tick();
+        sync.tick();
+        std::thread::sleep(Duration::from_millis(60));
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[1].clone(),
+        ))?;
+        sync.tick();
+        sync.tick();
+        let ewma_ms = sync
+            .download_window
+            .lock()
+            .front_interval_ewma_ms()
+            .ok_or_else(|| std::io::Error::other("front deliveries must seed the cadence EWMA"))?;
+
+        // The successor (block 4) arrives, the new front (block 3) never
+        // does: wedge + episode on the staller, which owns the whole stripe.
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[3].clone(),
+        ))?;
+        sync.tick();
+        assert_eq!(
+            sync.download_window
+                .lock()
+                .stalling_peer()
+                .map(|(addr, _)| addr),
+            Some(staller)
+        );
+
+        // Fire: disconnect, and the front re-request lands on the honest
+        // peer despite its (much) lower advertised height. The effective
+        // threshold is max(100ms, 2x the measured seed cadence), so the
+        // wait is derived from the EWMA instead of hardcoded.
+        std::thread::sleep(Duration::from_millis(
+            ewma_ms.saturating_mul(2).saturating_add(150),
+        ));
+        sync.tick();
+        assert!(!peer_outbound.read().contains_key(&staller));
+        let retry = next_getdata(&honest_rx)?;
+        assert_eq!(
+            witness_block_inventory(retry)?,
+            alloc::vec![blocks[2].block_hash()]
+        );
+
+        // Immediate reconnect on the same address (the net layer's re-dial):
+        // the honest peer delivers the front, sync advances, and the NEW
+        // window front (block 5) must again go to the honest peer — the
+        // reconnected staller stays in cooldown and receives no block
+        // requests.
+        let (staller_tx2, staller_rx2) = unbounded::<Message>();
+        peer_outbound.write().insert(staller, staller_tx2);
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[2].clone(),
+        ))?;
+        sync.tick();
+        // The re-request narrowed the expected-apply cache to the front, so
+        // the staged successor drains on the following tick's tree walk.
+        sync.tick();
+
+        let applied_height = applied_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
+            .height;
+        assert_eq!(applied_height, 4, "sync must proceed past the stall");
+        let front = next_getdata(&honest_rx)?;
+        assert_eq!(
+            witness_block_inventory(front)?,
+            alloc::vec![blocks[4].block_hash()]
+        );
+        assert_no_getdata(&staller_rx2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // RE-ADV-1 byte-denominated R+P wedge: staged bytes + the stalled
+        // front's estimated bytes exhaust the staging byte headroom, so the
+        // request gate is closed while the gate itself (`staged_bytes_
+        // exhausted`) is still open. Both 1-minute timeouts are live
+        // defaults here — pre-U7 the received-prune was the only recovery;
+        // now the staller disconnect frees the wedge in well under a second.
+        let (sync, peers, peer_outbound, applied_tip, blocks, blocks_tx) =
+            sync_with_mined_chain(2)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                // One initial-estimate slot (the pending front) plus the
+                // delivered successor: byte headroom is exactly zero once
+                // both are accounted.
+                max_received_bytes: 256 * 1024 + blocks[1].total_size(),
+                getdata_batch_limit: 2,
+                stall_timeout_initial: Duration::from_millis(100),
+                ..super::default_sync_budget()
+            },
+        );
+        let staller = test_addr(9430, 0)?;
+        let honest = test_addr(9430, 1)?;
+        let staller_rx = connect_peer(&peers, &peer_outbound, synthetic_peer(staller, 200));
+        let honest_rx = connect_peer(&peers, &peer_outbound, synthetic_peer(honest, 100));
+
+        // Cold-start disarm: this byte-wedge construction depends on the
+        // pristine 256KiB initial block-size estimate, so the cadence EWMA
+        // is seeded directly instead of via two real front deliveries (the
+        // real sampling path is pinned by the window tests). 50ms keeps the
+        // decay floor at the injected 100ms initial threshold.
+        sync.download_window
+            .lock()
+            .seed_front_cadence_for_test(50, Instant::now());
+
+        sync.tick();
+        let NetworkMessage::GetData(inventory) = staller_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected staller getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            alloc::vec![blocks[0].block_hash(), blocks[1].block_hash()]
+        );
+
+        // The successor stages; byte headroom hits zero (R + P at the byte
+        // budget) with the front still pending to the staller.
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[1].clone(),
+        ))?;
+        sync.tick();
+        {
+            let window = sync.download_window.lock();
+            assert!(!window.has_request_capacity());
+            assert_eq!(window.stalling_peer().map(|(addr, _)| addr), Some(staller));
+        }
+        assert!(honest_rx.try_recv().is_err());
+
+        // Fire: the staller's disconnect releases its pending bytes, which
+        // reopens exactly enough headroom to re-request the front from the
+        // honest peer — with the staged successor untouched (the 1-minute
+        // prune never ran).
+        std::thread::sleep(Duration::from_millis(150));
+        sync.tick();
+        assert!(!peer_outbound.read().contains_key(&staller));
+        assert_eq!(
+            sync.block_stager.lock().received_len(),
+            1,
+            "recovery must not discard staged progress (prune-free)"
+        );
+        let NetworkMessage::GetData(retry) = honest_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected honest peer front retry").into());
+        };
+        assert_eq!(
+            witness_block_inventory(retry)?,
+            alloc::vec![blocks[0].block_hash()]
+        );
+
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[0].clone(),
+        ))?;
+        sync.tick();
+        // The re-request narrowed the expected-apply cache to the front, so
+        // the staged successor drains on the following tick's tree walk.
+        sync.tick();
+        let applied_height = applied_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
+            .height;
+        assert_eq!(applied_height, 2, "the byte wedge must fully recover");
+        Ok(())
+    }
+
+    #[test]
+    fn slow_trickle_front_peer_observable_but_never_disconnected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // R10 slow-trickle: a peer delivering each front block just under
+        // the adaptive threshold is never disconnected (Core has the same
+        // exposure), but the stall state must be visible — via the window
+        // accessor and the node.sync.stall_seconds gauge.
+        let recorder = TestRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            let (sync, peers, peer_outbound, applied_tip, blocks, blocks_tx) =
+                sync_with_mined_chain(6)?;
+            install_budget(
+                &sync,
+                super::SyncBudget {
+                    max_pending_blocks: 3,
+                    max_received_blocks: 3,
+                    max_peer_inflight: 3,
+                    getdata_batch_limit: 3,
+                    // Default 2s initial threshold: the 100ms trickle below
+                    // stays far under it on any machine.
+                    ..super::default_sync_budget()
+                },
+            );
+            let trickler = test_addr(9440, 0)?;
+            let rx = connect_peer(&peers, &peer_outbound, synthetic_peer(trickler, 100));
+
+            for round in 0..2_usize {
+                let offset = round * 3;
+                sync.tick();
+                let inventory = next_getdata(&rx)?;
+                assert_eq!(inventory.len(), 3);
+                // Successors arrive, the front trickles: window-blocked.
+                blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                    blocks[offset + 1].clone(),
+                ))?;
+                blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                    blocks[offset + 2].clone(),
+                ))?;
+                sync.tick();
+                assert_eq!(
+                    sync.download_window
+                        .lock()
+                        .stalling_peer()
+                        .map(|(addr, _)| addr),
+                    Some(trickler),
+                    "the stall episode must be observable while the front trickles"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+                sync.tick();
+                // Still under the threshold: observed, not punished.
+                assert!(peer_outbound.read().contains_key(&trickler));
+                match recorder.snapshot().get("node.sync.stall_seconds") {
+                    Some(TestMetric::Gauge(seconds)) => {
+                        assert!(
+                            *seconds > 0.0,
+                            "stall age must be exported while an episode runs"
+                        );
+                    }
+                    value => panic!("stall_seconds gauge missing or wrong type: {value:?}"),
+                }
+                // The front arrives just under the threshold: progress —
+                // episode ends, adaptive threshold stays at its initial
+                // value, and the next round starts clean.
+                blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+                    blocks[offset].clone(),
+                ))?;
+                sync.tick();
+                assert!(sync.download_window.lock().stalling_peer().is_none());
+                assert_eq!(
+                    sync.download_window.lock().stall_timeout(),
+                    super::BLOCK_STALLING_TIMEOUT,
+                    "front progress must keep the adaptive threshold at its floor"
+                );
+            }
+
+            let applied_height = applied_tip
+                .load_full()
+                .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
+                .height;
+            assert_eq!(applied_height, 6);
+            assert!(
+                peer_outbound.read().contains_key(&trickler),
+                "a trickler under the threshold must never be disconnected"
+            );
+            assert!(
+                !recorder
+                    .snapshot()
+                    .contains_key("node.sync.staller_disconnects"),
+                "no staller disconnect may fire for an under-threshold trickler"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // No-blame guard at the sync layer: while the stager holds the next
+        // expected block (apply lag / failed-apply restore), the stall clock
+        // must not run — no disconnect fires even arbitrarily far past the
+        // threshold, and the busy interval is never charged to the peer.
+        // Time is injected through the detection entry point directly.
+        let (sync, peers, peer_outbound, _block_tree, _applied_tip, expected) =
+            sync_with_header_chain(4)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 2,
+                max_received_blocks: 2,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                ..super::default_sync_budget()
+            },
+        );
+        let staller = test_addr(9450, 0)?;
+        let rx = connect_peer(&peers, &peer_outbound, synthetic_peer(staller, 100));
+
+        // Cold-start disarm: an unseeded EWMA would suppress the fire on its
+        // own and this test would pass vacuously. Seed it (50ms keeps the
+        // decay floor at the default 2s initial threshold) so the no-fire
+        // phase below pins the apply-side no-blame guard specifically.
+        sync.download_window
+            .lock()
+            .seed_front_cadence_for_test(50, Instant::now());
+
+        sync.tick();
+        let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(witness_block_inventory(inventory)?, expected[..2]);
+        // The successor stages; the window is otherwise fully blocked on the
+        // front-holding peer.
+        let successor = Hash256::from_le_bytes(&expected[1].to_byte_array());
+        {
+            let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+            let serialized = bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block));
+            sync.block_stager
+                .lock()
+                .insert(successor, None, block, serialized, Instant::now());
+        }
+        sync.download_window
+            .lock()
+            .mark_received(successor, 80, Instant::now());
+
+        // Apply-side backpressure: the next expected block (the frontier) is
+        // itself staged but not yet drained.
+        let frontier = Hash256::from_le_bytes(&expected[0].to_byte_array());
+        {
+            let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+            let serialized = bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block));
+            sync.block_stager
+                .lock()
+                .insert(frontier, None, block, serialized, Instant::now());
+        }
+
+        let applied = sync
+            .handles
+            .applied_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+        let far_future = Instant::now() + Duration::from_secs(60);
+
+        // Far past any threshold, but the apply side is busy: frozen.
+        sync.disconnect_window_staller(Some(&applied), far_future);
+        assert!(sync.download_window.lock().stalling_peer().is_none());
+        assert!(peer_outbound.read().contains_key(&staller));
+
+        // The apply side drains the frontier: blame starts from scratch and
+        // only then runs to a fire — the busy interval was not charged.
+        let drained = sync.block_stager.lock().drain_expected_prefix(&[frontier]);
+        assert_eq!(drained.len(), 1);
+        sync.disconnect_window_staller(Some(&applied), far_future);
+        assert_eq!(
+            sync.download_window
+                .lock()
+                .stalling_peer()
+                .map(|(addr, _)| addr),
+            Some(staller)
+        );
+        assert!(peer_outbound.read().contains_key(&staller));
+        sync.disconnect_window_staller(Some(&applied), far_future + super::BLOCK_STALLING_TIMEOUT);
+        assert!(
+            !peer_outbound.read().contains_key(&staller),
+            "with the apply side idle the same state must fire normally"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sole_peer_staller_disconnected_and_usable_again_as_last_resort()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Few-peers design decision (R10): Core disconnects stallers
+        // regardless of peer count — a stalled-forever peer is worse than no
+        // peer, because the disconnect is what re-queues the wedged front.
+        // This node's net layer re-dials `--connect` peers every 2s (DNS
+        // bootstrap is one-shot; that boundary is documented in the staller
+        // module docs), and a reconnected sole staller is usable again
+        // through the last-resort exemption, so liveness is preserved.
+        //
+        // The sole peer first delivers two front blocks >= 50ms apart (real
+        // cadence samples seeding the interval EWMA through the chunk path)
+        // before going silent: an unseeded window would defer conviction to
+        // the 60s pending-timeout fallback (cold-start suppression) and the
+        // disconnect under test would never fire.
+        let (sync, peers, peer_outbound, applied_tip, blocks, blocks_tx) =
+            sync_with_mined_chain(4)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 2,
+                max_received_blocks: 2,
+                max_peer_inflight: 2,
+                getdata_batch_limit: 2,
+                stall_timeout_initial: Duration::from_millis(100),
+                ..super::default_sync_budget()
+            },
+        );
+        let sole = test_addr(9460, 0)?;
+        let rx = connect_peer(&peers, &peer_outbound, synthetic_peer(sole, 100));
+
+        sync.tick();
+        let NetworkMessage::GetData(inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            alloc::vec![blocks[0].block_hash(), blocks[1].block_hash()]
+        );
+
+        // Seed: blocks 1 and 2 arrive as window fronts >= 60ms apart.
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[0].clone(),
+        ))?;
+        sync.tick();
+        sync.tick();
+        std::thread::sleep(Duration::from_millis(60));
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[1].clone(),
+        ))?;
+        sync.tick();
+        sync.tick();
+        let ewma_ms = sync
+            .download_window
+            .lock()
+            .front_interval_ewma_ms()
+            .ok_or_else(|| std::io::Error::other("front deliveries must seed the cadence EWMA"))?;
+
+        // The successor (block 4) arrives, the new front (block 3) never
+        // does: wedge + episode on the sole peer.
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[3].clone(),
+        ))?;
+        sync.tick();
+        assert!(sync.download_window.lock().stalling_peer().is_some());
+
+        // The disconnect fires even with no alternative peer. The effective
+        // threshold is max(100ms, 2x the measured seed cadence), so the
+        // wait is derived from the EWMA instead of hardcoded.
+        std::thread::sleep(Duration::from_millis(
+            ewma_ms.saturating_mul(2).saturating_add(150),
+        ));
+        sync.tick();
+        assert!(
+            !peer_outbound.read().contains_key(&sole),
+            "the sole peer's staller disconnect must fire — the re-queue is the recovery"
+        );
+
+        // Net-layer re-dial: the same address reconnects and, being the only
+        // candidate, serves as the last resort despite the cooldown.
+        let (tx2, rx2) = unbounded::<Message>();
+        peer_outbound.write().insert(sole, tx2);
+        sync.tick();
+        let retry = next_getdata(&rx2)?;
+        assert_eq!(
+            witness_block_inventory(retry)?,
+            alloc::vec![blocks[2].block_hash()]
+        );
+
+        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
+            blocks[2].clone(),
+        ))?;
+        sync.tick();
+        // The re-request narrowed the expected-apply cache to the front, so
+        // the staged successor drains on the following tick's tree walk.
+        sync.tick();
+        let applied_height = applied_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
+            .height;
+        assert_eq!(
+            applied_height, 4,
+            "liveness must survive the sole-peer disconnect"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Sync-level smoke for the self-eclipse blocker and the ADV-DRIP-1
+        // drip: 8 eligible peers in saturated fan-out (window 24 = 8 peers x
+        // cap 3 over a 32-block chain, so refills keep R+P pinned at the
+        // count budget and "no request capacity" is the steady state) over a
+        // fully applicable mined chain. Every peer keeps streaming — one
+        // block per peer per round, lowest-block-first so the window front
+        // advances at the round cadence — while every round lands 150ms
+        // apart, past the injected 100ms threshold. Each tick drains the
+        // round's deliveries before observing, so per-peer delivery progress
+        // clears every delivery-time episode; the mid-gap ticks (the wake
+        // path observes between the front owner's deliveries — where the
+        // pre-fix drip fired) stay under the adaptive decay floor once the
+        // interval EWMA has its first sample: zero staller disconnects and
+        // the sync completes. (The timing-injected constructions live in the
+        // window module: `uniform_slow_streaming_saturated_fanout_never_fires`
+        // and `stall_decay_limit_cycle_stops_at_adaptive_floor`.)
+        let recorder = TestRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            let (sync, peers, peer_outbound, applied_tip, blocks, blocks_tx) =
+                sync_with_mined_chain(32)?;
+            install_budget(
+                &sync,
+                super::SyncBudget {
+                    max_pending_blocks: 24,
+                    max_pending_bytes: usize::MAX,
+                    max_received_blocks: 24,
+                    max_received_bytes: usize::MAX,
+                    max_peer_inflight: 24,
+                    fanout_peer_inflight: 3,
+                    min_peers_for_fanout: 8,
+                    getdata_batch_limit: 24,
+                    stall_timeout_initial: Duration::from_millis(100),
+                    ..super::default_sync_budget()
+                },
+            );
+            let mut rxs = Vec::new();
+            for idx in 0..8_usize {
+                let addr = test_addr(9470, idx)?;
+                rxs.push(connect_peer(
+                    &peers,
+                    &peer_outbound,
+                    eligible_peer(addr, 200 - i32::try_from(idx)?),
+                ));
+            }
+
+            // Tick 1: fan-out stripes the 24-block window, 3 blocks per peer.
+            sync.tick();
+            let mut stripes = Vec::new();
+            for rx in &rxs {
+                let stripe = witness_block_inventory(next_getdata(rx)?)?;
+                assert_eq!(stripe.len(), 3, "each peer must own a 3-block stripe");
+                stripes.push(stripe);
+            }
+            let by_hash: HashMap<BlockHash, bitcoin::Block> = blocks
+                .iter()
+                .map(|block| (block.block_hash(), block.clone()))
+                .collect();
+
+            // Three rounds, each past the stall threshold. The front
+            // (heights 1, 2, 3 — peer 0's stripe) advances once per round,
+            // so the interval EWMA takes its first sample at round 1 and the
+            // adaptive floor (2x the ~150ms demonstrated cadence) covers the
+            // mid-gap wakes from the round 1 -> 2 gap on. The round 0 -> 1
+            // gap has no sample yet, but an unseeded window cannot fire at
+            // all: cold-start conviction is suppressed and deferred to the
+            // 60s pending-timeout fallback (`observe_stall` in the window
+            // module), so even a wake landing there is safe.
+            for round in 0..3_usize {
+                if round == 2 {
+                    // The wake path observes at ~g/8 cadence, so episodes
+                    // form on the first wake after a round's deliveries
+                    // (the round tick itself observes before its refill
+                    // re-closes request capacity) and age across the
+                    // following wakes. Two mid-gap wakes reproduce that:
+                    // one just inside the gap to form the episode, one
+                    // ~120ms later — past the 100ms static threshold (the
+                    // pre-fix drip disconnected peer 0 exactly there) but
+                    // under the adaptive floor (2x the ~150ms demonstrated
+                    // front cadence).
+                    std::thread::sleep(Duration::from_millis(5));
+                    sync.tick();
+                    std::thread::sleep(Duration::from_millis(120));
+                    sync.tick();
+                    assert_eq!(
+                        peer_outbound.read().len(),
+                        8,
+                        "a mid-gap wake must not disconnect a streaming peer"
+                    );
+                    std::thread::sleep(Duration::from_millis(25));
+                } else {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                for stripe in &stripes {
+                    let block = by_hash
+                        .get(&stripe[round])
+                        .ok_or_else(|| std::io::Error::other("unknown getdata hash"))?;
+                    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))?;
+                }
+                sync.tick();
+                assert_eq!(
+                    peer_outbound.read().len(),
+                    8,
+                    "no streaming peer may be disconnected (round {round})"
+                );
+            }
+            // Drain: feed the refill tail (heights 25..=32) one block per
+            // tick — the staged set is still near the 24-block budget while
+            // the expected-apply cache narrows, and a burst would push the
+            // stager into evicting frontier blocks that are never
+            // re-delivered here.
+            let mut tail = blocks[24..].iter();
+            for _ in 0..40_usize {
+                let applied = applied_tip.load_full().map_or(0, |tip| tip.height);
+                if applied == 32 {
+                    break;
+                }
+                if let Some(block) = tail.next() {
+                    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))?;
+                }
+                sync.tick();
+            }
+
+            let applied_height = applied_tip
+                .load_full()
+                .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
+                .height;
+            assert_eq!(applied_height, 32, "uniform-slow sync must complete");
+            assert_eq!(peer_outbound.read().len(), 8);
+            assert!(
+                !recorder
+                    .snapshot()
+                    .contains_key("node.sync.staller_disconnects"),
+                "zero staller fires in the uniform-slow regime"
+            );
+            Ok(())
+        })
     }
 
     #[test]
@@ -2733,7 +3592,7 @@ mod tests {
         let received_hash = Hash256::from_le_bytes(&expected[1].to_byte_array());
         {
             let mut window = sync.download_window.lock();
-            let needs_height = window.mark_received(received_hash, 80);
+            let needs_height = window.mark_received(received_hash, 80, Instant::now());
             assert!(needs_height);
             window.update_received_height(&received_hash, 2);
         }
@@ -4017,6 +4876,67 @@ mod tests {
         ))
     }
 
+    type MinedChainFixture = (
+        BlockSync,
+        Arc<RwLock<Vec<PeerInfo>>>,
+        Arc<RwLock<HashMap<SocketAddr, crossbeam_channel::Sender<Message>>>>,
+        Arc<ArcSwapOption<TipSnapshot>>,
+        Vec<bitcoin::Block>,
+        InboundBlockSender,
+    );
+
+    /// Like [`sync_with_header_chain_and_blocks`] but with fully applicable
+    /// mined regtest blocks (coinbase-bearing, PoW-valid), so tests can drive
+    /// real apply progress through the inbound channel.
+    fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut tree = BlockTree::new();
+        let mut node_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+        let mut prev_hash = genesis.block_hash();
+        let mut blocks = Vec::with_capacity(usize::try_from(count)?);
+        for height in 1..=count {
+            let block =
+                mined_block_with_prev_hash(prev_hash, height, vec![coinbase_transaction(height)]);
+            node_id = tree.insert_node(Some(node_id), block.header, NodeStatus::HeaderValid)?;
+            prev_hash = block.block_hash();
+            blocks.push(block);
+        }
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let peers = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<Vec<BlockHeader>>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::new(
+            handles,
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // `node_id` ends as the chain tip; it only exists to thread parents.
+        let _ = node_id;
+
+        Ok((
+            sync,
+            peers,
+            peer_outbound,
+            applied_tip,
+            blocks,
+            inbound_blocks_tx,
+        ))
+    }
+
     type WedgeFixture = (
         BlockSync,
         Arc<RwLock<Vec<PeerInfo>>>,
@@ -4034,26 +4954,27 @@ mod tests {
     /// drains them, staged (14) + pending (2) sit exactly at the count
     /// budget (16) with the apply frontier frozen behind the stall. Byte
     /// budgets are unbounded so only count-denominated behavior is exercised.
+    fn wedge_budget(pending_timeout: Duration) -> super::SyncBudget {
+        super::SyncBudget {
+            max_pending_blocks: 16,
+            max_pending_bytes: usize::MAX,
+            max_received_blocks: 16,
+            max_received_bytes: usize::MAX,
+            max_peer_inflight: 16,
+            fanout_peer_inflight: 2,
+            min_peers_for_fanout: 8,
+            getdata_batch_limit: 16,
+            pending_timeout,
+            ..super::default_sync_budget()
+        }
+    }
+
     fn staged_count_wedge(
-        pending_timeout: Duration,
+        budget: super::SyncBudget,
     ) -> Result<WedgeFixture, Box<dyn std::error::Error>> {
         let ((sync, peers, peer_outbound, block_tree, applied_tip, expected), blocks_tx) =
             sync_with_header_chain_and_blocks(64)?;
-        install_budget(
-            &sync,
-            super::SyncBudget {
-                max_pending_blocks: 16,
-                max_pending_bytes: usize::MAX,
-                max_received_blocks: 16,
-                max_received_bytes: usize::MAX,
-                max_peer_inflight: 16,
-                fanout_peer_inflight: 2,
-                min_peers_for_fanout: 8,
-                getdata_batch_limit: 16,
-                pending_timeout,
-                ..super::default_sync_budget()
-            },
-        );
+        install_budget(&sync, budget);
         let mut rxs = Vec::new();
         for idx in 0..super::MIN_PEERS_FOR_FANOUT {
             let addr = test_addr(9320, idx)?;
@@ -4082,6 +5003,19 @@ mod tests {
             ))?;
         }
         Ok((sync, peers, peer_outbound, expected, rxs, blocks_tx))
+    }
+
+    /// Returns the next `getdata` inventory from `rx`, skipping header
+    /// traffic; fails when none is queued.
+    fn next_getdata(
+        rx: &crossbeam_channel::Receiver<Message>,
+    ) -> Result<Vec<Inventory>, Box<dyn std::error::Error>> {
+        while let Ok(message) = rx.try_recv() {
+            if let NetworkMessage::GetData(inventory) = message {
+                return Ok(inventory);
+            }
+        }
+        Err(std::io::Error::other("expected a queued getdata").into())
     }
 
     /// Drains `rx`, failing on any `getdata` while ignoring header traffic.

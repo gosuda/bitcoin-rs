@@ -347,6 +347,7 @@ fn run_outbound_connection(
             &mut peer,
             addr,
             &outbound_tx,
+            peer_outbound,
             inbound_sync_sinks,
             chain_query.as_deref(),
         )
@@ -483,6 +484,7 @@ fn run_handshake(
             &mut peer,
             peer_addr,
             &outbound_tx,
+            peer_outbound,
             inbound_sync_sinks,
             chain_query.as_deref(),
         )
@@ -505,6 +507,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
     outbound_tx: &Sender<crate::Message>,
+    peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, Sender<crate::Message>>>,
     inbound_sync_sinks: &InboundSyncSinks,
     chain_query: Option<&dyn crate::dispatch::ChainQuery>,
 ) -> Result<(), crate::wire::PeerError> {
@@ -517,6 +520,17 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
 
     loop {
         if peer.state == PeerState::Disconnecting {
+            return Ok(());
+        }
+
+        // The peer's entry in `peer_outbound` is the connection's lease: it
+        // is inserted exactly once before this loop and normally removed only
+        // by this thread on exit, so an external removal (the node sync
+        // layer's staller disconnect) is a disconnect request. The loop wakes
+        // at least once per second (1s read timeout), bounding the teardown
+        // latency.
+        if !peer_outbound.read().contains_key(&peer_addr) {
+            tracing::debug!(peer_addr = %peer_addr, "p2p peer lease revoked; closing");
             return Ok(());
         }
 
@@ -650,6 +664,128 @@ mod outbound_tests {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    use bitcoin::p2p::Magic;
+    use parking_lot::RwLock;
+
+    use super::{InboundSyncSinks, run_message_loop};
+    use crate::peer::{Peer, PeerState};
+
+    type OutboundMap =
+        Arc<RwLock<hashbrown::HashMap<SocketAddr, crossbeam_channel::Sender<crate::Message>>>>;
+
+    fn sinks() -> InboundSyncSinks {
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        InboundSyncSinks {
+            headers_tx,
+            blocks_tx,
+            wake_tx: None,
+        }
+    }
+
+    /// A stream that revokes the connection's `peer_outbound` lease on the
+    /// first read, then reports `WouldBlock` — modelling the sync layer
+    /// removing the entry while the loop is blocked in its 1s read timeout.
+    struct RevokingStream {
+        peer_outbound: OutboundMap,
+        addr: SocketAddr,
+    }
+
+    impl io::Read for RevokingStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            self.peer_outbound.write().remove(&self.addr);
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    impl io::Write for RevokingStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A stream the loop must never read from (the lease is already gone
+    /// before the first iteration).
+    struct UnreadableStream;
+
+    impl io::Read for UnreadableStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            panic!("message loop must check the lease before reading")
+        }
+    }
+
+    impl io::Write for UnreadableStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn message_loop_exits_cleanly_when_lease_already_revoked() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_444));
+        let peer_outbound: OutboundMap = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+        let mut peer = Peer::new(UnreadableStream, Magic::BITCOIN);
+        peer.state = PeerState::Ready;
+
+        let result = run_message_loop(
+            &mut peer,
+            addr,
+            &outbound_tx,
+            &peer_outbound,
+            &sinks(),
+            None,
+        );
+
+        assert!(result.is_ok(), "revoked lease must close the loop cleanly");
+    }
+
+    #[test]
+    fn message_loop_exits_after_external_lease_revocation() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_445));
+        let peer_outbound: OutboundMap = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+        peer_outbound.write().insert(addr, outbound_tx.clone());
+        let mut peer = Peer::new(
+            RevokingStream {
+                peer_outbound: Arc::clone(&peer_outbound),
+                addr,
+            },
+            Magic::BITCOIN,
+        );
+        peer.state = PeerState::Ready;
+
+        let result = run_message_loop(
+            &mut peer,
+            addr,
+            &outbound_tx,
+            &peer_outbound,
+            &sinks(),
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "lease revocation mid-loop must close the loop cleanly"
+        );
+        assert!(!peer_outbound.read().contains_key(&addr));
     }
 }
 

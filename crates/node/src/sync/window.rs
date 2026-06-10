@@ -18,6 +18,9 @@ pub(super) struct SyncBudget {
     pub(super) getdata_batch_limit: usize,
     pub(super) pending_timeout: Duration,
     pub(super) received_timeout: Duration,
+    pub(super) stall_timeout_initial: Duration,
+    pub(super) stall_timeout_max: Duration,
+    pub(super) staller_cooldown: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +93,17 @@ impl SelectedHashes {
     }
 }
 
+/// Smallest inter-front-advance interval (milliseconds) accepted as a front
+/// cadence sample. The sync layer timestamps a whole inbound chunk with one
+/// `Instant` (`buffer_received_block_chunk`), so an in-order run of front
+/// blocks processed in the same chunk yields same-instant "advances" whose
+/// 0ms samples are batching artifacts, not network cadence — left unfiltered
+/// they walk the EWMA toward zero (x3/4 each) and collapse the adaptive stall
+/// floor back to the static minimum. Skipping genuine sub-50ms cadence loses
+/// nothing: at that speed the decay floor is clamped at
+/// `stall_timeout_initial` anyway.
+const EWMA_MIN_SAMPLE_MS: u64 = 50;
+
 #[derive(Clone, Copy, Debug)]
 struct PendingBlock {
     peer_addr: SocketAddr,
@@ -101,6 +115,17 @@ struct PendingBlock {
 #[derive(Clone, Copy, Debug, Default)]
 struct PeerInflight {
     blocks: usize,
+}
+
+/// A running window-blocked stall observation: the window front (`front_hash`)
+/// has been in flight to `peer_addr` with the apply frontier idle and no other
+/// download progress possible since `since`. The analog of Bitcoin Core's
+/// per-peer `m_stalling_since` (`net_processing.cpp`).
+#[derive(Clone, Copy, Debug)]
+struct StallEpisode {
+    peer_addr: SocketAddr,
+    front_hash: Hash256,
+    since: Instant,
 }
 
 #[derive(Debug)]
@@ -121,6 +146,47 @@ pub(super) struct DownloadWindow {
     /// Starts disengaged so a fresh window always begins in single-peer
     /// fallback.
     fanout_engaged: bool,
+    /// Current window-blocked stall observation, if any (R8). Re-derived from
+    /// the predicate every [`Self::observe_stall`] call; cleared whenever any
+    /// predicate term stops holding, so a transient stall never accumulates
+    /// blame across unrelated episodes.
+    stall: Option<StallEpisode>,
+    /// Adaptive stalling threshold: starts at `stall_timeout_initial` (2s),
+    /// doubles on every staller disconnect up to `stall_timeout_max` (64s),
+    /// and decays by x0.85 per window-front arrival back toward the decay
+    /// floor ([`Self::stall_decay_floor`]) — Core's `m_block_stalling_timeout`
+    /// shape (PR #25880) with an adaptive floor. Decay, never reset: snapping
+    /// to the floor on front progress would discard the anti-cascade doubling
+    /// across a peer rotation and re-arm the 2s floor against the next
+    /// honest-but-slow front owner. Window-global (not per-peer) exactly like
+    /// Core's, so an immediately-reconnecting staller faces the doubled
+    /// threshold instead of a fresh 2s.
+    stall_timeout: Duration,
+    /// EWMA (integer milliseconds, smoothing alpha = 1/4) of the interval
+    /// between consecutive window-front arrivals — the network's demonstrated
+    /// front cadence. `None` until the second front arrival produces the
+    /// first sample; the first sample seeds the EWMA directly. Feeds
+    /// [`Self::stall_decay_floor`] (the ADV-DRIP-1 fix): with a uniform
+    /// honest per-peer delivery gap g > `stall_timeout_initial` (ordinary
+    /// high-height IBD under peer upload caps), the static 2s floor lets the
+    /// x0.85 decay re-cross g in ~4-5 front advances and fire again — a limit
+    /// cycle draining one honest peer per ~5g seconds. Keying the floor to
+    /// twice the demonstrated cadence kills the cycle while a true staller
+    /// (silent while others stream) still convicts at ~2g. Two guards keep
+    /// the estimate honest: same-chunk batch arrivals (samples under
+    /// [`EWMA_MIN_SAMPLE_MS`]) are skipped so an in-order burst sharing one
+    /// chunk timestamp cannot deflate the floor, and while no sample exists
+    /// at all (cold start) [`Self::observe_stall`] suppresses conviction
+    /// entirely, deferring to the 60s pending-timeout fallback.
+    front_interval_ewma_ms: Option<u64>,
+    /// When the window front last advanced (a front block arrived); the
+    /// anchor for the next `front_interval_ewma_ms` sample.
+    last_front_advance: Option<Instant>,
+    /// Peers disconnected for stalling, by fire time. While inside
+    /// `staller_cooldown` such a peer is not fan-out eligible and receives no
+    /// block requests except as the last-resort peer — the re-acquisition
+    /// guard for a staller that immediately reconnects on the same address.
+    recent_stallers: HashMap<SocketAddr, Instant>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +210,11 @@ impl DownloadWindow {
             next_request_height: 1,
             next_pending_deadline: None,
             fanout_engaged: false,
+            stall: None,
+            stall_timeout: budget.stall_timeout_initial,
+            front_interval_ewma_ms: None,
+            last_front_advance: None,
+            recent_stallers: HashMap::new(),
         }
     }
 
@@ -365,6 +436,194 @@ impl DownloadWindow {
         })
     }
 
+    /// Advances the window-blocked stall state machine one observation (R8).
+    ///
+    /// Inputs computed by the sync layer each tick, after the apply drain:
+    /// - `next_apply_height`: `applied_tip.height + 1`, the apply frontier.
+    /// - `apply_side_busy`: the no-blame guard — true while the stager holds
+    ///   the next expected block (apply lag / failed-apply restore). Our own
+    ///   slowness must never be blamed on a peer, so the stall clock does not
+    ///   run at all.
+    ///
+    /// Deliberately *not* an input: a chain-tail arm ("nothing above the
+    /// window left to request"). At the tip, one >2s block from a caught-up
+    /// peer is the normal regime, not a stall — Core's stalling logic does
+    /// not engage there either, and the last <window blocks of IBD stay
+    /// covered by the pre-existing 60s pending-timeout machinery.
+    ///
+    /// Returns `Some(peer)` exactly when the stall threshold fires: the
+    /// caller must disconnect that peer (its pendings then re-queue through
+    /// `release_disconnected_peers`). On fire the adaptive threshold doubles
+    /// (capped at `stall_timeout_max`) and the peer enters the staller
+    /// cooldown. When any predicate term stops holding — including any
+    /// delivery from the blamed peer ([`Self::record_delivery_progress`]) —
+    /// the episode is cleared, more forgiving than freezing the clock and
+    /// Core-shaped (`m_stalling_since` is likewise re-derived, never frozen).
+    pub(super) fn observe_stall(
+        &mut self,
+        next_apply_height: u32,
+        apply_side_busy: bool,
+        now: Instant,
+    ) -> Option<SocketAddr> {
+        let staller_cooldown = self.budget.staller_cooldown;
+        self.recent_stallers
+            .retain(|_, fired_at| now.duration_since(*fired_at) < staller_cooldown);
+        if apply_side_busy {
+            self.stall = None;
+            return None;
+        }
+        let Some((peer_addr, front_hash)) = self.window_blocked_on(next_apply_height) else {
+            self.stall = None;
+            return None;
+        };
+        let episode = match self.stall {
+            Some(episode) if episode.peer_addr == peer_addr && episode.front_hash == front_hash => {
+                episode
+            }
+            _ => {
+                let episode = StallEpisode {
+                    peer_addr,
+                    front_hash,
+                    since: now,
+                };
+                self.stall = Some(episode);
+                episode
+            }
+        };
+        // Cold start: while the front-cadence EWMA has no sample the decay
+        // floor cannot distinguish a slow network from a staller, so
+        // conviction defers to the 60s pending-timeout fallback — the
+        // pre-U7 status quo. The episode above still forms so the stall
+        // stays observable (`stalling_peer`, the stall_seconds gauge); only
+        // the fire is suppressed until the estimate has one real sample.
+        self.front_interval_ewma_ms?;
+        // The fire threshold is the stored adaptive value, never below the
+        // ADV-DRIP-1 decay floor: on a network whose demonstrated front
+        // cadence exceeds `stall_timeout_initial`, an episode younger than
+        // twice that cadence is the uniform-slow steady state, not a stall.
+        let effective_timeout = self.stall_timeout.max(self.stall_decay_floor());
+        if now.duration_since(episode.since) < effective_timeout {
+            return None;
+        }
+        // Fire: blame is settled. Double the threshold for the next episode
+        // (sudden bandwidth drops must not cascade into disconnecting every
+        // peer at 2s — Core's rationale) and start the re-acquisition
+        // cooldown for this peer. Doubling starts from the effective
+        // threshold the fire was judged against, so a conviction at the
+        // adaptive floor elevates the next episode's bar just like one at
+        // the stored value.
+        self.stall = None;
+        self.stall_timeout = effective_timeout
+            .saturating_mul(2)
+            .min(self.budget.stall_timeout_max);
+        self.recent_stallers.insert(peer_addr, now);
+        Some(peer_addr)
+    }
+
+    /// Lower bound for the adaptive threshold's x0.85 decay (and for the
+    /// fire check itself): twice the network's demonstrated front cadence
+    /// ([`Self::front_interval_ewma_ms`]), never below
+    /// `stall_timeout_initial` and never above `stall_timeout_max`.
+    ///
+    /// The ADV-DRIP-1 fix. Consequences, pinned by tests:
+    /// - Fast network (front cadence well under 1s): the EWMA term stays
+    ///   below `stall_timeout_initial`, the floor is the static 2s, and
+    ///   conviction speed matches Core.
+    /// - Slow network (uniform honest gap g = 3s): the floor lands at ~6s
+    ///   (> g), so the decay limit cycle that fired one honest peer per ~5g
+    ///   cannot re-cross g — zero false fires — while a true staller
+    ///   (silent while others stream) still convicts at ~6s, far inside the
+    ///   60s pending-timeout fallback. That zero-false-fires guarantee
+    ///   holds only because of two qualifications: same-chunk batch
+    ///   arrivals are filtered out of the EWMA (sub-[`EWMA_MIN_SAMPLE_MS`]
+    ///   samples share one chunk timestamp and would otherwise deflate the
+    ///   floor back to the static 2s), and a cold-start window (no sample
+    ///   yet) does not trust the floor at all — [`Self::observe_stall`]
+    ///   suppresses conviction and defers to the 60s pending-timeout
+    ///   fallback until the cadence estimate has one real sample.
+    ///
+    /// The 2x multiplier is deliberately hardcoded (no `SyncBudget` knob):
+    /// it is the audit finding's refuted-equilibrium margin — the floor must
+    /// clear the cadence itself (1x fires on jitter) and stay well under the
+    /// fallback machinery; nothing tunes it per deployment.
+    fn stall_decay_floor(&self) -> Duration {
+        self.front_interval_ewma_ms
+            .map_or(Duration::ZERO, |ewma_ms| {
+                Duration::from_millis(ewma_ms.saturating_mul(2))
+            })
+            .max(self.budget.stall_timeout_initial)
+            .min(self.budget.stall_timeout_max)
+    }
+
+    /// The stall predicate: the window cannot progress and exactly one peer's
+    /// in-flight front block is why. All terms derive from window state:
+    ///
+    /// 1. **Front in flight at the apply frontier**: the minimum-height
+    ///    pending entry sits exactly at `next_apply_height`. This is also the
+    ///    structural half of the no-blame rule — if anything applicable were
+    ///    staged instead, the frontier would be the apply side's to drain and
+    ///    the front pending could not be at `next_apply_height`. It equally
+    ///    discriminates "frontier block never requested / expired" (front
+    ///    above the frontier): no peer owns the gap, so no peer is blamed.
+    /// 2. **Delivered successors are waiting**: at least one staged block
+    ///    above the front. Without arrivals the download is generally slow or
+    ///    just started — download-bound, not window-blocked, no single
+    ///    blocker.
+    /// 3. **No download progress is possible**: request capacity is closed
+    ///    (the U5/U6 count/byte clamps — the recorded R+P wedge shapes).
+    ///    While new requests can still be issued the window is making
+    ///    progress and Core likewise assigns work instead of blaming
+    ///    (`FindNextBlocksToDownload` sets a staller only when an idle peer
+    ///    cannot be given any block). The chain tail (nothing above the
+    ///    window left to request) is deliberately not an arm of this term —
+    ///    see [`Self::observe_stall`].
+    fn window_blocked_on(&self, next_apply_height: u32) -> Option<(SocketAddr, Hash256)> {
+        let (front_hash, front) = self
+            .pending
+            .iter()
+            .min_by_key(|(_, pending)| pending.height)?;
+        if front.height != next_apply_height {
+            return None;
+        }
+        if !self
+            .received
+            .values()
+            .any(|received| received.height > front.height)
+        {
+            return None;
+        }
+        if self.has_request_capacity() {
+            return None;
+        }
+        Some((front.peer_addr, *front_hash))
+    }
+
+    /// Current stall observation, if one is running: the blamed peer and when
+    /// the episode started. The R10 slow-trickle observability surface — a
+    /// peer delivering each front block just under the adaptive threshold is
+    /// never disconnected (same exposure as Core) but is visible here and on
+    /// the `node.sync.stall_seconds` gauge.
+    pub(super) fn stalling_peer(&self) -> Option<(SocketAddr, Instant)> {
+        self.stall.map(|episode| (episode.peer_addr, episode.since))
+    }
+
+    /// Current adaptive stalling threshold (2s doubling to 64s).
+    #[cfg(test)]
+    pub(super) const fn stall_timeout(&self) -> Duration {
+        self.stall_timeout
+    }
+
+    /// Whether `peer_addr` was disconnected for stalling within the cooldown.
+    /// Such a peer is not fan-out eligible and gets no block requests unless
+    /// it is the last-resort peer — without this, a staller reconnecting on
+    /// the same address immediately re-acquires the window front and restarts
+    /// the cycle (the RE-ADV-2 recurrence).
+    pub(super) fn peer_in_staller_cooldown(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+        self.recent_stallers
+            .get(&peer_addr)
+            .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
+    }
+
     #[cfg(test)]
     pub(super) fn received_len(&self) -> usize {
         self.received.len()
@@ -443,7 +702,10 @@ impl DownloadWindow {
         if self.staged_bytes_exhausted() {
             return None;
         }
-        if !allow_expired_retry_from_peer && self.peer_has_expired_pending(peer_addr, now) {
+        if !allow_expired_retry_from_peer
+            && (self.peer_has_expired_pending(peer_addr, now)
+                || self.peer_in_staller_cooldown(peer_addr, now))
+        {
             return None;
         }
         let mut expired = self.expire_pending(now);
@@ -646,8 +908,9 @@ impl DownloadWindow {
         self.has_request_capacity()
     }
 
-    pub(super) fn mark_received(&mut self, hash: Hash256, bytes: usize) -> bool {
+    pub(super) fn mark_received(&mut self, hash: Hash256, bytes: usize, now: Instant) -> bool {
         let (height, needs_height_lookup) = if let Some(pending) = self.remove_pending(&hash) {
+            self.record_delivery_progress(pending.peer_addr, hash, pending.height, now);
             (pending.height, false)
         } else {
             (0, true)
@@ -664,6 +927,92 @@ impl DownloadWindow {
             / 8;
         self.ewma_block_bytes = self.ewma_block_bytes.max(80);
         needs_height_lookup
+    }
+
+    /// Delivery progress for the stall state machine, charged per peer
+    /// (Core's `RemoveBlockRequest`: "this peer delivered, so it's not
+    /// stalling"). Called after `hash` was removed from `pending`.
+    ///
+    /// Any requested block arriving from the episode peer clears the running
+    /// episode, so blame accumulates only against a peer that delivers
+    /// *nothing* while owning the front and others stream past it. In the
+    /// saturated fan-out steady state ("no request capacity" holds almost
+    /// always), charging only front arrivals would serially false-blame
+    /// every slow-but-streaming peer — the self-eclipse cascade. Deliveries
+    /// from *other* peers do not clear it: they are the discriminator that
+    /// convicts a true staller.
+    ///
+    /// A window-front arrival additionally samples the inter-front-advance
+    /// interval into [`Self::front_interval_ewma_ms`] (unless the sample is
+    /// a same-chunk batch artifact under [`EWMA_MIN_SAMPLE_MS`]) and decays
+    /// the adaptive threshold by x0.85 toward [`Self::stall_decay_floor`]
+    /// (Core's PR #25880 shape with the ADV-DRIP-1 adaptive floor) instead
+    /// of snapping it to the floor: after a real fire the elevated threshold
+    /// must survive the peer rotation, so the next front owner is judged
+    /// against the doubled value while it gradually relaxes with front
+    /// progress.
+    fn record_delivery_progress(
+        &mut self,
+        peer_addr: SocketAddr,
+        hash: Hash256,
+        height: u32,
+        now: Instant,
+    ) {
+        if self
+            .stall
+            .is_some_and(|episode| episode.peer_addr == peer_addr || episode.front_hash == hash)
+        {
+            self.stall = None;
+        }
+        let was_front = self.pending.values().all(|pending| pending.height > height);
+        if was_front {
+            if let Some(previous) = self.last_front_advance {
+                // Millisecond integer math throughout: ewma += (sample -
+                // ewma) / 4 (alpha = 1/4). `Instant::duration_since`
+                // saturates to zero for an earlier `now`, so out-of-order
+                // timestamps fall under the batch filter below instead of
+                // corrupting the EWMA.
+                let sample_ms =
+                    u64::try_from(now.duration_since(previous).as_millis()).unwrap_or(u64::MAX);
+                // Batch artifacts are not cadence: an in-order front run
+                // processed in one chunk shares the chunk's single timestamp
+                // (see `EWMA_MIN_SAMPLE_MS`), so sub-threshold samples are
+                // skipped entirely — never averaged in, never seeding. The
+                // anchor below still moves to `now` (all batched advances
+                // share it), so the next genuine sample correctly measures
+                // from the batch.
+                if sample_ms >= EWMA_MIN_SAMPLE_MS {
+                    self.front_interval_ewma_ms = Some(match self.front_interval_ewma_ms {
+                        None => sample_ms,
+                        Some(ewma_ms) if sample_ms >= ewma_ms => {
+                            ewma_ms.saturating_add((sample_ms - ewma_ms) / 4)
+                        }
+                        Some(ewma_ms) => ewma_ms - (ewma_ms - sample_ms) / 4,
+                    });
+                }
+            }
+            self.last_front_advance = Some(now);
+            self.stall_timeout =
+                (self.stall_timeout.saturating_mul(85) / 100).max(self.stall_decay_floor());
+        }
+    }
+
+    /// Current inter-front-advance EWMA in milliseconds, if seeded.
+    #[cfg(test)]
+    pub(super) const fn front_interval_ewma_ms(&self) -> Option<u64> {
+        self.front_interval_ewma_ms
+    }
+
+    /// Test-only cold-start disarm: installs a front-cadence estimate as if
+    /// the network had demonstrated `ewma_ms` with its last front advance at
+    /// `now`. Sync-layer tests whose fixtures never advance the window front
+    /// (the recorded wedge constructions) use this instead of replaying two
+    /// real front deliveries; the real sampling path is pinned by the window
+    /// tests.
+    #[cfg(test)]
+    pub(super) const fn seed_front_cadence_for_test(&mut self, ewma_ms: u64, now: Instant) {
+        self.front_interval_ewma_ms = Some(ewma_ms);
+        self.last_front_advance = Some(now);
     }
 
     pub(super) fn update_received_height(&mut self, hash: &Hash256, height: u32) {
@@ -943,7 +1292,7 @@ mod tests {
             .peer_inflight
             .insert(peer_addr, super::PeerInflight { blocks: 2 });
 
-        let needs_height_lookup = window.mark_received(earliest, 80);
+        let needs_height_lookup = window.mark_received(earliest, 80, now);
 
         assert!(!needs_height_lookup);
         assert_eq!(window.pending_len(), 1);
@@ -1001,7 +1350,7 @@ mod tests {
         assert!(window.has_request_capacity());
         assert_ne!(window.request_peer_scan_limit(Instant::now()), 0);
 
-        window.mark_received(staged, 100);
+        window.mark_received(staged, 100, Instant::now());
 
         // Staged bytes at the budget: stop issuing new block requests instead
         // of letting arrivals bounce off the exhausted stager.
@@ -1051,7 +1400,7 @@ mod tests {
             ..test_budget()
         });
         for byte in [0xc1, 0xc2, 0xc3] {
-            window.mark_received(hash(byte), slot);
+            window.mark_received(hash(byte), slot, Instant::now());
         }
 
         assert!(window.has_request_capacity());
@@ -1059,7 +1408,7 @@ mod tests {
 
         // The fourth staged block consumes the last slot: headroom hits zero
         // and request capacity closes before any eviction can happen.
-        window.mark_received(hash(0xc4), slot);
+        window.mark_received(hash(0xc4), slot, Instant::now());
         assert!(!window.has_request_capacity());
         assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
     }
@@ -1074,7 +1423,7 @@ mod tests {
             ..test_budget()
         });
         for byte in [0xd1, 0xd2, 0xd3] {
-            window.mark_received(hash(byte), 80);
+            window.mark_received(hash(byte), 80, Instant::now());
         }
 
         assert!(window.has_request_capacity());
@@ -1083,7 +1432,7 @@ mod tests {
         // The fourth staged block consumes the last slot: count headroom hits
         // zero and requests stop — overflow becomes request backpressure
         // before the stager's count budget could ever evict.
-        window.mark_received(hash(0xd4), 80);
+        window.mark_received(hash(0xd4), 80, Instant::now());
         assert!(!window.has_request_capacity());
         assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
     }
@@ -1123,7 +1472,7 @@ mod tests {
             .peer_inflight
             .insert(peer_addr, super::PeerInflight { blocks: 2 });
         for byte in [0xe3, 0xe4] {
-            window.mark_received(hash(byte), 80);
+            window.mark_received(hash(byte), 80, now);
         }
 
         assert_eq!(window.request_peer_scan_limit(now), 0);
@@ -1162,6 +1511,786 @@ mod tests {
         assert!(window.fanout_active());
     }
 
+    /// Budget for the stall state-machine tests: a 4-slot window whose count
+    /// clamp saturates with three staged successors plus the pending front,
+    /// unbounded bytes, and short injectable stall thresholds.
+    fn stall_budget() -> SyncBudget {
+        SyncBudget {
+            max_pending_blocks: 4,
+            max_received_blocks: 4,
+            max_peer_inflight: 4,
+            getdata_batch_limit: 4,
+            stall_timeout_initial: Duration::from_secs(2),
+            stall_timeout_max: Duration::from_secs(8),
+            staller_cooldown: Duration::from_secs(30),
+            ..test_budget()
+        }
+    }
+
+    fn insert_pending(
+        window: &mut DownloadWindow,
+        peer_addr: std::net::SocketAddr,
+        block_hash: Hash256,
+        height: u32,
+        now: Instant,
+    ) {
+        window.pending.insert(
+            block_hash,
+            super::PendingBlock {
+                peer_addr,
+                requested_at: now,
+                height,
+                estimated_bytes: 80,
+            },
+        );
+        window.pending_bytes = window.pending_bytes.saturating_add(80);
+        window.record_pending_deadline(now);
+        let inflight = window.peer_inflight.entry(peer_addr).or_default();
+        inflight.blocks = inflight.blocks.saturating_add(1);
+    }
+
+    /// Seeds the front-cadence EWMA through the real delivery path: heights
+    /// 1 and 2 arrive from `peer` `gap` apart (must be >=
+    /// `EWMA_MIN_SAMPLE_MS` or the second advance is skipped as a batch
+    /// artifact) and apply immediately. Disarms `observe_stall`'s cold-start
+    /// fire suppression and returns the instant of the second front advance
+    /// — the anchor for the next interval sample.
+    fn seed_front_cadence(
+        window: &mut DownloadWindow,
+        peer: std::net::SocketAddr,
+        t0: Instant,
+        gap: Duration,
+    ) -> Instant {
+        insert_pending(window, peer, hash(0x01), 1, t0);
+        window.mark_received(hash(0x01), 80, t0);
+        window.mark_applied(&hash(0x01));
+        let t1 = t0 + gap;
+        insert_pending(window, peer, hash(0x02), 2, t1);
+        window.mark_received(hash(0x02), 80, t1);
+        window.mark_applied(&hash(0x02));
+        t1
+    }
+
+    /// A fully window-blocked construction with a seeded front-cadence EWMA:
+    /// heights 1-2 first seed the EWMA at a 100ms cadence (the decay floor
+    /// stays clamped at the static `stall_timeout_initial`, so the fire
+    /// arithmetic matches a fast network while the cold-start suppression is
+    /// disarmed), then the front (height 3) is in flight to `staller` while
+    /// `healthy` delivered heights 4..=6, leaving zero staged-count headroom
+    /// — every stall-predicate term holds. Returns the window and the
+    /// construction instant (100ms after `t0`); observe with
+    /// `next_apply_height` 3.
+    fn window_blocked_on_staller(
+        staller: std::net::SocketAddr,
+        healthy: std::net::SocketAddr,
+        t0: Instant,
+    ) -> (DownloadWindow, Instant) {
+        let mut window = DownloadWindow::new(stall_budget());
+        let t1 = seed_front_cadence(&mut window, healthy, t0, Duration::from_millis(100));
+        assert_eq!(window.front_interval_ewma_ms(), Some(100));
+        insert_pending(&mut window, staller, hash(0x03), 3, t1);
+        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
+            insert_pending(&mut window, healthy, hash(byte), height, t1);
+            window.mark_received(hash(byte), 80, t1);
+        }
+        (window, t1)
+    }
+
+    fn staller_addr() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], 8333))
+    }
+
+    fn healthy_addr() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 2], 8333))
+    }
+
+    #[test]
+    fn stall_clock_idle_without_staged_successors() {
+        // Download-bound, not window-blocked: the front is in flight but
+        // nothing was delivered — no single peer can be blamed, regardless of
+        // how much time passes.
+        let now = Instant::now();
+        let mut window = DownloadWindow::new(stall_budget());
+        insert_pending(&mut window, staller_addr(), hash(0x01), 1, now);
+
+        assert_eq!(window.observe_stall(1, false, now), None);
+        assert_eq!(
+            window.observe_stall(1, false, now + Duration::from_secs(60)),
+            None
+        );
+        assert!(window.stalling_peer().is_none());
+    }
+
+    #[test]
+    fn stall_clock_idle_when_frontier_block_is_not_in_flight() {
+        // The apply frontier (height 1) was never requested (or expired): the
+        // pending front sits above it, so no peer owns the gap and no blame
+        // attaches even with delivered successors and zero headroom.
+        let now = Instant::now();
+        let mut window = DownloadWindow::new(stall_budget());
+        insert_pending(&mut window, staller_addr(), hash(0x02), 2, now);
+        for (byte, height) in [(0x03_u8, 3_u32), (0x04, 4), (0x05, 5)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            window.mark_received(hash(byte), 80, now);
+        }
+
+        assert_eq!(window.observe_stall(1, false, now), None);
+        assert_eq!(
+            window.observe_stall(1, false, now + Duration::from_secs(60)),
+            None
+        );
+        assert!(window.stalling_peer().is_none());
+    }
+
+    #[test]
+    fn stall_clock_idle_while_window_can_still_request() {
+        // One staged successor but plenty of headroom: the window can make
+        // download progress by requesting more, so the front owner is not yet
+        // a staller (Core assigns work instead of blaming).
+        let now = Instant::now();
+        let mut window = DownloadWindow::new(stall_budget());
+        insert_pending(&mut window, staller_addr(), hash(0x01), 1, now);
+        insert_pending(&mut window, healthy_addr(), hash(0x02), 2, now);
+        window.mark_received(hash(0x02), 80, now);
+        assert!(window.has_request_capacity());
+
+        assert_eq!(window.observe_stall(1, false, now), None);
+        assert!(window.stalling_peer().is_none());
+
+        // Chain-tail decision (ADV-2): this same state at the header tip
+        // (nothing above the window left to request) must NOT arm the clock
+        // either — a caught-up peer taking >2s on one tip block is the
+        // normal tip regime, owned by the 60s pending-timeout machinery.
+        // With request capacity open the predicate stays false no matter how
+        // much time passes.
+        assert_eq!(
+            window.observe_stall(1, false, now + Duration::from_secs(60)),
+            None
+        );
+        assert!(window.stalling_peer().is_none());
+    }
+
+    #[test]
+    fn stall_fires_after_threshold_and_starts_cooldown() {
+        let (mut window, now) =
+            window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+
+        // Episode starts on first observation; no fire before the threshold.
+        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_secs(1)),
+            None
+        );
+
+        let fired = window.observe_stall(3, false, now + Duration::from_secs(2));
+
+        assert_eq!(fired, Some(staller_addr()));
+        assert!(window.stalling_peer().is_none());
+        assert!(window.peer_in_staller_cooldown(staller_addr(), now + Duration::from_secs(2)));
+        assert!(!window.peer_in_staller_cooldown(healthy_addr(), now + Duration::from_secs(2)));
+        // Cooldown expires after `staller_cooldown`.
+        assert!(!window.peer_in_staller_cooldown(staller_addr(), now + Duration::from_secs(33)));
+    }
+
+    #[test]
+    fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
+        let (mut window, now) =
+            window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+        assert_eq!(window.stall_timeout(), Duration::from_secs(2));
+
+        // Fire 1 at +2s: threshold doubles to 4s.
+        window.observe_stall(3, false, now);
+        let mut at = now + Duration::from_secs(2);
+        assert_eq!(window.observe_stall(3, false, at), Some(staller_addr()));
+        assert_eq!(window.stall_timeout(), Duration::from_secs(4));
+
+        // The window state still satisfies the predicate (the disconnect and
+        // re-queue are the sync layer's job), so a fresh episode starts and
+        // must now survive the doubled threshold: fire 2 doubles to the 8s
+        // cap, fire 3 stays capped.
+        window.observe_stall(3, false, at);
+        at += Duration::from_secs(4);
+        assert_eq!(window.observe_stall(3, false, at), Some(staller_addr()));
+        assert_eq!(window.stall_timeout(), Duration::from_secs(8));
+        window.observe_stall(3, false, at);
+        at += Duration::from_secs(8);
+        assert_eq!(window.observe_stall(3, false, at), Some(staller_addr()));
+        assert_eq!(window.stall_timeout(), Duration::from_secs(8));
+
+        // Progress: the front block arrives — any running episode ends, and
+        // the threshold must not snap back to the 2s floor: that snap is
+        // what let the anti-cascade doubling be discarded across a peer
+        // rotation (the self-eclipse blocker). The 14s front gap is a real
+        // (non-batch) sample, so it lifts the EWMA from the 100ms seed to
+        // 100 + (14000-100)/4 = 3575ms and the adaptive floor to 7150ms —
+        // above the bare x0.85 decay (8s x0.85 = 6.8s), so the floor binds.
+        // (The bare decay arithmetic in isolation is pinned by
+        // `stall_timeout_decays_across_rotation_and_shields_slow_honest_peer`.)
+        window.observe_stall(3, false, at);
+        window.mark_received(hash(0x03), 80, at);
+        assert_eq!(window.front_interval_ewma_ms(), Some(3575));
+        assert_eq!(window.stall_timeout(), Duration::from_millis(7150));
+        assert!(window.stalling_peer().is_none());
+    }
+
+    #[test]
+    fn successor_arrival_does_not_reset_stall_clock() {
+        // Mid-window deliveries are data progress but not front progress: the
+        // episode keeps running and fires on schedule. Heights 1-2 seed the
+        // cadence EWMA first (cold start would otherwise defer the fire to
+        // the pending-timeout fallback); the 100ms cadence keeps the decay
+        // floor at the static 2s.
+        let mut window = DownloadWindow::new(stall_budget());
+        let now = seed_front_cadence(
+            &mut window,
+            healthy_addr(),
+            Instant::now(),
+            Duration::from_millis(100),
+        );
+        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            window.mark_received(hash(byte), 80, now);
+        }
+        insert_pending(&mut window, healthy_addr(), hash(0x06), 6, now);
+
+        window.observe_stall(3, false, now);
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
+
+        window.mark_received(hash(0x06), 80, now + Duration::from_secs(1));
+
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            Some(staller_addr())
+        );
+    }
+
+    #[test]
+    fn no_blame_guard_keeps_stall_clock_idle_while_apply_side_is_busy() {
+        let (mut window, now) =
+            window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+
+        // With the apply side busy the clock never runs, no matter how long
+        // the state persists.
+        assert_eq!(window.observe_stall(3, true, now), None);
+        assert!(window.stalling_peer().is_none());
+        let later = now + Duration::from_secs(60);
+        assert_eq!(window.observe_stall(3, true, later), None);
+        assert!(window.stalling_peer().is_none());
+
+        // Once the apply side drains, blame starts from scratch — the busy
+        // interval is never retroactively charged to the peer.
+        assert_eq!(window.observe_stall(3, false, later), None);
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), later)));
+        assert_eq!(
+            window.observe_stall(3, false, later + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            window.observe_stall(3, false, later + Duration::from_secs(2)),
+            Some(staller_addr())
+        );
+    }
+
+    fn peer_addr(idx: u8) -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([10, 0, 0, idx], 8333))
+    }
+
+    #[test]
+    fn uniform_slow_streaming_saturated_fanout_never_fires() {
+        // The self-eclipse blocker construction, time-injected: a uniformly
+        // slow honest network in saturated fan-out (8 peers, window 24, R+P
+        // pinned at the count budget, so "no request capacity" is the steady
+        // state) where EVERY peer keeps streaming — one block per peer per
+        // round — but each round arrives 3s apart, past the 2s threshold.
+        // Each peer serves its stripe slowest-block-last, so the window
+        // front is always the laggard while its owner demonstrably keeps
+        // delivering. Per-peer delivery progress keeps every delivery-time
+        // episode from surviving to the threshold, and the ADV-DRIP-1
+        // adaptive floor keeps the MID-GAP observations (the wake path
+        // observes at ~g/8 cadence, so most observations land between the
+        // front owner's deliveries) from firing: zero fires, zero cooldowns.
+        let t0 = Instant::now();
+        let budget = SyncBudget {
+            max_pending_blocks: 24,
+            max_received_blocks: 24,
+            max_peer_inflight: 24,
+            getdata_batch_limit: 24,
+            ..stall_budget()
+        };
+        let mut window = DownloadWindow::new(budget);
+
+        // Pre-seed: the network has already demonstrated its 3s front
+        // cadence — two front advances 3s apart seed the interval EWMA at
+        // 3000ms and lift the decay floor to 2x3s = 6s before the saturated
+        // rounds begin. An unseeded window cannot fire at all (cold-start
+        // conviction is suppressed and deferred to the pending-timeout
+        // fallback — `cold_start_unseeded_ewma_never_fires_and_defers_to_
+        // fallback`), and in real IBD the EWMA has tracked the cadence since
+        // the first two blocks of the session anyway, long before blocks
+        // grow past one threshold of transfer time.
+        insert_pending(&mut window, peer_addr(0), hash(0x01), 1, t0);
+        window.mark_received(hash(0x01), 80, t0);
+        window.mark_applied(&hash(0x01));
+        let t1 = t0 + Duration::from_secs(3);
+        insert_pending(&mut window, peer_addr(0), hash(0x02), 2, t1);
+        window.mark_received(hash(0x02), 80, t1);
+        window.mark_applied(&hash(0x02));
+        assert_eq!(window.front_interval_ewma_ms(), Some(3000));
+        assert_eq!(
+            window.stall_timeout(),
+            Duration::from_secs(6),
+            "the second front advance must lift the threshold to the adaptive floor"
+        );
+
+        // The saturated window: heights 3..=26 striped 3 per peer.
+        for peer in 0..8u8 {
+            for slot in 0..3u8 {
+                let height = peer * 3 + slot + 3;
+                insert_pending(
+                    &mut window,
+                    peer_addr(peer),
+                    hash(height),
+                    u32::from(height),
+                    t1,
+                );
+            }
+        }
+        // Nothing staged yet: download-bound, no episode regardless of time.
+        assert_eq!(window.observe_stall(3, false, t1), None);
+
+        for round in 0..3u8 {
+            let at = t1 + Duration::from_secs(3) * (u32::from(round) + 1);
+            for peer in 0..8u8 {
+                // Highest remaining block of the stripe first: the front
+                // (height 3, peer 0) arrives only in the last round.
+                let height = peer * 3 + 5 - round;
+                window.mark_received(hash(height), 80, at);
+            }
+            assert_eq!(
+                window.observe_stall(3, false, at),
+                None,
+                "a streaming peer must never fire (round {round})"
+            );
+            // ADV-DRIP-1 mid-gap wake, 2s into the 3s gap between the front
+            // owner's deliveries: the saturated fan-out predicate holds and
+            // the episode is 2s old — past the static 2s floor (the
+            // pre-fix drip fired exactly here) but under the 6s adaptive
+            // floor.
+            assert_eq!(
+                window.observe_stall(3, false, at + Duration::from_secs(2)),
+                None,
+                "a mid-gap observation must never fire on a streaming peer (round {round})"
+            );
+        }
+
+        let end = t1 + Duration::from_secs(12);
+        // The last round drains the whole window in ascending front order:
+        // the deferred front (slowest-block-last) lands one real 9s interval
+        // sample (3000 + (9000-3000)/4 = 4500ms), then seven same-instant
+        // front advances follow — batch artifacts of the chunk-shared
+        // timestamp. Pre-fix each walked the EWMA down by a quarter
+        // (4500 x (3/4)^7 = 602ms), collapsing the adaptive floor back to
+        // the static 2s; now they are skipped and the EWMA must hold at
+        // 4500ms. The threshold tracked the moving floor throughout and was
+        // never doubled by a fire (the per-round and cooldown asserts above
+        // pin that directly).
+        assert_eq!(window.front_interval_ewma_ms(), Some(4500));
+        for peer in 0..8u8 {
+            assert!(
+                !window.peer_in_staller_cooldown(peer_addr(peer), end),
+                "no staller cooldown may exist after uniform-slow streaming"
+            );
+        }
+
+        // Consequence pin: with the burst filtered out, the floor stays at
+        // min(2x4500ms, stall_timeout_max) = 8s, so a slow honest owner of
+        // the next front — 7s of blame, well past the static 2s that the
+        // deflated floor would have re-armed — still does not fire. The
+        // staged backlog (heights 3..=26, never applied in this
+        // construction) keeps request capacity closed, so the predicate
+        // holds the moment a front pending and a staged successor exist.
+        insert_pending(&mut window, peer_addr(0), hash(27), 27, end);
+        insert_pending(&mut window, peer_addr(1), hash(28), 28, end);
+        window.mark_received(hash(28), 80, end);
+        assert_eq!(window.observe_stall(27, false, end), None);
+        assert_eq!(
+            window.stalling_peer().map(|(addr, _)| addr),
+            Some(peer_addr(0))
+        );
+        assert_eq!(
+            window.observe_stall(27, false, end + Duration::from_secs(7)),
+            None,
+            "a slow honest front owner must stay under the preserved adaptive floor"
+        );
+    }
+
+    #[test]
+    fn episode_peer_delivery_restarts_stall_clock() {
+        // The per-peer progress discriminator in isolation: the front owner
+        // delivers a NON-front block mid-episode — under front-only progress
+        // accounting the episode would survive and fire at +2.5s; charging
+        // per-peer delivery restarts the clock instead. When the same peer
+        // then stops delivering entirely, it is a true staller and still
+        // fires one full threshold after its last delivery. Heights 1-2 seed
+        // the cadence EWMA first (cold start would otherwise defer the fire
+        // to the pending-timeout fallback); the 100ms cadence keeps the
+        // decay floor at the static 2s.
+        let mut window = DownloadWindow::new(stall_budget());
+        let now = seed_front_cadence(
+            &mut window,
+            healthy_addr(),
+            Instant::now(),
+            Duration::from_millis(100),
+        );
+        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        insert_pending(&mut window, staller_addr(), hash(0x06), 6, now);
+        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            window.mark_received(hash(byte), 80, now);
+        }
+
+        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
+
+        // The episode peer delivers its mid-window block at +1.5s: progress,
+        // episode cleared (and no threshold decay — not the front).
+        window.mark_received(hash(0x06), 80, now + Duration::from_millis(1500));
+        assert!(window.stalling_peer().is_none());
+        assert_eq!(window.stall_timeout(), Duration::from_secs(2));
+
+        // +2.5s (past the original episode's threshold): blame restarts from
+        // the delivery, no fire.
+        let restarted = now + Duration::from_millis(2500);
+        assert_eq!(window.observe_stall(3, false, restarted), None);
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), restarted)));
+
+        // No deliveries for a full threshold after that: a true staller now,
+        // and it fires.
+        assert_eq!(
+            window.observe_stall(3, false, restarted + Duration::from_secs(2)),
+            Some(staller_addr())
+        );
+    }
+
+    #[test]
+    fn stall_timeout_decays_across_rotation_and_shields_slow_honest_peer() {
+        // Anti-cascade across a peer rotation: after a true fire doubles the
+        // threshold, front arrivals from healthy peers must DECAY it in
+        // x0.85 steps — never snap it to the floor — so a subsequent
+        // ~3s-honest front owner is judged against the still-elevated value
+        // and does not fire.
+        //
+        // Every front past the rotation is delivered with the same
+        // `fired_at` timestamp: those 0ms inter-front-advance samples are
+        // batch artifacts (same-chunk timestamp sharing) and are SKIPPED, so
+        // the interval EWMA stays at 575ms (the 100ms seed plus the one real
+        // 2s rotation sample) and the adaptive decay floor sits at the
+        // static 2s — this test pins the bare x0.85 decay arithmetic. The
+        // adaptive-floor interaction is pinned separately in
+        // `stall_decay_limit_cycle_stops_at_adaptive_floor`.
+        let (mut window, now) =
+            window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+        assert_eq!(window.observe_stall(3, false, now), None);
+        let fired_at = now + Duration::from_secs(2);
+        assert_eq!(
+            window.observe_stall(3, false, fired_at),
+            Some(staller_addr())
+        );
+        assert_eq!(window.stall_timeout(), Duration::from_secs(4));
+
+        // Rotation: the sync layer drops the staller and re-queues the front
+        // to the healthy peer, which delivers it. The 2s wedge gap is a real
+        // sample: EWMA 100 -> 100 + (2000-100)/4 = 575ms, floor still 2s.
+        window.release_disconnected_peers(|peer| *peer != staller_addr());
+        insert_pending(&mut window, healthy_addr(), hash(0x03), 3, fired_at);
+        window.mark_received(hash(0x03), 80, fired_at);
+        assert_eq!(window.front_interval_ewma_ms(), Some(575));
+        assert_eq!(
+            window.stall_timeout(),
+            Duration::from_millis(3400),
+            "front arrival after a fire must decay the threshold, not snap it to the floor"
+        );
+
+        // A ~3s-honest peer now owns the new front (height 7) with the
+        // window again saturated: 3s of blame stays under the elevated
+        // 3.4s threshold — no fire.
+        let honest = peer_addr(3);
+        insert_pending(&mut window, honest, hash(0x07), 7, fired_at);
+        for (byte, height) in [(0x08_u8, 8_u32), (0x09, 9)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, fired_at);
+            window.mark_received(hash(byte), 80, fired_at);
+        }
+        assert_eq!(window.observe_stall(7, false, fired_at), None);
+        assert_eq!(
+            window.observe_stall(7, false, fired_at + Duration::from_secs(3)),
+            None,
+            "a ~3s honest front owner must not fire while the threshold is elevated"
+        );
+        window.mark_received(hash(0x07), 80, fired_at);
+
+        // Gradual 0.85 steps down to the floor, never below it. All these
+        // same-instant front advances are skipped batch samples: the EWMA
+        // (and so the floor) must not move.
+        assert_eq!(window.stall_timeout(), Duration::from_micros(2_890_000));
+        for (byte, expected) in [
+            (0x0a_u8, Duration::from_micros(2_456_500)),
+            (0x0b, Duration::from_micros(2_088_025)),
+            (0x0c, Duration::from_secs(2)),
+            (0x0d, Duration::from_secs(2)),
+        ] {
+            insert_pending(&mut window, honest, hash(byte), u32::from(byte), fired_at);
+            window.mark_received(hash(byte), 80, fired_at);
+            assert_eq!(window.stall_timeout(), expected);
+        }
+        assert_eq!(window.front_interval_ewma_ms(), Some(575));
+    }
+
+    #[test]
+    fn stall_decay_limit_cycle_stops_at_adaptive_floor() {
+        // ADV-DRIP-1, the drip itself: with a uniform honest front cadence
+        // g = 3s above the 2s static floor, the x0.85 decay used to re-cross
+        // g within a few front advances after a fire and fire again — a
+        // limit cycle draining one honest peer per ~5g seconds. The adaptive
+        // floor must stop the decay at 2x the demonstrated cadence (>= 2g):
+        // no re-fire ever, while a true staller still convicts at the
+        // elevated ~2g threshold.
+        //
+        // The session's first two blocks seed the EWMA at the 3s cadence
+        // (cold start no longer convicts at all — the fire suppression
+        // defers an unseeded window to the pending-timeout fallback, pinned
+        // by `cold_start_unseeded_ewma_never_fires_and_defers_to_fallback`),
+        // so even the FIRST conviction is judged at the 6s adaptive floor.
+        let mut window = DownloadWindow::new(stall_budget());
+        let t1 = seed_front_cadence(
+            &mut window,
+            healthy_addr(),
+            Instant::now(),
+            Duration::from_secs(3),
+        );
+        assert_eq!(window.front_interval_ewma_ms(), Some(3000));
+        assert_eq!(
+            window.stall_timeout(),
+            Duration::from_secs(6),
+            "the second front advance must lift the threshold to the adaptive floor"
+        );
+
+        // A true staller takes the front (height 3) with the window
+        // saturated: it convicts at the 6s adaptive floor (~2g), not the 2s
+        // static one — a 3s-old episode (one full honest gap) stays quiet.
+        insert_pending(&mut window, staller_addr(), hash(0x03), 3, t1);
+        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, t1);
+            window.mark_received(hash(byte), 80, t1);
+        }
+        assert_eq!(window.observe_stall(3, false, t1), None);
+        assert_eq!(
+            window.observe_stall(3, false, t1 + Duration::from_secs(3)),
+            None,
+            "one honest-cadence gap of blame must stay under the adaptive floor"
+        );
+        let fired_at = t1 + Duration::from_secs(6);
+        assert_eq!(
+            window.observe_stall(3, false, fired_at),
+            Some(staller_addr())
+        );
+        // Doubling from the 6s effective threshold caps at 8s.
+        assert_eq!(window.stall_timeout(), Duration::from_secs(8));
+        window.release_disconnected_peers(|peer| *peer != staller_addr());
+
+        // The healthy peer takes over the front and the network settles back
+        // into the uniform 3s cadence. The 6s wedge gap is one real sample
+        // (EWMA 3000 -> 3750, floor 7.5s); each 3s cycle then walks the EWMA
+        // back toward 3000 while the x0.85 decay chases the moving floor and
+        // never re-crosses g. Each cycle: a wake lands a full gap (3s) into
+        // the episode — the worst-case observation — then the front arrives,
+        // the 4-block slice applies, and the next slice re-saturates the
+        // window (R+P pinned at the 4-block budget).
+        //
+        // Pre-fix decay from 8s with the static 2s floor: 6.8s -> 5.78s ->
+        // 4.913s -> ... re-crossing g = 3s within six advances and firing at
+        // a later cycle's 3s-old wake. Post-fix the floor binds every step:
+        // EWMA 3750 -> 3563 -> 3423 -> 3318 (alpha = 1/4 toward 3000), the
+        // floor 2x that, and the decay clamped up to it. (EWMA after the
+        // four cycle samples: 3563 -> 3423 -> 3318 -> 3239.)
+        insert_pending(&mut window, healthy_addr(), hash(0x03), 3, fired_at);
+        window.mark_received(hash(0x03), 80, fired_at);
+        assert_eq!(window.front_interval_ewma_ms(), Some(3750));
+        assert_eq!(window.stall_timeout(), Duration::from_millis(7500));
+        for offset in 0..4u8 {
+            window.mark_received_applied(&hash(3 + offset));
+        }
+        let silent = peer_addr(9);
+        insert_pending(&mut window, healthy_addr(), hash(0x07), 7, fired_at);
+        for offset in 1..4u8 {
+            insert_pending(
+                &mut window,
+                healthy_addr(),
+                hash(7 + offset),
+                u32::from(7 + offset),
+                fired_at,
+            );
+            window.mark_received(hash(7 + offset), 80, fired_at);
+        }
+        let mut front: u8 = 7;
+        let mut at = fired_at;
+        let expected = [
+            Duration::from_millis(7126),
+            Duration::from_millis(6846),
+            Duration::from_millis(6636),
+            Duration::from_millis(6478),
+        ];
+        for expected_timeout in expected {
+            assert_eq!(window.observe_stall(u32::from(front), false, at), None);
+            let arrive = at + Duration::from_secs(3);
+            assert_eq!(
+                window.observe_stall(u32::from(front), false, arrive),
+                None,
+                "an honest 3s front owner must never fire again after the first conviction"
+            );
+            window.mark_received(hash(front), 80, arrive);
+            assert_eq!(
+                window.stall_timeout(),
+                expected_timeout,
+                "the decay must stop at the adaptive floor, never re-crossing the 3s cadence"
+            );
+            // The slice applies; the next slice re-saturates. The last
+            // slice's front goes to a peer that will deliver nothing.
+            for offset in 0..4u8 {
+                window.mark_received_applied(&hash(front + offset));
+            }
+            let next_front = front + 4;
+            let owner = if next_front == 23 {
+                silent
+            } else {
+                healthy_addr()
+            };
+            insert_pending(
+                &mut window,
+                owner,
+                hash(next_front),
+                u32::from(next_front),
+                arrive,
+            );
+            for offset in 1..4u8 {
+                let height = next_front + offset;
+                insert_pending(
+                    &mut window,
+                    healthy_addr(),
+                    hash(height),
+                    u32::from(height),
+                    arrive,
+                );
+                window.mark_received(hash(height), 80, arrive);
+            }
+            front = next_front;
+            at = arrive;
+        }
+        assert_eq!(window.front_interval_ewma_ms(), Some(3239));
+
+        // A true staller now owns the front: zero deliveries while the
+        // healthy peer keeps streaming successors. The episode survives the
+        // successor arrival (different peer, not the front hash) and convicts
+        // at the adaptive ~2g threshold — 6.478s, far inside the 60s
+        // pending-timeout fallback.
+        assert_eq!(window.observe_stall(u32::from(front), false, at), None);
+        insert_pending(
+            &mut window,
+            healthy_addr(),
+            hash(front + 4),
+            u32::from(front) + 4,
+            at,
+        );
+        window.mark_received(hash(front + 4), 80, at + Duration::from_secs(2));
+        assert_eq!(
+            window.observe_stall(u32::from(front), false, at + Duration::from_secs(3)),
+            None,
+            "a true staller is judged at the adaptive floor, not the static 2s"
+        );
+        assert_eq!(
+            window.observe_stall(u32::from(front), false, at + Duration::from_millis(6478)),
+            Some(silent),
+            "a silent front owner must still convict at the adaptive threshold"
+        );
+        // Doubling starts from the effective (floor-bound) threshold, capped
+        // at `stall_timeout_max` (8s in this budget).
+        assert_eq!(window.stall_timeout(), Duration::from_secs(8));
+        let end = at + Duration::from_millis(6478);
+        assert!(window.peer_in_staller_cooldown(silent, end));
+        assert!(!window.peer_in_staller_cooldown(healthy_addr(), end));
+    }
+
+    #[test]
+    fn cold_start_unseeded_ewma_never_fires_and_defers_to_fallback() {
+        // Cold-start suppression: while the front-cadence EWMA has no sample
+        // the decay floor cannot distinguish a slow network from a staller,
+        // so `observe_stall` never convicts — conviction belongs to the 60s
+        // pending-timeout fallback (the pre-U7 status quo) until the
+        // estimate seeds. The episode still forms: the stall must stay
+        // observable (gauge / `stalling_peer`) even while unconvictable.
+        let t0 = Instant::now();
+        let mut window = DownloadWindow::new(stall_budget());
+        insert_pending(&mut window, staller_addr(), hash(0x01), 1, t0);
+        for (byte, height) in [(0x02_u8, 2_u32), (0x03, 3), (0x04, 4)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, t0);
+            window.mark_received(hash(byte), 80, t0);
+        }
+        assert_eq!(window.front_interval_ewma_ms(), None);
+
+        assert_eq!(window.observe_stall(1, false, t0), None);
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), t0)));
+        // Well past `stall_timeout_initial` (2s) — pre-fix this convicted.
+        assert_eq!(
+            window.observe_stall(1, false, t0 + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(
+            window.observe_stall(1, false, t0 + Duration::from_secs(30)),
+            None,
+            "an unseeded window must defer conviction to the pending-timeout fallback"
+        );
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), t0)));
+        assert_eq!(window.stall_timeout(), Duration::from_secs(2));
+        assert!(!window.peer_in_staller_cooldown(staller_addr(), t0 + Duration::from_secs(30)));
+
+        // The wedge resolves (the front finally arrives — first advance,
+        // anchor only) and a later front advance 3s after it seeds the EWMA:
+        // the cadence estimate now exists and conviction re-arms.
+        let t1 = t0 + Duration::from_secs(30);
+        window.mark_received(hash(0x01), 80, t1);
+        assert_eq!(window.front_interval_ewma_ms(), None);
+        for byte in [0x01_u8, 0x02, 0x03, 0x04] {
+            window.mark_received_applied(&hash(byte));
+        }
+        let t2 = t1 + Duration::from_secs(3);
+        insert_pending(&mut window, healthy_addr(), hash(0x05), 5, t1);
+        window.mark_received(hash(0x05), 80, t2);
+        window.mark_received_applied(&hash(0x05));
+        assert_eq!(window.front_interval_ewma_ms(), Some(3000));
+
+        // A true staller (silent on the front while the healthy peer's
+        // staged successors wait) now fires at the effective threshold —
+        // the 6s adaptive floor (2x the demonstrated 3s cadence).
+        let silent = peer_addr(9);
+        insert_pending(&mut window, silent, hash(0x06), 6, t2);
+        for (byte, height) in [(0x07_u8, 7_u32), (0x08, 8), (0x09, 9)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, t2);
+            window.mark_received(hash(byte), 80, t2);
+        }
+        assert_eq!(window.observe_stall(6, false, t2), None);
+        assert_eq!(
+            window.observe_stall(6, false, t2 + Duration::from_secs(3)),
+            None
+        );
+        assert_eq!(
+            window.observe_stall(6, false, t2 + Duration::from_secs(6)),
+            Some(silent),
+            "a seeded window must convict a true staller at the effective threshold"
+        );
+    }
+
     fn test_budget() -> SyncBudget {
         SyncBudget {
             max_pending_blocks: 128,
@@ -1176,6 +2305,9 @@ mod tests {
             getdata_batch_limit: 16,
             pending_timeout: Duration::from_secs(30),
             received_timeout: Duration::from_secs(30),
+            stall_timeout_initial: Duration::from_secs(2),
+            stall_timeout_max: Duration::from_secs(64),
+            staller_cooldown: Duration::from_secs(64),
         }
     }
 

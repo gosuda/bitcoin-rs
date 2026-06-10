@@ -144,7 +144,9 @@ impl BlockStager {
         StagedBlock::Memory { bytes, dropped }
     }
 
-    #[cfg(test)]
+    /// Whether `hash` is currently staged. Feeds the stall detector's
+    /// no-blame guard: a staged next-expected block means the apply side owns
+    /// the frontier.
     pub(super) fn contains(&self, hash: &Hash256) -> bool {
         self.received.contains_key(hash)
     }
