@@ -102,3 +102,35 @@ jobs:
       - run: |
           cargo test -p bitcoin-rs-consensus --no-fail-fast \
             --no-default-features --features kernel -- --include-ignored
+
+  # Full kernel-build profile gate (plan 2026-06-10-001 R5): consensus parity
+  # suite (committed fixture corpus, --include-ignored by design), the node
+  # under the kernel engine, and clippy on both kernel-profile package roots.
+  # Storage backend is rocksdb-only by CI wall-clock decision: the four-backend
+  # storage-equivalence surface is already covered by the portable `test` job,
+  # and the extra native backend builds (mdbx/fjall/redb) buy no kernel-specific
+  # coverage here. `kernel` and `bitcoinconsensus` cannot share a binary
+  # (overlapping native Core symbols), hence the isolated job.
+  kernel-node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo test -p bitcoin-rs-consensus --no-fail-fast \
+            --no-default-features --features kernel -- --include-ignored
+      - run: |
+          cargo test -p bitcoin-rs --no-fail-fast \
+            --no-default-features --features "rocksdb,kernel"
+      - run: |
+          cargo clippy -p bitcoin-rs --all-targets \
+            --no-default-features --features "rocksdb,kernel" \
+            -- -D warnings
+      - run: |
+          cargo clippy -p bitcoin-rs-consensus --all-targets \
+            --no-default-features --features kernel \
+            -- -D warnings
