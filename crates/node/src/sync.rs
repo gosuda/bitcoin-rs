@@ -45,11 +45,20 @@ const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Time after which a pending getdata is considered stuck and re-requestable.
 const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
-const PENDING_BUDGET: usize = 128;
+///
+/// 256 = two full fan-out waves (8 peers x 16 in-flight): measured on live
+/// IBD 0->150k, a window of exactly one wave (128) leaves zero pipelining
+/// headroom — the scheduler cannot request wave N+1 while wave N stages, and
+/// the download path (~256s of the 359.5s matched-assumption wall) was the
+/// binding constraint with apply at only ~103s. Core's window is 1024 for the
+/// same reason. Byte budgets and the fallback per-peer cap derive from this
+/// and scale with it; `MIN_PEERS_FOR_FANOUT` deliberately does NOT (see its
+/// doc).
+const PENDING_BUDGET: usize = 256;
 /// Time after which a received out-of-order block is discarded.
 const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of received blocks waiting for their predecessor.
-const RECEIVED_BLOCK_BUDGET: usize = 128;
+const RECEIVED_BLOCK_BUDGET: usize = PENDING_BUDGET;
 /// Mainnet-oriented block-size estimate for sizing the in-flight request window.
 const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 /// Maximum estimated bytes in the in-flight request window.
@@ -80,15 +89,26 @@ const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 /// under-fill regression — both are pinned in
 /// `docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md`.
 const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
-/// Minimum fan-out-eligible peers before block requests fan out: exactly
-/// enough peers to fill the deep window at the shallow fan-out cap
-/// (128 / 16 = 8). Below this, fan-out would under-fill the window versus the
-/// single-peer-deep fallback, so the fallback wins. This equals the outbound
-/// connection budget, leaving zero slack: a single transient soft-demotion
-/// sits exactly at the boundary, which is why engagement carries one-peer
-/// hysteresis in [`DownloadWindow::set_fanout_eligible_peers`] instead of
-/// being re-derived from the raw count each tick.
-const MIN_PEERS_FOR_FANOUT: usize = PENDING_BUDGET / MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+/// Minimum fan-out-eligible peers before block requests fan out. Pinned to
+/// the outbound connection budget (`P2P_OUTBOUND_ACTIVE_LIMIT` = 8), NOT
+/// derived from the window: when the window deepened past one fan-out wave
+/// (`PENDING_BUDGET` 128 -> 256), the old `PENDING_BUDGET / 16` derivation
+/// would have demanded 16 eligible peers — above the 8 outbound slots — and
+/// silently disabled fan-out forever. Eight eligible peers at cap 16 fill one
+/// 128-block wave; the window's extra depth is pipelining headroom, not a
+/// reason to demand more peers. The threshold equals the outbound budget,
+/// leaving zero slack: a single transient soft-demotion sits exactly at the
+/// boundary, which is why engagement carries one-peer hysteresis in
+/// [`DownloadWindow::set_fanout_eligible_peers`] instead of being re-derived
+/// from the raw count each tick.
+const MIN_PEERS_FOR_FANOUT: usize = 8;
+// The window is exactly two fan-out waves deep: wave N+1 streams while wave N
+// stages (see `PENDING_BUDGET`'s doc for the live-IBD measurement). One tick
+// of fan-out fills at most one wave (`MIN_PEERS_FOR_FANOUT *
+// MAX_BLOCKS_IN_TRANSIT_PER_PEER` blocks); the second wave is pipelining
+// headroom. No runtime test can observe both waves in a single tick, so the
+// relationship is pinned here.
+const _: () = assert!(PENDING_BUDGET == 2 * MIN_PEERS_FOR_FANOUT * MAX_BLOCKS_IN_TRANSIT_PER_PEER);
 /// Initial window-blocked stalling threshold, mirroring Bitcoin Core's
 /// `BLOCK_STALLING_TIMEOUT_DEFAULT` (2s, `net_processing.cpp`): when the
 /// window front has been in flight to one peer this long with the apply
@@ -1500,9 +1520,12 @@ mod tests {
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         let first_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         let second_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        // Equal heights above the deep chain tip: both peers can serve the
+        // full window (and headers past it), so list order alone decides.
+        let equal_height = i32::try_from(super::PENDING_BUDGET)? + 100;
         peers.write().extend([
-            synthetic_peer(first_addr, 200),
-            synthetic_peer(second_addr, 200),
+            synthetic_peer(first_addr, equal_height),
+            synthetic_peer(second_addr, equal_height),
         ]);
         let (first_tx, first_rx) = unbounded::<Message>();
         let (second_tx, second_rx) = unbounded::<Message>();
@@ -2180,12 +2203,15 @@ mod tests {
         let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         let mut rxs = Vec::new();
+        // Heights above the deep chain tip: every peer can serve any window
+        // height (and the highest can serve headers past the tip).
+        let peer_height_base = i32::try_from(super::PENDING_BUDGET)? + 100;
         for idx in 0..super::MIN_PEERS_FOR_FANOUT {
             let addr = test_addr(9001, idx)?;
             rxs.push(connect_peer(
                 &peers,
                 &peer_outbound,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, peer_height_base - i32::try_from(idx)?),
             ));
         }
 
@@ -2215,9 +2241,120 @@ mod tests {
         }
         assert_eq!(
             sync.download_window.lock().pending_len(),
-            super::PENDING_BUDGET,
-            "fan-out must fill the deep window"
+            super::MIN_PEERS_FOR_FANOUT * super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+            "one fan-out wave fills exactly half the two-wave window; the \
+             remaining depth is pipelining headroom for the next wave"
         );
+        Ok(())
+    }
+
+    /// Verifies the "two-wave pipeline" behaviour that the compile-time assert
+    /// (`PENDING_BUDGET == 2 * MIN_PEERS_FOR_FANOUT * MAX_BLOCKS_IN_TRANSIT_PER_PEER`)
+    /// encodes structurally but cannot prove dynamically: after tick 1 fills
+    /// wave N (128 in-flight blocks) and those blocks are received/staged,
+    /// tick 2 issues wave N+1 (another 128 in-flight) while wave N remains in
+    /// `window.received` — both waves simultaneously active, totalling
+    /// `PENDING_BUDGET` blocks in the pipeline.
+    ///
+    /// Refutes the source comment "No runtime test can observe both waves in a
+    /// single tick": two ticks suffice.
+    #[test]
+    fn two_tick_fanout_pipeline_issues_wave2_while_wave1_staged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let wave_size = super::MIN_PEERS_FOR_FANOUT * super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        let chain_len = u32::try_from(super::PENDING_BUDGET * 2 + 4)?;
+        let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
+            sync_with_header_chain(chain_len)?;
+        let peer_height = i32::try_from(super::PENDING_BUDGET * 2 + 100)?;
+        let mut rxs = Vec::new();
+        for idx in 0..super::MIN_PEERS_FOR_FANOUT {
+            let addr = test_addr(9700, idx)?;
+            rxs.push(connect_peer(
+                &peers,
+                &peer_outbound,
+                eligible_peer(addr, peer_height - i32::try_from(idx)?),
+            ));
+        }
+
+        // Tick 1: wave N issues (MIN_PEERS_FOR_FANOUT × MAX_BLOCKS_IN_TRANSIT_PER_PEER
+        // = half of PENDING_BUDGET blocks distributed across the eligible peers).
+        sync.tick();
+        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        assert_eq!(
+            sync.download_window.lock().pending_len(),
+            wave_size,
+            "tick 1: exactly one fan-out wave in-flight, window has headroom for wave N+1"
+        );
+
+        // Drain wave-N getdatas from peer channels so tick-2 output is clean.
+        for rx in &rxs {
+            while let Ok(msg) = rx.try_recv() {
+                if matches!(msg, NetworkMessage::GetData(_)) {
+                    break;
+                }
+            }
+        }
+
+        // Simulate wave-N block arrivals via window.mark_received: removes each
+        // block from pending and decrements per-peer inflight (freeing capacity
+        // for wave N+1), while adding it to window.received (the "staged but not
+        // yet applied" accounting layer).  The block stager is intentionally left
+        // empty so drain_inbound_blocks returns early in tick 2 and does not
+        // apply — wave N stays staged.
+        let now = Instant::now();
+        {
+            let mut window = sync.download_window.lock();
+            for bh in &expected[..wave_size] {
+                window.mark_received(
+                    Hash256::from_le_bytes(bh.as_byte_array()),
+                    80, // representative byte count; well within the staging budget
+                    now,
+                );
+            }
+        }
+        assert_eq!(
+            sync.download_window.lock().pending_len(),
+            0,
+            "wave N moved out of pending after arrivals"
+        );
+        assert_eq!(
+            sync.download_window.lock().received_len(),
+            wave_size,
+            "wave N blocks staged in window.received (not yet applied)"
+        );
+
+        // Tick 2: drain_inbound_blocks returns early (block stager empty), then
+        // the scheduler sees per-peer inflight cleared and issues wave N+1 into
+        // the window's remaining headroom.
+        sync.tick();
+
+        // Both waves are simultaneously active: wave N in received (staged),
+        // wave N+1 in pending (in-flight) — the two-wave pipeline is live.
+        {
+            let window = sync.download_window.lock();
+            assert_eq!(
+                window.pending_len(),
+                wave_size,
+                "tick 2: wave N+1 now in-flight"
+            );
+            assert_eq!(
+                window.received_len(),
+                wave_size,
+                "wave N still staged while wave N+1 issues — two-wave pipeline confirmed"
+            );
+        }
+
+        // Assert each peer received exactly one wave-N+1 getdata stripe.
+        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        for (idx, rx) in rxs.iter().enumerate() {
+            let wave2_inventory = next_getdata(rx)?;
+            let got = witness_block_inventory(wave2_inventory)?;
+            assert_eq!(
+                got,
+                expected[wave_size + idx * cap..wave_size + (idx + 1) * cap],
+                "peer {idx}: wave N+1 stripe must be the next {cap} in-order blocks"
+            );
+        }
         Ok(())
     }
 
@@ -2227,12 +2364,15 @@ mod tests {
         let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         let mut rxs = Vec::new();
+        // Heights above the deep chain tip so the highest peer can serve the
+        // entire window in one batch.
+        let peer_height_base = i32::try_from(super::PENDING_BUDGET)? + 100;
         for idx in 0..super::MIN_PEERS_FOR_FANOUT - 1 {
             let addr = test_addr(9021, idx)?;
             rxs.push(connect_peer(
                 &peers,
                 &peer_outbound,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, peer_height_base - i32::try_from(idx)?),
             ));
         }
 
@@ -2261,7 +2401,12 @@ mod tests {
     {
         let ineligible = PeerInfo {
             inbound: true,
-            ..eligible_peer(test_addr(9200, 0)?, 300)
+            // Highest candidate by a margin over the helper's eligible peers,
+            // so the fallback must pick it.
+            ..eligible_peer(
+                test_addr(9200, 0)?,
+                i32::try_from(super::PENDING_BUDGET)? + 300,
+            )
         };
         assert_fallback_with_ineligible_candidate(ineligible, true)
     }
@@ -2272,7 +2417,12 @@ mod tests {
         let ineligible = PeerInfo {
             // NODE_NETWORK only — no NODE_WITNESS.
             services: 1,
-            ..eligible_peer(test_addr(9210, 0)?, 300)
+            // Highest candidate by a margin over the helper's eligible peers,
+            // so the fallback must pick it.
+            ..eligible_peer(
+                test_addr(9210, 0)?,
+                i32::try_from(super::PENDING_BUDGET)? + 300,
+            )
         };
         assert_fallback_with_ineligible_candidate(ineligible, true)
     }
@@ -2300,12 +2450,16 @@ mod tests {
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         let ineligible_rx = connect_peer(&peers, &peer_outbound, ineligible);
         let mut rxs = Vec::new();
+        // Heights above the deep chain tip (but below the `serves_fallback`
+        // ineligible candidate) so whichever peer wins the fallback can serve
+        // the entire window in one batch.
+        let peer_height_base = i32::try_from(super::PENDING_BUDGET)? + 100;
         for idx in 0..super::MIN_PEERS_FOR_FANOUT - 1 {
             let addr = test_addr(9230, idx)?;
             rxs.push(connect_peer(
                 &peers,
                 &peer_outbound,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, peer_height_base - i32::try_from(idx)?),
             ));
         }
 
@@ -2488,19 +2642,33 @@ mod tests {
     #[test]
     fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
     -> Result<(), Box<dyn std::error::Error>> {
+        // Requeue-on-disconnect is geometry-independent, so pin it at a
+        // one-wave window: under the production two-wave window the
+        // request-peer scan width (pending capacity / fan-out cap) exceeds
+        // `MIN_PEERS_FOR_FANOUT + 1`, leaving no peer spare on the first tick.
+        let window = super::MIN_PEERS_FOR_FANOUT * super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
         let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
-            sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
+            sync_with_header_chain(u32::try_from(window)?)?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: window,
+                ..super::default_sync_budget()
+            },
+        );
+        let peer_height_base = i32::try_from(window)? + 100;
         let mut rxs = Vec::new();
         let mut addrs = Vec::new();
-        // One spare peer beyond the fan-out scan width: it gets nothing on
-        // the first tick and picks up the re-queued blocks on the second.
+        // One spare peer beyond the one-wave fan-out scan width: it gets
+        // nothing on the first tick and picks up the re-queued blocks on the
+        // second.
         for idx in 0..=super::MIN_PEERS_FOR_FANOUT {
             let addr = test_addr(9261, idx)?;
             addrs.push(addr);
             rxs.push(connect_peer(
                 &peers,
                 &peer_outbound,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, peer_height_base - i32::try_from(idx)?),
             ));
         }
 
@@ -2536,10 +2704,7 @@ mod tests {
             return Err(std::io::Error::other("expected re-queued getdata for spare peer").into());
         };
         assert_eq!(witness_block_inventory(requeued)?, expected[cap..2 * cap]);
-        assert_eq!(
-            sync.download_window.lock().pending_len(),
-            super::PENDING_BUDGET
-        );
+        assert_eq!(sync.download_window.lock().pending_len(), window);
         for rx in &rxs[..super::MIN_PEERS_FOR_FANOUT] {
             assert!(rx.try_recv().is_err());
         }
@@ -3620,7 +3785,12 @@ mod tests {
         let (sync, peers, peer_outbound, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-        peers.write().push(synthetic_peer(addr, 200));
+        // Height above the deep chain tip: the lone peer can serve the entire
+        // window (and headers past it).
+        peers.write().push(synthetic_peer(
+            addr,
+            i32::try_from(super::PENDING_BUDGET)? + 100,
+        ));
         let (tx, rx) = unbounded::<Message>();
         peer_outbound.write().insert(addr, tx);
 
