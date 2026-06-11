@@ -630,14 +630,23 @@ impl DownloadWindow {
     ///    above the front. Without arrivals the download is generally slow or
     ///    just started — download-bound, not window-blocked, no single
     ///    blocker.
-    /// 3. **No download progress is possible**: request capacity is closed
-    ///    (the U5/U6 count/byte clamps — the recorded R+P wedge shapes).
-    ///    While new requests can still be issued the window is making
-    ///    progress and Core likewise assigns work instead of blaming
-    ///    (`FindNextBlocksToDownload` sets a staller only when an idle peer
-    ///    cannot be given any block). The chain tail (nothing above the
-    ///    window left to request) is deliberately not an arm of this term —
-    ///    see [`Self::observe_stall`].
+    /// 3. **Deep staged backlog**: at least half the staged count window
+    ///    (`max_received_blocks / 2`, integer division) is occupied. Staged
+    ///    blocks pile up only when the frontier is slow while the rest of the
+    ///    window is fast (apply outruns download by orders of magnitude, so
+    ///    healthy staged occupancy stays near zero between frontier waits) —
+    ///    the term encodes the asymmetric-frontier-blockage signature that
+    ///    defines a staller. As a fixed fraction of the window it scales with
+    ///    depth by construction, and a single apply cannot drop the staged
+    ///    count below half the window, so the tick-ordering flap that zeroed
+    ///    episodes during partial progress under the previous term
+    ///    (`!has_request_capacity()`, which one freed slot per applied block
+    ///    momentarily reopened) cannot clear it. The U5 count/byte clamps are
+    ///    read by the request path, not here; the recorded R+P count-wedge
+    ///    shapes (staged + pending pinned at the count budget) satisfy this
+    ///    term trivially, so wedge conviction is preserved. The chain tail
+    ///    (nothing above the window left to request) is deliberately not an
+    ///    arm of this term — see [`Self::observe_stall`].
     fn window_blocked_on(&self, next_apply_height: u32) -> Option<(SocketAddr, Hash256)> {
         let (front_hash, front) = self
             .pending
@@ -653,7 +662,7 @@ impl DownloadWindow {
         {
             return None;
         }
-        if self.has_request_capacity() {
+        if self.received.len() < self.budget.max_received_blocks / 2 {
             return None;
         }
         Some((front.peer_addr, *front_hash))
@@ -997,8 +1006,9 @@ impl DownloadWindow {
     /// Any requested block arriving from the episode peer clears the running
     /// episode, so blame accumulates only against a peer that delivers
     /// *nothing* while owning the front and others stream past it. In the
-    /// saturated fan-out steady state ("no request capacity" holds almost
-    /// always), charging only front arrivals would serially false-blame
+    /// saturated fan-out steady state (the staged backlog sits at the count
+    /// budget, so the staged-fraction arming term holds almost always),
+    /// charging only front arrivals would serially false-blame
     /// every slow-but-streaming peer — the self-eclipse cascade. Deliveries
     /// from *other* peers do not clear it: they are the discriminator that
     /// convicts a true staller.
@@ -1705,10 +1715,15 @@ mod tests {
     }
 
     #[test]
-    fn stall_clock_idle_while_window_can_still_request() {
-        // One staged successor but plenty of headroom: the window can make
-        // download progress by requesting more, so the front owner is not yet
-        // a staller (Core assigns work instead of blaming).
+    fn stall_clock_idle_below_staged_backlog_fraction() {
+        // Phase 1 arming term: one staged successor in a 4-slot staged
+        // window is below the half-window fraction (4 / 2 = 2), so the
+        // backlog is too shallow to show the asymmetric-frontier-blockage
+        // signature — the front owner is not yet a staller. (Pre-Phase-1
+        // this test pinned the "request capacity open" term; the fraction
+        // term subsumes it here, and the capacity-closed counterpart is
+        // pinned by `below_fraction_staged_backlog_never_arms_even_with_
+        // capacity_closed`.)
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
         insert_pending(&mut window, staller_addr(), hash(0x01), 1, now);
@@ -1723,11 +1738,158 @@ mod tests {
         // (nothing above the window left to request) must NOT arm the clock
         // either — a caught-up peer taking >2s on one tip block is the
         // normal tip regime, owned by the 60s pending-timeout machinery.
-        // With request capacity open the predicate stays false no matter how
+        // Below the staged fraction the predicate stays false no matter how
         // much time passes.
         assert_eq!(
             window.observe_stall(1, false, now + Duration::from_mins(1)),
             None
+        );
+        assert!(window.stalling_peer().is_none());
+    }
+
+    #[test]
+    fn staged_backlog_fraction_arms_with_request_capacity_open() {
+        // Phase 1 arming: staged >= max_received_blocks / 2 with the
+        // frontier pending to one peer arms the episode even while request
+        // capacity is OPEN — the state the old `!has_request_capacity()`
+        // term could never arm (it blamed nobody until the U5 clamps
+        // closed, widening the blind region with window depth). Conviction
+        // semantics are unchanged: the episode still runs the same clock to
+        // the same threshold.
+        let mut window = DownloadWindow::new(stall_budget());
+        let now = seed_front_cadence(
+            &mut window,
+            healthy_addr(),
+            Instant::now(),
+            Duration::from_millis(100),
+        );
+        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        // Exactly half the 4-slot staged window (2 blocks) above the front.
+        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            window.mark_received(hash(byte), 80, now);
+        }
+        assert!(
+            window.has_request_capacity(),
+            "the construction must keep request capacity open: arming no longer reads it"
+        );
+
+        // U7 no-blame guard, under the new arming term: while the apply
+        // side is busy the armed-shaped window must not start an episode.
+        assert_eq!(window.observe_stall(3, true, now), None);
+        assert!(window.stalling_peer().is_none());
+
+        // Apply idle: the staged fraction arms, and the unchanged
+        // conviction clock fires at the unchanged threshold.
+        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
+        assert!(window.has_request_capacity());
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            Some(staller_addr())
+        );
+    }
+
+    #[test]
+    fn arming_threshold_is_same_fraction_of_window_at_any_depth() {
+        // The w256 re-attempt condition: the arm point is a fixed FRACTION
+        // of the staged window (half, integer division), so deepening the
+        // window moves the arming bar proportionally instead of widening a
+        // capacity-closed blind region. Request capacity stays open
+        // throughout at both depths — arming is independent of it.
+        for depth in [128_usize, 256] {
+            let mut window = DownloadWindow::new(SyncBudget {
+                max_pending_blocks: depth,
+                max_received_blocks: depth,
+                max_peer_inflight: depth,
+                getdata_batch_limit: depth,
+                ..stall_budget()
+            });
+            let now = seed_front_cadence(
+                &mut window,
+                healthy_addr(),
+                Instant::now(),
+                Duration::from_millis(100),
+            );
+            insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+            let half = depth / 2;
+            // One below the fraction: no episode, no matter the depth.
+            for offset in 0..half - 1 {
+                let byte = u8::try_from(4 + offset).unwrap_or_else(|_| panic!("height fits u8"));
+                insert_pending(
+                    &mut window,
+                    healthy_addr(),
+                    hash(byte),
+                    u32::from(byte),
+                    now,
+                );
+                window.mark_received(hash(byte), 80, now);
+            }
+            assert!(window.has_request_capacity());
+            assert_eq!(window.observe_stall(3, false, now), None);
+            assert!(
+                window.stalling_peer().is_none(),
+                "one below half the window must not arm (depth {depth})"
+            );
+
+            // At the fraction: the episode arms.
+            let byte = u8::try_from(4 + half - 1).unwrap_or_else(|_| panic!("height fits u8"));
+            insert_pending(
+                &mut window,
+                healthy_addr(),
+                hash(byte),
+                u32::from(byte),
+                now,
+            );
+            window.mark_received(hash(byte), 80, now);
+            assert!(window.has_request_capacity());
+            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(
+                window.stalling_peer(),
+                Some((staller_addr(), now)),
+                "half the window must arm (depth {depth})"
+            );
+        }
+    }
+
+    #[test]
+    fn below_fraction_staged_backlog_never_arms_even_with_capacity_closed() {
+        // The old rule's trigger, inverted: request capacity CLOSED (here by
+        // the staged-byte clamp) with the staged backlog below half the
+        // window (4 of 10 staged, 40%) must NOT arm — pre-Phase-1 exactly
+        // this state armed the episode. A shallow backlog above a slow front
+        // does not show the asymmetric-frontier-blockage signature, however
+        // the byte budget happens to sit.
+        let mut window = DownloadWindow::new(SyncBudget {
+            max_pending_blocks: 10,
+            max_received_blocks: 10,
+            max_peer_inflight: 10,
+            getdata_batch_limit: 10,
+            max_received_bytes: 4 * 80,
+            ..stall_budget()
+        });
+        let now = seed_front_cadence(
+            &mut window,
+            healthy_addr(),
+            Instant::now(),
+            Duration::from_millis(100),
+        );
+        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6), (0x07, 7)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            window.mark_received(hash(byte), 80, now);
+        }
+        assert!(
+            !window.has_request_capacity(),
+            "the staged-byte clamp must close request capacity (the old arming trigger)"
+        );
+
+        assert_eq!(window.observe_stall(3, false, now), None);
+        assert!(window.stalling_peer().is_none());
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_mins(1)),
+            None,
+            "capacity-closed below the staged fraction must never arm"
         );
         assert!(window.stalling_peer().is_none());
     }
@@ -2244,8 +2406,9 @@ mod tests {
         // the next front — 7s of blame, well past the static 2s that the
         // deflated floor would have re-armed — still does not fire. The
         // staged backlog (heights 3..=26, never applied in this
-        // construction) keeps request capacity closed, so the predicate
-        // holds the moment a front pending and a staged successor exist.
+        // construction) sits at the count budget, far past the half-window
+        // arming fraction, so the predicate holds the moment a front
+        // pending and a staged successor exist.
         insert_pending(&mut window, peer_addr(0), hash(27), 27, end);
         insert_pending(&mut window, peer_addr(1), hash(28), 28, end);
         window.mark_received(hash(28), 80, end);

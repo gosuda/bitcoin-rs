@@ -250,6 +250,14 @@ arming test at w128 and w256 budgets asserting the arm point is the same *fracti
 window; (b) below-fraction non-arming test (slow front, 40% staged → no episode); (c) the
 uniform-slow zero-disconnect test re-derived: uniform slowness keeps staged < half → never
 arms (stronger than today's EWMA-floor argument).
+*Delivery note (implementation + adversarial audit):* clause (c)'s premise is wrong for the
+existing saturated uniform-slow fixture — it pins staged at the **full** count budget, so
+uniform slowness there *does* arm; the fixture keeps its armed-but-never-fires EWMA-floor
+pin (the stronger safety property), and the below-half-never-arms direction is pinned
+generically by the new fraction tests instead. Audit also added a compile-time
+budget-pairing assertion (`RECEIVED_BLOCK_BYTE_BUDGET ≥ RECEIVED_BLOCK_BUDGET/2 ×
+MAX_SERIALIZED_BLOCK_SIZE`) so a future depth bump without a byte-budget rebalance fails the
+build rather than silently un-arming byte wedges.
 
 **Live measurement.** Same-hour A/B (Phase 1 only vs head), kernel build, AV=150k, fresh
 datadirs, stop-hash identity required. Keep iff: (a) no regression ≥ 15 s; (b) Phase 0

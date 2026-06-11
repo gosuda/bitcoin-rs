@@ -62,6 +62,23 @@ const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
 /// without eviction. At the 150k acceptance window this bound rarely binds —
 /// blocks there are far below the per-slot estimate.
 const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
+/// Consensus-maximum serialized block size in bytes: a witness-serialized
+/// block cannot exceed its 4,000,000 weight, so no valid block is larger.
+const MAX_SERIALIZED_BLOCK_SIZE: usize = 4_000_000;
+// Staller-arming reachability invariant (Phase 1 of the staller arming
+// redesign): the stall episode arms on a staged-count fraction
+// (`received >= max_received_blocks / 2`, `window_blocked_on` term 3), so the
+// staged byte budget must admit at least half the staged count window even at
+// consensus-maximum block size. If a depth bump (e.g. the w256 re-attempt)
+// outgrows the byte budget, byte backpressure would silently hold the staged
+// count below the arming fraction and byte-shaped wedges would stop arming at
+// production budgets, degrading to the 60s pending-timeout fallback. Rebalance
+// both constants together; this assertion turns silent drift into a build
+// failure. (Margin today: 128 * 2 MiB >= 64 * 4 MB, ~4.6%.)
+const _: () = assert!(
+    RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_SERIALIZED_BLOCK_SIZE,
+    "staged byte budget must admit half the staged count window at max block size"
+);
 /// Maximum decoded inbound blocks held before handing them to `BlockStager`,
 /// sized from the same byte budget that bounds retained staged blocks.
 const INBOUND_BLOCK_STAGE_CHUNK: usize =
@@ -2909,6 +2926,13 @@ mod tests {
                 // delivered successor: byte headroom is exactly zero once
                 // both are accounted.
                 max_received_bytes: 256 * 1024 + blocks[1].total_size(),
+                // Phase 1: arming reads the staged-count fraction, not
+                // request capacity, so the single staged successor must be
+                // >= half the count window (2 / 2 = 1) for the episode to
+                // arm. The byte clamp still closes the request gate (the
+                // wedge under test); the count budget only sizes the arming
+                // bar to this two-block construction.
+                max_received_blocks: 2,
                 getdata_batch_limit: 2,
                 stall_timeout_initial: Duration::from_millis(100),
                 ..super::default_sync_budget()
