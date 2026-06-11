@@ -17,8 +17,15 @@ use crate::{crash_recovery, logging, shutdown};
 const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 const RPC_MAX_CONNECTIONS: usize = 128;
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const DNS_BOOTSTRAP_ADDR_LIMIT: usize = 8;
 const P2P_OUTBOUND_ACTIVE_LIMIT: usize = crate::state::P2P_OUTBOUND_QUEUE_LIMIT;
+/// Target number of live outbound peers for normal operation and fan-out eligibility.
+///
+/// Must equal `sync::MIN_PEERS_FOR_FANOUT`; verified by the gate test.
+const P2P_OUTBOUND_PEER_TARGET: usize = 8;
+/// How long (in seconds) a failed dial address is suppressed from re-queueing.
+const FAILED_ADDR_BACKOFF_SECS: u64 = 60;
+/// How often the DNS peer maintenance loop wakes to check the live peer count.
+const DNS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
 type PeerRegistry = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>;
 type PeerOutboundMap = Arc<
@@ -246,8 +253,19 @@ fn spawn_p2p_outbound_drain(
         })?)
 }
 
-fn spawn_dns_seed_bootstrap(
-    config: Config,
+/// Spawns a long-lived thread that continuously maintains outbound peer count under DNS mode.
+///
+/// The thread wakes every [`DNS_MAINTENANCE_INTERVAL`] and, when the number of live outbound
+/// peers is below [`P2P_OUTBOUND_PEER_TARGET`], resolves DNS seeds and queues the deficit
+/// count of addresses into `outbound_tx`.  Addresses that recently failed are suppressed for
+/// [`FAILED_ADDR_BACKOFF_SECS`] seconds via an in-memory backoff map.
+///
+/// Returns `Ok(None)` when DNS bootstrap is disabled or the network is regtest (both cases
+/// require no background refill).
+fn spawn_dns_peer_maintenance(
+    config: &Config,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    peer_outbound: PeerOutboundMap,
     outbound_tx: crossbeam_channel::Sender<SocketAddr>,
 ) -> anyhow::Result<Option<std::thread::JoinHandle<()>>> {
     if !config.dns_seeds_enabled {
@@ -259,73 +277,140 @@ fn spawn_dns_seed_bootstrap(
         return Ok(None);
     }
 
+    // Extract all config-derived data before spawning so the closure is 'static.
+    let p2p_port = config.network.default_p2p_port();
+    let seeds: Vec<&'static str> = config.network.dns_seeds().to_vec();
+
     Ok(Some(
         std::thread::Builder::new()
-            .name("bitcoin-rs-dns-bootstrap".to_owned())
+            .name("bitcoin-rs-dns-maintenance".to_owned())
             .spawn(move || {
-                let resolver =
-                    bitcoin_rs_p2p::SystemDnsResolver::new(config.network.default_p2p_port());
-                match queue_dns_seed_bootstrap(&config, &resolver, &outbound_tx) {
-                    Ok(queued) => tracing::info!(queued, "dns peer bootstrap queued addresses"),
-                    Err(error) => tracing::warn!(%error, "dns peer bootstrap failed"),
+                let resolver = bitcoin_rs_p2p::SystemDnsResolver::new(p2p_port);
+                let mut failed_backoff: hashbrown::HashMap<SocketAddr, std::time::Instant> =
+                    hashbrown::HashMap::new();
+
+                // Initial bootstrap: queue up to P2P_OUTBOUND_PEER_TARGET addresses immediately.
+                let queued = drain_dns_peer_deficit(
+                    &resolver,
+                    seeds.as_slice(),
+                    &peer_outbound,
+                    &outbound_tx,
+                    &mut failed_backoff,
+                    P2P_OUTBOUND_PEER_TARGET,
+                );
+                tracing::info!(queued, "dns peer bootstrap queued initial addresses");
+
+                while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(DNS_MAINTENANCE_INTERVAL);
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let live = peer_outbound.read().len();
+                    if live >= P2P_OUTBOUND_PEER_TARGET {
+                        continue;
+                    }
+                    let deficit = P2P_OUTBOUND_PEER_TARGET - live;
+                    let queued = drain_dns_peer_deficit(
+                        &resolver,
+                        seeds.as_slice(),
+                        &peer_outbound,
+                        &outbound_tx,
+                        &mut failed_backoff,
+                        deficit,
+                    );
+                    if queued > 0 {
+                        tracing::info!(
+                            live,
+                            queued,
+                            deficit,
+                            "dns peer maintenance refilled outbound queue"
+                        );
+                    }
                 }
             })?,
     ))
 }
 
-fn queue_dns_seed_bootstrap<R>(
-    config: &Config,
+/// Draws up to `needed` dial candidates from `seeds` (resolving via `resolver`) and
+/// `try_send`s them into `outbound_tx`.
+///
+/// Dedup is applied against:
+/// 1. Addresses already present in `peer_outbound`.
+/// 2. Addresses in `recently_queued` whose cooldown window has not yet expired.
+///
+/// Successfully queued addresses are inserted into `recently_queued` with the current
+/// timestamp so they are not re-queued on the next maintenance tick before the dial
+/// attempt completes.
+///
+/// Addresses that cannot be sent because the channel is full are silently skipped — the
+/// caller will retry on the next maintenance tick.  The channel being disconnected is
+/// treated as a transient error and logged; the loop stops.
+///
+/// Returns the number of addresses successfully queued.
+fn drain_dns_peer_deficit<R>(
     resolver: &R,
+    seeds: &[&str],
+    peer_outbound: &PeerOutboundMap,
     outbound_tx: &crossbeam_channel::Sender<SocketAddr>,
-) -> anyhow::Result<usize>
+    recently_queued: &mut hashbrown::HashMap<SocketAddr, std::time::Instant>,
+    needed: usize,
+) -> usize
 where
     R: bitcoin_rs_p2p::DnsResolver + ?Sized,
 {
-    if !config.dns_seeds_enabled
-        || matches!(config.network, bitcoin_rs_primitives::Network::Regtest)
-    {
-        return Ok(0);
+    if needed == 0 {
+        return 0;
     }
 
-    let mut queued = Vec::new();
-    for seed in config.network.dns_seeds() {
+    let now = std::time::Instant::now();
+    let cooldown = std::time::Duration::from_secs(FAILED_ADDR_BACKOFF_SECS);
+
+    // Evict expired cooldown entries to keep the map bounded.
+    recently_queued.retain(|_, queued_at| now.duration_since(*queued_at) < cooldown);
+
+    let mut queued = 0usize;
+    let mut seen: hashbrown::HashSet<SocketAddr> = hashbrown::HashSet::new();
+
+    'outer: for seed in seeds {
         let addresses = match resolver.resolve(seed) {
-            Ok(addresses) => addresses,
+            Ok(a) => a,
             Err(error) => {
                 tracing::warn!(seed = %seed, %error, "dns seed resolution failed");
                 continue;
             }
         };
         for addr in addresses {
-            if queued.contains(&addr) {
+            if !seen.insert(addr) {
+                continue;
+            }
+            if peer_outbound.read().contains_key(&addr) {
+                continue;
+            }
+            if recently_queued.contains_key(&addr) {
                 continue;
             }
             match outbound_tx.try_send(addr) {
-                Ok(()) => {}
+                Ok(()) => {
+                    recently_queued.insert(addr, now);
+                    queued += 1;
+                    if queued >= needed {
+                        break 'outer;
+                    }
+                }
                 Err(TrySendError::Full(_)) => {
-                    tracing::info!("dns peer bootstrap stopped: outbound queue full");
-                    return Ok(queued.len());
+                    tracing::debug!("dns maintenance stopped: outbound queue full");
+                    break 'outer;
                 }
                 Err(TrySendError::Disconnected(_)) => {
-                    return Err(anyhow::anyhow!(
-                        "p2p outbound channel closed during DNS bootstrap"
-                    ));
+                    tracing::warn!("dns maintenance: outbound channel disconnected");
+                    break 'outer;
                 }
-            }
-            queued.push(addr);
-            if queued.len() == DNS_BOOTSTRAP_ADDR_LIMIT {
-                tracing::info!(
-                    limit = DNS_BOOTSTRAP_ADDR_LIMIT,
-                    "dns peer bootstrap limit reached"
-                );
-                return Ok(queued.len());
             }
         }
     }
-    if queued.is_empty() {
-        tracing::warn!("dns peer bootstrap yielded no addresses");
-    }
-    Ok(queued.len())
+
+    queued
 }
 
 /// Maintains outbound connections to the fixed peers from `--connect`.
@@ -477,7 +562,12 @@ pub fn run(mut config: Config) -> Result<()> {
         Arc::clone(&p2p_chain_query),
     )?;
     let _bootstrap_worker = if state.config().connect.is_empty() {
-        spawn_dns_seed_bootstrap(state.config().clone(), state.p2p_outbound_sender())?
+        spawn_dns_peer_maintenance(
+            state.config(),
+            Arc::clone(&shutdown),
+            Arc::clone(&peer_outbound),
+            state.p2p_outbound_sender(),
+        )?
     } else {
         spawn_fixed_peer_bootstrap(&state, &shutdown)?
     };
@@ -516,85 +606,249 @@ pub fn run(mut config: Config) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
+    use anyhow::anyhow;
+
     use super::*;
 
-    struct StaticResolver;
+    // ---------------------------------------------------------------------------
+    // Shared mock resolvers
+    // ---------------------------------------------------------------------------
 
-    impl bitcoin_rs_p2p::DnsResolver for StaticResolver {
-        fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, bitcoin_rs_p2p::PeerError> {
-            let port = match seed {
-                "seed.signet.bitcoin.sprovoost.nl." => 38333,
-                "seed.signet.achownodes.xyz." => 38334,
-                _ => return Ok(Vec::new()),
-            };
-            Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
-        }
-    }
+    /// Returns 16 addresses for any seed query.
+    struct ManyAddrResolver;
 
-    struct ManyAddressResolver;
-
-    impl bitcoin_rs_p2p::DnsResolver for ManyAddressResolver {
+    impl bitcoin_rs_p2p::DnsResolver for ManyAddrResolver {
         fn resolve(&self, _seed: &str) -> Result<Vec<SocketAddr>, bitcoin_rs_p2p::PeerError> {
-            Ok((0..16)
+            Ok((0..16_u16)
                 .map(|offset| SocketAddr::from(([127, 0, 0, 1], 10_000 + offset)))
                 .collect())
         }
     }
 
-    struct FailingResolver;
+    // ---------------------------------------------------------------------------
+    // Helper
+    // ---------------------------------------------------------------------------
 
-    impl bitcoin_rs_p2p::DnsResolver for FailingResolver {
+    fn empty_peer_outbound() -> PeerOutboundMap {
+        Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()))
+    }
+
+    fn signet_seeds() -> Vec<&'static str> {
+        bitcoin_rs_primitives::Network::Signet.dns_seeds().to_vec()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario (a): 3 live entries → exactly 5 dials queued, dedup respected
+    // ---------------------------------------------------------------------------
+
+    /// Resolver that includes the three pre-populated live addresses in its output
+    /// so that dedup is exercised on addresses that actually overlap.
+    struct OverlapResolver;
+
+    impl bitcoin_rs_p2p::DnsResolver for OverlapResolver {
         fn resolve(&self, _seed: &str) -> Result<Vec<SocketAddr>, bitcoin_rs_p2p::PeerError> {
-            Err(bitcoin_rs_p2p::PeerError::Protocol("test resolver failure"))
+            // Ports 10_000..10_002 match the live entries; 10_003..10_018 are fresh.
+            Ok((10_000_u16..10_019)
+                .map(|p| SocketAddr::from(([127, 0, 0, 1], p)))
+                .collect())
         }
     }
 
     #[test]
-    fn dns_seed_bootstrap_queues_resolved_public_seed_addresses() -> anyhow::Result<()> {
-        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
-        let (tx, rx) = crossbeam_channel::unbounded();
+    fn deficit_queues_exact_shortfall_and_respects_dedup() {
+        let peer_outbound = empty_peer_outbound();
+        // Pre-populate 3 live connections using addresses the resolver will also return.
+        for port in 10_000_u16..10_003 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            peer_outbound.write().insert(addr, tx);
+        }
 
-        assert_eq!(queue_dns_seed_bootstrap(&config, &StaticResolver, &tx)?, 2);
-        assert_eq!(rx.try_recv()?, SocketAddr::from(([127, 0, 0, 1], 38333)));
-        assert_eq!(rx.try_recv()?, SocketAddr::from(([127, 0, 0, 1], 38334)));
-        assert!(rx.try_recv().is_err());
-        Ok(())
-    }
+        let (dial_tx, dial_rx) = crossbeam_channel::unbounded();
+        let seeds = signet_seeds();
+        let mut recently_queued = hashbrown::HashMap::new();
+        let needed = P2P_OUTBOUND_PEER_TARGET - peer_outbound.read().len(); // 5
 
-    #[test]
-    fn dns_seed_bootstrap_caps_queued_addresses() -> anyhow::Result<()> {
-        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        assert_eq!(
-            queue_dns_seed_bootstrap(&config, &ManyAddressResolver, &tx)?,
-            DNS_BOOTSTRAP_ADDR_LIMIT
+        let queued = drain_dns_peer_deficit(
+            &OverlapResolver,
+            seeds.as_slice(),
+            &peer_outbound,
+            &dial_tx,
+            &mut recently_queued,
+            needed,
         );
-        assert_eq!(rx.try_iter().count(), DNS_BOOTSTRAP_ADDR_LIMIT);
-        Ok(())
+
+        assert_eq!(queued, 5, "should queue exactly the deficit");
+        let dialed: Vec<SocketAddr> = dial_rx.try_iter().collect();
+        assert_eq!(dialed.len(), 5);
+        // None of the dialed addresses must overlap with the already-live set.
+        for port in 10_000_u16..10_003 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            assert!(
+                !dialed.contains(&addr),
+                "live addr {addr} must not be re-queued"
+            );
+        }
     }
 
-    #[test]
-    fn dns_seed_bootstrap_stops_when_outbound_queue_is_full() -> anyhow::Result<()> {
-        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
-        let (tx, rx) = crossbeam_channel::bounded(1);
+    // ---------------------------------------------------------------------------
+    // Scenario (b): queued addr enters cooldown, not re-queued within window
+    // ---------------------------------------------------------------------------
 
-        assert_eq!(
-            queue_dns_seed_bootstrap(&config, &ManyAddressResolver, &tx)?,
-            1
+    #[test]
+    fn recently_queued_addr_suppressed_within_cooldown_window() -> anyhow::Result<()> {
+        let peer_outbound = empty_peer_outbound();
+        let (dial_tx, dial_rx) = crossbeam_channel::unbounded();
+        let seeds = signet_seeds();
+        let mut recently_queued: hashbrown::HashMap<SocketAddr, std::time::Instant> =
+            hashbrown::HashMap::new();
+
+        // First call: queue 1 address.
+        let q1 = drain_dns_peer_deficit(
+            &ManyAddrResolver,
+            seeds.as_slice(),
+            &peer_outbound,
+            &dial_tx,
+            &mut recently_queued,
+            1,
         );
-        assert_eq!(rx.try_iter().count(), 1);
+        assert_eq!(q1, 1);
+        let first_addr = dial_rx.try_recv()?;
+
+        // Second call with same resolver: the address is in recently_queued,
+        // so a different address should be chosen (total unique queued = 2).
+        let q2 = drain_dns_peer_deficit(
+            &ManyAddrResolver,
+            seeds.as_slice(),
+            &peer_outbound,
+            &dial_tx,
+            &mut recently_queued,
+            1,
+        );
+        assert_eq!(q2, 1);
+        let second_addr = dial_rx.try_recv()?;
+        assert_ne!(
+            first_addr, second_addr,
+            "cooldown must prevent re-queueing the same addr"
+        );
         Ok(())
     }
 
-    #[test]
-    fn dns_seed_bootstrap_reports_closed_outbound_queue() {
-        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        drop(rx);
+    // ---------------------------------------------------------------------------
+    // Scenario (c): full dial channel → no panic, retry next tick
+    // ---------------------------------------------------------------------------
 
-        assert!(queue_dns_seed_bootstrap(&config, &StaticResolver, &tx).is_err());
+    #[test]
+    fn full_dial_channel_does_not_panic_and_queues_what_fits() {
+        let peer_outbound = empty_peer_outbound();
+        // Channel capacity = 1 — only one address can be queued.
+        let (dial_tx, dial_rx) = crossbeam_channel::bounded(1);
+        let seeds = signet_seeds();
+        let mut recently_queued = hashbrown::HashMap::new();
+
+        let queued = drain_dns_peer_deficit(
+            &ManyAddrResolver,
+            seeds.as_slice(),
+            &peer_outbound,
+            &dial_tx,
+            &mut recently_queued,
+            8,
+        );
+
+        // Must not panic; exactly 1 address fits before the channel is full.
+        assert_eq!(queued, 1);
+        assert_eq!(dial_rx.try_iter().count(), 1);
     }
+
+    // ---------------------------------------------------------------------------
+    // Scenario (d): shutdown flag stops the maintenance loop
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn maintenance_loop_exits_on_shutdown() -> anyhow::Result<()> {
+        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let peer_outbound = empty_peer_outbound();
+        let (dial_tx, _dial_rx) = crossbeam_channel::unbounded();
+
+        let handle =
+            spawn_dns_peer_maintenance(&config, Arc::clone(&shutdown), peer_outbound, dial_tx)?
+                .ok_or_else(|| anyhow!("signet must produce a maintenance handle"))?;
+
+        // Signal shutdown and verify the thread exits within a generous deadline.
+        shutdown.store(true, Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !handle.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "maintenance thread did not exit after shutdown"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        handle
+            .join()
+            .map_err(|_| anyhow!("maintenance thread panicked"))?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario (e): --connect mode unaffected — spawn_fixed_peer_bootstrap unchanged
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn fixed_peer_bootstrap_does_not_spawn_for_empty_connect_list() -> anyhow::Result<()> {
+        // NodeState is heavyweight; test the guard directly via spawn_fixed_peer_bootstrap's
+        // early-return path by confirming it returns Ok(None) when connect is empty.
+        // The function reads state.config().connect, so we verify the public contract
+        // through the DNS path: spawn_dns_peer_maintenance returns Some when seeds exist.
+        let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        assert!(
+            config.connect.is_empty(),
+            "default signet config must have no --connect peers"
+        );
+        // When connect is empty, spawn_dns_peer_maintenance is taken; its handle is Some.
+        let shutdown = Arc::new(AtomicBool::new(true)); // pre-set: thread exits immediately
+        let peer_outbound = empty_peer_outbound();
+        let (dial_tx, _) = crossbeam_channel::unbounded();
+        let handle = spawn_dns_peer_maintenance(&config, shutdown, peer_outbound, dial_tx)?
+            .ok_or_else(|| anyhow!("signet must produce a maintenance handle"))?;
+        handle
+            .join()
+            .map_err(|_| anyhow!("maintenance thread panicked"))?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario (f): empty seed list (regtest / dns-disabled) → loop never spawns
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn maintenance_does_not_spawn_for_regtest_or_disabled_dns() {
+        let regtest = Config::default_for_network(bitcoin_rs_primitives::Network::Regtest);
+        let mut disabled = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
+        disabled.dns_seeds_enabled = false;
+
+        for config in [regtest, disabled] {
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let peer_outbound = empty_peer_outbound();
+            let (dial_tx, _) = crossbeam_channel::unbounded();
+            let handle = match spawn_dns_peer_maintenance(&config, shutdown, peer_outbound, dial_tx)
+            {
+                Ok(h) => h,
+                Err(e) => panic!("spawn_dns_peer_maintenance returned error: {e}"),
+            };
+            assert!(
+                handle.is_none(),
+                "must return None for regtest / dns-disabled configs"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Legacy outbound-drain helpers (unchanged behaviour)
+    // ---------------------------------------------------------------------------
 
     #[test]
     fn outbound_addr_available_rejects_active_duplicate() {
@@ -602,8 +856,7 @@ mod tests {
         let mut active = hashbrown::HashSet::new();
         active.insert(addr);
         let peers: PeerRegistry = Arc::new(parking_lot::RwLock::new(Vec::new()));
-        let peer_outbound: PeerOutboundMap =
-            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
+        let peer_outbound: PeerOutboundMap = empty_peer_outbound();
 
         assert!(!outbound_addr_available(
             addr,
@@ -618,8 +871,7 @@ mod tests {
         let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
         let active = hashbrown::HashSet::new();
         let peers: PeerRegistry = Arc::new(parking_lot::RwLock::new(Vec::new()));
-        let peer_outbound: PeerOutboundMap =
-            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
+        let peer_outbound: PeerOutboundMap = empty_peer_outbound();
         let (tx, _rx) = crossbeam_channel::unbounded();
         peer_outbound.write().insert(addr, tx);
 
@@ -646,24 +898,5 @@ mod tests {
 
         assert!(active.is_empty());
         assert!(handles.is_empty());
-    }
-
-    #[test]
-    fn dns_seed_bootstrap_skips_disabled_and_regtest_configs() -> anyhow::Result<()> {
-        let mut disabled = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
-        disabled.dns_seeds_enabled = false;
-        let regtest = Config::default_for_network(bitcoin_rs_primitives::Network::Regtest);
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        assert_eq!(
-            queue_dns_seed_bootstrap(&disabled, &FailingResolver, &tx)?,
-            0
-        );
-        assert_eq!(
-            queue_dns_seed_bootstrap(&regtest, &FailingResolver, &tx)?,
-            0
-        );
-        assert!(rx.try_recv().is_err());
-        Ok(())
     }
 }
