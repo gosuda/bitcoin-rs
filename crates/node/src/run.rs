@@ -300,9 +300,9 @@ fn spawn_dns_peer_maintenance(
                 );
                 tracing::info!(queued, "dns peer bootstrap queued initial addresses");
 
-                while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                while !shutdown.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(DNS_MAINTENANCE_INTERVAL);
-                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    if shutdown.load(std::sync::atomic::Ordering::Acquire) {
                         break;
                     }
 
@@ -766,6 +766,11 @@ mod tests {
     // Scenario (d): shutdown flag stops the maintenance loop
     // ---------------------------------------------------------------------------
 
+    // NOTE: uses the real SystemDnsResolver so requires network access. In a
+    // network-isolated environment the initial DNS call may block for up to the
+    // OS resolver timeout; the 15 s deadline accommodates typical public-CI
+    // latency. The shutdown signal is set before the loop body executes, so the
+    // thread exits on the first loop condition check after the initial bootstrap.
     #[test]
     fn maintenance_loop_exits_on_shutdown() -> anyhow::Result<()> {
         let config = Config::default_for_network(bitcoin_rs_primitives::Network::Signet);
