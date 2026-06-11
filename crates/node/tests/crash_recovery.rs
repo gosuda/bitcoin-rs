@@ -3,6 +3,7 @@
 use anyhow::{Context as _, Result};
 use bitcoin_rs_node::{Config, Network, crash_recovery, state::NodeState};
 
+#[cfg(feature = "redb")]
 #[test]
 fn recovery_replays_from_last_committed_height_to_tip() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -29,6 +30,7 @@ fn recovery_replays_from_last_committed_height_to_tip() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "redb")]
 #[test]
 fn recovery_meta_write_leaves_readable_sidecar_without_tmp() -> Result<()> {
     let temp = tempfile::tempdir()?;

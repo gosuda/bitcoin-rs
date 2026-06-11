@@ -230,6 +230,7 @@ fn event_loop_sync_wake_applies_inbound_block_without_periodic_tick()
     );
     Ok(())
 }
+#[cfg(feature = "redb")]
 #[test]
 fn tick_writes_g2_muhash_sample_for_applied_genesis() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -261,6 +262,7 @@ fn tick_writes_g2_muhash_sample_for_applied_genesis() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+#[cfg(feature = "redb")]
 #[test]
 fn node_state_open_rejects_g2_tip_height_without_sample_path()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -747,6 +749,7 @@ fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     }
 }
 
+#[cfg(feature = "redb")]
 #[test]
 fn tick_writes_g14_utxo_commit_sample_for_applied_genesis() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -787,6 +790,7 @@ fn tick_writes_g14_utxo_commit_sample_for_applied_genesis() -> Result<(), Box<dy
     Ok(())
 }
 
+#[cfg(feature = "redb")]
 #[test]
 fn tick_skips_g14_utxo_commit_samples_outside_window() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -809,6 +813,7 @@ fn tick_skips_g14_utxo_commit_samples_outside_window() -> Result<(), Box<dyn std
     Ok(())
 }
 
+#[cfg(feature = "redb")]
 #[test]
 fn apply_buffers_g14_utxo_commit_samples_until_stop_height()
 -> Result<(), Box<dyn std::error::Error>> {

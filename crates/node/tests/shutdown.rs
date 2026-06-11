@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "redb")]
 #[test]
 fn run_exits_cleanly_after_fast_shutdown_signal() -> Result<()> {
     let temp = tempfile::tempdir()?;
