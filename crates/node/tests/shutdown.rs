@@ -1,4 +1,5 @@
 //! Integration tests for the bitcoin-rs node.
+#![cfg(feature = "redb")]
 
 use anyhow::{Context as _, Result, anyhow};
 use bitcoin_rs_node::{Auth, Config, Network, run};
