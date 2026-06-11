@@ -1615,7 +1615,7 @@ mod tests {
 
         assert_eq!(window.observe_stall(1, false, now), None);
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_secs(60)),
+            window.observe_stall(1, false, now + Duration::from_mins(1)),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -1636,7 +1636,7 @@ mod tests {
 
         assert_eq!(window.observe_stall(1, false, now), None);
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_secs(60)),
+            window.observe_stall(1, false, now + Duration::from_mins(1)),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -1664,7 +1664,7 @@ mod tests {
         // With request capacity open the predicate stays false no matter how
         // much time passes.
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_secs(60)),
+            window.observe_stall(1, false, now + Duration::from_mins(1)),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -1776,7 +1776,7 @@ mod tests {
         // the state persists.
         assert_eq!(window.observe_stall(3, true, now), None);
         assert!(window.stalling_peer().is_none());
-        let later = now + Duration::from_secs(60);
+        let later = now + Duration::from_mins(1);
         assert_eq!(window.observe_stall(3, true, later), None);
         assert!(window.stalling_peer().is_none());
 
@@ -2034,7 +2034,7 @@ mod tests {
         // Gradual 0.85 steps down to the floor, never below it. All these
         // same-instant front advances are skipped batch samples: the EWMA
         // (and so the floor) must not move.
-        assert_eq!(window.stall_timeout(), Duration::from_micros(2_890_000));
+        assert_eq!(window.stall_timeout(), Duration::from_millis(2890));
         for (byte, expected) in [
             (0x0a_u8, Duration::from_micros(2_456_500)),
             (0x0b, Duration::from_micros(2_088_025)),
@@ -2063,132 +2063,23 @@ mod tests {
         // defers an unseeded window to the pending-timeout fallback, pinned
         // by `cold_start_unseeded_ewma_never_fires_and_defers_to_fallback`),
         // so even the FIRST conviction is judged at the 6s adaptive floor.
-        let mut window = DownloadWindow::new(stall_budget());
-        let t1 = seed_front_cadence(
-            &mut window,
-            healthy_addr(),
-            Instant::now(),
-            Duration::from_secs(3),
-        );
-        assert_eq!(window.front_interval_ewma_ms(), Some(3000));
-        assert_eq!(
-            window.stall_timeout(),
-            Duration::from_secs(6),
-            "the second front advance must lift the threshold to the adaptive floor"
-        );
-
-        // A true staller takes the front (height 3) with the window
-        // saturated: it convicts at the 6s adaptive floor (~2g), not the 2s
-        // static one — a 3s-old episode (one full honest gap) stays quiet.
-        insert_pending(&mut window, staller_addr(), hash(0x03), 3, t1);
-        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, t1);
-            window.mark_received(hash(byte), 80, t1);
-        }
-        assert_eq!(window.observe_stall(3, false, t1), None);
-        assert_eq!(
-            window.observe_stall(3, false, t1 + Duration::from_secs(3)),
-            None,
-            "one honest-cadence gap of blame must stay under the adaptive floor"
-        );
-        let fired_at = t1 + Duration::from_secs(6);
-        assert_eq!(
-            window.observe_stall(3, false, fired_at),
-            Some(staller_addr())
-        );
-        // Doubling from the 6s effective threshold caps at 8s.
-        assert_eq!(window.stall_timeout(), Duration::from_secs(8));
-        window.release_disconnected_peers(|peer| *peer != staller_addr());
-
-        // The healthy peer takes over the front and the network settles back
-        // into the uniform 3s cadence. The 6s wedge gap is one real sample
-        // (EWMA 3000 -> 3750, floor 7.5s); each 3s cycle then walks the EWMA
-        // back toward 3000 while the x0.85 decay chases the moving floor and
-        // never re-crosses g. Each cycle: a wake lands a full gap (3s) into
-        // the episode — the worst-case observation — then the front arrives,
-        // the 4-block slice applies, and the next slice re-saturates the
-        // window (R+P pinned at the 4-block budget).
-        //
-        // Pre-fix decay from 8s with the static 2s floor: 6.8s -> 5.78s ->
-        // 4.913s -> ... re-crossing g = 3s within six advances and firing at
-        // a later cycle's 3s-old wake. Post-fix the floor binds every step:
-        // EWMA 3750 -> 3563 -> 3423 -> 3318 (alpha = 1/4 toward 3000), the
-        // floor 2x that, and the decay clamped up to it. (EWMA after the
-        // four cycle samples: 3563 -> 3423 -> 3318 -> 3239.)
-        insert_pending(&mut window, healthy_addr(), hash(0x03), 3, fired_at);
-        window.mark_received(hash(0x03), 80, fired_at);
-        assert_eq!(window.front_interval_ewma_ms(), Some(3750));
-        assert_eq!(window.stall_timeout(), Duration::from_millis(7500));
-        for offset in 0..4u8 {
-            window.mark_received_applied(&hash(3 + offset));
-        }
-        let silent = peer_addr(9);
-        insert_pending(&mut window, healthy_addr(), hash(0x07), 7, fired_at);
-        for offset in 1..4u8 {
-            insert_pending(
-                &mut window,
-                healthy_addr(),
-                hash(7 + offset),
-                u32::from(7 + offset),
-                fired_at,
-            );
-            window.mark_received(hash(7 + offset), 80, fired_at);
-        }
-        let mut front: u8 = 7;
-        let mut at = fired_at;
-        let expected = [
-            Duration::from_millis(7126),
-            Duration::from_millis(6846),
-            Duration::from_millis(6636),
-            Duration::from_millis(6478),
-        ];
-        for expected_timeout in expected {
-            assert_eq!(window.observe_stall(u32::from(front), false, at), None);
-            let arrive = at + Duration::from_secs(3);
-            assert_eq!(
-                window.observe_stall(u32::from(front), false, arrive),
-                None,
-                "an honest 3s front owner must never fire again after the first conviction"
-            );
-            window.mark_received(hash(front), 80, arrive);
-            assert_eq!(
-                window.stall_timeout(),
-                expected_timeout,
-                "the decay must stop at the adaptive floor, never re-crossing the 3s cadence"
-            );
-            // The slice applies; the next slice re-saturates. The last
-            // slice's front goes to a peer that will deliver nothing.
-            for offset in 0..4u8 {
-                window.mark_received_applied(&hash(front + offset));
-            }
-            let next_front = front + 4;
-            let owner = if next_front == 23 {
-                silent
-            } else {
-                healthy_addr()
-            };
-            insert_pending(
-                &mut window,
-                owner,
-                hash(next_front),
-                u32::from(next_front),
-                arrive,
-            );
-            for offset in 1..4u8 {
-                let height = next_front + offset;
-                insert_pending(
-                    &mut window,
-                    healthy_addr(),
-                    hash(height),
-                    u32::from(height),
-                    arrive,
-                );
-                window.mark_received(hash(height), 80, arrive);
-            }
-            front = next_front;
-            at = arrive;
-        }
+        let (mut window, front, at, _silent) = limit_cycle_window_state();
         assert_eq!(window.front_interval_ewma_ms(), Some(3239));
+        // No re-fire: the honest 3s owner must never cross the adaptive floor.
+        assert_eq!(window.observe_stall(u32::from(front), false, at), None);
+        assert_eq!(
+            window.observe_stall(u32::from(front), false, at + Duration::from_secs(3)),
+            None,
+            "honest front owner must not fire after limit cycle stops"
+        );
+    }
+
+    #[test]
+    fn adaptive_floor_still_convicts_true_staller_after_limit_cycle() {
+        // Companion to `stall_decay_limit_cycle_stops_at_adaptive_floor`:
+        // once the decay floor stabilises at 2g, a genuinely silent peer that
+        // holds the front must still convict at the elevated threshold.
+        let (mut window, front, at, silent) = limit_cycle_window_state();
 
         // A true staller now owns the front: zero deliveries while the
         // healthy peer keeps streaming successors. The episode survives the
@@ -2220,6 +2111,111 @@ mod tests {
         let end = at + Duration::from_millis(6478);
         assert!(window.peer_in_staller_cooldown(silent, end));
         assert!(!window.peer_in_staller_cooldown(healthy_addr(), end));
+    }
+
+    /// Builds the window state reached after the first stall conviction in the
+    /// ADV-DRIP-1 limit-cycle scenario: EWMA seeded at 3s cadence, one fire
+    /// and release, four more 3s front advances with the decay clamped at the
+    /// adaptive floor. Returns `(window, front_height, now, silent_peer)`.
+    fn limit_cycle_window_state() -> (DownloadWindow, u8, Instant, std::net::SocketAddr) {
+        let mut window = DownloadWindow::new(stall_budget());
+        let t1 = seed_front_cadence(
+            &mut window,
+            healthy_addr(),
+            Instant::now(),
+            Duration::from_secs(3),
+        );
+
+        // First conviction: staller takes height 3 at the 6s adaptive floor.
+        insert_pending(&mut window, staller_addr(), hash(0x03), 3, t1);
+        for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, t1);
+            window.mark_received(hash(byte), 80, t1);
+        }
+        assert_eq!(window.observe_stall(3, false, t1), None);
+        assert_eq!(
+            window.observe_stall(3, false, t1 + Duration::from_secs(3)),
+            None,
+            "one honest-cadence gap of blame must stay under the adaptive floor"
+        );
+        let fired_at = t1 + Duration::from_secs(6);
+        assert_eq!(
+            window.observe_stall(3, false, fired_at),
+            Some(staller_addr())
+        );
+        assert_eq!(window.stall_timeout(), Duration::from_secs(8));
+        window.release_disconnected_peers(|peer| *peer != staller_addr());
+
+        // Healthy peer resumes; four 3s cycles walk the EWMA back with the
+        // decay clamped at the adaptive floor — the limit cycle never re-fires.
+        insert_pending(&mut window, healthy_addr(), hash(0x03), 3, fired_at);
+        window.mark_received(hash(0x03), 80, fired_at);
+        for offset in 0..4u8 {
+            window.mark_received_applied(&hash(3 + offset));
+        }
+        let silent = peer_addr(9);
+        insert_pending(&mut window, healthy_addr(), hash(0x07), 7, fired_at);
+        for offset in 1..4u8 {
+            insert_pending(
+                &mut window,
+                healthy_addr(),
+                hash(7 + offset),
+                u32::from(7 + offset),
+                fired_at,
+            );
+            window.mark_received(hash(7 + offset), 80, fired_at);
+        }
+        let mut front: u8 = 7;
+        let mut at = fired_at;
+        let expected = [
+            Duration::from_millis(7126),
+            Duration::from_millis(6846),
+            Duration::from_millis(6636),
+            Duration::from_millis(6478),
+        ];
+        for expected_timeout in expected {
+            let arrive = at + Duration::from_secs(3);
+            // No fire at wake or at honest-cadence arrival.
+            assert_eq!(window.observe_stall(u32::from(front), false, at), None);
+            assert_eq!(window.observe_stall(u32::from(front), false, arrive), None);
+            window.mark_received(hash(front), 80, arrive);
+            assert_eq!(
+                window.stall_timeout(),
+                expected_timeout,
+                "the decay must stop at the adaptive floor, never re-crossing the 3s cadence"
+            );
+            for offset in 0..4u8 {
+                window.mark_received_applied(&hash(front + offset));
+            }
+            let next_front = front + 4;
+            let owner = if next_front == 23 {
+                silent
+            } else {
+                healthy_addr()
+            };
+            insert_pending(
+                &mut window,
+                owner,
+                hash(next_front),
+                u32::from(next_front),
+                arrive,
+            );
+            for offset in 1..4u8 {
+                let height = next_front + offset;
+                insert_pending(
+                    &mut window,
+                    healthy_addr(),
+                    hash(height),
+                    u32::from(height),
+                    arrive,
+                );
+                window.mark_received(hash(height), 80, arrive);
+            }
+            front = next_front;
+            at = arrive;
+        }
+        assert_eq!(window.front_interval_ewma_ms(), Some(3239));
+        (window, front, at, silent)
     }
 
     #[test]

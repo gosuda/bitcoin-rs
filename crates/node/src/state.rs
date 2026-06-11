@@ -1478,9 +1478,9 @@ mod tests {
         // (the OOM-flood guard), proving backpressure engages at the producer.
         for _ in 0..super::INBOUND_BLOCK_CHANNEL_LIMIT {
             tx.try_send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
-                .expect("send within the bound must succeed");
+                .unwrap_or_else(|e| panic!("send within the bound must succeed: {e}"));
         }
-        let overflow = tx.try_send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()));
+        let overflow = tx.try_send(bitcoin_rs_p2p::InboundBlock::from_decoded(block));
         assert!(
             matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
             "channel must reject blocks past INBOUND_BLOCK_CHANNEL_LIMIT, got {overflow:?}",

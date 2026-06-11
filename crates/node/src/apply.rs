@@ -3319,7 +3319,7 @@ mod consensus_rule_tests {
             .raw_block
             .lock()
             .clone()
-            .expect("rawblock bytes should be published");
+            .unwrap_or_else(|| panic!("rawblock bytes should be published"));
         assert_eq!(published, expected_block_bytes);
         assert!(published.len() > SERIALIZED_BLOCK_HEADER_LEN);
         Ok(())

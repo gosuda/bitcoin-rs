@@ -366,7 +366,7 @@ mod tests {
 
         stager.insert(first, None, block.clone(), serialized.clone(), now);
         stager.insert(third, None, block.clone(), serialized.clone(), now);
-        stager.insert(fourth, None, block, serialized.clone(), now);
+        stager.insert(fourth, None, block, serialized, now);
 
         let drained = stager.drain_expected_prefix(&[first, missing, third, fourth]);
 
@@ -391,7 +391,7 @@ mod tests {
 
         stager.insert(first, None, block.clone(), serialized.clone(), now);
         stager.insert(second, None, block.clone(), serialized.clone(), now);
-        stager.insert(third, None, block, serialized.clone(), now);
+        stager.insert(third, None, block, serialized, now);
         let mut drained = stager.drain_expected_prefix(&[first, second, third]);
         assert_eq!(stager.received_order_len(), 0);
         assert_eq!(stager.next_received_deadline, None);
@@ -418,7 +418,7 @@ mod tests {
 
         assert_eq!(stager.ready_received_len(None), None);
 
-        stager.insert(staged, None, block, serialized.clone(), now);
+        stager.insert(staged, None, block, serialized, now);
 
         assert_eq!(stager.ready_received_len(None), Some(1));
         assert_eq!(stager.ready_received_len(Some(staged)), Some(1));
@@ -449,7 +449,7 @@ mod tests {
             serialized.clone(),
             old_received_at,
         );
-        stager.insert(fresh, None, block, serialized.clone(), fresh_received_at);
+        stager.insert(fresh, None, block, serialized, fresh_received_at);
 
         let first_drop = stager.prune_expired(now);
 
@@ -482,13 +482,7 @@ mod tests {
         let hash = Hash256::from_le_bytes(&[0x43; 32]);
 
         stager.insert(hash, None, block.clone(), serialized.clone(), now);
-        stager.insert(
-            hash,
-            None,
-            block,
-            serialized.clone(),
-            now + Duration::from_secs(5),
-        );
+        stager.insert(hash, None, block, serialized, now + Duration::from_secs(5));
 
         assert_eq!(stager.received_len(), 1);
         assert_eq!(stager.received_bytes(), block_bytes);
@@ -542,7 +536,7 @@ mod tests {
             incoming,
             Some(protected),
             block,
-            serialized.clone(),
+            serialized,
             now + Duration::from_secs(4),
         ) {
             super::StagedBlock::AlreadyStaged => {
@@ -580,7 +574,7 @@ mod tests {
         stager.insert(third, None, block.clone(), serialized.clone(), now);
         stager.budget.max_received_blocks = 2;
 
-        let dropped = match stager.insert(incoming, None, block, serialized.clone(), now) {
+        let dropped = match stager.insert(incoming, None, block, serialized, now) {
             super::StagedBlock::AlreadyStaged => {
                 panic!("incoming block should not already be staged")
             }
@@ -612,13 +606,7 @@ mod tests {
         let fresh = Hash256::from_le_bytes(&[0x66; 32]);
 
         stager.insert(old, None, block.clone(), serialized.clone(), now);
-        stager.insert(
-            fresh,
-            None,
-            block,
-            serialized.clone(),
-            now + Duration::from_secs(5),
-        );
+        stager.insert(fresh, None, block, serialized, now + Duration::from_secs(5));
 
         assert_eq!(
             stager.next_received_deadline,
@@ -648,7 +636,7 @@ mod tests {
         assert_eq!(drained.len(), 1);
         stager.budget.max_received_blocks = 2;
 
-        let dropped = match stager.insert(incoming, None, block, serialized.clone(), now) {
+        let dropped = match stager.insert(incoming, None, block, serialized, now) {
             super::StagedBlock::AlreadyStaged => {
                 panic!("incoming block should not already be staged")
             }
@@ -715,7 +703,7 @@ mod tests {
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
         let window_slots = budget.max_received_blocks;
-        assert!(window_slots <= usize::from(u8::MAX));
+        assert!(u8::try_from(window_slots).is_ok());
 
         for index in 0..window_slots {
             let mut raw = [0xee_u8; 32];
@@ -820,13 +808,7 @@ mod tests {
         // The next expected block must stage even at byte exhaustion (bounded
         // overshoot) — refusing it would deadlock the apply frontier behind
         // the staged successors that hold the budget.
-        match stager.insert(
-            expected,
-            Some(expected),
-            block.clone(),
-            serialized.clone(),
-            now,
-        ) {
+        match stager.insert(expected, Some(expected), block, serialized, now) {
             super::StagedBlock::Memory { dropped, .. } => {
                 assert!(
                     dropped.is_empty(),
@@ -863,7 +845,7 @@ mod tests {
         let first = Hash256::from_le_bytes(&[0xa1; 32]);
         let second = Hash256::from_le_bytes(&[0xa2; 32]);
         stager.insert(first, None, block.clone(), serialized.clone(), now);
-        let dropped = match stager.insert(second, None, block, serialized.clone(), now) {
+        let dropped = match stager.insert(second, None, block, serialized, now) {
             super::StagedBlock::AlreadyStaged => {
                 panic!("incoming block should not already be staged")
             }

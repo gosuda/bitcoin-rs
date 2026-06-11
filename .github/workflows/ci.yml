@@ -45,6 +45,10 @@ jobs:
           cargo clippy -p bitcoin-rs --all-targets \
             --no-default-features --features "${PORTABLE_FEATURES}" \
             -- -D warnings
+          # -p bitcoin-rs-node catches test-target lints invisible to the line above
+          # (virtual workspace: -p bitcoin-rs does not forward features to node's own
+          # test targets, so their lints are silently skipped without this step).
+          cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest

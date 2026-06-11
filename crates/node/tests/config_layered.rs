@@ -310,9 +310,9 @@ fn assume_valid_height_layers_use_cli_env_toml_precedence() -> Result<()> {
 
     fs::write(
         &toml_path,
-        r#"
+        r"
 assume_valid_height = 10000
-"#,
+",
     )?;
 
     let toml_config = Config::from_layered_sources(
@@ -354,7 +354,7 @@ fn connect_layers_parse_cli_and_env_peer_lists() -> Result<()> {
     let cli_config = Config::from_layered_sources(
         None,
         None,
-        [] as [(&str, &str); 0],
+        core::iter::empty::<EnvPair>(),
         [
             "bitcoin-rs-node",
             "--connect",
@@ -380,8 +380,12 @@ fn connect_layers_parse_cli_and_env_peer_lists() -> Result<()> {
         vec!["192.0.2.5:8333".parse::<SocketAddr>()?]
     );
 
-    let default_config =
-        Config::from_layered_sources(None, None, [] as [(&str, &str); 0], ["bitcoin-rs-node"])?;
+    let default_config = Config::from_layered_sources(
+        None,
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node"],
+    )?;
     assert!(default_config.connect.is_empty());
     Ok(())
 }
@@ -398,7 +402,7 @@ fn g14_utxo_commit_sample_path_requires_window_fields() {
     let result = Config::from_layered_sources(
         None,
         None,
-        [] as [(&str, &str); 0],
+        core::iter::empty::<EnvPair>(),
         [
             "bitcoin-rs-node",
             "--g14-utxo-commit-samples",

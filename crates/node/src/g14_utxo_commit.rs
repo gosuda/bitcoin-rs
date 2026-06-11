@@ -406,12 +406,14 @@ mod tests {
         }
 
         let payload: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-        let samples = payload.as_array().expect("samples array");
+        let samples = payload
+            .as_array()
+            .unwrap_or_else(|| panic!("samples array"));
         assert_eq!(samples.len(), 3);
         let sample = samples
             .iter()
             .find(|entry| entry["height"] == 2)
-            .expect("stop-height sample");
+            .unwrap_or_else(|| panic!("stop-height sample"));
         assert_eq!(sample["block_size_bytes"], 4 * 1024 * 1024);
         assert_eq!(sample["utxo_commit_us"], 12_500);
         Ok(())
@@ -427,7 +429,9 @@ mod tests {
         )?;
         let result =
             G14UtxoCommitSampler::open(&path, 0, 10, START_HASH.to_owned(), STOP_HASH.to_owned());
-        let error = result.err().expect("expected open failure");
+        let Err(error) = result else {
+            panic!("expected open failure");
+        };
         assert!(error.to_string().contains("start height"));
         Ok(())
     }
@@ -443,14 +447,15 @@ mod tests {
             4 * 1024 * 1024,
             Duration::from_micros(10),
         )?;
-        let error = sampler
-            .record(
-                1,
-                Hash256::from_le_bytes(&[2; 32]),
-                4 * 1024 * 1024,
-                Duration::from_micros(10),
-            )
-            .unwrap_err();
+        let error = match sampler.record(
+            1,
+            Hash256::from_le_bytes(&[2; 32]),
+            4 * 1024 * 1024,
+            Duration::from_micros(10),
+        ) {
+            Err(e) => e,
+            Ok(()) => panic!("expected record to fail on inconsistent sample"),
+        };
         assert!(error.to_string().contains("changed"));
         Ok(())
     }

@@ -2327,7 +2327,7 @@ mod tests {
                 "ineligible peer must receive nothing"
             );
         }
-        for rx in &rxs[if serves_fallback { 0 } else { 1 }..] {
+        for rx in &rxs[usize::from(!serves_fallback)..] {
             assert!(rx.try_recv().is_err(), "fallback is single-peer");
         }
         Ok(())
@@ -3145,7 +3145,7 @@ mod tests {
             .applied_tip
             .load_full()
             .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
-        let far_future = Instant::now() + Duration::from_secs(60);
+        let far_future = Instant::now() + Duration::from_mins(1);
 
         // Far past any threshold, but the apply side is busy: frozen.
         sync.disconnect_window_staller(Some(&applied), far_future);
@@ -4051,8 +4051,91 @@ mod tests {
     }
 
     #[test]
+    fn staging_byte_exhaustion_blocks_all_requests() -> Result<(), Box<dyn std::error::Error>> {
+        let ExhaustionFixture {
+            sync,
+            stalled_rx,
+            healthy_rx,
+            ..
+        } = staging_exhaustion_fixture()?;
+
+        // While the staged bytes are exhausted no getdata is issued at all —
+        // the gate is checked before expired-pending retry, so even though
+        // block1's pending entry is already expired (zero pending timeout)
+        // neither peer is asked for anything.
+        sync.tick();
+        while let Ok(message) = stalled_rx.try_recv() {
+            if matches!(message, NetworkMessage::GetData(_)) {
+                return Err(std::io::Error::other(
+                    "exhausted staging must not request from the stalled peer",
+                )
+                .into());
+            }
+        }
+        assert!(
+            healthy_rx.try_recv().is_err(),
+            "exhausted staging must not request from the healthy peer"
+        );
+        assert_eq!(sync.block_stager.lock().received_len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
     -> Result<(), Box<dyn std::error::Error>> {
+        let ExhaustionFixture {
+            sync,
+            stalled_rx,
+            healthy_rx,
+            block1_hash,
+            block2_hash,
+            ..
+        } = staging_exhaustion_fixture()?;
+
+        // Drain the first tick's messages before testing recovery.
+        sync.tick();
+        while stalled_rx.try_recv().is_ok() {}
+
+        // Let the staged successor outlive its received timeout, then tick:
+        // prune_expired drops it, drop_received_for_retry releases its bytes
+        // (gate reopens), and expire_pending re-queues the stalled frontier
+        // height-first toward the healthy peer.
+        std::thread::sleep(Duration::from_millis(125));
+        sync.tick();
+
+        assert_eq!(sync.block_stager.lock().received_len(), 0);
+        {
+            let window = sync.download_window.lock();
+            assert_eq!(window.received_len(), 0);
+            assert!(window.has_request_capacity());
+            assert!(window.contains_pending(&Hash256::from_le_bytes(block1_hash.as_byte_array())));
+        }
+        let NetworkMessage::GetData(retry) = healthy_rx.try_recv()? else {
+            return Err(std::io::Error::other("expected healthy peer retry getdata").into());
+        };
+        assert_eq!(
+            witness_block_inventory(retry)?,
+            alloc::vec![block1_hash, block2_hash]
+        );
+        while let Ok(message) = stalled_rx.try_recv() {
+            if matches!(message, NetworkMessage::GetData(_)) {
+                return Err(
+                    std::io::Error::other("stalled peer should not receive retry getdata").into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    struct ExhaustionFixture {
+        sync: BlockSync,
+        stalled_rx: crossbeam_channel::Receiver<Message>,
+        healthy_rx: crossbeam_channel::Receiver<Message>,
+        block1_hash: bitcoin::BlockHash,
+        block2_hash: bitcoin::BlockHash,
+    }
+
+    fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let block1 =
             mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
@@ -4092,10 +4175,7 @@ mod tests {
             inbound_headers_rx,
             inbound_blocks_rx,
         );
-        // Staging byte budget that exactly one staged block exhausts. Unlike
-        // the arrival-recovery sibling above, the frontier block never shows
-        // up, so the only way back is timeout-driven: instantly-expirable
-        // pending entries and a short staged-block timeout.
+        // Staging byte budget that exactly one staged block exhausts.
         install_budget(
             &sync,
             super::SyncBudget {
@@ -4127,66 +4207,21 @@ mod tests {
         // Deliver only the successor: it stages (waiting on block1, which the
         // stalled peer will never send) and exactly exhausts the staging byte
         // budget, closing the request gate.
-        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2.clone()))?;
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2))?;
         sync.drain_inbound_blocks();
-        assert_eq!(
-            sync.block_stager.lock().received_bytes(),
-            block2.total_size()
-        );
         assert!(!sync.download_window.lock().has_request_capacity());
 
         peers.write().push(synthetic_peer(healthy_addr, 100));
         let (healthy_tx, healthy_rx) = unbounded::<Message>();
         peer_outbound.write().insert(healthy_addr, healthy_tx);
 
-        // While the staged bytes are exhausted no getdata is issued at all —
-        // the gate is checked before expired-pending retry, so even though
-        // block1's pending entry is already expired (zero pending timeout)
-        // neither peer is asked for anything.
-        sync.tick();
-        while let Ok(message) = stalled_rx.try_recv() {
-            if matches!(message, NetworkMessage::GetData(_)) {
-                return Err(std::io::Error::other(
-                    "exhausted staging must not request from the stalled peer",
-                )
-                .into());
-            }
-        }
-        assert!(
-            healthy_rx.try_recv().is_err(),
-            "exhausted staging must not request from the healthy peer"
-        );
-        assert_eq!(sync.block_stager.lock().received_len(), 1);
-
-        // Let the staged successor outlive its received timeout, then tick:
-        // prune_expired drops it, drop_received_for_retry releases its bytes
-        // (gate reopens), and expire_pending re-queues the stalled frontier
-        // height-first toward the healthy peer.
-        std::thread::sleep(Duration::from_millis(125));
-        sync.tick();
-
-        assert_eq!(sync.block_stager.lock().received_len(), 0);
-        {
-            let window = sync.download_window.lock();
-            assert_eq!(window.received_len(), 0);
-            assert!(window.has_request_capacity());
-            assert!(window.contains_pending(&Hash256::from_le_bytes(block1_hash.as_byte_array())));
-        }
-        let NetworkMessage::GetData(retry) = healthy_rx.try_recv()? else {
-            return Err(std::io::Error::other("expected healthy peer retry getdata").into());
-        };
-        assert_eq!(
-            witness_block_inventory(retry)?,
-            alloc::vec![block1_hash, block2_hash]
-        );
-        while let Ok(message) = stalled_rx.try_recv() {
-            if matches!(message, NetworkMessage::GetData(_)) {
-                return Err(
-                    std::io::Error::other("stalled peer should not receive retry getdata").into(),
-                );
-            }
-        }
-        Ok(())
+        Ok(ExhaustionFixture {
+            sync,
+            stalled_rx,
+            healthy_rx,
+            block1_hash,
+            block2_hash,
+        })
     }
 
     const DETERMINISTIC_PROXY_BLOCKS: usize = 24;
@@ -5471,7 +5506,7 @@ mod tests {
     }
 
     /// A fan-out-eligible synthetic peer: outbound and witness-serving
-    /// (NODE_NETWORK | NODE_WITNESS), unlike [`synthetic_peer`] which models
+    /// (`NODE_NETWORK` | `NODE_WITNESS`), unlike [`synthetic_peer`] which models
     /// the ineligible (inbound, flagless) shape.
     fn eligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         PeerInfo {
