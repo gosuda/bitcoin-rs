@@ -689,25 +689,15 @@ mod tests {
 
     #[test]
     fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
-        let default_budget = default_sync_budget();
+        let budget = default_sync_budget();
         // Budget-pair consistency (R9): the staging byte budget admits a full
         // download window of blocks at the high-height per-slot estimate.
         assert_eq!(
-            default_budget.max_received_bytes,
-            default_budget
+            budget.max_received_bytes,
+            budget
                 .max_received_blocks
                 .saturating_mul(crate::sync::PENDING_BLOCK_BYTE_ESTIMATE)
         );
-        // Exercise the no-eviction fill on a scaled copy of the pair: only
-        // the slots-times-estimate-equals-bytes relationship (asserted above
-        // for the production default) is load-bearing, and the production
-        // window (256 slots x 2 MiB) would transiently allocate ~512 MiB for
-        // no additional coverage.
-        let mut budget = default_budget;
-        budget.max_received_blocks = 8;
-        budget.max_received_bytes = budget
-            .max_received_blocks
-            .saturating_mul(crate::sync::PENDING_BLOCK_BYTE_ESTIMATE);
         let block = block_with_total_size(crate::sync::PENDING_BLOCK_BYTE_ESTIMATE);
         let serialized = bytes::Bytes::from(serialize(&block));
         let mut stager = BlockStager::new(budget);
