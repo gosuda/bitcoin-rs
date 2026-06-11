@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 #[cfg(feature = "bitcoinconsensus")]
 use bitcoin::consensus::encode;
 use bitcoin::hashes::Hash as _;
@@ -223,6 +225,12 @@ impl Interpreter {
     pub const BATCH_SCHNORR_THRESHOLD: usize = 16;
 
     /// Executes a script spend through the enabled script backend.
+    ///
+    /// When `script_sig` and `witness` already match the bytes stored on
+    /// `tx.input[input_idx]` — true for every block/mempool validation caller,
+    /// which reads them straight off the transaction — `tx` is used as-is with
+    /// no clone. Only callers that pass substitute bytes (e.g. vector tests
+    /// grafting a foreign witness) pay for a clone to splice them in.
     pub fn execute(
         &self,
         script_pubkey: &[u8],
@@ -233,17 +241,36 @@ impl Interpreter {
         tx: &bitcoin::Transaction,
         input_idx: usize,
     ) -> Result<bool, ScriptError> {
-        let mut spending = tx.clone();
-        let inputs = spending.input.len();
-        let input = spending
-            .input
-            .get_mut(input_idx)
-            .ok_or(ScriptError::InputIndexOutOfRange {
-                index: input_idx,
-                inputs,
-            })?;
-        input.script_sig = ScriptBuf::from_bytes(script_sig.to_vec());
-        input.witness = Witness::from_slice(witness);
+        let inputs = tx.input.len();
+        let out_of_range = ScriptError::InputIndexOutOfRange {
+            index: input_idx,
+            inputs,
+        };
+        let input = tx.input.get(input_idx).ok_or(out_of_range)?;
+
+        let matches_tx = input.script_sig.as_bytes() == script_sig
+            && input.witness.len() == witness.len()
+            && input
+                .witness
+                .iter()
+                .zip(witness)
+                .all(|(stored, provided)| stored == provided.as_slice());
+        let spending: Cow<'_, bitcoin::Transaction> = if matches_tx {
+            Cow::Borrowed(tx)
+        } else {
+            let mut grafted = tx.clone();
+            let grafted_input =
+                grafted
+                    .input
+                    .get_mut(input_idx)
+                    .ok_or(ScriptError::InputIndexOutOfRange {
+                        index: input_idx,
+                        inputs,
+                    })?;
+            grafted_input.script_sig = ScriptBuf::from_bytes(script_sig.to_vec());
+            grafted_input.witness = Witness::from_slice(witness);
+            Cow::Owned(grafted)
+        };
 
         let script = Script::from_bytes(script_pubkey);
         if script.is_p2tr() && flags.contains(VerifyFlags::TAPROOT) {
