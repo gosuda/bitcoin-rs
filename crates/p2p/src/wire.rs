@@ -361,13 +361,48 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
 
     use bitcoin::consensus::encode::serialize;
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message::NetworkMessage;
 
-    use super::{encode_payload, read_message, write_message};
+    use super::{
+        HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, write_message,
+    };
+
+    /// Serves exactly one v1 wire header and fails on any read beyond it.
+    ///
+    /// Used to prove that `read_message` rejects oversized payload lengths
+    /// before attempting to read the payload body. (The buffer allocation
+    /// sits between the size guard and the body read, so guard-before-read
+    /// implies guard-before-allocation in the current code; only the read
+    /// ordering is directly enforced by this reader.)
+    struct HeaderOnlyReader {
+        header: Cursor<Vec<u8>>,
+    }
+
+    impl Read for HeaderOnlyReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.header.read(buf)?;
+            if n == 0 {
+                return Err(std::io::Error::other("read past 24-byte header"));
+            }
+            Ok(n)
+        }
+    }
+
+    /// Build a regtest `ping` wire header declaring `payload_len` bytes of payload.
+    fn header_declaring(payload_len: usize) -> Result<Vec<u8>, PeerError> {
+        let len = u32::try_from(payload_len)
+            .map_err(|_| PeerError::Protocol("payload length does not fit in u32"))?;
+        let mut header = Vec::with_capacity(HEADER_LEN);
+        header.extend_from_slice(&Magic::REGTEST.to_bytes());
+        header.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
+        header.extend_from_slice(&len.to_le_bytes());
+        header.extend_from_slice(&[0u8; 4]); // checksum (never reached / wrong on purpose)
+        Ok(header)
+    }
 
     #[test]
     fn block_message_roundtrip_preserves_wire_payload() -> Result<(), super::PeerError> {
@@ -393,5 +428,70 @@ mod tests {
         assert_eq!(decoded_block.block_hash(), expected_hash);
 
         Ok(())
+    }
+
+    #[test]
+    fn read_message_rejects_oversized_payload_before_reading_body() -> Result<(), PeerError> {
+        let oversize = MAX_MESSAGE_PAYLOAD + 1;
+        let mut reader = HeaderOnlyReader {
+            header: Cursor::new(header_declaring(oversize)?),
+        };
+
+        // `HeaderOnlyReader` errors on any read past the 24-byte header, so
+        // getting `PayloadTooLarge` (not `Io`) proves the size guard fires
+        // before the payload buffer is allocated or read.
+        match read_message(&mut reader, Magic::REGTEST) {
+            Err(PeerError::PayloadTooLarge(len)) => {
+                assert_eq!(len, oversize);
+                Ok(())
+            }
+            other => Err(PeerError::Protocol(match other {
+                Err(PeerError::Io(_)) => "read past header: guard fired after body read",
+                _ => "expected PayloadTooLarge for oversized payload length",
+            })),
+        }
+    }
+
+    #[test]
+    fn read_message_accepts_payload_length_at_exact_cap() -> Result<(), PeerError> {
+        let mut reader = HeaderOnlyReader {
+            header: Cursor::new(header_declaring(MAX_MESSAGE_PAYLOAD)?),
+        };
+
+        // Exactly MAX_MESSAGE_PAYLOAD passes the size guard; the failure must
+        // come from reading the (absent) body, never from the size check.
+        match read_message(&mut reader, Magic::REGTEST) {
+            Err(PeerError::PayloadTooLarge(_)) => Err(PeerError::Protocol(
+                "size guard rejected payload length exactly at the cap",
+            )),
+            Err(PeerError::Io(_)) => Ok(()),
+            Err(_) => Err(PeerError::Protocol(
+                "expected Io error from truncated body at exact cap",
+            )),
+            Ok(_) => Err(PeerError::Protocol(
+                "truncated message unexpectedly decoded",
+            )),
+        }
+    }
+
+    #[test]
+    fn write_message_rejects_payload_exceeding_cap() -> Result<(), PeerError> {
+        let oversize = MAX_MESSAGE_PAYLOAD + 1;
+        let message = NetworkMessage::Unknown {
+            command: super::command_string("huge")?,
+            payload: vec![0u8; oversize],
+        };
+
+        let mut sink = Vec::new();
+        match write_message(&mut sink, Magic::REGTEST, &message) {
+            Err(PeerError::PayloadTooLarge(len)) => {
+                assert_eq!(len, oversize);
+                assert!(sink.is_empty(), "nothing must be written on rejection");
+                Ok(())
+            }
+            _ => Err(PeerError::Protocol(
+                "expected PayloadTooLarge from encode path",
+            )),
+        }
     }
 }
