@@ -87,22 +87,6 @@ jobs:
           rust-version: "1.95.0"
           arguments: --workspace --no-default-features --features ${{ env.PORTABLE_FEATURES }}
 
-  # Heavy sys-crate gate:
-  # - libboost-dev for libbitcoinkernel-sys
-  # Builds and smoke-tests the bitcoinkernel-backed consensus package without
-  # libbitcoinconsensus; both native Core archives export overlapping symbols and
-  # cannot share a single Rust test binary.
-  kernel-only:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
-      - run: |
-          cargo test -p bitcoin-rs-consensus --no-fail-fast \
-            --no-default-features --features kernel -- --include-ignored
-
   # Full kernel-build profile gate (plan 2026-06-10-001 R5): consensus parity
   # suite (committed fixture corpus, --include-ignored by design), the node
   # under the kernel engine, and clippy on both kernel-profile package roots.
