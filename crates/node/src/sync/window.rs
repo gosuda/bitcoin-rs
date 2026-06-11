@@ -126,6 +126,32 @@ struct StallEpisode {
     peer_addr: SocketAddr,
     front_hash: Hash256,
     since: Instant,
+    /// Whether the one-shot episode-observability INFO line has been emitted
+    /// for this episode (fires once when the episode survives
+    /// [`STALL_EPISODE_LOG_AGE`]; see [`DownloadWindow::observe_stall`]).
+    info_logged: bool,
+}
+
+/// Episode age at which the one-shot stall-episode observability INFO line is
+/// emitted. Below the 2s conviction floor by design: the line exists to make
+/// episode dynamics visible in run logs *below* the WARN fire line — which
+/// clearing rule zeroed the clock, and what the front-cadence EWMA (the
+/// threshold's falsifier) was while the episode ran.
+const STALL_EPISODE_LOG_AGE: Duration = Duration::from_secs(1);
+
+/// Stall-episode clearing reasons, the counter taxonomy for
+/// `node.sync.stall_episodes_cleared{reason}`. Every path that zeroes the
+/// episode clock tags exactly one reason:
+/// - `apply_busy`: the no-blame guard held this tick ([`DownloadWindow::observe_stall`]).
+/// - `predicate`: a [`DownloadWindow::window_blocked_on`] term went false
+///   (front moved off the frontier, no staged successor, or capacity opened).
+/// - `front_moved`: the predicate still holds but for a different
+///   `(peer, front_hash)` — the episode re-keyed and a new one started.
+/// - `peer_delivery`: the blamed peer delivered a requested block
+///   ([`DownloadWindow::record_delivery_progress`]).
+/// - `fired`: conviction — the episode reached the effective threshold.
+fn count_stall_episode_cleared(reason: &'static str) {
+    metrics::counter!("node.sync.stall_episodes_cleared", "reason" => reason).increment(1);
 }
 
 #[derive(Debug)]
@@ -469,27 +495,61 @@ impl DownloadWindow {
         self.recent_stallers
             .retain(|_, fired_at| now.duration_since(*fired_at) < staller_cooldown);
         if apply_side_busy {
-            self.stall = None;
+            if self.stall.take().is_some() {
+                count_stall_episode_cleared("apply_busy");
+            }
             return None;
         }
         let Some((peer_addr, front_hash)) = self.window_blocked_on(next_apply_height) else {
-            self.stall = None;
+            if self.stall.take().is_some() {
+                count_stall_episode_cleared("predicate");
+            }
             return None;
         };
         let episode = match self.stall {
             Some(episode) if episode.peer_addr == peer_addr && episode.front_hash == front_hash => {
                 episode
             }
-            _ => {
+            previous => {
+                if previous.is_some() {
+                    // Predicate still holds but for a different
+                    // (peer, front_hash): the front advanced (or rotated
+                    // owner) and the episode re-keyed.
+                    count_stall_episode_cleared("front_moved");
+                }
+                metrics::counter!("node.sync.stall_episodes_started").increment(1);
                 let episode = StallEpisode {
                     peer_addr,
                     front_hash,
                     since: now,
+                    info_logged: false,
                 };
                 self.stall = Some(episode);
                 episode
             }
         };
+        // Phase 0 observability: one INFO line per episode, once it survives
+        // STALL_EPISODE_LOG_AGE — visible below the WARN fire line so episode
+        // dynamics (and the EWMA the threshold tracks, the design falsifier)
+        // appear in run logs. Emitted regardless of EWMA cold start: a
+        // suppressed-conviction episode is exactly what must be observable.
+        let effective_timeout = self.stall_timeout.max(self.stall_decay_floor());
+        if !episode.info_logged && now.duration_since(episode.since) >= STALL_EPISODE_LOG_AGE {
+            if let Some(stored) = self.stall.as_mut() {
+                stored.info_logged = true;
+            }
+            tracing::info!(
+                peer_addr = %episode.peer_addr,
+                front_hash = %episode.front_hash,
+                front_height = next_apply_height,
+                episode_age_ms = u64::try_from(now.duration_since(episode.since).as_millis())
+                    .unwrap_or(u64::MAX),
+                effective_timeout_ms = u64::try_from(effective_timeout.as_millis())
+                    .unwrap_or(u64::MAX),
+                front_interval_ewma_ms = ?self.front_interval_ewma_ms,
+                "block sync: stall episode running"
+            );
+        }
         // Cold start: while the front-cadence EWMA has no sample the decay
         // floor cannot distinguish a slow network from a staller, so
         // conviction defers to the 60s pending-timeout fallback — the
@@ -497,14 +557,15 @@ impl DownloadWindow {
         // stays observable (`stalling_peer`, the stall_seconds gauge); only
         // the fire is suppressed until the estimate has one real sample.
         self.front_interval_ewma_ms?;
-        // The fire threshold is the stored adaptive value, never below the
-        // ADV-DRIP-1 decay floor: on a network whose demonstrated front
-        // cadence exceeds `stall_timeout_initial`, an episode younger than
-        // twice that cadence is the uniform-slow steady state, not a stall.
-        let effective_timeout = self.stall_timeout.max(self.stall_decay_floor());
+        // The fire threshold (`effective_timeout` above) is the stored
+        // adaptive value, never below the ADV-DRIP-1 decay floor: on a
+        // network whose demonstrated front cadence exceeds
+        // `stall_timeout_initial`, an episode younger than twice that
+        // cadence is the uniform-slow steady state, not a stall.
         if now.duration_since(episode.since) < effective_timeout {
             return None;
         }
+        count_stall_episode_cleared("fired");
         // Fire: blame is settled. Double the threshold for the next episode
         // (sudden bandwidth drops must not cascade into disconnecting every
         // peer at 2s — Core's rationale) and start the re-acquisition
@@ -963,6 +1024,7 @@ impl DownloadWindow {
             .is_some_and(|episode| episode.peer_addr == peer_addr || episode.front_hash == hash)
         {
             self.stall = None;
+            count_stall_episode_cleared("peer_delivery");
         }
         let was_front = self.pending.values().all(|pending| pending.height > height);
         if was_front {
@@ -1792,6 +1854,278 @@ mod tests {
             window.observe_stall(3, false, later + Duration::from_secs(2)),
             Some(staller_addr())
         );
+    }
+
+    /// Counter-only local metrics recorder for the stall-episode
+    /// observability tests: counters keyed `name{label=value}`, gauges and
+    /// histograms discarded.
+    #[derive(Clone, Default)]
+    struct CounterRecorder {
+        counts: std::sync::Arc<parking_lot::Mutex<hashbrown::HashMap<String, u64>>>,
+    }
+
+    impl CounterRecorder {
+        fn counter_key(key: &metrics::Key) -> String {
+            use std::fmt::Write as _;
+            let mut name = key.name().to_owned();
+            for label in key.labels() {
+                let _ = write!(name, "{{{}={}}}", label.key(), label.value());
+            }
+            name
+        }
+
+        fn count(&self, name: &str) -> u64 {
+            self.counts.lock().get(name).copied().unwrap_or(0)
+        }
+
+        fn cleared(&self, reason: &str) -> u64 {
+            self.count(&format!(
+                "node.sync.stall_episodes_cleared{{reason={reason}}}"
+            ))
+        }
+
+        fn started(&self) -> u64 {
+            self.count("node.sync.stall_episodes_started")
+        }
+    }
+
+    struct CounterHandle {
+        key: String,
+        recorder: CounterRecorder,
+    }
+
+    impl metrics::CounterFn for CounterHandle {
+        fn increment(&self, value: u64) {
+            let mut counts = self.recorder.counts.lock();
+            let entry = counts.entry(self.key.clone()).or_insert(0);
+            *entry = entry.saturating_add(value);
+        }
+
+        fn absolute(&self, value: u64) {
+            self.recorder.counts.lock().insert(self.key.clone(), value);
+        }
+    }
+
+    impl metrics::Recorder for CounterRecorder {
+        fn describe_counter(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::from_arc(std::sync::Arc::new(CounterHandle {
+                key: Self::counter_key(key),
+                recorder: self.clone(),
+            }))
+        }
+
+        fn register_gauge(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// Phase 0 taxonomy exhaustiveness: every path that zeroes the episode
+    /// clock tags exactly one cleared reason, and every episode start
+    /// increments `stall_episodes_started`. The five reasons mirror
+    /// `count_stall_episode_cleared`'s doc table; a new clear path without a
+    /// counter shows up here as a started/cleared imbalance.
+    #[test]
+    fn stall_episode_counters_cover_every_clear_path() {
+        let recorder = CounterRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            let (mut window, now) =
+                window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+
+            // No running episode: the guard paths must not count a clear.
+            assert_eq!(window.observe_stall(3, true, now), None);
+            assert_eq!(window.observe_stall(4, false, now), None);
+            assert_eq!(recorder.cleared("apply_busy"), 0);
+            assert_eq!(recorder.cleared("predicate"), 0);
+            assert_eq!(recorder.started(), 0);
+
+            // apply_busy: a running episode cleared by the no-blame guard.
+            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(recorder.started(), 1);
+            assert_eq!(window.observe_stall(3, true, now), None);
+            assert_eq!(recorder.cleared("apply_busy"), 1);
+
+            // predicate: re-arm, then a predicate term goes false (the
+            // frontier moves past the pending front, so term 1 fails).
+            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(recorder.started(), 2);
+            assert_eq!(window.observe_stall(4, false, now), None);
+            assert_eq!(recorder.cleared("predicate"), 1);
+
+            // front_moved: re-arm, then re-key the front to another peer at
+            // the same frontier while every predicate term still holds — the
+            // old episode clears as front_moved and a new one starts.
+            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(recorder.started(), 3);
+            window.remove_pending(&hash(0x03));
+            insert_pending(&mut window, healthy_addr(), hash(0x07), 3, now);
+            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(recorder.cleared("front_moved"), 1);
+            assert_eq!(recorder.started(), 4);
+
+            // peer_delivery: the blamed peer (now `healthy`, owning the
+            // re-keyed front) delivers a requested block.
+            window.mark_received(hash(0x07), 80, now + Duration::from_millis(100));
+            assert_eq!(recorder.cleared("peer_delivery"), 1);
+
+            // fired: a fresh construction runs an episode to conviction.
+            let (mut window, now) =
+                window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(recorder.started(), 5);
+            assert_eq!(
+                window.observe_stall(3, false, now + Duration::from_secs(2)),
+                Some(staller_addr())
+            );
+            assert_eq!(recorder.cleared("fired"), 1);
+
+            // Exhaustive: five episodes started, five cleared, one per reason.
+            for reason in [
+                "apply_busy",
+                "predicate",
+                "front_moved",
+                "peer_delivery",
+                "fired",
+            ] {
+                assert_eq!(recorder.cleared(reason), 1, "reason {reason}");
+            }
+            assert_eq!(recorder.started(), 5);
+        });
+    }
+
+    /// The stored episode's one-shot log latch, if an episode is running.
+    /// `observe_stall` emits the INFO line in exactly the branch that flips
+    /// this `false -> true`, so the latch IS the emission contract — pinned
+    /// here at the state level because asserting through the global tracing
+    /// pipeline is racy under parallel tests (tracing-core caches per-callsite
+    /// interest globally; sibling tests hitting the same callsite with no
+    /// dispatcher can poison a thread-local `with_default` capture).
+    fn info_logged(window: &DownloadWindow) -> Option<bool> {
+        window.stall.map(|episode| episode.info_logged)
+    }
+
+    /// Phase 0 observability: an episode surviving `STALL_EPISODE_LOG_AGE`
+    /// emits the INFO line exactly once — not per tick — and a subsequent
+    /// episode gets its own line. Pinned via the `info_logged` latch (see
+    /// [`info_logged`] for why not via log capture).
+    #[test]
+    fn stall_episode_logs_info_once_per_episode_after_one_second() {
+        let (mut window, now) =
+            window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+
+        // Below the 1s log age: episode running, nothing emitted.
+        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(info_logged(&window), Some(false));
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_millis(500)),
+            None
+        );
+        assert_eq!(info_logged(&window), Some(false));
+
+        // Past 1s: the latch flips on the emitting tick and stays latched —
+        // one line, no matter how many further ticks the episode survives.
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(info_logged(&window), Some(true));
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_millis(1500)),
+            None
+        );
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_millis(1900)),
+            None
+        );
+        assert_eq!(info_logged(&window), Some(true));
+
+        // Fire ends the episode; the replacement episode (judged against the
+        // doubled threshold) carries a fresh latch and re-emits once at 1s.
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            Some(staller_addr())
+        );
+        assert_eq!(info_logged(&window), None);
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(info_logged(&window), Some(false));
+        assert_eq!(
+            window.observe_stall(3, false, now + Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(info_logged(&window), Some(true));
+    }
+
+    /// Cold start (front-cadence EWMA unseeded): conviction is suppressed
+    /// but the episode still forms and the observability line still fires —
+    /// a suppressed-conviction episode is exactly what must be visible in
+    /// run logs (the `front_interval_ewma_ms=None` shape).
+    #[test]
+    fn stall_episode_logs_info_during_ewma_cold_start_without_firing() {
+        let now = Instant::now();
+        let mut window = DownloadWindow::new(stall_budget());
+        insert_pending(&mut window, staller_addr(), hash(0x01), 1, now);
+        for (byte, height) in [(0x02_u8, 2_u32), (0x03, 3), (0x04, 4)] {
+            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            window.mark_received(hash(byte), 80, now);
+        }
+        assert_eq!(window.front_interval_ewma_ms(), None);
+
+        assert_eq!(window.observe_stall(1, false, now), None);
+        assert_eq!(info_logged(&window), Some(false));
+        // The episode ages far past every threshold: the INFO latch flips at
+        // 1s, but cold-start suppression keeps the fire from ever happening.
+        assert_eq!(
+            window.observe_stall(1, false, now + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(info_logged(&window), Some(true));
+        assert_eq!(
+            window.observe_stall(1, false, now + Duration::from_mins(1)),
+            None
+        );
+        assert_eq!(info_logged(&window), Some(true));
     }
 
     fn peer_addr(idx: u8) -> std::net::SocketAddr {
