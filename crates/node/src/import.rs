@@ -85,14 +85,33 @@ mod tests {
             0,
             "genesis coinbase is unspendable and absent from live UTXO state"
         );
-        assert_eq!(
-            state.transactions().read().len(),
-            1,
-            "genesis coinbase must be indexed"
+        assert!(
+            state.transactions().read().is_empty(),
+            "txindex disabled must not retain confirmed transactions in memory"
         );
         assert!(
             state.mempool().read().is_empty(),
             "genesis import must leave mempool empty"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn import_caches_confirmed_transactions_only_when_txindex_is_enabled() -> Result<()> {
+        let bytes = hex_decode(REGTEST_GENESIS_HEX)?;
+        let dir = tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.txindex = true;
+        let state = NodeState::open(config)?;
+
+        let outcome = import_block(&state, &bytes)?;
+        assert!(outcome.applied, "decoded block must be applied");
+        assert_eq!(
+            state.transactions().read().len(),
+            1,
+            "txindex enabled must retain the confirmed coinbase for getrawtransaction"
         );
         Ok(())
     }

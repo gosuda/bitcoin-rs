@@ -332,12 +332,17 @@ pub fn apply_block(
     let mempool_evict_dur = mempool_evict_started.elapsed();
     metrics::histogram!("node.apply_block.mempool_evict_seconds")
         .record(mempool_evict_dur.as_secs_f64());
+    // Retaining every confirmed transaction solely to refine `bumpfee`'s error
+    // would duplicate txindex in RAM. Historical lookup is gated on txindex;
+    // locally submitted transactions remain cached by the RPC path.
     let tx_index_started = quanta::Instant::now();
-    for tx in &block.txdata {
-        handles
-            .transactions
-            .write()
-            .insert(tx.compute_txid(), tx.clone());
+    if handles.tx_index.is_some() {
+        for tx in &block.txdata {
+            handles
+                .transactions
+                .write()
+                .insert(tx.compute_txid(), tx.clone());
+        }
     }
     let tx_index_dur = tx_index_started.elapsed();
     metrics::histogram!("node.apply_block.tx_index_seconds").record(tx_index_dur.as_secs_f64());
