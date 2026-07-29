@@ -277,14 +277,17 @@ impl UtxoChangeListener for CoinStatsListener {
     }
 }
 
+/// Applies a signed `delta` to `value`, saturating at the `u64` bounds.
+///
+/// Invariant: the sign of `delta` selects the direction. Magnitudes beyond
+/// `u64::MAX` saturate to `u64::MAX` in that direction; they never flip it.
 fn apply_signed_delta(value: &mut u64, delta: i128) {
-    if let Ok(increment) = u64::try_from(delta) {
-        *value = value.saturating_add(increment);
-        return;
-    }
-
-    let decrement = u64::try_from(delta.saturating_neg()).unwrap_or(u64::MAX);
-    *value = value.saturating_sub(decrement);
+    let magnitude = u64::try_from(delta.unsigned_abs()).unwrap_or(u64::MAX);
+    *value = if delta >= 0 {
+        value.saturating_add(magnitude)
+    } else {
+        value.saturating_sub(magnitude)
+    };
 }
 
 fn coin_hash_bytes(op: &OutPoint, txout: &TxOut, height: u32, coinbase: bool) -> Vec<u8> {
@@ -326,5 +329,33 @@ fn read_array<const N: usize>(
 impl From<Infallible> for CoinStatsDecodeError {
     fn from(value: Infallible) -> Self {
         match value {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_signed_delta;
+
+    #[test]
+    fn signed_delta_saturates_in_the_direction_of_its_sign() {
+        let cases: &[(u64, i128, u64)] = &[
+            (0, 0, 0),
+            (10, 5, 15),
+            (10, -4, 6),
+            (10, -25, 0),
+            (u64::MAX, 1, u64::MAX),
+            // Positive magnitude beyond u64::MAX must still add.
+            (5, i128::from(u64::MAX) + 10, u64::MAX),
+            (0, i128::MAX, u64::MAX),
+            // Negative magnitude beyond u64::MAX must still subtract.
+            (u64::MAX, -(i128::from(u64::MAX) + 10), 0),
+            (u64::MAX, i128::MIN, 0),
+        ];
+
+        for &(start, delta, expected) in cases {
+            let mut value = start;
+            apply_signed_delta(&mut value, delta);
+            assert_eq!(value, expected, "start={start} delta={delta}");
+        }
     }
 }
