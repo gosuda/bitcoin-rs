@@ -179,19 +179,14 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
         });
     }
 
+    // Filled by the first input that actually reaches bitcoinconsensus; an
+    // all-taproot transaction never pays for the encode.
     #[cfg(feature = "bitcoinconsensus")]
-    let serialized_tx = encode::serialize(tx);
+    let mut serialized_tx: Option<Vec<u8>> = None;
 
     for (input_index, (input, prevout)) in tx.input.iter().zip(input_prevouts.iter()).enumerate() {
         #[cfg(feature = "bitcoinconsensus")]
-        verify_input_script(
-            input_index,
-            input,
-            prevout,
-            tx,
-            serialized_tx.as_slice(),
-            flags,
-        )?;
+        verify_input_script(input_index, input, prevout, tx, &mut serialized_tx, flags)?;
         #[cfg(not(feature = "bitcoinconsensus"))]
         verify_input_script(input_index, input, prevout, tx, flags)?;
     }
@@ -208,13 +203,19 @@ fn verify_transaction_borrowed_with_locktime_cutoff(
     Ok(())
 }
 
+/// Verifies one input script, serializing `tx` into `serialized_tx` on first use.
+///
+/// Invariant: `serialized_tx` is populated at most once per transaction, and only
+/// when an input actually reaches the bitcoinconsensus backend. Taproot key-path
+/// inputs under `VerifyFlags::TAPROOT` return through the local interpreter
+/// without touching it.
 #[cfg(feature = "bitcoinconsensus")]
 fn verify_input_script(
     input_index: usize,
     input: &bitcoin::TxIn,
     prevout: &bitcoin::TxOut,
     tx: &bitcoin::Transaction,
-    serialized_tx: &[u8],
+    serialized_tx: &mut Option<Vec<u8>>,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
     let script = Script::from_bytes(prevout.script_pubkey.as_bytes());
@@ -222,11 +223,12 @@ fn verify_input_script(
         return verify_input_script_with_interpreter(input_index, input, prevout, tx, flags);
     }
 
+    let tx_bytes = serialized_tx.get_or_insert_with(|| encode::serialize(tx));
     script
         .verify_with_flags(
             input_index,
             prevout.value,
-            serialized_tx,
+            tx_bytes.as_slice(),
             flags.consensus_bits(),
         )
         .map_err(|error| ConsensusError::Script {
@@ -289,6 +291,8 @@ fn total_output_value_borrowed(tx: &bitcoin::Transaction) -> Result<u64, Consens
 mod tests {
     use std::collections::BTreeMap;
 
+    #[cfg(feature = "bitcoinconsensus")]
+    use bitcoin::consensus::encode;
     use bitcoin::hashes::Hash as _;
     use bitcoin::script::Builder;
     #[cfg(feature = "bitcoinconsensus")]
@@ -451,7 +455,7 @@ mod tests {
 
     #[cfg(feature = "bitcoinconsensus")]
     #[test]
-    fn non_taproot_input_uses_supplied_serialized_tx() {
+    fn non_taproot_input_reuses_cached_serialized_tx() {
         let outpoint = OutPoint {
             txid: Txid::from_byte_array([6; 32]),
             vout: 0,
@@ -470,26 +474,78 @@ mod tests {
             script_pubkey: Builder::new().push_int(1).into_script(),
         };
 
+        // A pre-populated cache is handed to bitcoinconsensus verbatim: the empty
+        // body fails to decode, proving the transaction was not re-serialized.
+        let mut serialized_tx = Some(Vec::new());
         assert!(matches!(
-            super::verify_input_script(0, &tx.input[0], &prevout, &tx, &[], VerifyFlags::NONE),
+            super::verify_input_script(
+                0,
+                &tx.input[0],
+                &prevout,
+                &tx,
+                &mut serialized_tx,
+                VerifyFlags::NONE
+            ),
             Err(ConsensusError::Script { input_index: 0, .. })
         ));
+        assert_eq!(
+            serialized_tx,
+            Some(Vec::new()),
+            "a pre-populated cache must not be re-serialized"
+        );
     }
 
     #[cfg(feature = "bitcoinconsensus")]
     #[test]
-    fn p2tr_taproot_input_ignores_supplied_serialized_tx_for_local_fallback() {
+    fn non_taproot_input_serializes_transaction_on_first_use() {
+        let outpoint = OutPoint {
+            txid: Txid::from_byte_array([6; 32]),
+            vout: 0,
+        };
+        let tx = Transaction {
+            version: transaction::Version(1),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![spending_input(outpoint)],
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let prevout = TxOut {
+            value: Amount::from_sat(100),
+            script_pubkey: Builder::new().push_int(1).into_script(),
+        };
+
+        let mut serialized_tx = None;
+        assert_eq!(
+            super::verify_input_script(
+                0,
+                &tx.input[0],
+                &prevout,
+                &tx,
+                &mut serialized_tx,
+                VerifyFlags::NONE
+            ),
+            Ok(())
+        );
+        assert_eq!(serialized_tx, Some(encode::serialize(&tx)));
+    }
+
+    #[cfg(feature = "bitcoinconsensus")]
+    #[test]
+    fn p2tr_taproot_input_does_not_serialize_transaction() {
         let Some(fixture) = p2tr_extra_witness_spend(7) else {
             panic!("test secret key must produce a taproot spend fixture");
         };
 
         assert!(VerifyFlags::MANDATORY.contains(VerifyFlags::TAPROOT));
+        let mut serialized_tx = None;
         match super::verify_input_script(
             0,
             &fixture.tx.0.input[0],
             &fixture.prevout,
             &fixture.tx.0,
-            &[],
+            &mut serialized_tx,
             VerifyFlags::MANDATORY,
         ) {
             Err(ConsensusError::Script {
@@ -501,6 +557,10 @@ mod tests {
             ),
             other => panic!("expected taproot fallback script error, got {other:?}"),
         }
+        assert!(
+            serialized_tx.is_none(),
+            "taproot-only verification must not serialize the transaction"
+        );
     }
 
     #[cfg(not(feature = "bitcoinconsensus"))]
