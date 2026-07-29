@@ -231,27 +231,24 @@ pub fn apply_block(
     let verify_flags = compute_verify_flags(handles.network, height, softfork_state);
     let verify_flags_dur = verify_flags_started.elapsed();
     let script_verify_started = quanta::Instant::now();
-    let block_transactions_started = quanta::Instant::now();
     let script_verify_result =
         verify_block_transactions(handles, block, height, locktime_cutoff, verify_flags);
-    let block_transactions_dur = block_transactions_started.elapsed();
     let script_verify_dur = script_verify_started.elapsed();
     metrics::histogram!("node.apply_block.script_verify_seconds")
         .record(script_verify_dur.as_secs_f64());
     let script_verify_profile = script_verify_result?;
     if script_verify_dur.as_micros() >= SCRIPT_VERIFY_OUTLIER_BLOCK_US {
-        let verify_block_transactions_us = block_transactions_dur.as_micros();
+        let script_verify_us = script_verify_dur.as_micros();
         tracing::info!(
             height,
             %block_hash,
             tx_count = block.txdata.len(),
             non_coinbase_tx_count = script_verify_profile.non_coinbase_tx_count,
             total_input_count = script_verify_profile.total_input_count,
-            script_verify_us = script_verify_dur.as_micros(),
+            script_verify_us,
             compute_verify_flags_us = verify_flags_dur.as_micros(),
-            verify_block_transactions_us,
             tx_verify_call_us = script_verify_profile.tx_verify_call_us,
-            tx_nonverify_us = script_verify_profile.nonverify_us(verify_block_transactions_us),
+            tx_nonverify_us = script_verify_profile.nonverify_us(script_verify_us),
             "apply_block: script verify attribution"
         );
         for (rank_index, tx_profile) in script_verify_profile.slow_txs.iter().enumerate() {
@@ -265,7 +262,7 @@ pub fn apply_block(
                 output_count = tx_profile.output_count,
                 tx_verify_us = tx_profile.tx_verify_us,
                 block_tx_verify_call_us = script_verify_profile.tx_verify_call_us,
-                block_script_verify_us = script_verify_dur.as_micros(),
+                block_script_verify_us = script_verify_us,
                 "apply_block: script verify transaction attribution"
             );
         }
@@ -643,8 +640,8 @@ impl ScriptVerifyProfile {
         self.tx_verify_call_us = self.tx_verify_call_us.saturating_add(elapsed_us);
     }
 
-    fn nonverify_us(&self, verify_block_transactions_us: u128) -> u128 {
-        verify_block_transactions_us.saturating_sub(self.tx_verify_call_us)
+    fn nonverify_us(&self, script_verify_us: u128) -> u128 {
+        script_verify_us.saturating_sub(self.tx_verify_call_us)
     }
 }
 
