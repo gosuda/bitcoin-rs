@@ -194,7 +194,25 @@ The last row is why `cap_global_thread_pool` lives in `node::run` and not in the
 
 Two of four were wrong, and both were wrong for the same two reasons — tuned against a harness sharing CPU with the node, and tuned on wall alone. Neither mistake is visible without measuring CPU on an idle many-core host. **No constant remains to tune**; what is left is per-unit work, itemised in the stage decomposition below.
 
-A useful framing of that remainder: at 8 script threads bitcoin-rs spends 474.2s CPU, near Core's 463.6s, but takes 130.6s against Core's 60.7s. Core extracts roughly 2.1× more parallelism per CPU-second. We reach a comparable wall only by spending more threads and more total CPU, which is the signature of a per-unit-work gap rather than a scheduling one.
+Two measured facts about the remainder, and no causal claim between them. At our operating point (32 script threads) bitcoin-rs spends 652.5s CPU against Core's 463.6s and 77.9s wall against 60.7s. At 8 threads it spends 474.2s CPU — near Core's — but takes 130.6s, reaching only 3.63 mean cores against Core's 7.64.
+
+**Do not read that second row as a per-unit-work gap.** Equal CPU with higher wall is the signature of *lower effective parallelism or idle time*, which is the opposite reading. The two rows describe different operating points and cannot be combined into a single cause. Assigning one needs a CPU profile or a stage concurrency trace, and neither has been taken.
+
+The current apply decomposition (150001 blocks, `assume_valid_height=0`):
+
+| stage | seconds | n |
+|---|---|---|
+| apply total | 69.39 | 150001 |
+| script verify | 49.34 | 150001 |
+| — of which parallel | 26.08 | 44008 |
+| — of which serial overlay | 23.26 | 23883 |
+| utxo commit | 3.65 | 150001 |
+| block rules | 2.81 | 150001 |
+| script prepare | 2.57 | 67891 |
+| block body persist | 1.73 | 150001 |
+| everything else | <1.1 each | |
+
+Non-script apply is now about 10s total, down from roughly 20s. Script verification is 71% of apply, and **23.26s of it runs serially because those blocks need the same-block UTXO overlay**. That is the largest single identified item left and it is structural, not a constant.
 
 ### Memory is the metric bitcoin-rs wins
 
@@ -527,7 +545,7 @@ That leaves **block parse (3.70s)** and **`script_prepare` + `resolve` (5.80s)**
 
 Only the last row approaches parity, and it requires undoing three things that are measured as irreducible: merkle is at its hashing floor, `utxo_commit` is real work, and `block_body_persist` has 0.66s of removable overhead in 3.28s. So parity is not one refactor away. Core is modestly faster across nearly every non-crypto stage at once — 3-4s here, 3-4s there — which is what a mature C++ implementation with tuned allocation and batching looks like, not a defect with a fix.
 
-What is genuinely true and worth carrying forward: script verification is a **tie**, memory is **2.9× better**, GoCoin is beaten by **2.3×**, and the total gap is **1.26×** and itemised. Anyone resuming should decide whether 1.26× on throughput is worth a broad re-engineering of the non-crypto apply path, rather than starting a multi-crate refactor expecting parity from it.
+What is genuinely true and worth carrying forward: script verification **was** a tie at 36.47s vs 36.07s, and the threshold correction deliberately gave that up — the stage now measures 49.34s of wall while costing far less CPU, and total apply fell from 76.7s to 69.39s. Judge the stage on total cost, not on its own clock. Memory is, memory is **2.9× better**, GoCoin is beaten by **2.3×**, and the total gap is **1.26×** and itemised. Anyone resuming should decide whether 1.26× on throughput is worth a broad re-engineering of the non-crypto apply path, rather than starting a multi-crate refactor expecting parity from it.
 
 ## Guidance
 
