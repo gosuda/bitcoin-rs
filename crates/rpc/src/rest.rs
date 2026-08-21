@@ -152,6 +152,18 @@ fn header_records(ctx: &Context, hash: Hash256, count: u32) -> Vec<HeaderRecord>
     // Cache-only records predate tree publication, so their active-chain
     // membership cannot be established here; preserve the singleton fallback
     // for those records rather than turning a usable header into a 404.
+    //
+    // It no longer has a header to hand back. Records stopped carrying one when
+    // the block tree became the single source: `record_for_hash` fills the
+    // header from the tree node, and reaching here means the tree has no node
+    // for this hash. So this now yields an empty result rather than a header.
+    //
+    // Left in place rather than deleted. A record whose hash the tree does not
+    // know cannot arise in a running node — `apply_block` inserts the header
+    // before pushing the record, through the same handles, and the tree never
+    // drops a node — so this is unreachable outside fixtures. Removing an
+    // unreachable fallback is a separate claim from removing a stored field,
+    // and it should be argued on its own.
     let Some(record) = ctx.block_by_hash(hash) else {
         return Vec::new();
     };
@@ -790,6 +802,59 @@ mod tests {
         assert_eq!(values.len(), 2);
         assert_eq!(values[0].get("height").and_then(Value::as_u64), Some(0));
         assert_eq!(values[1].get("height").and_then(Value::as_u64), Some(1));
+    }
+
+    /// `/rest/headers/` must serve bytes identical to the block's own header.
+    ///
+    /// The three formats all serialize `HeaderRecord.header`, which comes from
+    /// the block tree. This pins the bytes rather than a field count, so a
+    /// header sourced from the wrong place fails here even if every JSON key is
+    /// still present.
+    #[test]
+    fn headers_serve_the_block_header_bytes_verbatim() {
+        let ctx = Arc::new(Context::new());
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        let _ = publish_active_chain(&ctx, &[genesis.header]);
+
+        let expected = serialize(&genesis.header);
+        let path = format!("/rest/headers/{}.bin", genesis.block_hash());
+        let response = route(&ctx, &path, "count=1", true);
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body, expected,
+            "the served header bytes must be the block's own"
+        );
+
+        let path = format!("/rest/headers/{}.hex", genesis.block_hash());
+        let response = route(&ctx, &path, "count=1", true);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected.to_lower_hex_string().into_bytes());
+    }
+
+    /// A hash the tree does not know yields nothing, and that is now the answer.
+    ///
+    /// The singleton fallback in `header_records` used to decode a header out of
+    /// the cached record. Records no longer carry one — the tree is the single
+    /// source — so reaching the fallback means there is no header to serve. This
+    /// pins that outcome so it is a recorded consequence rather than a silent
+    /// one. The state is not reachable in a running node; see the comment on
+    /// the fallback.
+    #[test]
+    fn headers_for_a_record_the_tree_does_not_know_serve_nothing() {
+        let ctx = Arc::new(Context::new());
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        // Record pushed, tree deliberately left empty.
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+
+        let path = format!("/rest/headers/{}.json", genesis.block_hash());
+        let response = route(&ctx, &path, "count=1", true);
+        assert_eq!(response.status, 200);
+        let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
+        assert!(
+            values.is_empty(),
+            "a record with no tree node has no header to serve"
+        );
     }
 
     #[test]

@@ -2363,6 +2363,27 @@ fn apply_block_admitted(
             &block_bytes,
             handles.cache_block_bodies_in_memory,
         );
+        // The record carries no header. `BlockRecord`'s is filled from the block
+        // tree when a caller resolves one, which is sound only because the
+        // header is already in the tree by the time the record is in the log —
+        // `applied_header_tip` above, through these same handles, is what puts
+        // it there.
+        //
+        // That ordering is the whole of the argument, and until this assertion
+        // nothing enforced it. Reverse the two and every `getblock` /
+        // `getblockheader` answer for a freshly applied block loses its header,
+        // with nothing failing at the point the mistake is made.
+        //
+        // The tree lock is free here: `applied_header_tip` released its write
+        // guard before returning. The check is one hash-table lookup, and it is
+        // compiled out of release builds — so this is a guard for the test
+        // suite, where it runs on every block any node test applies.
+        debug_assert!(
+            handles.block_tree.read().node_by_hash(block_hash).is_some(),
+            "block {} is entering the record log with no block-tree node; \
+             its header would be unrecoverable",
+            block_hash.to_string_be()
+        );
         handles.blocks.write().push(block_record);
     }
     let block_record_dur = block_record_started.elapsed();
@@ -3604,20 +3625,17 @@ fn applied_block_record(
     } else {
         String::new()
     };
-    let header = block_bytes
-        .get(..SERIALIZED_BLOCK_HEADER_LEN)
-        .and_then(|prefix| prefix.try_into().ok())
-        .or_else(|| {
-            bitcoin::consensus::encode::serialize(&block.header)
-                .try_into()
-                .ok()
-        });
     BlockRecord {
         hash: block_hash,
         height,
         block_hex,
         body_size: block_bytes.len(),
-        header,
+        // Not stored. `applied_header_tip` above has already put this block's
+        // header in the block tree — the record is pushed after that, through
+        // the same handles — and the tree never drops a node. Keeping a second
+        // copy here kept it for every block on the chain, for the life of the
+        // process.
+        header: None,
         tx_count: block.txdata.len(),
         time: block.header.time,
     }

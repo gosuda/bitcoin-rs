@@ -1044,6 +1044,22 @@ mod tests {
         ctx
     }
 
+    /// Makes `ctx` know `block` the way a running node does: header in the block
+    /// tree, record in the log.
+    ///
+    /// A record on its own is not a node's state. `apply_block` puts the header
+    /// in the tree first and pushes the record after, through the same handles,
+    /// and the record carries no header of its own — the tree is where one
+    /// lives. A fixture that pushes only a record is asking `getblock` to answer
+    /// from half the state a node would have.
+    fn seed_block(ctx: &Arc<Context>, block: &bitcoin::Block, record: BlockRecord) {
+        {
+            let mut tree = ctx.block_tree.write();
+            let _ = tree.insert_node(None, block.header, NodeStatus::Active);
+        }
+        ctx.add_block(record);
+    }
+
     #[test]
     fn subsidy_at_height_genesis_is_50_btc() {
         assert_eq!(subsidy_at_height(0), 5_000_000_000);
@@ -1128,7 +1144,7 @@ mod tests {
         let block_hash_hex = record.hash.to_string_be();
         let block_size = u64::try_from(record.body_size)?;
         let tx_count = u64::try_from(record.tx_count)?;
-        ctx.add_block(record);
+        seed_block(&ctx, &genesis, record);
 
         let block_json = getblock(&ctx, &json!([block_hash_hex.as_str(), 1]))?;
         let header_json = getblockheader(&ctx, &json!([block_hash_hex.as_str(), true]))?;
@@ -1213,7 +1229,7 @@ mod tests {
         });
         let calls = Arc::clone(&source);
         let ctx = Arc::new(Context::new().with_block_body_source(source));
-        ctx.add_block(record);
+        seed_block(&ctx, &genesis, record);
 
         let expected_hex = body.to_lower_hex_string();
         assert_eq!(
@@ -1241,7 +1257,7 @@ mod tests {
 
         let ctx = Arc::new(Context::new());
         let genesis = bitcoin::blockdata::constants::genesis_block(Network::Regtest);
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        seed_block(&ctx, &genesis, BlockRecord::from_block(0, &genesis));
         let block_hash =
             bitcoin_rs_primitives::Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
         let result = getblock(&ctx, &json!([block_hash.to_string_be(), 2]))
