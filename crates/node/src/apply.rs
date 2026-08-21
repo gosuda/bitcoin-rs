@@ -496,6 +496,14 @@ pub(crate) trait PruneBodyStore: Send + Sync {
         Ok(Some((body.len(), tx_count)))
     }
 
+    /// Bytes this store's block files occupy on disk, when it keeps files.
+    ///
+    /// `None` from a store with nothing on disk to measure; the caller then
+    /// falls back to the block-record sum.
+    fn disk_usage(&self) -> Option<u64> {
+        None
+    }
+
     /// Makes body bytes durable before their checkpoint can be published.
     fn sync(&self) -> Result<(), StorageError>;
 }
@@ -632,6 +640,10 @@ impl<S: KvStore> FlatFilePruneBodyStore<S> {
 }
 
 impl<S: KvStore> PruneBodyStore for FlatFilePruneBodyStore<S> {
+    fn disk_usage(&self) -> Option<u64> {
+        Some(self.files.disk_usage())
+    }
+
     fn persist_block_body(
         &self,
         height: u32,

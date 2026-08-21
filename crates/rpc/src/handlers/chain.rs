@@ -41,11 +41,20 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         bitcoin_rs_primitives::Network::Signet => "signet",
         bitcoin_rs_primitives::Network::Regtest => "regtest",
     };
-    // The whole call needs exactly one number out of the block log, and it is a
-    // sum the log already maintains. Reading it releases the lock immediately;
-    // folding ~963k records for it held the lock that block application takes to
-    // append.
-    let size_on_disk = ctx.blocks.read().size_on_disk();
+    // Bytes on disk, from whatever owns them.
+    //
+    // The block store knows what its files occupy and shrinks when pruning
+    // deletes one. The record log can only offer the sum of the block sizes it
+    // has seen: records outlive the bodies they describe, so that sum goes on
+    // counting bytes that are gone — under a field name people read to check
+    // that pruning worked. It stays as the fallback for a context with no
+    // durable storage behind it, which is every test fixture and nothing else.
+    //
+    // Either way the read is O(1) and the log's lock — the one block
+    // application takes to append — is released immediately.
+    let size_on_disk = ctx
+        .block_storage_disk_usage()
+        .unwrap_or_else(|| ctx.blocks.read().size_on_disk());
     let prune_status = ctx.prune_status();
     let bestblockhash = applied_tip
         .as_ref()
@@ -1442,6 +1451,44 @@ mod tests {
         assert_eq!(
             result.get("size_on_disk").and_then(JsonValueTrait::as_u64),
             Some(u64::try_from(body.len()).unwrap_or(u64::MAX))
+        );
+    }
+
+    /// `size_on_disk` reports what the block store says, not the record sum.
+    ///
+    /// The record sum keeps counting blocks whose bytes pruning has deleted, so
+    /// it cannot be what a field named "size on disk" reports. This gives the
+    /// context a store that answers with a figure deliberately unrelated to the
+    /// records, so a handler that quietly went on summing them fails here rather
+    /// than looking right by coincidence.
+    #[test]
+    fn getblockchaininfo_size_on_disk_comes_from_the_block_store() {
+        struct SizedStore(u64);
+
+        impl crate::BlockBodySource for SizedStore {
+            fn block_body(&self, _height: u32, _hash: Hash256) -> Option<Vec<u8>> {
+                None
+            }
+            fn disk_usage(&self) -> Option<u64> {
+                Some(self.0)
+            }
+        }
+
+        let genesis = genesis_block(bitcoin::Network::Regtest);
+        let record = BlockRecord::from_block_metadata(0, &genesis);
+        let record_bytes = u64::try_from(record.body_size).unwrap_or(u64::MAX);
+        let store_bytes = record_bytes.saturating_add(4_096);
+        let ctx =
+            Arc::new(Context::new().with_block_body_source(Arc::new(SizedStore(store_bytes))));
+        ctx.add_block(record);
+
+        let result = getblockchaininfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+
+        assert_eq!(
+            result.get("size_on_disk").and_then(JsonValueTrait::as_u64),
+            Some(store_bytes),
+            "size_on_disk must come from the store that owns the bytes"
         );
     }
 

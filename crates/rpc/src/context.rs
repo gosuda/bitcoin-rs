@@ -362,6 +362,22 @@ pub trait BlockBodySource: Send + Sync {
         None
     }
 
+    /// Bytes this source's block storage currently occupies on disk.
+    ///
+    /// This is `getblockchaininfo`'s `size_on_disk`, and it has to come from
+    /// whatever owns the bytes. The block-record log can only offer the sum of
+    /// the block sizes it has seen, which is a different number: records outlive
+    /// the bodies they describe, so that sum keeps counting bytes pruning has
+    /// already deleted — under a field name that is read to check whether
+    /// pruning is working.
+    ///
+    /// `None` means "this source does not know", and the caller falls back to
+    /// that sum. A source with no durable storage behind it — a test fixture, a
+    /// cache-only context — has nothing better to say.
+    fn disk_usage(&self) -> Option<u64> {
+        None
+    }
+
     /// Returns `len` body bytes starting `offset` bytes into the serialized
     /// block, letting a caller read one transaction without materializing the
     /// whole body.
@@ -1098,6 +1114,14 @@ impl Context {
         self.block_body_source
             .as_ref()?
             .block_body(record.height, record.hash)
+    }
+
+    /// Bytes the node's block storage occupies on disk, when it can say.
+    ///
+    /// `None` when there is no durable body source, or it does not track usage.
+    #[must_use]
+    pub fn block_storage_disk_usage(&self) -> Option<u64> {
+        self.block_body_source.as_ref()?.disk_usage()
     }
 
     /// Returns lowercase serialized block hex from the record or durable storage.

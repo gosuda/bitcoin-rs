@@ -479,6 +479,10 @@ impl BlockBodySource for StoredBlockBodySource {
         self.store.load_block_body(height, hash).ok().flatten()
     }
 
+    fn disk_usage(&self) -> Option<u64> {
+        self.store.disk_usage()
+    }
+
     fn block_body_range(
         &self,
         height: u32,
@@ -2360,6 +2364,106 @@ mod tests {
             NodeStorage::Mdbx(store) => metadata_exists(&**store)?,
         };
         assert!(!has_metadata);
+        Ok(())
+    }
+
+    /// Pruning a block file must reduce what the node reports as its disk size.
+    ///
+    /// `getblockchaininfo.size_on_disk` used to be the sum of every block
+    /// record's `body_size`. Pruning does not remove records — it clears their
+    /// cached bodies and leaves the rest — so that sum could not move, and a
+    /// pruned node went on reporting bytes it no longer had, under the one field
+    /// an operator reads to check that pruning worked.
+    ///
+    /// This asserts both halves: the store's figure falls by exactly the file
+    /// that was deleted, and the record sum does not move at all. The second is
+    /// what makes the first worth having.
+    #[test]
+    fn pruning_a_block_file_reduces_the_reported_disk_size() -> anyhow::Result<()> {
+        use bitcoin::blockdata::constants::genesis_block;
+
+        fn seed_file_height<S: KvStore>(store: &S, height: u32) -> anyhow::Result<()> {
+            let mut batch = store.new_batch();
+            batch.put(
+                bitcoin_rs_pruning::BLOCK_DATA_CF,
+                &bitcoin_rs_storage::block_file_max_height_key(0),
+                &bitcoin_rs_storage::encode_block_file_max_height(height),
+            );
+            store.write(batch)?;
+            Ok(())
+        }
+
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.prune_target_mb = 1;
+
+        // Two files present before the store opens, so the earlier one is not
+        // the append target and is therefore prunable. Same shape as
+        // `prune_reclaims_whole_files_and_keeps_current_file`, but with bytes in
+        // it, because bytes are what is being counted.
+        let blocks_dir = config.data_dir.join("blocks");
+        std::fs::create_dir_all(&blocks_dir)?;
+        let prunable_file = blocks_dir.join("blk00000.dat");
+        let prunable_bytes = vec![7_u8; 4_096];
+        std::fs::write(&prunable_file, &prunable_bytes)?;
+        std::fs::write(blocks_dir.join("blk00001.dat"), [])?;
+
+        let state = NodeState::open(config)?;
+        let block = genesis_block(bitcoin::Network::Regtest);
+        // The hash is not needed: this test counts bytes in files, not bodies.
+        let record = BlockRecord::from_block_metadata(10, &block);
+        let record_sum_before = u64::try_from(record.body_size)?;
+        state.blocks.write().push(record);
+
+        let Some(before) = state.block_body_store.disk_usage() else {
+            anyhow::bail!("a flat-file store must report its usage");
+        };
+        assert!(
+            before >= u64::try_from(prunable_bytes.len())?,
+            "the fixture's bytes must be accounted for"
+        );
+
+        // Tell the pruner that file 0 tops out at height 10, so pruning to 11
+        // makes it prunable.
+        match &state.storage {
+            #[cfg(feature = "rocksdb")]
+            NodeStorage::RocksDb(store) => seed_file_height(&**store, 10)?,
+            #[cfg(feature = "fjall")]
+            NodeStorage::Fjall(store) => seed_file_height(&**store, 10)?,
+            #[cfg(feature = "redb")]
+            NodeStorage::Redb(store) => seed_file_height(&**store, 10)?,
+            #[cfg(feature = "mdbx")]
+            NodeStorage::Mdbx(store) => seed_file_height(&**store, 10)?,
+        }
+
+        let Some(service) = state.prune_service() else {
+            anyhow::bail!("prune service should exist when prune_target_mb > 0");
+        };
+        service
+            .prune_to_height(11)
+            .map_err(|error| anyhow::anyhow!("prune failed: {error}"))?;
+
+        assert!(!prunable_file.exists(), "the fixture must actually prune");
+        let Some(after) = state.block_body_store.disk_usage() else {
+            anyhow::bail!("a flat-file store must report its usage");
+        };
+        assert_eq!(
+            after,
+            before.saturating_sub(u64::try_from(prunable_bytes.len())?),
+            "the reported size must fall by exactly the file that was deleted"
+        );
+
+        // The number this replaces, unmoved — which is the defect.
+        let record_sum_after = state.blocks.read().iter().fold(0_u64, |total, entry| {
+            total.saturating_add(u64::try_from(entry.body_size).unwrap_or(0))
+        });
+        assert_eq!(
+            record_sum_after, record_sum_before,
+            "the block-record sum cannot see pruning, which is why it is not \
+             what size_on_disk reports"
+        );
         Ok(())
     }
 

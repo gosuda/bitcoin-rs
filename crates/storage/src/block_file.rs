@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use parking_lot::Mutex;
 
 use crate::StorageError;
@@ -91,6 +93,21 @@ pub struct FlatFileBlockStore {
     blocks_dir: PathBuf,
     max_file_bytes: u64,
     writer: Mutex<WriterState>,
+    /// Bytes currently occupied by this store's block files.
+    ///
+    /// Seeded by walking the directory once at open, then maintained by the two
+    /// operations that change it: `append` adds a framed record, and
+    /// `delete_file_if_not_current` subtracts a whole file. Every deletion in
+    /// the workspace goes through that one method, so there is no second path
+    /// to forget.
+    ///
+    /// Maintained rather than measured because the caller is
+    /// `getblockchaininfo`. Walking the directory costs one `stat` per file —
+    /// thousands at a mainnet-sized chain — and that call has just been made
+    /// independent of chain length; putting a directory walk back into it would
+    /// undo that. `disk_usage` checks the running figure against a real walk
+    /// under `debug_assert`.
+    usage: AtomicU64,
 }
 
 struct WriterState {
@@ -198,7 +215,31 @@ impl FlatFileBlockStore {
             .append_offset
             .checked_add(record_len)
             .ok_or(StorageError::InvalidOperation("block file offset overflow"))?;
+        // After the write, so a failed append does not inflate the figure.
+        let _ = self.usage.fetch_add(record_len, Ordering::Relaxed);
         Ok(position)
+    }
+
+    /// Bytes this store's block files currently occupy on disk.
+    ///
+    /// This is what `getblockchaininfo` reports as `size_on_disk`: bytes that
+    /// are actually there, so pruning a file makes it fall. It is not the sum of
+    /// the block sizes the node has seen — that figure keeps counting blocks
+    /// whose bytes have been deleted, which is the opposite of what the field
+    /// is read for.
+    ///
+    /// Undo data is not included. It lives in the key-value store rather than in
+    /// files here, so this store cannot see it; Bitcoin Core counts its undo
+    /// files in the same number and this does not.
+    #[must_use]
+    pub fn disk_usage(&self) -> u64 {
+        debug_assert_eq!(
+            self.usage.load(Ordering::Relaxed),
+            measure_blocks_dir(&self.blocks_dir)
+                .unwrap_or_else(|_| self.usage.load(Ordering::Relaxed)),
+            "running block-file usage drifted from the files on disk"
+        );
+        self.usage.load(Ordering::Relaxed)
     }
 
     /// Flushes the current append file to stable storage.
@@ -297,8 +338,18 @@ impl FlatFileBlockStore {
             return Ok(false);
         }
         let path = block_file_path(&self.blocks_dir, file_no);
+        // Sized before the unlink, because afterwards there is nothing to size.
+        // A file that cannot be sized is removed without adjusting the running
+        // figure rather than guessed at; `disk_usage`'s `debug_assert` is what
+        // notices if that ever happens.
+        let reclaimed = fs::metadata(&path).map(|metadata| metadata.len()).ok();
         match fs::remove_file(path) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                if let Some(bytes) = reclaimed {
+                    let _ = self.usage.fetch_sub(bytes, Ordering::Relaxed);
+                }
+                Ok(true)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error.into()),
         }
@@ -342,6 +393,11 @@ impl FlatFileBlockStore {
         }
         file.seek(SeekFrom::Start(recovered_offset))?;
 
+        // Seeded from the files themselves, once. A store reopened over an
+        // existing directory has to start from what is there, and an incomplete
+        // tail was just truncated above, so this runs after that.
+        let usage = AtomicU64::new(measure_blocks_dir(&blocks_dir)?);
+
         Ok(Self {
             blocks_dir,
             max_file_bytes,
@@ -351,6 +407,7 @@ impl FlatFileBlockStore {
                 append_offset: recovered_offset,
                 directory_dirty: false,
             }),
+            usage,
         })
     }
 }
@@ -620,6 +677,27 @@ fn read_exact_or_none(reader: &mut impl io::Read, bytes: &mut [u8]) -> Result<bo
     }
 }
 
+/// Sums the sizes of every block file in `blocks_dir`.
+///
+/// The truth `disk_usage`'s running figure is kept honest against, and how that
+/// figure is seeded at open. Costs one `stat` per file, which is why it is not
+/// what `getblockchaininfo` calls.
+fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
+    let mut total = 0_u64;
+    for entry in fs::read_dir(blocks_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if parse_block_file_name(name).is_none() {
+            continue;
+        }
+        total = total.saturating_add(entry.metadata()?.len());
+    }
+    Ok(total)
+}
+
 fn highest_block_file_number(blocks_dir: &Path) -> Result<Option<u32>, StorageError> {
     let mut highest = None;
     for entry in fs::read_dir(blocks_dir)? {
@@ -671,6 +749,113 @@ mod tests {
 
     fn hash(byte: u8) -> [u8; 32] {
         [byte; 32]
+    }
+
+    /// `disk_usage` reports bytes that are there, and stops reporting them when
+    /// they are deleted.
+    ///
+    /// This is what `getblockchaininfo` calls `size_on_disk`. The figure it
+    /// replaces was the sum of every block's serialized length, which pruning
+    /// could not move: records are kept when their bodies are dropped, so a
+    /// pruned node went on reporting bytes it no longer had — under a field name
+    /// that is read precisely to check whether pruning is working.
+    ///
+    /// Compared against a fresh walk of the directory at every step, so it pins
+    /// the number against the files rather than against itself.
+    #[test]
+    fn disk_usage_follows_the_files_through_appends_and_deletion() -> Result<(), crate::StorageError>
+    {
+        let data_dir = tempdir()?;
+        let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        let blocks_dir = data_dir.path().join(super::BLOCK_FILE_DIRECTORY);
+        assert_eq!(store.disk_usage(), 0, "a fresh store occupies nothing");
+
+        let _first = store.persist(None, 1, hash(1), b"first")?;
+        let after_first = store.disk_usage();
+        assert_eq!(after_first, super::measure_blocks_dir(&blocks_dir)?);
+        assert!(after_first > 0, "an appended body occupies bytes");
+
+        // Past the 120-byte cap, so this rolls into a second file.
+        let third = store.persist(None, 2, hash(2), b"a longer second body")?;
+        let third = store.persist(None, 3, hash(3), b"third").map(|_| third)?;
+        assert_eq!(third.file_no, 0, "the fixture must roll over");
+        let after_rollover = store.disk_usage();
+        assert_eq!(after_rollover, super::measure_blocks_dir(&blocks_dir)?);
+        assert!(after_rollover > after_first, "appends add bytes");
+
+        // File 0 is complete, so it is prunable; file 1 is the current one.
+        assert!(
+            store.delete_file_if_not_current(0)?,
+            "the fixture must have a prunable file"
+        );
+        let after_prune = store.disk_usage();
+        assert_eq!(
+            after_prune,
+            super::measure_blocks_dir(&blocks_dir)?,
+            "usage must follow the files after a deletion"
+        );
+        assert!(
+            after_prune < after_rollover,
+            "pruning a file must reduce the reported size, which is the whole \
+             reason this is not a sum of block lengths"
+        );
+        Ok(())
+    }
+
+    /// Only block files count, and a stray file must not be mistaken for one.
+    ///
+    /// The seeding walk and the running figure have to agree about what a block
+    /// file is: `append` counts framed records and nothing else, so a walk that
+    /// counted every directory entry would seed a number the maintained one can
+    /// never match — and `disk_usage`'s guard would fire on a node that had
+    /// nothing wrong with it. Backup copies, editor scratch files and the
+    /// operating system's own directory droppings all land here.
+    #[test]
+    fn disk_usage_counts_only_block_files() -> Result<(), crate::StorageError> {
+        let data_dir = tempdir()?;
+        let blocks_dir = data_dir.path().join(super::BLOCK_FILE_DIRECTORY);
+        let expected = {
+            let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+            let _ = store.persist(None, 1, hash(1), b"first")?;
+            store.disk_usage()
+        };
+
+        std::fs::write(blocks_dir.join("blk00000.dat.bak"), vec![9_u8; 8_192])?;
+        std::fs::write(blocks_dir.join("notes.txt"), vec![9_u8; 8_192])?;
+
+        assert_eq!(
+            super::measure_blocks_dir(&blocks_dir)?,
+            expected,
+            "the walk must ignore files that are not block files"
+        );
+        let reopened = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        assert_eq!(
+            reopened.disk_usage(),
+            expected,
+            "a stray file must not be seeded into the usage figure"
+        );
+        Ok(())
+    }
+
+    /// A reopened store starts from the files it finds, not from zero.
+    #[test]
+    fn disk_usage_is_seeded_from_an_existing_directory() -> Result<(), crate::StorageError> {
+        let data_dir = tempdir()?;
+        let expected = {
+            let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+            let _ = store.persist(None, 1, hash(1), b"first")?;
+            let _ = store.persist(None, 2, hash(2), b"second")?;
+            store.disk_usage()
+        };
+        assert!(expected > 0, "the fixture must write something");
+
+        let reopened = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        assert_eq!(
+            reopened.disk_usage(),
+            expected,
+            "a reopened store must account for the files already there"
+        );
+        Ok(())
     }
 
     #[test]
