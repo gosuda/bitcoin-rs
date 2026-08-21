@@ -6344,14 +6344,15 @@ mod consensus_rule_tests {
             utxo.commit_block(&remove, &Hash256::from_le_bytes(&[0x83; 32]))?;
 
             let transition = handles.begin_chain_transition()?;
-            let error = apply_block_admitted(
+            let Err(error) = apply_block_admitted(
                 &handles,
                 &block,
                 Some(raw),
                 Some(ProvenApply::Proven(proof)),
                 &transition,
-            )
-            .expect_err("a mismatched proof must re-read the now-missing live prevout");
+            ) else {
+                panic!("a mismatched proof must re-read the now-missing live prevout");
+            };
             assert!(
                 matches!(
                     error,
@@ -6539,26 +6540,24 @@ mod consensus_rule_tests {
             "an empty verification dispatch must not count as script verification",
         );
         let mut entries = prove_window(&handles, &[&block], core::slice::from_ref(&raw));
-        let skipped = entries
-            .pop()
-            .expect("the trusted assume-valid window returned one entry above");
+        let Some(skipped) = entries.pop() else {
+            panic!("the trusted assume-valid window returned one entry above");
+        };
         handles.assume_valid_gate = Arc::new(AssumeValidGate::with_anchor(Some((
             1,
             Hash256::from_le_bytes(&[0xff; 32]),
         ))));
         assert!(!handles.assume_valid_gate.trusted());
         let transition = handles.begin_chain_transition()?;
-        let error = apply_block_admitted(&handles, &block, Some(raw), Some(skipped), &transition)
-            .expect_err("an untrusted gate at commit must run and reject the bad script");
+        let outcome = apply_block_admitted(&handles, &block, Some(raw), Some(skipped), &transition);
         assert!(
             matches!(
-                error,
-                ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
-                    input_index: 0,
-                    ..
-                })
+                outcome,
+                Err(ApplyError::Consensus(
+                    bitcoin_rs_consensus::ConsensusError::Script { input_index: 0, .. }
+                ))
             ),
-            "trust-gate flip must re-enter ordinary script validation, got {error:?}"
+            "trust-gate flip must re-enter ordinary script validation, got {outcome:?}"
         );
 
         // Full verification must be completely unaffected.
