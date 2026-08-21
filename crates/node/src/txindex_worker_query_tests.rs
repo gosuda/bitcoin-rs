@@ -232,7 +232,9 @@ impl QueryFixture {
         } else {
             Vec::new()
         };
-        let block_source = NodeBlockSource::new(Arc::new(RwLock::new(records)));
+        let block_source = NodeBlockSource::new(Arc::new(RwLock::new(
+            records.into_iter().collect::<bitcoin_rs_rpc::BlockLog>(),
+        )));
         let engine =
             TxIndexQueryEngine::new(runtime, reader, block_source, tree, applied_tip, None);
         Ok(Self { engine })

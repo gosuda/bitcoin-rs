@@ -12,7 +12,7 @@ use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, rust_path::UtxoView};
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_primitives::{Hash256, Network, OutPoint};
-use bitcoin_rs_rpc::BlockRecord;
+use bitcoin_rs_rpc::{BlockLog, BlockRecord};
 use bitcoin_rs_utxo::{
     LiveOutput, LiveOutputMeta, UtxoSet,
     set::{BorrowedBlockChanges, BorrowedUtxoAdd},
@@ -944,7 +944,7 @@ pub struct ApplyHandles {
     /// Shared mempool.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Shared block records exposed to RPC handlers.
-    pub blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    pub blocks: Arc<RwLock<BlockLog>>,
     /// Shared transaction map exposed to RPC handlers.
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
@@ -1010,7 +1010,7 @@ impl ApplyHandles {
         tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
         filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
         mempool: Arc<RwLock<Mempool>>,
-        blocks: Arc<RwLock<Vec<BlockRecord>>>,
+        blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
         zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     ) -> Self {
@@ -8840,7 +8840,7 @@ mod consensus_rule_tests {
             None,
             filter_index,
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(BlockLog::new())),
             Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),
             Arc::new(crate::NoOpZmqPublisher),
         )
@@ -9854,7 +9854,7 @@ mod consensus_rule_tests {
             None,
             noop_filter_index(),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(BlockLog::new())),
             Arc::new(RwLock::new(HashMap::<bitcoin::Txid, Transaction>::new())),
             Arc::new(crate::NoOpZmqPublisher),
         )

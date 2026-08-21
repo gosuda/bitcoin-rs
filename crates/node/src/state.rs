@@ -11,7 +11,7 @@ use bitcoin::hex::FromHex as _;
 use bitcoin::{Transaction, Txid};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_rpc::{
-    BlockBodyMetadata, BlockBodySource, BlockRecord, NetworkState, PruneResult, PruneService,
+    BlockBodyMetadata, BlockBodySource, BlockLog, NetworkState, PruneResult, PruneService,
     PruneServiceError, PruneStatus, ZmqNotification,
 };
 use compact_str::CompactString;
@@ -330,7 +330,7 @@ impl NodeStorage {
         &self,
         block_files: &Arc<FlatFileBlockStore>,
         block_body_store: &Arc<dyn crate::apply::PruneBodyStore>,
-        blocks: Arc<RwLock<Vec<BlockRecord>>>,
+        blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
         durable_tip_height: &Arc<AtomicU32>,
     ) -> Result<Arc<dyn PruneService>> {
@@ -549,7 +549,7 @@ pub struct NodePruneService<S: KvStore> {
     store: Arc<S>,
     block_files: Arc<FlatFileBlockStore>,
     block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
-    blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     pruneheight: Mutex<Option<u32>>,
     /// Height the last clean checkpoint would restore to, 0 when none exists.
@@ -565,7 +565,7 @@ impl<S: KvStore> NodePruneService<S> {
         store: Arc<S>,
         block_files: Arc<FlatFileBlockStore>,
         block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
-        blocks: Arc<RwLock<Vec<BlockRecord>>>,
+        blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
         durable_tip_height: Arc<AtomicU32>,
     ) -> Result<Self> {
@@ -659,7 +659,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
             }
         }
 
-        for record in blocks.iter_mut() {
+        for record in blocks.records_mut() {
             if record.height < updated_pruneheight {
                 record.block_hex = String::new();
             }
@@ -870,7 +870,7 @@ pub struct NodeState {
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<bitcoin_rs_chain::BlockTree>>,
-    blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     network: Arc<RwLock<NetworkState>>,
     peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
@@ -1058,7 +1058,7 @@ impl NodeState {
         if let Some(restored_applied_tip) = restored_applied_tip {
             applied_tip.store(Some(Arc::new(restored_applied_tip)));
         }
-        let blocks = Arc::new(RwLock::new(Vec::new()));
+        let blocks = Arc::new(RwLock::new(BlockLog::new()));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let tx_index_open = open_tx_index(&config)?;
         let (tx_index_runtime, tx_index_worker, tx_index_query) = match tx_index_open {
@@ -1374,7 +1374,7 @@ impl NodeState {
 
     /// Returns the shared block-records handle exposed to RPC handlers.
     #[must_use]
-    pub fn blocks(&self) -> Arc<RwLock<Vec<BlockRecord>>> {
+    pub fn blocks(&self) -> Arc<RwLock<BlockLog>> {
         Arc::clone(&self.blocks)
     }
 
@@ -1555,6 +1555,7 @@ impl Drop for NodeState {
 mod tests {
     use super::*;
     use bitcoin::hashes::Hash as _;
+    use bitcoin_rs_rpc::BlockRecord;
 
     #[test]
     fn open_constructs_empty_handles() -> anyhow::Result<()> {

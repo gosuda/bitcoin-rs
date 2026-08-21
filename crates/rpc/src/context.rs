@@ -35,6 +35,313 @@ pub struct BlockRecord {
     pub time: u32,
 }
 
+/// The node's block-record log, with the two whole-log sums kept as it changes.
+///
+/// The log holds one record per applied block and grows for the life of the
+/// process — ~963k entries on a mainnet node at the time of writing. Two
+/// RPC-visible figures are sums over all of it: `size_on_disk` in
+/// `getblockchaininfo`, and `txcount` in `getchaintxstats`. Folding the log to
+/// answer them made a call that reports a handful of scalars cost time linear in
+/// chain length, and it was paid **under the log's read lock**, which is the
+/// lock block application takes to append. The sums are maintained here instead.
+///
+/// Deliberately not a `Vec<BlockRecord>` with the totals kept beside it: the log
+/// is appended from `apply`, from `Context::add_block`, and from tests, and a
+/// total that any of those could forget to update is a total that will drift.
+/// Mutation goes through the methods below, so it cannot.
+///
+/// Reads are unchanged. The type derefs to `[BlockRecord]`, so every existing
+/// slice, index, iterator and binary search over the log keeps working.
+#[derive(Clone, Debug, Default)]
+pub struct BlockLog {
+    records: Vec<BlockRecord>,
+    /// Sum of `body_size` over every record.
+    total_body_size: u64,
+    /// `cumulative_tx_count[i]` is the sum of `tx_count` over `records[..=i]`.
+    ///
+    /// A single running total would answer `txcount` only when the applied tip
+    /// is the log's last record, and would fall back to walking everything above
+    /// it otherwise — a cliff, not a bound. Prefix sums answer any prefix in
+    /// constant time, so the cost no longer depends on where the applied tip
+    /// sits relative to the log. Eight bytes per record, ~7.7 MB at a mainnet
+    /// tip, against ~254 MB the records themselves occupy.
+    cumulative_tx_count: Vec<u64>,
+}
+
+impl BlockLog {
+    /// Creates an empty log.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            total_body_size: 0,
+            cumulative_tx_count: Vec::new(),
+        }
+    }
+
+    /// Appends a record, extending the running body-size sum and the prefix sums.
+    pub fn push(&mut self, record: BlockRecord) {
+        self.total_body_size = self
+            .total_body_size
+            .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+        // Read the last prefix directly rather than through `total_tx_count`:
+        // that one carries a `debug_assert` which folds the log, and paying it
+        // per append would make block application quadratic in debug builds.
+        let running = self
+            .cumulative_tx_count
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
+        self.cumulative_tx_count.push(running);
+        self.records.push(record);
+    }
+
+    /// Removes the last record, taking it back out of both.
+    ///
+    /// This is the disconnect path: a reorg pops the tip's record after checking
+    /// it is the one being disconnected.
+    pub fn pop(&mut self) -> Option<BlockRecord> {
+        let record = self.records.pop()?;
+        let _ = self.cumulative_tx_count.pop();
+        self.total_body_size = self
+            .total_body_size
+            .saturating_sub(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+        Some(record)
+    }
+
+    /// Empties the log.
+    pub fn clear(&mut self) {
+        self.records.clear();
+        self.cumulative_tx_count.clear();
+        self.total_body_size = 0;
+    }
+
+    /// Reserves capacity for `additional` more records.
+    pub fn reserve(&mut self, additional: usize) {
+        self.records.reserve(additional);
+        self.cumulative_tx_count.reserve(additional);
+    }
+
+    /// Mutable access to the records, for fields the running sums do not cover.
+    ///
+    /// Pruning uses this to release cached block bodies. `body_size` and
+    /// `tx_count` describe the block and do not change when its body is dropped,
+    /// so the sums stay correct — and `debug_assert`s in [`Self::size_on_disk`]
+    /// and [`Self::tx_count_before`] fail loudly if a caller ever changes them.
+    pub fn records_mut(&mut self) -> impl Iterator<Item = &mut BlockRecord> {
+        self.records.iter_mut()
+    }
+
+    /// Sum of every record's serialized block length, in bytes.
+    ///
+    /// This is `getblockchaininfo`'s `size_on_disk`. It counts the block sizes
+    /// the node has recorded, which is what the fold it replaced counted;
+    /// pruning does not remove records, so a pruned node still reports the bytes
+    /// its blocks would occupy.
+    #[must_use]
+    pub fn size_on_disk(&self) -> u64 {
+        debug_assert_eq!(
+            self.total_body_size,
+            self.records.iter().fold(0_u64, |total, record| total
+                .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX))),
+            "running body-size total drifted from the records it summarizes"
+        );
+        self.total_body_size
+    }
+
+    /// Sum of `tx_count` over the first `count` records.
+    ///
+    /// `count` is clamped to the log's length, so a caller that computed a
+    /// boundary against a longer log gets the whole sum rather than a panic.
+    #[must_use]
+    pub fn tx_count_before(&self, count: usize) -> u64 {
+        // The prefix vector is parallel to the records. Stating it here rather
+        // than relying on the clamp below is the difference between a mutation
+        // that drops a `pop` dying on the invariant it broke and dying on an
+        // out-of-range read further along.
+        debug_assert_eq!(
+            self.records.len(),
+            self.cumulative_tx_count.len(),
+            "the tx-count prefix vector is no longer parallel to the records"
+        );
+        let count = count.min(self.records.len());
+        let prefix = count
+            .checked_sub(1)
+            .and_then(|last| self.cumulative_tx_count.get(last).copied())
+            .unwrap_or(0);
+        debug_assert_eq!(
+            prefix,
+            self.records[..count]
+                .iter()
+                .fold(0_u64, |total, record| total
+                    .saturating_add(u64::try_from(record.tx_count).unwrap_or(0))),
+            "tx-count prefix sums drifted from the records they summarize"
+        );
+        prefix
+    }
+
+    /// Sum of every record's transaction count.
+    #[must_use]
+    pub fn total_tx_count(&self) -> u64 {
+        self.tx_count_before(self.cumulative_tx_count.len())
+    }
+}
+
+impl core::ops::Deref for BlockLog {
+    type Target = [BlockRecord];
+
+    fn deref(&self) -> &Self::Target {
+        &self.records
+    }
+}
+
+impl FromIterator<BlockRecord> for BlockLog {
+    fn from_iter<I: IntoIterator<Item = BlockRecord>>(iter: I) -> Self {
+        let mut log = Self::new();
+        for record in iter {
+            log.push(record);
+        }
+        log
+    }
+}
+
+/// `getchaintxstats`'s figures, read from the log without walking all of it.
+///
+/// The log is appended in height order and only ever popped from the tail
+/// (`apply::disconnect_block` checks the tail's hash before popping), so it is
+/// non-decreasing by height. `Context::block_at_height` already relies on that
+/// and binary-searches it; this reads the same three boundaries out of it:
+///
+/// - `end`: one past the last record at or below the applied tip.
+/// - `tip_start`: the *first* record at the applied height. Duplicate heights
+///   are possible across a reorg, and the fold this replaces took the first one.
+/// - `window_start`: the first record inside the requested window.
+///
+/// Both transaction counts are differences of prefix sums across those
+/// boundaries, so neither depends on where the applied tip sits in the log.
+///
+/// Only the window is then walked, and only for `earliest_window_time`: it is a
+/// minimum over block timestamps, which are not monotonic, so no prefix sum can
+/// answer it. The window is the caller's `nblocks` (~4,320 by default), not the
+/// chain.
+///
+/// [`fold_block_records`] is the implementation this replaced, kept as
+/// the oracle `chain_stats_matches_the_fold_it_replaced` compares against.
+#[must_use]
+pub fn chain_stats(log: &BlockLog, applied_height: u32, lowest_window_height: u64) -> ChainStats {
+    let blocks: &[BlockRecord] = log;
+    debug_assert!(
+        blocks
+            .windows(2)
+            .all(|pair| pair[0].height <= pair[1].height),
+        "the block log must be non-decreasing by height for these searches"
+    );
+
+    let end = blocks.partition_point(|record| record.height <= applied_height);
+    let applied = &blocks[..end];
+
+    let tip_start = applied.partition_point(|record| record.height < applied_height);
+    let tip_time = applied
+        .get(tip_start)
+        .filter(|record| record.height == applied_height)
+        .map(|record| record.time);
+
+    let window_start =
+        applied.partition_point(|record| u64::from(record.height) < lowest_window_height);
+    let mut earliest_window_time: Option<u32> = None;
+    for record in &applied[window_start..] {
+        earliest_window_time =
+            Some(earliest_window_time.map_or(record.time, |earliest| earliest.min(record.time)));
+    }
+    let total_tx_count = log.tx_count_before(end);
+    let window_tx_count = total_tx_count.saturating_sub(log.tx_count_before(window_start));
+
+    ChainStats {
+        total_tx_count,
+        window_tx_count,
+        tip_time,
+        earliest_window_time,
+    }
+}
+
+/// The figures `getchaintxstats` reports, read from a [`BlockLog`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChainStats {
+    /// Sum of `tx_count` over records at or below the applied tip.
+    pub total_tx_count: u64,
+    /// Sum of `tx_count` over records inside the requested window.
+    pub window_tx_count: u64,
+    /// Timestamp of the first record at the applied height.
+    pub tip_time: Option<u32>,
+    /// Lowest timestamp inside the requested window.
+    pub earliest_window_time: Option<u32>,
+}
+/// What a whole-log fold produced for the chain-info RPCs.
+///
+/// See [`fold_block_records`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FoldedBlockRecords {
+    /// Sum of `body_size` over every record.
+    pub size_on_disk: u64,
+    /// Sum of `tx_count` over records at or below the applied tip.
+    pub total_tx_count: u64,
+    /// Sum of `tx_count` over records inside the requested window.
+    pub window_tx_count: u64,
+    /// Timestamp of the first record at the applied height.
+    pub tip_time: Option<u32>,
+    /// Lowest timestamp inside the requested window.
+    pub earliest_window_time: Option<u32>,
+}
+
+/// The whole-log fold `getblockchaininfo` and `getchaintxstats` used to run.
+///
+/// Retained deliberately, not left behind. It is the oracle the equivalence
+/// tests compare [`BlockLog`]'s running sums and the windowed search against,
+/// and the `before` arm of `benches/chaininfo.rs` — both arms have to run in one
+/// process over one fixture for the ratio to mean anything, which they cannot do
+/// if this is deleted.
+///
+/// Nothing in the node calls it. It walks every record the node holds, which is
+/// the entire reason it was replaced.
+///
+/// It makes no assumption about the log's ordering, which is the point: the
+/// replacement binary-searches, and an oracle that shared that assumption could
+/// not catch it being wrong.
+#[must_use]
+pub fn fold_block_records(
+    blocks: &[BlockRecord],
+    applied_height: u32,
+    lowest_window_height: Option<u64>,
+) -> FoldedBlockRecords {
+    let mut stats = FoldedBlockRecords::default();
+    for record in blocks {
+        stats.size_on_disk = stats
+            .size_on_disk
+            .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+        if record.height > applied_height {
+            continue;
+        }
+        stats.total_tx_count = stats
+            .total_tx_count
+            .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
+        if record.height == applied_height && stats.tip_time.is_none() {
+            stats.tip_time = Some(record.time);
+        }
+        if lowest_window_height.is_some_and(|lowest| u64::from(record.height) >= lowest) {
+            stats.window_tx_count = stats
+                .window_tx_count
+                .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
+            stats.earliest_window_time = Some(
+                stats
+                    .earliest_window_time
+                    .map_or(record.time, |earliest| earliest.min(record.time)),
+            );
+        }
+    }
+    stats
+}
+
 /// Block payload facts available without materializing a full block body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockBodyMetadata {
@@ -354,7 +661,7 @@ pub struct Context {
     /// In-memory mempool handle.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Block records already available without blocking storage readers.
-    pub blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    pub blocks: Arc<RwLock<BlockLog>>,
     /// Raw transactions indexed by txid for Core transaction RPCs.
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// UTXO set snapshot handle used by chain metadata RPCs.
@@ -439,7 +746,7 @@ impl Context {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip: Arc::new(ArcSwapOption::empty()),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            blocks: Arc::new(RwLock::new(Vec::new())),
+            blocks: Arc::new(RwLock::new(BlockLog::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
             utxo: Arc::new(utxo),
             coin_stats,
@@ -474,7 +781,7 @@ impl Context {
         chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
         applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         mempool: Arc<RwLock<Mempool>>,
-        blocks: Arc<RwLock<Vec<BlockRecord>>>,
+        blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
         utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
         coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
@@ -877,7 +1184,7 @@ mod tests {
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(BlockLog::new())),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::clone(&utxo),
             Arc::clone(&coin_stats),

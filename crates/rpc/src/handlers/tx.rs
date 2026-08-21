@@ -172,7 +172,7 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
             };
             vec![record]
         }
-        None => ctx.blocks.read().clone(),
+        None => ctx.blocks.read().to_vec(),
     };
     let mut saw_pruned_block = false;
     for record in &blocks {

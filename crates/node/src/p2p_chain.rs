@@ -13,24 +13,21 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_p2p::{ChainQuery, InventoryResponse};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_rpc::{BlockBodySource, BlockRecord};
+use bitcoin_rs_rpc::{BlockBodySource, BlockLog};
 use parking_lot::RwLock;
 
 /// Read-only in-memory active-chain view for P2P `getheaders` / `getdata`.
 #[derive(Clone)]
 pub struct NodeP2pChainQuery {
     block_tree: Arc<RwLock<BlockTree>>,
-    blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    blocks: Arc<RwLock<BlockLog>>,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
 }
 
 impl NodeP2pChainQuery {
     /// Builds a P2P chain query view over the node's shared active-chain state.
     #[must_use]
-    pub const fn new(
-        block_tree: Arc<RwLock<BlockTree>>,
-        blocks: Arc<RwLock<Vec<BlockRecord>>>,
-    ) -> Self {
+    pub const fn new(block_tree: Arc<RwLock<BlockTree>>, blocks: Arc<RwLock<BlockLog>>) -> Self {
         Self {
             block_tree,
             blocks,
@@ -201,6 +198,7 @@ mod tests {
     use bitcoin::pow::CompactTarget;
     use bitcoin::{Block, TxMerkleNode, Txid};
     use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_rpc::BlockRecord;
 
     #[test]
     fn getheaders_empty_locator_returns_only_active_stop() -> Result<(), Box<dyn std::error::Error>>
@@ -277,7 +275,7 @@ mod tests {
         tree.insert_node(Some(genesis_id), fork1, NodeStatus::Stale)?;
         let query = NodeP2pChainQuery::new(
             Arc::new(RwLock::new(tree)),
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(BlockLog::new())),
         );
 
         let response = query.headers_after(&[fork1.block_hash()], BlockHash::all_zeros(), 10);
@@ -378,7 +376,7 @@ mod tests {
         }
         Ok(NodeP2pChainQuery::new(
             Arc::new(RwLock::new(tree)),
-            Arc::new(RwLock::new(records)),
+            Arc::new(RwLock::new(records.into_iter().collect::<BlockLog>())),
         ))
     }
 

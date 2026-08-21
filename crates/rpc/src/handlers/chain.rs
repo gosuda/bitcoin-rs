@@ -9,7 +9,7 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_pruning::policy::CORE_REORG_SAFETY_MARGIN;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
-use crate::context::{BlockRecord, ChainControlError, Context, TxQueryError};
+use crate::context::{BlockRecord, ChainControlError, Context, TxQueryError, chain_stats};
 use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str, required_u64};
 
@@ -41,10 +41,11 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         bitcoin_rs_primitives::Network::Signet => "signet",
         bitcoin_rs_primitives::Network::Regtest => "regtest",
     };
-    let block_stats = {
-        let blocks = ctx.blocks.read();
-        fold_block_records(&blocks, applied, None)
-    };
+    // The whole call needs exactly one number out of the block log, and it is a
+    // sum the log already maintains. Reading it releases the lock immediately;
+    // folding ~963k records for it held the lock that block application takes to
+    // append.
+    let size_on_disk = ctx.blocks.read().size_on_disk();
     let prune_status = ctx.prune_status();
     let bestblockhash = applied_tip
         .as_ref()
@@ -64,7 +65,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let _ = response.insert(&"verificationprogress", json!(verification_progress));
     let _ = response.insert(&"initialblockdownload", applied < headers);
     let _ = response.insert(&"chainwork", chainwork.as_str());
-    let _ = response.insert(&"size_on_disk", block_stats.size_on_disk);
+    let _ = response.insert(&"size_on_disk", size_on_disk);
     let _ = response.insert(&"pruned", prune_status.pruned);
     if let Some(pruneheight) = prune_status.pruneheight {
         let _ = response.insert(&"pruneheight", pruneheight);
@@ -169,7 +170,7 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         .saturating_sub(window_block_count);
     let block_stats = {
         let blocks_guard = ctx.blocks.read();
-        fold_block_records(&blocks_guard, applied_height, Some(lowest_window_height))
+        chain_stats(&blocks_guard, applied_height, lowest_window_height)
     };
     let total_tx_count = block_stats.total_tx_count;
     let window_tx_count = block_stats.window_tx_count;
@@ -193,48 +194,6 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         "window_interval": window_interval,
         "txrate": txrate
     }))
-}
-
-#[derive(Default)]
-struct FoldedBlockRecords {
-    size_on_disk: u64,
-    total_tx_count: u64,
-    window_tx_count: u64,
-    tip_time: Option<u32>,
-    earliest_window_time: Option<u32>,
-}
-
-fn fold_block_records(
-    blocks: &[BlockRecord],
-    applied_height: u32,
-    lowest_window_height: Option<u64>,
-) -> FoldedBlockRecords {
-    let mut stats = FoldedBlockRecords::default();
-    for record in blocks {
-        stats.size_on_disk = stats
-            .size_on_disk
-            .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
-        if record.height > applied_height {
-            continue;
-        }
-        stats.total_tx_count = stats
-            .total_tx_count
-            .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
-        if record.height == applied_height && stats.tip_time.is_none() {
-            stats.tip_time = Some(record.time);
-        }
-        if lowest_window_height.is_some_and(|lowest| u64::from(record.height) >= lowest) {
-            stats.window_tx_count = stats
-                .window_tx_count
-                .saturating_add(u64::try_from(record.tx_count).unwrap_or(0));
-            stats.earliest_window_time = Some(
-                stats
-                    .earliest_window_time
-                    .map_or(record.time, |earliest| earliest.min(record.time)),
-            );
-        }
-    }
-    stats
 }
 
 pub(crate) fn getblockcount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -1009,6 +968,7 @@ mod tests {
     use bitcoin::{BlockHash, CompactTarget, TxMerkleNode, block::Header, block::Version};
 
     use super::*;
+    use crate::context::{BlockLog, fold_block_records};
     use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 
     fn context_with_tip(
@@ -1536,6 +1496,106 @@ mod tests {
             panic!("time missing: {result:?}");
         };
         assert_eq!(time, u64::from(expected_time));
+    }
+
+    /// A log with every shape the windowed search has to survive.
+    ///
+    /// Heights are non-decreasing, which is the invariant the binary searches
+    /// rest on, but they are not a clean `0..n`: height 3 is recorded twice, as
+    /// a reorg leaves it, so the "first record at this height" and
+    /// "records at or below this height" boundaries are not the same thing.
+    /// Timestamps dip at height 5, because block times are not monotonic and an
+    /// earliest-in-window that assumed they were would be wrong there.
+    fn shaped_log() -> BlockLog {
+        const HEIGHTS: [u32; 10] = [0, 1, 2, 3, 3, 4, 5, 6, 7, 8];
+        const TIMES: [u32; 10] = [
+            1_000, 1_010, 1_020, 1_030, 1_031, 1_040, 1_035, 1_060, 1_070, 1_080,
+        ];
+        let mut log = BlockLog::new();
+        for (index, (height, time)) in HEIGHTS.into_iter().zip(TIMES).enumerate() {
+            log.push(BlockRecord {
+                hash: Hash256::from_le_bytes(&[u8::try_from(index).unwrap_or(0); 32]),
+                height,
+                block_hex: String::new(),
+                body_size: 100 + index * 7,
+                header_hex: String::new(),
+                tx_count: 1 + index * 3,
+                time,
+            });
+        }
+        log
+    }
+
+    /// The windowed search must land on exactly what the whole-log fold did.
+    ///
+    /// `getblockchaininfo` and `getchaintxstats` used to walk every record the
+    /// node holds. They now read running sums off the log and binary-search it,
+    /// which is an argument about the log being ordered by height. This checks
+    /// that argument against the implementation that made no argument and simply
+    /// looked at everything — `fold_block_records`, kept for exactly this.
+    ///
+    /// Swept over every applied height and every window length rather than one
+    /// pair, because the boundaries are where a search is wrong: at the
+    /// duplicate height, at the ends, and past both.
+    #[test]
+    fn chain_stats_matches_the_fold_it_replaced() {
+        let log = shaped_log();
+
+        for applied_height in 0_u32..11 {
+            for window in 0_u64..13 {
+                let lowest = u64::from(applied_height)
+                    .saturating_add(1)
+                    .saturating_sub(window.min(u64::from(applied_height).saturating_add(1)));
+
+                let oracle = fold_block_records(&log, applied_height, Some(lowest));
+                let actual = chain_stats(&log, applied_height, lowest);
+
+                assert_eq!(
+                    actual.total_tx_count, oracle.total_tx_count,
+                    "txcount at applied={applied_height} window={window}"
+                );
+                assert_eq!(
+                    actual.window_tx_count, oracle.window_tx_count,
+                    "window_tx_count at applied={applied_height} window={window}"
+                );
+                assert_eq!(
+                    actual.tip_time, oracle.tip_time,
+                    "tip_time at applied={applied_height} window={window}"
+                );
+                assert_eq!(
+                    actual.earliest_window_time, oracle.earliest_window_time,
+                    "earliest_window_time at applied={applied_height} window={window}"
+                );
+            }
+        }
+    }
+
+    /// `size_on_disk` is now a running sum, so it has to equal the fold's.
+    #[test]
+    fn size_on_disk_matches_the_fold_it_replaced() {
+        let mut log = shaped_log();
+        assert_eq!(
+            log.size_on_disk(),
+            fold_block_records(&log, u32::MAX, None).size_on_disk,
+            "the running body-size sum disagrees with a fold of the records"
+        );
+
+        // The disconnect path: popping the tip must take its bytes back out.
+        let _popped = log.pop();
+        assert_eq!(
+            log.size_on_disk(),
+            fold_block_records(&log, u32::MAX, None).size_on_disk,
+            "the running body-size sum survived a pop but stopped matching"
+        );
+        assert_eq!(
+            log.total_tx_count(),
+            fold_block_records(&log, u32::MAX, None).total_tx_count,
+            "the running tx-count sum survived a pop but stopped matching"
+        );
+
+        log.clear();
+        assert_eq!(log.size_on_disk(), 0, "clear must reset the running sums");
+        assert_eq!(log.total_tx_count(), 0, "clear must reset the running sums");
     }
 
     #[test]

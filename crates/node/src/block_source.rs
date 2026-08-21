@@ -14,7 +14,7 @@ use bitcoin::hex::FromHex as _;
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_rpc::{BlockBodySource, BlockRecord};
+use bitcoin_rs_rpc::{BlockBodySource, BlockLog, BlockRecord};
 use parking_lot::RwLock;
 
 /// Reads decoded Bitcoin blocks from the shared in-memory log.
@@ -22,7 +22,7 @@ use parking_lot::RwLock;
 /// Cheap-clonable; the inner Arc is shared with `NodeState`'s record store.
 #[derive(Clone)]
 pub struct NodeBlockSource {
-    blocks: Arc<RwLock<Vec<BlockRecord>>>,
+    blocks: Arc<RwLock<BlockLog>>,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
     block_tree: Option<Arc<RwLock<BlockTree>>>,
     applied_tip: Option<Arc<arc_swap::ArcSwapOption<TipSnapshot>>>,
@@ -31,7 +31,7 @@ pub struct NodeBlockSource {
 impl NodeBlockSource {
     /// Builds a source over the shared block-record vector.
     #[must_use]
-    pub const fn new(blocks: Arc<RwLock<Vec<BlockRecord>>>) -> Self {
+    pub const fn new(blocks: Arc<RwLock<BlockLog>>) -> Self {
         Self {
             blocks,
             block_body_source: None,
@@ -378,7 +378,7 @@ mod tests {
     fn block_at_height_returns_some_after_record_added() {
         let genesis = genesis_block(Network::Regtest);
         let record = BlockRecord::from_block(0, &genesis);
-        let blocks = Arc::new(RwLock::new(vec![record]));
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
         let source = NodeBlockSource::new(blocks);
         let Some(decoded) = source.block_at_height(0) else {
             panic!("expected block at height 0");
@@ -424,7 +424,7 @@ mod tests {
             hash: record.hash,
             bytes: bytes.clone(),
         });
-        let blocks = Arc::new(RwLock::new(vec![record]));
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
         let source = NodeBlockSource::new(blocks).with_block_body_source(body_source);
 
         for offset in 0..u32::try_from(bytes.len())? {
@@ -455,7 +455,7 @@ mod tests {
         // `block_at_height`, which is what it would have done anyway.
         let genesis = genesis_block(Network::Regtest);
         let record = BlockRecord::from_block(0, &genesis);
-        let blocks = Arc::new(RwLock::new(vec![record]));
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
         let source = NodeBlockSource::new(blocks);
 
         assert!(source.block_bytes_at_height(0, 0, 4).is_none());
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn block_at_height_returns_none_when_missing() {
-        let blocks: Arc<RwLock<Vec<BlockRecord>>> = Arc::new(RwLock::new(Vec::new()));
+        let blocks: Arc<RwLock<BlockLog>> = Arc::new(RwLock::new(BlockLog::new()));
         let source = NodeBlockSource::new(blocks);
         assert!(source.block_at_height(0).is_none());
     }
@@ -493,7 +493,7 @@ mod tests {
             hash: record.hash,
             bytes: serialize(&genesis),
         });
-        let blocks = Arc::new(RwLock::new(vec![record]));
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
         let source = NodeBlockSource::new(blocks).with_block_body_source(body_source);
 
         let Some(decoded) = source.block_at_height(0) else {
@@ -514,7 +514,9 @@ mod tests {
             BlockRecord::from_block(2, &first),
             BlockRecord::from_block(2, &second),
         ];
-        let source = NodeBlockSource::new(Arc::new(RwLock::new(records)));
+        let source = NodeBlockSource::new(Arc::new(RwLock::new(
+            records.into_iter().collect::<BlockLog>(),
+        )));
 
         let Some(decoded) = source.block_at_height(2) else {
             panic!("expected duplicate height record");
@@ -534,7 +536,7 @@ mod tests {
         let tree = Arc::new(RwLock::new(tree));
 
         // Empty record vector — simulates post-checkpoint-restore state.
-        let blocks: Arc<RwLock<Vec<BlockRecord>>> = Arc::new(RwLock::new(Vec::new()));
+        let blocks: Arc<RwLock<BlockLog>> = Arc::new(RwLock::new(BlockLog::new()));
         let source = NodeBlockSource::new(blocks)
             .with_block_body_source(Arc::new(FixedBody {
                 height: 0,
@@ -566,7 +568,7 @@ mod tests {
 
         // Record vector has a STALE entry at height 0 (different hash).
         let stale_record = BlockRecord::from_block(0, &stale_block);
-        let blocks = Arc::new(RwLock::new(vec![stale_record]));
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([stale_record])));
 
         let body_source = Arc::new(CorrectBody {
             hash: correct_hash,
@@ -618,7 +620,7 @@ mod tests {
         applied_tip.store(Some(Arc::new(applied)));
 
         let record = BlockRecord::from_block(0, &genesis);
-        let blocks = Arc::new(RwLock::new(vec![record]));
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
         let source = NodeBlockSource::new(blocks)
             .with_block_tree(tree)
             .with_applied_tip(applied_tip);

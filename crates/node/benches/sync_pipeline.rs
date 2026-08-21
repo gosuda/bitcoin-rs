@@ -31,7 +31,7 @@ use bitcoin_rs_node::{
 };
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_rpc::BlockRecord;
+use bitcoin_rs_rpc::{BlockLog, BlockRecord};
 use bitcoin_rs_utxo::UtxoSet;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossbeam_channel::unbounded;
@@ -1076,7 +1076,7 @@ fn apply_handles(
         tx_index_runtime,
         noop_filter_index(),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-        Arc::new(RwLock::new(Vec::new())),
+        Arc::new(RwLock::new(BlockLog::new())),
         Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
         Arc::new(NoOpZmqPublisher),
     )

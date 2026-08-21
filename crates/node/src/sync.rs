@@ -7398,7 +7398,7 @@ mod tests {
             None,
             noop_filter_index(),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(bitcoin_rs_rpc::BlockLog::new())),
             Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
             Arc::new(crate::NoOpZmqPublisher),
         )
