@@ -42,6 +42,11 @@ pub enum RpcError {
     /// The node is still catching up with the chain.
     #[error("{0}")]
     ClientInInitialDownload(&'static str),
+    /// A hex-encoded consensus object could not be decoded.
+    ///
+    /// Bitcoin Core's `RPC_DESERIALIZATION_ERROR` (-22).
+    #[error("{0}")]
+    Deserialization(&'static str),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -70,6 +75,8 @@ impl RpcError {
     pub const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
     /// Bitcoin Core still-syncing code, `RPC_CLIENT_IN_INITIAL_DOWNLOAD`.
     pub const CORE_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
+    /// Bitcoin Core decode-failure code, `RPC_DESERIALIZATION_ERROR`.
+    pub const CORE_DESERIALIZATION_ERROR: i64 = -22;
 
     /// Builds the no-private-keys policy error used by signing RPCs.
     #[must_use]
@@ -91,6 +98,7 @@ impl RpcError {
             Self::InvalidParameter(_) => Self::CORE_INVALID_PARAMETER,
             Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
             Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
+            Self::Deserialization(_) => Self::CORE_DESERIALIZATION_ERROR,
             Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
         }
     }

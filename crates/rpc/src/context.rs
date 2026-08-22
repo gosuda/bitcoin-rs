@@ -307,7 +307,32 @@ pub trait ChainControl: Send + Sync {
         &self,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<(), ChainControlError>;
+
+    /// Validates a proposed block against the current tip without connecting it.
+    ///
+    /// Bitcoin Core's `TestBlockValidity`, which is what `getblocktemplate`
+    /// `mode: "proposal"` answers from. `Ok(())` means the block would connect;
+    /// the error carries the reject reason BIP22 asks the RPC to return.
+    ///
+    /// Proof of work is deliberately not checked: a proposal is a block whose
+    /// nonce has not been searched for yet. The declared difficulty still is.
+    ///
+    /// This crate cannot reach the validator itself -- `bitcoin-rs-node`
+    /// depends on `bitcoin-rs-rpc`, not the other way round -- so the node
+    /// installs the implementation at startup, the way it does for
+    /// `invalidate_block`.
+    fn test_block_validity(&self, block: &bitcoin::Block) -> Result<(), BlockRejectReason>;
 }
+
+/// Why a proposed block would not connect.
+///
+/// The string is what `getblocktemplate` returns to the miner. Bitcoin Core
+/// emits its validation state's reject reason -- `bad-txnmrklroot`,
+/// `bad-cb-amount`, and so on -- and BIP22 leaves the vocabulary open, so a
+/// reason this node has no Core equivalent for is passed through as itself.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+#[error("{0}")]
+pub struct BlockRejectReason(pub String);
 
 /// Failure from a node-owned chain mutation.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]

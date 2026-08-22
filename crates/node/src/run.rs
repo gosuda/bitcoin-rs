@@ -86,6 +86,74 @@ impl bitcoin_rs_rpc::ChainControl for RpcChainControl {
             other => bitcoin_rs_rpc::ChainControlError::Failed(other.to_string()),
         })
     }
+
+    fn test_block_validity(
+        &self,
+        block: &bitcoin::Block,
+    ) -> core::result::Result<(), bitcoin_rs_rpc::BlockRejectReason> {
+        crate::apply::test_block_validity(&self.handles, block, None)
+            .map_err(|error| bitcoin_rs_rpc::BlockRejectReason(reject_reason(&error)))
+    }
+}
+
+/// Bitcoin Core's reject-reason token for a rejection, where one corresponds.
+///
+/// `getblocktemplate` proposals return these verbatim, so a miner comparing
+/// this node against Core sees the same word for the same failure. BIP22 leaves
+/// the vocabulary open and Core simply reports whatever its validation state
+/// carries, so a rejection with no Core counterpart is passed through as its
+/// own message rather than forced into a token that means something else.
+///
+/// The tokens are transcribed from the vendored Core tree
+/// (`src/validation.cpp`, `src/consensus/tx_check.cpp`,
+/// `src/consensus/tx_verify.cpp`).
+fn reject_reason(error: &crate::state::ApplyError) -> String {
+    use crate::state::ApplyError as A;
+    use bitcoin_rs_consensus::ConsensusError as C;
+
+    let token = match error {
+        A::Consensus(consensus) => match consensus {
+            C::EmptyInputs => "bad-txns-vin-empty",
+            C::EmptyOutputs => "bad-txns-vout-empty",
+            C::CoinbaseScriptSigSize { .. } => "bad-cb-length",
+            C::NullPrevout { .. } => "bad-txns-prevout-null",
+            C::DuplicateInput { .. } => "bad-txns-inputs-duplicate",
+            C::MissingPrevout { .. } => "bad-txns-inputs-missingorspent",
+            C::OutputValueOverflow => "bad-txns-txouttotal-toolarge",
+            C::InputsLessThanOutputs { .. } => "bad-txns-in-belowout",
+            // Per-transaction, not the block budget: raised by `verify_tx`.
+            C::SigopsLimit { .. } => "bad-txns-too-many-sigops",
+            C::EmptyBlock | C::MissingCoinbase => "bad-cb-missing",
+            C::ExtraCoinbase { .. } => "bad-cb-multiple",
+            C::MerkleMutation => "bad-txns-duplicate",
+            C::MerkleRoot => "bad-txnmrklroot",
+            C::CoinbaseAmount { .. } => "bad-cb-amount",
+            C::BlockValueOverflow => "bad-txns-accumulated-fee-outofrange",
+            C::WitnessCommitment => "bad-witness-merkle-match",
+            C::BlockWeight { .. } => "bad-blk-weight",
+            C::Script { reason, .. } => {
+                return format!("mandatory-script-verify-flag-failed ({reason})");
+            }
+            C::Bip { bip, .. } => match *bip {
+                "BIP30" => "bad-txns-BIP30",
+                "BIP34" => "bad-cb-height",
+                "BIP68" | "BIP112" => "non-BIP68-final",
+                "BIP113" | "BIP65" => "non-final",
+                "COINBASE_MATURITY" => "bad-txns-premature-spend-of-coinbase",
+                _ => return consensus.to_string(),
+            },
+            C::PrevoutMatrixSize { .. } | C::Kernel(_) | C::Encoding(_) => {
+                return consensus.to_string();
+            }
+        },
+        A::ProofOfWork { .. } => "high-hash",
+        A::TargetAboveLimit | A::NbitsNonRetargetMismatch { .. } => "bad-diffbits",
+        // Block-wide: Core reaches the same conclusion per transaction.
+        A::BlockOutputsExceedInputs => "bad-txns-in-belowout",
+        A::BlockValueOverflow => "bad-txns-accumulated-fee-outofrange",
+        other => return other.to_string(),
+    };
+    token.to_owned()
 }
 
 /// Bounds rapid DNS retries while the initial outbound pool is still empty.
@@ -1270,5 +1338,66 @@ mod tests {
 
         assert!(active.is_empty());
         assert!(handles.is_empty());
+    }
+
+    /// A rejection a miner can act on carries Core's word for it.
+    ///
+    /// `getblocktemplate` proposals return these verbatim, so a miner that
+    /// switches between this node and Core reads the same token for the same
+    /// failure. The tokens come from the vendored Core tree, not from memory.
+    #[test]
+    fn a_rejection_reports_bitcoin_cores_reject_reason() {
+        use bitcoin_rs_consensus::ConsensusError;
+
+        for (error, expected) in [
+            (
+                crate::state::ApplyError::Consensus(ConsensusError::CoinbaseAmount {
+                    paid: 2,
+                    allowed: 1,
+                }),
+                "bad-cb-amount",
+            ),
+            (
+                crate::state::ApplyError::Consensus(ConsensusError::MerkleRoot),
+                "bad-txnmrklroot",
+            ),
+            (
+                crate::state::ApplyError::Consensus(ConsensusError::MissingPrevout {
+                    input_index: 0,
+                }),
+                "bad-txns-inputs-missingorspent",
+            ),
+            (
+                crate::state::ApplyError::Consensus(ConsensusError::Bip {
+                    bip: "COINBASE_MATURITY",
+                    reason: "too young".to_owned(),
+                }),
+                "bad-txns-premature-spend-of-coinbase",
+            ),
+            (crate::state::ApplyError::TargetAboveLimit, "bad-diffbits"),
+        ] {
+            assert_eq!(super::reject_reason(&error), expected, "for {error:?}");
+        }
+    }
+
+    /// A rejection with no Core counterpart says what it is.
+    ///
+    /// Reaching for the nearest-looking token would tell a miner the block
+    /// failed a rule it never failed. BIP22 leaves the vocabulary open, so
+    /// passing the message through is both allowed and honest.
+    #[test]
+    fn a_rejection_core_has_no_word_for_passes_its_own_message_through() {
+        let error = crate::state::ApplyError::Consensus(
+            bitcoin_rs_consensus::ConsensusError::Kernel("engine unavailable".to_owned()),
+        );
+        let reason = super::reject_reason(&error);
+        assert!(
+            reason.contains("engine unavailable"),
+            "the message must survive, got {reason}"
+        );
+        assert!(
+            !reason.starts_with("bad-"),
+            "an unmapped rejection must not borrow a Core token, got {reason}"
+        );
     }
 }

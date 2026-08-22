@@ -285,6 +285,18 @@ impl Network {
         }
     }
 
+    /// Returns the number of blocks between coinbase subsidy halvings.
+    ///
+    /// Bitcoin Core's `consensus.nSubsidyHalvingInterval`. Regtest halves every
+    /// 150 blocks so tests can reach a halving without mining 210 000 of them.
+    #[must_use]
+    pub const fn subsidy_halving_interval(self) -> u32 {
+        match self {
+            Self::Regtest => 150,
+            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Signet => 210_000,
+        }
+    }
+
     /// Returns the proof-of-work target spacing in seconds.
     #[must_use]
     pub const fn target_spacing_seconds(self) -> u32 {

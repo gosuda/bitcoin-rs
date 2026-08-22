@@ -26,9 +26,9 @@ pub mod server;
 
 pub use auth::Auth;
 pub use context::{
-    BlockBodyMetadata, BlockBodySource, BlockRecord, ChainControl, ChainControlError, Context,
-    NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus, TxIndexInfo,
-    TxIndexQuery, TxQueryError, ZmqNotification,
+    BlockBodyMetadata, BlockBodySource, BlockRecord, BlockRejectReason, ChainControl,
+    ChainControlError, Context, NetworkState, PruneResult, PruneService, PruneServiceError,
+    PruneStatus, TxIndexInfo, TxIndexQuery, TxQueryError, ZmqNotification,
 };
 pub use error::RpcError;
 pub use handlers::Handler;

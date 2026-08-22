@@ -148,6 +148,20 @@ pub enum ConsensusError {
     /// Block merkle root does not match transaction ids.
     #[error("block merkle root mismatch")]
     MerkleRoot,
+    /// The coinbase claims more than the subsidy plus the fees the block earned.
+    ///
+    /// Bitcoin Core's `bad-cb-amount`. Nothing else bounds what a coinbase may
+    /// pay itself, so this is the rule that keeps a miner from creating money.
+    #[error("coinbase pays {paid} sats but only {allowed} sats are available")]
+    CoinbaseAmount {
+        /// Total value the coinbase outputs claim.
+        paid: u64,
+        /// Block subsidy plus the fees of the block's other transactions.
+        allowed: u64,
+    },
+    /// Summing a block's values overflowed the satoshi range.
+    #[error("block value total overflows the satoshi range")]
+    BlockValueOverflow,
     /// Block witness commitment does not match.
     #[error("block witness commitment mismatch")]
     WitnessCommitment,
@@ -185,6 +199,61 @@ pub enum ConsensusError {
 
 /// Maximum valid money supply in satoshis.
 pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
+
+/// Coinbase subsidy at `height`, in satoshis.
+///
+/// Bitcoin Core's `GetBlockSubsidy`. `halving_interval` comes from the network
+/// (`Network::subsidy_halving_interval`) rather than being fixed at 210 000,
+/// because regtest halves every 150 blocks — hard-coding the mainnet interval
+/// would compute the wrong subsidy on the one network where a halving is
+/// reachable in a test.
+#[must_use]
+pub const fn block_subsidy(height: u32, halving_interval: u32) -> u64 {
+    const INITIAL_SUBSIDY_SATS: u64 = 50 * 100_000_000;
+
+    if halving_interval == 0 {
+        return INITIAL_SUBSIDY_SATS;
+    }
+    let halvings = height / halving_interval;
+    // Core stops at 64 shifts; past that the subsidy is zero and shifting a
+    // u64 by 64 or more is undefined.
+    if halvings >= 64 {
+        return 0;
+    }
+    INITIAL_SUBSIDY_SATS >> halvings
+}
+
+/// Verifies that a block's coinbase claims no more than it earned.
+///
+/// `fees` is the sum over the block's non-coinbase transactions of input value
+/// minus output value; `coinbase_out` is what the coinbase pays itself. Core
+/// applies this in `ConnectBlock` and rejects with `bad-cb-amount`.
+///
+/// Paying *less* than the maximum is allowed, as it is in Core — the
+/// difference is simply destroyed.
+///
+/// # Errors
+///
+/// Returns [`ConsensusError::CoinbaseAmount`] when the coinbase claims more
+/// than the subsidy plus `fees`, or [`ConsensusError::BlockValueOverflow`] if
+/// that sum leaves the satoshi range.
+pub const fn verify_coinbase_amount(
+    coinbase_out: u64,
+    fees: u64,
+    height: u32,
+    halving_interval: u32,
+) -> Result<(), ConsensusError> {
+    let Some(allowed) = block_subsidy(height, halving_interval).checked_add(fees) else {
+        return Err(ConsensusError::BlockValueOverflow);
+    };
+    if coinbase_out > allowed {
+        return Err(ConsensusError::CoinbaseAmount {
+            paid: coinbase_out,
+            allowed,
+        });
+    }
+    Ok(())
+}
 
 /// Maximum block sigop cost after segwit scaling.
 pub const MAX_BLOCK_SIGOPS_COST: u32 = 80_000;

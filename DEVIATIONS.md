@@ -305,3 +305,29 @@ position while keeping the rest. See the *All-or-scan position fallback* concept
 in `CONCEPTS.md`. The residual accepted: a stale offset landing exactly on a
 transaction boundary whose transaction also matches, while a different
 transaction in that block matches too.
+
+## §9 — `getblocktemplate` proposal mode: reject-reason vocabulary
+
+BIP23 proposal mode answers with a *string* naming why a block would not
+connect, and Bitcoin Core returns whatever its `BlockValidationState` carries --
+`bad-cb-amount`, `bad-txnmrklroot`, and so on. The vocabulary is open by
+specification, so there is no list to conform to.
+
+`crates/node/src/run.rs::reject_reason` maps this node's `ApplyError` onto
+Core's token wherever one corresponds, transcribed from the vendored Core tree
+(`src/validation.cpp`, `src/consensus/tx_check.cpp`,
+`src/consensus/tx_verify.cpp`). A rejection with no Core counterpart -- a kernel
+failure, an encoding failure, a BIP check Core words differently -- is passed
+through as its own message rather than forced into a token that means something
+else. A miner comparing the two implementations sees the same word for the same
+failure, and never sees a word for a failure that did not happen.
+
+Two rejections are block-wide here where Core reaches the same conclusion per
+transaction, and are reported with Core's per-transaction token:
+`BlockOutputsExceedInputs` as `bad-txns-in-belowout`, and `BlockValueOverflow`
+as `bad-txns-accumulated-fee-outofrange`.
+
+Validation itself is not a deviation: a proposal runs
+`crates/node/src/apply.rs::validate_block_for_apply`, the same function the
+connect path runs, with proof of work switched off exactly as Core's
+`TestBlockValidity` does with `fCheckPOW = false`.
