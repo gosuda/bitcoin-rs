@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
 use bitcoin::hashes::{Hash as _, sha256d};
-use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
+use bitcoin::{OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
 use slab::Slab;
@@ -291,6 +291,59 @@ impl Mempool {
             bytes,
             total_fee,
         }
+    }
+
+    /// Estimates the heap this pool occupies, in bytes.
+    ///
+    /// This is `getmempoolinfo`'s `usage`, and it is a different quantity from
+    /// `bytes`: `bytes` is the sum of virtual sizes, a consensus-facing measure
+    /// of the transactions, while this is how much memory holding them costs.
+    /// The two differ by a large constant factor — per-entry accounting, four
+    /// indexes, and the allocations inside each transaction.
+    ///
+    /// An estimate, as it is in Bitcoin Core, whose own `DynamicMemoryUsage`
+    /// carries the comment "Estimate the overhead of mapTx to be 9 pointers …
+    /// as no exact formula for `boost::multi_index_container` is implemented".
+    /// The figure is Core's *shape*, not Core's number: it counts this node's
+    /// structures, which are not Core's.
+    ///
+    /// Counted here: the entry arena at its allocated capacity, each
+    /// transaction's own heap, and the four indexes keyed off those entries.
+    #[must_use]
+    pub fn dynamic_memory_usage(&self) -> u64 {
+        use core::mem::size_of;
+
+        let live = u64::try_from(self.entries.len()).unwrap_or(u64::MAX);
+
+        // Per live entry, as in Core, whose term is
+        // `MallocUsage(sizeof(CTxMemPoolEntry) + 9 * sizeof(void*)) * mapTx.size()`.
+        let arena = live.saturating_mul(u64::try_from(size_of::<MempoolEntry>()).unwrap_or(0));
+
+        let transactions = self
+            .entries
+            .iter()
+            .map(|(_index, entry)| transaction_heap_usage(&entry.tx))
+            .fold(0_u64, u64::saturating_add);
+
+        // `by_txid` is a hash map, so it carries slack; the other three are
+        // B-tree sets of fixed-size keys.
+        let by_txid = u64::try_from(self.by_txid.capacity())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(size_of::<(Txid, EntryId)>()).unwrap_or(0));
+        let funding = u64::try_from(self.funding.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(size_of::<(ScriptHash, EntryId)>()).unwrap_or(0));
+        let spending = u64::try_from(self.spending.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(size_of::<(OutPoint, EntryId)>()).unwrap_or(0));
+        let pareto = live.saturating_mul(u64::try_from(size_of::<EntryId>()).unwrap_or(0));
+
+        arena
+            .saturating_add(transactions)
+            .saturating_add(by_txid)
+            .saturating_add(funding)
+            .saturating_add(spending)
+            .saturating_add(pareto)
     }
 
     /// Returns an entry by public id.
@@ -776,6 +829,32 @@ fn apply_delta_u64(value: u64, delta: i128) -> u64 {
     } else {
         value.saturating_sub(magnitude)
     }
+}
+
+/// Heap a single transaction owns, beyond the `Transaction` struct itself.
+///
+/// The input and output vectors, and the script and witness bytes inside them.
+/// Counted from the structures rather than from the serialized length, because
+/// a `Vec` costs its capacity and a serialized form costs neither the vector
+/// headers nor the per-field overhead.
+fn transaction_heap_usage(tx: &Transaction) -> u64 {
+    use core::mem::size_of;
+
+    let mut total = u64::try_from(size_of::<Transaction>()).unwrap_or(0);
+    total = total.saturating_add(
+        u64::try_from(tx.input.capacity().saturating_mul(size_of::<TxIn>())).unwrap_or(u64::MAX),
+    );
+    total = total.saturating_add(
+        u64::try_from(tx.output.capacity().saturating_mul(size_of::<TxOut>())).unwrap_or(u64::MAX),
+    );
+    for input in &tx.input {
+        total = total.saturating_add(u64::try_from(input.script_sig.len()).unwrap_or(u64::MAX));
+        total = total.saturating_add(u64::try_from(input.witness.size()).unwrap_or(u64::MAX));
+    }
+    for output in &tx.output {
+        total = total.saturating_add(u64::try_from(output.script_pubkey.len()).unwrap_or(u64::MAX));
+    }
+    total
 }
 
 const fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(OutPoint, EntryId)> {
@@ -1587,5 +1666,147 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![label]),
             }],
         }
+    }
+}
+
+#[cfg(test)]
+mod dynamic_memory_usage_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    use super::*;
+
+    fn tx_with(script_len: usize, tag: u8) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: alloc::vec![TxIn {
+                previous_output: OutPoint::new(Txid::from_byte_array([tag; 32]), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: alloc::vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::from_bytes(alloc::vec![0x51; script_len]),
+            }],
+        }
+    }
+
+    fn pool_with(count: u8, script_len: usize) -> Mempool {
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            ..MempoolLimits::default()
+        });
+        for tag in 0..count {
+            let entry = MempoolEntry::new(Arc::new(tx_with(script_len, tag)), 100, 10_000, 1, 7);
+            let Ok(_id) = pool.insert_entry(entry) else {
+                panic!("fixture insert failed");
+            };
+        }
+        pool
+    }
+
+    #[test]
+    fn an_empty_pool_reports_no_transaction_memory() {
+        let pool = Mempool::new(MempoolLimits::default());
+        // Only whatever the empty containers hold, which for unallocated ones is
+        // nothing. The point is that it does not report a phantom footprint.
+        assert_eq!(pool.dynamic_memory_usage(), 0);
+    }
+
+    #[test]
+    fn usage_is_a_different_quantity_from_the_vsize_sum() {
+        let pool = pool_with(4, 64);
+        let stats = pool.stats();
+        let usage = pool.dynamic_memory_usage();
+
+        assert!(usage > 0);
+        assert_ne!(
+            usage, stats.bytes,
+            "reporting `usage` as the vsize sum is the defect this replaces"
+        );
+        assert!(
+            usage > stats.bytes,
+            "holding a transaction costs more than its virtual size: {usage} vs {}",
+            stats.bytes
+        );
+    }
+
+    #[test]
+    fn usage_grows_with_the_transactions_it_holds() {
+        let small = pool_with(4, 64).dynamic_memory_usage();
+        let more_entries = pool_with(8, 64).dynamic_memory_usage();
+        let bigger_scripts = pool_with(4, 4_096).dynamic_memory_usage();
+
+        assert!(more_entries > small, "{more_entries} vs {small}");
+        assert!(
+            bigger_scripts > small,
+            "script bytes are held too: {bigger_scripts} vs {small}"
+        );
+    }
+
+    #[test]
+    fn usage_falls_when_the_pool_is_cleared() {
+        let mut pool = pool_with(4, 64);
+        let before = pool.dynamic_memory_usage();
+        pool.clear();
+        let after = pool.dynamic_memory_usage();
+        assert!(after < before, "{after} vs {before}");
+    }
+}
+
+#[cfg(test)]
+mod entry_overhead_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::Transaction;
+
+    use super::*;
+
+    /// A transaction that owns no heap of its own: no inputs, no outputs, so
+    /// `transaction_heap_usage` is just the struct. What is left in the estimate
+    /// for a pool of these is the per-entry accounting, which is what this pins.
+    fn empty_tx(tag: u32) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            // The only thing distinguishing them, so they get distinct txids.
+            lock_time: bitcoin::absolute::LockTime::from_consensus(tag),
+            input: alloc::vec::Vec::new(),
+            output: alloc::vec::Vec::new(),
+        }
+    }
+
+    #[test]
+    fn usage_counts_the_entry_itself_not_only_the_transaction() {
+        use core::mem::size_of;
+
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            ..MempoolLimits::default()
+        });
+        let count = 8_u32;
+        for tag in 0..count {
+            let entry = MempoolEntry::new(Arc::new(empty_tx(tag)), 100, 10_000, 1, 7);
+            let Ok(_id) = pool.insert_entry(entry) else {
+                panic!("fixture insert failed");
+            };
+        }
+
+        let live = u64::from(count);
+        let entry_bytes = u64::try_from(size_of::<MempoolEntry>()).unwrap_or(0);
+        let tx_bytes = u64::try_from(size_of::<Transaction>()).unwrap_or(0);
+
+        // These transactions have no inputs, so the funding and spending indexes
+        // are empty and cannot make up the difference. Dropping the per-entry
+        // term leaves the estimate below this bound.
+        assert!(
+            pool.dynamic_memory_usage()
+                >= live.saturating_mul(entry_bytes.saturating_add(tx_bytes)),
+            "usage {} is below {live} entries of {entry_bytes} plus their transactions",
+            pool.dynamic_memory_usage()
+        );
     }
 }

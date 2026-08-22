@@ -73,6 +73,27 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     Ok(Value::from(response))
 }
 
+/// The block's serialized size **without witness data** — Bitcoin Core's
+/// `strippedsize`, its `GetSerializeSize(block, …|SERIALIZE_TRANSACTION_NO_WITNESS)`.
+///
+/// This is what a pre-segwit node would have downloaded, so on any block
+/// carrying witnesses it is strictly smaller than `size`. Reporting `size` for
+/// it, as this handler did, made the two fields agree on every block and hid the
+/// witness discount entirely.
+///
+/// Derived from the BIP141 definition of block weight, `base * 3 + total`, since
+/// rust-bitcoin keeps `Block::base_size` private while exposing both of the
+/// other two. The division is exact: weight minus total is three times base by
+/// construction.
+fn stripped_size(block: &bitcoin::Block) -> u64 {
+    let total = u64::try_from(block.total_size()).unwrap_or(u64::MAX);
+    block
+        .weight()
+        .to_wu()
+        .checked_sub(total)
+        .map_or(total, |base_times_three| base_times_three / 3)
+}
+
 fn chainwork_hex(tip: &TipSnapshot) -> String {
     let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -903,7 +924,7 @@ fn block_json_verbose(
         "nTx": record.tx_count,
         "previousblockhash": header.prev_blockhash.to_string(),
         "nextblockhash": next_hash,
-        "strippedsize": block_bytes.len(),
+        "strippedsize": stripped_size(&block),
         "size": block_bytes.len(),
         "weight": block.weight().to_wu(),
         "tx": tx_array
@@ -2060,5 +2081,127 @@ fn compute_branchlen(
             return leaf_height;
         };
         cursor = parent_id;
+    }
+}
+
+#[cfg(test)]
+mod stripped_size_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{
+        Amount, BlockHash, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+        TxMerkleNode, TxOut, Witness,
+    };
+    use sonic_rs::{JsonValueTrait, json};
+
+    use super::*;
+
+    /// A block whose single transaction carries a witness.
+    fn witness_block() -> bitcoin::Block {
+        let mut witness = Witness::new();
+        witness.push([0x21_u8; 64]);
+        witness.push([0x03_u8; 33]);
+        let tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness,
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        bitcoin::Block {
+            header: bitcoin::block::Header {
+                version: bitcoin::block::Version::ONE,
+                prev_blockhash: BlockHash::all_zeros(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_700_000_000,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            },
+            txdata: vec![tx],
+        }
+    }
+
+    /// The same block re-serialized with every witness emptied.
+    ///
+    /// Independent of the implementation: it goes through the encoder rather
+    /// than through the `base * 3 + total` weight identity the code uses.
+    fn size_without_witnesses(block: &bitcoin::Block) -> u64 {
+        let stripped = bitcoin::Block {
+            header: block.header,
+            txdata: block
+                .txdata
+                .iter()
+                .map(|tx| Transaction {
+                    input: tx
+                        .input
+                        .iter()
+                        .map(|input| TxIn {
+                            witness: Witness::new(),
+                            ..input.clone()
+                        })
+                        .collect(),
+                    ..tx.clone()
+                })
+                .collect(),
+        };
+        u64::try_from(serialize(&stripped).len()).unwrap_or(u64::MAX)
+    }
+
+    #[test]
+    fn stripped_size_matches_a_witness_free_reserialization() {
+        let block = witness_block();
+        let expected = size_without_witnesses(&block);
+        let total = u64::try_from(block.total_size()).unwrap_or(u64::MAX);
+
+        assert!(
+            expected < total,
+            "the fixture must actually carry witness bytes, or this proves nothing"
+        );
+        assert_eq!(stripped_size(&block), expected);
+    }
+
+    #[test]
+    fn stripped_size_equals_the_total_for_a_block_without_witnesses() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        assert_eq!(
+            stripped_size(&block),
+            u64::try_from(block.total_size()).unwrap_or(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn getblock_reports_a_strippedsize_below_size_for_a_witness_block() {
+        let block = witness_block();
+        let bytes = serialize(&block);
+        let ctx = Arc::new(Context::new());
+        ctx.add_block(BlockRecord::from_block_bytes(1, &block, &bytes));
+
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        let value = handler
+            .dispatch("getblock", &json!([hash.to_string_be(), 1]))
+            .unwrap_or_else(|err| panic!("getblock failed: {err}"));
+
+        let Some(size) = value.get("size").and_then(JsonValueTrait::as_u64) else {
+            panic!("size missing: {value:?}");
+        };
+        let Some(stripped) = value.get("strippedsize").and_then(JsonValueTrait::as_u64) else {
+            panic!("strippedsize missing: {value:?}");
+        };
+        assert_eq!(size, u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        assert_eq!(stripped, size_without_witnesses(&block));
+        assert!(
+            stripped < size,
+            "the witness discount must be visible on the wire: {stripped} vs {size}"
+        );
     }
 }
