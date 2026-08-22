@@ -2237,7 +2237,7 @@ fn apply_block_admitted(
     };
 
     let utxo_changes_started = quanta::Instant::now();
-    let (changes, undo) = build_utxo_changes(
+    let (changes, undo, value_totals) = build_utxo_changes(
         block,
         height,
         &scratch,
@@ -2248,6 +2248,27 @@ fn apply_block_admitted(
     let utxo_changes_dur = utxo_changes_started.elapsed();
     metrics::histogram!("node.apply_block.utxo_changes_seconds")
         .record(utxo_changes_dur.as_secs_f64());
+
+    // The last consensus gate, and the one that keeps a miner from creating
+    // money. Nothing above bounds what the coinbase pays itself: block rules
+    // check structure, and per-transaction verification exempts the coinbase
+    // because it has no inputs to weigh its outputs against.
+    //
+    // Placed here because `build_utxo_changes` has just gathered the totals for
+    // free, and still before `persist_undo` -- the first write of any kind --
+    // so a rejected block leaves nothing behind. Genesis is skipped for the
+    // same reason its transactions are not connected.
+    if height > 0 {
+        let fees = value_totals
+            .fees()
+            .ok_or(ApplyError::BlockOutputsExceedInputs)?;
+        bitcoin_rs_consensus::verify_coinbase_amount(
+            value_totals.coinbase_out,
+            fees,
+            height,
+            handles.network.subsidy_halving_interval(),
+        )?;
+    }
 
     // Persist undo before the block body, the index, and the UTXO commit. All
     // three are derived state for a block that is about to apply; if the undo
@@ -3480,13 +3501,50 @@ fn apply_nbits_error(error: bitcoin_rs_chain::ChainError) -> ApplyError {
     }
 }
 
+/// What a block pays its coinbase and what it earned in fees.
+///
+/// Gathered by `build_utxo_changes` because that walk already visits exactly
+/// the right two sets. Outputs created and spent inside the same block are
+/// skipped there, and they cancel in the fee sum -- a same-block output is one
+/// transaction's output and another's input -- so leaving both out is exact,
+/// not an approximation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BlockValueTotals {
+    /// Total value the coinbase outputs claim.
+    pub(crate) coinbase_out: u64,
+    /// Input value of the block's non-coinbase transactions, same-block
+    /// spends excluded.
+    pub(crate) spent_in: u64,
+    /// Output value of the block's non-coinbase transactions, outputs spent
+    /// in the same block excluded.
+    pub(crate) created_out: u64,
+}
+
+impl BlockValueTotals {
+    /// Fees the block earned, or `None` if the totals are inconsistent.
+    ///
+    /// Returns `None` rather than saturating: outputs exceeding inputs is a
+    /// consensus failure that per-transaction verification should already have
+    /// rejected, and silently reporting zero fees would let it through here.
+    pub(crate) const fn fees(self) -> Option<u64> {
+        self.spent_in.checked_sub(self.created_out)
+    }
+}
+
 fn build_utxo_changes<'a>(
     block: &'a bitcoin::Block,
     height: u32,
     scratch: &ApplyScratch,
     resolved: &ResolvedUtxoView,
     overwritten: Option<&UtxoSet>,
-) -> core::result::Result<(BorrowedBlockChanges<'a>, bitcoin_rs_utxo::UndoBatch), ApplyError> {
+) -> core::result::Result<
+    (
+        BorrowedBlockChanges<'a>,
+        bitcoin_rs_utxo::UndoBatch,
+        BlockValueTotals,
+    ),
+    ApplyError,
+> {
     use bitcoin::hashes::Hash as _;
 
     // Bitcoin Core indexes genesis but does not connect its transactions into
@@ -3495,17 +3553,39 @@ fn build_utxo_changes<'a>(
         return Ok((
             BorrowedBlockChanges::default(),
             bitcoin_rs_utxo::UndoBatch::default(),
+            BlockValueTotals::default(),
         ));
     }
 
     let (add_capacity, remove_capacity) = scratch.utxo_change_capacity();
     let mut changes = BorrowedBlockChanges::with_capacity(add_capacity, remove_capacity);
     let mut undo = bitcoin_rs_utxo::UndoBatch::default();
+    let mut totals = BlockValueTotals::default();
     let net_same_block_spends = scratch.has_same_block_spends();
     for (tx, txid) in block.txdata.iter().zip(scratch.txids()) {
         let txid = bitcoin_rs_primitives::Hash256::from_le_bytes(txid.as_byte_array());
         let coinbase = tx.is_coinbase();
         for (vout_idx, txout) in tx.output.iter().enumerate() {
+            // Before the unspendable-output skip below: an OP_RETURN output
+            // never enters the UTXO set, but the transaction that created it
+            // still paid for it, so it counts against the fee.
+            let value = txout.value.to_sat();
+            if coinbase {
+                totals.coinbase_out = totals
+                    .coinbase_out
+                    .checked_add(value)
+                    .ok_or(ApplyError::BlockValueOverflow)?;
+            } else if !(net_same_block_spends
+                && scratch.contains_same_block_spent(&OutPoint::new(
+                    txid,
+                    u32::try_from(vout_idx).map_err(|_| ApplyError::HeightOverflow(height))?,
+                )))
+            {
+                totals.created_out = totals
+                    .created_out
+                    .checked_add(value)
+                    .ok_or(ApplyError::BlockValueOverflow)?;
+            }
             if txout.script_pubkey.is_op_return() || txout.script_pubkey.len() > MAX_SCRIPT_SIZE {
                 continue;
             }
@@ -3555,6 +3635,10 @@ fn build_utxo_changes<'a>(
                         vout: previous_output.vout,
                     },
                 )?;
+                totals.spent_in = totals
+                    .spent_in
+                    .checked_add(spent.txout.value.to_sat())
+                    .ok_or(ApplyError::BlockValueOverflow)?;
                 undo.restore(bitcoin_rs_utxo::UtxoAdd::new(
                     previous_output,
                     spent.txout.clone(),
@@ -3564,7 +3648,7 @@ fn build_utxo_changes<'a>(
             }
         }
     }
-    Ok((changes, undo))
+    Ok((changes, undo, totals))
 }
 
 fn internal_outpoint(outpoint: &bitcoin::OutPoint) -> OutPoint {
@@ -4624,7 +4708,7 @@ mod consensus_rule_tests {
         let txid = coinbase.compute_txid();
         let block = block_with_transaction(coinbase);
         let scratch = ApplyScratch::new(&block, 1, false, false)?;
-        let (changes, _undo) =
+        let (changes, _undo, _totals) =
             build_utxo_changes(&block, 1, &scratch, &ResolvedUtxoView::empty(), None)?;
         let utxo = UtxoSet::new();
 
@@ -4655,7 +4739,7 @@ mod consensus_rule_tests {
         let txid = coinbase.compute_txid();
         let block = block_with_transaction(coinbase);
         let scratch = ApplyScratch::new(&block, 1, false, false)?;
-        let (changes, _undo) =
+        let (changes, _undo, _totals) =
             build_utxo_changes(&block, 1, &scratch, &ResolvedUtxoView::empty(), None)?;
         let utxo = UtxoSet::new();
 
@@ -4710,7 +4794,7 @@ mod consensus_rule_tests {
         // resolved view that spend came from. An empty view would now be
         // rejected, which is the point of UndoPrevoutMissing.
         let resolved = ResolvedUtxoView::resolve(utxo.as_ref(), &block, &tx_plan(&block));
-        let (changes, undo) = build_utxo_changes(&block, 2, &scratch, &resolved, None)?;
+        let (changes, undo, _totals) = build_utxo_changes(&block, 2, &scratch, &resolved, None)?;
         assert_eq!(
             undo.restores().len(),
             1,
@@ -4759,7 +4843,7 @@ mod consensus_rule_tests {
         let block = block_with_transaction(coinbase_transaction(0x70));
 
         let scratch = ApplyScratch::new(&block, 1, false, true)?;
-        let (changes, _undo) =
+        let (changes, _undo, _totals) =
             build_utxo_changes(&block, 1, &scratch, &ResolvedUtxoView::empty(), None)?;
 
         assert!(
@@ -6112,6 +6196,145 @@ mod consensus_rule_tests {
         );
     }
 
+    /// A coinbase may not pay itself more than the subsidy plus the fees.
+    ///
+    /// Nothing else in the node bounds this. Block rules check structure, and
+    /// per-transaction verification exempts the coinbase because it has no
+    /// inputs to weigh its outputs against -- so without this rule a miner can
+    /// simply write any amount into the coinbase and the block is accepted.
+    /// That is inflation, and it is what this test would have demonstrated
+    /// before the rule existed.
+    ///
+    /// The paired accept is the point: the same block, one satoshi lower, must
+    /// apply. Otherwise a rejection for any unrelated reason would read as
+    /// success here.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_rejects_a_coinbase_that_pays_more_than_the_subsidy() {
+        let subsidy =
+            bitcoin_rs_consensus::block_subsidy(1, Network::Regtest.subsidy_halving_interval());
+        assert_eq!(
+            subsidy,
+            50 * 100_000_000,
+            "regtest height 1 pays the full subsidy"
+        );
+
+        let over = apply_coinbase_only_block(subsidy + 1);
+        assert!(
+            matches!(
+                &over,
+                Err(ApplyError::Consensus(
+                    bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { paid, allowed }
+                )) if *paid == subsidy + 1 && *allowed == subsidy
+            ),
+            "a coinbase claiming one satoshi too much must be refused, got {over:?}"
+        );
+
+        let exact = apply_coinbase_only_block(subsidy);
+        assert!(
+            exact.is_ok(),
+            "the same block claiming exactly the subsidy must apply, got {exact:?}"
+        );
+    }
+
+    /// The allowance includes the fees the block actually earned.
+    ///
+    /// A rule that only compared against the subsidy would pass the test above
+    /// and still be wrong in both directions: it would refuse every real block
+    /// that collects fees, and it would let a block claim fees it never earned.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn the_coinbase_allowance_counts_the_fees_the_block_earned() {
+        let subsidy =
+            bitcoin_rs_consensus::block_subsidy(1, Network::Regtest.subsidy_halving_interval());
+        // The seeded output is 1000 sats and the spend pays 1 sat onward.
+        let fee = 999_u64;
+
+        let exact = apply_block_with_a_fee_paying_transaction(subsidy + fee);
+        assert!(
+            exact.is_ok(),
+            "the coinbase may claim the subsidy plus the fee it collected, got {exact:?}"
+        );
+
+        let over = apply_block_with_a_fee_paying_transaction(subsidy + fee + 1);
+        assert!(
+            matches!(
+                &over,
+                Err(ApplyError::Consensus(
+                    bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { allowed, .. }
+                )) if *allowed == subsidy + fee
+            ),
+            "one satoshi past the fee must be refused, got {over:?}"
+        );
+    }
+
+    /// Applies a height-1 regtest block whose only transaction is a coinbase
+    /// claiming `coinbase_value`.
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_coinbase_only_block(coinbase_value: u64) -> Result<TipSnapshot, ApplyError> {
+        apply_height_one_block(vec![], coinbase_value)
+    }
+
+    /// The same, plus a transaction spending a seeded 1000-satoshi output and
+    /// paying 1 satoshi onward, so the block earns a 999-satoshi fee.
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_block_with_a_fee_paying_transaction(
+        coinbase_value: u64,
+    ) -> Result<TipSnapshot, ApplyError> {
+        let funded = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x71; 32]),
+            vout: 0,
+        };
+        let spend = spending_transaction_to_script(
+            funded,
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        apply_height_one_block(vec![spend], coinbase_value)
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn apply_height_one_block(
+        extra: Vec<Transaction>,
+        coinbase_value: u64,
+    ) -> Result<TipSnapshot, ApplyError> {
+        let funded = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x71; 32]),
+            vout: 0,
+        };
+        // Height 0 so the seeded coin is mature, and non-coinbase so maturity
+        // does not apply to it at all.
+        let Ok(utxo) = utxo_with_output(funded, 0) else {
+            panic!("seeding the fixture UTXO must succeed");
+        };
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let mut coinbase = coinbase_transaction_with_height(1);
+        // The BIP34 height push alone is one byte, and consensus requires a
+        // coinbase scriptSig of at least two.
+        coinbase.input[0].script_sig = bitcoin::script::Builder::new()
+            .push_int(1)
+            .push_slice([0_u8; 4])
+            .into_script();
+        coinbase.output = vec![TxOut {
+            value: Amount::from_sat(coinbase_value),
+            script_pubkey: op_true_script(),
+        }];
+        let mut txdata = vec![coinbase];
+        txdata.extend(extra);
+
+        let mut block = block_with_prev_hash_and_transactions(genesis.block_hash(), txdata);
+        let target = block.header.target();
+        while block.header.validate_pow(target).is_err() {
+            block.header.nonce = block.header.nonce.wrapping_add(1);
+        }
+        apply_block(&handles, &block)
+    }
+
     /// Timestamp rules must hold on the apply path, not only in header sync.
     ///
     /// `applied_header_tip` inserts a header the tree has never seen, so before
@@ -6658,7 +6881,7 @@ mod consensus_rule_tests {
         utxo.commit_block(&seed, &Hash256::from_le_bytes(&[0x30; 32]))?;
 
         let scratch = ApplyScratch::new(&block, 91_842, false, false)?;
-        let (_changes, undo) = build_utxo_changes(
+        let (_changes, undo, _totals) = build_utxo_changes(
             &block,
             91_842,
             &scratch,

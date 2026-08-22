@@ -97,6 +97,15 @@ pub enum ApplyError {
     /// Height arithmetic overflowed `u32::MAX`.
     #[error("height overflow at tip {0}")]
     HeightOverflow(u32),
+    /// Summing a block's input or output values left the satoshi range.
+    #[error("block value total overflows the satoshi range")]
+    BlockValueOverflow,
+    /// A block's non-coinbase outputs exceed the inputs they spend.
+    ///
+    /// Per-transaction verification rejects this first, so reaching it means
+    /// the two disagree; refuse rather than treat the block as fee-free.
+    #[error("block creates more value than it spends")]
+    BlockOutputsExceedInputs,
     /// The block header hash does not satisfy its declared proof-of-work target.
     #[error("proof-of-work: header hash {hash} exceeds declared target")]
     ProofOfWork {

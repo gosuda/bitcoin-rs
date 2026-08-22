@@ -5,7 +5,6 @@ use bitcoin_rs_primitives::Hash256;
 use thiserror::Error;
 
 const HALVING_INTERVAL: u32 = 210_000;
-const INITIAL_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
 const WITNESS_COMMITMENT_TAG: [u8; 4] = [0xaa, 0x21, 0xa9, 0xed];
 
@@ -109,11 +108,15 @@ pub fn build_coinbase_template(
 /// Returns the block subsidy for a height in satoshis.
 #[must_use]
 pub const fn block_subsidy(height: u32) -> u64 {
-    let halvings = height / HALVING_INTERVAL;
-    if halvings >= u64::BITS {
-        return 0;
-    }
-    INITIAL_SUBSIDY_SATS >> halvings
+    // Delegates so the subsidy has one implementation. It is a consensus
+    // quantity, and a template that computed it differently from the validator
+    // would propose blocks the node then rejects.
+    //
+    // The mainnet interval is passed because this entry point has no network.
+    // A regtest template therefore still over-states the subsidy; that is
+    // pre-existing and belongs with making `BlockTemplateParams` carry the
+    // network, not with the validation rule.
+    bitcoin_rs_consensus::block_subsidy(height, HALVING_INTERVAL)
 }
 
 /// Builds the BIP141 witness commitment output script.
