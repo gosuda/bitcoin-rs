@@ -14,7 +14,7 @@ use bitcoin::hex::FromHex as _;
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_rpc::{BlockBodySource, BlockRecord};
+use bitcoin_rs_rpc::{BlockBodySource, BlockRecord, record_at_height, record_at_height_hash};
 use parking_lot::RwLock;
 
 /// Reads decoded Bitcoin blocks from the shared in-memory log.
@@ -296,47 +296,6 @@ fn serialized_header(
             "invalid serialized block header length".into(),
         )
     })
-}
-
-fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRecord> {
-    if let Ok(index) = usize::try_from(height)
-        && let Some(record) = records.get(index)
-        && record.height == height
-        && index
-            .checked_sub(1)
-            .and_then(|previous| records.get(previous))
-            .is_none_or(|previous| previous.height < height)
-    {
-        return Some(record);
-    }
-
-    let mut index = records
-        .binary_search_by_key(&height, |record| record.height)
-        .ok()?;
-    while index > 0 && records[index.saturating_sub(1)].height == height {
-        index = index.saturating_sub(1);
-    }
-    records.get(index)
-}
-
-fn record_at_height_hash(
-    records: &[BlockRecord],
-    height: u32,
-    hash: Hash256,
-) -> Option<&BlockRecord> {
-    let mut index = records
-        .binary_search_by_key(&height, |record| record.height)
-        .ok()?;
-    while index > 0 && records[index.saturating_sub(1)].height == height {
-        index = index.saturating_sub(1);
-    }
-    while index < records.len() && records[index].height == height {
-        if records[index].hash == hash {
-            return Some(&records[index]);
-        }
-        index += 1;
-    }
-    None
 }
 
 #[cfg(test)]

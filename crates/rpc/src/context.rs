@@ -35,6 +35,66 @@ pub struct BlockRecord {
     pub time: u32,
 }
 
+/// Finds the record at `height`, or `None` when the log holds no such height.
+///
+/// The log is append-only in height order — `Context::add_block` pushes, and the
+/// only removal is the tail `pop` a disconnect performs on the applied tip — so
+/// it is non-decreasing by height and binary-searchable. Where several records
+/// share a height, this returns the first.
+///
+/// The direct index is tried first because the log is usually dense from height
+/// zero, which makes the common case one bounds check instead of a search. The
+/// guard on the preceding record is what keeps that fast path honest when it is
+/// not dense.
+#[must_use]
+pub fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRecord> {
+    if let Ok(index) = usize::try_from(height)
+        && let Some(record) = records.get(index)
+        && record.height == height
+        && index
+            .checked_sub(1)
+            .and_then(|previous| records.get(previous))
+            .is_none_or(|previous| previous.height < height)
+    {
+        return Some(record);
+    }
+
+    let mut index = records
+        .binary_search_by_key(&height, |record| record.height)
+        .ok()?;
+    while index > 0 && records[index.saturating_sub(1)].height == height {
+        index = index.saturating_sub(1);
+    }
+    records.get(index)
+}
+
+/// Finds the record with both `height` and `hash`, or `None`.
+///
+/// Several records can share a height — a reorg leaves the losing block in the
+/// log beside the winner — so the binary search lands anywhere in that run and
+/// this walks it in both directions before comparing hashes. Returning the first
+/// record at the height without checking the hash would hand back the wrong
+/// block on exactly the chain shape this exists to handle.
+#[must_use]
+pub fn record_at_height_hash(
+    records: &[BlockRecord],
+    height: u32,
+    hash: Hash256,
+) -> Option<&BlockRecord> {
+    let mut index = records
+        .binary_search_by_key(&height, |record| record.height)
+        .ok()?;
+    while index > 0 && records[index.saturating_sub(1)].height == height {
+        index = index.saturating_sub(1);
+    }
+    while index < records.len() && records[index].height == height {
+        if records[index].hash == hash {
+            return Some(&records[index]);
+        }
+        index += 1;
+    }
+    None
+}
 /// Block payload facts available without materializing a full block body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockBodyMetadata {
@@ -706,12 +766,10 @@ impl Context {
         //    identity wins; enrich with a height-matched cached payload, else
         //    with durable body metadata.
         if let Some(mut record) = self.header_record(hash) {
-            if let Some(cached) = self
-                .blocks
-                .read()
-                .iter()
-                .find(|candidate| candidate.hash == hash && candidate.height == record.height)
-            {
+            // The tree already gave us the height, so this is a binary search
+            // over a height-ordered log rather than a walk of every record on
+            // the chain. `getblock` and `getblockheader` both land here.
+            if let Some(cached) = record_at_height_hash(&self.blocks.read(), record.height, hash) {
                 return Some(cached.clone());
             }
             if let Some(metadata) = self
@@ -727,6 +785,10 @@ impl Context {
         // 2. Legacy/cache-only fallback. The tree cannot resolve this identity,
         //    so accept a vector record by exact hash. Metadata-only records and
         //    pruned-body payloads pass through unchanged via their own fields.
+        //
+        //    This one stays linear on purpose: without the tree there is no
+        //    height to search on, and a hash-keyed index would have to be kept
+        //    for every block to serve a path that only legacy state reaches.
         self.blocks
             .read()
             .iter()
@@ -752,11 +814,7 @@ impl Context {
                     .as_byte_array(),
             ));
         }
-        self.blocks
-            .read()
-            .iter()
-            .find(|candidate| candidate.height == height)
-            .map(|candidate| candidate.hash)
+        record_at_height(&self.blocks.read(), height).map(|candidate| candidate.hash)
     }
 
     /// Returns a known block by hash.
@@ -775,11 +833,7 @@ impl Context {
             let hash = self.hash_at_height_from_tip(&tip, height)?;
             return self.record_for_hash(hash);
         }
-        self.blocks
-            .read()
-            .iter()
-            .find(|candidate| candidate.height == height)
-            .cloned()
+        record_at_height(&self.blocks.read(), height).cloned()
     }
 
     /// Returns serialized block bytes from the record or durable storage.
@@ -858,6 +912,203 @@ fn bitcoin_network(network: Network) -> bitcoin::Network {
 mod tests {
     use super::*;
 
+    /// A log whose heights are non-decreasing but not a clean `0..n`.
+    ///
+    /// Height 3 is recorded three times, as two reorgs leave it; the log starts
+    /// at height 1, as a restored or pruned log may; and heights 6 and 7 are
+    /// missing. All three break the "record for height `h` is at index `h`"
+    /// assumption the direct-index fast path tries first.
+    ///
+    /// The starting height is load-bearing. With the log starting at zero, index
+    /// 3 holds the *first* record at height 3, so a fast path that skipped the
+    /// "is the predecessor lower?" guard would answer correctly anyway. Starting
+    /// at one puts a duplicate at index 3 and the run head at index 2, which is
+    /// where the two disagree.
+    fn shaped_records() -> Vec<BlockRecord> {
+        const HEIGHTS: [u32; 8] = [1, 2, 3, 3, 3, 4, 8, 9];
+        HEIGHTS
+            .into_iter()
+            .enumerate()
+            .map(|(index, height)| {
+                let mut hash = [0_u8; 32];
+                // Distinct per record, not per height: the duplicates have to be
+                // distinguishable by hash or the walk has nothing to walk.
+                hash[0] = u8::try_from(index).unwrap_or(0);
+                let mut record = BlockRecord::synthetic(height, Hash256::from_le_bytes(&hash));
+                record.time = 1_000 + u32::try_from(index).unwrap_or(0);
+                record
+            })
+            .collect()
+    }
+
+    /// The search must land on exactly what the scan it replaced found.
+    ///
+    /// `record_for_hash` had the height from the block tree and scanned the log
+    /// for the matching pair anyway. The scan made no assumption about ordering;
+    /// the search assumes the log is non-decreasing by height. This holds the
+    /// search to the scan over every height in and around the fixture, and over
+    /// every hash in it — including hashes at the wrong height, which must find
+    /// nothing.
+    ///
+    /// A sweep rather than a chosen pair: a search is wrong at its boundaries,
+    /// and a test that picks one pair picks whether it visits them.
+    #[test]
+    fn record_at_height_hash_matches_the_scan_it_replaced() {
+        let records = shaped_records();
+        let hashes = records.iter().map(|record| record.hash).collect::<Vec<_>>();
+
+        for height in 0_u32..12 {
+            for hash in &hashes {
+                let scanned = records
+                    .iter()
+                    .find(|candidate| candidate.hash == *hash && candidate.height == height);
+                assert_eq!(
+                    record_at_height_hash(&records, height, *hash).map(|r| r.time),
+                    scanned.map(|r| r.time),
+                    "search and scan disagree at height {height}"
+                );
+            }
+        }
+    }
+
+    /// The same for the height-only lookup, which has to return the *first*
+    /// record at a duplicated height because that is what the scan returned.
+    #[test]
+    fn record_at_height_matches_the_scan_it_replaced() {
+        let records = shaped_records();
+        for height in 0_u32..12 {
+            let scanned = records.iter().find(|candidate| candidate.height == height);
+            assert_eq!(
+                record_at_height(&records, height).map(|r| r.time),
+                scanned.map(|r| r.time),
+                "search and scan disagree at height {height}"
+            );
+        }
+    }
+
+    /// Every record at a duplicated height must be reachable by its own hash.
+    ///
+    /// A search that stopped at the run's first record would answer `None` for
+    /// the others, turning `getblock` on a stale branch into "block not found".
+    #[test]
+    fn every_record_at_a_duplicated_height_is_reachable() {
+        let records = shaped_records();
+        let duplicates = records
+            .iter()
+            .filter(|record| record.height == 3)
+            .map(|record| (record.hash, record.time))
+            .collect::<Vec<_>>();
+        assert_eq!(duplicates.len(), 3, "the fixture must duplicate height 3");
+
+        for (hash, time) in duplicates {
+            assert_eq!(
+                record_at_height_hash(&records, 3, hash).map(|r| r.time),
+                Some(time),
+                "a record at a duplicated height was not reachable by its hash"
+            );
+        }
+    }
+
+    /// `block_by_height` with no applied tip reads the log directly.
+    ///
+    /// That fallback used to scan for the first record at the height and now
+    /// searches for it. It is the path a Context takes before the first tip is
+    /// published, and nothing covered it: a mutation replacing it with "the last
+    /// record in the log" stayed green.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn block_by_height_without_an_applied_tip_reads_the_log() {
+        let ctx = Context::new();
+        for record in shaped_records() {
+            ctx.add_block(record);
+        }
+
+        for height in 0_u32..12 {
+            let expected = shaped_records()
+                .into_iter()
+                .find(|candidate| candidate.height == height)
+                .map(|record| record.hash);
+            assert_eq!(
+                ctx.block_by_height(height).map(|record| record.hash),
+                expected,
+                "block_by_height disagrees with the log at height {height}"
+            );
+        }
+    }
+
+    /// A reorg leaves the losing block in the log beside the winner, so a height
+    /// can address two records. The binary search lands anywhere in that run,
+    /// which is why the lookup walks it and compares hashes; returning the first
+    /// record at the height would hand back the wrong block on exactly the shape
+    /// this exists for.
+    #[test]
+    fn record_at_height_hash_picks_the_matching_hash_within_a_duplicate_height() {
+        let first = Hash256::from_le_bytes(&[0x11_u8; 32]);
+        let second = Hash256::from_le_bytes(&[0x22_u8; 32]);
+        let records = vec![
+            BlockRecord::synthetic(0, Hash256::from_le_bytes(&[0x00_u8; 32])),
+            BlockRecord::synthetic(1, first),
+            BlockRecord::synthetic(1, second),
+            BlockRecord::synthetic(2, Hash256::from_le_bytes(&[0x33_u8; 32])),
+        ];
+
+        assert_eq!(
+            record_at_height_hash(&records, 1, second).map(|record| record.hash),
+            Some(second),
+            "the second record at the height must be reachable, not just the first"
+        );
+        assert_eq!(
+            record_at_height_hash(&records, 1, first).map(|record| record.hash),
+            Some(first)
+        );
+        assert!(
+            record_at_height_hash(&records, 1, Hash256::from_le_bytes(&[0x99_u8; 32])).is_none(),
+            "a hash absent from the height run must not resolve to a sibling"
+        );
+    }
+
+    /// Heights `[1, 1, 2]` are chosen so the dense fast path indexes straight
+    /// onto the *second* of the duplicates: `records[1]` has height 1, so the
+    /// height check alone would accept it. Only the guard on the preceding
+    /// record rejects it and sends the lookup to the search that finds the run
+    /// start. A log starting at height 0 never exercises that, which is how an
+    /// earlier version of this test passed while the guard was removed.
+    #[test]
+    fn record_at_height_returns_the_first_record_of_a_duplicate_height() {
+        let first = Hash256::from_le_bytes(&[0x11_u8; 32]);
+        let records = vec![
+            BlockRecord::synthetic(1, first),
+            BlockRecord::synthetic(1, Hash256::from_le_bytes(&[0x22_u8; 32])),
+            BlockRecord::synthetic(2, Hash256::from_le_bytes(&[0x33_u8; 32])),
+        ];
+
+        assert_eq!(
+            record_at_height(&records, 1).map(|record| record.hash),
+            Some(first),
+            "the dense index lands on the second duplicate; the first must win"
+        );
+        assert!(record_at_height(&records, 7).is_none());
+    }
+
+    /// The dense fast path indexes straight into the log. It must not fire when
+    /// the log does not start at height zero, or it would answer with whatever
+    /// record happens to sit at that index.
+    #[test]
+    fn record_at_height_does_not_trust_the_index_on_a_sparse_log() {
+        let wanted = Hash256::from_le_bytes(&[0x44_u8; 32]);
+        let records = vec![
+            BlockRecord::synthetic(10, Hash256::from_le_bytes(&[0x0a_u8; 32])),
+            BlockRecord::synthetic(11, wanted),
+            BlockRecord::synthetic(12, Hash256::from_le_bytes(&[0x0c_u8; 32])),
+        ];
+
+        assert_eq!(
+            record_at_height(&records, 11).map(|record| record.hash),
+            Some(wanted),
+            "a log that does not start at zero must still resolve by search"
+        );
+        assert!(record_at_height(&records, 1).is_none());
+    }
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn from_handles_shares_tip_handles_with_caller() {
