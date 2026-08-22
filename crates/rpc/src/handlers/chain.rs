@@ -818,13 +818,27 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
     Hash256::from_str(value).map_err(|_| RpcError::InvalidParams("hash must be 64 hex characters"))
 }
 
-fn confirmations(ctx: &Context, height: u32) -> u32 {
-    let applied = ctx.applied_height();
-    if height > applied {
-        0
-    } else {
-        applied.saturating_sub(height).saturating_add(1)
+/// The block's depth in the **active chain**, or `-1` when it is not in the
+/// active chain at all.
+///
+/// This is Bitcoin Core's `chain.Contains(pindex) ? chain.Height() -
+/// pindex->nHeight + 1 : -1`, and the membership test is the whole point.
+/// Height alone cannot answer it: a block that lost a reorg keeps its height,
+/// so deriving the answer from height reports a *positive* confirmation count
+/// for a block that is no longer in the chain — and anything gating on
+/// `confirmations >= N` reads that as buried.
+///
+/// The chain asked is the **applied** chain, not the header chain. Core's
+/// `m_chain` is the connected, fully-validated chain, and header-first sync
+/// keeps headers ahead of it; a block whose header is known but which has not
+/// been connected is not in it, so it is `-1` rather than `0`.
+fn confirmations(ctx: &Context, hash: Hash256, height: u32) -> i64 {
+    if ctx.active_hash_at_height(height) != Some(hash) {
+        return -1;
     }
+    i64::from(ctx.applied_height())
+        .saturating_sub(i64::from(height))
+        .saturating_add(1)
 }
 
 fn block_json_verbose(
@@ -853,7 +867,7 @@ fn block_json_verbose(
     if !include_block_fields {
         return Ok(json!({
             "hash": record.hash.to_string_be(),
-            "confirmations": confirmations(ctx, record.height),
+            "confirmations": confirmations(ctx, record.hash, record.height),
             "height": record.height,
             "version": i64::from(version),
             "versionHex": format!("{version_hex:08x}"),
@@ -889,7 +903,7 @@ fn block_json_verbose(
 
     Ok(json!({
         "hash": record.hash.to_string_be(),
-        "confirmations": confirmations(ctx, record.height),
+        "confirmations": confirmations(ctx, record.hash, record.height),
         "height": record.height,
         "version": i64::from(version),
         "versionHex": format!("{version_hex:08x}"),
@@ -959,7 +973,7 @@ fn synthetic_block_json(ctx: &Context, record: &BlockRecord, include_block_field
     if !include_block_fields {
         return json!({
             "hash": record.hash.to_string_be(),
-            "confirmations": confirmations(ctx, record.height),
+            "confirmations": confirmations(ctx, record.hash, record.height),
             "height": record.height,
             "version": 0,
             "versionHex": "00000000",
@@ -978,7 +992,7 @@ fn synthetic_block_json(ctx: &Context, record: &BlockRecord, include_block_field
 
     json!({
         "hash": record.hash.to_string_be(),
-        "confirmations": confirmations(ctx, record.height),
+        "confirmations": confirmations(ctx, record.hash, record.height),
         "height": record.height,
         "version": 0,
         "versionHex": "00000000",
@@ -1300,30 +1314,215 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn confirmations_uses_applied_height_not_header_tip() {
-        use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
-        use bitcoin_rs_primitives::Hash256;
+    /// A genesis, an applied child at height 1, and a competing branch off the
+    /// same genesis whose *header* chain reaches height 2.
+    ///
+    /// ```text
+    ///   genesis ──> applied            (height 1, the applied tip)
+    ///           └─> fork ──> fork_tip  (heights 1 and 2, headers only)
+    /// ```
+    ///
+    /// `fork` sits at height 1 exactly like `applied` does, which is the state
+    /// a height-only confirmation count cannot tell apart.
+    struct Fork {
+        ctx: Arc<Context>,
+        /// Height 1, on the applied chain.
+        applied: Hash256,
+        /// Height 1 as well, on the branch that lost.
+        fork: Hash256,
+        /// Height 2, header-only — never connected.
+        header_tip: Hash256,
+        /// The headers behind `applied` and `fork`, so a test can build log
+        /// records that actually decode.
+        applied_header: bitcoin::block::Header,
+        fork_header: bitcoin::block::Header,
+    }
+
+    fn forked_ctx() -> Result<Fork, Box<dyn std::error::Error>> {
+        use bitcoin::block::Version;
+        use bitcoin::hashes::Hash as _;
+        use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
+        use bitcoin_rs_chain::NodeStatus;
 
         let ctx = Context::new();
-        // Header tip at 100, applied tip at 50.
-        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
-        ctx.set_chain_tip(TipSnapshot {
-            tip_id: NodeId::new(0),
-            height: 100,
-            chainwork: ChainWork::ZERO,
-            hash,
-        });
-        ctx.set_applied_tip(TipSnapshot {
-            tip_id: NodeId::new(0),
-            height: 50,
-            chainwork: ChainWork::ZERO,
-            hash,
-        });
-        // Block at height 10: confirmations = applied(50) - 10 + 1 = 41.
-        assert_eq!(confirmations(&ctx, 10), 41);
-        // Block at height 60 (above applied tip): confirmations = 0.
-        assert_eq!(confirmations(&ctx, 60), 0);
+        let header = |prev: BlockHash, nonce: u32, time: u32| bitcoin::block::Header {
+            version: Version::ONE,
+            prev_blockhash: prev,
+            merkle_root: TxMerkleNode::all_zeros(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce,
+        };
+
+        let (applied_tip, header_tip, fork_hash, applied_header, fork_header) = {
+            let mut tree = ctx.block_tree.write();
+            let genesis = header(BlockHash::all_zeros(), 0, 1_000_000);
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+
+            let applied = header(genesis.block_hash(), 1, 1_000_900);
+            let applied_id = tree.insert_node(Some(genesis_id), applied, NodeStatus::Active)?;
+            let applied_tip = tree
+                .tip()
+                .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+            assert_eq!(applied_tip.tip_id, applied_id);
+
+            let fork = header(genesis.block_hash(), 2, 1_000_901);
+            let fork_id = tree.insert_node(Some(genesis_id), fork, NodeStatus::HeaderValid)?;
+            let fork_hash = tree.node(fork_id)?.hash;
+            let fork_tip = header(fork.block_hash(), 3, 1_001_800);
+            let _header_tip_id =
+                tree.insert_node(Some(fork_id), fork_tip, NodeStatus::HeaderValid)?;
+            let header_tip = tree
+                .tip()
+                .ok_or_else(|| std::io::Error::other("missing header tip"))?;
+            (applied_tip, header_tip, fork_hash, applied, fork)
+        };
+
+        ctx.set_applied_tip((*applied_tip).clone());
+        ctx.set_chain_tip((*header_tip).clone());
+        Ok(Fork {
+            ctx: Arc::new(ctx),
+            applied: applied_tip.hash,
+            fork: fork_hash,
+            header_tip: header_tip.hash,
+            applied_header,
+            fork_header,
+        })
+    }
+
+    #[test]
+    fn confirmations_uses_applied_height_not_header_tip() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Fork {
+            ctx,
+            applied: applied_hash,
+            ..
+        } = forked_ctx()?;
+
+        // Header tip is height 2, applied tip height 1. The applied block is one
+        // deep, not two: the header chain does not count.
+        assert_eq!(confirmations(&ctx, applied_hash, 1), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn confirmations_is_negative_one_for_a_block_that_lost_the_reorg()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Fork {
+            ctx,
+            applied: applied_hash,
+            fork: fork_hash,
+            ..
+        } = forked_ctx()?;
+
+        assert_ne!(applied_hash, fork_hash, "the fixture branches must differ");
+        // Same height as the applied block, different chain. Deriving the answer
+        // from height alone reports 1 here, which says "in the chain, one deep".
+        assert_eq!(
+            confirmations(&ctx, fork_hash, 1),
+            -1,
+            "a block off the applied chain is not in it at any depth"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn confirmations_is_negative_one_for_a_header_above_the_applied_tip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Fork {
+            ctx,
+            header_tip: header_tip_hash,
+            ..
+        } = forked_ctx()?;
+
+        // Known header, never connected. Core's m_chain does not contain it.
+        assert_eq!(confirmations(&ctx, header_tip_hash, 2), -1);
+        Ok(())
+    }
+
+    #[test]
+    fn confirmations_is_negative_one_for_a_hash_the_tree_never_saw()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Fork { ctx, .. } = forked_ctx()?;
+        let unknown = Hash256::from_le_bytes(&[0xab_u8; 32]);
+
+        assert_eq!(confirmations(&ctx, unknown, 1), -1);
+        Ok(())
+    }
+
+    /// A log record for `header`, either carrying the block or standing in for
+    /// one whose body the node no longer has.
+    fn record_for(header: bitcoin::block::Header, with_body: bool) -> BlockRecord {
+        use bitcoin::hashes::Hash as _;
+
+        let hash = Hash256::from_le_bytes(header.block_hash().as_byte_array());
+        if !with_body {
+            return BlockRecord::synthetic(1, hash);
+        }
+        let block = bitcoin::Block {
+            header,
+            txdata: Vec::new(),
+        };
+        let bytes = bitcoin::consensus::encode::serialize(&block);
+        BlockRecord::from_block_bytes(1, &block, &bytes)
+    }
+
+    /// `getblock` and `getblockheader` render `confirmations` through three
+    /// different branches depending on what the record holds, and each one
+    /// spells the field out separately. A record with no decodable header takes
+    /// the synthetic branch for both methods — so a fixture built only from
+    /// `BlockRecord::synthetic` leaves the header-bearing branch unrendered,
+    /// and a mutation that reverts *it* to the old height-only formula survives.
+    /// Both fixtures run the same assertions.
+    fn assert_reorged_block_reports_negative_confirmations(
+        with_body: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Fork {
+            ctx,
+            applied: applied_hash,
+            fork: fork_hash,
+            applied_header,
+            fork_header,
+            ..
+        } = forked_ctx()?;
+        ctx.add_block(record_for(applied_header, with_body));
+        ctx.add_block(record_for(fork_header, with_body));
+
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let confirmations_of =
+            |method: &str, hash: Hash256| -> Result<i64, Box<dyn std::error::Error>> {
+                let value = handler.dispatch(method, &json!([hash.to_string_be(), true]))?;
+                value
+                    .get("confirmations")
+                    .and_then(JsonValueTrait::as_i64)
+                    .ok_or_else(|| {
+                        Box::<dyn std::error::Error>::from(format!(
+                            "confirmations missing or not an integer: {value:?}"
+                        ))
+                    })
+            };
+
+        for method in ["getblockheader", "getblock"] {
+            assert_eq!(confirmations_of(method, applied_hash)?, 1, "{method}");
+            assert_eq!(
+                confirmations_of(method, fork_hash)?,
+                -1,
+                "{method} must carry the -1 through, not clamp it"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reorged_block_reports_negative_confirmations_with_the_block_stored()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_reorged_block_reports_negative_confirmations(true)
+    }
+
+    #[test]
+    fn reorged_block_reports_negative_confirmations_without_the_block_stored()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_reorged_block_reports_negative_confirmations(false)
     }
 
     #[test]
