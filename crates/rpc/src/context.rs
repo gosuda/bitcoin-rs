@@ -27,8 +27,12 @@ pub struct BlockRecord {
     pub block_hex: String,
     /// Serialized block byte length.
     pub body_size: usize,
-    /// Serialized block header bytes as lowercase hex.
-    pub header_hex: String,
+    /// Serialized block header bytes, when the record carries a header.
+    ///
+    /// Stored raw rather than as hex: a record is held for every block for the
+    /// life of the process, while the one reader that wants hex is a single RPC
+    /// call, and two of the three readers decode it straight back to bytes.
+    pub header: Option<[u8; SERIALIZED_BLOCK_HEADER_LEN]>,
     /// Transaction count in the block.
     pub tx_count: usize,
     /// Block header timestamp (UNIX seconds).
@@ -91,14 +95,14 @@ impl BlockRecord {
     pub fn from_block_bytes(height: u32, block: &Block, block_bytes: &[u8]) -> Self {
         let block_hash = block.block_hash();
         let hash = Hash256::from_le_bytes(block_hash.as_byte_array());
-        let header_hex = header_hex_from_block_bytes(block, block_bytes);
+        let header = header_from_block_bytes(block, block_bytes);
         let block_hex = block_bytes.to_lower_hex_string();
         Self {
             hash,
             height,
             block_hex,
             body_size: block_bytes.len(),
-            header_hex,
+            header,
             tx_count: block.txdata.len(),
             time: block.header.time,
         }
@@ -116,13 +120,13 @@ impl BlockRecord {
     pub fn from_block_metadata_bytes(height: u32, block: &Block, block_bytes: &[u8]) -> Self {
         let block_hash = block.block_hash();
         let hash = Hash256::from_le_bytes(block_hash.as_byte_array());
-        let header_hex = header_hex_from_block_bytes(block, block_bytes);
+        let header = header_from_block_bytes(block, block_bytes);
         Self {
             hash,
             height,
             block_hex: String::new(),
             body_size: block_bytes.len(),
-            header_hex,
+            header,
             tx_count: block.txdata.len(),
             time: block.header.time,
         }
@@ -136,18 +140,44 @@ impl BlockRecord {
             height,
             block_hex: String::new(),
             body_size: 0,
-            header_hex: String::new(),
+            header: None,
             tx_count: 0,
             time: 0,
         }
     }
+
+    /// The serialized block header, when the record carries one.
+    #[must_use]
+    pub const fn header_bytes(&self) -> Option<&[u8; SERIALIZED_BLOCK_HEADER_LEN]> {
+        self.header.as_ref()
+    }
+
+    /// The serialized block header as lowercase hex, empty when absent.
+    ///
+    /// Encoded on demand. The record is stored for every block for the life of
+    /// the process; this is read by one RPC call, and the other two readers want
+    /// the bytes back anyway.
+    #[must_use]
+    pub fn header_hex(&self) -> String {
+        self.header
+            .as_ref()
+            .map_or_else(String::new, |bytes| bytes.to_lower_hex_string())
+    }
 }
 
-fn header_hex_from_block_bytes(block: &Block, block_bytes: &[u8]) -> String {
-    block_bytes.get(..SERIALIZED_BLOCK_HEADER_LEN).map_or_else(
-        || serialize(&block.header).to_lower_hex_string(),
-        DisplayHex::to_lower_hex_string,
-    )
+/// Extracts the serialized 80-byte header from a block, preferring the bytes the
+/// caller already has.
+///
+/// Falls back to re-serializing the header only when the supplied bytes are too
+/// short to contain one, which a well-formed block never is.
+fn header_from_block_bytes(
+    block: &Block,
+    block_bytes: &[u8],
+) -> Option<[u8; SERIALIZED_BLOCK_HEADER_LEN]> {
+    block_bytes
+        .get(..SERIALIZED_BLOCK_HEADER_LEN)
+        .and_then(|prefix| prefix.try_into().ok())
+        .or_else(|| serialize(&block.header).try_into().ok())
 }
 
 /// Network counters and peer metadata exposed by network RPCs.
@@ -685,7 +715,7 @@ impl Context {
             height: node.height,
             block_hex: String::new(),
             body_size: 0,
-            header_hex: serialize(&node.header).to_lower_hex_string(),
+            header: serialize(&node.header).try_into().ok(),
             tx_count: 0,
             time: node.header.time,
         })
@@ -963,7 +993,7 @@ mod tests {
         assert_eq!(from_bytes.height, from_block.height);
         assert_eq!(from_bytes.block_hex, from_block.block_hex);
         assert_eq!(from_bytes.body_size, from_block.body_size);
-        assert_eq!(from_bytes.header_hex, from_block.header_hex);
+        assert_eq!(from_bytes.header, from_block.header);
         assert_eq!(from_bytes.tx_count, from_block.tx_count);
         assert_eq!(from_bytes.time, from_block.time);
     }
@@ -1006,6 +1036,104 @@ mod tests {
         );
     }
 
+    /// Pins the cost this change exists to remove.
+    ///
+    /// One `BlockRecord` is held per block for the life of the process and
+    /// nothing removes one, so the record's own footprint is the cost. Before
+    /// this change it was 104 bytes inline plus a 160-byte heap `String` holding
+    /// the 80-byte header rendered as hex — 264 bytes and one allocation per
+    /// block. The raw header is 168 bytes inline and no allocation, so the
+    /// saving is **96 bytes per block**, about 88 MiB at a mainnet-sized chain.
+    ///
+    /// The `DEVIATIONS`-era arithmetic put this at 160 bytes per block by
+    /// counting the heap string as removed without counting the 64 bytes the
+    /// inline array adds to the struct. This test pins the measured figure so
+    /// the claim cannot drift back.
+    #[test]
+    fn block_record_holds_its_header_inline() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let record = BlockRecord::from_block_metadata(0, &block);
+
+        assert_eq!(
+            core::mem::size_of::<BlockRecord>(),
+            168,
+            "BlockRecord footprint changed; re-measure the per-block saving"
+        );
+        assert_eq!(
+            record.header_bytes().map(|bytes| bytes.len()),
+            Some(SERIALIZED_BLOCK_HEADER_LEN)
+        );
+    }
+
+    /// The hex a caller sees must be byte-identical to what the stored `String`
+    /// used to hold; only where it is produced changed.
+    #[test]
+    fn header_hex_is_unchanged_by_storing_raw_bytes() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let record = BlockRecord::from_block_metadata(0, &block);
+
+        assert_eq!(
+            record.header_hex(),
+            serialize(&block.header).to_lower_hex_string()
+        );
+        assert_eq!(record.header_hex().len(), SERIALIZED_BLOCK_HEADER_LEN * 2);
+    }
+
+    /// A record with no header must render as the empty string, the way an empty
+    /// `String` field did, so callers that inspected it for emptiness still see
+    /// what they saw.
+    #[test]
+    fn synthetic_record_has_no_header_and_renders_empty_hex() {
+        let record = BlockRecord::synthetic(7, Hash256::from_le_bytes(&[3_u8; 32]));
+
+        assert!(record.header_bytes().is_none());
+        assert!(record.header_hex().is_empty());
+    }
+
+    /// Covers the record the block tree derives, which had no test at all.
+    ///
+    /// `header_record` builds its header with `try_into().ok()`, so a length that
+    /// does not fit yields `None` and the header vanishes silently — where the
+    /// old `String` field would at least have carried something. A mutation that
+    /// dropped the header from this path failed no test before this one existed.
+    #[test]
+    fn tree_derived_record_carries_the_header() {
+        use bitcoin::block::Version;
+        use bitcoin::hashes::Hash as _;
+        use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
+        use bitcoin_rs_chain::NodeStatus;
+
+        let ctx = Context::new();
+        let header = bitcoin::block::Header {
+            version: Version::ONE,
+            prev_blockhash: BlockHash::all_zeros(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: 1_000_000,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 7,
+        };
+        let hash = {
+            let mut tree = ctx.block_tree.write();
+            let id = tree
+                .insert_node(None, header, NodeStatus::Active)
+                .expect("genesis inserts");
+            tree.node(id).expect("inserted node").hash
+        };
+
+        // Nothing was pushed into `blocks`, so the record can only come from the
+        // tree.
+        let record = ctx.record_for_hash(hash).expect("tree resolves the hash");
+
+        assert_eq!(
+            record.header_bytes().map(|bytes| bytes.as_slice()),
+            Some(serialize(&header).as_slice()),
+            "the tree-derived record must carry the header the tree holds"
+        );
+        assert_eq!(
+            record.header_hex(),
+            serialize(&header).to_lower_hex_string()
+        );
+    }
     #[test]
     fn block_by_height_returns_record_after_add_block() {
         use bitcoin_rs_primitives::Hash256;

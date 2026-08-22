@@ -3588,16 +3588,20 @@ fn applied_block_record(
     } else {
         String::new()
     };
-    let header_hex = block_bytes.get(..SERIALIZED_BLOCK_HEADER_LEN).map_or_else(
-        || bitcoin::consensus::encode::serialize(&block.header).to_lower_hex_string(),
-        DisplayHex::to_lower_hex_string,
-    );
+    let header = block_bytes
+        .get(..SERIALIZED_BLOCK_HEADER_LEN)
+        .and_then(|prefix| prefix.try_into().ok())
+        .or_else(|| {
+            bitcoin::consensus::encode::serialize(&block.header)
+                .try_into()
+                .ok()
+        });
     BlockRecord {
         hash: block_hash,
         height,
         block_hex,
         body_size: block_bytes.len(),
-        header_hex,
+        header,
         tx_count: block.txdata.len(),
         time: block.header.time,
     }
@@ -3697,7 +3701,7 @@ mod consensus_rule_tests {
         assert_eq!(cached.height, expected_cached.height);
         assert_eq!(cached.block_hex, expected_cached.block_hex);
         assert_eq!(cached.body_size, expected_cached.body_size);
-        assert_eq!(cached.header_hex, expected_cached.header_hex);
+        assert_eq!(cached.header, expected_cached.header);
         assert_eq!(cached.tx_count, expected_cached.tx_count);
         assert_eq!(cached.time, expected_cached.time);
 
@@ -3707,7 +3711,7 @@ mod consensus_rule_tests {
         assert_eq!(metadata.height, expected_metadata.height);
         assert_eq!(metadata.block_hex, expected_metadata.block_hex);
         assert_eq!(metadata.body_size, expected_metadata.body_size);
-        assert_eq!(metadata.header_hex, expected_metadata.header_hex);
+        assert_eq!(metadata.header, expected_metadata.header);
         assert_eq!(metadata.tx_count, expected_metadata.tx_count);
         assert_eq!(metadata.time, expected_metadata.time);
     }

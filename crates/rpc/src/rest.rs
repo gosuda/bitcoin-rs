@@ -6,7 +6,7 @@ use std::str::FromStr;
 use bitcoin::block::Header;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_primitives::Hash256;
 use sonic_rs::{Value, json};
 
@@ -207,8 +207,7 @@ fn invalid_count(value: &str) -> Response {
 }
 
 fn decode_header(record: &BlockRecord) -> Option<Header> {
-    let bytes = Vec::<u8>::from_hex(&record.header_hex).ok()?;
-    bitcoin::consensus::encode::deserialize(&bytes).ok()
+    bitcoin::consensus::encode::deserialize(record.header_bytes()?.as_slice()).ok()
 }
 
 fn header_json(record: &HeaderRecord) -> Value {
@@ -803,7 +802,7 @@ mod tests {
             height: 1,
             block_hex: String::new(),
             body_size: 0,
-            header_hex: String::new(),
+            header: None,
             tx_count: 0,
             time: 123,
         };

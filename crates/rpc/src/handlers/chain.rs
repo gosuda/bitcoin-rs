@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use bitcoin::consensus::encode::deserialize;
-use bitcoin::hex::{DisplayHex as _, FromHex as _};
+use bitcoin::hex::DisplayHex as _;
 use core::str::FromStr as _;
 use core::{fmt, fmt::Write as _};
 
@@ -283,12 +283,12 @@ pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value
         let synthetic_height = ctx.height_for_hash(hash).unwrap_or_else(|| ctx.height());
         let record = BlockRecord::synthetic(synthetic_height, hash);
         if !verbose {
-            return Ok(json!(record.header_hex));
+            return Ok(json!(record.header_hex()));
         }
         return Ok(synthetic_block_json(ctx, &record, false));
     };
     if !verbose {
-        return Ok(json!(record.header_hex));
+        return Ok(json!(record.header_hex()));
     }
     block_json_verbose(ctx, &record, false, 1)
 }
@@ -911,18 +911,8 @@ fn block_json_verbose(
 }
 
 fn decode_header(record: &BlockRecord) -> Option<bitcoin::block::Header> {
-    let bytes = match Vec::<u8>::from_hex(&record.header_hex) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(
-                block_hash = %record.hash.to_string_be(),
-                %error,
-                "stored block header hex is invalid"
-            );
-            return None;
-        }
-    };
-    match deserialize(&bytes) {
+    let bytes = record.header_bytes()?;
+    match deserialize(bytes.as_slice()) {
         Ok(header) => Some(header),
         Err(error) => {
             tracing::warn!(
@@ -942,7 +932,7 @@ fn decode_block(
     let Some(bytes) = ctx.block_body_bytes(record) else {
         return Err(RpcError::NotFound("block data pruned"));
     };
-    match deserialize(&bytes) {
+    match deserialize(bytes.as_slice()) {
         Ok(block) => Ok(Some((bytes, block))),
         Err(error) => {
             tracing::warn!(
@@ -1549,7 +1539,7 @@ mod tests {
                 height,
                 block_hex: String::new(),
                 body_size: usize::try_from(100_u32.saturating_add(height))?,
-                header_hex: String::new(),
+                header: None,
                 tx_count: usize::try_from(height.saturating_add(1))?,
                 time: 1_000_u32.saturating_add(height.saturating_mul(10)),
             });
@@ -1559,7 +1549,7 @@ mod tests {
             height: 4,
             block_hex: String::new(),
             body_size: 104,
-            header_hex: String::new(),
+            header: None,
             tx_count: 100,
             time: 1,
         });
@@ -1611,7 +1601,7 @@ mod tests {
             height: 2,
             block_hex: String::new(),
             body_size: 100,
-            header_hex: String::new(),
+            header: None,
             tx_count: 1,
             time: 200,
         });
@@ -1620,7 +1610,7 @@ mod tests {
             height: 2,
             block_hex: String::new(),
             body_size: 100,
-            header_hex: String::new(),
+            header: None,
             tx_count: 1,
             time: 300,
         });
