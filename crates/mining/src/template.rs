@@ -97,7 +97,7 @@ impl BlockTemplate {
             let entry = mempool
                 .entry(id)
                 .ok_or(MiningError::MissingMempoolEntry(id))?;
-            tx_positions.insert(entry.tx.compute_txid(), index + 1);
+            tx_positions.insert(entry.txid, index + 1);
         }
 
         let mut fees = 0_u64;

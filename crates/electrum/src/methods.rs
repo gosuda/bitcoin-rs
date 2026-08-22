@@ -496,7 +496,7 @@ impl MempoolHandle {
         let pool = self.pool.read();
         let mut records = Vec::new();
         for (_id, entry) in &pool.entries {
-            let txid = entry.tx.compute_txid();
+            let txid = entry.txid;
             for (vout, output) in entry.tx.output.iter().enumerate() {
                 if ScriptHash::new(&output.script_pubkey) != scripthash {
                     continue;
@@ -539,7 +539,7 @@ impl MempoolHandle {
         let mut mempool_txids = HashMap::with_capacity(pool.entries.len());
         let mut funding_txids = HashMap::new();
         for (_id, entry) in &pool.entries {
-            let txid = entry.tx.compute_txid();
+            let txid = entry.txid;
             mempool_txids.insert(txid, ());
             for (vout, output) in entry.tx.output.iter().enumerate() {
                 if ScriptHash::new(&output.script_pubkey) != scripthash {
@@ -555,7 +555,7 @@ impl MempoolHandle {
 
         let mut records = Vec::new();
         for (_id, entry) in &pool.entries {
-            let txid = entry.tx.compute_txid();
+            let txid = entry.txid;
             let spends_watched = entry
                 .tx
                 .input

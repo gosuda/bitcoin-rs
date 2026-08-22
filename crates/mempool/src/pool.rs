@@ -132,7 +132,7 @@ impl Mempool {
 
     /// Inserts an entry after applying ancestor and descendant policy checks.
     pub fn insert_entry(&mut self, mut entry: MempoolEntry) -> Result<EntryId, MempoolError> {
-        let txid = entry.tx.compute_txid();
+        let txid = entry.txid;
         let min_rate = self.limits.min_relay_fee_sat_per_kvb;
         if min_rate > 0 && entry.fee_rate < min_rate {
             return Err(PolicyError::BelowMinRelayFee {
@@ -230,10 +230,7 @@ impl Mempool {
     /// use `iter_by_fee_rate_desc` for that).
     #[must_use]
     pub fn iter_txids(&self) -> Vec<bitcoin::Txid> {
-        self.entries
-            .iter()
-            .map(|(_id, entry)| entry.tx.compute_txid())
-            .collect()
+        self.entries.iter().map(|(_id, entry)| entry.txid).collect()
     }
 
     /// Returns txids of mempool entries signalling BIP-125 RBF eligibility.
@@ -246,7 +243,7 @@ impl Mempool {
         self.entries
             .iter()
             .filter(|(_id, entry)| entry.is_replaceable())
-            .map(|(_id, entry)| entry.tx.compute_txid())
+            .map(|(_id, entry)| entry.txid)
             .collect()
     }
 
@@ -357,7 +354,7 @@ impl Mempool {
         for (_id, entry) in &self.entries {
             for input in &entry.tx.input {
                 if input.previous_output == *outpoint {
-                    return Some(entry.tx.compute_txid());
+                    return Some(entry.txid);
                 }
             }
         }
@@ -452,7 +449,7 @@ impl Mempool {
         let mut to_evict: Vec<bitcoin::Txid> = Vec::new();
         for (_id, entry) in &self.entries {
             if entry.fee_rate < threshold_sat_per_kvb {
-                to_evict.push(entry.tx.compute_txid());
+                to_evict.push(entry.txid);
             }
         }
 
@@ -533,7 +530,7 @@ impl Mempool {
             }
             let entry = self.entries.remove(index);
             removed_any = true;
-            self.by_txid.remove(&entry.tx.compute_txid());
+            self.by_txid.remove(&entry.txid);
             self.pareto.remove(*id);
             for (vout, output) in entry.tx.output.iter().enumerate() {
                 let Ok(_) = EntryId::try_from(vout) else {
@@ -706,7 +703,7 @@ impl Mempool {
         let Some(entry) = self.entry(id) else {
             return Vec::new();
         };
-        let txid = entry.tx.compute_txid();
+        let txid = entry.txid;
         let mut children = Vec::new();
         for (vout, _) in entry.tx.output.iter().enumerate() {
             let Ok(vout) = u32::try_from(vout) else {
@@ -720,6 +717,25 @@ impl Mempool {
         children.sort_unstable();
         children.dedup();
         children
+    }
+
+    /// Returns the txids of in-pool transactions that spend an output of `id`,
+    /// in `EntryId` order and deduplicated.
+    ///
+    /// This is Bitcoin Core's `spentby` field. The answer comes from the
+    /// `spending` index — `O(outputs · log n + children)` — where asking the
+    /// same question by scanning is `O(inputs in the whole pool)` per entry.
+    ///
+    /// Only outputs this transaction actually has are consulted, so a child
+    /// spending an out-of-range `vout` is not reported. That case cannot occur
+    /// for a transaction the pool would accept, and it is the relation Core
+    /// tracks: `mapNextTx` is keyed by the exact `COutPoint`.
+    #[must_use]
+    pub fn spender_txids(&self, id: EntryId) -> Vec<Txid> {
+        self.child_ids(id)
+            .into_iter()
+            .filter_map(|child| self.entry(child).map(|entry| entry.txid))
+            .collect()
     }
 
     /// Returns the descendant-package count for `id` (inclusive of `id` itself).
@@ -1587,5 +1603,157 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![label]),
             }],
         }
+    }
+}
+
+#[cfg(test)]
+mod spend_index_tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+
+    use super::*;
+
+    fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: inputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: (0..outputs)
+                .map(|vout| TxOut {
+                    value: Amount::from_sat(
+                        10_000_u64
+                            .saturating_add(u64::from(vout))
+                            .saturating_add(tag.saturating_mul(1_000)),
+                    ),
+                    script_pubkey: ScriptBuf::from_bytes(alloc::vec![0x51]),
+                })
+                .collect(),
+        }
+    }
+
+    /// ```text
+    ///   root ──vout 0──> child_a ──vout 0──> child_c
+    ///        ──vout 1──> child_b
+    ///        ──vout 2──> child_b
+    /// ```
+    ///
+    /// `child_b` spends **two of the root's outputs**, so walking the index
+    /// reaches it twice and a missing dedup shows up as a repeat. Nothing in a
+    /// fixture where each child spends one output can catch that.
+    fn graph_pool() -> (Mempool, Txid) {
+        let confirmed = OutPoint::new(Txid::from_byte_array([7_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 3, 1);
+        let root_txid = root.compute_txid();
+        let child_a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        let child_a_txid = child_a.compute_txid();
+        let child_b = tx_with(
+            &[OutPoint::new(root_txid, 1), OutPoint::new(root_txid, 2)],
+            1,
+            3,
+        );
+        let child_c = tx_with(&[OutPoint::new(child_a_txid, 0)], 1, 4);
+
+        let mut pool = Mempool::new(MempoolLimits::default());
+        for tx in [root, child_a, child_b, child_c] {
+            let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+            let Ok(_id) = pool.insert_entry(entry) else {
+                panic!("mempool insert failed while building the fixture");
+            };
+        }
+        (pool, root_txid)
+    }
+
+    #[test]
+    fn the_cached_txid_matches_a_recomputation() {
+        let (pool, _root_txid) = graph_pool();
+        for (_id, entry) in &pool.entries {
+            assert_eq!(
+                entry.txid,
+                entry.tx.compute_txid(),
+                "the entry's cached txid drifted from its transaction"
+            );
+        }
+    }
+
+    #[test]
+    fn spender_txids_matches_a_scan_of_every_entrys_inputs() {
+        let (pool, _root_txid) = graph_pool();
+
+        let mut spenders_seen = 0_usize;
+        for (index, entry) in &pool.entries {
+            let Ok(id) = EntryId::try_from(index) else {
+                panic!("entry index {index} does not fit an EntryId");
+            };
+
+            // The scan the index replaces, written out rather than reused.
+            let mut expected: Vec<Txid> = Vec::new();
+            for (_other_index, candidate) in &pool.entries {
+                if candidate
+                    .tx
+                    .input
+                    .iter()
+                    .any(|input| input.previous_output.txid == entry.txid)
+                {
+                    expected.push(candidate.tx.compute_txid());
+                }
+            }
+            expected.sort_unstable();
+            spenders_seen = spenders_seen.saturating_add(expected.len());
+
+            let mut actual = pool.spender_txids(id);
+            actual.sort_unstable();
+            assert_eq!(
+                actual, expected,
+                "spender_txids diverged from the scan for {}",
+                entry.txid
+            );
+        }
+
+        assert_eq!(
+            spenders_seen, 3,
+            "the fixture must exercise spenders: root has 2, child_a has 1"
+        );
+    }
+
+    #[test]
+    fn a_transaction_reached_through_two_outputs_is_reported_once() {
+        let (pool, root_txid) = graph_pool();
+        let Some(&root_id) = pool.by_txid.get(&root_txid) else {
+            panic!("root missing from the fixture pool");
+        };
+        let spenders = pool.spender_txids(root_id);
+        let mut deduped = spenders.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            spenders.len(),
+            deduped.len(),
+            "child_b spends two of the root's outputs and must still appear once"
+        );
+        assert_eq!(spenders.len(), 2, "the root has two distinct spenders");
+    }
+
+    #[test]
+    fn spender_txids_is_empty_once_the_spenders_are_gone() {
+        let (mut pool, root_txid) = graph_pool();
+        let Some(&root_id) = pool.by_txid.get(&root_txid) else {
+            panic!("root missing from the fixture pool");
+        };
+        let removed = pool.remove_entry_and_descendants(root_id);
+        assert!(!removed.is_empty());
+        // The root left with its descendants, so nothing is left to spend it.
+        assert!(pool.by_txid.get(&root_txid).is_none());
+        assert!(pool.is_empty(), "the fixture is a single connected package");
     }
 }

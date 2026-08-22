@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use bitcoin::Transaction;
+use bitcoin::{Transaction, Txid};
 
 /// Stable mempool entry identifier.
 pub type EntryId = u32;
@@ -10,6 +10,17 @@ pub type EntryId = u32;
 pub struct MempoolEntry {
     /// Transaction payload shared with downstream consumers.
     pub tx: Arc<Transaction>,
+    /// Transaction id, hashed once at construction.
+    ///
+    /// `Transaction::compute_txid` is a double-SHA256 over the whole serialized
+    /// transaction and rust-bitcoin caches nothing, so every call re-hashes the
+    /// body. Bitcoin Core hashes once in the `CTransaction` constructor and
+    /// keeps the result (`const Txid hash`); this field is the same decision,
+    /// made where the transaction becomes immutable pool state.
+    ///
+    /// The entry owns an `Arc<Transaction>`, which cannot be mutated behind the
+    /// pool's back, so the field cannot go stale.
+    pub txid: Txid,
     /// Virtual transaction size in vbytes.
     pub vsize: u32,
     /// Transaction fee in satoshis.
@@ -35,8 +46,10 @@ impl MempoolEntry {
     #[must_use]
     pub fn new(tx: Arc<Transaction>, vsize: u32, fee: u64, time: u64, height: u32) -> Self {
         let own_size = u64::from(vsize);
+        let txid = tx.compute_txid();
         Self {
             tx,
+            txid,
             vsize,
             fee,
             fee_rate: fee_rate(fee, own_size),

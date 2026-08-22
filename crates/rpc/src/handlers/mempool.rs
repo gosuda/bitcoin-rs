@@ -77,10 +77,7 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     if verbose {
         let mut object = serde_json::Map::new();
         for (_id, entry) in &pool.entries {
-            object.insert(
-                entry.tx.compute_txid().to_string(),
-                entry_to_serde(entry, &pool),
-            );
+            object.insert(entry.txid.to_string(), entry_to_serde(entry, &pool));
         }
         if include_sequence {
             object.insert(
@@ -148,7 +145,7 @@ fn render_relatives(
         let mut object = serde_json::Map::new();
         for id in ids {
             if let Some(entry) = pool.entry(*id) {
-                let txid = entry.tx.compute_txid().to_string();
+                let txid = entry.txid.to_string();
                 object.insert(txid, entry_to_serde(entry, pool));
             }
         }
@@ -157,7 +154,7 @@ fn render_relatives(
         let mut txids = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(entry) = pool.entry(*id) {
-                txids.push(entry.tx.compute_txid().to_string());
+                txids.push(entry.txid.to_string());
             }
         }
         Ok(json!(txids))
@@ -176,7 +173,7 @@ fn entry_to_value(
 }
 
 fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> serde_json::Value {
-    let txid = entry.tx.compute_txid();
+    let txid = entry.txid;
     let bip125_replaceable = entry.is_replaceable();
     let mut depends = Vec::new();
     for input in &entry.tx.input {
@@ -188,19 +185,20 @@ fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> s
     depends.sort();
     depends.dedup();
 
-    let mut spentby = Vec::new();
-    for (_id, candidate) in &pool.entries {
-        for input in &candidate.tx.input {
-            if input.previous_output.txid == txid {
-                spentby.push(candidate.tx.compute_txid().to_string());
-                break;
-            }
-        }
-    }
+    let entry_id = pool.by_txid.get(&txid).copied();
+
+    // The spend index answers this directly. Scanning every entry's inputs here
+    // made a `getrawmempool true` cost O(pool²) input comparisons while holding
+    // the mempool read lock, which is what blocks transaction acceptance.
+    let mut spentby: Vec<String> = entry_id
+        .map(|id| pool.spender_txids(id))
+        .unwrap_or_default()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     spentby.sort();
     spentby.dedup();
 
-    let entry_id = pool.by_txid.get(&entry.tx.compute_txid()).copied();
     let (descendantcount, ancestorcount) = entry_id.map_or((1, 1), |id| {
         (
             pool.descendant_count_inclusive(id),
@@ -611,5 +609,205 @@ mod tests {
                 script_pubkey: ScriptBuf::from_bytes(vec![label]),
             }],
         }
+    }
+}
+
+#[cfg(test)]
+mod spentby_tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+    use bitcoin_rs_mempool::{Mempool, MempoolEntry};
+
+    use super::*;
+
+    /// The answer `entry_to_serde` used to compute: for every entry in the pool,
+    /// walk its inputs and keep it if any of them spends `txid`.
+    ///
+    /// Spelled out here instead of being shared with the implementation. An
+    /// oracle that calls the code under test cannot disagree with it.
+    fn spentby_by_scanning_every_entry(pool: &Mempool, txid: Txid) -> Vec<String> {
+        let mut spentby = Vec::new();
+        for (_id, candidate) in &pool.entries {
+            for input in &candidate.tx.input {
+                if input.previous_output.txid == txid {
+                    spentby.push(candidate.tx.compute_txid().to_string());
+                    break;
+                }
+            }
+        }
+        spentby.sort();
+        spentby.dedup();
+        spentby
+    }
+
+    fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: inputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence(0xFFFF_FFFD),
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: (0..outputs)
+                .map(|vout| TxOut {
+                    value: Amount::from_sat(
+                        10_000_u64
+                            .saturating_add(u64::from(vout))
+                            .saturating_add(tag.saturating_mul(1_000)),
+                    ),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                })
+                .collect(),
+        }
+    }
+
+    /// A pool whose spend graph is not a chain:
+    ///
+    /// ```text
+    ///   root ──vout 0──> child_a ──vout 0──> child_c
+    ///        ──vout 1──> child_b
+    ///        ──vout 2──> child_b
+    ///   loner (spends nothing in the pool)
+    /// ```
+    ///
+    /// So `root` has two spenders, `child_a` one, and everything else none.
+    /// `child_b` spends two of the root's outputs, so a walk of the spend index
+    /// reaches it twice — the case a missing dedup shows up in, and the case a
+    /// fixture where every child spends one output cannot reach.
+    fn graph_ctx() -> (Arc<Context>, Txid) {
+        let confirmed = OutPoint::new(Txid::from_byte_array([7_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 3, 1);
+        let root_txid = root.compute_txid();
+        let child_a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        let child_a_txid = child_a.compute_txid();
+        let child_b = tx_with(
+            &[OutPoint::new(root_txid, 1), OutPoint::new(root_txid, 2)],
+            1,
+            3,
+        );
+        let child_c = tx_with(&[OutPoint::new(child_a_txid, 0)], 1, 4);
+        let loner = tx_with(&[OutPoint::new(Txid::from_byte_array([9_u8; 32]), 0)], 1, 5);
+
+        // `spentby` is rendered in txid order, but the spend index answers in
+        // `EntryId` — that is, insertion — order. Insert the root's two spenders
+        // highest-txid-first so the two orders are opposite: a rendering that
+        // forgets to sort then produces a visibly different list, instead of
+        // passing because the fixture happened to be inserted in order already.
+        let root_spenders = if child_a.compute_txid() > child_b.compute_txid() {
+            [child_a, child_b]
+        } else {
+            [child_b, child_a]
+        };
+        let [first_spender, second_spender] = root_spenders;
+
+        let ctx = Arc::new(Context::new());
+        {
+            let mut pool = ctx.mempool.write();
+            for tx in [root, first_spender, second_spender, child_c, loner] {
+                let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+                let Ok(_id) = pool.insert_entry(entry) else {
+                    panic!("mempool insert failed while building the fixture");
+                };
+            }
+        }
+        (ctx, root_txid)
+    }
+
+    fn rendered_spentby(value: &serde_json::Value) -> Vec<String> {
+        let Some(array) = value.get("spentby").and_then(serde_json::Value::as_array) else {
+            panic!("spentby missing from {value}");
+        };
+        array
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .unwrap_or_else(|| panic!("spentby entry is not a string: {item}"))
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn spentby_matches_the_scan_it_replaced_for_every_entry() {
+        let (ctx, root_txid) = graph_ctx();
+        let pool = ctx.mempool.read();
+
+        let mut spenders_seen = 0_usize;
+        for (_id, entry) in &pool.entries {
+            let expected = spentby_by_scanning_every_entry(&pool, entry.txid);
+            spenders_seen = spenders_seen.saturating_add(expected.len());
+            assert_eq!(
+                rendered_spentby(&entry_to_serde(entry, &pool)),
+                expected,
+                "spentby diverged from the scan for {}",
+                entry.txid
+            );
+        }
+
+        // Without this the equality above would pass on a pool where nothing
+        // spends anything, which is exactly the fixture this bug survived.
+        assert_eq!(
+            spenders_seen, 3,
+            "the fixture must exercise spenders: root has 2, child_a has 1"
+        );
+        assert_eq!(
+            spentby_by_scanning_every_entry(&pool, root_txid).len(),
+            2,
+            "root must be spent by two transactions"
+        );
+    }
+
+    #[test]
+    fn getrawmempool_verbose_spentby_matches_the_scan_for_every_key() {
+        let (ctx, _root_txid) = graph_ctx();
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getrawmempool", &json!([true]))
+            .unwrap_or_else(|err| panic!("getrawmempool failed: {err}"));
+        let rendered = sonic_rs::to_string(&result)
+            .unwrap_or_else(|err| panic!("re-encoding the response failed: {err}"));
+        let rendered: serde_json::Value = serde_json::from_str(&rendered)
+            .unwrap_or_else(|err| panic!("re-parsing the response failed: {err}"));
+        let Some(object) = rendered.as_object() else {
+            panic!("verbose getrawmempool must answer an object: {rendered}");
+        };
+
+        let pool = ctx.mempool.read();
+        assert_eq!(object.len(), pool.len(), "one key per mempool entry");
+        for (txid, entry) in object {
+            let txid = Txid::from_str(txid)
+                .unwrap_or_else(|err| panic!("key {txid} is not a txid: {err}"));
+            assert_eq!(
+                rendered_spentby(entry),
+                spentby_by_scanning_every_entry(&pool, txid),
+                "spentby diverged for key {txid}"
+            );
+        }
+    }
+
+    #[test]
+    fn getmempoolentry_reports_every_spender_of_the_root() {
+        let (ctx, root_txid) = graph_ctx();
+        let expected = {
+            let pool = ctx.mempool.read();
+            spentby_by_scanning_every_entry(&pool, root_txid)
+        };
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolentry", &json!([root_txid.to_string()]))
+            .unwrap_or_else(|err| panic!("getmempoolentry failed: {err}"));
+        let rendered = sonic_rs::to_string(&result)
+            .unwrap_or_else(|err| panic!("re-encoding the response failed: {err}"));
+        let rendered: serde_json::Value = serde_json::from_str(&rendered)
+            .unwrap_or_else(|err| panic!("re-parsing the response failed: {err}"));
+        assert_eq!(rendered_spentby(&rendered), expected);
     }
 }
