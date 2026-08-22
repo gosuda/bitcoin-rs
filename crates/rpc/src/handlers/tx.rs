@@ -231,34 +231,66 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "raw transaction is required")?;
     let tx = decode_tx(raw)?;
-    let txid = ctx.add_transaction(tx);
-    Ok(json!(txid.to_string()))
+    let txid = tx.compute_txid();
+    match ctx.accept_transaction(tx, now_seconds()) {
+        Ok(result) => Ok(json!(result.checks.txid.to_string())),
+        // Core does not treat a resubmission as a failure: `BroadcastTransaction`
+        // finds the transaction already in the mempool, rebroadcasts it, and
+        // returns the txid. Callers retry on a dropped connection and expect
+        // that to be idempotent.
+        Err(bitcoin_rs_mempool::AcceptError::AlreadyInPool) => Ok(json!(txid.to_string())),
+        Err(error) => Err(RpcError::TxRejected(error.to_string())),
+    }
 }
 
-pub(crate) fn testmempoolaccept(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw_txs = params_array(params)?
         .first()
         .and_then(|value| value.as_array())
         .ok_or(RpcError::InvalidParams("raw transaction array is required"))?;
+    let now = now_seconds();
     let mut rows = Vec::with_capacity(raw_txs.len());
     for raw in raw_txs {
         let Some(raw) = raw.as_str() else {
             return Err(RpcError::InvalidType("raw transaction must be a string"));
         };
-        let decoded = decode_tx(raw);
-        let txid = decoded.as_ref().map_or_else(
-            |_| Hash256::default().to_string_be(),
-            |tx| tx.compute_txid().to_string(),
-        );
-        rows.push(json!({
-            "txid": txid,
-            "wtxid": txid,
-            "allowed": decoded.is_ok(),
-            "vsize": decoded.as_ref().map_or(0, Transaction::vsize),
-            "fees": {"base": 0.0}
-        }));
+        let Ok(tx) = decode_tx(raw) else {
+            rows.push(json!({
+                "txid": Hash256::default().to_string_be(),
+                "allowed": false,
+                "reject-reason": "transaction decode failed"
+            }));
+            continue;
+        };
+        let tx = Arc::new(tx);
+        let txid = tx.compute_txid().to_string();
+        // The old code reported the txid here too. A witness transaction's
+        // wtxid differs, and package relay identifies transactions by it.
+        let wtxid = tx.compute_wtxid().to_string();
+        match ctx.check_transaction(&tx, now) {
+            Ok(checks) => rows.push(json!({
+                "txid": txid,
+                "wtxid": wtxid,
+                "allowed": true,
+                "vsize": checks.vsize,
+                "fees": {"base": bitcoin::Amount::from_sat(checks.fee).to_btc()}
+            })),
+            Err(error) => rows.push(json!({
+                "txid": txid,
+                "wtxid": wtxid,
+                "allowed": false,
+                "reject-reason": error.to_string()
+            })),
+        }
     }
     Ok(json!(rows))
+}
+
+/// Wall-clock seconds since the UNIX epoch, for mempool entry timestamps.
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 pub(crate) fn decoderawtransaction(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -674,6 +706,249 @@ mod gettxout_via_utxo_tests {
         assert!(
             value.is_null(),
             "expected null for output absent from UTXO set, got {value:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod acceptance_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::absolute::LockTime;
+    use bitcoin::consensus::encode::serialize;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::hex::DisplayHex as _;
+    use bitcoin::transaction::Version;
+    use bitcoin::{Amount, PubkeyHash, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
+    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
+
+    use super::{sendrawtransaction, testmempoolaccept};
+    use crate::context::Context;
+    use crate::error::RpcError;
+
+    fn internal_outpoint(tag: u8) -> bitcoin_rs_primitives::OutPoint {
+        bitcoin_rs_primitives::OutPoint::new(Hash256::from_le_bytes(&[tag; 32]), 0)
+    }
+
+    fn spent_outpoint(tag: u8) -> bitcoin::OutPoint {
+        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([tag; 32]), 0)
+    }
+
+    /// Seeds one confirmed, anyone-can-spend output worth `value`.
+    fn seed_utxo(ctx: &Context, tag: u8, value: u64) {
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            internal_outpoint(tag),
+            TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            false,
+            7,
+        ));
+        ctx.utxo
+            .commit_block(&changes, &Hash256::default())
+            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    }
+
+    fn spending_tx(tag: u8, output_value: u64) -> Transaction {
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: spent_outpoint(tag),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(output_value),
+                script_pubkey: ScriptBuf::new_p2pkh(&PubkeyHash::from_byte_array([9_u8; 20])),
+            }],
+        }
+    }
+
+    fn hex_of(tx: &Transaction) -> String {
+        serialize(tx).to_lower_hex_string()
+    }
+
+    /// The transaction must land in the mempool.
+    ///
+    /// It previously went into a side `HashMap` that nothing else treated as
+    /// the mempool: `getmempoolinfo` reported an empty pool, mining saw no
+    /// candidates, and no policy check ran at all.
+    #[test]
+    fn sendrawtransaction_admits_the_transaction_to_the_mempool() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+        let tx = spending_tx(1, 90_000);
+
+        let Ok(value) = sendrawtransaction(&ctx, &json!([hex_of(&tx)])) else {
+            panic!("a standard transaction spending a confirmed output must be accepted");
+        };
+
+        assert_eq!(value.as_str(), Some(tx.compute_txid().to_string().as_str()));
+        assert_eq!(ctx.mempool.read().len(), 1, "the pool must hold it");
+        assert!(ctx.mempool.read().contains_txid(&tx.compute_txid()));
+    }
+
+    /// A rejection must say why, under Core's `RPC_VERIFY_REJECTED` code.
+    #[test]
+    fn sendrawtransaction_rejects_a_transaction_whose_inputs_do_not_exist() {
+        let ctx = Arc::new(Context::new());
+        let tx = spending_tx(4, 90_000);
+
+        let outcome = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
+
+        let Err(error) = outcome else {
+            panic!("a transaction with no resolvable inputs must not be accepted");
+        };
+        assert!(
+            matches!(error, RpcError::TxRejected(_)),
+            "expected a rejection, got {error:?}"
+        );
+        assert_eq!(error.code(), RpcError::CORE_VERIFY_REJECTED);
+        assert!(ctx.mempool.read().is_empty());
+    }
+
+    /// Core rebroadcasts rather than failing, and callers retry on a dropped
+    /// connection expecting that to be safe.
+    #[test]
+    fn sendrawtransaction_is_idempotent_for_a_transaction_already_in_the_pool() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+        let tx = spending_tx(1, 90_000);
+        let params = json!([hex_of(&tx)]);
+        let Ok(first) = sendrawtransaction(&ctx, &params) else {
+            panic!("the first submission must succeed");
+        };
+
+        let Ok(second) = sendrawtransaction(&ctx, &params) else {
+            panic!("resubmitting a transaction already in the mempool must not fail");
+        };
+
+        assert_eq!(first.as_str(), second.as_str());
+        assert_eq!(ctx.mempool.read().len(), 1, "it must not be inserted twice");
+    }
+
+    /// The verdict must come from the acceptance checks.
+    ///
+    /// This RPC used to answer `allowed: true` for anything that merely
+    /// decoded, so a transaction spending outputs that do not exist was
+    /// reported as acceptable.
+    #[test]
+    fn testmempoolaccept_rejects_a_transaction_that_only_decodes() {
+        let ctx = Arc::new(Context::new());
+        let tx = spending_tx(4, 90_000);
+
+        let Ok(value) = testmempoolaccept(&ctx, &json!([[hex_of(&tx)]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+
+        let Some(rows) = value.as_array() else {
+            panic!("testmempoolaccept must return an array");
+        };
+        let Some(row) = rows.first() else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(row.get("allowed").as_bool(), Some(false));
+        assert!(
+            row.get("reject-reason")
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "a rejection must carry a reason"
+        );
+    }
+
+    #[test]
+    fn testmempoolaccept_allows_a_transaction_without_admitting_it() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+        let tx = spending_tx(1, 90_000);
+
+        let Ok(value) = testmempoolaccept(&ctx, &json!([[hex_of(&tx)]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+
+        let Some(row) = value.as_array().and_then(|rows| rows.first()) else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(row.get("allowed").as_bool(), Some(true));
+        assert_eq!(
+            row.get("vsize").as_u64(),
+            u64::try_from(tx.vsize()).ok(),
+            "vsize must be the transaction's, not a placeholder"
+        );
+        assert!(
+            ctx.mempool.read().is_empty(),
+            "testing acceptance must not accept"
+        );
+    }
+
+    /// `wtxid` was a copy of `txid`. They differ for any witness transaction,
+    /// and package relay identifies transactions by the witness id.
+    #[test]
+    fn testmempoolaccept_reports_the_witness_txid() {
+        let ctx = Arc::new(Context::new());
+        let mut tx = spending_tx(4, 90_000);
+        tx.input[0].witness.push([1_u8; 8]);
+        assert_ne!(
+            tx.compute_txid().to_string(),
+            tx.compute_wtxid().to_string(),
+            "the fixture must carry a witness or this proves nothing"
+        );
+
+        let Ok(value) = testmempoolaccept(&ctx, &json!([[hex_of(&tx)]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+
+        let Some(row) = value.as_array().and_then(|rows| rows.first()) else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(
+            row.get("txid").as_str(),
+            Some(tx.compute_txid().to_string().as_str())
+        );
+        assert_eq!(
+            row.get("wtxid").as_str(),
+            Some(tx.compute_wtxid().to_string().as_str())
+        );
+    }
+
+    /// Standardness is relay policy, and Core relaxes it only on regtest.
+    ///
+    /// The mempool crate tests the gate itself; this covers the wiring that
+    /// decides the flag, which is the half that can silently invert.
+    #[test]
+    fn standardness_is_relaxed_on_regtest_only() {
+        let non_standard = || {
+            let mut tx = spending_tx(1, 90_000);
+            // Consensus-valid, non-standard.
+            tx.version = Version(4);
+            tx
+        };
+
+        let mainnet = Arc::new(Context::new());
+        assert_eq!(
+            mainnet.chain_network,
+            bitcoin_rs_primitives::Network::Mainnet,
+            "the fixture assumes the default context is mainnet"
+        );
+        seed_utxo(&mainnet, 1, 100_000);
+        assert!(
+            sendrawtransaction(&mainnet, &json!([hex_of(&non_standard())])).is_err(),
+            "mainnet must enforce standardness"
+        );
+
+        let mut regtest = Context::new();
+        regtest.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        let regtest = Arc::new(regtest);
+        seed_utxo(&regtest, 1, 100_000);
+        assert!(
+            sendrawtransaction(&regtest, &json!([hex_of(&non_standard())])).is_ok(),
+            "regtest must accept the same transaction"
         );
     }
 }

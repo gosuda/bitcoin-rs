@@ -27,6 +27,9 @@ pub enum RpcError {
     /// A method is intentionally disabled by policy.
     #[error("{0}")]
     MethodDisabled(&'static str),
+    /// A transaction was rejected by consensus or mempool policy.
+    #[error("{0}")]
+    TxRejected(String),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -49,6 +52,8 @@ impl RpcError {
     pub const CORE_NOT_FOUND: i64 = -5;
     /// Bitcoin Core invalid parameter value code.
     pub const CORE_INVALID_PARAMETER: i64 = -8;
+    /// Bitcoin Core transaction-rejected code, `RPC_VERIFY_REJECTED`.
+    pub const CORE_VERIFY_REJECTED: i64 = -26;
 
     /// Builds the no-private-keys policy error used by signing RPCs.
     #[must_use]
@@ -66,6 +71,7 @@ impl RpcError {
             Self::InvalidParams(_) => Self::INVALID_PARAMS,
             Self::InvalidType(_) => Self::CORE_INVALID_TYPE,
             Self::NotFound(_) => Self::CORE_NOT_FOUND,
+            Self::TxRejected(_) => Self::CORE_VERIFY_REJECTED,
             Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
         }
     }

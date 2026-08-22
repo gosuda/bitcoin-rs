@@ -18,6 +18,12 @@ pub struct ReplacementCandidate {
     pub fee: u64,
     /// Incremental relay fee rate in sat/kvB.
     pub min_relay_fee_rate: u64,
+    /// BIP141 sigop cost against the resolved prevouts.
+    ///
+    /// Carried through so a replacement lands with the same accounting a plain
+    /// acceptance would give it. Zero when the candidate was built without
+    /// resolved prevouts, which means unknown rather than none.
+    pub sigop_cost: u32,
 }
 
 impl ReplacementCandidate {
@@ -29,7 +35,15 @@ impl ReplacementCandidate {
             vsize,
             fee,
             min_relay_fee_rate,
+            sigop_cost: 0,
         }
+    }
+
+    /// Attaches a sigop cost counted against resolved prevouts.
+    #[must_use]
+    pub const fn with_sigop_cost(mut self, sigop_cost: u32) -> Self {
+        self.sigop_cost = sigop_cost;
+        self
     }
 
     /// Candidate fee rate in sat/vB multiplied by 1000.
@@ -146,7 +160,8 @@ impl Mempool {
         for id in plan.evicted {
             let _ = self.remove_entry_and_descendants(id);
         }
-        let entry = MempoolEntry::new(candidate.tx, candidate.vsize, candidate.fee, time, height);
+        let entry = MempoolEntry::new(candidate.tx, candidate.vsize, candidate.fee, time, height)
+            .with_sigop_cost(candidate.sigop_cost);
         self.insert_entry(entry).map_err(RbfError::from)
     }
 }

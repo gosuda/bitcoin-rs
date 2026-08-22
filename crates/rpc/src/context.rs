@@ -5,16 +5,55 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex, FromHex as _};
-use bitcoin::{Block, OutPoint, Transaction, Txid};
+use bitcoin::{Block, FeeRate, OutPoint, Transaction, TxOut, Txid};
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_consensus::rust_path::UtxoView;
+use bitcoin_rs_mempool::{
+    AcceptChecks, AcceptContext, AcceptError, AcceptResult, Mempool, MempoolLimits,
+    StandardnessPolicy, accept_to_mempool, check_acceptance,
+};
+use bitcoin_rs_primitives::{Hash256, Network, OutPoint as InternalOutPoint};
 use compact_str::CompactString;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
+
+/// Number of blocks in a median-time-past window (BIP113).
+const MEDIAN_TIME_SPAN: usize = 11;
+
+/// Aggregate nulldata bytes relay policy allows in one transaction.
+///
+/// Bitcoin Core's `MAX_OP_RETURN_RELAY`, defined as
+/// `MAX_STANDARD_TX_WEIGHT / WITNESS_SCALE_FACTOR`. The historical 83-byte
+/// limit is gone; using it here would reject transactions Core relays.
+const MAX_OP_RETURN_RELAY: usize = 400_000 / 4;
+
+/// The confirmed UTXO set, as the consensus crate's lookup contract.
+///
+/// Named to avoid colliding with the two other `UtxoSetView` types in the
+/// workspace: `bitcoin_rs_utxo`'s borrowed view and the node's apply-path
+/// adapter.
+struct ChainUtxoView {
+    set: Arc<bitcoin_rs_utxo::UtxoSet>,
+}
+
+impl ChainUtxoView {
+    const fn new(set: Arc<bitcoin_rs_utxo::UtxoSet>) -> Self {
+        Self { set }
+    }
+}
+
+impl UtxoView for ChainUtxoView {
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        let internal = InternalOutPoint::new(
+            Hash256::from_le_bytes(outpoint.txid.as_byte_array()),
+            outpoint.vout,
+        );
+        self.set.get(&internal)
+    }
+}
 
 /// Block data made available to RPC handlers without forcing storage I/O.
 #[derive(Clone, Debug)]
@@ -609,6 +648,70 @@ impl Context {
         let txid = tx.compute_txid();
         self.transactions.write().insert(txid, tx);
         txid
+    }
+
+    /// Validates `tx` and admits it to the mempool.
+    ///
+    /// `now` is the acceptance timestamp in seconds; it is a parameter rather
+    /// than a clock read so tests can pin it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first check that rejected the transaction.
+    pub fn accept_transaction(
+        &self,
+        tx: Transaction,
+        now: u64,
+    ) -> Result<AcceptResult, AcceptError> {
+        let chain = ChainUtxoView::new(Arc::clone(&self.utxo));
+        let accept_ctx = self.accept_context(now);
+        let result = {
+            let mut pool = self.mempool.write();
+            accept_to_mempool(&mut pool, tx, &chain, &accept_ctx)?
+        };
+        // A new mempool transaction changes what the next block template would
+        // contain, so long polls waiting on it should wake.
+        let _ignored = self.mining_sender.send(());
+        Ok(result)
+    }
+
+    /// Runs every acceptance check without admitting the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first check that rejected the transaction.
+    pub fn check_transaction(
+        &self,
+        tx: &Arc<Transaction>,
+        now: u64,
+    ) -> Result<AcceptChecks, AcceptError> {
+        let chain = ChainUtxoView::new(Arc::clone(&self.utxo));
+        let accept_ctx = self.accept_context(now);
+        let pool = self.mempool.read();
+        check_acceptance(&pool, tx, &chain, &accept_ctx)
+    }
+
+    fn accept_context(&self, now: u64) -> AcceptContext {
+        AcceptContext {
+            // The next block's height: a transaction entering the mempool is a
+            // candidate for the block being built, not for the tip.
+            height: self.applied_height().saturating_add(1),
+            locktime_cutoff: self.tip_median_time_past().unwrap_or(0),
+            time: now,
+            standardness: StandardnessPolicy {
+                dust_relay_fee: FeeRate::DUST,
+                max_datacarrier_bytes: Some(MAX_OP_RETURN_RELAY),
+            },
+            // Core's `-acceptnonstdtxn`, which it permits only on regtest.
+            require_standard: self.chain_network != Network::Regtest,
+        }
+    }
+
+    fn tip_median_time_past(&self) -> Option<u32> {
+        let tip = self.applied_tip.load_full()?;
+        self.block_tree
+            .read()
+            .median_time_past_at(tip.tip_id, MEDIAN_TIME_SPAN)
     }
 
     /// Returns the current tip height, or zero before initial sync publishes one.

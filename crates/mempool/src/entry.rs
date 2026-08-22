@@ -28,6 +28,18 @@ pub struct MempoolEntry {
     pub time: u64,
     /// Chain height at acceptance.
     pub height: u32,
+    /// BIP141 sigop cost, counted against the resolved prevouts.
+    ///
+    /// P2SH sigops cannot be counted from the transaction alone — the spent
+    /// `scriptPubKey` is what says how many there are — so this is computed
+    /// once by `accept_to_mempool`, where the prevouts are already resolved,
+    /// and carried from there. Bitcoin Core does the same, storing
+    /// `sigOpCost` on `CTxMemPoolEntry` at acceptance rather than recounting
+    /// per block template.
+    ///
+    /// Zero for entries inserted through `MempoolEntry::new` without going
+    /// through acceptance: the count is unknown, not known to be zero.
+    pub sigop_cost: u32,
 }
 
 impl MempoolEntry {
@@ -46,7 +58,20 @@ impl MempoolEntry {
             descendant_fee: fee,
             time,
             height,
+            sigop_cost: 0,
         }
+    }
+
+    /// Attaches a sigop cost counted against resolved prevouts.
+    ///
+    /// Only `accept_to_mempool` is in a position to call this correctly, since
+    /// only it has the prevouts. Kept as a separate builder rather than a
+    /// `new` parameter so the ~30 fixtures that construct entries directly do
+    /// not have to invent a number they cannot compute.
+    #[must_use]
+    pub const fn with_sigop_cost(mut self, sigop_cost: u32) -> Self {
+        self.sigop_cost = sigop_cost;
+        self
     }
 
     /// Ancestor package fee rate in sat/vB multiplied by 1000.

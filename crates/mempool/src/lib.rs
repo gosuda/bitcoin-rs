@@ -3,6 +3,8 @@
 
 extern crate alloc;
 
+/// Transaction acceptance into the mempool.
+pub mod accept;
 /// Mempool entry metadata.
 pub mod entry;
 /// Package eviction policy.
@@ -22,9 +24,14 @@ pub mod rbf;
 /// Transaction relay standardness policy.
 pub mod standardness;
 
+pub use accept::{
+    AcceptChecks, AcceptContext, AcceptError, AcceptResult, MempoolUtxoView, accept_to_mempool,
+    check_acceptance,
+};
 pub use entry::{EntryId, MempoolEntry};
 pub use eviction::evict_lowest_fee_packages;
 pub use pareto::ParetoFront;
 pub use policy::{MempoolLimits, PolicyError};
 pub use pool::{Mempool, MempoolError, MempoolStats, ScriptHash};
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
+pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
