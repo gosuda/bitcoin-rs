@@ -471,14 +471,17 @@ fn getblockstats_errors_when_any_prevout_missing() {
 }
 
 #[test]
-fn empty_context_is_not_initial_block_download() -> Result<(), Box<dyn std::error::Error>> {
+fn empty_context_is_in_initial_block_download() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(Arc::new(Context::new()));
 
     let result = handler.dispatch("getblockchaininfo", &json!([]))?;
 
     assert_eq!(result.get("blocks").as_u64(), Some(0));
     assert_eq!(result.get("headers").as_u64(), Some(0));
-    assert_eq!(result.get("initialblockdownload").as_bool(), Some(false));
+    // A node that has applied no blocks is in initial block download by
+    // definition, and Bitcoin Core says so. This asserted `false` while the
+    // field was `applied < headers`, which on an empty node is `0 < 0`.
+    assert_eq!(result.get("initialblockdownload").as_bool(), Some(true));
     Ok(())
 }
 

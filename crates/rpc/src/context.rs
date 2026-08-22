@@ -16,6 +16,12 @@ use parking_lot::RwLock;
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
+/// How stale the applied tip may be while the node still counts as synced.
+///
+/// Bitcoin Core's `DEFAULT_MAX_TIP_AGE`, 24 hours. Core exposes it as
+/// `-maxtipage`; this node has no such option yet, so the default stands.
+const MAX_TIP_AGE_SECONDS: u64 = 24 * 60 * 60;
+
 /// Block data made available to RPC handlers without forcing storage I/O.
 #[derive(Clone, Debug)]
 pub struct BlockRecord {
@@ -351,6 +357,16 @@ pub struct Context {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best-applied-block tip snapshot published after block application.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Whether this node has ever observed itself to be out of initial block
+    /// download. Once set it is never cleared.
+    ///
+    /// Bitcoin Core latches the same way (`m_cached_is_ibd`, cleared once by
+    /// `UpdateIBDStatus` and never set again) and logs "Leaving
+    /// `InitialBlockDownload (latching to false)`" when it happens. Without the
+    /// latch the answer oscillates: a synced node that has not seen a block for
+    /// longer than the tip-age window would announce that it is back in initial
+    /// sync, and callers treat that as "do not trust this node's data yet".
+    left_initial_block_download: Arc<core::sync::atomic::AtomicBool>,
     /// In-memory mempool handle.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Block records already available without blocking storage readers.
@@ -438,6 +454,7 @@ impl Context {
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip: Arc::new(ArcSwapOption::empty()),
+            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -494,6 +511,7 @@ impl Context {
         Self {
             chain_tip,
             applied_tip,
+            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool,
             blocks,
             transactions,
@@ -622,6 +640,55 @@ impl Context {
     #[must_use]
     pub fn applied_height(&self) -> u32 {
         self.applied_tip.load_full().map_or(0, |tip| tip.height)
+    }
+
+    /// Answers Bitcoin Core's `IsInitialBlockDownload()` for the applied tip.
+    ///
+    /// A node has left initial block download once its applied tip has at least
+    /// the network's `nMinimumChainWork` **and** carries a timestamp no older
+    /// than `max_tip_age` (Core's 24-hour default). Both are required: work
+    /// alone would trust a stale chain, and recency alone would trust a cheap
+    /// one that simply claims a recent timestamp.
+    ///
+    /// The answer latches. Once this returns `false` it returns `false` for the
+    /// life of the process, exactly as Core's `m_cached_is_ibd` does, so a
+    /// synced node that goes an hour without a block does not announce that it
+    /// is resyncing.
+    ///
+    /// `now` is UNIX seconds, taken by the caller so the decision itself stays a
+    /// pure function of observable state.
+    #[must_use]
+    pub fn is_initial_block_download(&self, now: u64) -> bool {
+        use core::sync::atomic::Ordering;
+
+        if self.left_initial_block_download.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Some(tip) = self.applied_tip.load_full() else {
+            return true;
+        };
+        // Big-endian, fixed width: byte order is numeric order.
+        let work: [u8; 32] = tip.chainwork.to_be_bytes();
+        if work < self.chain_network.minimum_chain_work() {
+            return true;
+        }
+        // `TipSnapshot` carries no timestamp, so the tip's header supplies it —
+        // the same route `getdifficulty` takes to the tip's `bits`.
+        let Some(tip_time) = self
+            .block_tree
+            .read()
+            .node(tip.tip_id)
+            .ok()
+            .map(|node| node.header.time)
+        else {
+            return true;
+        };
+        if u64::from(tip_time) < now.saturating_sub(MAX_TIP_AGE_SECONDS) {
+            return true;
+        }
+        self.left_initial_block_download
+            .store(true, Ordering::Relaxed);
+        false
     }
 
     /// Returns the current best-applied-block hash.

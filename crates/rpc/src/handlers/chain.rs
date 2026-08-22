@@ -28,11 +28,20 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             )
         })
     });
+    // Still the height ratio, and still wrong for the reason the audit gives:
+    // early blocks are nearly empty, so this reports the chain further along
+    // than it is. Core's `GuessVerificationProgress` needs a cumulative chain
+    // transaction count that survives a restart, and this node has none — the
+    // block-record log is rebuilt empty on every open, so the count reads zero
+    // on any node that did not sync in this process. Correcting the formula
+    // without first making its input durable would turn a wrong-but-close
+    // number into a confident 0.0 on every restarted node.
     let verification_progress = if headers > 0 {
         f64::from(applied) / f64::from(headers)
     } else {
         0.0
     };
+    let initialblockdownload = ctx.is_initial_block_download(unix_now());
     let chain = match ctx.chain_network {
         bitcoin_rs_primitives::Network::Mainnet => "main",
         bitcoin_rs_primitives::Network::Testnet3 | bitcoin_rs_primitives::Network::Testnet4 => {
@@ -62,7 +71,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let _ = response.insert(&"time", time);
     let _ = response.insert(&"mediantime", mediantime);
     let _ = response.insert(&"verificationprogress", json!(verification_progress));
-    let _ = response.insert(&"initialblockdownload", applied < headers);
+    let _ = response.insert(&"initialblockdownload", initialblockdownload);
     let _ = response.insert(&"chainwork", chainwork.as_str());
     let _ = response.insert(&"size_on_disk", block_stats.size_on_disk);
     let _ = response.insert(&"pruned", prune_status.pruned);
@@ -71,6 +80,13 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }
     let _ = response.insert(&"warnings", "");
     Ok(Value::from(response))
+}
+
+/// UNIX seconds now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn chainwork_hex(tip: &TipSnapshot) -> String {
@@ -2060,5 +2076,155 @@ fn compute_branchlen(
             return leaf_height;
         };
         cursor = parent_id;
+    }
+}
+
+#[cfg(test)]
+mod initial_block_download_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::block::Version;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_primitives::Network;
+
+    use super::*;
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// A context whose applied tip is a real tree node stamped `tip_time`, so
+    /// the tip has an age to be judged on. Chain work comes from the tree's own
+    /// accounting, which for a two-block regtest chain is far below any
+    /// production `nMinimumChainWork` — hence the network parameter: regtest
+    /// pins that floor at zero, mainnet does not.
+    fn ctx_with_tip_at(network: Network, tip_time: u32) -> Arc<Context> {
+        let mut ctx = Context::new();
+        ctx.chain_network = network;
+        let tip = {
+            let mut tree = ctx.block_tree.write();
+            let genesis = bitcoin::block::Header {
+                version: Version::ONE,
+                prev_blockhash: BlockHash::all_zeros(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_000_000,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            };
+            let Ok(genesis_id) = tree.insert_node(None, genesis, NodeStatus::Active) else {
+                panic!("genesis insert failed");
+            };
+            let child = bitcoin::block::Header {
+                version: Version::ONE,
+                prev_blockhash: genesis.block_hash(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: tip_time,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 1,
+            };
+            let Ok(_child_id) = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)
+            else {
+                panic!("child insert failed");
+            };
+            let Some(tip) = tree.tip() else {
+                panic!("no tip published");
+            };
+            (*tip).clone()
+        };
+        ctx.set_applied_tip(tip);
+        Arc::new(ctx)
+    }
+
+    #[test]
+    fn a_node_that_has_applied_nothing_is_in_initial_block_download() {
+        let ctx = Arc::new(Context::new());
+        assert!(ctx.is_initial_block_download(1_800_000_000));
+    }
+
+    #[test]
+    fn a_recent_tip_without_the_networks_minimum_work_is_still_initial_block_download() {
+        let now = 1_800_000_000_u64;
+        // Timestamped one minute ago, so recency is satisfied and only the work
+        // floor can be what decides. A two-block regtest-difficulty chain has
+        // nowhere near mainnet's `nMinimumChainWork`.
+        let ctx = ctx_with_tip_at(
+            Network::Mainnet,
+            u32::try_from(now - 60).unwrap_or(u32::MAX),
+        );
+        assert!(
+            ctx.is_initial_block_download(now),
+            "a chain this cheap must not count as synced merely for being recent"
+        );
+    }
+
+    #[test]
+    fn a_stale_tip_with_enough_work_is_still_initial_block_download() {
+        let now = 1_800_000_000_u64;
+        // Regtest's work floor is zero, so only the tip's age is left to decide.
+        let ctx = ctx_with_tip_at(
+            Network::Regtest,
+            u32::try_from(now - DAY - 60).unwrap_or(u32::MAX),
+        );
+        assert!(ctx.is_initial_block_download(now));
+    }
+
+    #[test]
+    fn a_recent_tip_with_enough_work_has_left_initial_block_download() {
+        let now = 1_800_000_000_u64;
+        let ctx = ctx_with_tip_at(
+            Network::Regtest,
+            u32::try_from(now - 60).unwrap_or(u32::MAX),
+        );
+        assert!(!ctx.is_initial_block_download(now));
+    }
+
+    #[test]
+    fn the_tip_age_boundary_is_twenty_four_hours() {
+        let now = 1_800_000_000_u64;
+        let at_the_edge = ctx_with_tip_at(
+            Network::Regtest,
+            u32::try_from(now - DAY).unwrap_or(u32::MAX),
+        );
+        assert!(
+            !at_the_edge.is_initial_block_download(now),
+            "exactly `max_tip_age` old is still recent enough"
+        );
+
+        let past_the_edge = ctx_with_tip_at(
+            Network::Regtest,
+            u32::try_from(now - DAY - 1).unwrap_or(u32::MAX),
+        );
+        assert!(past_the_edge.is_initial_block_download(now));
+    }
+
+    #[test]
+    fn leaving_initial_block_download_latches() {
+        let now = 1_800_000_000_u64;
+        let ctx = ctx_with_tip_at(
+            Network::Regtest,
+            u32::try_from(now - 60).unwrap_or(u32::MAX),
+        );
+        assert!(!ctx.is_initial_block_download(now));
+
+        // Two days later, with no new block. Judged afresh the tip is stale and
+        // the answer would flip back to `true`; latched, it does not. This is
+        // the defect the field had — it went true again every time the node went
+        // quiet, and callers read that as "resyncing, do not trust me".
+        assert!(
+            !ctx.is_initial_block_download(now + 2 * DAY),
+            "the answer must not flip back once the node has left initial sync"
+        );
+    }
+
+    #[test]
+    fn the_latch_does_not_fire_before_the_conditions_are_met() {
+        let now = 1_800_000_000_u64;
+        let ctx = ctx_with_tip_at(
+            Network::Regtest,
+            u32::try_from(now - DAY - 60).unwrap_or(u32::MAX),
+        );
+        assert!(ctx.is_initial_block_download(now));
+        // Same tip, asked later at a time when it *is* within the window.
+        assert!(!ctx.is_initial_block_download(now - DAY));
     }
 }
