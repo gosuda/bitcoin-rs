@@ -111,6 +111,27 @@ For raw Key-Value database stores (`fjall`, `rocksdb`, `mdbx`, `redb`):
 **`bitcoin-rs` does not support in-place database migrations.**
 The codebase contains zero schema transformation scripts, database version tables, or in-place record converters.
 
+#### 6.1.0 Additive Manifest Fields
+
+Every manifest struct in `checkpoint.rs` carries `#[serde(deny_unknown_fields)]`,
+so an older binary refuses a manifest written by a newer one. That direction is
+covered by the no-downgrade stance. The other direction — a newer binary reading
+an older manifest — is where a new field decides between a silent read and a
+forced resync, because a missing required field fails the parse and the node
+falls all the way back to a cold start.
+
+A field that carries **information a node can do without** must therefore be
+`#[serde(default)]`, and its absent value must be distinguishable from a real
+one. `CheckpointTipV1::chain_tx_count` is the worked example: it defaults to `0`,
+which is Bitcoin Core's own "unset" encoding for `m_chain_tx_count`, and every
+reader treats `0` as *unknown* rather than *zero transactions*. A chain applied
+before the field existed cannot recover the number — nothing short of re-reading
+every block body would — so it stays unknown until that node is resynced, and
+nothing is migrated in place.
+
+A field the node **cannot** do without is a different case and takes the version
+bump in section 6.2.
+
 ### 6.1.1 Undo Record Encoding
 Undo records in `UndoData` carry their own format version as the first byte
 (`crates/utxo/src/undo_codec.rs`), and each record is bound to the height AND

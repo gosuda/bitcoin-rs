@@ -351,6 +351,13 @@ pub struct Context {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best-applied-block tip snapshot published after block application.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Cumulative transaction count of the applied chain, `0` when unknown.
+    ///
+    /// Maintained by block application and restored from the chainstate
+    /// checkpoint, so it survives a restart. Read through
+    /// [`Self::chain_tx_count`], which turns Bitcoin Core's zero-means-unset
+    /// encoding into an `Option`.
+    chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
     /// In-memory mempool handle.
     pub mempool: Arc<RwLock<Mempool>>,
     /// Block records already available without blocking storage readers.
@@ -438,6 +445,7 @@ impl Context {
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip: Arc::new(ArcSwapOption::empty()),
+            chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             blocks: Arc::new(RwLock::new(Vec::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -494,6 +502,7 @@ impl Context {
         Self {
             chain_tip,
             applied_tip,
+            chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
             mempool,
             blocks,
             transactions,
@@ -622,6 +631,34 @@ impl Context {
     #[must_use]
     pub fn applied_height(&self) -> u32 {
         self.applied_tip.load_full().map_or(0, |tip| tip.height)
+    }
+
+    /// Returns `self` sharing `handle` as the cumulative chain transaction count.
+    ///
+    /// The node owns the counter; the RPC surface only reads it.
+    #[must_use]
+    pub fn with_chain_tx_count(mut self, handle: Arc<core::sync::atomic::AtomicU64>) -> Self {
+        self.chain_tx_count = handle;
+        self
+    }
+
+    /// Returns the cumulative transaction count of the applied chain, or `None`
+    /// when this node cannot know it.
+    ///
+    /// This is Bitcoin Core's `CBlockIndex::m_chain_tx_count`, and `None` is its
+    /// `HaveNumChainTxs() == false`: a chain whose history was applied before
+    /// the node tracked the count cannot recover it without re-reading every
+    /// block body. Callers must treat `None` as *unknown*, never as zero — the
+    /// two differ by an entire chain.
+    #[must_use]
+    pub fn chain_tx_count(&self) -> Option<u64> {
+        match self
+            .chain_tx_count
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            count => Some(count),
+        }
     }
 
     /// Returns the current best-applied-block hash.

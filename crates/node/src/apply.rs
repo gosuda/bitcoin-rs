@@ -20,7 +20,7 @@ use bitcoin_rs_utxo::{
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::state::ApplyError;
 use bitcoin_rs_storage::{
@@ -931,6 +931,18 @@ pub struct ApplyHandles {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Shared best-applied-block tip handle.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Cumulative transaction count of the applied chain, or `0` when unknown.
+    ///
+    /// Bitcoin Core's `CBlockIndex::m_chain_tx_count`, including its convention
+    /// that zero means *unset* rather than *empty* (`HaveNumChainTxs()`). Only a
+    /// chain applied from genesis by a node that maintains this counter can know
+    /// it; a datadir written before it existed restores as unknown and stays
+    /// unknown, because nothing short of re-reading every block body could
+    /// recover the history.
+    ///
+    /// Kept beside `applied_tip` and moved with it, so the pair is always
+    /// consistent: a count that lagged its tip would be worse than no count.
+    pub chain_tx_count: Arc<AtomicU64>,
     /// Shared in-memory block tree.
     pub block_tree: Arc<RwLock<BlockTree>>,
     /// Shared UTXO set.
@@ -1018,6 +1030,7 @@ impl ApplyHandles {
             network,
             chain_tip,
             applied_tip,
+            chain_tx_count: Arc::new(AtomicU64::new(0)),
             block_tree,
             utxo,
             coin_stats,
@@ -1361,6 +1374,7 @@ pub(crate) fn disconnect_block_admitted(
     handles
         .applied_tip
         .store(Some(Arc::new(parent_tip.clone())));
+    rewind_chain_tx_count(handles, tx_count_delta);
     handles.wake_tx_index();
 
     if handles.zmq_publisher.wants_notifications() {
@@ -1403,6 +1417,43 @@ pub(crate) fn disconnect_block_admitted(
 /// apply never added.
 fn tx_count_delta_for(block: &bitcoin::Block) -> u64 {
     u64::try_from(block.txdata.len()).unwrap_or(u64::MAX)
+}
+
+/// Carries the cumulative transaction count forward across a connected block.
+///
+/// Zero means *unknown*, so a count that is already unknown stays unknown
+/// rather than restarting from this block and pretending to be a chain total.
+/// Genesis is the one block that can establish the count from nothing: there is
+/// no chain below it.
+fn advance_chain_tx_count(handles: &ApplyHandles, height: u32, tx_count_delta: u64) {
+    let known = handles.chain_tx_count.load(Ordering::Relaxed);
+    if known == 0 && height != 0 {
+        return;
+    }
+    let _ = handles
+        .chain_tx_count
+        .fetch_add(tx_count_delta, Ordering::Relaxed);
+}
+
+/// Takes a disconnected block's transactions back out of the cumulative count.
+///
+/// An unknown count stays unknown. A subtraction that would go below zero means
+/// the count and the chain have diverged, and a silently clamped total is worse
+/// than an admitted absence, so that case resets to unknown.
+fn rewind_chain_tx_count(handles: &ApplyHandles, tx_count_delta: u64) {
+    let known = handles.chain_tx_count.load(Ordering::Relaxed);
+    if known == 0 {
+        return;
+    }
+    let rewound = known.checked_sub(tx_count_delta).unwrap_or_else(|| {
+        tracing::warn!(
+            known,
+            tx_count_delta,
+            "cumulative chain transaction count fell below zero; marking it unknown"
+        );
+        0
+    });
+    handles.chain_tx_count.store(rewound, Ordering::Relaxed);
 }
 
 /// Synthetically applies `block` as the next tip after consensus checks.
@@ -2453,6 +2504,7 @@ fn apply_block_admitted(
         }
     }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
+    advance_chain_tx_count(handles, height, tx_count_delta_for(block));
     handles.wake_tx_index();
     if handles.zmq_publisher.wants_notifications() {
         handles
@@ -8554,8 +8606,47 @@ mod consensus_rule_tests {
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    fn empty_apply_handles() -> ApplyHandles {
+    pub(super) fn empty_apply_handles() -> ApplyHandles {
         empty_apply_handles_for_network(Network::Mainnet)
+    }
+
+    /// The rewind is wired to the disconnect, not merely implemented.
+    ///
+    /// `rewind_chain_tx_count` has its own unit tests, and they all passed while
+    /// the call site was missing: a mutation that deleted the call from
+    /// `disconnect_block_admitted` survived the whole audit. Testing a function
+    /// is not testing that anything calls it.
+    #[test]
+    fn a_disconnect_takes_the_blocks_transactions_back_out_of_the_chain_count()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let utxo = Arc::new(UtxoSet::new());
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        // Genesis counted, as it would be on a node that synced from it.
+        handles.chain_tx_count.store(1, Ordering::Relaxed);
+
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+        let applied = apply_block(&handles, &block)?;
+        assert_eq!(applied.height, 1, "the block must connect first");
+        assert_eq!(
+            handles.chain_tx_count.load(Ordering::Relaxed),
+            2,
+            "connecting a one-transaction block moves the count by one"
+        );
+
+        let _restored = disconnect_block(&handles, &block)?;
+        assert_eq!(
+            handles.chain_tx_count.load(Ordering::Relaxed),
+            1,
+            "the disconnected block's transactions must leave the count with it"
+        );
+        Ok(())
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
@@ -10223,4 +10314,62 @@ fn check_pow_limit_and_continuity_for_seeded_tip(
 ) -> core::result::Result<(), ApplyError> {
     let prior = handles.chain_tip.load_full();
     check_pow_limit_and_continuity(handles, prior.as_deref(), block, height)
+}
+
+#[cfg(test)]
+mod chain_tx_count_tests {
+    use super::*;
+
+    fn handles() -> ApplyHandles {
+        super::consensus_rule_tests::empty_apply_handles()
+    }
+
+    #[test]
+    fn genesis_establishes_the_count_from_nothing() {
+        let handles = handles();
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
+        advance_chain_tx_count(&handles, 0, 1);
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn an_unknown_count_stays_unknown_above_genesis() {
+        let handles = handles();
+        // A datadir written before the counter existed restores as unknown.
+        // Accumulating from here would produce a small number that looks like a
+        // chain total and is not one — worse than admitting we do not know.
+        advance_chain_tx_count(&handles, 900_000, 2_500);
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_known_count_advances_and_rewinds_by_the_same_delta() {
+        let handles = handles();
+        advance_chain_tx_count(&handles, 0, 1);
+        advance_chain_tx_count(&handles, 1, 7);
+        advance_chain_tx_count(&handles, 2, 3);
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 11);
+
+        rewind_chain_tx_count(&handles, 3);
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 8);
+        rewind_chain_tx_count(&handles, 7);
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn rewinding_an_unknown_count_leaves_it_unknown() {
+        let handles = handles();
+        rewind_chain_tx_count(&handles, 5);
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_rewind_past_zero_admits_it_does_not_know_rather_than_clamping() {
+        let handles = handles();
+        advance_chain_tx_count(&handles, 0, 4);
+        // Only reachable if the count and the chain have diverged. A clamp to
+        // some small number would keep reporting a confident wrong total.
+        rewind_chain_tx_count(&handles, 9);
+        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
+    }
 }

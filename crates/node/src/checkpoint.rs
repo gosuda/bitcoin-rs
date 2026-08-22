@@ -446,6 +446,19 @@ struct CheckpointTipV1 {
     height: u32,
     hash: String,
     chainwork: String,
+    /// Cumulative transaction count of the chain through this tip.
+    ///
+    /// `#[serde(default)]` so a manifest written before this field existed
+    /// still parses, restoring as `0` — Bitcoin Core's own "unset" encoding for
+    /// `m_chain_tx_count`. Those chains cannot recover the number without
+    /// re-reading every block body, and this project does not do in-place
+    /// migrations (see `docs/policies/db-migration.md`), so they stay unknown
+    /// until the node is resynced.
+    ///
+    /// Only meaningful for the applied tip; the best-header tip records `0`,
+    /// since headers carry no transactions.
+    #[serde(default)]
+    chain_tx_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -526,6 +539,9 @@ pub(crate) struct RestoredChainstate {
     pub(crate) utxo: UtxoSet,
     pub(crate) coin_stats: CoinStats,
     pub(crate) applied_tip: TipSnapshot,
+    /// Cumulative transaction count through `applied_tip`, or `0` when the
+    /// manifest predates the field.
+    pub(crate) chain_tx_count: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -767,6 +783,7 @@ pub(crate) fn write_checkpoint_from_dir(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
+    chain_tx_count: u64,
     rolling_stats: bool,
 ) -> Result<CheckpointWrite, CheckpointError> {
     write_checkpoint_inner(
@@ -776,6 +793,7 @@ pub(crate) fn write_checkpoint_from_dir(
         utxo,
         coin_stats,
         applied_tip,
+        chain_tx_count,
         rolling_stats,
         test_failpoint(),
     )
@@ -798,6 +816,7 @@ fn write_checkpoint(
         utxo,
         coin_stats,
         applied_tip,
+        0,
         rolling_stats,
     )
 }
@@ -826,6 +845,7 @@ fn write_checkpoint_inner(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
+    chain_tx_count: u64,
     rolling_stats: bool,
     #[cfg_attr(not(test), allow(unused_variables))] failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointWrite, CheckpointError> {
@@ -951,8 +971,8 @@ fn write_checkpoint_inner(
         network: network_name(config.network).to_owned(),
         network_magic: hex_encode(&config.network.magic()),
         genesis_hash: config.genesis.to_string_be(),
-        applied_tip: manifest_tip(headers_write.metadata.applied),
-        best_header_tip: manifest_tip(headers_write.metadata.best),
+        applied_tip: manifest_tip(headers_write.metadata.applied, chain_tx_count),
+        best_header_tip: manifest_tip(headers_write.metadata.best, 0),
         headers: HeadersArtifactV1 {
             file: HEADERS_FILE.to_owned(),
             codec: HEADER_CODEC.to_owned(),
@@ -1077,6 +1097,7 @@ pub(crate) fn write_checkpoint_with_failpoint(
         utxo,
         coin_stats,
         applied_tip,
+        0,
         rolling_stats,
         Some(failpoint),
     )
@@ -1305,6 +1326,7 @@ fn load_payloads(
     manifest: &CheckpointManifestV1,
     headers: RestoredHeaders,
 ) -> Result<RestoredChainstate, Box<(BlockTree, CheckpointError)>> {
+    let chain_tx_count = manifest.applied_tip.chain_tx_count;
     match load_payloads_inner(generation_dir, manifest, &headers) {
         Ok((utxo, coin_stats)) => {
             let applied_node = match headers.tree.node(headers.applied_tip_id) {
@@ -1327,6 +1349,7 @@ fn load_payloads(
                 utxo,
                 coin_stats,
                 applied_tip,
+                chain_tx_count,
             })
         }
         Err(error) => Err(Box::new((headers.tree, error))),
@@ -1695,12 +1718,13 @@ fn require_filename(actual: &str, expected: &str) -> Result<(), CheckpointError>
     Ok(())
 }
 
-fn manifest_tip(tip: HeaderCheckpointTip) -> CheckpointTipV1 {
+fn manifest_tip(tip: HeaderCheckpointTip, chain_tx_count: u64) -> CheckpointTipV1 {
     let chainwork: [u8; 32] = tip.chainwork.to_be_bytes();
     CheckpointTipV1 {
         height: tip.height,
         hash: tip.hash.to_string_be(),
         chainwork: hex_encode(&chainwork),
+        chain_tx_count,
     }
 }
 
@@ -1761,6 +1785,28 @@ fn decode_nibble(byte: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
+
+    /// The migration guarantee. `docs/policies/db-migration.md` rules out
+    /// in-place migrations, so a field added to the manifest has to be readable
+    /// as absent — otherwise every existing datadir fails to load and resyncs
+    /// from genesis for the sake of one number.
+    #[test]
+    fn a_manifest_tip_written_before_the_count_existed_reads_as_unknown() {
+        let without = r#"{"height":7,"hash":"00","chainwork":"01"}"#;
+        let Ok(parsed) = serde_json::from_str::<super::CheckpointTipV1>(without) else {
+            panic!("a pre-existing manifest tip must still parse");
+        };
+        assert_eq!(
+            parsed.chain_tx_count, 0,
+            "absent must decode as Core's unset encoding, not as a wrong total"
+        );
+
+        let with = r#"{"height":7,"hash":"00","chainwork":"01","chain_tx_count":42}"#;
+        let Ok(parsed) = serde_json::from_str::<super::CheckpointTipV1>(with) else {
+            panic!("a manifest tip carrying the count must parse");
+        };
+        assert_eq!(parsed.chain_tx_count, 42);
+    }
     use std::fs;
     use std::io::Cursor;
     use std::path::Path;

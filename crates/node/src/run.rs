@@ -650,6 +650,7 @@ pub fn run(mut config: Config) -> Result<()> {
         state.tx_index_query(),
     );
     rpc_context = rpc_context.with_block_body_source(block_body_source);
+    rpc_context = rpc_context.with_chain_tx_count(state.chain_tx_count_handle());
     if let Some(prune_service) = state.prune_service() {
         rpc_context = rpc_context.with_prune_service(prune_service);
     }
