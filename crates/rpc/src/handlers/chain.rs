@@ -171,9 +171,17 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         let blocks_guard = ctx.blocks.read();
         fold_block_records(&blocks_guard, applied_height, Some(lowest_window_height))
     };
-    let total_tx_count = block_stats.total_tx_count;
+    // The chain total comes from the durable counter when the node has one.
+    // Folding the record log cannot answer it after a restart: the log is
+    // rebuilt empty on every open while the applied tip resumes at its real
+    // height, so the sum covers only blocks applied in this process.
+    let total_tx_count = ctx.chain_tx_count().unwrap_or(block_stats.total_tx_count);
     let window_tx_count = block_stats.window_tx_count;
-    let tip_time = block_stats.tip_time.unwrap_or(0);
+    // Likewise the tip's timestamp: the log has no record for a tip restored
+    // from a checkpoint, and reported `time: 0` for it. The block tree does.
+    let tip_time = applied_tip_block_time(ctx)
+        .or(block_stats.tip_time)
+        .unwrap_or(0);
     let earliest_window_time = block_stats.earliest_window_time.unwrap_or(tip_time);
     let window_interval = u64::from(tip_time).saturating_sub(u64::from(earliest_window_time));
     let txrate = if window_interval > 0 {
@@ -193,6 +201,17 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         "window_interval": window_interval,
         "txrate": txrate
     }))
+}
+
+/// The applied tip's block timestamp, read from the block tree.
+///
+/// The tree keeps every header it has accepted and is restored in full, so it
+/// can answer for a tip the in-process record log never saw. `getblockchaininfo`
+/// takes the same route to the same value.
+fn applied_tip_block_time(ctx: &Context) -> Option<u32> {
+    let tip = ctx.applied_tip.load_full()?;
+    let tree = ctx.block_tree.read();
+    tree.node(tip.tip_id).ok().map(|node| node.header.time)
 }
 
 #[derive(Default)]
@@ -2060,5 +2079,132 @@ fn compute_branchlen(
             return leaf_height;
         };
         cursor = parent_id;
+    }
+}
+
+#[cfg(test)]
+mod chaintxstats_durability_tests {
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicU64;
+
+    use bitcoin::block::Version;
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{BlockHash, CompactTarget, TxMerkleNode};
+    use bitcoin_rs_chain::NodeStatus;
+    use sonic_rs::{JsonValueTrait, json};
+
+    use super::*;
+
+    const TIP_TIME: u32 = 1_700_000_123;
+
+    /// A context whose applied tip is a real tree node, and whose block-record
+    /// log is **empty** — the state a node is in after a restart, which is when
+    /// folding the log stops being able to answer.
+    fn restarted_ctx(chain_tx_count: Option<u64>) -> Arc<Context> {
+        let ctx = Context::new();
+        let tip = {
+            let mut tree = ctx.block_tree.write();
+            let genesis = bitcoin::block::Header {
+                version: Version::ONE,
+                prev_blockhash: BlockHash::all_zeros(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_000_000,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            };
+            let Ok(genesis_id) = tree.insert_node(None, genesis, NodeStatus::Active) else {
+                panic!("genesis insert failed");
+            };
+            let child = bitcoin::block::Header {
+                version: Version::ONE,
+                prev_blockhash: genesis.block_hash(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: TIP_TIME,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 1,
+            };
+            let Ok(_child_id) = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)
+            else {
+                panic!("child insert failed");
+            };
+            let Some(tip) = tree.tip() else {
+                panic!("no tip published");
+            };
+            (*tip).clone()
+        };
+        ctx.set_applied_tip(tip);
+        let ctx = match chain_tx_count {
+            Some(count) => ctx.with_chain_tx_count(Arc::new(AtomicU64::new(count))),
+            None => ctx,
+        };
+        let ctx = Arc::new(ctx);
+        assert!(
+            ctx.blocks.read().is_empty(),
+            "the fixture must leave the record log empty, or it is not a restart"
+        );
+        ctx
+    }
+
+    fn stats_of(ctx: &Arc<Context>) -> sonic_rs::Value {
+        getchaintxstats(ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"))
+    }
+
+    #[test]
+    fn txcount_comes_from_the_durable_counter_not_the_in_process_log() {
+        let value = stats_of(&restarted_ctx(Some(1_315_805_869)));
+        assert_eq!(
+            value.get("txcount").and_then(JsonValueTrait::as_u64),
+            Some(1_315_805_869),
+            "folding the empty log would have reported zero"
+        );
+    }
+
+    #[test]
+    fn txcount_falls_back_to_the_log_when_the_counter_is_unknown() {
+        let ctx = restarted_ctx(None);
+        // The log must hold something, or "fell back to the fold" and "reported
+        // zero" are the same observation and this proves neither.
+        let Some(tip) = ctx.applied_tip.load_full() else {
+            panic!("fixture has no applied tip");
+        };
+        ctx.add_block(BlockRecord {
+            hash: tip.hash,
+            height: tip.height,
+            block_hex: String::new(),
+            body_size: 0,
+            header_hex: String::new(),
+            tx_count: 7,
+            time: TIP_TIME,
+        });
+
+        assert_eq!(
+            stats_of(&ctx)
+                .get("txcount")
+                .and_then(JsonValueTrait::as_u64),
+            Some(7),
+            "an unknown counter must leave the old fold answering, not report zero"
+        );
+    }
+
+    #[test]
+    fn txcount_is_zero_when_neither_the_counter_nor_the_log_knows() {
+        assert_eq!(
+            stats_of(&restarted_ctx(None))
+                .get("txcount")
+                .and_then(JsonValueTrait::as_u64),
+            Some(0),
+            "it must not invent a count it does not have"
+        );
+    }
+
+    #[test]
+    fn time_is_the_applied_tips_block_time_even_with_no_record_for_it() {
+        let value = stats_of(&restarted_ctx(Some(10)));
+        assert_eq!(
+            value.get("time").and_then(JsonValueTrait::as_u64),
+            Some(u64::from(TIP_TIME)),
+            "the tree knows the tip's timestamp; the log does not have to"
+        );
     }
 }
