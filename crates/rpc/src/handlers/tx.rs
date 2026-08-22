@@ -114,6 +114,34 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let vout = required_u64(params, 1, "vout is required")?;
     let vout_u32 = u32::try_from(vout).map_err(|_| RpcError::InvalidParams("vout exceeds u32"))?;
+    // Bitcoin Core's third argument, defaulting to true. It was being dropped,
+    // so this RPC answered from the confirmed set only and could not see any
+    // unconfirmed activity at all.
+    let include_mempool = optional_bool(params, 2, true)?;
+
+    if include_mempool {
+        let mempool_outpoint = bitcoin::OutPoint {
+            txid,
+            vout: vout_u32,
+        };
+        let pool = ctx.mempool.read();
+        // Core: "an unspent output that is spent in the mempool won't appear".
+        // The coin is still in the confirmed set, but a mempool transaction has
+        // claimed it, so reporting it spendable would hand a caller a conflict.
+        if pool.is_outpoint_spent(&mempool_outpoint) {
+            return Ok(Value::new_null());
+        }
+        if let Some(tx) = pool.transaction_by_txid(&txid)
+            && let Some(txout) = usize::try_from(vout_u32)
+                .ok()
+                .and_then(|index| tx.output.get(index))
+        {
+            // Core gives a mempool coin `MEMPOOL_HEIGHT`, which renders as zero
+            // confirmations. A mempool transaction is never a coinbase.
+            return Ok(txout_json(ctx, txout, 0, false));
+        }
+    }
+
     let outpoint = OutPoint::new(Hash256::from_le_bytes(txid.as_byte_array()), vout_u32);
     let Some(live) = ctx.utxo.get_entry(&outpoint) else {
         // Spent or never existed: Core-spec returns JSON null.
@@ -121,28 +149,41 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     };
     let applied = ctx.applied_height();
     let confirmations = applied.saturating_sub(live.height).saturating_add(1);
-    let script_hex = live.txout.script_pubkey.as_bytes().to_lower_hex_string();
-    let address = script_to_address(&live.txout.script_pubkey, ctx.chain_network);
+    Ok(txout_json(ctx, &live.txout, confirmations, live.coinbase))
+}
+
+/// Renders one output the way `gettxout` reports it.
+///
+/// Shared by the confirmed and mempool answers so the two cannot drift into
+/// describing the same script differently.
+fn txout_json(
+    ctx: &Arc<Context>,
+    txout: &bitcoin::TxOut,
+    confirmations: u32,
+    coinbase: bool,
+) -> Value {
+    let script_hex = txout.script_pubkey.as_bytes().to_lower_hex_string();
+    let address = script_to_address(&txout.script_pubkey, ctx.chain_network);
     let desc = address.as_deref().map_or_else(
         || format!("raw({script_hex})"),
         |addr| format!("addr({addr})"),
     );
     let mut script_pubkey = json!({
-        "asm": live.txout.script_pubkey.to_asm_string(),
+        "asm": txout.script_pubkey.to_asm_string(),
         "desc": desc,
         "hex": script_hex,
-        "type": classify_script(&live.txout.script_pubkey)
+        "type": classify_script(&txout.script_pubkey)
     });
     if let Some(addr) = address {
         let _ = script_pubkey.insert("address", json!(addr));
     }
-    Ok(json!({
+    json!({
         "bestblock": ctx.best_hash().to_string_be(),
         "confirmations": confirmations,
-        "value": super::tx_render::btc_value(live.txout.value.to_sat()),
+        "value": super::tx_render::btc_value(txout.value.to_sat()),
         "scriptPubKey": script_pubkey,
-        "coinbase": live.coinbase
-    }))
+        "coinbase": coinbase
+    })
 }
 
 pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -674,6 +715,169 @@ mod gettxout_via_utxo_tests {
         assert!(
             value.is_null(),
             "expected null for output absent from UTXO set, got {value:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gettxout_mempool_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use bitcoin_rs_mempool::MempoolEntry;
+    use sonic_rs::{JsonValueTrait, json};
+
+    use super::*;
+
+    fn funding_tx(tag: u8) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: bitcoin::OutPoint::new(
+                    bitcoin::Txid::from_byte_array([tag; 32]),
+                    0,
+                ),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(42_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        }
+    }
+
+    fn insert(ctx: &Arc<Context>, tx: Transaction) {
+        let mut pool = ctx.mempool.write();
+        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7)) else {
+            panic!("fixture insert failed");
+        };
+    }
+
+    fn gettxout_of(
+        ctx: &Arc<Context>,
+        txid: bitcoin::Txid,
+        vout: u64,
+        params_tail: &Value,
+    ) -> Value {
+        let mut params = vec![json!(txid.to_string()), json!(vout)];
+        if let Some(flag) = params_tail.as_bool() {
+            params.push(json!(flag));
+        }
+        gettxout(ctx, &json!(params)).unwrap_or_else(|err| panic!("gettxout failed: {err}"))
+    }
+
+    #[test]
+    fn an_unconfirmed_output_is_reported_with_zero_confirmations() {
+        let ctx = Arc::new(Context::new());
+        let tx = funding_tx(0x11);
+        let txid = tx.compute_txid();
+        insert(&ctx, tx);
+
+        let value = gettxout_of(&ctx, txid, 0, &Value::new_null());
+        assert_eq!(
+            value.get("confirmations").and_then(JsonValueTrait::as_u64),
+            Some(0),
+            "a mempool coin is Core's MEMPOOL_HEIGHT, which renders as zero: {value:?}"
+        );
+        assert_eq!(
+            value.get("coinbase").and_then(JsonValueTrait::as_bool),
+            Some(false),
+            "a mempool transaction is never a coinbase"
+        );
+        assert!(value.get("value").is_number(), "{value:?}");
+    }
+
+    #[test]
+    fn the_mempool_is_consulted_by_default_and_skipped_when_asked() {
+        let ctx = Arc::new(Context::new());
+        let tx = funding_tx(0x22);
+        let txid = tx.compute_txid();
+        insert(&ctx, tx);
+
+        // Default is true, so omitting the argument must find it.
+        assert!(!gettxout_of(&ctx, txid, 0, &Value::new_null()).is_null());
+        assert!(!gettxout_of(&ctx, txid, 0, &json!(true)).is_null());
+        // Explicitly false falls back to the confirmed set, which has nothing.
+        assert!(
+            gettxout_of(&ctx, txid, 0, &json!(false)).is_null(),
+            "include_mempool=false must not see unconfirmed outputs"
+        );
+    }
+
+    #[test]
+    fn an_output_a_mempool_transaction_spends_stops_being_reported() {
+        let ctx = Arc::new(Context::new());
+        let parent = funding_tx(0x33);
+        let parent_txid = parent.compute_txid();
+        insert(&ctx, parent);
+
+        // Before the spend exists, the parent's output is there.
+        assert!(!gettxout_of(&ctx, parent_txid, 0, &Value::new_null()).is_null());
+
+        let spend = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: bitcoin::OutPoint::new(parent_txid, 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(41_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        insert(&ctx, spend);
+
+        // The case the rule exists for: the coin is CONFIRMED and unspent in the
+        // UTXO set, and a mempool transaction has claimed it. Without this the
+        // fixture could not tell "hidden because the mempool spent it" from
+        // "absent because nothing confirmed it".
+        {
+            let mut changes = bitcoin_rs_utxo::BlockChanges::default();
+            changes.add(bitcoin_rs_utxo::UtxoAdd::new(
+                OutPoint::new(Hash256::from_le_bytes(parent_txid.as_byte_array()), 0),
+                TxOut {
+                    value: Amount::from_sat(42_000),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+                false,
+                1,
+            ));
+            let Ok(()) = ctx
+                .utxo
+                .commit_block(&changes, &Hash256::from_le_bytes(&[0x99; 32]))
+            else {
+                panic!("seeding the confirmed output failed");
+            };
+        }
+        assert!(
+            !gettxout_of(&ctx, parent_txid, 0, &json!(false)).is_null(),
+            "the output really is in the confirmed set"
+        );
+
+        // Core: "an unspent output that is spent in the mempool won't appear".
+        assert!(
+            gettxout_of(&ctx, parent_txid, 0, &Value::new_null()).is_null(),
+            "an output claimed by a mempool transaction must not read as spendable"
+        );
+    }
+
+    #[test]
+    fn a_vout_the_mempool_transaction_does_not_have_is_not_invented() {
+        let ctx = Arc::new(Context::new());
+        let tx = funding_tx(0x44);
+        let txid = tx.compute_txid();
+        insert(&ctx, tx);
+
+        assert!(
+            gettxout_of(&ctx, txid, 7, &Value::new_null()).is_null(),
+            "the fixture transaction has one output"
         );
     }
 }

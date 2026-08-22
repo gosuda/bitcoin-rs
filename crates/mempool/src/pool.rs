@@ -349,19 +349,20 @@ impl Mempool {
     }
 
     /// Returns the txid of the in-mempool transaction that spends `outpoint`,
-    /// or `None` if no entry spends it. Linear scan over entries; acceptable
-    /// for early IBD where the pool is small, future strands may add a per-
-    /// outpoint index.
+    /// or `None` if no entry spends it.
+    ///
+    /// Answered from the `spending` index — the set is keyed by exactly this
+    /// question — so the cost is a range lookup rather than a walk of every
+    /// entry's inputs. `gettxout` asks it on every call, under the mempool read
+    /// lock that transaction acceptance needs, so a scan here is a scan on a
+    /// caller-triggered path.
     #[must_use]
     pub fn find_by_outpoint(&self, outpoint: &bitcoin::OutPoint) -> Option<bitcoin::Txid> {
-        for (_id, entry) in &self.entries {
-            for input in &entry.tx.input {
-                if input.previous_output == *outpoint {
-                    return Some(entry.tx.compute_txid());
-                }
-            }
-        }
-        None
+        self.spending
+            .range(outpoint_range(*outpoint))
+            .next()
+            .and_then(|(_outpoint, id)| self.entry(*id))
+            .map(|entry| entry.tx.compute_txid())
     }
 
     /// Returns whether any in-pool transaction spends `outpoint`.
