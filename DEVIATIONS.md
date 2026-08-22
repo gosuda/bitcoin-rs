@@ -305,3 +305,34 @@ position while keeping the rest. See the *All-or-scan position fallback* concept
 in `CONCEPTS.md`. The residual accepted: a stale offset landing exactly on a
 transaction boundary whose transaction also matches, while a different
 transaction in that block matches too.
+
+## §10 — `getchaintxstats` reports counts only when it knows them
+
+Bitcoin Core carries a cumulative transaction count on every block index entry
+(`m_chain_tx_count`) and answers `txcount` and `window_tx_count` by subtracting
+two of them. It omits both fields when a count is unknown, which for Core means
+a chain loaded from an assumeutxo snapshot whose history has not been validated
+yet.
+
+This node keeps a durable cumulative count for its **applied tip only**, plus an
+in-memory record log that is rebuilt empty on every open. So the same fields are
+answered from a different place, and are unknown in different situations:
+
+- `txcount` comes from the durable counter. Without one it comes from the record
+  log, but only when the log still reaches genesis — a log that starts wherever
+  this process began applying sums to a number that is not a chain total. A
+  window ending anywhere but the applied tip has no cumulative count at all.
+- `window_tx_count` is summed per block over the window instead of subtracted,
+  and is reported only when the log holds every height in it.
+
+Where Core would answer and this node cannot, the field is **omitted**, which is
+Core's own signal for an unknown count. It is not reported as `0`: a real chain
+never has zero transactions — genesis alone contributes one — so a zero would be
+read as an empty chain rather than as an absent measurement.
+
+Removing the difference means storing the cumulative count per height rather
+than per tip. That is a storage change, and it is not this one.
+
+`window_interval` and `txrate` have no such caveat. They are computed from the
+median-time-past of the window's two boundary blocks, exactly as Core computes
+them, out of the block tree — which is restored in full and always knows.
