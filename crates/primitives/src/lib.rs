@@ -25,7 +25,7 @@ pub mod version;
 pub use block::Block;
 pub use hash::{Hash256, HashError};
 pub use header::Header;
-pub use network::Network;
+pub use network::{ChainTxData, Network};
 pub use outpoint::OutPoint;
 pub use sighash::{Sighash, SighashError};
 pub use tx::{Tx, TxIn, TxOut};

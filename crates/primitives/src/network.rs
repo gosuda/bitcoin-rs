@@ -2,6 +2,24 @@ use ruint::Uint;
 
 use crate::Hash256;
 
+/// A dated observation of the chain's cumulative transaction count, plus the
+/// rate transactions have arrived since — Bitcoin Core's `ChainTxData`.
+///
+/// This is what turns "how many transactions have I verified" into "how much of
+/// the chain is that": the count alone says nothing without an estimate of the
+/// total, and the total is not knowable, so it is extrapolated from a pinned
+/// observation. Core re-measures these every release with
+/// `getchaintxstats 4096 <defaultAssumeValid>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChainTxData {
+    /// UNIX timestamp of the block the observation was taken at.
+    pub time: u64,
+    /// Cumulative transaction count of the chain at that block.
+    pub tx_count: u64,
+    /// Transactions per second observed over the window ending there.
+    pub tx_rate: f64,
+}
+
 /// Bitcoin Core's mainnet `consensus.BIP16Exception` — block 170060, whose display
 /// hash is `00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22`. Stored
 /// in consensus little-endian (display hex reversed byte-wise) so it compares directly
@@ -291,6 +309,41 @@ impl Network {
         10 * 60
     }
 
+    /// Returns the network's `chainTxData`.
+    ///
+    /// See [`ChainTxData`]. Regtest carries Core's deliberately non-zero rate
+    /// against a zero baseline, which is what makes progress testable there.
+    #[must_use]
+    pub const fn chain_tx_data(self) -> ChainTxData {
+        match self {
+            Self::Mainnet => ChainTxData {
+                time: 1_772_055_173,
+                tx_count: 1_315_805_869,
+                tx_rate: 5.401_110_064_961_22,
+            },
+            Self::Testnet3 => ChainTxData {
+                time: 1_772_051_651,
+                tx_count: 536_108_416,
+                tx_rate: 0.026_914_790_162_571_17,
+            },
+            Self::Testnet4 => ChainTxData {
+                time: 1_772_013_387,
+                tx_count: 14_191_421,
+                tx_rate: 0.018_485_795_795_284_12,
+            },
+            Self::Signet => ChainTxData {
+                time: 1_772_055_248,
+                tx_count: 28_676_833,
+                tx_rate: 0.067_366_234_363_389_29,
+            },
+            Self::Regtest => ChainTxData {
+                time: 0,
+                tx_count: 0,
+                tx_rate: 0.001,
+            },
+        }
+    }
+
     /// Returns the proof-of-work retarget timespan in seconds.
     #[must_use]
     pub const fn target_timespan_seconds(self) -> u32 {
@@ -344,7 +397,7 @@ impl Network {
 
 #[cfg(test)]
 mod tests {
-    use super::Network;
+    use super::{ChainTxData, Network};
     use crate::Hash256;
 
     #[test]
@@ -553,5 +606,29 @@ mod tests {
         assert_activation(Network::is_taproot_active, Network::Testnet4, 0);
         assert_activation(Network::is_taproot_active, Network::Signet, 0);
         assert_activation(Network::is_taproot_active, Network::Regtest, 0);
+    }
+    #[test]
+    fn every_network_carries_chain_tx_data() {
+        for network in [
+            Network::Mainnet,
+            Network::Testnet3,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            let ChainTxData {
+                time,
+                tx_count,
+                tx_rate,
+            } = network.chain_tx_data();
+            assert!(tx_rate > 0.0, "{network:?} needs a non-zero rate");
+            if matches!(network, Network::Regtest) {
+                // Core pins regtest at a zero baseline with a non-zero rate on
+                // purpose, so progress there is a function of time alone.
+                assert_eq!((time, tx_count), (0, 0));
+            } else {
+                assert!(time > 0 && tx_count > 0, "{network:?}");
+            }
+        }
     }
 }

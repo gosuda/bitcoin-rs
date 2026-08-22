@@ -28,11 +28,33 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             )
         })
     });
-    let verification_progress = if headers > 0 {
-        f64::from(applied) / f64::from(headers)
-    } else {
-        0.0
-    };
+    // Core's estimate when this node knows how many transactions it has
+    // verified, and the old height ratio when it does not.
+    //
+    // The count is unknown only for a datadir written before the node tracked
+    // it: nothing short of re-reading every block body could recover it, so
+    // those chains keep the answer they have always had rather than being told
+    // a confident 0.0. A node that syncs, or resyncs, after that change always
+    // takes the first branch.
+    let verification_progress = ctx.chain_tx_count().map_or_else(
+        || {
+            if headers > 0 {
+                f64::from(applied) / f64::from(headers)
+            } else {
+                0.0
+            }
+        },
+        |chain_tx_count| {
+            verification_progress(
+                ctx.chain_network,
+                chain_tx_count,
+                applied,
+                headers,
+                time,
+                unix_now(),
+            )
+        },
+    );
     let chain = match ctx.chain_network {
         bitcoin_rs_primitives::Network::Mainnet => "main",
         bitcoin_rs_primitives::Network::Testnet3 | bitcoin_rs_primitives::Network::Testnet4 => {
@@ -71,6 +93,90 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }
     let _ = response.insert(&"warnings", "");
     Ok(Value::from(response))
+}
+
+/// UNIX seconds now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Bitcoin Core's `GuessVerificationProgress`, as a fraction in `[0, 1]`.
+///
+/// The quantity is **transactions verified over transactions believed to
+/// exist** — not a ratio of heights. Early blocks are nearly empty, so a height
+/// ratio reports the chain as most of the way done while most of the work is
+/// still ahead; Core moved off height for that reason.
+///
+/// The denominator cannot be known, so it is extrapolated from the network's
+/// pinned [`ChainTxData`] observation at `tx_rate` transactions per second. When
+/// the node is already past that observation its own count is used as the
+/// baseline instead, which keeps the fraction from sticking at 1.0 forever.
+///
+/// `tip_time` is the applied tip's block timestamp. When the tip is within two
+/// hours of `now`, Core stops trusting that miner-set timestamp and estimates
+/// the tip's age from how many blocks the header chain is ahead instead — which
+/// also quantizes the answer near 1.0, where people expect to see it settle.
+fn verification_progress(
+    network: bitcoin_rs_primitives::Network,
+    chain_tx_count: u64,
+    applied_height: u32,
+    header_height: u32,
+    tip_time: u64,
+    now: u64,
+) -> f64 {
+    const RECENT_TIP_WINDOW_SECONDS: i64 = 2 * 60 * 60;
+
+    if chain_tx_count == 0 {
+        return 0.0;
+    }
+    let data = network.chain_tx_data();
+
+    let now_signed = i64::try_from(now).unwrap_or(i64::MAX);
+    let tip_time_signed = i64::try_from(tip_time).unwrap_or(i64::MAX);
+    let block_time = if (now_signed - tip_time_signed).abs() <= RECENT_TIP_WINDOW_SECONDS
+        && header_height >= applied_height
+    {
+        let behind = i64::from(header_height - applied_height);
+        let spacing = i64::from(network.target_spacing_seconds());
+        now_signed.saturating_sub(behind.saturating_mul(spacing))
+    } else {
+        tip_time_signed
+    };
+
+    let total = if chain_tx_count <= data.tx_count {
+        // Still behind the pinned observation: extrapolate forward from it.
+        let elapsed = now_signed.saturating_sub(i64::try_from(data.time).unwrap_or(i64::MAX));
+        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(data.tx_count))
+    } else {
+        // Past it, so this node's own count is the better baseline. Without
+        // this the fraction would pin at 1.0 and stay there.
+        let elapsed = now_signed.saturating_sub(block_time);
+        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(chain_tx_count))
+    };
+    if total <= 0.0 {
+        return 0.0;
+    }
+    (u64_to_f64(chain_tx_count) / total).clamp(0.0, 1.0)
+}
+
+/// `u64` to `f64` without a silent `as` cast, which this crate forbids.
+///
+/// Exact for every input up to `2^53`; above that the low half rounds, which is
+/// inherent to `f64` and is what Bitcoin Core accepts here too.
+fn u64_to_f64(value: u64) -> f64 {
+    const TWO_POW_32: f64 = 4_294_967_296.0;
+
+    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX);
+    f64::from(high).mul_add(TWO_POW_32, f64::from(low))
+}
+
+/// [`u64_to_f64`] with a sign; the elapsed times here can run either way.
+fn i64_to_f64(value: i64) -> f64 {
+    let magnitude = u64_to_f64(value.unsigned_abs());
+    if value < 0 { -magnitude } else { magnitude }
 }
 
 fn chainwork_hex(tip: &TipSnapshot) -> String {
@@ -1356,6 +1462,127 @@ mod tests {
         );
     }
 
+    /// Regtest's pinned observation is `{time: 0, tx_count: 0, tx_rate: 0.001}`,
+    /// so the estimate reduces to arithmetic that can be done by hand:
+    /// `total = verified + elapsed * 0.001`.
+    #[test]
+    fn verification_progress_is_transactions_verified_over_transactions_estimated() {
+        let now = 1_800_000_000_u64;
+        // Ten thousand seconds behind, which is outside the two-hour window, so
+        // the tip's own timestamp is the one used.
+        let tip_time = now - 10_000;
+
+        // 100 / (100 + 10_000 * 0.001) = 100 / 110
+        let progress = verification_progress(
+            bitcoin_rs_primitives::Network::Regtest,
+            100,
+            9,
+            9,
+            tip_time,
+            now,
+        );
+        assert!(
+            (progress - (100.0 / 110.0)).abs() < 1e-12,
+            "expected 100/110, got {progress}"
+        );
+    }
+
+    #[test]
+    fn verification_progress_is_not_the_height_ratio_it_replaced() {
+        let now = 1_800_000_000_u64;
+        // Half the headers applied, on a mainnet whose pinned observation counts
+        // more than a billion transactions. The old field said 0.5 here.
+        let progress = verification_progress(
+            bitcoin_rs_primitives::Network::Mainnet,
+            5_000,
+            50,
+            100,
+            now - 10_000,
+            now,
+        );
+        assert!(
+            progress < 0.001,
+            "50 blocks of a 1.3-billion-transaction chain is not half of it, got {progress}"
+        );
+    }
+
+    #[test]
+    fn verification_progress_ignores_the_tip_timestamp_when_the_tip_is_recent() {
+        let now = 1_800_000_000_u64;
+        // Both inside the two-hour window: Core stops trusting the miner-set
+        // timestamp there and derives the tip's age from the header chain, so
+        // these must agree despite an hour between them.
+        let a = verification_progress(
+            bitcoin_rs_primitives::Network::Regtest,
+            100,
+            9,
+            10,
+            now - 60,
+            now,
+        );
+        let b = verification_progress(
+            bitcoin_rs_primitives::Network::Regtest,
+            100,
+            9,
+            10,
+            now - 3_600,
+            now,
+        );
+        assert!((a - b).abs() < 1e-12, "{a} != {b}");
+
+        // Outside the window the timestamp is used again, so this one differs.
+        let outside = verification_progress(
+            bitcoin_rs_primitives::Network::Regtest,
+            100,
+            9,
+            10,
+            now - 100_000,
+            now,
+        );
+        assert!(outside < a, "{outside} should trail {a}");
+    }
+
+    #[test]
+    fn verification_progress_is_zero_before_anything_is_verified() {
+        assert!(
+            (verification_progress(
+                bitcoin_rs_primitives::Network::Mainnet,
+                0,
+                0,
+                0,
+                0,
+                1_800_000_000
+            ) - 0.0)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn verification_progress_never_exceeds_one_for_a_future_dated_tip() {
+        let now = 1_800_000_000_u64;
+        // A miner-set timestamp ahead of our clock by more than the two-hour
+        // window, so the tip's own time is used and the elapsed term goes
+        // negative — the estimated total lands *below* what this node has
+        // already verified. Unclamped that is a progress above 1.0.
+        let tip_time = now + 10_000;
+        let unclamped_total = 10_000.0_f64.mul_add(-0.001, 100.0_f64);
+        assert!(
+            100.0 / unclamped_total > 1.0,
+            "the fixture must actually overshoot, or the clamp is untested"
+        );
+
+        let progress = verification_progress(
+            bitcoin_rs_primitives::Network::Regtest,
+            100,
+            9,
+            9,
+            tip_time,
+            now,
+        );
+        assert!((progress - 1.0).abs() < f64::EPSILON, "got {progress}");
+    }
+
     #[test]
     fn verificationprogress_reports_zero_when_headers_unset() {
         let ctx = Arc::new(Context::new());
@@ -2060,5 +2287,109 @@ fn compute_branchlen(
             return leaf_height;
         };
         cursor = parent_id;
+    }
+}
+
+#[cfg(test)]
+mod verification_progress_wiring_tests {
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicU64;
+
+    use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+    use bitcoin_rs_primitives::Hash256;
+    use sonic_rs::{JsonValueTrait, json};
+
+    use super::*;
+
+    /// Applied at height 50 of a 100-header chain, so the height ratio is
+    /// exactly 0.5 and any answer that is not 0.5 cannot have come from it.
+    fn half_applied_ctx(chain_tx_count: Option<u64>) -> Arc<Context> {
+        let ctx = Context::new();
+        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        ctx.set_chain_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 100,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 50,
+            chainwork: ChainWork::ZERO,
+            hash,
+        });
+        let ctx = match chain_tx_count {
+            Some(count) => ctx.with_chain_tx_count(Arc::new(AtomicU64::new(count))),
+            None => ctx,
+        };
+        Arc::new(ctx)
+    }
+
+    fn progress_of(ctx: &Arc<Context>) -> f64 {
+        let result = getblockchaininfo(ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+        let Some(progress) = result
+            .get("verificationprogress")
+            .and_then(JsonValueTrait::as_f64)
+        else {
+            panic!("verificationprogress missing: {result:?}");
+        };
+        progress
+    }
+
+    #[test]
+    fn a_known_count_is_answered_with_cores_estimate_not_the_height_ratio() {
+        // 5000 transactions against mainnet's billion-transaction observation is
+        // nowhere near half the chain, whatever the heights say.
+        let progress = progress_of(&half_applied_ctx(Some(5_000)));
+        assert!(
+            progress < 0.001,
+            "expected Core's transaction-count estimate, got {progress}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_count_keeps_the_height_ratio_rather_than_reporting_zero() {
+        // A datadir written before the node tracked the count. Reporting 0.0
+        // here would break every caller that gates on `verificationprogress`,
+        // which is why the fallback exists at all.
+        let progress = progress_of(&half_applied_ctx(None));
+        assert!(
+            (progress - 0.5).abs() < 1e-9,
+            "expected the height ratio, got {progress}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod float_conversion_tests {
+    use super::{i64_to_f64, u64_to_f64};
+
+    #[test]
+    fn u64_to_f64_is_exact_below_two_to_the_fifty_third() {
+        for value in [
+            0_u64,
+            1,
+            4_294_967_295,
+            4_294_967_296,
+            1_315_805_869,
+            1 << 52,
+        ] {
+            // Independently derived: the halves recombined by hand.
+            let expected = f64::from(u32::try_from(value >> 32).unwrap_or(u32::MAX))
+                * 4_294_967_296.0_f64
+                + f64::from(u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX));
+            assert!(
+                (u64_to_f64(value) - expected).abs() < f64::EPSILON,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn i64_to_f64_carries_the_sign() {
+        assert!((i64_to_f64(-3_600) + 3_600.0).abs() < f64::EPSILON);
+        assert!((i64_to_f64(3_600) - 3_600.0).abs() < f64::EPSILON);
+        assert!((i64_to_f64(0) - 0.0).abs() < f64::EPSILON);
     }
 }
