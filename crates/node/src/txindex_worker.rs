@@ -1157,6 +1157,26 @@ impl TxIndexQueryEngine {
         budget: &mut QueryBudget,
         txid: &Txid,
     ) -> Result<Option<Transaction>, TxQueryError> {
+        Ok(self
+            .locate_transaction_for(snapshot, tip, budget, txid)?
+            .map(|(_, transaction)| transaction))
+    }
+
+    /// Resolves both the confirming height and the transaction itself.
+    ///
+    /// `transaction_for` and `transaction_height_for` are the same walk, so they
+    /// share it rather than keeping two copies of the row/position/full-block
+    /// fallback ladder. The height caller pays for the deserialization it does
+    /// not use, which is the price of not answering with an unverified row: a
+    /// row surviving from a reorged block would otherwise name a height whose
+    /// block never held the transaction.
+    fn locate_transaction_for(
+        &self,
+        snapshot: &dyn TxIndexSnapshot,
+        tip: &TipSnapshot,
+        budget: &mut QueryBudget,
+        txid: &Txid,
+    ) -> Result<Option<(u32, Transaction)>, TxQueryError> {
         let limit = budget.next_scan_limit()?;
         let scan = snapshot
             .transaction_rows(txid, limit)
@@ -1172,20 +1192,20 @@ impl TxIndexQueryEngine {
                 if let Some(transaction) =
                     self.transaction_from_full_block(tip, budget, height, txid)?
                 {
-                    return Ok(Some(transaction));
+                    return Ok(Some((height, transaction)));
                 }
                 continue;
             };
             let position = positions[0];
             match self.resolve_positioned_transaction(tip, budget, height, position)? {
                 Some(transaction) if transaction.compute_txid() == *txid => {
-                    return Ok(Some(transaction));
+                    return Ok(Some((height, transaction)));
                 }
                 _ => {
                     if let Some(transaction) =
                         self.transaction_from_full_block(tip, budget, height, txid)?
                     {
-                        return Ok(Some(transaction));
+                        return Ok(Some((height, transaction)));
                     }
                 }
             }
@@ -1505,6 +1525,14 @@ impl TxIndexQuery for TxIndexQueryEngine {
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
         self.with_snapshot(|snapshot, tip, budget| {
             self.outpoint_value_for(snapshot, tip, budget, outpoint)
+        })
+    }
+
+    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+        self.with_snapshot(|snapshot, tip, budget| {
+            Ok(self
+                .locate_transaction_for(snapshot, tip, budget, txid)?
+                .map(|(height, _)| height))
         })
     }
 

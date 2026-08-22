@@ -323,6 +323,16 @@ pub trait TxIndexQuery: Send + Sync {
     fn transaction(&self, txid: &Txid) -> Result<Option<Transaction>, TxQueryError>;
     /// Resolves a confirmed prevout value, returning `None` only after complete absence is proven.
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError>;
+    /// Resolves the height of the block confirming `txid`, without materializing the transaction.
+    ///
+    /// Callers that only need to locate the block — `gettxoutproof` is the one —
+    /// would otherwise deserialize a transaction and throw it away. The default
+    /// answers `None`, which every caller must already handle as "the index
+    /// cannot say", so an implementor that does not track heights keeps working.
+    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+        let _ = txid;
+        Ok(None)
+    }
     /// Returns the transaction index's actual durable progress.
     fn index_info(&self) -> Result<TxIndexInfo, TxQueryError>;
 }

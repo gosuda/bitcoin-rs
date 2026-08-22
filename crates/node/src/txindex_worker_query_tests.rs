@@ -340,6 +340,69 @@ fn transaction_uses_positioned_range_without_full_body_load()
     Ok(())
 }
 
+/// `gettxoutproof` asks only where a transaction is, never what it is, so the
+/// height query must take the same positioned-read path rather than falling back
+/// to loading the whole block.
+#[test]
+fn transaction_height_uses_positioned_range_without_full_body_load()
+-> Result<(), Box<dyn std::error::Error>> {
+    let block = genesis_block(Network::Regtest);
+    let txid = block.txdata[0].compute_txid();
+    let value = TxPositionValue::encode(&[transaction_position(&block, 0)?]);
+    let full_calls = Arc::new(AtomicUsize::new(0));
+    let range_calls = Arc::new(AtomicUsize::new(0));
+    let mut fixture = QueryFixture::new(FixtureConfig {
+        block: block.clone(),
+        retain_body: false,
+        scans: vec![scan_response(
+            ColumnFamily::TxConfirmed,
+            TxidRow::scan_prefix(&txid),
+            vec![(TxidRow::row(&txid, 0).to_db_row().to_vec(), value)],
+            true,
+        )],
+        aba_trigger: None,
+        watermark: None,
+    })?;
+    fixture.engine.body_source = Some(Arc::new(CountingBodySource {
+        full_calls: Arc::clone(&full_calls),
+        range_calls: Arc::clone(&range_calls),
+        bytes: bitcoin::consensus::serialize(&block),
+    }));
+
+    assert_eq!(fixture.engine.transaction_height(&txid)?, Some(0));
+    assert_eq!(range_calls.load(Ordering::Acquire), 1);
+    assert_eq!(full_calls.load(Ordering::Acquire), 0);
+    Ok(())
+}
+
+/// Pins that the height query proves absence rather than guessing the tip.
+///
+/// Without this, an implementation that answered `Some(tip.height)` for anything
+/// would satisfy the test above, and `gettxoutproof` would build its proof from
+/// the wrong block — or, having verified it, fall into the full chain scan the
+/// index path exists to avoid.
+#[test]
+fn transaction_height_reports_nothing_for_an_unindexed_txid()
+-> Result<(), Box<dyn std::error::Error>> {
+    let block = genesis_block(Network::Regtest);
+    let txid = block.txdata[0].compute_txid();
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: false,
+        scans: vec![scan_response(
+            ColumnFamily::TxConfirmed,
+            TxidRow::scan_prefix(&txid),
+            Vec::new(),
+            true,
+        )],
+        aba_trigger: None,
+        watermark: None,
+    })?;
+
+    assert_eq!(fixture.engine.transaction_height(&txid)?, None);
+    Ok(())
+}
+
 #[test]
 fn duplicate_positions_fall_back_before_range_io() -> Result<(), Box<dyn std::error::Error>> {
     let block = genesis_block(Network::Regtest);

@@ -562,6 +562,7 @@ dependencies = [
  "bitcoin-rs-utxo",
  "bitcoin-rs-wallet",
  "compact_str",
+ "criterion",
  "crossbeam-channel",
  "hashbrown 0.17.1",
  "parking_lot",
