@@ -57,3 +57,7 @@ mimalloc.workspace = true
 [[bench]]
 name = "utxo_commit"
 harness = false
+
+[[bench]]
+name = "record_codec"
+harness = false

@@ -111,6 +111,16 @@ pub enum UtxoError {
     /// Snapshot full txid does not match the stored key prefix.
     #[error("snapshot txid prefix does not match record key prefix")]
     SnapshotTxidPrefixMismatch,
+    /// An output value exceeds the largest amount any UTXO can hold.
+    ///
+    /// Unreachable through consensus, which caps the money supply. It exists so
+    /// a corrupt or synthetic value fails loudly instead of overflowing the
+    /// amount compression.
+    #[error("output value {value} exceeds the maximum money supply")]
+    AmountOutOfRange {
+        /// Offending value in satoshis.
+        value: u64,
+    },
 }
 
 /// Receives UTXO mutations committed to durable shard state.
@@ -687,6 +697,34 @@ pub struct UtxoSet {
     listener: Option<Box<dyn UtxoChangeListener + Send + Sync>>,
 }
 
+/// Byte-level accounting of what a UTXO set holds in memory.
+///
+/// Every field is what the set can account for itself. What it cannot see —
+/// allocator size-class rounding, fragmentation, and per-allocation metadata —
+/// is exactly the residual against process RSS, which is the point.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UtxoMemoryReport {
+    /// Transaction-level records held.
+    pub records: usize,
+    /// Live outputs across those records.
+    pub outputs: usize,
+    /// Sum of every record's heap allocation: header plus buffer capacity.
+    pub record_allocation_bytes: usize,
+    /// Sum of every record's live encoded payload, excluding header and slack.
+    pub record_payload_bytes: usize,
+    /// Estimated hash-table backing store across all shards.
+    pub table_bytes: usize,
+}
+
+impl UtxoMemoryReport {
+    /// Everything the set can attribute: record allocations plus table storage.
+    #[must_use]
+    pub const fn accounted_bytes(&self) -> usize {
+        self.record_allocation_bytes
+            .saturating_add(self.table_bytes)
+    }
+}
+
 /// Read guard for a stable whole-set UTXO view.
 pub struct UtxoSetView<'a> {
     set: &'a UtxoSet,
@@ -710,6 +748,30 @@ impl UtxoSetView<'_> {
     #[must_use]
     pub fn record_count(&self) -> usize {
         self.set.shards.iter().map(Shard::record_count).sum()
+    }
+
+    /// Accounts for what this set holds in memory, shard by shard.
+    ///
+    /// Exists to attribute process RSS rather than to guess at it. The set is
+    /// fully memory-resident with no eviction tier, and the published
+    /// 13.83 GiB at height 645,804 is far above what the record encoding alone
+    /// predicts, so the gap between `record_allocation_bytes + table_bytes` and
+    /// actual RSS is the number that decides whether an encoding change is worth
+    /// making at all.
+    ///
+    /// Walks every record in every shard: O(records), for measurement only.
+    #[must_use]
+    pub fn memory_report(&self) -> UtxoMemoryReport {
+        let mut report = UtxoMemoryReport::default();
+        for shard in &self.set.shards {
+            let (allocation, payload) = shard.allocation_and_payload_bytes();
+            report.records += shard.record_count();
+            report.outputs += shard.output_count();
+            report.record_allocation_bytes += allocation;
+            report.record_payload_bytes += payload;
+            report.table_bytes += shard.table_bytes();
+        }
+        report
     }
 
     /// Computes Bitcoin Core's `hash_serialized_3` commitment for this stable view.

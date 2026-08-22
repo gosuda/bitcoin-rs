@@ -305,3 +305,64 @@ position while keeping the rest. See the *All-or-scan position fallback* concept
 in `CONCEPTS.md`. The residual accepted: a stale offset landing exactly on a
 transaction boundary whose transaction also matches, while a different
 transaction in that block matches too.
+
+## §9 — UTXO record payload encoding, and the arena PLAN.md specified
+
+`PLAN.md` design principle 8 specifies a `bumpalo::Bump` arena per shard for
+UTXO record storage. The shipped implementation deviated earlier to one heap
+allocation per record via `ThinRecordBuf`; this section records why the arena
+is now **rejected on measurement** rather than merely deferred, and what
+replaced the record encoding instead.
+
+### The arena is rejected, not pending
+
+The arena's stated purpose was the per-record allocation overhead and the
+fragmentation expected from tens of millions of small allocations. Both were
+measured before any work started (`docs/benchmarks/utxo-memory.md`):
+
+- Allocation header plus slack is **2.2 bytes per output** on a real mainnet
+  chainstate at height 412,732 (55.1 B payload against 57.3 accounted).
+- Fragmentation is **5%** after churning twice the whole set, and the curve is
+  flattening rather than climbing. Uniform small allocations are the case a
+  size-class allocator handles well.
+
+An arena removes an overhead that measurement puts at a few percent, at the cost
+of a self-referential per-shard structure (`self_cell!` over a pinned `Bump`)
+plus the round-robin `defrag_one_shard` PLAN.md Task 5 Step 7 also specifies.
+Do not start it without new evidence; the two numbers above are the evidence
+against it.
+
+### The record payload is v5, not the v4 layout
+
+The same measurement found the UTXO set is **77.4% of process RSS**, which is
+where the encoding work went instead. Per-output metadata was a fixed 19 bytes
+(`vout(4) || value(8) || height(4) || coinbase(1) || script_len(2)`); it is now
+Core's `CTxOutCompressor` amount transform, `height` and `coinbase` packed into
+one varint, and two fixed-width directories in front of the payloads. Measured
+saving **11.75 bytes per output, 21.7% of the payload**, about 1.97 GiB at tip.
+
+Three things about this are deviations worth naming:
+
+- **A flat varint layout was built first and rejected.** It hit the size target
+  and lost 4.4-4.9x on `find_output`, the hot read. See the *Directory-layout
+  record* concept.
+- **`height` is not hoisted into the record header**, which would save three
+  bytes more. It needs "every output of a record shares one height" to hold, and
+  BIP30's duplicate coinbase txids are exactly where it might not.
+- **The snapshot disk format is unchanged.** `PLAN.md`'s successor step called
+  for a v5 file format; disk size is not a G14 budget item (the budgets are tip
+  RSS and Electrum p95), so the invariant that step really protects was covered
+  instead by a golden vector generated from a v4 build —
+  `crates/utxo/tests/snapshot_v4_golden.rs`. `hash_serialized_3` and the MuHash
+  trailer are computed over decoded consensus values, never over the in-memory
+  encoding, and that is asserted in both directions plus as a load/store fixed
+  point.
+
+### Revert criterion
+
+v5 costs about 3 ns per lookup at the measured mainnet average and 3-21% on
+block commit p95, against budgets with roughly twenty times the headroom. It
+buys 12 points of the 16 GiB tip-RSS budget. **If G14 tip RSS measures well
+under budget — say below 10 GiB — this complexity is not earning its keep and
+reverting is the right call.** v4 remains in the tree as the equivalence oracle
+and the benchmark's `before` arm, so a revert is a revert, not a rewrite.

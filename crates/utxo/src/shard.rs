@@ -34,6 +34,38 @@ impl ShardTable {
     pub(crate) fn output_count(&self) -> usize {
         self.table.iter().map(UtxoRecord::output_count).sum()
     }
+
+    /// Sums every record's heap allocation and live payload.
+    ///
+    /// The allocation is what the process actually holds — `AllocHeader` plus
+    /// the buffer's capacity — while the payload is the encoded bytes inside it.
+    /// The two differ wherever a record was grown and kept slack, and the gap
+    /// between the allocation total and process RSS is what allocator size
+    /// classes and fragmentation cost.
+    pub(crate) fn allocation_and_payload_bytes(&self) -> (usize, usize) {
+        self.table.iter().fold((0, 0), |(alloc, payload), record| {
+            (
+                alloc + record.allocation_bytes(),
+                payload + record.payload_bytes(),
+            )
+        })
+    }
+
+    /// Estimated bytes held by the hash table itself, excluding record payloads.
+    ///
+    /// `hashbrown` exposes usable capacity, not bucket count, so this
+    /// reconstructs the layout: buckets are a power of two above
+    /// `capacity / 0.875`, and each carries one `UtxoRecord` (a pointer) plus one
+    /// control byte. An estimate by construction — treat it as the right order of
+    /// magnitude, not an exact figure.
+    pub(crate) fn table_bytes(&self) -> usize {
+        let capacity = self.table.capacity();
+        if capacity == 0 {
+            return 0;
+        }
+        let buckets = capacity.saturating_mul(8).div_ceil(7).next_power_of_two();
+        buckets.saturating_mul(core::mem::size_of::<UtxoRecord>() + 1)
+    }
 }
 
 /// One live UTXO output with the metadata consensus consumers need.
@@ -201,6 +233,16 @@ impl Shard {
     pub(crate) fn output_count(&self) -> usize {
         let table = self.inner.read();
         table.output_count()
+    }
+
+    pub(crate) fn allocation_and_payload_bytes(&self) -> (usize, usize) {
+        let table = self.inner.read();
+        table.allocation_and_payload_bytes()
+    }
+
+    pub(crate) fn table_bytes(&self) -> usize {
+        let table = self.inner.read();
+        table.table_bytes()
     }
 
     pub(crate) fn insert_owned_record(

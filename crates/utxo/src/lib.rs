@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// Compact encodings for UTXO record fields.
+mod compress;
 /// UTXO hash-table key.
 pub mod key;
 /// Owned UTXO records.
@@ -21,10 +23,10 @@ pub mod snapshot;
 pub mod undo_codec;
 
 pub use key::{UtxoBuildHasher, UtxoKey};
-pub use record::{OneUtxoOut, UtxoRecord};
+pub use record::{OneUtxoOut, RecordCodec, UtxoRecord};
 pub use set::{
     BlockChanges, ScannedUtxo, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoError, UtxoInserted,
-    UtxoRemoved, UtxoScan, UtxoSet, UtxoSetView,
+    UtxoMemoryReport, UtxoRemoved, UtxoScan, UtxoSet, UtxoSetView,
 };
 pub use shard::{LiveOutput, LiveOutputMeta};
 pub use snapshot::{
