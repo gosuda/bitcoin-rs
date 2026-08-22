@@ -30,6 +30,18 @@ pub enum RpcError {
     /// A transaction was rejected by consensus or mempool policy.
     #[error("{0}")]
     TxRejected(String),
+    /// A parameter's value is unacceptable, as opposed to malformed.
+    ///
+    /// Bitcoin Core's `RPC_INVALID_PARAMETER` (-8). Distinct from
+    /// [`RpcError::InvalidParams`], which is the JSON-RPC shape error.
+    #[error("{0}")]
+    InvalidParameter(String),
+    /// The node has no peers.
+    #[error("{0}")]
+    ClientNotConnected(&'static str),
+    /// The node is still catching up with the chain.
+    #[error("{0}")]
+    ClientInInitialDownload(&'static str),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -54,6 +66,10 @@ impl RpcError {
     pub const CORE_INVALID_PARAMETER: i64 = -8;
     /// Bitcoin Core transaction-rejected code, `RPC_VERIFY_REJECTED`.
     pub const CORE_VERIFY_REJECTED: i64 = -26;
+    /// Bitcoin Core no-peers code, `RPC_CLIENT_NOT_CONNECTED`.
+    pub const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
+    /// Bitcoin Core still-syncing code, `RPC_CLIENT_IN_INITIAL_DOWNLOAD`.
+    pub const CORE_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
 
     /// Builds the no-private-keys policy error used by signing RPCs.
     #[must_use]
@@ -72,6 +88,9 @@ impl RpcError {
             Self::InvalidType(_) => Self::CORE_INVALID_TYPE,
             Self::NotFound(_) => Self::CORE_NOT_FOUND,
             Self::TxRejected(_) => Self::CORE_VERIFY_REJECTED,
+            Self::InvalidParameter(_) => Self::CORE_INVALID_PARAMETER,
+            Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
+            Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
             Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
         }
     }

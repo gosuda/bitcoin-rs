@@ -58,7 +58,6 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         ("disconnectnode", json!(["127.0.0.1:8333"])),
         ("getconnectioncount", json!([])),
         ("getnettotals", json!([])),
-        ("getblocktemplate", json!([{}])),
         ("submitblock", json!([""])),
         ("prioritisetransaction", json!([txid.as_str(), 0, 0])),
         (
@@ -104,11 +103,19 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
             .as_array()
             .is_some()
     );
-    assert!(
-        handler
-            .dispatch("getblocktemplate", &json!([{}]))?
-            .get("longpollid")
-            .is_str()
+    // getblocktemplate is deliberately absent from the list above. This
+    // fixture is a mainnet context with no peers whose tip is the 2009 genesis
+    // block, and Bitcoin Core refuses to build a template in either of those
+    // states. Asserting the refusal is the honest shape check here; the happy
+    // path is covered where a regtest context can be built.
+    let refusal = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]));
+    let Err(error) = refusal else {
+        panic!("a mainnet node with no peers must not serve a template");
+    };
+    assert_eq!(
+        error.code(),
+        RpcError::CORE_CLIENT_NOT_CONNECTED,
+        "expected the Core not-connected code, got {error:?}"
     );
     Ok(())
 }

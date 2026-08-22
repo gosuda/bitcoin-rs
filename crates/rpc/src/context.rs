@@ -23,6 +23,28 @@ const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 /// Number of blocks in a median-time-past window (BIP113).
 const MEDIAN_TIME_SPAN: usize = 11;
 
+/// A `getblocktemplate` response and the state it was assembled from.
+///
+/// Miners poll `getblocktemplate` hard, and assembling one walks and sorts the
+/// whole mempool under its read lock — the same lock transaction acceptance
+/// needs to write. Rebuilding per request puts that walk on a
+/// caller-controlled path. Bitcoin Core caches for the same reason.
+#[derive(Clone, Debug)]
+pub struct CachedBlockTemplate {
+    /// Applied tip the template was built on.
+    pub tip: Hash256,
+    /// Mempool sequence number at assembly time.
+    ///
+    /// The pool bumps this on every insert and removal, so any change to the
+    /// candidate set invalidates the entry — which is what lets the time bound
+    /// below be about `curtime` going stale rather than about correctness.
+    pub mempool_sequence: u64,
+    /// Assembly time, in seconds since the epoch.
+    pub built_at: u64,
+    /// The assembled template.
+    pub template: bitcoin_rs_mining::BlockTemplate,
+}
+
 /// Aggregate nulldata bytes relay policy allows in one transaction.
 ///
 /// Bitcoin Core's `MAX_OP_RETURN_RELAY`, defined as
@@ -422,6 +444,8 @@ pub struct Context {
     pub block_body_source: Option<Arc<dyn BlockBodySource>>,
     /// Current getblocktemplate long-poll id.
     pub mining_template_id: Arc<ArcSwap<CompactString>>,
+    /// Most recently assembled `getblocktemplate` response, if still current.
+    pub mining_template_cache: Arc<RwLock<Option<CachedBlockTemplate>>>,
     /// Receiver notified when mining template inputs change.
     pub mining_notifications: Receiver<()>,
     /// Optional outbound channel that submits decoded blocks back to the node's
@@ -492,6 +516,7 @@ impl Context {
             block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
             block_body_source: None,
             mining_template_id: Arc::new(ArcSwap::from_pointee(CompactString::new("0"))),
+            mining_template_cache: Arc::new(RwLock::new(None)),
             mining_notifications,
             inbound_blocks_sender: None,
             p2p_outbound_sender: None,
@@ -546,6 +571,7 @@ impl Context {
             block_tree,
             block_body_source: None,
             mining_template_id,
+            mining_template_cache: Arc::new(RwLock::new(None)),
             mining_notifications,
             inbound_blocks_sender,
             p2p_outbound_sender,
