@@ -72,6 +72,21 @@ pub struct Mempool {
     pub pareto: ParetoFront,
     /// Active mempool policy limits.
     pub limits: MempoolLimits,
+    /// Running sum of `vsize` over `entries`.
+    ///
+    /// Maintained by the mutation methods below rather than folded on demand.
+    /// `insert_entry` consults it on every accepted transaction to decide
+    /// whether the pool is over its size limit, so folding it there cost `O(n)`
+    /// per acceptance and made insertion quadratic in pool size on its own.
+    ///
+    /// `entries` is a public field, so code outside this module *could*
+    /// desynchronize this by mutating the slab directly. Nothing does — every
+    /// mutation goes through `insert_entry`, `remove_entries`, `prioritise` or
+    /// `clear` — and `debug_assert`s in `total_vsize` and `aggregate_fees` fail
+    /// loudly in test and debug builds if that ever stops being true.
+    total_vsize: u64,
+    /// Running sum of `fee` over `entries`. See `total_vsize`.
+    total_fee: u64,
     sequence: core::sync::atomic::AtomicU64,
 }
 /// Aggregate mempool counters surfaced through the JSON-RPC `getmempoolinfo`
@@ -97,6 +112,8 @@ impl Mempool {
             spending: std::collections::BTreeSet::new(),
             pareto: ParetoFront::new(),
             limits,
+            total_vsize: 0,
+            total_fee: 0,
             sequence: core::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -109,6 +126,8 @@ impl Mempool {
         self.funding.clear();
         self.spending.clear();
         self.pareto = ParetoFront::new();
+        self.total_vsize = 0;
+        self.total_fee = 0;
         self.bump_sequence();
     }
 
@@ -164,11 +183,20 @@ impl Mempool {
         entry.descendant_size = u64::from(entry.vsize);
         entry.descendant_fee = entry.fee;
 
+        let added_vsize = u64::from(entry.vsize);
+        let added_fee = entry.fee;
         let index = self.entries.insert(entry);
         let id = EntryId::try_from(index).map_err(|_| MempoolError::TooManyEntries)?;
+        self.total_vsize = self.total_vsize.saturating_add(added_vsize);
+        self.total_fee = self.total_fee.saturating_add(added_fee);
         self.by_txid.insert(txid, id);
         self.index_entry(id);
-        self.recompute_all_metadata();
+        // The closure is taken after `index_entry`, because a transaction can
+        // arrive after something that already spends its outputs — an orphan
+        // promotion, or plain out-of-order relay — and those descendants only
+        // become reachable once this entry is in the spend indexes.
+        let affected = self.metadata_closure(&[id]);
+        self.refresh_metadata(&affected);
         self.bump_sequence();
         if self.limits.max_total_bytes > 0 && self.total_vsize() > self.limits.max_total_bytes {
             let _evicted = self.enforce_size_limit(self.limits.max_total_bytes);
@@ -253,9 +281,13 @@ impl Mempool {
     /// Returns the total virtual size of all entries.
     #[must_use]
     pub fn total_vsize(&self) -> u64 {
-        self.entries.iter().fold(0, |total, (_, entry)| {
-            total.saturating_add(u64::from(entry.vsize))
-        })
+        debug_assert_eq!(
+            self.total_vsize,
+            self.entries.iter().fold(0_u64, |total, (_, entry)| total
+                .saturating_add(u64::from(entry.vsize))),
+            "running vsize total drifted from the entries it summarizes"
+        );
+        self.total_vsize
     }
 
     /// Evicts the lowest-fee packages until the pool's total vsize is at or below
@@ -275,9 +307,14 @@ impl Mempool {
     /// above the 21M BTC monetary cap, so saturation here is purely defensive).
     #[must_use]
     pub fn aggregate_fees(&self) -> u64 {
-        self.entries
-            .iter()
-            .fold(0_u64, |acc, (_id, entry)| acc.saturating_add(entry.fee))
+        debug_assert_eq!(
+            self.total_fee,
+            self.entries
+                .iter()
+                .fold(0_u64, |acc, (_id, entry)| acc.saturating_add(entry.fee)),
+            "running fee total drifted from the entries it summarizes"
+        );
+        self.total_fee
     }
 
     /// Returns aggregate counters for the current pool.
@@ -396,27 +433,21 @@ impl Mempool {
             entry.fee = new_fee;
             let denom = u64::from(entry.vsize).max(1);
             entry.fee_rate = new_fee.saturating_mul(1_000) / denom;
-            entry.ancestor_fee = apply_delta_u64(entry.ancestor_fee, actual_delta);
             actual_delta
         };
+        self.total_fee = apply_delta_u64(self.total_fee, actual_delta);
 
-        let ancestor_ids = self.ancestor_ids_for_entry(id);
-        let descendant_ids = self.descendant_ids_for_entry(id);
-        for ancestor_id in ancestor_ids {
-            if let Some(ancestor) = self.entry_mut(ancestor_id) {
-                ancestor.descendant_fee = apply_delta_u64(ancestor.descendant_fee, actual_delta);
-            }
-        }
-        for descendant_id in descendant_ids {
-            if let Some(descendant) = self.entry_mut(descendant_id) {
-                descendant.ancestor_fee = apply_delta_u64(descendant.ancestor_fee, actual_delta);
-            }
-        }
-
-        let Some(entry) = self.entry(id).cloned() else {
-            return false;
-        };
-        self.pareto.insert(id, &entry);
+        // The entry's own fee is the only thing that moved, so the package
+        // totals of its relatives follow from the graph — the same refresh an
+        // insertion does. This replaces three hand-applied delta loops, and
+        // fixes what they left behind: they updated each descendant's
+        // `ancestor_fee` but never reindexed it, so a descendant kept the
+        // priority key it had before its ancestor was bumped. Since
+        // `prioritisetransaction` exists to move transactions in the miner's
+        // template, leaving descendants ranked on the pre-bump figure defeated
+        // it for exactly the packages it was aimed at.
+        let affected = self.metadata_closure(&[id]);
+        self.refresh_metadata(&affected);
         self.bump_sequence();
         true
     }
@@ -523,6 +554,13 @@ impl Mempool {
     }
 
     fn remove_entries(&mut self, ids: &[EntryId]) {
+        // Collected first: once an entry is out of the slab its ancestors can no
+        // longer be walked, and they are exactly the entries whose descendant
+        // totals this removal invalidates. Surviving descendants are in the
+        // closure too — `remove_entries` is reached from eviction paths that
+        // remove arbitrary sets, not only from the one that takes descendants
+        // along with their parent.
+        let affected = self.metadata_closure(ids);
         let mut removed_any = false;
         for id in ids {
             let Some(index) = usize::try_from(*id).ok() else {
@@ -532,6 +570,8 @@ impl Mempool {
                 continue;
             }
             let entry = self.entries.remove(index);
+            self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
+            self.total_fee = self.total_fee.saturating_sub(entry.fee);
             removed_any = true;
             self.by_txid.remove(&entry.tx.compute_txid());
             self.pareto.remove(*id);
@@ -547,7 +587,7 @@ impl Mempool {
                 let _ = self.spending.remove(&(input.previous_output, *id));
             }
         }
-        self.recompute_all_metadata();
+        self.refresh_metadata(&affected);
         if removed_any {
             self.bump_sequence();
         }
@@ -577,6 +617,111 @@ impl Mempool {
         }
     }
 
+    /// Recomputes one entry's four package totals directly from the spend graph.
+    ///
+    /// This is the invariant written out: an entry's ancestor totals are its own
+    /// plus every transitive in-mempool parent, and its descendant totals are
+    /// its own plus every transitive in-mempool child. `recompute_all_metadata`
+    /// arrives at the same numbers by a reset-then-accumulate pass over the
+    /// whole pool; this arrives at them for one entry.
+    ///
+    /// Cost is bounded by the ancestor and descendant *policy* limits — 25 each
+    /// by default — not by the number of entries in the pool.
+    fn recompute_entry_totals(&mut self, id: EntryId) {
+        let Some(entry) = self.entry(id) else {
+            return;
+        };
+        let own_size = u64::from(entry.vsize);
+        let own_fee = entry.fee;
+
+        let (ancestor_size, ancestor_fee) = self
+            .ancestor_ids_for_entry(id)
+            .into_iter()
+            .filter_map(|ancestor| self.entry(ancestor))
+            .fold((own_size, own_fee), |(size, fee), ancestor| {
+                (
+                    size.saturating_add(u64::from(ancestor.vsize)),
+                    fee.saturating_add(ancestor.fee),
+                )
+            });
+        let (descendant_size, descendant_fee) = self
+            .descendant_ids_for_entry(id)
+            .into_iter()
+            .filter_map(|descendant| self.entry(descendant))
+            .fold((own_size, own_fee), |(size, fee), descendant| {
+                (
+                    size.saturating_add(u64::from(descendant.vsize)),
+                    fee.saturating_add(descendant.fee),
+                )
+            });
+
+        if let Some(entry) = self.entry_mut(id) {
+            entry.ancestor_size = ancestor_size;
+            entry.ancestor_fee = ancestor_fee;
+            entry.descendant_size = descendant_size;
+            entry.descendant_fee = descendant_fee;
+        }
+    }
+
+    /// Every entry whose totals a change at `seeds` can have altered.
+    ///
+    /// Linking one transaction into the spend graph changes package totals for
+    /// its transitive ancestors, itself, and its transitive descendants — and
+    /// for nothing else. An entry `x` outside that set gains no new ancestor,
+    /// because `x` is not a descendant of the seed; and gains no new descendant,
+    /// because every new path runs through the seed, which would put `x` among
+    /// its ancestors. That argument is what makes the incremental update exact
+    /// rather than approximate, and
+    /// `incremental_metadata_matches_the_full_recompute` holds it to it.
+    ///
+    /// Collected before the mutation on a removal, because a removed entry's
+    /// ancestors cannot be walked once it is gone.
+    fn metadata_closure(&self, seeds: &[EntryId]) -> Vec<EntryId> {
+        let mut affected = Vec::new();
+        for seed in seeds {
+            for id in self
+                .ancestor_ids_for_entry(*seed)
+                .into_iter()
+                .chain(core::iter::once(*seed))
+                .chain(self.descendant_ids_for_entry(*seed))
+            {
+                if !affected.contains(&id) {
+                    affected.push(id);
+                }
+            }
+        }
+        affected
+    }
+
+    /// Recomputes package totals and priority keys for `affected` only.
+    ///
+    /// Entries that no longer exist are skipped rather than resurrected: a
+    /// removal's closure is collected before the removal, so it names entries
+    /// that are deliberately gone by the time this runs.
+    fn refresh_metadata(&mut self, affected: &[EntryId]) {
+        for id in affected {
+            self.recompute_entry_totals(*id);
+        }
+        for id in affected {
+            match self.entry(*id).cloned() {
+                Some(entry) => self.pareto.insert(*id, &entry),
+                None => {
+                    let _ = self.pareto.remove(*id);
+                }
+            }
+        }
+    }
+
+    /// Rebuilds every entry's package totals and the whole priority index.
+    ///
+    /// Nothing in the pool calls this any more, and that is the change: it is
+    /// `n` walks of the spend graph, and doing it per accepted transaction is
+    /// what made `insert_entry` quadratic in mempool size. It is kept, compiled
+    /// only under `cfg(test)`, as the oracle that
+    /// `incremental_metadata_matches_the_full_recompute` compares the
+    /// incremental path against — an oracle nothing in production can drift
+    /// away from, because production no longer has a path to it.
+    #[cfg(test)]
     fn recompute_all_metadata(&mut self) {
         let ids = self
             .entries
@@ -1567,6 +1712,319 @@ mod tests {
             "size limit must hold after inserts: {}",
             pool.total_vsize()
         );
+    }
+
+    /// Every entry's four package totals, in entry-id order.
+    fn totals(pool: &Mempool) -> Vec<(usize, u64, u64, u64, u64)> {
+        let mut all = pool
+            .entries
+            .iter()
+            .map(|(index, entry)| {
+                (
+                    index,
+                    entry.ancestor_size,
+                    entry.ancestor_fee,
+                    entry.descendant_size,
+                    entry.descendant_fee,
+                )
+            })
+            .collect::<Vec<_>>();
+        all.sort_unstable();
+        all
+    }
+
+    /// Builds a pool whose spend graph has every shape the closure argument
+    /// rests on: a chain, a fan-out, a fan-in, and an isolated entry.
+    ///
+    /// Returns the pool and the outpoint of each inserted transaction's first
+    /// output so a caller can extend the graph further.
+    fn graph_pool() -> Result<(Mempool, Vec<OutPoint>), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let mut outs = Vec::new();
+
+        let add = |pool: &mut Mempool,
+                   label: u8,
+                   parents: Vec<OutPoint>|
+         -> Result<OutPoint, MempoolError> {
+            let transaction = tx(label, parents);
+            let txid = transaction.compute_txid();
+            let vsize = 100 + u32::from(label);
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(transaction),
+                vsize,
+                u64::from(vsize) * 10,
+                u64::from(label),
+                1,
+            ))?;
+            Ok(OutPoint::new(txid, 0))
+        };
+
+        // root -> mid -> leaf: a chain.
+        let root = add(&mut pool, 1, vec![OutPoint::null()])?;
+        let mid = add(&mut pool, 2, vec![root])?;
+        let leaf = add(&mut pool, 3, vec![mid])?;
+        // root also funds a second child: a fan-out.
+        let sibling = add(&mut pool, 4, vec![root])?;
+        // one transaction spending two unrelated parents: a fan-in.
+        let joined = add(&mut pool, 5, vec![leaf, sibling])?;
+        // an entry connected to nothing.
+        let lonely = add(&mut pool, 6, vec![OutPoint::null()])?;
+
+        outs.extend([root, mid, leaf, sibling, joined, lonely]);
+        Ok((pool, outs))
+    }
+
+    /// The incremental update must land on exactly what a full recompute would.
+    ///
+    /// `insert_entry` and `remove_entries` now refresh only the entries a change
+    /// can have touched. That is an argument about the spend graph, so this
+    /// checks it against the implementation that made no argument and simply
+    /// recomputed everything: run the incremental path, then run the full
+    /// recompute, and assert nothing moved.
+    #[test]
+    fn incremental_metadata_matches_the_full_recompute() -> Result<(), MempoolError> {
+        let (mut pool, _outs) = graph_pool()?;
+
+        let incremental = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(
+            incremental,
+            totals(&pool),
+            "incremental insert metadata diverged from the full recompute"
+        );
+        Ok(())
+    }
+
+    /// The same, after a removal that leaves surviving relatives behind.
+    ///
+    /// Every entry in the fixture is removed in turn, from a fresh pool each
+    /// time, rather than one chosen entry. Each victim exercises a different
+    /// shape: removing the middle of the chain leaves a parent that must forget
+    /// descendants and a child that must forget an ancestor, and removing
+    /// `leaf` takes the fan-in `joined` with it while `sibling` — `joined`'s
+    /// *other* parent — survives and has to drop it from its descendant totals.
+    /// That last one is not reachable by removing any single entry the closure
+    /// names directly, and is the case a chosen victim is most likely to miss.
+    ///
+    /// The victim is addressed by entry id, which is the slab index and so
+    /// follows insertion order. An earlier revision picked it out of
+    /// `pool.by_txid`, a `HashMap` whose iteration order is randomized per
+    /// process: the test removed a different entry on every run, and under a
+    /// mutation that took the closure after the removal instead of before it,
+    /// it went red in only 36 of 60 runs.
+    #[test]
+    fn incremental_metadata_matches_the_full_recompute_after_removals() -> Result<(), MempoolError>
+    {
+        for victim in 0..6_u32 {
+            let (mut pool, _outs) = graph_pool()?;
+            let removed = pool.remove_entry_and_descendants(victim);
+            assert!(
+                !removed.is_empty(),
+                "entry {victim} must be present in the fixture"
+            );
+
+            let incremental = totals(&pool);
+            pool.recompute_all_metadata();
+            assert_eq!(
+                incremental,
+                totals(&pool),
+                "incremental removal metadata diverged from the full recompute \
+                 after removing entry {victim}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The eviction path is a `remove_entries` caller nothing else drives.
+    ///
+    /// `insert_entry` calls `enforce_size_limit` when an acceptance puts the
+    /// pool over `max_total_bytes`, and that removes packages the caller never
+    /// named. The refresh has to leave both the package totals and the priority
+    /// index in the state a full rebuild would, from inside the insertion that
+    /// triggered it.
+    #[test]
+    fn eviction_during_insertion_leaves_metadata_a_rebuild_agrees_with() -> Result<(), MempoolError>
+    {
+        let limits = MempoolLimits {
+            max_total_bytes: 400,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        let root = tx(31, vec![OutPoint::null()]);
+        let root_out = OutPoint::new(root.compute_txid(), 0);
+        pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 500, 0, 1))?;
+        let child = tx(32, vec![root_out]);
+        let child_out = OutPoint::new(child.compute_txid(), 0);
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 9_000, 1, 1))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(33, vec![child_out])),
+            100,
+            100_000,
+            2,
+            1,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(34, vec![OutPoint::null()])),
+            100,
+            200,
+            3,
+            1,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(35, vec![OutPoint::null()])),
+            100,
+            300,
+            4,
+            1,
+        ))?;
+        assert!(
+            pool.len() < 5,
+            "the fixture must actually cross the size limit"
+        );
+
+        let incremental = totals(&pool);
+        let index = pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>();
+        pool.recompute_all_metadata();
+        assert_eq!(
+            incremental,
+            totals(&pool),
+            "eviction left package totals a full recompute disagrees with"
+        );
+        assert_eq!(
+            index,
+            pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>(),
+            "eviction left a stale priority index behind"
+        );
+        Ok(())
+    }
+
+    /// The running totals must survive every mutation, not just insertion.
+    ///
+    /// `total_vsize` and `aggregate_fees` each guard themselves with a
+    /// `debug_assert` against a fold of `entries`, but a guard only fires when
+    /// something calls it. `total_vsize` is called by `insert_entry` on every
+    /// acceptance, so its bookkeeping was covered by accident; `aggregate_fees`
+    /// is only reached through `stats`, and deleting the fee bookkeeping in
+    /// *both* the removal path and `prioritise` turned nothing red. This calls
+    /// both accessors after each kind of mutation, and compares against an
+    /// independent fold so the check survives a release build where the
+    /// `debug_assert`s are compiled out.
+    #[test]
+    fn running_totals_track_inserts_removals_and_prioritise() -> Result<(), MempoolError> {
+        fn folded(pool: &Mempool) -> (u64, u64) {
+            pool.entries
+                .iter()
+                .fold((0_u64, 0_u64), |(size, fee), (_, entry)| {
+                    (
+                        size.saturating_add(u64::from(entry.vsize)),
+                        fee.saturating_add(entry.fee),
+                    )
+                })
+        }
+        fn check(pool: &Mempool, stage: &str) {
+            let (size, fee) = folded(pool);
+            assert_eq!(pool.total_vsize(), size, "vsize total wrong after {stage}");
+            assert_eq!(pool.aggregate_fees(), fee, "fee total wrong after {stage}");
+            let stats = pool.stats();
+            assert_eq!(stats.bytes, size, "stats.bytes wrong after {stage}");
+            assert_eq!(stats.total_fee, fee, "stats.total_fee wrong after {stage}");
+        }
+
+        let (mut pool, outs) = graph_pool()?;
+        check(&pool, "inserts");
+
+        // Addressed through the fixture's own handles, in insertion order.
+        // `pool.by_txid` is a `HashMap`, so picking from it would choose a
+        // different subject on every run — see
+        // `incremental_metadata_matches_the_full_recompute_after_removals`.
+        let Some(root) = outs.first().map(|out| out.txid) else {
+            panic!("fixture must hold entries");
+        };
+        assert!(pool.prioritise(root, 250_000), "prioritise up must apply");
+        check(&pool, "a positive fee delta");
+
+        assert!(
+            pool.prioritise(root, -100_000),
+            "prioritise down must apply"
+        );
+        check(&pool, "a negative fee delta");
+
+        // `mid`: removing it takes the rest of the chain with it and leaves
+        // both a surviving parent and an unrelated entry behind.
+        let Some(victim_txid) = outs.get(1).map(|out| out.txid) else {
+            panic!("fixture must hold a second entry");
+        };
+        let removed = pool.remove_by_txid(&victim_txid);
+        assert!(!removed.is_empty(), "the victim must actually be removed");
+        check(&pool, "a removal");
+
+        pool.clear();
+        check(&pool, "clear");
+        Ok(())
+    }
+
+    /// Bumping a transaction's fee must reindex the transactions it drags with it.
+    ///
+    /// Before the refresh replaced the hand-applied delta loops, `prioritise`
+    /// updated each descendant's `ancestor_fee` and then never reindexed it, so
+    /// the descendant kept the priority key it had before its ancestor was
+    /// bumped. Comparing the index against a full rebuild is what catches that:
+    /// the totals were already right, only the keys derived from them were
+    /// stale.
+    #[test]
+    fn prioritise_reindexes_the_descendants_it_lifts() -> Result<(), MempoolError> {
+        let (mut pool, outs) = graph_pool()?;
+
+        // Lift the chain root, which every entry in the chain descends from.
+        let Some(txid) = outs.first().map(|out| out.txid) else {
+            panic!("fixture must hold entries");
+        };
+        assert!(pool.prioritise(txid, 5_000_000), "prioritise must apply");
+
+        let after_prioritise = pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>();
+        let totals_after = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(
+            totals_after,
+            totals(&pool),
+            "prioritise left package totals a full recompute disagrees with"
+        );
+        assert_eq!(
+            after_prioritise,
+            pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>(),
+            "prioritise left stale priority keys behind"
+        );
+        Ok(())
+    }
+
+    /// A transaction can arrive after something that already spends its outputs.
+    ///
+    /// The closure is taken after the entry is put in the spend indexes for
+    /// exactly this reason: taken before, the pre-existing child would not be
+    /// reachable and would keep ancestor totals that no longer count its new
+    /// parent.
+    #[test]
+    fn inserting_a_parent_after_its_child_refreshes_the_child() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+
+        let parent = tx(11, vec![OutPoint::null()]);
+        let parent_out = OutPoint::new(parent.compute_txid(), 0);
+        let child = tx(12, vec![parent_out]);
+
+        // Child first: at this point it has no in-mempool ancestor.
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 1))?;
+        // Then the parent it spends from.
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 4_000, 1, 1))?;
+
+        let incremental = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(
+            incremental,
+            totals(&pool),
+            "a child inserted before its parent kept stale ancestor totals"
+        );
+        Ok(())
     }
 
     fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Transaction {
