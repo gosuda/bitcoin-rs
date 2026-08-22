@@ -84,10 +84,15 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 
 fn estimate_current_block(ctx: &Context) -> (u64, u64) {
     const MAX_BLOCK_WEIGHT: u32 = 4_000_000;
+    const MAX_BLOCK_SIGOPS_COST: u32 = 80_000;
 
     let policy = bitcoin_rs_mining::MiningPolicy;
     let pool = ctx.mempool.read();
-    let selected = policy.select_transactions(&pool, MAX_BLOCK_WEIGHT);
+    let selected = policy.select_transactions(
+        &pool,
+        MAX_BLOCK_WEIGHT.saturating_sub(bitcoin_rs_mining::DEFAULT_BLOCK_RESERVED_WEIGHT),
+        MAX_BLOCK_SIGOPS_COST,
+    );
     let mut weight: u64 = 0;
     let mut count: u64 = 0;
     for entry_id in &selected {

@@ -29,6 +29,9 @@ pub enum MiningError {
     /// A transaction weight did not fit into the template field width.
     #[error("transaction weight does not fit in u32")]
     TransactionWeightOverflow,
+    /// The witness merkle root could not be computed for the selected set.
+    #[error("witness commitment could not be computed")]
+    WitnessCommitment,
 }
 
 /// Coinbase construction parameters that are stable across template requests.

@@ -12,5 +12,5 @@ pub use coinbase::{
     CoinbaseTemplateConfig, MiningError, block_subsidy, build_coinbase_template,
     witness_commitment_script,
 };
-pub use policy::MiningPolicy;
+pub use policy::{DEFAULT_BLOCK_RESERVED_WEIGHT, MiningPolicy};
 pub use template::{BlockTemplate, BlockTemplateParams, TemplateTransaction};

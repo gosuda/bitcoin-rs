@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use bitcoin::{Transaction, Txid, consensus};
+use bitcoin::hashes::{Hash as _, sha256d};
+use bitcoin::{Transaction, Txid, consensus, merkle_tree};
 use bitcoin_rs_mempool::{EntryId as MempoolEntryId, Mempool};
 use bitcoin_rs_primitives::Hash256;
 use serde::{Deserialize, Serialize};
@@ -33,8 +34,6 @@ pub struct BlockTemplateParams {
     pub max_sigops: u32,
     /// Maximum serialized block size.
     pub max_size: u32,
-    /// BIP141 default witness commitment payload.
-    pub witness_commitment: Hash256,
 }
 
 /// BIP22/23 `getblocktemplate` response using Bitcoin Core's JSON field names.
@@ -83,7 +82,12 @@ impl BlockTemplate {
         policy: &MiningPolicy,
         params: BlockTemplateParams,
     ) -> Result<Self, MiningError> {
-        let selected = policy.select_transactions(mempool, params.max_weight);
+        // Select against the budget minus the coinbase reserve; `weightlimit`
+        // still advertises the full limit, as Core does.
+        let budget = params
+            .max_weight
+            .saturating_sub(crate::policy::DEFAULT_BLOCK_RESERVED_WEIGHT);
+        let selected = policy.select_transactions(mempool, budget, params.max_sigops);
         Self::from_selected(mempool, selected, params)
     }
 
@@ -102,6 +106,9 @@ impl BlockTemplate {
 
         let mut fees = 0_u64;
         let mut transactions = Vec::with_capacity(selected.len());
+        // The coinbase's own wtxid is defined to be all zeros for this tree.
+        let mut wtxids = Vec::with_capacity(selected.len().saturating_add(1));
+        wtxids.push(bitcoin::Wtxid::all_zeros().to_raw_hash());
         for id in selected {
             let entry = mempool
                 .entry(id)
@@ -109,9 +116,11 @@ impl BlockTemplate {
             fees = fees
                 .checked_add(entry.fee)
                 .ok_or(MiningError::CoinbaseValueOverflow)?;
+            wtxids.push(entry.tx.compute_wtxid().to_raw_hash());
             transactions.push(TemplateTransaction::from_entry(
                 &entry.tx,
                 entry.fee,
+                entry.sigop_cost,
                 &tx_positions,
             )?);
         }
@@ -119,7 +128,8 @@ impl BlockTemplate {
         let coinbasevalue = block_subsidy(params.height)
             .checked_add(fees)
             .ok_or(MiningError::CoinbaseValueOverflow)?;
-        let witness_script = witness_commitment_script(&params.witness_commitment);
+        let commitment = witness_commitment(wtxids).ok_or(MiningError::WitnessCommitment)?;
+        let witness_script = witness_commitment_script(&commitment);
 
         Ok(Self {
             version: params.version,
@@ -170,6 +180,7 @@ impl TemplateTransaction {
     fn from_entry(
         tx: &Transaction,
         fee: u64,
+        sigops: u32,
         tx_positions: &BTreeMap<Txid, usize>,
     ) -> Result<Self, MiningError> {
         let weight = u32::try_from(tx.weight().to_wu())
@@ -180,10 +191,38 @@ impl TemplateTransaction {
             hash: tx.compute_wtxid().to_string(),
             depends: depends(tx, tx_positions),
             fee,
-            sigops: 0,
+            // Counted at mempool acceptance against the resolved prevouts.
+            // This field was hardcoded to zero, which also made `sigoplimit`
+            // unenforceable: a miner cannot budget sigops it is told are free.
+            sigops,
             weight,
         })
     }
+}
+
+/// BIP141 witness commitment over the selected transactions.
+///
+/// The witness merkle root with the coinbase's wtxid taken as all zeros,
+/// double-SHA256'd together with the 32-byte witness reserved value, which is
+/// zero for the default commitment Core advertises.
+///
+/// Derived here rather than accepted as a parameter. It is a function of the
+/// selected set, and a function of the selected set that the caller supplies
+/// is a value that can disagree with the set it describes.
+fn witness_commitment(wtxids: Vec<sha256d::Hash>) -> Option<Hash256> {
+    const WITNESS_RESERVED_VALUE: [u8; 32] = [0_u8; 32];
+
+    let root = merkle_tree::calculate_root(wtxids.into_iter())?;
+    let mut preimage = [0_u8; 64];
+    preimage
+        .get_mut(..32)?
+        .copy_from_slice(root.as_byte_array().as_slice());
+    preimage
+        .get_mut(32..)?
+        .copy_from_slice(WITNESS_RESERVED_VALUE.as_slice());
+    Some(Hash256::from_le_bytes(
+        sha256d::Hash::hash(&preimage).as_byte_array(),
+    ))
 }
 
 fn depends(tx: &Transaction, tx_positions: &BTreeMap<Txid, usize>) -> Vec<usize> {

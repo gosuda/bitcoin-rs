@@ -30,7 +30,7 @@ fn selects_transactions_by_pareto_fee_rate_until_weight_limit() -> Result<(), Bo
     }
 
     entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    let selected = MiningPolicy.select_transactions(&mempool, 4_000_000);
+    let selected = MiningPolicy.select_transactions(&mempool, 4_000_000, 80_000);
     let expected = entries.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
 
     assert_eq!(selected, expected);

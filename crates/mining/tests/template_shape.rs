@@ -38,7 +38,6 @@ fn block_template_serializes_core_required_fields() -> Result<(), Box<dyn Error>
         max_weight: 4_000_000,
         max_sigops: 80_000,
         max_size: 4_000_000,
-        witness_commitment: Hash256::from_le_bytes(&[2_u8; 32]),
     };
 
     let template = BlockTemplate::from_mempool(&mempool, &MiningPolicy, params)?;
