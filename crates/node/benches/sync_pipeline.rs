@@ -20,7 +20,6 @@ use bitcoin::{
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
-use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_index::BlockSource as _;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
@@ -123,26 +122,6 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
                         .applied_tip()
                         .load_full()
                         .unwrap_or_else(|| panic!("spend-heavy proxy did not publish a tip"))
-                        .height,
-                );
-            },
-            BatchSize::SmallInput,
-        );
-    });
-    c.bench_function("sync_pipeline_apply_spend_heavy_proxy_filter", |b| {
-        b.iter_batched(
-            open_regtest_filter_state,
-            |(_dir, state)| {
-                for block in &spend_blocks {
-                    state.apply_block(black_box(block)).unwrap_or_else(|error| {
-                        panic!("spend-heavy filter proxy apply failed: {error}")
-                    });
-                }
-                black_box(
-                    state
-                        .applied_tip()
-                        .load_full()
-                        .unwrap_or_else(|| panic!("spend-heavy filter proxy did not publish a tip"))
                         .height,
                 );
             },
@@ -422,18 +401,6 @@ fn open_regtest_state() -> (TempDir, NodeState) {
     config.txindex = false;
     let state =
         NodeState::open(config).unwrap_or_else(|error| panic!("open node state failed: {error}"));
-    (dir, state)
-}
-
-fn open_regtest_filter_state() -> (TempDir, NodeState) {
-    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
-    let mut config = Config::default_for_network(Network::Regtest);
-    config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
-    config.txindex = false;
-    config.blockfilterindex = true;
-    let state = NodeState::open(config)
-        .unwrap_or_else(|error| panic!("open filter node state failed: {error}"));
     (dir, state)
 }
 
@@ -785,7 +752,6 @@ impl ProductionStateSyncFixture {
         let mut config = production_state_config();
         "fjall".clone_into(&mut config.storage_backend);
         config.txindex = true;
-        config.blockfilterindex = true;
         Self::with_config(peer_count, config)
     }
 
@@ -807,7 +773,6 @@ impl ProductionStateSyncFixture {
         let mut config = production_state_config();
         "fjall".clone_into(&mut config.storage_backend);
         config.txindex = true;
-        config.blockfilterindex = true;
         let body_blocks = spend_heavy_proxy_blocks()
             .into_iter()
             .skip(1)
@@ -986,7 +951,6 @@ fn production_state_config() -> Config {
     let mut config = Config::default_for_network(Network::Regtest);
     config.p2p_listen.clear();
     config.txindex = false;
-    config.blockfilterindex = false;
     config
 }
 
@@ -1086,7 +1050,6 @@ fn apply_handles(
         utxo,
         coin_stats,
         tx_index_runtime,
-        noop_filter_index(),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Arc::new(RwLock::new(BlockLog::new())),
         Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
@@ -1107,32 +1070,6 @@ fn tx_index_for_mode(mode: TxIndexMode) -> Option<Arc<TxIndexRuntime>> {
             Some(Arc::new(TxIndexRuntime::new(wake_tx)))
         }
     }
-}
-
-struct NoopFilterIndex;
-
-impl FilterIndexLike for NoopFilterIndex {
-    fn wants_filters(&self) -> bool {
-        false
-    }
-
-    fn put_filter(
-        &self,
-        _block_hash: Hash256,
-        _prev_header: Hash256,
-        _filter_bytes: &[u8],
-    ) -> Result<Hash256, FilterIndexError> {
-        Ok(Hash256::default())
-    }
-
-    fn filter_header(&self, _block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
-        Ok(None)
-    }
-}
-
-fn noop_filter_index() -> Arc<Box<dyn FilterIndexLike>> {
-    let filter_index: Box<dyn FilterIndexLike> = Box::new(NoopFilterIndex);
-    Arc::new(filter_index)
 }
 
 fn synthetic_peer(addr: SocketAddr) -> PeerInfo {

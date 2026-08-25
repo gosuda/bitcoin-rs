@@ -351,7 +351,6 @@ fn main() -> Result<()> {
     config.p2p_listen.clear();
     config.dns_seeds_enabled = false;
     config.txindex = args.txindex;
-    config.blockfilterindex = args.blockfilterindex;
     config.assume_valid_height = args.assume_valid_height;
 
     // In-memory recorder for the apply path's per-stage histograms; the bind
@@ -515,7 +514,6 @@ fn file_replay_artifact(
         "checkpoint_generation": checkpoint_generation,
         "storage_backend": &args.storage_backend,
         "txindex": args.txindex,
-        "blockfilterindex": args.blockfilterindex,
         "block_count": metrics.block_count,
         "tx_count": totals.tx_count,
         "block_bytes": totals.block_bytes,
@@ -548,7 +546,6 @@ fn legacy_replay_artifact(
         "git_head": git_head().ok(),
         "storage_backend": &args.storage_backend,
         "txindex": args.txindex,
-        "blockfilterindex": args.blockfilterindex,
         "assume_valid_height": args.assume_valid_height,
         "window": metrics.window,
         "start_height": args.start_height,
@@ -619,7 +616,6 @@ struct Args {
     stop_height: u32,
     storage_backend: String,
     txindex: bool,
-    blockfilterindex: bool,
     #[cfg(feature = "checksig-census")]
     census_diagnostic: bool,
 }
@@ -641,7 +637,6 @@ impl Args {
             stop_height: 0,
             storage_backend: "fjall".to_owned(),
             txindex: false,
-            blockfilterindex: false,
             #[cfg(feature = "checksig-census")]
             census_diagnostic: false,
         };
@@ -690,7 +685,6 @@ impl Args {
                     parsed.storage_backend = next_arg(&mut args, "--storage-backend")?;
                 }
                 "--txindex" => parsed.txindex = true,
-                "--blockfilterindex" => parsed.blockfilterindex = true,
                 #[cfg(feature = "checksig-census")]
                 "--cmodern-diagnostic-protocol" => parsed.census_diagnostic = true,
                 #[cfg(not(feature = "checksig-census"))]
@@ -1175,7 +1169,6 @@ fn write_diagnostic_artifact(
         "stop_reason": "controller-request",
         "storage_backend": args.storage_backend,
         "txindex": args.txindex,
-        "blockfilterindex": args.blockfilterindex,
         "data_dir": args.data_dir,
         "elapsed_seconds": elapsed.as_secs_f64(),
     });
@@ -1439,7 +1432,7 @@ fn wait_for_txindex(state: &NodeState) -> Result<Duration> {
 
 fn print_usage() {
     println!(
-        "usage: mainnet_prefix_replay --stop-height <height> [--blocks-file <core-framed-archive> --corpus-manifest <manifest> | --rest-url <host:port> | --bitcoin-cli <path>] [--assume-valid-height <height>] [--bitcoin-cli-arg <arg>]... [--data-dir <path>] [--output <path>] [--validation-output <path>] [--txindex] [--blockfilterindex]"
+        "usage: mainnet_prefix_replay --stop-height <height> [--blocks-file <core-framed-archive> --corpus-manifest <manifest> | --rest-url <host:port> | --bitcoin-cli <path>] [--assume-valid-height <height>] [--bitcoin-cli-arg <arg>]... [--data-dir <path>] [--output <path>] [--validation-output <path>] [--txindex]"
     );
 }
 

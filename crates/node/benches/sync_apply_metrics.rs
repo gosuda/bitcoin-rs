@@ -84,8 +84,6 @@ const APPLY_STAGE_METRICS: &[(&str, &str)] = &[
         "coin_stats_finish",
         "node.apply_block.coin_stats_finish_seconds",
     ),
-    ("filter_build", "node.apply_block.filter_build_seconds"),
-    ("filter_index", "node.apply_block.filter_index_seconds"),
     ("total", "node.apply_block.total_seconds"),
 ];
 
@@ -107,13 +105,11 @@ fn main() {
         "coinbase_32",
         &proxy_blocks(COINBASE_PROXY_BLOCKS),
         false,
-        false,
         &metrics,
     );
     print_apply_metrics(
         "coinbase_128",
         &proxy_blocks(PRODUCTION_PROXY_BLOCKS),
-        false,
         false,
         &metrics,
     );
@@ -121,20 +117,11 @@ fn main() {
         "fanout_128",
         &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
         false,
-        false,
         &metrics,
     );
     print_apply_metrics(
         "fanout_128_txindex",
         &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
-        true,
-        false,
-        &metrics,
-    );
-    print_apply_metrics(
-        "fanout_128_filter",
-        &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
-        false,
         true,
         &metrics,
     );
@@ -142,34 +129,23 @@ fn main() {
         "fanout_128_all_indexes",
         &fanout_proxy_blocks(PRODUCTION_PROXY_BLOCKS),
         true,
-        true,
         &metrics,
     );
     print_apply_metrics(
         "spend_heavy_117",
         &spend_heavy_proxy_blocks(),
         false,
-        false,
-        &metrics,
-    );
-    print_apply_metrics(
-        "spend_heavy_117_filter",
-        &spend_heavy_proxy_blocks(),
-        false,
-        true,
         &metrics,
     );
     print_apply_metrics(
         "spend_heavy_117_txindex",
         &spend_heavy_proxy_blocks(),
         true,
-        false,
         &metrics,
     );
     print_apply_metrics(
         "spend_heavy_117_all_indexes",
         &spend_heavy_proxy_blocks(),
-        true,
         true,
         &metrics,
     );
@@ -244,16 +220,10 @@ fn install_diagnostic_metrics() -> MetricsHandle {
         .unwrap_or_else(|| panic!("metrics recorder was not installed"))
 }
 
-fn print_apply_metrics(
-    name: &str,
-    blocks: &[Block],
-    txindex: bool,
-    blockfilterindex: bool,
-    metrics: &MetricsHandle,
-) {
+fn print_apply_metrics(name: &str, blocks: &[Block], txindex: bool, metrics: &MetricsHandle) {
     let before = metrics.snapshot();
     let backend = storage_backend();
-    let (_dir, state) = open_regtest_state(backend, txindex, blockfilterindex);
+    let (_dir, state) = open_regtest_state(backend, txindex);
     let started = Instant::now();
     for block in blocks {
         state
@@ -276,7 +246,7 @@ fn print_apply_metrics(
         .map(|record| record.body_size)
         .sum();
     println!(
-        "sync_apply_metrics backend={backend} workload={name} txindex={txindex} blockfilterindex={blockfilterindex} blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes} selected_apply_stage_metrics={} {}",
+        "sync_apply_metrics backend={backend} workload={name} txindex={txindex} blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes} selected_apply_stage_metrics={} {}",
         APPLY_STAGE_METRICS.len(),
         apply_stage_sum_summary(&before, &after),
     );
@@ -314,7 +284,7 @@ fn print_staged_sync_apply_metrics(name: &str, kind: StagedSyncApplyKind, metric
         required_histogram_delta_ms(&before, &after, APPLY_TOTAL_METRIC, "apply total");
     let sync_wrapper_gap_ms = sync_apply.sum_ms - apply_total.sum_ms;
     println!(
-        "staged_sync_apply_metrics backend=fjall workload={name} txindex=true blockfilterindex=true blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} sync_apply_buffered_samples={} sync_apply_buffered_sum_ms={:.4} sync_apply_buffered_avg_ms={:.4} apply_total_samples={} apply_total_sum_ms={:.4} apply_total_avg_ms={:.4} sync_wrapper_gap_ms={sync_wrapper_gap_ms:.4} selected_apply_stage_metrics={} {}",
+        "staged_sync_apply_metrics backend=fjall workload={name} txindex=true blocks={block_count} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} sync_apply_buffered_samples={} sync_apply_buffered_sum_ms={:.4} sync_apply_buffered_avg_ms={:.4} apply_total_samples={} apply_total_sum_ms={:.4} apply_total_avg_ms={:.4} sync_wrapper_gap_ms={sync_wrapper_gap_ms:.4} selected_apply_stage_metrics={} {}",
         sync_apply.count,
         sync_apply.sum_ms,
         sync_apply.avg_ms,
@@ -338,7 +308,6 @@ impl StagedSyncApplyFixture {
         let mut config = production_state_config();
         "fjall".clone_into(&mut config.storage_backend);
         config.txindex = true;
-        config.blockfilterindex = true;
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         config.data_dir = dir.path().join("node");
         let state = NodeState::open(config)
@@ -449,22 +418,16 @@ fn production_state_config() -> Config {
     let mut config = Config::default_for_network(Network::Regtest);
     config.p2p_listen.clear();
     config.txindex = false;
-    config.blockfilterindex = false;
     config
 }
 
-fn open_regtest_state(
-    backend: &str,
-    txindex: bool,
-    blockfilterindex: bool,
-) -> (TempDir, NodeState) {
+fn open_regtest_state(backend: &str, txindex: bool) -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let mut config = Config::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
     backend.clone_into(&mut config.storage_backend);
     config.p2p_listen.clear();
     config.txindex = txindex;
-    config.blockfilterindex = blockfilterindex;
     let state =
         NodeState::open(config).unwrap_or_else(|error| panic!("open node state failed: {error}"));
     (dir, state)

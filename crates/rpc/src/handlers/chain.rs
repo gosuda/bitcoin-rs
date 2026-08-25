@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use bitcoin::consensus::encode::deserialize;
+#[cfg(test)]
 use bitcoin::hex::DisplayHex as _;
 use core::str::FromStr as _;
 use core::{fmt, fmt::Write as _};
@@ -811,27 +812,8 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     Ok(Value::from(response))
 }
 
-pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash = required_str(params, 0, "block hash is required")?;
-    let hash = parse_hash(hash)?;
-    let filter_bytes = ctx
-        .filter_index
-        .filter(hash)
-        .map_err(|error| RpcError::Internal(error.to_string()))?
-        .ok_or(RpcError::NotFound("block filter not found"))?;
-    let header = ctx
-        .filter_index
-        .filter_header(hash)
-        .map_err(|error| RpcError::Internal(error.to_string()))?
-        .ok_or(RpcError::NotFound("block filter header not found"))?;
-    Ok(json!({
-        "filter": filter_bytes.to_lower_hex_string(),
-        "header": header.to_string_be()
-    }))
-}
-
 pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let filter = if params.is_null() {
+    let index_name = if params.is_null() {
         None
     } else if let Some(array) = params.as_array() {
         if array.is_empty() {
@@ -841,16 +823,6 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         }
     } else {
         return Err(RpcError::InvalidParams("params must be null or array"));
-    };
-
-    let header_height = ctx.height();
-    let applied_height = ctx.applied_height();
-    let synced = header_height > 0 && applied_height >= header_height;
-    let entry = || {
-        json!({
-            "synced": synced,
-            "best_block_height": applied_height,
-        })
     };
 
     let txindex_entry = ctx
@@ -865,19 +837,17 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         })
     });
 
-    match filter {
+    match index_name {
         None => {
             let mut indexes = sonic_rs::Object::new();
             if let Some(entry) = txindex_entry {
                 let _ = indexes.insert(&"txindex", entry);
             }
-            let _ = indexes.insert(&"basicblockfilterindex", entry());
             Ok(indexes.into())
         }
         Some("txindex") => {
             Ok(txindex_entry.map_or_else(|| json!({}), |entry| json!({ "txindex": entry })))
         }
-        Some("basicblockfilterindex") => Ok(json!({ "basicblockfilterindex": entry() })),
         Some(_) => Ok(json!({})),
     }
 }

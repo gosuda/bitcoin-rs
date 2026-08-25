@@ -65,7 +65,7 @@ Later code changed both failed bitcoin-rs paths, but no completed rerun is attac
 |---|---|---|
 | IBD throughput | bitcoin-rs faster than Bitcoin Core on one identical window | Bounded 0–150,000 one-peer daemon IBD: Core median 73.459s vs bitcoin-rs 89.576s; Core delivered 1.219× bitcoin-rs throughput; gate and 2× target failed |
 | UTXO commit p95 | ≤50ms for serialized blocks ≥1MB | Not captured |
-| Tip RSS | ≤16GiB with fjall, txindex, and blockfilterindex | Bounded txindex-only RSS: 313.1MB; completed current-tip evidence with both indexes not captured |
+| Tip RSS | ≤16GiB with fjall and txindex | Bounded txindex-only RSS: 313.1MB; completed current-tip evidence not captured |
 
 These historical measurements do not establish a current performance claim.
 

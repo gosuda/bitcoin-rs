@@ -26,7 +26,6 @@ bitcoin-rs-index.workspace = true
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
 bitcoin-rs-utxo.workspace = true
-bitcoin-rs-filters.workspace = true
 bitcoin-rs-coinstats.workspace = true
 bitcoin-rs-mining.workspace = true
 bitcoin-rs-wallet.workspace = true

@@ -18,7 +18,6 @@ fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
 -server=1
 -listen=0
 -txindex=1
--blockfilterindex=1
 -dbcache=768
 ",
     )?;
@@ -30,7 +29,6 @@ fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
     assert_auth(&config.rpc_auth, "foo", "bar");
     assert!(config.p2p_listen.is_empty());
     assert!(config.txindex);
-    assert!(config.blockfilterindex);
     assert_eq!(config.dbcache_mb, 768);
     Ok(())
 }

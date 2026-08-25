@@ -28,7 +28,6 @@ rocksdb = [
     "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-coinstats/rocksdb",
     "bitcoin-rs-consensus/rocksdb",
-    "bitcoin-rs-filters/rocksdb",
     "bitcoin-rs-index/rocksdb",
     "bitcoin-rs-mempool/rocksdb",
     "bitcoin-rs-mining/rocksdb",
@@ -45,7 +44,6 @@ fjall = [
     "bitcoin-rs-chain/fjall",
     "bitcoin-rs-coinstats/fjall",
     "bitcoin-rs-consensus/fjall",
-    "bitcoin-rs-filters/fjall",
     "bitcoin-rs-index/fjall",
     "bitcoin-rs-mempool/fjall",
     "bitcoin-rs-mining/fjall",
@@ -62,7 +60,6 @@ redb = [
     "bitcoin-rs-chain/redb",
     "bitcoin-rs-coinstats/redb",
     "bitcoin-rs-consensus/redb",
-    "bitcoin-rs-filters/redb",
     "bitcoin-rs-index/redb",
     "bitcoin-rs-mempool/redb",
     "bitcoin-rs-mining/redb",
@@ -76,7 +73,6 @@ redb = [
     "bitcoin-rs-wallet/redb",
 ]
 mdbx = [
-    "bitcoin-rs-filters/mdbx",
     "bitcoin-rs-index/mdbx",
     "bitcoin-rs-storage/mdbx",
 ]
@@ -99,7 +95,6 @@ bitcoin-rs-utxo.workspace = true
 bitcoin-rs-utreexo = { workspace = true, optional = true }
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-index.workspace = true
-bitcoin-rs-filters.workspace = true
 bitcoin-rs-coinstats.workspace = true
 bitcoin-rs-pruning.workspace = true
 bitcoin-rs-mempool.workspace = true

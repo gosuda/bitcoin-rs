@@ -34,36 +34,6 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
 
-type FilterIndexHandle = Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>;
-
-struct DisabledFilterIndex;
-
-impl bitcoin_rs_filters::FilterIndexLike for DisabledFilterIndex {
-    fn wants_filters(&self) -> bool {
-        false
-    }
-
-    fn put_filter(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-        _prev_header: bitcoin_rs_primitives::Hash256,
-        _filter_bytes: &[u8],
-    ) -> std::result::Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_filters::FilterIndexError>
-    {
-        Ok(bitcoin_rs_primitives::Hash256::default())
-    }
-
-    fn filter_header(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-    ) -> std::result::Result<
-        Option<bitcoin_rs_primitives::Hash256>,
-        bitcoin_rs_filters::FilterIndexError,
-    > {
-        Ok(None)
-    }
-}
-
 // One active generation of outbound requests is enough to keep the drain fed;
 // extra backlog is overload and must fail fast at producers.
 pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
@@ -196,12 +166,6 @@ pub enum ApplyError {
         /// Block whose body was rejected.
         hash: bitcoin_rs_primitives::Hash256,
     },
-    /// Reading a BIP157 filter header failed.
-    ///
-    /// A broken backend, not a missing row: an absent header is answered by
-    /// skipping the filter write, which keeps the chain moving.
-    #[error("filter header lookup: {0}")]
-    FilterHeaderLookup(#[source] bitcoin_rs_filters::FilterIndexError),
     /// Rewinding the block-level coinstats failed.
     ///
     /// The per-coin fields ride the UTXO change listener and are already
@@ -833,39 +797,6 @@ fn open_tx_index(config: &Config) -> Result<Option<OpenTxIndex>> {
     }
 }
 
-fn open_filter_index(config: &Config) -> Result<FilterIndexHandle> {
-    if !config.blockfilterindex {
-        let filter_index: Box<dyn bitcoin_rs_filters::FilterIndexLike> =
-            Box::new(DisabledFilterIndex);
-        return Ok(Arc::new(filter_index));
-    }
-
-    let filters_dir = config.data_dir.join("filters");
-    std::fs::create_dir_all(&filters_dir)
-        .with_context(|| format!("create filters_dir {}", filters_dir.display()))?;
-    let filter_index: Box<dyn bitcoin_rs_filters::FilterIndexLike> =
-        match config.storage_backend.as_str() {
-            #[cfg(feature = "rocksdb")]
-            "rocksdb" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::RocksDbStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            #[cfg(feature = "fjall")]
-            "fjall" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::FjallStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            #[cfg(feature = "redb")]
-            "redb" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::RedbStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            #[cfg(feature = "mdbx")]
-            "mdbx" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::MdbxStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            other => bail!("unsupported storage backend for filter index: {other}"),
-        };
-    Ok(Arc::new(filter_index))
-}
-
 /// Aggregate handle to a running node.
 pub struct NodeState {
     /// Height the last clean checkpoint would restore to, 0 when none exists.
@@ -884,7 +815,6 @@ pub struct NodeState {
     tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
     tx_index_worker: Option<crate::txindex_worker::TxIndexWorker>,
     tx_index_query: Option<Arc<crate::txindex_worker::TxIndexQueryEngine>>,
-    filter_index: FilterIndexHandle,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
@@ -1004,7 +934,6 @@ impl NodeState {
         let block_body_store =
             storage.block_body_store(Arc::clone(&block_files), &config.data_dir)?;
 
-        let filter_index = open_filter_index(&config)?;
         let zmq_publications = config.zmq_publications();
         let active_zmq_notifications: Vec<_> = zmq_publications
             .iter()
@@ -1147,12 +1076,11 @@ impl NodeState {
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
             tx_index_runtime: tx_index_runtime.clone(),
-            filter_index: Arc::clone(&filter_index),
             mempool: Arc::clone(&mempool),
             blocks: Arc::clone(&blocks),
             transactions: Arc::clone(&transactions),
             zmq_publisher: Arc::clone(&zmq_publisher),
-            filter_header_cache: Arc::new(Mutex::new(None)),
+            cache_block_bodies_in_memory: false,
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
             g2_muhash_sampler,
@@ -1209,7 +1137,6 @@ impl NodeState {
             tx_index_runtime,
             tx_index_worker,
             tx_index_query,
-            filter_index,
             prune_service,
             zmq_publisher,
             active_zmq_notifications,
@@ -1366,12 +1293,6 @@ impl NodeState {
             let adapter: Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery> = query.clone();
             adapter
         })
-    }
-
-    /// Returns the shared compact-filter index handle.
-    #[must_use]
-    pub fn filter_index(&self) -> FilterIndexHandle {
-        Arc::clone(&self.filter_index)
     }
 
     /// Returns the manual pruning service when pruning is enabled.
@@ -1762,49 +1683,6 @@ mod tests {
                 .to_string()
                 .contains("transaction and script indexing are not compatible with -prune"),
             "unexpected error: {error:#}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn open_skips_filter_index_when_disabled() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        let state = NodeState::open(config)?;
-        let a = state.filter_index();
-        let b = state.filter_index();
-        assert!(!a.wants_filters(), "blockfilterindex disabled by default");
-        assert!(
-            !state.data_dir().join("filters").exists(),
-            "disabled blockfilterindex must not create storage"
-        );
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "filter_index handle stable across calls"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn open_constructs_filter_index_when_enabled() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.blockfilterindex = true;
-        let state = NodeState::open(config)?;
-        let a = state.filter_index();
-        let b = state.filter_index();
-        assert!(a.wants_filters(), "enabled blockfilterindex builds filters");
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "filter_index handle stable across calls"
-        );
-        assert!(
-            state.data_dir().join("filters").exists(),
-            "enabled blockfilterindex must create storage"
         );
         Ok(())
     }

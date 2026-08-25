@@ -9,7 +9,6 @@ members = [
     "crates/utreexo",
     "crates/chain",
     "crates/index",
-    "crates/filters",
     "crates/coinstats",
     "crates/pruning",
     "crates/mempool",
@@ -48,7 +47,6 @@ bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.4.0" }
 bitcoin-rs-utreexo    = { path = "crates/utreexo",    version = "0.4.0" }
 bitcoin-rs-chain      = { path = "crates/chain",      version = "0.4.0" }
 bitcoin-rs-index      = { path = "crates/index",      version = "0.4.0" }
-bitcoin-rs-filters    = { path = "crates/filters",    version = "0.4.0" }
 bitcoin-rs-coinstats  = { path = "crates/coinstats",  version = "0.4.0" }
 bitcoin-rs-pruning    = { path = "crates/pruning",    version = "0.4.0" }
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.4.0" }

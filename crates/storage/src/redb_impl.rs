@@ -572,8 +572,6 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
         ColumnFamily::BlockHeaders => TableDefinition::new("block_headers"),
         ColumnFamily::Funding => TableDefinition::new("funding"),
         ColumnFamily::Spending => TableDefinition::new("spending"),
-        ColumnFamily::Filters => TableDefinition::new("filters"),
-        ColumnFamily::FilterHeaders => TableDefinition::new("filter_headers"),
         ColumnFamily::Coinstats => TableDefinition::new("coinstats"),
         ColumnFamily::BlockTree => TableDefinition::new("block_tree"),
         ColumnFamily::UtxoMeta => TableDefinition::new("utxo_meta"),

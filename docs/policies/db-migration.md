@@ -22,21 +22,28 @@ This policy applies to all persistent storage surfaces in `bitcoin-rs`:
 | Chainstate Checkpoint | `crates/node/src/checkpoint.rs` | `chainstate-checkpoints/CURRENT` & `gen-N/` | Manifest `1`, Headers `1`, UTXO `4`, CoinStats `1` |
 
 ### 2.1 Key-Value Store Column Families
-`KvStore` (`crates/storage/src/trait_.rs`) abstracts backend storage over twelve fixed column families defined in `ColumnFamily` (`crates/storage/src/column_families.rs`):
+`KvStore` (`crates/storage/src/trait_.rs`) abstracts backend storage over ten fixed column families defined in `ColumnFamily` (`crates/storage/src/column_families.rs`):
 - `TxConfirmed` (`0`)
 - `TxMempool` (`1`)
 - `BlockHeaders` (`2`)
 - `Funding` (`3`)
 - `Spending` (`4`)
-- `Filters` (`5`)
-- `FilterHeaders` (`6`)
-- `Coinstats` (`7`)
-- `BlockTree` (`8`)
-- `UtxoMeta` (`9`)
-- `BlockBodies` (`10`)
-- `UndoData` (`11`)
+- `Coinstats` (`5`)
+- `BlockTree` (`6`)
+- `UtxoMeta` (`7`)
+- `BlockBodies` (`8`)
+- `UndoData` (`9`)
 
-Storage backends (`FjallStore` in `fjall_impl.rs`, `RocksDbStore` in `rocksdb_impl.rs`, `MdbxStore` in `mdbx_impl.rs`, and `RedbStore` in `redb_impl.rs`) create or open these twelve tables on startup using `ColumnFamily::ALL`.
+Storage backends (`FjallStore` in `fjall_impl.rs`, `RocksDbStore` in `rocksdb_impl.rs`, `MdbxStore` in `mdbx_impl.rs`, and `RedbStore` in `redb_impl.rs`) create or open these ten tables on startup using `ColumnFamily::ALL`.
+
+The BIP157/158 `Filters` (`5`) and `FilterHeaders` (`6`) families were removed
+with the compact-filter index (issue #143). Their removal renumbered the
+surviving discriminants, which is a breaking change under section 3.1: the
+engines open tables by string name and ignore unknown retired tables, so
+fjall, MDBX, and redb datadirs reopen unchanged, while a RocksDB datadir
+written by a binary that still created the retired families must be wiped and
+resynced per section 6.2 (RocksDB refuses to open a database unless every
+existing column family is in the open set).
 
 `UndoData` holds the per-block records a reorg needs to disconnect a block, keyed by `bitcoin_rs_pruning::block_undo_key` (height and block hash). It is canonical persistent state, not a cache: without a block's undo record the node cannot disconnect that block, so any schema or resync decision that discards it costs the ability to reorganise below the point it was discarded.
 

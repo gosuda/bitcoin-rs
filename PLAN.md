@@ -6,7 +6,9 @@
 > configuration are defined by `CONCEPTS.md` and `docs/getting-started.md`; do not
 > treat unfinished tasks or dependency entries below as current work.
 
-**Goal:** Ship `bitcoin-rs` — a single-binary fast Bitcoin full node in Rust 2024. Natively-integrated UTXO (gocoin shape), Electrum-style index (electrs shape), utreexo accumulator (utreexod shape), in-process wallet (PSBT builder; **no private keys, no signing**), in-process mining (getblocktemplate), pruning, BIP157/158 compact filters, coinstats index, four pluggable storage backends (RocksDB / MDBX / fjall / redb), SIMD JSON on the RPC hot path. All production polish (graceful shutdown, ban-score, crash recovery, metrics, structured logging, config) is part of core scope.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to implement task-by-task. Steps use checkbox (`- [ ]`) syntax. **Do not split phases or roadmaps** — every task in this plan must ship before bitcoin-rs is declared done.
+
+**Goal:** Ship `bitcoin-rs` — a single-binary fast Bitcoin full node in Rust 2024. Natively-integrated UTXO (gocoin shape), Electrum-style index (electrs shape), utreexo accumulator (utreexod shape), in-process wallet (PSBT builder; **no private keys, no signing**), in-process mining (getblocktemplate), pruning, coinstats index, four pluggable storage backends (RocksDB / MDBX / fjall / redb), SIMD JSON on the RPC hot path. All production polish (graceful shutdown, ban-score, crash recovery, metrics, structured logging, config) is part of core scope. BIP157/158 compact filters were specced and then removed (issue #143): no in-tree consumer existed and the P2P serving half was never implemented.
 
 **Architecture:** One process. One `crossbeam-channel`-driven event loop (no tokio/async-std). UTXO held as 256 shards of `hashbrown::HashTable<ArenaRef<'arena>>` over `bumpalo::Bump`, arenas pinned via `self_cell!` so the lifetime is sound (not transmuted), each shard guarded by `parking_lot::RwLock` and `CachePadded` against false sharing. Block tree as `slab::Slab<Node>` + `u32 NodeId`; tip published via `arc_swap::ArcSwapOption<TipSnapshot>`; chainwork as `ruint::Uint<256,4>`. Consensus *borrowed* from `bitcoinkernel >=0.2, <0.3` (default-on, alpha-but-load-bearing) — our Rust validator runs in parallel and is asserted byte-identical to kernel for every accepted block. Wallet is in-process PSBT builder + descriptor watcher with **zero private-key surface**: external signers receive a PSBT, return a signed PSBT, finalize happens inside the daemon. Storage is a `KvStore` trait with **fjall as the launch default**; RocksDB, `signet-libmdbx` (MDBX — memory-mapped CoW B+tree), and `redb` (pure-Rust B+tree) live behind cargo features. All four backends are gated by G7 backend-equivalence.
 
@@ -61,7 +63,6 @@ bitcoin-rs/
 │   ├── chain/                    # Slab<BlockTreeNode>+u32 NodeId; ArcSwapOption tip; ruint chainwork; reorg
 │   ├── index/                    # port electrs verbatim (embedded; 5 CFs; HashPrefixRow; bitcoin_slices visitor)
 │   │   └── benches/              # history_resolve.rs
-│   ├── filters/                  # BIP157 cfheaders + BIP158 GCS encoding + filter index
 │   ├── coinstats/                # running muhash3072; O(1) gettxoutsetinfo
 │   │   └── benches/              # coinstats_hotpath.rs
 │   ├── pruning/                  # block-file + undo-file pruner; utreexo-only mode coordinator
@@ -349,7 +350,7 @@ pub trait WriteBatch {
 }
 ```
 
-- [ ] **Step 2: `ColumnFamily` enum** — exactly electrs's 5 CFs: `TxConfirmed`, `TxMempool`, `BlockHeaders`, `Funding`, `Spending`. Plus `Filters` (BIP157/158), `FilterHeaders`, `Coinstats`, `BlockTree`, `UtxoMeta` (snapshot ptrs).
+- [ ] **Step 2: `ColumnFamily` enum** — exactly electrs's 5 CFs: `TxConfirmed`, `TxMempool`, `BlockHeaders`, `Funding`, `Spending`. Plus `Coinstats`, `BlockTree`, `UtxoMeta` (snapshot ptrs). (`Filters`/`FilterHeaders` were specced for the removed BIP157/158 index; see issue #143.)
 
 - [ ] **Step 3: RocksDB impl.** Mirror `electrs/src/db.rs` block-based options exactly (4 MiB blocks, lz4 compression, 256 MiB block-cache, bloom 10 bits/key, mt static). All CFs pre-created at open.
 
@@ -524,28 +525,6 @@ git commit -am "feat(index): port electrs to KvStore-backed embedded indexer" -m
 
 ---
 
-### Task 9: `crates/filters` — BIP157 cfheaders + BIP158 GCS encoding
-
-**Files:**
-- Create: `crates/filters/src/{lib,gcs,cfheaders,filter_index}.rs`
-- Test: `crates/filters/tests/bip158_vectors.rs`
-
-- [ ] **Step 1: GCS-encoded filter (BIP158)** — `P=19`, `M=784931`. Golomb-Rice coding; SipHash-1-3 key derivation from block hash.
-
-- [ ] **Step 2: `FilterHeader { prev_header, filter_hash } → header_hash`** chain per BIP157.
-
-- [ ] **Step 3: Filter index** — `Filters` CF + `FilterHeaders` CF (Task 4). One row per block: key = `Hash256`, value = filter bytes.
-
-- [ ] **Step 4: BIP158 reference vectors** — vendor `bitcoin/src/test/data/blockfilters.json`; runner asserts byte-identical filter + filter header.
-
-- [ ] **Step 5: Commit.**
-
-```bash
-git commit -am "feat(filters): BIP157/158 cfheaders + GCS filter index" -m "Op: extend"
-```
-
----
-
 ### Task 10: `crates/coinstats` — running muhash3072 for O(1) gettxoutsetinfo
 
 **Files:**
@@ -638,7 +617,7 @@ git commit -am "feat(mempool): Pareto-front + RBF + ancestor/descendant + packag
 
 - [ ] **Step 5: `BanList`** — score-based per-peer (Core's `MAX_BAN_SCORE = 100`); persistence to disk.
 
-- [ ] **Step 6: Inbound dispatch** — `version`, `verack`, `ping`/`pong`, `inv`, `getheaders`, `headers`, `getblocks`, `block`, `tx`, `getdata`, `notfound`, `addr`/`addrv2`, `getaddr`, `mempool`, `filterload`/`filteradd`/`filterclear` (BIP37 — accept but ignore; we serve filters via BIP157 instead), `cfheaders`/`cfilter`/`getcfheaders`/`getcfilter`/`getcfcheckpt` (BIP157).
+- [ ] **Step 6: Inbound dispatch** — `version`, `verack`, `ping`/`pong`, `inv`, `getheaders`, `headers`, `getblocks`, `block`, `tx`, `getdata`, `notfound`, `addr`/`addrv2`, `getaddr`, `mempool`, `filterload`/`filteradd`/`filterclear` (BIP37 — accept but ignore), `cfheaders`/`cfilter`/`getcfheaders`/`getcfilter`/`getcfcheckpt` (BIP157 — decoded, never served).
 
 - [ ] **Step 7: Outbound peer manager** — DNS-seed bootstrap, addrman shape, 8 outbound + 2 block-only + 117 inbound default capacity.
 
@@ -736,7 +715,6 @@ RPC surface (Core-compat for tooling):
 - `estimatesmartfee`, `estimaterawfee`
 - `getnetworkinfo`, `getpeerinfo`, `addnode`, `disconnectnode`, `getconnectioncount`, `getnettotals`
 - `getblocktemplate`, `submitblock`, `prioritisetransaction`
-- `getblockfilter` (BIP157)
 - `getdescriptorinfo`, `deriveaddresses`, `scantxoutset` (wallet-adjacent — no signing)
 - `walletcreatefundedpsbt`, `walletprocesspsbt`, `finalizepsbt`, `combinepsbt` (all PSBT — no signing; signing is rejected with a `-32603` "wallet has no private keys; use external signer" error)
 - `bumpfee` (PSBT-only)
@@ -783,7 +761,7 @@ git commit -am "feat(electrum): protocol surface over embedded index" -m "Op: ex
 - Create: `crates/node/src/{lib,event_loop,config,bitcoin_conf_compat,signal,metrics,logging,shutdown}.rs`
 - Test: `crates/node/tests/{shutdown,crash_recovery}.rs`
 
-- [ ] **Step 1: `Config`** — TOML + CLI (clap) + env (`BITCOIN_RS_*`). `bitcoin.conf` compatibility layer that parses Core's `bitcoin.conf` format into our `Config` for the overlapping option set (`-prune`, `-rpcuser`, `-rpcpassword`, `-server`, `-listen`, `-txindex`, `-blockfilterindex`, `-dbcache`, …). Conflicts resolved in order: CLI > env > TOML > bitcoin.conf > defaults.
+- [ ] **Step 1: `Config`** — TOML + CLI (clap) + env (`BITCOIN_RS_*`). `bitcoin.conf` compatibility layer that parses Core's `bitcoin.conf` format into our `Config` for the overlapping option set (`-prune`, `-rpcuser`, `-rpcpassword`, `-server`, `-listen`, `-txindex`, `-dbcache`, …). Conflicts resolved in order: CLI > env > TOML > bitcoin.conf > defaults.
 
 - [ ] **Step 2: Event loop** — single `crossbeam-channel::Select` over: `p2p_inbound`, `p2p_outbound`, `rpc_request`, `electrum_request`, `mempool_tick` (1 Hz), `defrag_tick` (1 Hz), `metrics_scrape` (10 s), `shutdown_signal`.
 

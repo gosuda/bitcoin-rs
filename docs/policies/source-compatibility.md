@@ -55,7 +55,6 @@ All crates in `bitcoin-rs` share a single workspace version managed by `[workspa
 | `bitcoin-rs-utreexo` | `crates/utreexo` | Utreexo accumulator implementation |
 | `bitcoin-rs-chain` | `crates/chain` | Block tree and chain index tracking |
 | `bitcoin-rs-index` | `crates/index` | Transaction and address indexing |
-| `bitcoin-rs-filters` | `crates/filters` | BIP157/158 compact block filters |
 | `bitcoin-rs-coinstats` | `crates/coinstats` | UTXO statistics and MuHash computation |
 | `bitcoin-rs-pruning` | `crates/pruning` | Block file and state pruning logic |
 | `bitcoin-rs-mempool` | `crates/mempool` | Memory pool transaction storage |

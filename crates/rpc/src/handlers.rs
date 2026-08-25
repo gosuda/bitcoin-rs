@@ -50,7 +50,6 @@ impl Handler {
             "getblockstats" => chain::getblockstats(&self.ctx, params),
             "verifychain" => chain::verifychain(&self.ctx, params),
             "gettxoutsetinfo" => chain::gettxoutsetinfo(&self.ctx, params),
-            "getblockfilter" => chain::getblockfilter(&self.ctx, params),
             "getindexinfo" => chain::getindexinfo(&self.ctx, params),
             "pruneblockchain" => chain::pruneblockchain(&self.ctx, params),
             "invalidateblock" => chain::invalidateblock(&self.ctx, params),

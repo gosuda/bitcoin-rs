@@ -78,7 +78,6 @@ Defaults worth knowing:
 | `--prune-target-mb` | 0, meaning no pruning |
 | `--txindex` | off |
 | `--scriptindex` | off |
-| `--blockfilterindex` | off |
 
 The node logs its startup and the address the RPC listener bound to. If you see
 that line, it is running.

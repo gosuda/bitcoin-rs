@@ -63,7 +63,6 @@ rpc_password = "toml-pass"
     assert_eq!(config.dbcache_mb, 2048);
     assert_eq!(config.log_level, "trace");
     assert!(config.txindex);
-    assert!(config.blockfilterindex);
     assert_auth_user(&config.rpc_auth, "toml-user");
     Ok(())
 }

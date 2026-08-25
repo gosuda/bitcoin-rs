@@ -334,21 +334,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bitcoin-rs-filters"
-version = "0.4.0"
-dependencies = [
- "bitcoin",
- "bitcoin-rs-primitives",
- "bitcoin-rs-storage",
- "bytemuck",
- "proptest",
- "serde_json",
- "thiserror",
- "tracing",
- "zerocopy",
-]
-
-[[package]]
 name = "bitcoin-rs-index"
 version = "0.4.0"
 dependencies = [
@@ -418,7 +403,6 @@ dependencies = [
  "bitcoin-rs-chain",
  "bitcoin-rs-coinstats",
  "bitcoin-rs-consensus",
- "bitcoin-rs-filters",
  "bitcoin-rs-index",
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",
@@ -526,7 +510,6 @@ dependencies = [
  "bitcoin-rs-chain",
  "bitcoin-rs-coinstats",
  "bitcoin-rs-consensus",
- "bitcoin-rs-filters",
  "bitcoin-rs-index",
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",

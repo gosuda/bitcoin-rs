@@ -166,7 +166,6 @@ fn node_config(args: &Args) -> Config {
     config.p2p_listen.clear();
     config.dns_seeds_enabled = false;
     config.txindex = false;
-    config.blockfilterindex = false;
     // Mirror the timed-trial replay default: full script verification on every block.
     config.assume_valid_height = 0;
     config

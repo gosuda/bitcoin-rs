@@ -1671,7 +1671,6 @@ mod tests {
         script::Builder,
     };
     use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-    use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
     use bitcoin_rs_mempool::{Mempool, MempoolLimits};
     use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerSource};
     use bitcoin_rs_primitives::Hash256;
@@ -7381,31 +7380,6 @@ mod tests {
             .collect()
     }
 
-    struct NoopFilterIndex;
-
-    impl FilterIndexLike for NoopFilterIndex {
-        fn wants_filters(&self) -> bool {
-            false
-        }
-
-        fn put_filter(
-            &self,
-            _block_hash: Hash256,
-            _prev_header: Hash256,
-            _filter_bytes: &[u8],
-        ) -> Result<Hash256, FilterIndexError> {
-            Ok(Hash256::default())
-        }
-
-        fn filter_header(&self, _block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
-            Ok(None)
-        }
-
-        fn filter(&self, _block_hash: Hash256) -> Result<Option<Vec<u8>>, FilterIndexError> {
-            Ok(None)
-        }
-    }
-
     #[allow(clippy::arc_with_non_send_sync)]
     fn apply_handles(
         chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -7422,17 +7396,11 @@ mod tests {
                 bitcoin_rs_coinstats::CoinStats::default(),
             )),
             None,
-            noop_filter_index(),
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Arc::new(RwLock::new(bitcoin_rs_rpc::context::BlockLog::new())),
             Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
             Arc::new(crate::NoOpZmqPublisher),
         )
-    }
-
-    fn noop_filter_index() -> Arc<Box<dyn FilterIndexLike>> {
-        let filter_index: Box<dyn FilterIndexLike> = Box::new(NoopFilterIndex);
-        Arc::new(filter_index)
     }
 
     /// Regtest genesis timestamp. Fixture headers must advance past it or the

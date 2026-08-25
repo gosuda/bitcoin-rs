@@ -82,7 +82,7 @@ Against [GoCoin](https://github.com/piotrnar/gocoin) on the same harness:
   verification dispatch, while each block still commits in order, so every rule
   that depends on committed state sees the real chain.
 - Optional utreexo (Pollard, Stump, MemForest) for stateless validation.
-- A native ScriptIndex with an Esplora HTTP surface, BIP157/158 filters, coinstats over MuHash, and
+- A native ScriptIndex with an Esplora HTTP surface, coinstats over MuHash, and
   pruning with Core's 288-block reorg-safety floor.
 - `getblocktemplate` for mining.
 - Synchronous HTTP/1.1 JSON-RPC over sonic-rs using Core's method names.
