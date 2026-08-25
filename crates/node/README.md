@@ -30,7 +30,6 @@ through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPubli
   instrumentation.
 - `mimalloc`: pulls the optional `mimalloc` dependency; the
   `mainnet_prefix_replay` example registers it as the global allocator.
-- `utreexo`: pull in the optional `bitcoin-rs-utreexo` crate.
 - `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;
   the in-process metrics recorder does not start an HTTP listener.
 

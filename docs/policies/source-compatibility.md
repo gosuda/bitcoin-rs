@@ -52,7 +52,6 @@ All crates in `bitcoin-rs` share a single workspace version managed by `[workspa
 | `bitcoin-rs-script` | `crates/script` | Script execution and evaluation |
 | `bitcoin-rs-storage` | `crates/storage` | Key-value store abstraction and implementations |
 | `bitcoin-rs-utxo` | `crates/utxo` | In-memory UTXO set management and snapshots |
-| `bitcoin-rs-utreexo` | `crates/utreexo` | Utreexo accumulator implementation |
 | `bitcoin-rs-chain` | `crates/chain` | Block tree and chain index tracking |
 | `bitcoin-rs-index` | `crates/index` | Transaction and address indexing |
 | `bitcoin-rs-coinstats` | `crates/coinstats` | UTXO statistics and MuHash computation |

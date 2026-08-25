@@ -213,9 +213,11 @@ Subsystem wiring lands in a follow-up.
 `node::run`. `Config::load_from_args` distinguishes `clap::Error` kinds
 `DisplayHelp` / `DisplayVersion` and calls `err.exit()` so `bitcoin-rs
 --help` and `--version` return exit code 0 — the standard clap idiom.
-A `utreexo` feature was added to `crates/node/Cargo.toml` as a
-passthrough to `dep:bitcoin-rs-utreexo` to make the bin's feature table
-resolvable.
+A `utreexo` feature passthrough existed in `crates/node/Cargo.toml`; it was
+removed together with the whole Utreexo node mode (issue #144): the node
+never shipped a proof transport, accumulator lifecycle, or compact-mode
+recovery, so the partial integration carried a second validation and pruning
+architecture with no consumer.
 
 - Files: `bin/bitcoin-rs/{Cargo.toml,src/main.rs,tests/cli_help.rs}`, `crates/node/{Cargo.toml,src/config.rs}`
 - Commit: 47af93b

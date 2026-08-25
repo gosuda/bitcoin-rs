@@ -13,8 +13,7 @@ bodies are re-downloadable and are not held to that constraint. After the index 
 commit, `reclaim_staged_flat_block_files` deletes the staged flat block files.
 `PruneOutcome` reports the bytes and row counts freed by a pass. The per-row machinery
 lives in `block_pruner` (`BlockPruner`, `block_body_key`, `BLOCK_DATA_CF`) and
-`undo_pruner` (`UndoPruner`, `block_undo_key`), and `UtreexoOnlyCoordinator`
-coordinates utreexo-only block-body deletion driven by `BlockProcessed` events.
+`undo_pruner` (`UndoPruner`, `block_undo_key`), and the staging helpers in `lib.rs` coordinate block-body deletion.
 
 ## Features
 - `rocksdb`: forward the rocksdb storage backend to `bitcoin-rs-storage`.

@@ -168,9 +168,6 @@ impl ConfigLayerMerge for ConfigLayer {
         if other.prune_target_mb.is_some() {
             self.prune_target_mb = other.prune_target_mb;
         }
-        if other.utreexo_mode.is_some() {
-            self.utreexo_mode = other.utreexo_mode;
-        }
         if other.txindex.is_some() {
             self.txindex = other.txindex;
         }

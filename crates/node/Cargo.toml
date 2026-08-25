@@ -36,7 +36,6 @@ rocksdb = [
     "bitcoin-rs-rpc/rocksdb",
     "bitcoin-rs-script/rocksdb",
     "bitcoin-rs-storage/rocksdb",
-    "bitcoin-rs-utreexo/rocksdb",
     "bitcoin-rs-utxo/rocksdb",
     "bitcoin-rs-wallet/rocksdb",
 ]
@@ -52,7 +51,6 @@ fjall = [
     "bitcoin-rs-rpc/fjall",
     "bitcoin-rs-script/fjall",
     "bitcoin-rs-storage/fjall",
-    "bitcoin-rs-utreexo/fjall",
     "bitcoin-rs-utxo/fjall",
     "bitcoin-rs-wallet/fjall",
 ]
@@ -68,7 +66,6 @@ redb = [
     "bitcoin-rs-rpc/redb",
     "bitcoin-rs-script/redb",
     "bitcoin-rs-storage/redb",
-    "bitcoin-rs-utreexo/redb",
     "bitcoin-rs-utxo/redb",
     "bitcoin-rs-wallet/redb",
 ]
@@ -82,7 +79,6 @@ checksig-census = [
     "bitcoin-rs-consensus/checksig-census",
 ]
 mimalloc = ["dep:mimalloc"]
-utreexo = ["dep:bitcoin-rs-utreexo"]
 prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
@@ -92,7 +88,6 @@ bitcoin-rs-script.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-utxo.workspace = true
-bitcoin-rs-utreexo = { workspace = true, optional = true }
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-index.workspace = true
 bitcoin-rs-coinstats.workspace = true

@@ -81,7 +81,6 @@ Against [GoCoin](https://github.com/piotrnar/gocoin) on the same harness:
 - Block application in windows: consecutive blocks share one script
   verification dispatch, while each block still commits in order, so every rule
   that depends on committed state sees the real chain.
-- Optional utreexo (Pollard, Stump, MemForest) for stateless validation.
 - A native ScriptIndex with an Esplora HTTP surface, coinstats over MuHash, and
   pruning with Core's 288-block reorg-safety floor.
 - `getblocktemplate` for mining.
@@ -100,7 +99,6 @@ The defaults target mainnet initial block download.
 | multi-peer download | on: 8 outbound peers, 128-block pending budget, 16 blocks in flight per peer |
 | transaction index | off |
 | pruning | off |
-| utreexo | off |
 
 Mainnet also skips historical script verification up to height 938343, block
 `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`. Checks are

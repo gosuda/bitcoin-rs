@@ -9,13 +9,10 @@ pub mod block_pruner;
 pub mod policy;
 /// Undo-data pruning over persisted undo rows.
 pub mod undo_pruner;
-/// Utreexo-only block body deletion coordinator.
-pub mod utreexo_only;
 
 pub use block_pruner::{BLOCK_DATA_CF, BlockPruner, block_body_key};
 pub use policy::PrunePolicy;
 pub use undo_pruner::{UndoPruner, block_undo_key};
-pub use utreexo_only::{BlockProcessed, UtreexoOnlyCoordinator};
 
 use bitcoin_rs_storage::{StorageError, WriteBatch as _};
 use thiserror::Error;
