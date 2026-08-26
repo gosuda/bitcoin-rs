@@ -12,7 +12,6 @@ members = [
     "crates/pruning",
     "crates/mempool",
     "crates/p2p",
-    "crates/wallet",
     "crates/mining",
     "crates/rpc",
     "crates/node",
@@ -49,7 +48,6 @@ bitcoin-rs-coinstats  = { path = "crates/coinstats",  version = "0.4.0" }
 bitcoin-rs-pruning    = { path = "crates/pruning",    version = "0.4.0" }
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.4.0" }
 bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.4.0" }
-bitcoin-rs-wallet     = { path = "crates/wallet",     version = "0.4.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.4.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.4.0" }
 bitcoin-rs-node       = { path = "crates/node",       version = "0.4.0", default-features = false }
@@ -87,20 +85,11 @@ bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features
     "std",
 ] }
 
-# Miniscript: descriptors + BIP380/381/382.
-miniscript = { version = ">=13, <14", default-features = false, features = [
-    "std", "serde",
-] }
-
-
 # bitcoin_slices: zero-alloc block visitor. Default features list is empty;
 # enable bitcoin + sha2 explicitly.
 bitcoin_slices = { version = ">=0.11, <0.12", default-features = false, features = [
     "bitcoin", "sha2",
 ] }
-
-# Coin selection — BnB + knapsack + waste-metric. `default = [std]`.
-bdk_coin_select = { version = ">=0.4.1, <0.5" }
 
 # Note: `payjoin` is intentionally NOT declared at the workspace level. Task 14
 # adds it with feature names verified against the version current at that time;

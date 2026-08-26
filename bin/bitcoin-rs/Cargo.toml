@@ -59,10 +59,6 @@ name = "g07_storage_equivalence"
 path = "tests/gates/g07_storage_equivalence.rs"
 
 [[test]]
-name = "g09_wallet_psbt_roundtrip"
-path = "tests/gates/g09_wallet_psbt_roundtrip.rs"
-
-[[test]]
 name = "g10_reorg_deep"
 path = "tests/gates/g10_reorg_deep.rs"
 

@@ -37,7 +37,6 @@ rocksdb = [
     "bitcoin-rs-script/rocksdb",
     "bitcoin-rs-storage/rocksdb",
     "bitcoin-rs-utxo/rocksdb",
-    "bitcoin-rs-wallet/rocksdb",
 ]
 fjall = [
     "bitcoin-rs-chain/fjall",
@@ -52,7 +51,6 @@ fjall = [
     "bitcoin-rs-script/fjall",
     "bitcoin-rs-storage/fjall",
     "bitcoin-rs-utxo/fjall",
-    "bitcoin-rs-wallet/fjall",
 ]
 redb = [
     "bitcoin-rs-chain/redb",
@@ -67,7 +65,6 @@ redb = [
     "bitcoin-rs-script/redb",
     "bitcoin-rs-storage/redb",
     "bitcoin-rs-utxo/redb",
-    "bitcoin-rs-wallet/redb",
 ]
 mdbx = [
     "bitcoin-rs-index/mdbx",
@@ -94,7 +91,6 @@ bitcoin-rs-coinstats.workspace = true
 bitcoin-rs-pruning.workspace = true
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
-bitcoin-rs-wallet.workspace = true
 bitcoin-rs-mining.workspace = true
 bitcoin-rs-rpc.workspace = true
 

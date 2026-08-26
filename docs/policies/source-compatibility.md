@@ -4,7 +4,7 @@ This document defines the toolchain requirements, dependency management rules, s
 
 ## 1. Scope and Authority
 
-This policy applies to all 18 crates in the `bitcoin-rs` workspace (`crates/*`) and the node binary (`bin/bitcoin-rs`).
+This policy applies to every crate in the `bitcoin-rs` workspace (`crates/*`) and the node binary (`bin/bitcoin-rs`).
 
 ## 2. Toolchain and Language Edition
 
@@ -58,7 +58,6 @@ All crates in `bitcoin-rs` share a single workspace version managed by `[workspa
 | `bitcoin-rs-pruning` | `crates/pruning` | Block file and state pruning logic |
 | `bitcoin-rs-mempool` | `crates/mempool` | Memory pool transaction storage |
 | `bitcoin-rs-p2p` | `crates/p2p` | Peer-to-peer network protocol |
-| `bitcoin-rs-wallet` | `crates/wallet` | Watch-only descriptor tracking, coin selection, PSBT construction, fee bumping |
 | `bitcoin-rs-mining` | `crates/mining` | Block template construction |
 | `bitcoin-rs-rpc` | `crates/rpc` | JSON-RPC HTTP server |
 | `bitcoin-rs-node` | `crates/node` | Full node state machine and event loop |

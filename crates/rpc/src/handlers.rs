@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value};
 
 use crate::context::Context;
 use crate::error::RpcError;
@@ -12,9 +12,6 @@ pub(crate) mod network;
 pub(crate) mod tx;
 pub(crate) mod tx_render;
 pub(crate) mod util;
-pub(crate) mod wallet;
-
-const NO_PRIVATE_KEYS: &str = "wallet has no private keys; use external signer";
 
 /// JSON-RPC method dispatcher backed by shared node context.
 #[derive(Clone, Debug)]
@@ -53,6 +50,7 @@ impl Handler {
             "getindexinfo" => chain::getindexinfo(&self.ctx, params),
             "pruneblockchain" => chain::pruneblockchain(&self.ctx, params),
             "invalidateblock" => chain::invalidateblock(&self.ctx, params),
+            "scantxoutset" => chain::scantxoutset(&self.ctx, params),
             "getrawtransaction" => tx::getrawtransaction(&self.ctx, params),
             "gettxout" => tx::gettxout(&self.ctx, params),
             "gettxoutproof" => tx::gettxoutproof(&self.ctx, params),
@@ -60,6 +58,8 @@ impl Handler {
             "sendrawtransaction" => tx::sendrawtransaction(&self.ctx, params),
             "testmempoolaccept" => tx::testmempoolaccept(&self.ctx, params),
             "decoderawtransaction" => tx::decoderawtransaction(&self.ctx, params),
+            "combinepsbt" => tx::combinepsbt(&self.ctx, params),
+            "finalizepsbt" => tx::finalizepsbt(&self.ctx, params),
             "getmempoolinfo" => mempool::getmempoolinfo(&self.ctx, params),
             "getmempoolentry" => mempool::getmempoolentry(&self.ctx, params),
             "getrawmempool" => mempool::getrawmempool(&self.ctx, params),
@@ -73,6 +73,8 @@ impl Handler {
             "estimaterawfee" => util::estimaterawfee(&self.ctx, params),
             "getzmqnotifications" => util::getzmqnotifications(&self.ctx, params),
             "validateaddress" => util::validateaddress(&self.ctx, params),
+            "getdescriptorinfo" => util::getdescriptorinfo(&self.ctx, params),
+            "deriveaddresses" => util::deriveaddresses(&self.ctx, params),
             "getnetworkinfo" => network::getnetworkinfo(&self.ctx, params),
             "getpeerinfo" => network::getpeerinfo(&self.ctx, params),
             "ping" => network::ping(&self.ctx, params),
@@ -89,26 +91,6 @@ impl Handler {
             "getmininginfo" => mining::getmininginfo(&self.ctx, params),
             "submitblock" => mining::submitblock(&self.ctx, params),
             "prioritisetransaction" => mining::prioritisetransaction(&self.ctx, params),
-            "getdescriptorinfo" => wallet::getdescriptorinfo(&self.ctx, params),
-            "deriveaddresses" => wallet::deriveaddresses(&self.ctx, params),
-            "scantxoutset" => wallet::scantxoutset(&self.ctx, params),
-            "walletcreatefundedpsbt" => wallet::walletcreatefundedpsbt(&self.ctx, params),
-            "walletprocesspsbt" => wallet::walletprocesspsbt(&self.ctx, params),
-            "finalizepsbt" => wallet::finalizepsbt(&self.ctx, params),
-            "combinepsbt" => wallet::combinepsbt(&self.ctx, params),
-            "bumpfee" => wallet::bumpfee(&self.ctx, params),
-            "signrawtransactionwithkey"
-            | "signrawtransactionwithwallet"
-            | "dumpprivkey"
-            | "dumpwallet"
-            | "importprivkey"
-            | "importwallet"
-            | "importmulti"
-            | "importdescriptors"
-            | "sethdseed"
-            | "walletpassphrase"
-            | "walletpassphrasechange"
-            | "encryptwallet" => Err(RpcError::method_disabled(NO_PRIVATE_KEYS)),
             _ => Err(RpcError::MethodNotFound(method.to_owned())),
         }
     }
@@ -169,10 +151,6 @@ pub(crate) fn required_u64(
         .get(index)
         .and_then(JsonValueTrait::as_u64)
         .ok_or(RpcError::InvalidParams(name))
-}
-
-pub(crate) fn invalid_psbt() -> Value {
-    json!({"psbt": "", "complete": false})
 }
 
 pub(crate) fn serde_to_sonic(value: &serde_json::Value) -> Result<Value, RpcError> {

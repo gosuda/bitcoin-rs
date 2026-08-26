@@ -19,8 +19,9 @@ Four storage backends are selectable at runtime: fjall, RocksDB, MDBX, and
 redb. An equivalence test replays the same chain through all four and requires
 an identical aggregate hash.
 
-The wallet is PSBT only. The node never handles a private key; signing happens
-behind an external signer trait.
+There is no in-tree wallet and the node never handles a private key. The RPC
+surface keeps the key-free PSBT utilities and descriptor helpers for
+external-signer workflows.
 
 ## Quick start
 
@@ -84,8 +85,9 @@ Against [GoCoin](https://github.com/piotrnar/gocoin) on the same harness:
 - A native ScriptIndex with an Esplora HTTP surface, coinstats over MuHash, and
   pruning with Core's 288-block reorg-safety floor.
 - `getblocktemplate` for mining.
-- Synchronous HTTP/1.1 JSON-RPC over sonic-rs using Core's method names.
-  Signing methods return -32603, "wallet has no private keys; use external signer".
+- Synchronous HTTP/1.1 JSON-RPC over sonic-rs using Core's method names. There
+  is no wallet: private-key methods are absent, and the key-free PSBT
+  utilities (`combinepsbt`, `finalizepsbt`) remain for external signers.
 - mimalloc as the global allocator, over a crossbeam-channel event loop.
 
 ## Default posture

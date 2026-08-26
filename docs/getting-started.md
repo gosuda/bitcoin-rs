@@ -126,9 +126,9 @@ curl -s --user bitcoin-rs:bitcoin-rs \
 ```
 
 The full list of implemented methods is the dispatch table in
-`crates/rpc/src/handlers.rs`. Signing methods are present but always return
--32603, "wallet has no private keys; use external signer", because the wallet
-holds no keys by design.
+`crates/rpc/src/handlers.rs`. There is no wallet: private-key and
+wallet-construction methods are not implemented, while the key-free PSBT
+utilities and descriptor helpers remain for external-signer workflows.
 
 ## Verifying everything yourself
 
