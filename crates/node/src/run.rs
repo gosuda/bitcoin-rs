@@ -793,15 +793,6 @@ pub fn run(mut config: Config) -> Result<()> {
             chain: bitcoin_rs_rpc::context::ChainHandles {
                 chain_tip: state.chain_tip(),
                 applied_tip: state.applied_tip(),
-                // FIXME: nothing updates this counter, so `chain_tx_count()`
-                // reads `None` and `getblockchaininfo` reports the height-ratio
-                // fallback instead of Core's transaction-count estimate. The
-                // authoritative count now lives on the block-tree nodes, and
-                // the atomic that block application used to maintain was
-                // removed from `NodeState` and `ApplyHandles`. Seeding this
-                // once here would go stale after every connect, so the fix is
-                // to read the applied tip's tree count instead of this atomic.
-                chain_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 blocks: state.blocks(),
                 transactions: state.transactions(),
                 utxo: state.utxo(),

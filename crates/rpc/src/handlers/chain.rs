@@ -3552,8 +3552,6 @@ mod verification_progress_wiring_tests {
             if let Some(count) = chain_tx_count {
                 tree.restore_chain_tx_count(id, count)
                     .unwrap_or_else(|err| panic!("restore: {err}"));
-                ctx.chain_tx_count_handle()
-                    .store(count, core::sync::atomic::Ordering::Relaxed);
             }
             id
         };

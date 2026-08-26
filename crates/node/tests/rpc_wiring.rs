@@ -198,7 +198,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         chain: ChainHandles {
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
-            chain_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             blocks: Arc::clone(&blocks),
             transactions: Arc::clone(&transactions),
             utxo: Arc::clone(&utxo),

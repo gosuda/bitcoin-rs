@@ -970,8 +970,6 @@ pub struct ChainHandles {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best fully-applied block tip.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Cumulative transaction count through the applied tip.
-    pub chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
     /// Applied block metadata log.
     pub blocks: Arc<RwLock<BlockLog>>,
     /// Transactions retained for direct RPC lookup.
@@ -1029,13 +1027,6 @@ pub struct Context {
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Serializes whole-chainstate RPC reads with node-owned connect/disconnect transitions.
     chain_transition: Arc<Mutex<()>>,
-    /// Cumulative transaction count of the applied chain, `0` when unknown.
-    ///
-    /// Maintained by block application and restored from the chainstate
-    /// checkpoint, so it survives a restart. Read through
-    /// [`Self::chain_tx_count`], which turns Bitcoin Core's zero-means-unset
-    /// encoding into an `Option`.
-    chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
     /// Whether this node has ever observed itself to be out of initial block
     /// download. Once set it is never cleared.
     ///
@@ -1152,7 +1143,6 @@ impl Context {
     #[must_use]
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
-        let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(0));
         let coin_stats_listener = bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
         );
@@ -1177,7 +1167,6 @@ impl Context {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
-            chain_tx_count,
             left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool,
             blocks: Arc::new(RwLock::new(BlockLog::new())),
@@ -1210,7 +1199,6 @@ impl Context {
             chain_tip: handles.chain.chain_tip,
             applied_tip: handles.chain.applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
-            chain_tx_count: handles.chain.chain_tx_count,
             left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool: handles.mempool,
             blocks: handles.chain.blocks,
@@ -1392,21 +1380,6 @@ impl Context {
         self.applied_tip.load_full().map_or(0, |tip| tip.height)
     }
 
-    /// Returns `self` sharing `handle` as the cumulative chain transaction count.
-    ///
-    /// The node owns the counter; the RPC surface only reads it.
-    #[must_use]
-    pub fn with_chain_tx_count(mut self, handle: Arc<core::sync::atomic::AtomicU64>) -> Self {
-        self.chain_tx_count = handle;
-        self
-    }
-
-    /// Shared chain-transaction counter handle used by node wiring tests.
-    #[must_use]
-    pub fn chain_tx_count_handle(&self) -> &Arc<core::sync::atomic::AtomicU64> {
-        &self.chain_tx_count
-    }
-
     /// Returns the cumulative transaction count of the applied chain, or `None`
     /// when this node cannot know it.
     ///
@@ -1415,12 +1388,18 @@ impl Context {
     /// the node tracked the count cannot recover it without re-reading every
     /// block body. Callers must treat `None` as *unknown*, never as zero — the
     /// two differ by an entire chain.
+    ///
+    /// The count is read from the authoritative block-tree node at the applied
+    /// tip. Block application maintains it there, and the chainstate checkpoint
+    /// restores it on restart, so it survives across process boundaries.
     #[must_use]
     pub fn chain_tx_count(&self) -> Option<u64> {
-        match self
-            .chain_tx_count
-            .load(core::sync::atomic::Ordering::Relaxed)
-        {
+        let tip = self.applied_tip.load_full()?;
+        let count = {
+            let tree = self.block_tree.read();
+            tree.node(tip.tip_id).ok()?.chain_tx_count
+        };
+        match count {
             0 => None,
             count => Some(count),
         }
@@ -1912,7 +1891,6 @@ mod tests {
 
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
-        let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(0));
         let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
         let coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
@@ -1931,7 +1909,6 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: Arc::clone(&chain_tip),
                 applied_tip: Arc::clone(&applied_tip),
-                chain_tx_count: Arc::clone(&chain_tx_count),
                 blocks: Arc::new(RwLock::new(BlockLog::new())),
                 transactions: Arc::new(RwLock::new(HashMap::new())),
                 utxo: Arc::clone(&utxo),
@@ -1949,7 +1926,6 @@ mod tests {
         });
         assert!(Arc::ptr_eq(&ctx.chain_tip, &chain_tip));
         assert!(Arc::ptr_eq(&ctx.applied_tip, &applied_tip));
-        assert!(Arc::ptr_eq(ctx.chain_tx_count_handle(), &chain_tx_count));
         assert!(Arc::ptr_eq(&ctx.utxo, &utxo));
         assert!(Arc::ptr_eq(&ctx.coin_stats, &coin_stats));
         assert!(Arc::ptr_eq(&ctx.block_tree, &block_tree));
