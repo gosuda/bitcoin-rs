@@ -5,6 +5,9 @@
 > including its now-removed Electrum design. The current architecture and supported
 > configuration are defined by `CONCEPTS.md` and `docs/getting-started.md`; do not
 > treat unfinished tasks or dependency entries below as current work.
+> Compact filters (issue #143) and the experimental Utreexo node mode
+> (issue #144) are removed roadmap items; their historical task and gate text
+> below does not describe supported code or configuration.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` to implement task-by-task. Steps use checkbox (`- [ ]`) syntax. **Do not split phases or roadmaps** — every task in this plan must ship before bitcoin-rs is declared done.
 

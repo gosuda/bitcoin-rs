@@ -793,7 +793,7 @@ mod tests {
 
     use super::{
         ScriptStageTimings, is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size,
-        verify_transaction, verify_transaction_non_script,
+        verify_transaction,
     };
 
     /// Wraps `txs` in a block and parses it the way production does, so tests
@@ -1499,6 +1499,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "kernel")]
     fn prepared_unit<'b>(
         txs: &'b [Transaction],
         resolved: Vec<Vec<Option<TxOut>>>,

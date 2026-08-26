@@ -470,7 +470,12 @@ mod tests {
         block
     }
     fn check_block_rules(block: &Block, context: BlockRuleContext) -> Result<(), ConsensusError> {
-        let txids: Vec<Txid> = block.0.txdata.iter().map(|tx| tx.compute_txid()).collect();
+        let txids: Vec<Txid> = block
+            .0
+            .txdata
+            .iter()
+            .map(bitcoin::Transaction::compute_txid)
+            .collect();
         let has_witness = block_has_witness(&block.0);
         verify_block_rules_precomputed(&block.0, context, &txids, has_witness)
     }
