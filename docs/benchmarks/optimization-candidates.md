@@ -253,6 +253,6 @@ Checked during the survey and cleared. Recorded so nobody re-checks them.
   not gated on anything.
 
 Three of the six point at the same missing measurement: **G14 tip RSS on a synced
-mainnet-tip node with `txindex` and `blockfilterindex`.** That run decides
+mainnet-tip node with `txindex` and the currently enabled derived indexes.** That run decides
 whether B and F are worth their complexity, and it is the same run that decides
 whether the v5 codec is kept or reverted (`DEVIATIONS.md` §9).

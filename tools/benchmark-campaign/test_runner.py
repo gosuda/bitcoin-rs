@@ -162,7 +162,6 @@ record = {{
     'checkpoint_generation': 1,
     'storage_backend': 'fjall',
     'txindex': False,
-    'blockfilterindex': False,
     'block_count': 3,
     'tx_count': 3,
     'block_bytes': corpus.stat().st_size,

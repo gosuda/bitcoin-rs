@@ -36,10 +36,9 @@ rpc_password = "toml-pass"
 ",
     )?;
 
-    let env: [EnvPair; 4] = [
+    let env: [EnvPair; 3] = [
         ("BITCOIN_RS_STORAGE_BACKEND", "redb"),
         ("BITCOIN_RS_DBCACHE_MB", "1024"),
-        ("BITCOIN_RS_BLOCKFILTERINDEX", "true"),
         ("BITCOIN_RS_LOG_LEVEL", "warn"),
     ];
     let config = Config::from_layered_sources(

@@ -622,7 +622,6 @@ def _make_replay_v2(
     archive_sha256: str = "0" * 64,
     block_bytes: int = 0,
     block_source: str = "file",
-    blockfilterindex: bool = False,
     blocks_per_second: float = 0.0,
     checkpoint_generation: int = 1,
     data_dir: str = "/tmp",
@@ -679,7 +678,6 @@ def _make_replay_v2(
         },
         "block_bytes": block_bytes,
         "block_source": block_source,
-        "blockfilterindex": blockfilterindex,
         "blocks_per_second": blocks_per_second,
         "checkpoint_generation": checkpoint_generation,
         "data_dir": data_dir,
@@ -5683,7 +5681,6 @@ def _build_meta(
         "stop_reason": "controller-request",
         "storage_backend": "fjall",
         "txindex": False,
-        "blockfilterindex": False,
         "data_dir": str(work_dir / "state"),
         "elapsed_seconds": 0.0,
     }
@@ -5750,7 +5747,6 @@ def test_find_cmodern_height_late_failure_keeps_sidecar_count_unpatched() -> Non
             _ceiling: int,
             _storage_backend: str,
             _txindex: bool,
-            _blockfilterindex: bool,
             _data_dir: str,
         ) -> None:
             raise AnalyzerError("late replay validation failure")
@@ -6288,7 +6284,6 @@ def test_salvage_rejects_semantically_valid_exact_replay_replacement() -> None:
             ceiling: int,
             storage_backend: str,
             txindex: bool,
-            blockfilterindex: bool,
             data_dir: str,
         ) -> None:
             replay = json.loads(path.read_text())
@@ -6302,7 +6297,6 @@ def test_salvage_rejects_semantically_valid_exact_replay_replacement() -> None:
                 ceiling,
                 storage_backend,
                 txindex,
-                blockfilterindex,
                 data_dir,
             )
 
@@ -6592,7 +6586,6 @@ def test_salvage_preserves_exact_data_dir_text_through_to_validation() -> None:
             ceiling: int,
             storage_backend: str,
             txindex: bool,
-            blockfilterindex: bool,
             data_dir: str,
         ) -> None:
             captured_data_dir.append(data_dir)
@@ -6602,7 +6595,6 @@ def test_salvage_preserves_exact_data_dir_text_through_to_validation() -> None:
                 ceiling,
                 storage_backend,
                 txindex,
-                blockfilterindex,
                 data_dir,
             )
 
@@ -6617,7 +6609,6 @@ def test_salvage_preserves_exact_data_dir_text_through_to_validation() -> None:
             data_dir=raw_data_dir,
             storage_backend="fjall",
             txindex=False,
-            blockfilterindex=False,
         )
         analyze._validate_replay_diagnostic = capture_validate
         try:
@@ -6726,7 +6717,6 @@ def test_validate_replay_diagnostic_accepts_a1_artifact_without_rest_url() -> No
             "stop_reason": "controller-request",
             "storage_backend": "fjall",
             "txindex": False,
-            "blockfilterindex": False,
             "data_dir": str(tmp / "state"),
             "elapsed_seconds": 1.5,
         }
@@ -6742,7 +6732,7 @@ def test_validate_replay_diagnostic_accepts_a1_artifact_without_rest_url() -> No
             journal_end=0,
         )
         _validate_replay_diagnostic(
-            replay_path, final, 11, 'fjall', False, False, str(tmp / 'state')
+            replay_path, final, 11, 'fjall', False, str(tmp / 'state')
         )
 
 
@@ -6768,7 +6758,6 @@ def test_validate_replay_diagnostic_rejects_invented_rest_url() -> None:
             "stop_reason": "controller-request",
             "storage_backend": "fjall",
             "txindex": False,
-            "blockfilterindex": False,
             "data_dir": str(tmp / "state"),
             "elapsed_seconds": 1.5,
         }
@@ -6786,7 +6775,7 @@ def test_validate_replay_diagnostic_rejects_invented_rest_url() -> None:
         _raises_with(
             AnalyzerError,
             lambda: _validate_replay_diagnostic(
-                replay_path, final, 11, 'fjall', False, False, str(tmp / 'state')
+                replay_path, final, 11, 'fjall', False, str(tmp / 'state')
             ),
             "invented rest_url",
             "rest_url",
@@ -6845,35 +6834,6 @@ def test_find_cmodern_height_settings_mismatch_txindex() -> None:
                 ),
                 'mismatched txindex',
                 'txindex',
-            )
-            assert not output.exists(), 'candidate must not be published'
-        finally:
-            os.environ.pop('FAKE_CENSUS_META', None)
-            os.environ.pop('FAKE_CENSUS_STAGE', None)
-
-def test_find_cmodern_height_settings_mismatch_blockfilterindex() -> None:
-    '''A child reporting blockfilterindex=True when parent passed False must fail.'''
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        stage = _write_diagnostic_stage(tmp)
-        work_dir = tmp / 'work'
-        work_dir.mkdir()
-        output = tmp / 'candidate.json'
-        meta_path = _build_meta(
-            tmp, stage, 100, work_dir,
-            replay_overrides={'blockfilterindex': True},
-        )
-        child = _make_fake_binary(tmp)
-        os.environ['FAKE_CENSUS_META'] = str(meta_path)
-        os.environ['FAKE_CENSUS_STAGE'] = str(stage)
-        try:
-            _raises_with(
-                AnalyzerError,
-                lambda: _run_diagnostic_scan(
-                    child, '127.0.0.1:18443', 100, work_dir, output
-                ),
-                'mismatched blockfilterindex',
-                'blockfilterindex',
             )
             assert not output.exists(), 'candidate must not be published'
         finally:
@@ -7791,7 +7751,6 @@ def main() -> int:
         test_atomic_publish_cleans_temp_on_post_link_fsync_failure,
         test_find_cmodern_height_settings_mismatch_storage_backend,
         test_find_cmodern_height_settings_mismatch_txindex,
-        test_find_cmodern_height_settings_mismatch_blockfilterindex,
         test_find_cmodern_height_settings_mismatch_data_dir,
         test_clone_committed_source_fallback_copies_only_committed_size,
         test_materialize_recovery_dir_fsyncs_parent_before_recovery_dir,

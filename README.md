@@ -99,7 +99,6 @@ The defaults target mainnet initial block download.
 | database cache | 450 MiB, matching Bitcoin Core |
 | multi-peer download | on: 8 outbound peers, 128-block pending budget, 16 blocks in flight per peer |
 | transaction index | off |
-| block filter index | off |
 | pruning | off |
 | utreexo | off |
 

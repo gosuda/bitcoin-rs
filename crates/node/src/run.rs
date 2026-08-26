@@ -560,8 +560,8 @@ pub fn run(mut config: Config) -> Result<()> {
         rx
     } else {
         let (tx, rx) = bounded(1);
-        // Forwards process signals into our channel; the JoinHandle outlives `run`.
-        let _signal_thread = crate::signal::install_shutdown_handler(tx)?;
+        // Forwards process termination into our shutdown channel.
+        crate::signal::install_shutdown_handler(tx)?;
         rx
     };
 

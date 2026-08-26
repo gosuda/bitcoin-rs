@@ -43,7 +43,6 @@ _REPLAY_KEYS = frozenset(
         "archive",
         "block_bytes",
         "block_source",
-        "blockfilterindex",
         "blocks_per_second",
         "checkpoint_generation",
         "data_dir",
@@ -500,7 +499,6 @@ def parse_candidate_file(path: Path, expected: CandidateExpectation) -> NativeAr
             ),
             _text(item["block_source"], "replay.block_source") == "file",
             not _boolean(item["txindex"], "replay.txindex"),
-            not _boolean(item["blockfilterindex"], "replay.blockfilterindex"),
             _text(item["storage_backend"], "replay.storage_backend")
             == expected.backend,
             _text(item["data_dir"], "replay.data_dir") == expected.data_dir,
