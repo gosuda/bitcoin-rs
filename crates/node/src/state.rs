@@ -1080,7 +1080,6 @@ impl NodeState {
             blocks: Arc::clone(&blocks),
             transactions: Arc::clone(&transactions),
             zmq_publisher: Arc::clone(&zmq_publisher),
-            cache_block_bodies_in_memory: false,
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
             g2_muhash_sampler,

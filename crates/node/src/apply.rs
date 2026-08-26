@@ -970,7 +970,6 @@ pub struct ApplyHandles {
     pub transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
     /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
     pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
-    pub(crate) cache_block_bodies_in_memory: bool,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     /// Undo storage. Mandatory: see [`UndoStore`].
     pub(crate) undo_store: Arc<dyn UndoStore>,
@@ -1046,7 +1045,6 @@ impl ApplyHandles {
             blocks,
             transactions,
             zmq_publisher,
-            cache_block_bodies_in_memory: true,
             block_body_store: None,
             undo_store: Arc::new(InMemoryUndoStore::default()),
             g2_muhash_sampler: None,
