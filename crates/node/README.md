@@ -31,8 +31,14 @@ through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPubli
 - `mimalloc`: pulls the optional `mimalloc` dependency; the
   `mainnet_prefix_replay` example registers it as the global allocator.
 - `utreexo`: pull in the optional `bitcoin-rs-utreexo` crate.
-- `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;
-  the in-process metrics recorder does not start an HTTP listener.
+
+When `metrics_bind` / `--metrics-bind` / `BITCOIN_RS_METRICS_BIND` is set, `run`
+binds a synchronous scrape listener after `NodeState::open` and keeps it for the
+process lifetime. `GET` on that address returns Prometheus text (`200`,
+`text/plain`) from the process-global recorder. Occupied-address bind fails
+before installing the recorder, so a later in-process retry does not hit
+`SetRecorderError`. There is no `prometheus-http` feature; the exporter crate is
+used without its HTTP listener.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

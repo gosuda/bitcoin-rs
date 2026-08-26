@@ -34,7 +34,7 @@ fn context_with_records(count: u32) -> Arc<Context> {
     let ctx = Arc::new(Context::new());
     {
         let mut blocks = ctx.blocks.write();
-        blocks.reserve(count as usize);
+        blocks.reserve(usize::try_from(count).expect("count fits usize"));
         for height in 0..count {
             let mut hash = [0_u8; 32];
             hash[..4].copy_from_slice(&height.to_le_bytes());
@@ -42,8 +42,9 @@ fn context_with_records(count: u32) -> Arc<Context> {
             // A real record carries the facts the stats read. Leaving them zero
             // would still walk the log, but would not fault in the bytes the
             // stats actually touch.
-            record.body_size = 1_000_000 + (height as usize % 400_000);
-            record.tx_count = 1 + (height as usize % 3_000);
+            record.body_size =
+                1_000_000 + (usize::try_from(height).expect("height fits usize") % 400_000);
+            record.tx_count = 1 + (usize::try_from(height).expect("height fits usize") % 3_000);
             record.time = 1_231_006_505 + height * 600;
             blocks.push(record);
         }

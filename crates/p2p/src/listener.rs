@@ -13,6 +13,9 @@ use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Maximum backoff for transient accept errors (ECONNABORTED, EMFILE, …).
+/// Bounded so the listener recovers quickly once the pressure clears.
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
 /// Stream read timeout used while polling handshake and message reads.
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -246,7 +249,7 @@ pub fn serve_with_shutdown(
 
 /// Binds `addr` and runs an accept loop with active-chain and sync-wake handles.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn serve_with_shutdown_with_chain_and_sync_wake(
+fn serve_with_shutdown_with_chain_and_sync_wake(
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
     magic: Magic,
@@ -275,6 +278,13 @@ pub fn serve_with_shutdown_with_chain_and_sync_wake(
 }
 
 /// Accept-loop core shared by every listener entry point.
+///
+/// Bind and `set_nonblocking` failures are fatal and propagated as
+/// [`ListenerError::Bind`]. Transient `accept` errors (ECONNABORTED,
+/// EMFILE/ENFILE under fd pressure, etc.) are logged at warn and the loop
+/// continues after a bounded backoff — matching Bitcoin Core's tolerant
+/// accept loop so inbound P2P stays alive through temporary resource
+/// exhaustion rather than permanently killing the listener thread.
 fn serve_connections(
     addr: SocketAddr,
     shutdown: &AtomicBool,
@@ -287,9 +297,17 @@ fn serve_connections(
     listener
         .set_nonblocking(true)
         .map_err(|source| ListenerError::Bind { addr, source })?;
+    let mut accept_backoff = POLL_INTERVAL;
     while !shutdown.load(Ordering::Relaxed) {
+        #[cfg(test)]
+        if ACCEPT_ERROR_INJECT.swap(false, Ordering::Relaxed) {
+            tracing::warn!(addr = %addr, "test-injected accept error; backing off");
+            std::thread::sleep(POLL_INTERVAL);
+            continue;
+        }
         match listener.accept() {
             Ok((stream, peer_addr)) => {
+                accept_backoff = POLL_INTERVAL;
                 if crate::subnet::is_banned(
                     &shared.banned.read(),
                     peer_addr.ip(),
@@ -319,7 +337,16 @@ fn serve_connections(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(POLL_INTERVAL);
             }
-            Err(error) => return Err(ListenerError::Accept(error)),
+            Err(error) => {
+                tracing::warn!(
+                    addr = %addr,
+                    %error,
+                    backoff_ms = accept_backoff.as_millis(),
+                    "p2p accept error; backing off and continuing",
+                );
+                std::thread::sleep(accept_backoff);
+                accept_backoff = std::cmp::min(accept_backoff * 2, ACCEPT_BACKOFF_MAX);
+            }
         }
     }
     Ok(())
@@ -383,7 +410,7 @@ pub fn spawn_outbound_connection(
 
 /// Spawns an outbound connection with active-chain and sync-wake handles.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn spawn_outbound_connection_with_chain_and_sync_wake(
+fn spawn_outbound_connection_with_chain_and_sync_wake(
     addr: SocketAddr,
     magic: Magic,
     peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
@@ -691,19 +718,45 @@ fn run_connected_session(
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
     info: crate::PeerInfo,
 ) -> Result<(), crate::wire::PeerError> {
-    let writer_stream = peer
-        .stream
-        .try_clone()
-        .map_err(crate::wire::PeerError::Io)?;
-    let writer = spawn_connection_writer(
-        writer_stream,
-        magic,
-        outbound_rx,
-        peer_addr,
-        lease.stats_handle(),
-        shared.totals.clone(),
-    )
-    .map_err(crate::wire::PeerError::Io)?;
+    let setup_result: Result<std::thread::JoinHandle<()>, crate::wire::PeerError> = (|| {
+        #[cfg(test)]
+        if WRITER_SETUP_FAIL.swap(false, Ordering::Relaxed) {
+            return Err(crate::wire::PeerError::Io(io::Error::other(
+                "test-injected writer setup failure",
+            )));
+        }
+        let writer_stream = peer
+            .stream
+            .try_clone()
+            .map_err(crate::wire::PeerError::Io)?;
+        spawn_connection_writer(
+            writer_stream,
+            magic,
+            outbound_rx,
+            peer_addr,
+            lease.stats_handle(),
+            shared.totals.clone(),
+        )
+        .map_err(crate::wire::PeerError::Io)
+    })();
+    let writer = match setup_result {
+        Ok(handle) => handle,
+        Err(error) => {
+            // The lease was already registered into peer_outbound at
+            // handshake time.  Run the same cleanup the normal exit path
+            // does so a spawn failure (e.g. EAGAIN under thread/fd
+            // pressure) does not leave a phantom peer registered.
+            remove_current_peer(
+                &shared.peer_registry,
+                &shared.peer_outbound,
+                peer_addr,
+                &lease,
+            );
+            let _ = peer.stream.shutdown(std::net::Shutdown::Both);
+            drop(lease);
+            return Err(error);
+        }
+    };
     publish_peer_info(
         &shared.peer_registry,
         shared.peer_registered.as_deref(),
@@ -1251,5 +1304,176 @@ mod sync_wake_tests {
     #[test]
     fn missing_sync_wake_is_noop() {
         wake_sync(None);
+    }
+}
+
+#[cfg(test)]
+static ACCEPT_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static WRITER_SETUP_FAIL: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod resilient_accept_tests {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use bitcoin::p2p::Magic;
+    use parking_lot::RwLock;
+
+    use super::{ACCEPT_ERROR_INJECT, ConnectionShared, InboundSyncSinks, serve_connections};
+
+    fn shared_state() -> ConnectionShared {
+        let peer_registry = Arc::new(RwLock::new(Vec::new()));
+        let peer_outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let banned = Arc::new(RwLock::new(Vec::new()));
+        ConnectionShared::from_parts(peer_registry, peer_outbound, banned, None, None)
+    }
+
+    fn sinks() -> InboundSyncSinks {
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        InboundSyncSinks {
+            headers_tx,
+            blocks_tx,
+            wake_tx: None,
+        }
+    }
+
+    /// A transient accept error must not kill the listener thread — the loop
+    /// logs, backs off, and continues until shutdown.
+    #[test]
+    fn serve_connections_survives_transient_accept_error() {
+        // Grab an ephemeral port, then release it so serve_connections can bind.
+        let probe =
+            TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind probe");
+        let addr = probe.local_addr().expect("local_addr");
+        drop(probe);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shared = shared_state();
+        let sinks = sinks();
+
+        // Inject one transient accept error.
+        ACCEPT_ERROR_INJECT.store(true, Ordering::Relaxed);
+
+        let thread_shutdown = Arc::clone(&shutdown);
+        let thread_shared = shared;
+        let handle = std::thread::spawn(move || {
+            serve_connections(
+                addr,
+                &thread_shutdown,
+                Magic::BITCOIN,
+                &thread_shared,
+                &sinks,
+            )
+        });
+
+        // Give the loop time to process the injected error and continue.
+        std::thread::sleep(Duration::from_millis(300));
+
+        // The listener must still be alive — connect a real client to prove it.
+        let _client = TcpStream::connect(addr).expect("listener should still accept");
+
+        // Shut down cleanly.
+        shutdown.store(true, Ordering::Relaxed);
+        let result = handle.join().expect("listener thread panicked");
+        assert!(
+            result.is_ok(),
+            "serve_connections must return Ok after shutdown, got {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod writer_setup_cleanup_tests {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use bitcoin::p2p::Magic;
+    use parking_lot::RwLock;
+
+    use super::{
+        ConnectionShared, InboundSyncSinks, WRITER_SETUP_FAIL, register_connection,
+        run_connected_session,
+    };
+    use crate::peer::Peer;
+
+    type OutboundMap = Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>;
+
+    fn peer_info(addr: SocketAddr, conn_time: u64) -> crate::PeerInfo {
+        crate::PeerInfo {
+            addr,
+            version: 70_016,
+            services: 0,
+            user_agent: String::from("/test/"),
+            start_height: 0,
+            conn_time,
+            inbound: false,
+        }
+    }
+
+    fn sinks() -> InboundSyncSinks {
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        InboundSyncSinks {
+            headers_tx,
+            blocks_tx,
+            wake_tx: None,
+        }
+    }
+
+    /// When the writer-thread setup fails (`try_clone` or `spawn`), the lease
+    #[test]
+    fn writer_setup_failure_cleans_up_lease() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server_stream, peer_addr) = listener.accept().expect("accept");
+        drop(server_stream);
+
+        let peer_registry = Arc::new(RwLock::new(Vec::new()));
+        let outbound: OutboundMap = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let banned = Arc::new(RwLock::new(Vec::new()));
+        let shared =
+            ConnectionShared::from_parts(peer_registry, outbound.clone(), banned, None, None);
+
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        register_connection(&shared.peer_outbound, peer_addr, lease.clone());
+
+        // Lease must be registered before the failure.
+        assert!(
+            outbound.read().contains_key(&peer_addr),
+            "lease must be registered before writer setup"
+        );
+
+        // Inject writer setup failure.
+        WRITER_SETUP_FAIL.store(true, Ordering::Relaxed);
+
+        let mut peer = Peer::new(client, Magic::BITCOIN);
+        let info = peer_info(peer_addr, 0);
+        let result = run_connected_session(
+            &mut peer,
+            peer_addr,
+            Magic::BITCOIN,
+            &shared,
+            &sinks(),
+            lease,
+            outbound_rx,
+            info,
+        );
+
+        assert!(result.is_err(), "writer setup failure must return Err");
+        assert!(
+            outbound.read().is_empty(),
+            "peer_outbound must be cleaned up after writer setup failure"
+        );
     }
 }

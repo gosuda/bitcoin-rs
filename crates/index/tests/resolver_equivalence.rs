@@ -4,7 +4,7 @@
 //! the same fixture. Equality is over the **full** result — same elements, same
 //! order, same values — not a spot check, because the resolvers' output order is
 //! itself contractual: `combined_history` sorts by `(height, txid)` downstream,
-//! and ScriptIndex clients hash the sequence to derive a status.
+//! and `ScriptIndex` clients hash the sequence to derive a status.
 //!
 //! These tests are deliberately backend-free so they run on a plain
 //! `cargo test --workspace`.

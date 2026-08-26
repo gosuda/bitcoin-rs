@@ -930,6 +930,7 @@ const fn compact_size_len(len: usize) -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use bitcoin::{Amount, ScriptBuf};
     use bitcoin_rs_utxo::{SnapshotCoin, SnapshotCoinObserver};

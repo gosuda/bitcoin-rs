@@ -66,13 +66,16 @@ Done:
 * A fatal disconnect closes apply admission and sets the process shutdown token.
   The durable marker prevents a restart on torn authoritative state.
 
-Still open: transaction reconsideration, filter-index backfill, real crash
-replay, and the ignored live `g10_reorg_deep` gate. ZMQ now publishes block
-disconnect notifications through `pubsequence`, but mempool `A`/`R` events remain
-intentionally open.
-Transaction reconsideration requires one production admission pipeline shared
-by Esplora broadcast, P2P relay, and reorg handling. Raw mempool insertion cannot supply
-the required fee, policy, conflict, and ancestry metadata.
+Still open: filter-index backfill, real crash
+replay, and the ignored live `g10_reorg_deep` gate.
+Disconnected transactions are re-admitted through canonical
+`admit_transaction` after the applied tip settles. Duplicate detection uses
+only `Mempool::contains_txid`; the transaction cache is lookup and relay.
+Re-admission reverses disconnected **block** order (ancestor-first) and keeps
+each block's original transaction order, skipping coinbases. ZMQ now publishes
+block disconnect notifications through `pubsequence`, but mempool `A`/`R`
+events remain intentionally open. Raw mempool insertion cannot supply the
+required fee, policy, conflict, and ancestry metadata.
 
 ## Why it matters
 
@@ -187,7 +190,7 @@ Open:
 
 | Piece | Notes |
 |---|---|
-| Mempool reconsideration | Block transactions need the same production admission pipeline as Esplora broadcast and future P2P relay. Direct insertion is invalid because it fabricates admission metadata |
+| Mempool re-admission | Implemented: `reorg::readmit_disconnected_transactions` walks disconnected blocks ancestor-first, transactions forward (skipping coinbase), and calls `bitcoin_rs_rpc::admission::admit_transaction`. `Mempool::contains_txid` is the sole duplicate authority. Failures drop that transaction only. |
 | Mempool sequence events | Mempool `A`/`R` notifications remain intentionally absent until event sequencing and removal reasons are redesigned |
 | Filter-index backfill | a gap leaves the index unavailable from that point, by design; nothing repairs it |
 | Real crash replay | the node detects and refuses torn disconnect state, but cannot replay or repair it in place |

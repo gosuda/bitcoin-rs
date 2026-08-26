@@ -135,8 +135,9 @@ pub struct TxAcceptanceFact {
     pub txid: Txid,
     /// Witness transaction id.
     pub wtxid: Wtxid,
-    /// Whether the transaction would be accepted under current policy.
-    pub allowed: bool,
+    /// Whether the transaction was accepted or rejected. `None` means package
+    /// evaluation stopped before this row was validated.
+    pub allowed: Option<bool>,
     /// Policy virtual size in vbytes.
     pub vsize: u32,
     /// Consensus weight.
@@ -182,6 +183,12 @@ pub enum AcceptanceRejectReason {
     /// Conflicting replacement fails BIP125.
     #[error(transparent)]
     Replacement(#[from] RbfError),
+    /// Next-block BIP68 relative sequence locks are unmet.
+    #[error("non-BIP68-final")]
+    NonBip68Final,
+    /// Consensus script verification failed.
+    #[error("script-verify-flag-failed")]
+    ScriptVerify,
 }
 
 /// Evaluates non-mutating package acceptance policy facts.
@@ -226,7 +233,7 @@ pub fn evaluate_package_acceptance(
             results.push(TxAcceptanceFact {
                 txid: tx.compute_txid(),
                 wtxid: tx.compute_wtxid(),
-                allowed: false,
+                allowed: None,
                 vsize: context.vsize,
                 weight: tx.weight().to_wu(),
                 sigop_cost: context.sigop_cost,
@@ -245,7 +252,7 @@ pub fn evaluate_package_acceptance(
             mempool_min_fee,
             incremental_relay_fee_sat_per_kvb,
         );
-        if !fact.allowed {
+        if fact.allowed == Some(false) {
             package_failed = true;
         }
         results.push(fact);
@@ -304,7 +311,7 @@ fn evaluate_one(
     TxAcceptanceFact {
         txid,
         wtxid,
-        allowed: reject.is_none(),
+        allowed: Some(reject.is_none()),
         vsize,
         weight,
         sigop_cost: context.sigop_cost,
@@ -497,6 +504,7 @@ fn is_standard_nulldata(script: &Script) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use bitcoin::absolute::LockTime;
@@ -876,7 +884,10 @@ mod tests {
         let txs: Vec<Transaction> = (0..=MAX_PACKAGE_COUNT)
             .map(|i| {
                 let mut tx = standard_tx(Version::ONE);
-                tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51, i as u8]);
+                tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![
+                    0x51,
+                    u8::try_from(i).expect("package index fits u8"),
+                ]);
                 tx
             })
             .collect();
@@ -899,14 +910,14 @@ mod tests {
         let facts = evaluate_package_acceptance(
             &pool,
             &policy(),
-            &[tx.clone()],
+            std::slice::from_ref(&tx),
             &[ctx(1_000, 100, false)],
             None,
             1_000,
         );
         assert!(facts.package_error.is_none());
         let row = &facts.results[0];
-        assert!(row.allowed);
+        assert_eq!(row.allowed, Some(true));
         assert_eq!(row.sigop_cost, 2);
         assert_eq!(row.base_fee, Some(1_000));
         assert_eq!(row.txid, tx.compute_txid());
@@ -931,8 +942,8 @@ mod tests {
             facts.results[0].reject_reason,
             Some(AcceptanceRejectReason::MissingInputs)
         );
-        assert!(!facts.results[0].allowed);
-        assert!(!facts.results[1].allowed);
+        assert_eq!(facts.results[0].allowed, Some(false));
+        assert_eq!(facts.results[1].allowed, None);
         assert_eq!(facts.results[1].reject_reason, None);
         assert_eq!(facts.results[1].base_fee, None);
     }
@@ -947,7 +958,7 @@ mod tests {
         let over = evaluate_package_acceptance(
             &pool,
             &policy(),
-            &[tx.clone()],
+            std::slice::from_ref(&tx),
             &[ctx(10_000, 100, false)],
             Some(50_000),
             1_000,

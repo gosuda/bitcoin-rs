@@ -115,6 +115,13 @@ pub struct Mempool {
     /// Exact running sum of `fee` over `entries`. A `u32` entry id bounds the
     /// successful-entry sum below `u128::MAX`.
     total_fee: u128,
+    /// Ordered multiset of live `MempoolEntry.fee_rate` values keyed to their
+    /// occurrence count. Mutation paths use it to advance `fee_rate_floor`
+    /// when the last entry at the current floor leaves.
+    fee_rate_counts: std::collections::BTreeMap<u64, u64>,
+    /// Cached first key of `fee_rate_counts`. Reads are `O(1)`; inserts and
+    /// removals maintain it together with the multiset.
+    fee_rate_floor: Option<u64>,
     /// Signed additive mining-only fee overlay, keyed by txid. A delta may be
     /// stored before its transaction is admitted, accumulates across calls,
     /// survives ordinary removal and replacement, and is erased only when the
@@ -221,6 +228,8 @@ impl Mempool {
             limits,
             total_vsize: 0,
             total_fee: 0,
+            fee_rate_counts: std::collections::BTreeMap::new(),
+            fee_rate_floor: None,
             fee_deltas: HashMap::new(),
             estimator: FeeEstimator::new(),
             sequence: core::sync::atomic::AtomicU64::new(0),
@@ -239,6 +248,8 @@ impl Mempool {
         self.pareto = ParetoFront::new();
         self.total_vsize = 0;
         self.total_fee = 0;
+        self.fee_rate_counts.clear();
+        self.fee_rate_floor = None;
         self.fee_deltas.clear();
         self.estimator = FeeEstimator::new();
         self.bump_sequence();
@@ -335,12 +346,18 @@ impl Mempool {
         let txid = entry.txid;
         let added_vsize = u64::from(entry.vsize);
         let added_fee = entry.fee;
+        let added_fee_rate = entry.fee_rate;
         let index = self.entries.insert(entry);
         let Ok(id) = EntryId::try_from(index) else {
             panic!("validate_insert accepted an entry id that does not fit u32");
         };
         self.total_vsize = self.total_vsize.saturating_add(added_vsize);
         self.total_fee += u128::from(added_fee);
+        *self.fee_rate_counts.entry(added_fee_rate).or_insert(0) += 1;
+        self.fee_rate_floor = Some(
+            self.fee_rate_floor
+                .map_or(added_fee_rate, |floor| floor.min(added_fee_rate)),
+        );
         self.by_txid.insert(txid, id);
         self.index_entry(id);
         // The closure is taken after `index_entry`, because a transaction can
@@ -598,15 +615,28 @@ impl Mempool {
     /// Returns the minimum `fee_rate` (sat/kvB) among all entries, or `None`
     /// for an empty pool.
     ///
-    /// Linear pass over `self.entries`. Used for `mempoolminfee` tightening
-    /// and fee-histogram tail bounds. The min is over `MempoolEntry.fee_rate`
-    /// which is already pre-computed at insert time.
+    /// Reads the cached first key of the maintained fee-rate multiset so
+    /// admission tightening does not scan `entries` or descend the tree.
+    /// The min is over `MempoolEntry.fee_rate`, which is pre-computed at insert
+    /// time.
     #[must_use]
     pub fn lowest_fee_rate(&self) -> Option<u64> {
-        self.entries
-            .iter()
-            .map(|(_index, entry)| entry.fee_rate)
-            .min()
+        debug_assert_eq!(
+            self.fee_rate_floor,
+            self.fee_rate_counts
+                .first_key_value()
+                .map(|(&rate, _count)| rate),
+            "cached fee-rate floor drifted from its multiset"
+        );
+        debug_assert_eq!(
+            self.fee_rate_floor,
+            self.entries
+                .iter()
+                .map(|(_index, entry)| entry.fee_rate)
+                .min(),
+            "maintained fee-rate floor drifted from the entries it summarizes"
+        );
+        self.fee_rate_floor
     }
 
     /// Returns mempool entry ids whose `fee_rate` >= `threshold_sat_per_kvb`.
@@ -888,6 +918,32 @@ impl Mempool {
             let entry = self.entries.remove(index);
             self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
             self.total_fee -= u128::from(entry.fee);
+            let removed_floor = match self.fee_rate_counts.entry(entry.fee_rate) {
+                std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                    let count = occupied.get_mut();
+                    if *count > 1 {
+                        *count -= 1;
+                        false
+                    } else {
+                        let removed_floor = self.fee_rate_floor == Some(entry.fee_rate);
+                        occupied.remove();
+                        removed_floor
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(_) => {
+                    debug_assert!(
+                        false,
+                        "fee-rate multiset drifted: removed a rate with no tracked count"
+                    );
+                    false
+                }
+            };
+            if removed_floor {
+                self.fee_rate_floor = self
+                    .fee_rate_counts
+                    .first_key_value()
+                    .map(|(&rate, _count)| rate);
+            }
             removed_any = true;
             self.by_txid.remove(&entry.txid);
             // A departure that is not a confirmation: eviction, replacement,
@@ -1297,6 +1353,7 @@ const fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(OutPoint, EntryId
     (outpoint, EntryId::MIN)..=(outpoint, EntryId::MAX)
 }
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -1629,6 +1686,156 @@ mod tests {
         pool.insert_entry(low)?;
 
         assert_eq!(pool.lowest_fee_rate(), Some(1_500));
+        Ok(())
+    }
+
+    fn independent_lowest_fee_rate(pool: &Mempool) -> Option<u64> {
+        pool.entries
+            .iter()
+            .map(|(_index, entry)| entry.fee_rate)
+            .min()
+    }
+
+    fn assert_floor(pool: &Mempool, expected: Option<u64>, stage: &str) {
+        assert_eq!(
+            pool.lowest_fee_rate(),
+            expected,
+            "maintained floor mismatched expected after {stage}"
+        );
+        assert_eq!(
+            pool.lowest_fee_rate(),
+            independent_lowest_fee_rate(pool),
+            "maintained floor drifted from entries after {stage}"
+        );
+    }
+
+    #[test]
+    fn lowest_fee_rate_tracks_duplicate_rates_and_every_removal_path() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            max_total_bytes: 10_000,
+            ..MempoolLimits::default()
+        });
+        assert_floor(&pool, None, "empty");
+
+        let high = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 1_000, 5_000, 1, 7);
+        pool.insert_entry(high)?;
+        assert_floor(&pool, Some(5_000), "insert high");
+
+        let low_a_tx = tx(2, Vec::new());
+        let low_a_txid = low_a_tx.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low_a_tx), 1_000, 1_500, 1, 7))?;
+        assert_floor(&pool, Some(1_500), "insert lower rate");
+
+        let low_b_tx = tx(3, Vec::new());
+        let low_b_txid = low_b_tx.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(low_b_tx), 1_000, 1_500, 1, 7))?;
+        assert_floor(&pool, Some(1_500), "duplicate min rate");
+
+        let removed = pool.remove_by_txid(&low_a_txid);
+        assert_eq!(removed.len(), 1);
+        assert_floor(&pool, Some(1_500), "explicit remove of one duplicate min");
+
+        let evicted = pool.evict_below_fee_rate(2_000);
+        assert_eq!(evicted, vec![low_b_txid]);
+        assert_floor(&pool, Some(5_000), "evict_below remaining min");
+
+        let mined = tx(4, Vec::new());
+        let mined_txid = mined.compute_txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(mined.clone()),
+            1_000,
+            2_000,
+            1,
+            7,
+        ))?;
+        assert_floor(&pool, Some(2_000), "insert new min before block");
+        let removed = pool.remove_for_block(&[&mined], &[mined_txid], 8);
+        assert_eq!(removed.len(), 1);
+        assert_floor(&pool, Some(5_000), "remove_for_block of current min");
+
+        let bulky_low = MempoolEntry::new(Arc::new(tx(5, Vec::new())), 5_000, 5_000, 1, 7);
+        pool.insert_entry(bulky_low)?;
+        assert_floor(&pool, Some(1_000), "insert eviction victim");
+        let evicted = pool.enforce_size_limit(5_000);
+        assert_eq!(evicted.len(), 1);
+        assert_floor(&pool, Some(5_000), "size-limit eviction of min");
+
+        pool.prioritise(
+            pool.iter_txids()
+                .into_iter()
+                .next()
+                .expect("survivor after eviction"),
+            250_000,
+        )
+        .expect("prioritise must not touch actual fee_rate");
+        assert_floor(&pool, Some(5_000), "prioritise overlay");
+
+        pool.clear();
+        assert_floor(&pool, None, "clear");
+        Ok(())
+    }
+
+    #[test]
+    fn lowest_fee_rate_tracks_bip125_replacement() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let prev = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0x11; 32]),
+            vout: 0,
+        };
+        let original = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: prev,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        pool.insert_entry(MempoolEntry::new(Arc::new(original), 1_000, 2_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx(8, Vec::new())),
+            1_000,
+            1_500,
+            1,
+            7,
+        ))?;
+        assert_floor(&pool, Some(1_500), "before replacement");
+
+        let replacement = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: prev,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(900),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x52]),
+            }],
+        };
+        pool.replace_transaction(
+            crate::ReplacementCandidate::new(Arc::new(replacement), 1_000, 4_000, 1),
+            10,
+            1,
+            4,
+        )
+        .expect("replacement must apply");
+        assert_floor(
+            &pool,
+            Some(1_500),
+            "replacement must not drop the bystander min",
+        );
         Ok(())
     }
 

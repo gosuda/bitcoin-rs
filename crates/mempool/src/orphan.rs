@@ -352,6 +352,7 @@ impl OrphanPool {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use alloc::vec::Vec;
 

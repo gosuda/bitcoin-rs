@@ -19,7 +19,7 @@ This policy applies to all persistent storage surfaces in `bitcoin-rs`:
 | Key-Value Storage | `crates/storage/src/column_families.rs` | Datadir root (`fjall`, `rocksdb`, `mdbx`, `redb`) | **None** (See Gap) |
 | Flat Block Files | `crates/storage/src/block_file.rs` | `blocks/blkNNNNN.dat` | Magic `BRSB` (`0x42525342`), no version field |
 | UTXO Snapshot | `crates/utxo/src/snapshot.rs` | `utxo-v4.dat` inside checkpoint directory | Magic `0x5554584F`, header version `4` |
-| Chainstate Checkpoint | `crates/node/src/checkpoint.rs` | `chainstate-checkpoints/CURRENT` & `gen-N/` | Manifest `1`, Headers `1`, UTXO `4`, CoinStats `1` |
+| Chainstate Checkpoint | `crates/node/src/checkpoint.rs` | `chainstate-checkpoints/CURRENT` & `gen-N/` | Manifest `1`, Headers `2`, UTXO `4`, CoinStats `1` |
 
 ### 2.1 Key-Value Store Column Families
 `KvStore` (`crates/storage/src/trait_.rs`) abstracts backend storage over twelve fixed column families defined in `ColumnFamily` (`crates/storage/src/column_families.rs`):
@@ -60,7 +60,7 @@ Storage backends (`FjallStore` in `fjall_impl.rs`, `RocksDbStore` in `rocksdb_im
 `crates/node/src/checkpoint.rs` persists full chainstate checkpoints under `chainstate-checkpoints/`.
 - `CURRENT` file contains `CurrentV1` JSON referencing an active generation directory (e.g. `gen-0000000000000001/`).
 - `manifest-v1.json` (`CheckpointManifestV1`) records component versions and codec identifier strings:
-  - `headers`: version `1`, codec `"bitcoin-rs-canonical-headers"`.
+  - `headers`: version `2`, file `headers-v2.dat`, codec `"bitcoin-rs-canonical-headers-v2"`. Each authenticated row is an 80-byte header plus an 8-byte little-endian cumulative transaction count. Old `headers-v1.dat` stores are not read or migrated.
   - `utxo`: version `4`, codec `"bitcoin-rs-utxo-spendable-v1"`.
   - `coinstats`: version `1`, codec `"bitcoin-rs-coinstats"`.
 
@@ -122,12 +122,13 @@ falls all the way back to a cold start.
 
 A field that carries **information a node can do without** must therefore be
 `#[serde(default)]`, and its absent value must be distinguishable from a real
-one. `CheckpointTipV1::chain_tx_count` is the worked example: it defaults to `0`,
-which is Bitcoin Core's own "unset" encoding for `m_chain_tx_count`, and every
-reader treats `0` as *unknown* rather than *zero transactions*. A chain applied
-before the field existed cannot recover the number — nothing short of re-reading
-every block body would — so it stays unknown until that node is resynced, and
-nothing is migrated in place.
+one.
+
+Cumulative chain transaction counts are not an additive manifest field. They are
+authenticated inside each headers-v2 row and rebuilt only by writing and reading
+that format. A node that still has `headers-v1.dat` takes the ordinary
+incompatible-checkpoint path and starts cold; there is no compatibility reader
+and no in-place conversion.
 
 A field the node **cannot** do without is a different case and takes the version
 bump in section 6.2.

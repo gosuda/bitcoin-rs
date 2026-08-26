@@ -48,4 +48,4 @@ pub use auth::Auth;
 
 pub use error::RpcError;
 pub use handlers::Handler;
-pub use server::{RpcLifecycle, RpcServer};
+pub use server::{RpcLifecycle, RpcServer, RpcWarnings};

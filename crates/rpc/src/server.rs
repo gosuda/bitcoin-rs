@@ -166,21 +166,30 @@ struct Warmup {
     status: String,
 }
 
-/// Shared RPC request lifecycle state for one serve loop: warmup, shutdown
-/// observation, and authoritative in-flight command tracking for `getrpcinfo`.
+/// Source of node-owned warning messages projected by RPC.
 ///
-/// This is the single request/error lifecycle owner demanded by the protocol
-/// ledger. It adapts Core's `g_rpc_warmup_mutex`/`fRPCInWarmup`, `g_rpc_running`
-/// (via the shutdown flag passed to [`RpcServer::serve_with_shutdown`]), and
-/// `g_rpc_server_info.active_commands` without any handler-domain behavior.
+/// Implementations return warnings in report order without copying a second
+/// transport-owned registry.
+pub trait RpcWarnings: Send + Sync {
+    /// Active warning messages in report order.
+    fn messages(&self) -> Vec<String>;
+}
+
+/// Shared request lifecycle state for one RPC serve loop.
+///
+/// Owns warmup, shutdown observation, authoritative process uptime, warning
+/// projection, and in-flight command tracking for `getrpcinfo`.
 pub struct RpcLifecycle {
     /// Shutdown flag; commands observed after it is set are rejected.
     shutdown: Arc<AtomicBool>,
+    /// Node-owned wake invoked after the first transition to shutdown.
+    shutdown_notify: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Process start instant recorded before the serve loop begins work.
     process_start: Instant,
     warmup: Mutex<Warmup>,
     active_commands: Mutex<Vec<CommandExecution>>,
     next_command_id: AtomicU64,
+    warnings: Option<Arc<dyn RpcWarnings>>,
 }
 
 impl RpcLifecycle {
@@ -190,17 +199,42 @@ impl RpcLifecycle {
     /// server is constructed with fully injected node state; owners sequencing
     /// a slower startup call [`Self::set_warmup_starting`] before serving.
     #[must_use]
-    pub fn new(shutdown: Arc<AtomicBool>) -> Self {
+    pub fn new(shutdown: Arc<AtomicBool>, process_start: Instant) -> Self {
         Self {
             shutdown,
-            process_start: Instant::now(),
+            shutdown_notify: None,
+            process_start,
             warmup: Mutex::new(Warmup {
                 in_warmup: false,
                 status: WARMUP_DEFAULT_STATUS.to_owned(),
             }),
             active_commands: Mutex::new(Vec::new()),
             next_command_id: AtomicU64::new(0),
+            warnings: None,
         }
+    }
+
+    /// Seconds-joined warning text from the node-owned registry, when attached.
+    #[must_use]
+    pub fn warnings_text(&self) -> String {
+        self.warnings
+            .as_ref()
+            .map(|warnings| warnings.messages().join("; "))
+            .unwrap_or_default()
+    }
+
+    /// Attaches the node-owned warning registry projected by RPC info methods.
+    #[must_use]
+    pub fn with_warnings(mut self, warnings: Arc<dyn RpcWarnings>) -> Self {
+        self.warnings = Some(warnings);
+        self
+    }
+
+    /// Attaches the node-owned wake for the process-wide shutdown broadcast.
+    #[must_use]
+    pub fn with_shutdown_notifier(mut self, notify: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.shutdown_notify = Some(notify);
+        self
     }
 
     /// Shared shutdown flag observed by the serve loop and mining waiters.
@@ -215,9 +249,16 @@ impl RpcLifecycle {
         self.shutdown.load(Ordering::Acquire)
     }
 
-    /// Requests process shutdown and wakes waiters that observe the shared flag.
+    /// Requests process shutdown and wakes node-owned waiters exactly once.
     pub fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
+        if self
+            .shutdown
+            .compare_exchange(false, true, Ordering::Release, Ordering::Acquire)
+            .is_ok()
+            && let Some(notify) = &self.shutdown_notify
+        {
+            notify();
+        }
     }
 
     /// Seconds since process start was recorded.
@@ -366,6 +407,20 @@ fn serve_connection(
                 return Ok(());
             }
             continue;
+        }
+
+        let internal_route = path == "/internal" || path.starts_with("/internal/");
+        if internal_route
+            && matches!(request.method.as_str(), "GET" | "POST")
+            && !auth.validate_header(request.authorization.as_deref())
+        {
+            if request.authorization.is_some() {
+                // Core delays the reply only for present-but-wrong
+                // credentials, never for a missing header.
+                thread::sleep(AUTH_FAILURE_DELAY);
+            }
+            write_unauthorized(reader.get_mut())?;
+            return Ok(());
         }
 
         if request.method == "GET" {
@@ -920,12 +975,13 @@ fn write_rest_response(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::context::Context;
 
     fn ready_lifecycle() -> RpcLifecycle {
-        RpcLifecycle::new(Arc::new(AtomicBool::new(false)))
+        RpcLifecycle::new(Arc::new(AtomicBool::new(false)), Instant::now())
     }
 
     fn test_handler() -> Handler {
@@ -938,7 +994,7 @@ mod tests {
         let auth = Arc::new(Auth::basic("alice", "secret"));
         let handler = Arc::new(Handler::new(Arc::new(Context::new())));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown)));
+        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown), Instant::now()));
         let server = RpcServer::bind(
             "127.0.0.1:0",
             auth,
@@ -952,6 +1008,22 @@ mod tests {
         std::thread::sleep(core::time::Duration::from_millis(150));
         lifecycle.request_shutdown();
         handle.join().expect("join serve thread")
+    }
+
+    #[test]
+    fn request_shutdown_notifies_node_once() {
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_count = Arc::clone(&wakes);
+        let lifecycle = RpcLifecycle::new(Arc::new(AtomicBool::new(false)), Instant::now())
+            .with_shutdown_notifier(Arc::new(move || {
+                wake_count.fetch_add(1, Ordering::Relaxed);
+            }));
+
+        lifecycle.request_shutdown();
+        lifecycle.request_shutdown();
+
+        assert!(lifecycle.is_shutdown());
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1135,7 +1207,8 @@ mod tests {
         let lifecycle = ready_lifecycle();
         let handler = test_handler();
 
-        for body in [br#"42"# as &[u8], br#""text""#] {
+        let bodies: [&[u8]; 2] = [br"42", br#""text""#];
+        for body in bodies {
             let response = handle_json(&lifecycle, &handler, body);
             let parsed = response.body.expect("JSON-RPC response body");
             let error = parsed.get("error").expect("error member");
@@ -1221,7 +1294,7 @@ mod tests {
         let body = response.body.expect("empty batch reply body");
 
         assert_eq!(status, 200);
-        assert_eq!(body.as_array().map(|a| a.len()), Some(0));
+        assert_eq!(body.as_array().map(sonic_rs::Array::len), Some(0));
     }
 
     #[test]
@@ -1364,7 +1437,7 @@ mod tests {
 
     #[test]
     fn shutdown_observed_between_commands_rejects_with_client_not_connected() {
-        let lifecycle = RpcLifecycle::new(Arc::new(AtomicBool::new(true)));
+        let lifecycle = RpcLifecycle::new(Arc::new(AtomicBool::new(true)), Instant::now());
         let handler = test_handler();
         let response = handle_json(
             &lifecycle,
@@ -1421,14 +1494,14 @@ mod tests {
         let auth = Arc::new(Auth::basic("alice", "secret"));
         let handler = Arc::new(Handler::new(Arc::new(Context::new())));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown)));
+        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown), Instant::now()));
         let server = RpcServer::bind(
             "127.0.0.1:0",
             auth,
             handler,
             Arc::clone(&lifecycle),
             4,
-            Duration::from_millis(2_000),
+            Duration::from_secs(2),
             false,
         )?;
         let address = server.local_addr()?;
@@ -1454,14 +1527,14 @@ mod tests {
         let auth = Arc::new(Auth::basic("alice", "secret"));
         let handler = Arc::new(Handler::new(Arc::new(Context::new())));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown)));
+        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown), Instant::now()));
         let server = RpcServer::bind(
             "127.0.0.1:0",
             auth,
             handler,
             Arc::clone(&lifecycle),
             4,
-            Duration::from_millis(2_000),
+            Duration::from_secs(2),
             false,
         )?;
         let address = server.local_addr()?;

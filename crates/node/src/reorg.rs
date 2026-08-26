@@ -6,8 +6,10 @@
 //! Without it the node follows the chain forward and cannot leave a branch that
 //! loses, which is the difference between a chain follower and a full node.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use bitcoin::Transaction;
 use bitcoin::consensus::Decodable as _;
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_chain::{NodeId, ReorgPlan, plan_reorg};
@@ -282,14 +284,20 @@ fn execute_loaded_plan(
     connect: &[LoadedBranchBody],
     transition: &crate::apply::ChainTransition<'_>,
 ) -> (usize, core::result::Result<(), ReorgError>) {
+    // Tip-first disconnect order. Re-admission reverses only the block list so
+    // ancestor blocks land first while each block keeps its original tx order.
+    let mut disconnected_blocks: Vec<&[Transaction]> = Vec::new();
     for body in disconnect {
         match crate::apply::disconnect_block_admitted(handles, &body.block, transition) {
-            Ok(_) => {}
+            Ok(_) => {
+                disconnected_blocks.push(body.block.txdata.as_slice());
+            }
             Err(error @ (DisconnectError::Fatal { .. } | DisconnectError::MarkerStuck { .. })) => {
                 handles.admission.close_permanently();
                 return (0, Err(ReorgError::Fatal(Box::new(error))));
             }
             Err(error) => {
+                readmit_disconnected_transactions(handles, &disconnected_blocks, transition);
                 return (
                     0,
                     Err(ReorgError::Refused {
@@ -319,6 +327,7 @@ fn execute_loaded_plan(
                 } else {
                     Vec::new()
                 };
+                readmit_disconnected_transactions(handles, &disconnected_blocks, transition);
                 return (
                     connected,
                     Err(ReorgError::ConnectFailed {
@@ -331,7 +340,36 @@ fn execute_loaded_plan(
             }
         }
     }
+    readmit_disconnected_transactions(handles, &disconnected_blocks, transition);
     (connected, Ok(()))
+}
+
+/// Re-admits disconnected non-coinbase transactions against the applied tip.
+///
+/// Blocks are walked ancestor-first (the reverse of tip-first disconnect).
+/// Transactions inside each block keep their original order; coinbases are
+/// skipped. Canonical `admit_transaction` is the sole readmission path.
+/// Failures drop that transaction only — they never fail the reorg.
+fn readmit_disconnected_transactions(
+    handles: &ApplyHandles,
+    disconnected_blocks: &[&[Transaction]],
+    _transition: &crate::apply::ChainTransition<'_>,
+) {
+    if disconnected_blocks.is_empty() {
+        return;
+    }
+    let admission = bitcoin_rs_rpc::admission::AdmissionHandles {
+        mempool: Arc::clone(&handles.mempool),
+        utxo: Arc::clone(&handles.utxo),
+        applied_tip: Arc::clone(&handles.applied_tip),
+        block_tree: Arc::clone(&handles.block_tree),
+        transactions: Arc::clone(&handles.transactions),
+    };
+    for txdata in disconnected_blocks.iter().rev() {
+        for tx in txdata.iter().skip(1) {
+            let _ = bitcoin_rs_rpc::admission::admit_transaction(&admission, tx, None);
+        }
+    }
 }
 
 fn current_reorg_plan(

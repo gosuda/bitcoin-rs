@@ -30,6 +30,7 @@ fn context() -> CandidateContext {
         current_time: 1_700_000_600,
         locktime_cutoff: 1_700_000_000,
         network: Network::Regtest,
+        csv_active: true,
         segwit_active: true,
         max_weight: 4_000_000,
         max_size: 4_000_000,
@@ -73,12 +74,12 @@ fn child(label: u64, parent: Txid) -> Transaction {
     }
 }
 
-fn fill_independent(size: usize) -> Mempool {
+fn fill_independent(size: u64) -> Mempool {
     let mut mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
     });
-    for index in 0..size as u64 {
+    for index in 0..size {
         mempool
             .insert_entry(MempoolEntry::new(
                 Arc::new(independent(index)),
@@ -92,18 +93,18 @@ fn fill_independent(size: usize) -> Mempool {
     mempool
 }
 
-fn fill_chains(chains: usize, depth: usize) -> Mempool {
+fn fill_chains(chains: u64, depth: u64) -> Mempool {
     let mut mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
     });
-    for chain in 0..chains as u64 {
+    for chain in 0..chains {
         let mut parent = independent(chain.saturating_mul(1_000));
         let mut parent_txid = parent.compute_txid();
         mempool
             .insert_entry(MempoolEntry::new(Arc::new(parent), 180, 2_000, chain, 100))
             .expect("chain root inserts");
-        for depth_index in 1..depth as u64 {
+        for depth_index in 1..depth {
             parent = child(chain.saturating_mul(1_000) + depth_index, parent_txid);
             parent_txid = parent.compute_txid();
             mempool
@@ -133,6 +134,9 @@ fn bench_candidate(c: &mut Criterion) {
     let chain_snapshot = fill_chains(64, 8).mining_snapshot();
     let payout = ScriptBuf::from_bytes(vec![0x51]);
     let context = context();
+    let mut congested = context.clone();
+    congested.max_weight = 50_000;
+    congested.max_size = 50_000;
 
     group.bench_function("empty", |b| {
         b.iter(|| {
@@ -163,6 +167,18 @@ fn bench_candidate(c: &mut Criterion) {
                     black_box(&payout),
                 )
                 .expect("chain candidate"),
+            )
+        });
+    });
+    group.bench_function("full_capacity_2000", |b| {
+        b.iter(|| {
+            black_box(
+                assemble_candidate(
+                    black_box(&congested),
+                    black_box(&independent_snapshot),
+                    black_box(&payout),
+                )
+                .expect("full-capacity candidate"),
             )
         });
     });

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,11 +25,26 @@ impl ShutdownBroadcast {
         }
     }
 
-    /// Marks the request and wakes every parked waiter.
-    fn request(&self) {
+    /// Marks the first request and wakes every parked waiter exactly once.
+    fn request(&self) -> bool {
         let mut requested = self.requested.lock();
+        if *requested {
+            return false;
+        }
         *requested = true;
         self.wake.notify_all();
+        true
+    }
+
+    /// Stores `flag` with Release ordering, then publishes the first broadcast.
+    fn trigger(&self, flag: &AtomicBool) -> bool {
+        if flag
+            .compare_exchange(false, true, Ordering::Release, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        self.request()
     }
 
     fn requested(&self) -> bool {
@@ -71,15 +87,25 @@ pub fn drain_and_shutdown(deadline: Duration) -> Result<()> {
     Ok(())
 }
 
+/// Sets `flag` before publishing the process-wide shutdown broadcast.
+///
+/// The store uses `Release` so any waiter that wakes from the broadcast can
+/// observe the flag with `Acquire`. Repeated calls stay idempotent: the flag
+/// remains true and the broadcast is published again without a second state
+/// transition.
+pub fn trigger_shutdown(flag: &AtomicBool) -> bool {
+    SHUTDOWN.trigger(flag)
+}
+
 /// Marks shutdown as requested and wakes every [`wait_for_shutdown`] waiter.
 ///
 /// Idempotent. Long-poll style waiters block in [`wait_for_shutdown`] and must
 /// observe a shutdown decision the moment it is made — not at their next
 /// timeout slice — which is the wake Core's shutdown sequence gives its own
-/// long-lived waiters. Every code path that decides to shut the node down
-/// (signal thread, event loop exit, fatal subsystem failure) calls this.
-pub fn request_shutdown() {
-    SHUTDOWN.request();
+/// long-lived waiters. Production signal and event-loop paths call
+/// [`trigger_shutdown`] so the node-owned flag is visible before this wake.
+pub fn request_shutdown() -> bool {
+    SHUTDOWN.request()
 }
 
 /// Returns whether shutdown has been requested.
@@ -99,6 +125,7 @@ pub fn wait_for_shutdown(deadline: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -134,8 +161,8 @@ mod tests {
     fn request_is_idempotent_and_pre_requested_wait_returns_immediately() {
         let broadcast = ShutdownBroadcast::new();
 
-        broadcast.request();
-        broadcast.request();
+        assert!(broadcast.request());
+        assert!(!broadcast.request());
 
         assert!(broadcast.requested());
         assert!(broadcast.wait_for(Duration::ZERO));
@@ -147,5 +174,36 @@ mod tests {
 
         assert!(super::shutdown_requested());
         assert!(super::wait_for_shutdown(Duration::ZERO));
+    }
+
+    #[test]
+    fn trigger_stores_the_flag_before_waiters_observe_the_wake() {
+        let broadcast = Arc::new(ShutdownBroadcast::new());
+        let flag = Arc::new(AtomicBool::new(false));
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let broadcast = Arc::clone(&broadcast);
+                let flag = Arc::clone(&flag);
+                thread::spawn(move || {
+                    assert!(broadcast.wait_for(Duration::from_secs(5)));
+                    assert!(
+                        flag.load(Ordering::Acquire),
+                        "every waiter must see the flag after the broadcast"
+                    );
+                })
+            })
+            .collect();
+
+        thread::sleep(Duration::from_millis(25));
+        assert!(broadcast.trigger(&flag));
+        assert!(!broadcast.trigger(&flag));
+
+        for waiter in waiters {
+            waiter
+                .join()
+                .unwrap_or_else(|_| panic!("shutdown waiter panicked"));
+        }
+        assert!(flag.load(Ordering::Acquire));
+        assert!(broadcast.requested());
     }
 }

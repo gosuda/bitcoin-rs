@@ -62,6 +62,13 @@ pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let verbose = optional_bool(params, 0, false)?;
     let include_sequence = optional_bool(params, 1, false)?;
+    if verbose && include_sequence {
+        // Core's MempoolToJSON rejects this combination with
+        // RPC_INVALID_PARAMETER; the REST twin enforces the same rule.
+        return Err(RpcError::InvalidParameter(
+            "Verbose results cannot contain mempool sequence values.".to_owned(),
+        ));
+    }
     let pool = ctx.mempool.read();
     if verbose {
         let mut object = sonic_rs::Object::new();
@@ -69,9 +76,6 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
             if let Some(entry) = pool.entry_by_txid(&txid) {
                 let _ = object.insert(&txid.to_string(), mempool_entry_json(entry, &pool));
             }
-        }
-        if include_sequence {
-            let _ = object.insert("mempool_sequence", json!(pool.sequence_number()));
         }
         return Ok(Value::from(object));
     }
@@ -211,6 +215,7 @@ fn signed_btc_amount_json(satoshis: i128) -> Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod amount_format_probe {
     use bitcoin::Amount;
     use sonic_rs::JsonValueTrait;
@@ -236,6 +241,7 @@ mod amount_format_probe {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod mempoolminfee_pressure_tests {
     use std::sync::Arc;
 
@@ -260,6 +266,7 @@ mod mempoolminfee_pressure_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -385,23 +392,18 @@ mod tests {
     }
 
     #[test]
-    fn getrawmempool_verbose_sequence_flag_flattens_response() {
+    fn getrawmempool_verbose_with_sequence_is_rejected() {
+        // Core's MempoolToJSON rejects verbose=true with mempool_sequence=true
+        // with RPC_INVALID_PARAMETER. The REST twin enforces the same rule.
         let ctx = Arc::new(Context::new());
         let handler = crate::Handler::new(Arc::clone(&ctx));
-        let result = handler
+        let error = handler
             .dispatch("getrawmempool", &json!([true, true]))
-            .unwrap_or_else(|err| panic!("getrawmempool failed: {err}"));
-        let Some(seq) = result
-            .get("mempool_sequence")
-            .and_then(JsonValueTrait::as_u64)
-        else {
-            panic!("mempool_sequence missing: {result:?}");
-        };
-        assert_eq!(seq, 0);
-        assert!(
-            result.get("txids").is_none(),
-            "verbose response must not use txids wrapper: {result:?}"
-        );
+            .expect_err("verbose+sequence must be rejected");
+        assert!(matches!(
+            error,
+            crate::RpcError::InvalidParameter(msg) if msg.contains("Verbose results cannot contain mempool sequence values")
+        ));
     }
 
     #[test]
@@ -571,6 +573,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod spentby_tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;

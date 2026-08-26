@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
@@ -166,7 +167,10 @@ fn estimatesmartfee_unavailable_then_available_after_block_removals() {
 
 #[test]
 fn getrpcinfo_reports_empty_active_commands_and_logpath_when_wired() {
-    let lifecycle = Arc::new(RpcLifecycle::new(Arc::new(AtomicBool::new(false))));
+    let lifecycle = Arc::new(RpcLifecycle::new(
+        Arc::new(AtomicBool::new(false)),
+        Instant::now(),
+    ));
     let ctx = Arc::new(
         Context::new()
             .with_rpc_lifecycle(Arc::clone(&lifecycle))

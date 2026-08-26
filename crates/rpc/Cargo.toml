@@ -50,6 +50,7 @@ tracing.workspace = true
 proptest.workspace = true
 tempfile = "3"
 criterion.workspace = true
+compact_str.workspace = true
 
 [[bench]]
 name = "chaininfo"

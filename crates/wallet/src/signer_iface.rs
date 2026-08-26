@@ -14,6 +14,19 @@ pub enum SignerError {
     /// The signer refused or could not satisfy the PSBT.
     #[error("external signer rejected PSBT: {0}")]
     Rejected(String),
+    /// A legacy input supplied only witness UTXO metadata, which does not
+    /// prove that the caller provided the transaction output being spent.
+    #[error("PSBT input {index} requires a matching non-witness UTXO")]
+    UnsafeLegacyPrevout {
+        /// Input whose previous output was not proven.
+        index: usize,
+    },
+    /// A legacy input's non-witness transaction does not prove its outpoint.
+    #[error("PSBT input {index} non-witness UTXO does not match its previous outpoint")]
+    MismatchedNonWitnessUtxo {
+        /// Input whose previous transaction or output did not match.
+        index: usize,
+    },
     /// The signer returned a PSBT that does not match the requested transaction.
     #[error("external signer returned an unrelated PSBT")]
     MismatchedPsbt,
@@ -28,20 +41,54 @@ pub trait ExternalSigner: Send + Sync {
     fn sign_psbt(&self, psbt: &Psbt) -> Result<Psbt, SignerError>;
 }
 
-/// Signs `psbt` with caller-provided keys.
+/// Signs `psbt` with caller-provided keys after proving legacy prevouts.
 ///
 /// The keys exist only for this call: they are never stored in wallet state
 /// and are dropped when the call returns. Only inputs whose scripts reference
 /// a supplied key are signed; every other input passes through unchanged.
+/// Legacy inputs require a matching non-witness transaction because their
+/// signatures do not commit to the spent output metadata.
 pub fn sign_psbt_with_caller_keys(
     psbt: &Psbt,
     caller_keys: &[PrivateKey],
+) -> Result<Psbt, SignerError> {
+    sign_psbt_with_policy(psbt, caller_keys, LegacyPrevoutPolicy::RequireProof)
+}
+
+/// Signs `psbt` using prevouts explicitly asserted by the caller.
+///
+/// This is restricted to interfaces such as `signrawtransactionwithkey` whose
+/// contract makes the caller responsible for the supplied previous outputs.
+pub fn sign_psbt_with_explicit_prevouts(
+    psbt: &Psbt,
+    caller_keys: &[PrivateKey],
+) -> Result<Psbt, SignerError> {
+    sign_psbt_with_policy(
+        psbt,
+        caller_keys,
+        LegacyPrevoutPolicy::ExplicitCallerAssertion,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyPrevoutPolicy {
+    RequireProof,
+    ExplicitCallerAssertion,
+}
+
+fn sign_psbt_with_policy(
+    psbt: &Psbt,
+    caller_keys: &[PrivateKey],
+    legacy_prevout_policy: LegacyPrevoutPolicy,
 ) -> Result<Psbt, SignerError> {
     let secp = Secp256k1::new();
     let mut signed = psbt.clone();
     let tx = psbt.unsigned_tx.clone();
     let mut cache = SighashCache::new(&tx);
     for index in 0..psbt.inputs.len() {
+        if legacy_prevout_policy == LegacyPrevoutPolicy::RequireProof {
+            require_proven_legacy_prevout(psbt, index)?;
+        }
         let utxo = psbt
             .spend_utxo(index)
             .map_err(|error| SignerError::Rejected(error.to_string()))?;
@@ -52,6 +99,65 @@ pub fn sign_psbt_with_caller_keys(
         }
     }
     Ok(signed)
+}
+
+fn require_proven_legacy_prevout(psbt: &Psbt, index: usize) -> Result<(), SignerError> {
+    let input = psbt
+        .inputs
+        .get(index)
+        .ok_or_else(|| SignerError::Rejected("psbt input missing".to_owned()))?;
+    let txin =
+        psbt.unsigned_tx.input.get(index).ok_or_else(|| {
+            SignerError::Rejected("unsigned transaction input missing".to_owned())
+        })?;
+    let spend_utxo = if let Some(utxo) = input.witness_utxo.as_ref() {
+        utxo
+    } else if let Some(transaction) = input.non_witness_utxo.as_ref() {
+        let vout = usize::try_from(txin.previous_output.vout)
+            .map_err(|_| SignerError::MismatchedNonWitnessUtxo { index })?;
+        transaction
+            .output
+            .get(vout)
+            .ok_or(SignerError::MismatchedNonWitnessUtxo { index })?
+    } else {
+        return Ok(());
+    };
+
+    if !is_legacy_prevout(psbt, index, spend_utxo) {
+        return Ok(());
+    }
+
+    let transaction = input
+        .non_witness_utxo
+        .as_ref()
+        .ok_or(SignerError::UnsafeLegacyPrevout { index })?;
+    if transaction.compute_txid() != txin.previous_output.txid {
+        return Err(SignerError::MismatchedNonWitnessUtxo { index });
+    }
+    let proven_utxo = transaction
+        .output
+        .get(
+            usize::try_from(txin.previous_output.vout)
+                .map_err(|_| SignerError::MismatchedNonWitnessUtxo { index })?,
+        )
+        .ok_or(SignerError::MismatchedNonWitnessUtxo { index })?;
+    if proven_utxo != spend_utxo {
+        return Err(SignerError::MismatchedNonWitnessUtxo { index });
+    }
+    Ok(())
+}
+
+fn is_legacy_prevout(psbt: &Psbt, index: usize, utxo: &TxOut) -> bool {
+    if utxo.script_pubkey.is_witness_program() {
+        return false;
+    }
+    if !utxo.script_pubkey.is_p2sh() {
+        return true;
+    }
+    !psbt.inputs[index]
+        .redeem_script
+        .as_ref()
+        .is_some_and(|script| script.is_witness_program())
 }
 
 fn sign_ecdsa_input(

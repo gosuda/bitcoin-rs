@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Focused network RPC coverage through shared `NetworkControls`.
 
 use std::net::SocketAddr;
@@ -162,8 +163,7 @@ fn disconnectnode_by_address_and_id_with_exact_missing_error() {
     let current_id = controls
         .connected_peers()
         .first()
-        .map(|peer| peer.node_id)
-        .unwrap_or(node_id);
+        .map_or(node_id, |peer| peer.node_id);
     handler
         .dispatch("disconnectnode", &json!(["", current_id]))
         .unwrap_or_else(|err| panic!("disconnect by id failed: {err}"));
@@ -225,8 +225,7 @@ fn ban_expiry_and_network_toggle_through_shared_controls() {
 
     let past = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs().saturating_sub(10))
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_secs().saturating_sub(10));
     let past_err = handler.dispatch("setban", &json!(["203.0.113.1", "add", past, true]));
     assert!(
         past_err.as_ref().err().is_some_and(|err| err
@@ -247,7 +246,7 @@ fn ban_expiry_and_network_toggle_through_shared_controls() {
     let listed = handler
         .dispatch("listbanned", &json!([]))
         .unwrap_or_else(|err| panic!("listbanned after expiry failed: {err}"));
-    assert!(listed.as_array().is_some_and(|arr| arr.is_empty()));
+    assert!(listed.as_array().is_some_and(sonic_rs::Array::is_empty));
 
     let inactive = handler
         .dispatch("setnetworkactive", &json!([false]))

@@ -71,7 +71,7 @@ impl EventLoop {
             }
             select! {
                 recv(self.shutdown_signal) -> _ => {
-                    shutdown.store(true, Ordering::Release);
+                    shutdown::trigger_shutdown(shutdown);
                     metrics::gauge!("node.shutdown.requested").set(1.0);
                     break;
                 }

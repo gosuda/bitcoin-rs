@@ -219,7 +219,10 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "relayfee": DEFAULT_RELAY_FEE_BTC_PER_KVB,
         "incrementalfee": DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB,
         "localaddresses": Vec::<String>::new(),
-        "warnings": ""
+        "warnings": ctx
+            .rpc_lifecycle
+            .as_ref()
+            .map_or_else(String::new, |lifecycle| lifecycle.warnings_text())
     }))
 }
 
@@ -384,6 +387,7 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use alloc::sync::Arc;
@@ -523,6 +527,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod ping_tests {
     use super::*;
     use alloc::sync::Arc;
@@ -559,6 +564,7 @@ mod ping_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod addnode_validation_tests {
     use super::*;
     use alloc::sync::Arc;
@@ -663,6 +669,7 @@ mod addnode_validation_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod admin_rpc_tests {
     use super::*;
     use alloc::sync::Arc;
@@ -724,7 +731,7 @@ mod admin_rpc_tests {
             listbanned(&ctx, &json!(null))
                 .unwrap_or_else(|err| panic!("listbanned failed: {err}"))
                 .as_array()
-                .is_some_and(|arr| arr.is_empty())
+                .is_some_and(sonic_rs::Array::is_empty)
         );
     }
 
@@ -762,6 +769,7 @@ mod admin_rpc_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod ban_state_tests {
     use super::*;
     use alloc::sync::Arc;

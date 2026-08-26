@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Authentication coverage for the synchronous RPC server.
 extern crate alloc;
 
@@ -5,7 +6,7 @@ use alloc::sync::Arc;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitcoin_rs_rpc::auth::constant_time_eq;
 use bitcoin_rs_rpc::context::Context;
@@ -53,7 +54,11 @@ fn legacy_error_has_core_envelope_and_http_error() -> Result<(), Box<dyn std::er
     assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     assert!(value.get("jsonrpc").is_none());
     assert!(value.get("error").is_some());
-    assert!(value.get("result").is_some_and(|v| v.is_null()));
+    assert!(
+        value
+            .get("result")
+            .is_some_and(sonic_rs::JsonValueTrait::is_null)
+    );
     Ok(())
 }
 
@@ -113,15 +118,23 @@ fn malformed_json_uses_core_legacy_parse_error_envelope() -> Result<(), Box<dyn 
 
     assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
     assert!(value.get("jsonrpc").is_none());
-    assert!(value.get("result").is_some_and(|v| v.is_null()));
+    assert!(
+        value
+            .get("result")
+            .is_some_and(sonic_rs::JsonValueTrait::is_null)
+    );
     assert_eq!(
         value
             .get("error")
             .and_then(|error| error.get("code"))
-            .and_then(|code| code.as_i64()),
+            .and_then(sonic_rs::JsonValueTrait::as_i64),
         Some(-32_700)
     );
-    assert!(value.get("id").is_some_and(|id| id.is_null()));
+    assert!(
+        value
+            .get("id")
+            .is_some_and(sonic_rs::JsonValueTrait::is_null)
+    );
     Ok(())
 }
 
@@ -165,6 +178,46 @@ fn non_rest_get_returns_not_found_without_authentication() -> Result<(), Box<dyn
     let address = spawn_with_rest(Auth::basic("alice", "secret"), true)?;
     let response = request_get(address, "/", "close")?;
     assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+    Ok(())
+}
+
+#[test]
+fn internal_routes_require_authentication() -> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    let unauthenticated = request_get(address, "/internal/mempool/txs", "close")?;
+    assert!(unauthenticated.starts_with("HTTP/1.1 401 Unauthorized"));
+
+    let bad = request_get_with_auth(address, "/internal/mempool/txs", Some("YWxpY2U6YmFk"))?;
+    assert!(bad.starts_with("HTTP/1.1 401 Unauthorized"));
+
+    let ok = request_get_with_auth(address, "/internal/mempool/txs", Some("YWxpY2U6c2VjcmV0"))?;
+    assert!(ok.starts_with("HTTP/1.1 200 OK"));
+
+    let unauthenticated_post = request_post_path(address, "/internal/txs", "[]", None)?;
+    assert!(unauthenticated_post.starts_with("HTTP/1.1 401 Unauthorized"));
+
+    let bad_post = request_post_path(address, "/internal/txs", "[]", Some("YWxpY2U6YmFk"))?;
+    assert!(bad_post.starts_with("HTTP/1.1 401 Unauthorized"));
+
+    let ok_post = request_post_path(address, "/internal/txs", "[]", Some("YWxpY2U6c2VjcmV0"))?;
+    assert!(ok_post.starts_with("HTTP/1.1 200 OK"));
+    Ok(())
+}
+
+#[test]
+fn public_esplora_and_tx_remain_unauthenticated() -> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    let tip = request_get(address, "/blocks/tip/height", "close")?;
+    assert!(tip.starts_with("HTTP/1.1 200 OK"));
+
+    let leaked = request_get(address, "/internalfoo", "close")?;
+    assert!(leaked.starts_with("HTTP/1.1 404 Not Found"));
+
+    let broadcast = request_post_path(address, "/tx", "zz", None)?;
+    assert!(
+        !broadcast.starts_with("HTTP/1.1 401 Unauthorized"),
+        "public POST /tx must not require auth: {broadcast}"
+    );
     Ok(())
 }
 
@@ -228,9 +281,10 @@ fn spawn_with_rest(
         max_connections: 8,
         idle_timeout: Duration::from_secs(2),
         rest_enabled,
-        lifecycle: Arc::new(RpcLifecycle::new(Arc::new(
-            std::sync::atomic::AtomicBool::new(false),
-        ))),
+        lifecycle: Arc::new(RpcLifecycle::new(
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Instant::now(),
+        )),
     };
     thread::spawn(move || {
         let _ignored = server.serve();
@@ -243,10 +297,30 @@ fn request_get(
     path: &str,
     connection: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    request_get_with_auth_connection(address, path, None, connection)
+}
+
+fn request_get_with_auth(
+    address: std::net::SocketAddr,
+    path: &str,
+    credentials: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    request_get_with_auth_connection(address, path, credentials, "close")
+}
+
+fn request_get_with_auth_connection(
+    address: std::net::SocketAddr,
+    path: &str,
+    credentials: Option<&str>,
+    connection: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(address)?;
+    let authorization = credentials.map_or(String::new(), |value| {
+        format!("Authorization: Basic {value}\r\n")
+    });
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: {connection}\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Connection: {connection}\r\n\r\n"
     )?;
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut response = String::new();
@@ -260,13 +334,32 @@ fn request_post(
     authorization: Option<&str>,
     connection: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    request_post_path_connection(address, "/", body, authorization, connection)
+}
+
+fn request_post_path(
+    address: std::net::SocketAddr,
+    path: &str,
+    body: &str,
+    authorization: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    request_post_path_connection(address, path, body, authorization, "close")
+}
+
+fn request_post_path_connection(
+    address: std::net::SocketAddr,
+    path: &str,
+    body: &str,
+    authorization: Option<&str>,
+    connection: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(address)?;
     let authorization = authorization.map_or(String::new(), |value| {
         format!("Authorization: Basic {value}\r\n")
     });
     write!(
         stream,
-        "POST / HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Length: {}\r\nConnection: {connection}\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Length: {}\r\nConnection: {connection}\r\n\r\n{body}",
         body.len()
     )?;
     stream.shutdown(std::net::Shutdown::Write)?;
@@ -302,16 +395,7 @@ fn request(
     credentials: &str,
     body: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(address)?;
-    write!(
-        stream,
-        "POST / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic {credentials}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )?;
-    stream.shutdown(std::net::Shutdown::Write)?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    Ok(response)
+    request_post_path(address, "/", body, Some(credentials))
 }
 
 #[test]

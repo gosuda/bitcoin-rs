@@ -1,13 +1,16 @@
 use core::ops::RangeInclusive;
 
 use hashbrown::HashMap;
+use serde::{Deserialize, Serialize};
 
-use bitcoin::{Address, Network, OutPoint};
+use bitcoin::{Address, Amount, Network, OutPoint};
 use bitcoin_rs_index::{HashPrefix, ScriptHash, ScriptHashRow};
 
 use crate::{Descriptor, WalletError, descriptor::validate_range};
+
+const WALLET_STATE_VERSION: u32 = 1;
 /// Timestamp attached to a watch-only descriptor import.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DescriptorTimestamp {
     /// Scan from the current chain tip.
     Now,
@@ -43,6 +46,8 @@ pub struct Watcher {
     pub imports: Vec<DescriptorImport>,
     /// Address-to-outpoint cache populated from index scans.
     pub addr_to_utxos: HashMap<Address, Vec<OutPoint>>,
+    /// Known output values for recorded outpoints.
+    pub utxo_values: HashMap<OutPoint, Amount>,
 }
 
 impl Watcher {
@@ -53,6 +58,7 @@ impl Watcher {
             descriptors,
             imports: Vec::new(),
             addr_to_utxos: HashMap::new(),
+            utxo_values: HashMap::new(),
         }
     }
 
@@ -144,17 +150,109 @@ impl Watcher {
             .collect()
     }
 
-    /// Records an outpoint observed for an address.
-    pub fn record_utxo(&mut self, address: Address, outpoint: OutPoint) {
-        self.addr_to_utxos
-            .entry(address)
-            .or_default()
-            .push(outpoint);
+    /// Records an outpoint observed for an address without a known amount.
+    ///
+    /// Unknown amounts stay absent rather than being stored as zero.
+    pub fn record_outpoint(&mut self, address: Address, outpoint: OutPoint) {
+        let outs = self.addr_to_utxos.entry(address).or_default();
+        if !outs.contains(&outpoint) {
+            outs.push(outpoint);
+        }
+    }
+
+    /// Records an outpoint and its authoritative amount.
+    pub fn record_utxo(&mut self, address: Address, outpoint: OutPoint, value: Amount) {
+        self.record_outpoint(address, outpoint);
+        self.utxo_values.insert(outpoint, value);
+    }
+
+    /// Drops runtime UTXO cache facts. Descriptor imports stay intact.
+    pub fn clear_utxos(&mut self) {
+        self.addr_to_utxos.clear();
+        self.utxo_values.clear();
+    }
+
+    /// Encodes canonical descriptor imports. UTXO cache facts are omitted.
+    pub fn encode_state(&self) -> Result<Vec<u8>, WalletError> {
+        let state = DurableWatcherState {
+            version: WALLET_STATE_VERSION,
+            imports: self
+                .imports
+                .iter()
+                .map(DurableImport::from_import)
+                .collect(),
+        };
+        serde_json::to_vec(&state).map_err(|error| WalletError::State(error.to_string()))
+    }
+
+    /// Rebuilds a watcher by routing stored imports through [`Watcher::import`].
+    pub fn decode_state(bytes: &[u8]) -> Result<Self, WalletError> {
+        let state: DurableWatcherState =
+            serde_json::from_slice(bytes).map_err(|error| WalletError::State(error.to_string()))?;
+        if state.version != WALLET_STATE_VERSION {
+            return Err(WalletError::State(format!(
+                "unsupported watch-only state version {}",
+                state.version
+            )));
+        }
+        let mut watcher = Self::new(Vec::new());
+        for import in state.imports {
+            watcher.import(&import.into_import())?;
+        }
+        Ok(watcher)
     }
 
     /// Returns cached UTXOs for an address.
     #[must_use]
     pub fn utxos_for(&self, address: &Address) -> &[OutPoint] {
         self.addr_to_utxos.get(address).map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns the known value for `outpoint`, if one was recorded.
+    #[must_use]
+    pub fn utxo_value(&self, outpoint: &OutPoint) -> Option<Amount> {
+        self.utxo_values.get(outpoint).copied()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct DurableWatcherState {
+    version: u32,
+    imports: Vec<DurableImport>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DurableImport {
+    descriptor: String,
+    timestamp: DescriptorTimestamp,
+    range_start: u32,
+    range_end: u32,
+    active: bool,
+    internal: bool,
+    label: Option<String>,
+}
+
+impl DurableImport {
+    fn from_import(import: &DescriptorImport) -> Self {
+        Self {
+            descriptor: import.descriptor.clone(),
+            timestamp: import.timestamp,
+            range_start: *import.range.start(),
+            range_end: *import.range.end(),
+            active: import.active,
+            internal: import.internal,
+            label: import.label.clone(),
+        }
+    }
+
+    fn into_import(self) -> DescriptorImport {
+        DescriptorImport {
+            descriptor: self.descriptor,
+            timestamp: self.timestamp,
+            range: self.range_start..=self.range_end,
+            active: self.active,
+            internal: self.internal,
+            label: self.label,
+        }
     }
 }

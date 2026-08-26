@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 //! Package selection, limits, and adversarial candidate tests.
 
 use std::error::Error;
@@ -159,7 +160,7 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
         &context(2_000, 4_000_000, 80_000),
         &MempoolMiningSnapshot {
             sequence: 1,
-            entries: vec![heavy.clone(), fitting.clone()],
+            entries: vec![heavy, fitting.clone()],
         },
         &ScriptBuf::from_bytes(vec![0x51]),
     )?;
@@ -171,7 +172,7 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
         &context(4_000_000, 2_000, 80_000),
         &MempoolMiningSnapshot {
             sequence: 2,
-            entries: vec![wide.clone(), fitting.clone()],
+            entries: vec![wide, fitting.clone()],
         },
         &ScriptBuf::from_bytes(vec![0x51]),
     )?;
@@ -189,6 +190,43 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
     )?;
     assert_eq!(sigop_limited.transactions.len(), 1);
     assert_eq!(sigop_limited.transactions[0].txid, fitting.txid);
+    Ok(())
+}
+
+#[test]
+fn bip68_unmet_unconfirmed_parent_package_is_skipped() -> Result<(), Box<dyn Error>> {
+    let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 400, 100, 0, vec![]);
+    let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
+    child_tx.input[0].sequence = Sequence::from_consensus(1);
+    let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
+    let snapshot = MempoolMiningSnapshot {
+        sequence: 12,
+        entries: vec![child, parent.clone()],
+    };
+    let candidate = assemble_candidate(
+        &context(4_000_000, 4_000_000, 80_000),
+        &snapshot,
+        &ScriptBuf::from_bytes(vec![0x51]),
+    )?;
+    assert_eq!(candidate.transactions.len(), 1);
+    assert_eq!(candidate.transactions[0].txid, parent.txid);
+    Ok(())
+}
+
+#[test]
+fn bip68_unmet_lock_is_ignored_when_csv_is_inactive() -> Result<(), Box<dyn Error>> {
+    let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 400, 100, 0, vec![]);
+    let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
+    child_tx.input[0].sequence = Sequence::from_consensus(1);
+    let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
+    let snapshot = MempoolMiningSnapshot {
+        sequence: 13,
+        entries: vec![child, parent],
+    };
+    let mut inactive = context(4_000_000, 4_000_000, 80_000);
+    inactive.csv_active = false;
+    let candidate = assemble_candidate(&inactive, &snapshot, &ScriptBuf::from_bytes(vec![0x51]))?;
+    assert_eq!(candidate.transactions.len(), 2);
     Ok(())
 }
 
@@ -275,7 +313,7 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
         vec![parent.txid]
     );
 
-    let mut excess_sigops_child = child.clone();
+    let mut excess_sigops_child = child;
     excess_sigops_child.sigop_cost += 1;
     let excess_sigops = assemble_candidate(
         &exact_limits,
@@ -501,6 +539,7 @@ fn context(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext 
         current_time: 2,
         locktime_cutoff: 1,
         network: Network::Regtest,
+        csv_active: true,
         segwit_active: true,
         max_weight,
         max_size,

@@ -6,23 +6,27 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin::{Amount, OutPoint as BitcoinOutPoint, Transaction, TxOut, Txid};
-use bitcoin_rs_mempool::standardness::{AcceptanceRejectReason, evaluate_package_acceptance};
+use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_primitives::{Hash256, OutPoint};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
-use crate::admission::{
-    DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB, package_contexts, standardness_policy,
-};
 use crate::context::{BlockRecord, Context, TransactionAdmissionError};
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, required_str, required_u64};
-use crate::tx_render::{self, TransactionChainContext};
+use crate::tx_render::{self, TransactionChainContext, TxPrevout};
 /// Bitcoin Core `DEFAULT_MAX_RAW_TX_FEE_RATE` = 0.10 BTC/kvB.
 const DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RawTxVerbosity {
+    Hex,
+    Tx,
+    Undo,
+}
+
 pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
-    let verbose = raw_transaction_verbosity(params)?;
+    let verbosity = raw_transaction_verbosity(params)?;
     let blockhash = params_array(params)?
         .get(2)
         .filter(|value| !value.is_null())
@@ -47,18 +51,20 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .iter()
             .find(|tx| tx.compute_txid() == txid)
             .ok_or(RpcError::NotFound("transaction not in specified block"))?;
-        return Ok(render_raw_transaction(ctx, tx, verbose, Some(&record)));
+        return render_raw_transaction(
+            ctx,
+            tx,
+            verbosity,
+            Some(explicit_chain_context(ctx, &record)),
+            Some(&record),
+            Some(&block),
+        );
     }
 
     {
         let pool = ctx.mempool.read();
         if let Some(entry) = pool.entry_by_txid(&txid) {
-            return Ok(render_raw_transaction(
-                ctx,
-                entry.tx.as_ref(),
-                verbose,
-                None,
-            ));
+            return render_raw_transaction(ctx, entry.tx.as_ref(), verbosity, None, None, None);
         }
     }
 
@@ -69,31 +75,50 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 .transaction_height(&txid)
                 .map_err(RpcError::from)?
                 .and_then(|height| ctx.block_by_height(height));
-            return Ok(render_raw_transaction(ctx, &tx, verbose, record.as_ref()));
+            let chain = record
+                .as_ref()
+                .map(|record| indexed_chain_context(ctx, record));
+            let block = match record.as_ref() {
+                Some(record) => load_block_if_available(ctx, record)?,
+                None => None,
+            };
+            return render_raw_transaction(
+                ctx,
+                &tx,
+                verbosity,
+                chain,
+                record.as_ref(),
+                block.as_ref(),
+            );
         }
     }
 
     // Compatibility cache used by tests and early wiring; not confirmation proof.
     if let Some(tx) = ctx.transactions.read().get(&txid) {
-        return Ok(render_raw_transaction(ctx, tx, verbose, None));
+        return render_raw_transaction(ctx, tx, verbosity, None, None, None);
     }
 
     Err(RpcError::NotFound("transaction not found"))
 }
 
-fn raw_transaction_verbosity(params: &Value) -> Result<bool, RpcError> {
+fn raw_transaction_verbosity(params: &Value) -> Result<RawTxVerbosity, RpcError> {
     let Some(value) = params_array(params)?.get(1) else {
-        return Ok(false);
+        return Ok(RawTxVerbosity::Hex);
     };
     if value.is_null() {
-        return Ok(false);
+        return Ok(RawTxVerbosity::Hex);
     }
     if let Some(verbose) = value.as_bool() {
-        return Ok(verbose);
+        return Ok(if verbose {
+            RawTxVerbosity::Tx
+        } else {
+            RawTxVerbosity::Hex
+        });
     }
     match value.as_u64() {
-        Some(0) => Ok(false),
-        Some(1 | 2) => Ok(true),
+        Some(0) => Ok(RawTxVerbosity::Hex),
+        Some(1) => Ok(RawTxVerbosity::Tx),
+        Some(2) => Ok(RawTxVerbosity::Undo),
         Some(_) => Err(RpcError::InvalidParameter(
             "verbosity must be 0, 1, or 2".to_owned(),
         )),
@@ -111,16 +136,39 @@ fn load_block(ctx: &Context, record: &BlockRecord) -> Result<bitcoin::Block, Rpc
         .map_err(|_| RpcError::Internal("stored block bytes failed decode".to_owned()))
 }
 
-fn render_raw_transaction(
+fn load_block_if_available(
     ctx: &Context,
-    tx: &Transaction,
-    verbose: bool,
-    record: Option<&BlockRecord>,
-) -> Value {
-    if !verbose {
-        return json!(serialize(tx).to_lower_hex_string());
+    record: &BlockRecord,
+) -> Result<Option<bitcoin::Block>, RpcError> {
+    let Some(bytes) = ctx.block_body_bytes(record) else {
+        return Ok(None);
+    };
+    deserialize(&bytes)
+        .map(Some)
+        .map_err(|_| RpcError::Internal("stored block bytes failed decode".to_owned()))
+}
+
+fn explicit_chain_context(ctx: &Context, record: &BlockRecord) -> TransactionChainContext {
+    let in_active_chain = ctx.active_hash_at_height(record.height) == Some(record.hash);
+    let confirmations = if in_active_chain {
+        i64::from(
+            ctx.applied_height()
+                .saturating_sub(record.height)
+                .saturating_add(1),
+        )
+    } else {
+        0
+    };
+    TransactionChainContext {
+        block_hash: bitcoin::BlockHash::from_byte_array(record.hash.to_le_bytes()),
+        confirmations,
+        block_time: u64::from(record.time),
+        in_active_chain: Some(in_active_chain),
     }
-    let chain = record.map(|record| TransactionChainContext {
+}
+
+fn indexed_chain_context(ctx: &Context, record: &BlockRecord) -> TransactionChainContext {
+    TransactionChainContext {
         block_hash: bitcoin::BlockHash::from_byte_array(record.hash.to_le_bytes()),
         confirmations: i64::from(
             ctx.applied_height()
@@ -128,8 +176,106 @@ fn render_raw_transaction(
                 .saturating_add(1),
         ),
         block_time: u64::from(record.time),
+        in_active_chain: None,
+    }
+}
+
+fn render_raw_transaction(
+    ctx: &Context,
+    tx: &Transaction,
+    verbosity: RawTxVerbosity,
+    chain: Option<TransactionChainContext>,
+    record: Option<&BlockRecord>,
+    block: Option<&bitcoin::Block>,
+) -> Result<Value, RpcError> {
+    if verbosity == RawTxVerbosity::Hex {
+        return Ok(json!(serialize(tx).to_lower_hex_string()));
+    }
+    let network = bitcoin_network(ctx.chain_network);
+    if verbosity == RawTxVerbosity::Undo {
+        let prevouts = verbosity2_prevouts(ctx, tx, record, block)?;
+        return Ok(tx_render::transaction_json_with_prevouts(
+            tx,
+            network,
+            chain,
+            prevouts.as_deref(),
+        ));
+    }
+    Ok(tx_render::transaction_json(tx, network, chain))
+}
+
+fn verbosity2_prevouts(
+    ctx: &Context,
+    tx: &Transaction,
+    record: Option<&BlockRecord>,
+    block: Option<&bitcoin::Block>,
+) -> Result<Option<Vec<Option<TxPrevout>>>, RpcError> {
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let undo = match ctx.block_undo_source.as_ref() {
+        Some(source) => source
+            .block_undo(record.height, record.hash)
+            .map_err(RpcError::from)?,
+        None => None,
+    };
+    let tx_index = block.and_then(|block| {
+        block
+            .txdata
+            .iter()
+            .position(|candidate| candidate.compute_txid() == tx.compute_txid())
     });
-    tx_render::transaction_json(tx, bitcoin_network(ctx.chain_network), chain)
+    let mut prevouts = Vec::with_capacity(tx.input.len());
+    for input in &tx.input {
+        if tx.is_coinbase() {
+            prevouts.push(None);
+            continue;
+        }
+        let same_block = tx_index.and_then(|index| {
+            block.and_then(|block| same_block_prevout(block, index, input, record.height))
+        });
+        if let Some(prevout) = same_block {
+            prevouts.push(Some(prevout));
+            continue;
+        }
+        let spent = undo.as_ref().and_then(|undo| {
+            undo.restores().iter().find(|restore| {
+                restore.outpoint.txid.to_le_bytes() == *input.previous_output.txid.as_byte_array()
+                    && restore.outpoint.vout == input.previous_output.vout
+            })
+        });
+        prevouts.push(spent.map(|restore| TxPrevout {
+            generated: restore.coinbase,
+            height: restore.height,
+            value: restore.txout.value,
+            script_pubkey: restore.txout.script_pubkey.clone(),
+        }));
+    }
+    Ok(Some(prevouts))
+}
+
+fn same_block_prevout(
+    block: &bitcoin::Block,
+    tx_index: usize,
+    input: &bitcoin::TxIn,
+    height: u32,
+) -> Option<TxPrevout> {
+    let earlier = block.txdata.get(..tx_index)?;
+    for previous in earlier {
+        if previous.compute_txid() != input.previous_output.txid {
+            continue;
+        }
+        let output = previous
+            .output
+            .get(usize::try_from(input.previous_output.vout).ok()?)?;
+        return Some(TxPrevout {
+            generated: previous.is_coinbase(),
+            height,
+            value: output.value,
+            script_pubkey: output.script_pubkey.clone(),
+        });
+    }
+    None
 }
 
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -401,25 +547,29 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
         .and_then(|value| value.as_array())
         .ok_or(RpcError::InvalidParams("raw transaction array is required"))?;
     let max_feerate = optional_max_feerate(params, 1)?;
+    if raw_txs.is_empty() || raw_txs.len() > 25 {
+        return Err(RpcError::InvalidParameter(
+            "Array must contain between 1 and 25 transactions.".to_owned(),
+        ));
+    }
 
     let mut txs = Vec::with_capacity(raw_txs.len());
     for raw in raw_txs {
         let Some(raw) = raw.as_str() else {
             return Err(RpcError::InvalidType("raw transaction must be a string"));
         };
-        txs.push(decode_tx(raw)?);
+        txs.push(decode_package_tx(raw)?);
     }
 
-    let pool = ctx.mempool.read();
-    let contexts = package_contexts(&ctx.utxo, &pool, &txs);
-    let facts = evaluate_package_acceptance(
-        &pool,
-        &standardness_policy(),
-        &txs,
-        &contexts,
-        max_feerate,
-        DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB,
-    );
+    let admission = ctx
+        .transaction_admission
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled(
+            "transaction admission is unavailable",
+        ))?;
+    let facts = admission
+        .test_transactions(&txs, max_feerate)
+        .map_err(admission_error_to_rpc)?;
     if let Some(error) = facts.package_error {
         return Err(reject_to_rpc_error(error));
     }
@@ -428,16 +578,18 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
     for fact in facts.results {
         let mut row = json!({
             "txid": fact.txid.to_string(),
-            "wtxid": fact.wtxid.to_string(),
-            "allowed": fact.allowed,
-            "vsize": fact.vsize,
-            "weight": fact.weight
+            "wtxid": fact.wtxid.to_string()
         });
-        if let Some(fee) = fact.base_fee {
-            let _ = row.insert(
-                "fees",
-                json!({ "base": tx_render::btc_amount_json(Amount::from_sat(fee)) }),
-            );
+        if let Some(allowed) = fact.allowed {
+            let _ = row.insert("allowed", json!(allowed));
+            let _ = row.insert("vsize", json!(fact.vsize));
+            let _ = row.insert("weight", json!(fact.weight));
+            if let Some(fee) = fact.base_fee {
+                let _ = row.insert(
+                    "fees",
+                    json!({ "base": tx_render::btc_amount_json(Amount::from_sat(fee)) }),
+                );
+            }
         }
         if let Some(reason) = fact.reject_reason {
             let _ = row.insert("reject-reason", json!(reason.to_string()));
@@ -460,6 +612,10 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
 fn decode_tx(raw: &str) -> Result<Transaction, RpcError> {
     let bytes = Vec::<u8>::from_hex(raw)?;
     deserialize(&bytes).map_err(|_| RpcError::InvalidParams("transaction decode failed"))
+}
+
+fn decode_package_tx(raw: &str) -> Result<Transaction, RpcError> {
+    decode_tx(raw).map_err(|_| RpcError::Deserialization("TX decode failed".to_owned()))
 }
 
 fn parse_txid(value: &str) -> Result<Txid, RpcError> {
@@ -523,11 +679,14 @@ fn reject_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
         | AcceptanceRejectReason::MissingInputs
         | AcceptanceRejectReason::MinRelayFeeNotMet
         | AcceptanceRejectReason::NonStandard(_)
-        | AcceptanceRejectReason::Replacement(_) => RpcError::Misc(reason.to_string()),
+        | AcceptanceRejectReason::Replacement(_)
+        | AcceptanceRejectReason::NonBip68Final
+        | AcceptanceRejectReason::ScriptVerify => RpcError::Misc(reason.to_string()),
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use alloc::sync::Arc;
 
@@ -778,7 +937,7 @@ mod tests {
             panic!("genesis has no transactions");
         };
         let txid = coinbase.compute_txid();
-        let ctx = context_with_blocks(&[genesis.clone()]);
+        let ctx = context_with_blocks(std::slice::from_ref(&genesis));
         let handler = Handler::new(Arc::clone(&ctx));
         let result = handler
             .dispatch("gettxoutproof", &json!([[txid.to_string()]]))
@@ -805,7 +964,7 @@ mod tests {
         let txid = coinbase.compute_txid();
         let mut ctx = Context::new();
         ctx.block_body_source = Some(Arc::new(ScriptedBodySource {
-            responses: std::sync::Mutex::new(std::collections::VecDeque::from([
+            responses: parking_lot::Mutex::new(std::collections::VecDeque::from([
                 None,
                 Some(serialize(&genesis)),
             ])),
@@ -1031,16 +1190,12 @@ mod tests {
 
     #[derive(Default)]
     struct ScriptedBodySource {
-        responses: std::sync::Mutex<std::collections::VecDeque<Option<Vec<u8>>>>,
+        responses: parking_lot::Mutex<std::collections::VecDeque<Option<Vec<u8>>>>,
     }
 
     impl crate::context::BlockBodySource for ScriptedBodySource {
         fn block_body(&self, _height: u32, _hash: Hash256) -> Option<Vec<u8>> {
-            self.responses
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pop_front()
-                .flatten()
+            self.responses.lock().pop_front().flatten()
         }
     }
 
@@ -1307,6 +1462,7 @@ mod tests {
             TxQueryError::Retry,
             TxQueryError::Unavailable("worker stopped".into()),
             TxQueryError::Storage("disk full".into()),
+            TxQueryError::Decode("corrupt undo".into()),
         ] {
             let blocks = [distinct_block(1), distinct_block(2)];
             let Some(wanted) = blocks[1]
@@ -1441,7 +1597,7 @@ mod tests {
             counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(Some(0))
         })));
-        install_blocks(&mut ctx, &[distinct_block(15), block.clone()]);
+        install_blocks(&mut ctx, &[distinct_block(15), block]);
         let ctx = Arc::new(ctx);
 
         let result = proof_for(&ctx, &wanted);

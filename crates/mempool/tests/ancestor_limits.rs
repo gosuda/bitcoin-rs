@@ -1,4 +1,7 @@
 //! Ancestor package policy limit coverage.
+// A failed pool or fixture invariant is a test failure, and panicking reports
+// it with the offending call site. `expect` is deliberate.
+#![allow(clippy::expect_used)]
 
 extern crate alloc;
 
@@ -189,7 +192,11 @@ fn multi_output_tx(label: u8, outputs: u32) -> Transaction {
         output: (0..outputs)
             .map(|vout| TxOut {
                 value: Amount::from_sat(1_000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51, label, vout as u8]),
+                script_pubkey: ScriptBuf::from_bytes(vec![
+                    0x51,
+                    label,
+                    u8::try_from(vout).expect("fixture vout fits u8"),
+                ]),
             })
             .collect(),
     }

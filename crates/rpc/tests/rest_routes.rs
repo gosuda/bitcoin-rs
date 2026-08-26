@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Focused REST route coverage for X1.
 //!
 //! Enumerates the fourteen Core registrations and exercises formats, errors,
@@ -51,9 +52,6 @@ fn publish_active_chain(ctx: &Context, headers: &[bitcoin::block::Header]) -> Ve
 }
 
 fn genesis_fixture() -> (Arc<Context>, Block, Hash256) {
-    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-    let hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
-    let body = serialize(&genesis);
     struct Source {
         height: u32,
         hash: Hash256,
@@ -64,10 +62,13 @@ fn genesis_fixture() -> (Arc<Context>, Block, Hash256) {
             (height == self.height && hash == self.hash).then(|| self.body.clone())
         }
     }
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+    let body = serialize(&genesis);
     let ctx = Arc::new(Context::new().with_block_body_source(Arc::new(Source {
         height: 0,
         hash,
-        body: body.clone(),
+        body,
     })));
     ctx.add_block(BlockRecord::from_block(0, &genesis));
     let _ = publish_active_chain(&ctx, &[genesis.header]);
@@ -384,5 +385,30 @@ fn unknown_rest_path_is_not_found() {
 
 // Silence unused import warnings if HttpResponse alias is reserved for future
 // transport assertions.
+
+#[test]
+fn deploymentinfo_with_block_hash_succeeds() {
+    // /rest/deploymentinfo/<blockhash>.json must parse the hash after the
+    // prefix strip leaves a leading slash. The old code passed "/<hash>" to
+    // Hash256::from_str, which always failed with 400.
+    let (ctx, _genesis, hash) = genesis_fixture();
+    let hash_hex = hash.to_string_be();
+    let response = route(
+        &ctx,
+        &format!("/rest/deploymentinfo/{hash_hex}.json"),
+        "",
+        true,
+    );
+    assert_eq!(
+        response.status, 200,
+        "deploymentinfo with hash must succeed"
+    );
+    let body: Value = sonic_rs::from_slice(&response.body).expect("deploymentinfo json");
+    assert_eq!(
+        body.get("hash").and_then(JsonValueTrait::as_str),
+        Some(hash_hex.as_str())
+    );
+    assert_eq!(body.get("height").and_then(JsonValueTrait::as_u64), Some(0));
+}
 #[allow(dead_code)]
 fn _http_response_ty(_: &HttpResponse) {}

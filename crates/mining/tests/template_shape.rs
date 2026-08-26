@@ -13,6 +13,7 @@ use bitcoin_rs_mining::{CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, as
 use bitcoin_rs_primitives::{Hash256, Network};
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
     let mut mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -48,6 +49,7 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
         current_time: 20,
         locktime_cutoff: 10,
         network: Network::Regtest,
+        csv_active: true,
         segwit_active: true,
         max_weight: 4_000_000,
         max_size: 4_000_000,
@@ -72,6 +74,8 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     assert_eq!(candidate.version, context.version);
     assert_eq!(candidate.bits, context.bits);
     assert_eq!(candidate.mempool_sequence, snapshot.sequence);
+    assert_eq!(candidate.csv_active, context.csv_active);
+    assert_eq!(candidate.segwit_active, context.segwit_active);
 
     let mut fees = 0_u64;
     let mut weight = candidate.coinbase.weight().to_wu();
@@ -161,6 +165,7 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
             current_time: 2,
             locktime_cutoff: 1,
             network: Network::Regtest,
+            csv_active: false,
             segwit_active: false,
             max_weight: 4_000_000,
             max_size: 4_000_000,
@@ -179,6 +184,7 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
             current_time: 2,
             locktime_cutoff: 1,
             network: Network::Regtest,
+            csv_active: false,
             segwit_active: false,
             max_weight: 4_000_000,
             max_size: 4_000_000,
@@ -237,4 +243,105 @@ fn tx(label: u8, value: u64, parent: Option<Txid>) -> Transaction {
             script_pubkey: ScriptBuf::from_bytes(vec![0x51, label]),
         }],
     }
+}
+
+#[test]
+fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
+    let payout = ScriptBuf::from_bytes(vec![0x51]);
+    let empty = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        ..MempoolLimits::default()
+    });
+    let zero = assemble_candidate(
+        &CandidateContext {
+            previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
+            height: 100,
+            version: 1,
+            bits: 0x207f_ffff,
+            min_time: 1,
+            current_time: 2,
+            locktime_cutoff: 1,
+            network: Network::Regtest,
+            csv_active: true,
+            segwit_active: true,
+            max_weight: 4_000_000,
+            max_size: 4_000_000,
+            max_sigops: 80_000,
+        },
+        &empty.mining_snapshot(),
+        &payout,
+    )?;
+    assert_eq!(
+        zero.transactions.len(),
+        0,
+        "coinbase-only candidate has zero non-coinbase txs"
+    );
+
+    let mut one_pool = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        ..MempoolLimits::default()
+    });
+    one_pool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(1, 1_000, None)),
+        120,
+        1_000,
+        1,
+        100,
+    ))?;
+    let one = assemble_candidate(
+        &CandidateContext {
+            previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
+            height: 100,
+            version: 1,
+            bits: 0x207f_ffff,
+            min_time: 1,
+            current_time: 2,
+            locktime_cutoff: 1,
+            network: Network::Regtest,
+            csv_active: true,
+            segwit_active: true,
+            max_weight: 4_000_000,
+            max_size: 4_000_000,
+            max_sigops: 80_000,
+        },
+        &one_pool.mining_snapshot(),
+        &payout,
+    )?;
+    assert_eq!(one.transactions.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
+    let snapshot = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        ..MempoolLimits::default()
+    })
+    .mining_snapshot();
+    let payout = ScriptBuf::from_bytes(vec![0x51]);
+    for (csv_active, segwit_active) in [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let candidate = assemble_candidate(
+            &CandidateContext {
+                previous_block_hash: Hash256::from_le_bytes(&[0x55; 32]),
+                height: 432,
+                version: 1,
+                bits: 0x207f_ffff,
+                min_time: 1,
+                current_time: 2,
+                locktime_cutoff: 1,
+                network: Network::Regtest,
+                csv_active,
+                segwit_active,
+                max_weight: 4_000_000,
+                max_size: 4_000_000,
+                max_sigops: 80_000,
+            },
+            &snapshot,
+            &payout,
+        )?;
+        assert_eq!(candidate.csv_active, csv_active);
+        assert_eq!(candidate.segwit_active, segwit_active);
+    }
+    Ok(())
 }

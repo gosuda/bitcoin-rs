@@ -19,7 +19,7 @@ use bitcoin_rs_utxo::{
 use hashbrown::{HashMap, HashSet};
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::state::ApplyError;
 use bitcoin_rs_storage::{
@@ -985,18 +985,6 @@ pub struct ApplyHandles {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Shared best-applied-block tip handle.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Cumulative transaction count of the applied chain, or `0` when unknown.
-    ///
-    /// Bitcoin Core's `CBlockIndex::m_chain_tx_count`, including its convention
-    /// that zero means *unset* rather than *empty* (`HaveNumChainTxs()`). Only a
-    /// chain applied from genesis by a node that maintains this counter can know
-    /// it; a datadir written before it existed restores as unknown and stays
-    /// unknown, because nothing short of re-reading every block body could
-    /// recover the history.
-    ///
-    /// Kept beside `applied_tip` and moved with it, so the pair is always
-    /// consistent: a count that lagged its tip would be worse than no count.
-    pub chain_tx_count: Arc<AtomicU64>,
     /// Shared in-memory block tree.
     pub block_tree: Arc<RwLock<BlockTree>>,
     /// Shared UTXO set.
@@ -1084,7 +1072,6 @@ impl ApplyHandles {
             network,
             chain_tip,
             applied_tip,
-            chain_tx_count: Arc::new(AtomicU64::new(0)),
             block_tree,
             utxo,
             coin_stats,
@@ -1250,7 +1237,7 @@ fn plan_disconnect(
 /// | `filter_index` | retained deliberately — its rows are hash-addressed, like block bodies, so a disconnected block's filter stays valid and simply stops being reachable. What is owed is BACKFILL after a gap, not rollback |
 /// | `blocks` | restored here — RPC would otherwise keep serving the disconnected block |
 /// | `transactions` | nothing owed: connection never populates it |
-/// | `mempool` | **owed** once transaction relay exists; disconnected transactions belong back in it |
+/// | `mempool` | not restored here. `reorg::execute_loaded_plan` re-admits disconnected non-coinbase transactions through the production admission pipeline after the branch switch settles against the winning tip |
 /// | `block_tree` | retained deliberately — the header stays valid and known |
 /// | `block_body_store` | retained deliberately — the body is still a real block |
 /// | `zmq_publisher` | a notification, not state; a disconnect event belongs here later |
@@ -1427,7 +1414,6 @@ pub(crate) fn disconnect_block_admitted(
     handles
         .applied_tip
         .store(Some(Arc::new(parent_tip.clone())));
-    rewind_chain_tx_count(handles, tx_count_delta);
     handles.wake_tx_index();
 
     if handles.zmq_publisher.wants_notifications() {
@@ -1470,49 +1456,6 @@ pub(crate) fn disconnect_block_admitted(
 /// apply never added.
 fn tx_count_delta_for(block: &bitcoin::Block) -> u64 {
     u64::try_from(block.txdata.len()).unwrap_or(u64::MAX)
-}
-
-/// Carries the cumulative transaction count forward across a connected block.
-///
-/// Zero means *unknown*, so a count that is already unknown stays unknown
-/// rather than restarting from this block and pretending to be a chain total.
-/// Genesis is the one block that can establish the count from nothing: there is
-/// no chain below it.
-fn advance_chain_tx_count(handles: &ApplyHandles, height: u32, tx_count_delta: u64) {
-    let known = handles.chain_tx_count.load(Ordering::Relaxed);
-    if known == 0 && height != 0 {
-        return;
-    }
-    let advanced = known.checked_add(tx_count_delta).unwrap_or_else(|| {
-        tracing::warn!(
-            known,
-            tx_count_delta,
-            "cumulative chain transaction count overflowed; marking it unknown"
-        );
-        0
-    });
-    handles.chain_tx_count.store(advanced, Ordering::Relaxed);
-}
-
-/// Takes a disconnected block's transactions back out of the cumulative count.
-///
-/// An unknown count stays unknown. A subtraction that would go below zero means
-/// the count and the chain have diverged, and a silently clamped total is worse
-/// than an admitted absence, so that case resets to unknown.
-fn rewind_chain_tx_count(handles: &ApplyHandles, tx_count_delta: u64) {
-    let known = handles.chain_tx_count.load(Ordering::Relaxed);
-    if known == 0 {
-        return;
-    }
-    let rewound = known.checked_sub(tx_count_delta).unwrap_or_else(|| {
-        tracing::warn!(
-            known,
-            tx_count_delta,
-            "cumulative chain transaction count fell below zero; marking it unknown"
-        );
-        0
-    });
-    handles.chain_tx_count.store(rewound, Ordering::Relaxed);
 }
 
 /// Synthetically applies `block` as the next tip after consensus checks.
@@ -2697,7 +2640,6 @@ fn apply_block_admitted(
         }
     }
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
-    advance_chain_tx_count(handles, height, tx_count_delta_for(block));
     handles.wake_tx_index();
     if handles.zmq_publisher.wants_notifications() {
         handles
@@ -2826,6 +2768,7 @@ fn applied_header_tip(
         Some(node_id) => node_id,
         None => tree.insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?,
     };
+    tree.record_applied_tx_count(node_id, tx_count_delta_for(block))?;
     let node = tree.node(node_id)?;
     if node.height != height {
         return Err(ApplyError::Consensus(
@@ -4023,6 +3966,40 @@ mod consensus_rule_tests {
         // The mutating path still accepts the same block afterward.
         let applied = apply_block(&handles, &child)?;
         assert_eq!(applied.height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn proposal_accepts_unsolved_pow_while_apply_rejects_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles_for_network(Network::Regtest);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_tip = apply_block(&handles, &genesis)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let mut child = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+        let target = child.header.target();
+        while child.header.validate_pow(target).is_ok() {
+            child.header.nonce = child
+                .header
+                .nonce
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("test block nonce exhausted"))?;
+        }
+
+        validate_block(&handles, &child)?;
+
+        let expected_hash = Hash256::from_le_bytes(child.block_hash().as_byte_array());
+        assert!(
+            matches!(
+                apply_block(&handles, &child),
+                Err(ApplyError::ProofOfWork { hash }) if hash == expected_hash
+            ),
+            "apply must reject the same unsolved block that proposal validation accepts"
+        );
         Ok(())
     }
 
@@ -9009,23 +8986,21 @@ mod consensus_rule_tests {
         empty_apply_handles_for_network(Network::Mainnet)
     }
 
-    /// The rewind is wired to the disconnect, not merely implemented.
-    ///
-    /// `rewind_chain_tx_count` has its own unit tests, and they all passed while
-    /// the call site was missing: a mutation that deleted the call from
-    /// `disconnect_block_admitted` survived the whole audit. Testing a function
-    /// is not testing that anything calls it.
     #[test]
-    fn a_disconnect_takes_the_blocks_transactions_back_out_of_the_chain_count()
+    fn disconnect_republishes_the_parent_without_rewinding_node_counts()
     -> Result<(), Box<dyn std::error::Error>> {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let utxo = Arc::new(UtxoSet::new());
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
         let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
         let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        let genesis_id = genesis_tip.tip_id;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
-        // Genesis counted, as it would be on a node that synced from it.
-        handles.chain_tx_count.store(1, Ordering::Relaxed);
+        assert_eq!(
+            handles.block_tree.read().node(genesis_id)?.chain_tx_count,
+            1,
+            "genesis establishes its own count"
+        );
 
         let block = mined_block_with_prev_hash_and_transactions(
             genesis.block_hash(),
@@ -9034,16 +9009,30 @@ mod consensus_rule_tests {
         let applied = apply_block(&handles, &block)?;
         assert_eq!(applied.height, 1, "the block must connect first");
         assert_eq!(
-            handles.chain_tx_count.load(Ordering::Relaxed),
+            handles
+                .block_tree
+                .read()
+                .node(applied.tip_id)?
+                .chain_tx_count,
             2,
-            "connecting a one-transaction block moves the count by one"
+            "the child derives independently from its parent"
         );
 
-        let _restored = disconnect_block(&handles, &block)?;
+        let restored = disconnect_block(&handles, &block)?;
+        assert_eq!(restored.tip_id, genesis_id);
         assert_eq!(
-            handles.chain_tx_count.load(Ordering::Relaxed),
+            handles.block_tree.read().node(genesis_id)?.chain_tx_count,
             1,
-            "the disconnected block's transactions must leave the count with it"
+            "disconnect republishes the parent whose count is already stored"
+        );
+        assert_eq!(
+            handles
+                .block_tree
+                .read()
+                .node(applied.tip_id)?
+                .chain_tx_count,
+            2,
+            "the disconnected node keeps its independently stored count"
         );
         Ok(())
     }
@@ -9626,21 +9615,8 @@ mod consensus_rule_tests {
             new_one.block_hash(),
             vec![coinbase_transaction(4)],
         )?;
-        let target = {
-            let mut tree = handles.block_tree.write();
-            let mut target = None;
-            for (height, block) in [(1_u32, &new_one), (2_u32, &new_two)] {
-                target = Some(tree.insert_header(block.header, NodeStatus::HeaderValid)?);
-                bodies.bodies.write().insert(
-                    (
-                        height,
-                        Hash256::from_le_bytes(block.block_hash().as_byte_array()),
-                    ),
-                    bitcoin::consensus::encode::serialize(block),
-                );
-            }
-            target.ok_or_else(|| anyhow::anyhow!("new branch has no target"))?
-        };
+        let target =
+            insert_branch_headers(&handles, &bodies, &[(1_u32, &new_one), (2_u32, &new_two)])?;
 
         crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {})?;
 
@@ -9669,6 +9645,353 @@ mod consensus_rule_tests {
                     3
                 ),
             ]
+        );
+        Ok(())
+    }
+
+    fn insert_branch_headers(
+        handles: &ApplyHandles,
+        bodies: &MapBodyStore,
+        chain: &[(u32, &bitcoin::Block)],
+    ) -> Result<bitcoin_rs_chain::NodeId, Box<dyn std::error::Error>> {
+        let mut tree = handles.block_tree.write();
+        let mut last = None;
+        for &(height, block) in chain {
+            last = Some(tree.insert_header(block.header, NodeStatus::HeaderValid)?);
+            bodies.bodies.write().insert(
+                (
+                    height,
+                    Hash256::from_le_bytes(block.block_hash().as_byte_array()),
+                ),
+                bitcoin::consensus::encode::serialize(block),
+            );
+        }
+        last.ok_or_else(|| anyhow::anyhow!("new branch has no target").into())
+    }
+
+    fn p2wpkh_script(byte: u8) -> ScriptBuf {
+        ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([byte; 20]))
+    }
+
+    fn standard_spend(
+        previous_output: bitcoin::OutPoint,
+        value: u64,
+        script_byte: u8,
+    ) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: p2wpkh_script(script_byte),
+            }],
+        }
+    }
+
+    #[test]
+    fn branch_switch_readmits_disconnected_non_coinbase_transactions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let utxo = Arc::new(UtxoSet::new());
+        let surviving_funding = bitcoin::Txid::from_byte_array([0x51; 32]);
+        let conflicted_funding = bitcoin::Txid::from_byte_array([0x52; 32]);
+        seed_op_true_outputs(&utxo, &[surviving_funding, conflicted_funding], 0x11)?;
+
+        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let bodies = Arc::new(MapBodyStore::default());
+        let body_handle: Arc<dyn crate::apply::PruneBodyStore> = bodies.clone();
+        handles.block_body_store = Some(body_handle);
+
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let surviving = standard_spend(
+            bitcoin::OutPoint {
+                txid: surviving_funding,
+                vout: 0,
+            },
+            40_000,
+            0x61,
+        );
+        let conflicted = standard_spend(
+            bitcoin::OutPoint {
+                txid: conflicted_funding,
+                vout: 0,
+            },
+            40_000,
+            0x62,
+        );
+        let winner_conflict = standard_spend(
+            bitcoin::OutPoint {
+                txid: conflicted_funding,
+                vout: 0,
+            },
+            39_000,
+            0x63,
+        );
+        let surviving_txid = surviving.compute_txid();
+        let conflicted_txid = conflicted.compute_txid();
+        let coinbase = coinbase_transaction(1);
+
+        let losing = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase.clone(), surviving, conflicted],
+        )?;
+        let losing_raw = bytes::Bytes::from(bitcoin::consensus::encode::serialize(&losing));
+        let losing_tip = apply_block_with_serialized(&handles, &losing, losing_raw.clone())?;
+        bodies
+            .bodies
+            .write()
+            .insert((losing_tip.height, losing_tip.hash), losing_raw.to_vec());
+        assert!(
+            !handles.mempool.read().contains_txid(&surviving_txid),
+            "connect must remove confirmed transactions from the mempool"
+        );
+
+        let target = winning_two_block_target_with_first_txs(
+            &handles,
+            &bodies,
+            &genesis,
+            (3, 4),
+            vec![winner_conflict],
+        )?;
+
+        crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {})?;
+
+        let pool = handles.mempool.read();
+        assert!(
+            pool.contains_txid(&surviving_txid),
+            "a still-valid disconnected spend must re-enter through admission"
+        );
+        assert!(
+            !pool.contains_txid(&conflicted_txid),
+            "a spend whose inputs the winning branch consumed must not re-enter"
+        );
+        assert!(
+            !pool.contains_txid(&coinbase.compute_txid()),
+            "a disconnected coinbase must not re-enter the mempool"
+        );
+        Ok(())
+    }
+
+    fn losing_branch_with_spends(
+        handles: &ApplyHandles,
+        bodies: &MapBodyStore,
+        genesis: &bitcoin::Block,
+        spends: Vec<(u8, Vec<Transaction>)>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut prev = genesis.block_hash();
+        for (seed, mut txs) in spends {
+            let mut block_txs = vec![coinbase_transaction(seed)];
+            block_txs.append(&mut txs);
+            let block = mined_block_with_prev_hash_and_transactions(prev, block_txs)?;
+            let raw = bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block));
+            let tip = apply_block_with_serialized(handles, &block, raw.clone())?;
+            bodies
+                .bodies
+                .write()
+                .insert((tip.height, tip.hash), raw.to_vec());
+            prev = block.block_hash();
+        }
+        Ok(())
+    }
+
+    fn winning_two_block_target(
+        handles: &ApplyHandles,
+        bodies: &MapBodyStore,
+        genesis: &bitcoin::Block,
+        seeds: (u8, u8),
+    ) -> Result<bitcoin_rs_chain::NodeId, Box<dyn std::error::Error>> {
+        winning_two_block_target_with_first_txs(handles, bodies, genesis, seeds, Vec::new())
+    }
+
+    fn winning_two_block_target_with_first_txs(
+        handles: &ApplyHandles,
+        bodies: &MapBodyStore,
+        genesis: &bitcoin::Block,
+        seeds: (u8, u8),
+        first_extra: Vec<Transaction>,
+    ) -> Result<bitcoin_rs_chain::NodeId, Box<dyn std::error::Error>> {
+        let mut first_txs = vec![coinbase_transaction(seeds.0)];
+        first_txs.extend(first_extra);
+        let winner_one =
+            mined_block_with_prev_hash_and_transactions(genesis.block_hash(), first_txs)?;
+        let winner_two = mined_block_with_prev_hash_and_transactions(
+            winner_one.block_hash(),
+            vec![coinbase_transaction(seeds.1)],
+        )?;
+        insert_branch_headers(
+            handles,
+            bodies,
+            &[(1_u32, &winner_one), (2_u32, &winner_two)],
+        )
+    }
+
+    fn seed_op_true_outputs(
+        utxo: &UtxoSet,
+        txids: &[bitcoin::Txid],
+        tag: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut seed = BlockChanges::default();
+        for txid in txids {
+            seed.add(UtxoAdd::new(
+                OutPoint::new(Hash256::from_le_bytes(txid.as_byte_array()), 0),
+                TxOut {
+                    value: Amount::from_sat(50_000),
+                    script_pubkey: op_true_script(),
+                },
+                false,
+                1,
+            ));
+        }
+        utxo.commit_block(&seed, &Hash256::from_le_bytes(&[tag; 32]))?;
+        Ok(())
+    }
+
+    fn seed_funding(
+        utxo: &UtxoSet,
+        txid: bitcoin::Txid,
+        tag: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        seed_op_true_outputs(utxo, &[txid], tag)
+    }
+
+    #[test]
+    fn one_block_reorg_preserves_in_block_transaction_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let utxo = Arc::new(UtxoSet::new());
+        let funding_a = bitcoin::Txid::from_byte_array([0x81; 32]);
+        let funding_b = bitcoin::Txid::from_byte_array([0x82; 32]);
+        seed_funding(&utxo, funding_a, 0x21)?;
+        seed_funding(&utxo, funding_b, 0x22)?;
+
+        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let bodies = Arc::new(MapBodyStore::default());
+        let body_handle: Arc<dyn crate::apply::PruneBodyStore> = bodies.clone();
+        handles.block_body_store = Some(body_handle);
+
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let first = standard_spend(
+            bitcoin::OutPoint {
+                txid: funding_a,
+                vout: 0,
+            },
+            40_000,
+            0x71,
+        );
+        let second = standard_spend(
+            bitcoin::OutPoint {
+                txid: funding_b,
+                vout: 0,
+            },
+            39_000,
+            0x72,
+        );
+        let first_txid = first.compute_txid();
+        let second_txid = second.compute_txid();
+        losing_branch_with_spends(&handles, &bodies, &genesis, vec![(1, vec![first, second])])?;
+        let target = winning_two_block_target(&handles, &bodies, &genesis, (3, 4))?;
+        crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {})?;
+
+        let pool = handles.mempool.read();
+        let first_id = pool
+            .entry_id_by_txid(&first_txid)
+            .ok_or_else(|| anyhow::anyhow!("first spend must be readmitted"))?;
+        let second_id = pool
+            .entry_id_by_txid(&second_txid)
+            .ok_or_else(|| anyhow::anyhow!("second spend must be readmitted"))?;
+        assert!(
+            first_id < second_id,
+            "forward in-block order must admit the earlier transaction first ({first_id:?} < {second_id:?})"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn two_block_reorg_is_ancestor_first_and_preserves_in_block_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let utxo = Arc::new(UtxoSet::new());
+        let unrelated_funding = bitcoin::Txid::from_byte_array([0x83; 32]);
+        let funding_a = bitcoin::Txid::from_byte_array([0x84; 32]);
+        let funding_b = bitcoin::Txid::from_byte_array([0x85; 32]);
+        seed_funding(&utxo, unrelated_funding, 0x23)?;
+        seed_funding(&utxo, funding_a, 0x24)?;
+        seed_funding(&utxo, funding_b, 0x25)?;
+
+        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let bodies = Arc::new(MapBodyStore::default());
+        let body_handle: Arc<dyn crate::apply::PruneBodyStore> = bodies.clone();
+        handles.block_body_store = Some(body_handle);
+
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let unrelated = standard_spend(
+            bitcoin::OutPoint {
+                txid: unrelated_funding,
+                vout: 0,
+            },
+            40_000,
+            0x73,
+        );
+        let first = standard_spend(
+            bitcoin::OutPoint {
+                txid: funding_a,
+                vout: 0,
+            },
+            40_000,
+            0x74,
+        );
+        let second = standard_spend(
+            bitcoin::OutPoint {
+                txid: funding_b,
+                vout: 0,
+            },
+            39_000,
+            0x75,
+        );
+        let unrelated_txid = unrelated.compute_txid();
+        let first_txid = first.compute_txid();
+        let second_txid = second.compute_txid();
+        losing_branch_with_spends(
+            &handles,
+            &bodies,
+            &genesis,
+            vec![(1, vec![unrelated]), (2, vec![first, second])],
+        )?;
+        let target = winning_two_block_target(&handles, &bodies, &genesis, (5, 6))?;
+        crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {})?;
+
+        let pool = handles.mempool.read();
+        let unrelated_id = pool
+            .entry_id_by_txid(&unrelated_txid)
+            .ok_or_else(|| anyhow::anyhow!("ancestor-block spend must be readmitted"))?;
+        let first_id = pool
+            .entry_id_by_txid(&first_txid)
+            .ok_or_else(|| anyhow::anyhow!("first later-block spend must be readmitted"))?;
+        let second_id = pool
+            .entry_id_by_txid(&second_txid)
+            .ok_or_else(|| anyhow::anyhow!("second later-block spend must be readmitted"))?;
+        assert!(
+            unrelated_id < first_id,
+            "ancestor-first re-admission must insert the earlier block first ({unrelated_id:?} < {first_id:?})"
+        );
+        assert!(
+            first_id < second_id,
+            "later block must keep forward transaction order ({first_id:?} < {second_id:?})"
         );
         Ok(())
     }
@@ -9960,7 +10283,8 @@ mod consensus_rule_tests {
             }],
         };
         let spend_txid = spend.compute_txid();
-        let admission = crate::run::RpcTransactionAdmission::new(&handles);
+        let admission =
+            crate::run::RpcTransactionAdmission::new(&handles, Arc::new(crate::run::SilentMining));
 
         let contender_handles = handles.clone();
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
@@ -10855,74 +11179,4 @@ fn check_pow_limit_and_continuity_for_seeded_tip(
 ) -> core::result::Result<(), ApplyError> {
     let prior = handles.chain_tip.load_full();
     check_pow_limit_and_continuity(handles, prior.as_deref(), block, height)
-}
-
-#[cfg(test)]
-mod chain_tx_count_tests {
-    use super::*;
-
-    fn handles() -> ApplyHandles {
-        super::consensus_rule_tests::empty_apply_handles()
-    }
-
-    #[test]
-    fn genesis_establishes_the_count_from_nothing() {
-        let handles = handles();
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
-        advance_chain_tx_count(&handles, 0, 1);
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn an_unknown_count_stays_unknown_above_genesis() {
-        let handles = handles();
-        // A datadir written before the counter existed restores as unknown.
-        // Accumulating from here would produce a small number that looks like a
-        // chain total and is not one — worse than admitting we do not know.
-        advance_chain_tx_count(&handles, 900_000, 2_500);
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn a_known_count_advances_and_rewinds_by_the_same_delta() {
-        let handles = handles();
-        advance_chain_tx_count(&handles, 0, 1);
-        advance_chain_tx_count(&handles, 1, 7);
-        advance_chain_tx_count(&handles, 2, 3);
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 11);
-
-        rewind_chain_tx_count(&handles, 3);
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 8);
-        rewind_chain_tx_count(&handles, 7);
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn rewinding_an_unknown_count_leaves_it_unknown() {
-        let handles = handles();
-        rewind_chain_tx_count(&handles, 5);
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn a_rewind_past_zero_admits_it_does_not_know_rather_than_clamping() {
-        let handles = handles();
-        advance_chain_tx_count(&handles, 0, 4);
-        // Only reachable if the count and the chain have diverged. A clamp to
-        // some small number would keep reporting a confident wrong total.
-        rewind_chain_tx_count(&handles, 9);
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn an_advance_past_u64_marks_the_count_unknown_instead_of_wrapping() {
-        let handles = handles();
-        handles
-            .chain_tx_count
-            .store(u64::MAX - 1, Ordering::Relaxed);
-
-        advance_chain_tx_count(&handles, 900_000, 3);
-
-        assert_eq!(handles.chain_tx_count.load(Ordering::Relaxed), 0);
-    }
 }

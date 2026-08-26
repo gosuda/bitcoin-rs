@@ -87,6 +87,47 @@ impl BlockTree {
             .ok_or(ChainError::UnknownNode { id })
     }
 
+    /// Records the cumulative transaction count after applying `id`'s block.
+    ///
+    /// Genesis establishes the count from its own block. Every other node derives
+    /// from its actual parent, so side branches remain independent. A parent with
+    /// an unknown count (`0`) keeps the child unknown rather than manufacturing a
+    /// partial total.
+    pub fn record_applied_tx_count(
+        &mut self,
+        id: NodeId,
+        block_tx_count: u64,
+    ) -> Result<(), ChainError> {
+        let (height, parent) = {
+            let node = self.node(id)?;
+            (node.height, node.parent)
+        };
+        let chain_tx_count = match parent {
+            None if height == 0 => block_tx_count,
+            Some(parent_id) => {
+                let parent_count = self.node(parent_id)?.chain_tx_count;
+                if parent_count == 0 {
+                    0
+                } else {
+                    parent_count.checked_add(block_tx_count).unwrap_or(0)
+                }
+            }
+            None => 0,
+        };
+        self.node_mut_without_index_invalidation(id)?.chain_tx_count = chain_tx_count;
+        Ok(())
+    }
+
+    /// Restores an authenticated cumulative transaction count for `id`.
+    pub fn restore_chain_tx_count(
+        &mut self,
+        id: NodeId,
+        chain_tx_count: u64,
+    ) -> Result<(), ChainError> {
+        self.node_mut_without_index_invalidation(id)?.chain_tx_count = chain_tx_count;
+        Ok(())
+    }
+
     /// Returns the highest shared ancestor of `a` and `b`, walking parent pointers.
     ///
     /// Returns `None` when either node is unknown or the chains share no common
@@ -607,6 +648,7 @@ impl BlockTree {
             hash,
             header,
             chainwork,
+            chain_tx_count: 0,
             status,
         });
         let id_u32 = u32::try_from(index).map_err(|_| ChainError::NodeIdOverflow { index })?;
@@ -1024,15 +1066,15 @@ mod tests {
         assert!(tree.active_by_height.is_tainted_for_test());
 
         // Local neighborhood coherence at h=24 would pass the old adjacency guard.
-        let i24 = tree.active_by_height.get(24).expect("corrupted slot 24");
-        let i23 = tree.active_by_height.get(23).expect("corrupted slot 23");
-        let i25 = tree.active_by_height.get(25).expect("corrupted slot 25");
+        let i24 = tree.active_by_height.get(24).ok_or("corrupted slot 24")?;
+        let i23 = tree.active_by_height.get(23).ok_or("corrupted slot 23")?;
+        let i25 = tree.active_by_height.get(25).ok_or("corrupted slot 25")?;
         assert_eq!(tree.node(i24)?.height, 24);
         assert_eq!(tree.node(i24)?.parent, Some(i23));
         assert_eq!(tree.node(i25)?.parent, Some(i24));
 
         for (offset, &side_id) in side_ids.iter().enumerate() {
-            let height = 19 + u32::try_from(offset).expect("side chain offset fits u32");
+            let height = 19 + u32::try_from(offset).map_err(|_| "side chain offset fits u32")?;
             assert_eq!(tree.node(side_id)?.height, height);
             if height == 19 {
                 assert_eq!(tree.node(side_id)?.parent, Some(main_ids[18]));
@@ -1163,8 +1205,11 @@ mod tests {
         ];
         let expected: Vec<Hash256> = expected_heights
             .iter()
-            .map(|&h| hashes[usize::try_from(h).expect("locator height fits usize")])
-            .collect();
+            .map(|&h| -> Result<Hash256, Box<dyn std::error::Error>> {
+                let idx = usize::try_from(h).map_err(|_| "locator height fits usize")?;
+                Ok(hashes[idx])
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(locator, expected);
         Ok(())
     }
@@ -1192,7 +1237,7 @@ mod tests {
 
         // A non-active-tip node still yields a non-empty locator via the
         // parent-walk fallback once the height index is cleared.
-        let side = mid_node.expect("height 10 node was recorded");
+        let side = mid_node.ok_or("height 10 node was recorded")?;
         let side_locator = tree.block_locator(side, 32);
         assert!(!side_locator.is_empty());
         assert_eq!(side_locator[0], tree.node(side)?.hash);
@@ -2009,6 +2054,55 @@ mod tests {
         let a3_id = tree.insert_node(Some(a1_id), a3, NodeStatus::HeaderValid)?;
         assert_eq!(tree.node(a3_id)?.status, NodeStatus::Invalid);
         assert_eq!(tree.tip_id(), Some(genesis_id));
+        Ok(())
+    }
+
+    #[test]
+    fn applied_transaction_counts_follow_each_nodes_parent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        assert_eq!(tree.node(genesis_id)?.chain_tx_count, 0);
+
+        tree.record_applied_tx_count(genesis_id, 1)?;
+        assert_eq!(tree.node(genesis_id)?.chain_tx_count, 1);
+
+        let genesis_hash = tree.node(genesis_id)?.hash;
+        let main_header = test_header(BlockHash::from_byte_array(genesis_hash.to_le_bytes()), 1);
+        let main_id = tree.insert_node(Some(genesis_id), main_header, NodeStatus::HeaderValid)?;
+        let side_header = test_header(BlockHash::from_byte_array(genesis_hash.to_le_bytes()), 101);
+        let side_id = tree.insert_node(Some(genesis_id), side_header, NodeStatus::HeaderValid)?;
+        assert_eq!(tree.node(main_id)?.chain_tx_count, 0);
+        assert_eq!(tree.node(side_id)?.chain_tx_count, 0);
+
+        tree.record_applied_tx_count(main_id, 2)?;
+        tree.record_applied_tx_count(side_id, 7)?;
+        assert_eq!(tree.node(main_id)?.chain_tx_count, 3);
+        assert_eq!(tree.node(side_id)?.chain_tx_count, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_parent_count_stays_unknown_until_authenticated_restore()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::all_zeros(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let child_header = test_header(
+            BlockHash::from_byte_array(tree.node(genesis_id)?.hash.to_le_bytes()),
+            1,
+        );
+        let child_id = tree.insert_node(Some(genesis_id), child_header, NodeStatus::HeaderValid)?;
+
+        tree.record_applied_tx_count(child_id, 3)?;
+        assert_eq!(tree.node(child_id)?.chain_tx_count, 0);
+
+        tree.restore_chain_tx_count(genesis_id, 11)?;
+        tree.record_applied_tx_count(child_id, 3)?;
+        assert_eq!(tree.node(child_id)?.chain_tx_count, 14);
+        tree.restore_chain_tx_count(child_id, 42)?;
+        assert_eq!(tree.node(child_id)?.chain_tx_count, 42);
         Ok(())
     }
 }

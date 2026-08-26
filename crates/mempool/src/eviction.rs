@@ -55,6 +55,7 @@ pub fn mempool_min_fee_sat_per_kvb(pool: &Mempool, incremental_relay_fee_sat_per
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
 
@@ -103,6 +104,26 @@ mod tests {
         let evicted = evict_lowest_fee_packages(&mut pool, 100);
         assert_eq!(evicted, vec![low_id]);
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn eviction_raises_lowest_fee_rate_and_mempool_min_fee() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 1_000,
+            max_total_bytes: 400,
+            ..MempoolLimits::default()
+        });
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1))
+            .expect("low");
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx(2)), 200, 800, 1, 1))
+            .expect("high");
+        assert_eq!(pool.lowest_fee_rate(), Some(2_000));
+        assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 3_000);
+
+        let evicted = evict_lowest_fee_packages(&mut pool, 200);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(pool.lowest_fee_rate(), Some(4_000));
+        assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 5_000);
     }
 
     fn tx(label: u8) -> Transaction {

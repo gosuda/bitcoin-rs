@@ -343,14 +343,8 @@ mod tests {
         let second = stats.begin_ping(10_000);
         assert_eq!(stats.complete_ping(second, 11_000), Some(1_000));
 
-        assert_eq!(
-            stats.ping_time(),
-            Some(std::time::Duration::from_micros(1_000))
-        );
-        assert_eq!(
-            stats.min_ping(),
-            Some(std::time::Duration::from_micros(1_000))
-        );
+        assert_eq!(stats.ping_time(), Some(std::time::Duration::from_millis(1)));
+        assert_eq!(stats.min_ping(), Some(std::time::Duration::from_millis(1)));
         assert_eq!(stats.ping_wait(12_000), None);
     }
 
@@ -364,7 +358,7 @@ mod tests {
         assert_eq!(stats.complete_ping(superseded, 9_000), None);
         assert_eq!(
             stats.ping_wait(3_000),
-            Some(std::time::Duration::from_micros(1_000))
+            Some(std::time::Duration::from_millis(1))
         );
         assert_eq!(stats.complete_ping(current, 9_000), Some(7_000));
     }

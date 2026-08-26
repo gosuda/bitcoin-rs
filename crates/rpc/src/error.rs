@@ -40,6 +40,9 @@ pub enum RpcError {
     /// A caught command failure with no more specific Core category.
     #[error("{0}")]
     Misc(String),
+    /// Transaction hex or consensus decoding failed.
+    #[error("{0}")]
+    Deserialization(String),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -68,6 +71,8 @@ impl RpcError {
     pub const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
     /// Bitcoin Core warmup code.
     pub const CORE_IN_WARMUP: i64 = -28;
+    /// Bitcoin Core deserialization error code.
+    pub const CORE_DESERIALIZATION_ERROR: i64 = -22;
 
     /// Builds the no-private-keys policy error used by signing RPCs.
     #[must_use]
@@ -90,6 +95,7 @@ impl RpcError {
             Self::InWarmup(_) => Self::CORE_IN_WARMUP,
             Self::ClientNotConnected => Self::CORE_CLIENT_NOT_CONNECTED,
             Self::Misc(_) => Self::CORE_MISC_ERROR,
+            Self::Deserialization(_) => Self::CORE_DESERIALIZATION_ERROR,
         }
     }
 
@@ -108,6 +114,7 @@ impl RpcError {
             | Self::InvalidParameter(message)
             | Self::InWarmup(message)
             | Self::Misc(message)
+            | Self::Deserialization(message)
             | Self::Internal(message) => message,
         }
     }
@@ -221,6 +228,11 @@ mod tests {
                 RpcError::Misc("uncaught command failure".to_owned()),
                 -1,
                 "uncaught command failure",
+            ),
+            (
+                RpcError::Deserialization("TX decode failed".to_owned()),
+                -22,
+                "TX decode failed",
             ),
         ];
 

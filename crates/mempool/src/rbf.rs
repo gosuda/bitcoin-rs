@@ -93,14 +93,20 @@ impl Mempool {
             return Err(RbfError::Rule1NoOptIn);
         }
 
-        let original_spends = direct_conflicts
+        let original_parent_txids = direct_conflicts
             .iter()
             .filter_map(|id| self.entry(*id))
-            .flat_map(|entry| entry.tx.input.iter().map(|input| input.previous_output))
-            .collect::<Vec<_>>();
+            .flat_map(|entry| {
+                entry
+                    .tx
+                    .input
+                    .iter()
+                    .map(|input| input.previous_output.txid)
+            })
+            .collect::<HashSet<_>>();
         for input in &candidate.tx.input {
             if self.is_unconfirmed_outpoint(input.previous_output)
-                && !original_spends.contains(&input.previous_output)
+                && !original_parent_txids.contains(&input.previous_output.txid)
             {
                 return Err(RbfError::Rule2NewUnconfirmedInput);
             }

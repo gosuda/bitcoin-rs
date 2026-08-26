@@ -81,13 +81,17 @@ fn expect_template(result: BlockTemplateResult) -> bitcoin_rs_rpc::context::Bloc
 }
 
 fn mined_child(prev: bitcoin::BlockHash) -> anyhow::Result<bitcoin::Block> {
+    mined_child_labeled(prev, 1)
+}
+
+fn mined_child_labeled(prev: bitcoin::BlockHash, label: i64) -> anyhow::Result<bitcoin::Block> {
     let coinbase = bitcoin::Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![bitcoin::TxIn {
             previous_output: bitcoin::OutPoint::null(),
             script_sig: bitcoin::script::Builder::new()
-                .push_int(1)
+                .push_int(label)
                 .push_int(1)
                 .into_script(),
             sequence: bitcoin::Sequence::MAX,
@@ -236,6 +240,18 @@ fn long_poll_wakes_on_tip_change() -> anyhow::Result<()> {
         template.candidate.template_id.as_str(),
         current.candidate.template_id.as_str()
     );
+    let child_hash =
+        bitcoin_rs_primitives::Hash256::from_le_bytes(child.block_hash().as_byte_array());
+    assert_eq!(template.candidate.previous_block_hash, child_hash);
+    assert_eq!(template.submit_old, Some(false));
+    assert_eq!(
+        template.rules.iter().any(|rule| rule.as_str() == "csv"),
+        template.candidate.csv_active
+    );
+    assert_eq!(
+        template.rules.iter().any(|rule| rule.as_str() == "segwit"),
+        template.candidate.segwit_active
+    );
     Ok(())
 }
 
@@ -272,6 +288,11 @@ fn long_poll_wakes_on_mempool_sequence_change() -> anyhow::Result<()> {
         template.candidate.mempool_sequence,
         current.candidate.mempool_sequence
     );
+    assert_eq!(
+        template.candidate.previous_block_hash,
+        current.candidate.previous_block_hash
+    );
+    assert_eq!(template.submit_old, Some(true));
     Ok(())
 }
 
@@ -464,5 +485,219 @@ fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     assert!(info.signet.is_none());
+    Ok(())
+}
+
+#[test]
+fn duplicate_submit_returns_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let child = mined_child(genesis.block_hash())?;
+    assert_eq!(
+        mining.submit_block(child.clone())?,
+        BlockValidationResult::Accepted
+    );
+    assert_eq!(
+        mining.submit_block(child)?,
+        BlockValidationResult::Duplicate
+    );
+    Ok(())
+}
+
+#[test]
+fn unsolved_pow_is_rejected_by_proposal_and_submit() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let mut block = mined_child(genesis.block_hash())?;
+    let target = block.header.target();
+    while block.header.validate_pow(target).is_ok() {
+        block.header.nonce = block
+            .header
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("nonce exhausted while invalidating PoW"))?;
+    }
+    let proposal = mining.get_block_template(BlockTemplateRequest {
+        mode: BlockTemplateMode::Proposal(block.clone()),
+        capabilities: Vec::new(),
+        rules: Vec::new(),
+        long_poll_id: None,
+    })?;
+    match proposal {
+        BlockTemplateResult::Proposal(BlockValidationResult::Accepted) => {}
+        other => panic!("BIP22 proposal must omit unsolved PoW, got {other:?}"),
+    }
+    match mining.submit_block(block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert!(reason.contains("high-hash"), "submit reason: {reason}");
+        }
+        other => panic!("expected submit high-hash, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn duplicate_solved_submission_is_idempotent() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let child = mined_child(genesis.block_hash())?;
+    assert_eq!(
+        mining.submit_block(child.clone())?,
+        BlockValidationResult::Accepted
+    );
+    let height = state.applied_tip().load_full().map_or(0, |tip| tip.height);
+    assert_eq!(
+        mining.submit_block(child)?,
+        BlockValidationResult::Duplicate
+    );
+    assert_eq!(
+        state.applied_tip().load_full().map_or(0, |tip| tip.height),
+        height,
+        "duplicate solved submission must not reapply"
+    );
+    Ok(())
+}
+
+#[test]
+fn mining_info_reports_network_hashps_after_genesis() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let info = mining.mining_info()?;
+    assert_eq!(info.blocks, 0);
+    assert!(
+        info.network_hashes_per_second.is_finite(),
+        "hashps must be a finite projection"
+    );
+    Ok(())
+}
+
+#[test]
+fn currentblocktx_excludes_coinbase_for_zero_and_one() -> anyhow::Result<()> {
+    use bitcoin::{
+        Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute, transaction,
+    };
+    use bitcoin_rs_mempool::MempoolEntry;
+
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let empty = expect_template(mining.get_block_template(template_request(None))?);
+    let empty_info = mining.mining_info()?;
+    assert!(empty.candidate.transactions.is_empty());
+    assert_eq!(
+        empty_info.last_candidate.map(|info| info.transactions),
+        Some(0)
+    );
+
+    let tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::new(Txid::from_byte_array([0x42; 32]), 0),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    {
+        let mempool = state.mempool();
+        let mut guard = mempool.write();
+        guard.insert_entry(MempoolEntry::new(Arc::new(tx), 120, 10_000, 1, 1))?;
+    }
+    mining.publish_generation();
+    let one = expect_template(mining.get_block_template(template_request(None))?);
+    let one_info = mining.mining_info()?;
+    assert_eq!(one.candidate.transactions.len(), 1);
+    assert_eq!(
+        one_info.last_candidate.map(|info| info.transactions),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[test]
+fn known_invalid_submit_is_duplicate_invalid() -> anyhow::Result<()> {
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_primitives::Hash256;
+
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+    let invalid = mined_child_labeled(genesis.block_hash(), 2)?;
+    {
+        let tree = state.block_tree();
+        let genesis_id = tree
+            .read()
+            .lookup(genesis_hash)
+            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+        tree.write()
+            .insert_node(Some(genesis_id), invalid.header, NodeStatus::Invalid)?;
+    }
+    assert_eq!(
+        mining.submit_block(invalid)?,
+        BlockValidationResult::DuplicateInvalid
+    );
+    Ok(())
+}
+
+#[test]
+fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let child = mined_child(genesis.block_hash())?;
+    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    assert_eq!(
+        mining.submit_block(genesis)?,
+        BlockValidationResult::Duplicate
+    );
+    Ok(())
+}
+
+#[test]
+fn known_non_active_submit_is_duplicate_inconclusive() -> anyhow::Result<()> {
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_primitives::Hash256;
+
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+    let side = mined_child_labeled(genesis.block_hash(), 3)?;
+    {
+        let tree = state.block_tree();
+        let genesis_id = tree
+            .read()
+            .lookup(genesis_hash)
+            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+        tree.write()
+            .insert_node(Some(genesis_id), side.header, NodeStatus::HeaderValid)?;
+    }
+    assert_eq!(
+        mining.submit_block(side)?,
+        BlockValidationResult::DuplicateInconclusive
+    );
     Ok(())
 }

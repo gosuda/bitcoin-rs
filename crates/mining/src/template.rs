@@ -32,6 +32,8 @@ pub struct CandidateContext {
     pub locktime_cutoff: u32,
     /// Network whose subsidy schedule applies.
     pub network: Network,
+    /// Whether CSV (BIP68/112/113) is active at `height`.
+    pub csv_active: bool,
     /// Whether BIP141 is active at `height`.
     pub segwit_active: bool,
     /// Maximum candidate block weight, including the coinbase.
@@ -120,6 +122,10 @@ pub struct Candidate {
     pub min_time: u32,
     /// Candidate creation time.
     pub current_time: u32,
+    /// Whether CSV (BIP68/112/113) is active at this candidate's height.
+    pub csv_active: bool,
+    /// Whether BIP141 is active at this candidate's height.
+    pub segwit_active: bool,
     /// Configured weight limit.
     pub max_weight: u64,
     /// Configured serialized-size limit.
@@ -235,6 +241,8 @@ pub fn assemble_candidate(
         bits: context.bits,
         min_time: context.min_time,
         current_time: context.current_time,
+        csv_active: context.csv_active,
+        segwit_active: context.segwit_active,
         max_weight: context.max_weight,
         max_size: context.max_size,
         max_sigops: context.max_sigops,

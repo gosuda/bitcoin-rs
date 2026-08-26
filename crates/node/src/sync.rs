@@ -761,15 +761,14 @@ impl BlockSync {
                     .load_full()
                     .map_or(0, |tip| tip.height);
                 tracing::info!(height, "block sync: switched to the heavier branch");
+                self.publish_generation_after_mutation();
             }
             Err(crate::reorg::ReorgError::MissingBody { height, .. }) => {
                 tracing::trace!(height, "block sync: heavier branch still downloading");
             }
             Err(error @ crate::reorg::ReorgError::Fatal(_)) => {
                 self.handles.admission.close_permanently();
-                self.handles
-                    .shutdown
-                    .store(true, std::sync::atomic::Ordering::Release);
+                crate::shutdown::trigger_shutdown(&self.handles.shutdown);
                 tracing::error!(
                     %error,
                     "block sync: chainstate torn by a failed disconnect, shutting down"

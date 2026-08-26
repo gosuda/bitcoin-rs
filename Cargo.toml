@@ -220,8 +220,8 @@ tracing-subscriber = { version = ">=0.3.23, <0.4", default-features = false, fea
 ] }
 # metrics 0.24 has NO features at all.
 metrics                     = { version = ">=0.24.6, <0.25" }
-# metrics-exporter-prometheus default pulls tokio+hyper+rustls; disable defaults
-# and let crates/node opt in to `http-listener` if/when wired (Task 18).
+# metrics-exporter-prometheus default pulls tokio+hyper+rustls; disable defaults.
+# crates/node serves the scrape endpoint itself on a synchronous thread.
 metrics-exporter-prometheus = { version = ">=0.18, <0.19", default-features = false }
 # quanta: monotonic TSC clock for hot-path timing. No special features needed.
 quanta                      = { version = ">=0.12.6, <0.13", default-features = false }

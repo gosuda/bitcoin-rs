@@ -127,6 +127,7 @@ fn segwit_candidate_commits_to_selected_wtxids_and_reserved_value() -> Result<()
 }
 
 #[test]
+#[allow(clippy::expect_used)]
 fn fee_overflow_is_reported_instead_of_wrapping() {
     let entry = snapshot_entry(
         Arc::new(tx_with_witness(1, 1_000, None)),
@@ -163,6 +164,7 @@ fn context(height: u32, segwit_active: bool) -> CandidateContext {
         current_time: 1_700_000_600,
         locktime_cutoff: 1_700_000_000,
         network: Network::Regtest,
+        csv_active: true,
         segwit_active,
         max_weight: 4_000_000,
         max_size: 4_000_000,

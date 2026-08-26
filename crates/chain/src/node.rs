@@ -58,6 +58,8 @@ pub struct BlockTreeNode {
     pub header: BlockHeader,
     /// Accumulated work through this header.
     pub chainwork: ChainWork,
+    /// Cumulative transaction count through this node, or `0` when unknown.
+    pub chain_tx_count: u64,
     /// Node validation and chain-selection status.
     pub status: NodeStatus,
 }

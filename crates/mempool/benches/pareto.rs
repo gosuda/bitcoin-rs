@@ -34,7 +34,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 /// Index fill sizes. The largest is far below a Core-default mempool (~10^5
 /// transactions at `-maxmempool=300MB`); the quadratic arm cannot be measured
 /// there in reasonable time, which is itself the finding.
-const FILL_SIZES: [usize; 4] = [1_000, 4_000, 16_000, 50_000];
+const FILL_SIZES: [u64; 4] = [1_000, 4_000, 16_000, 50_000];
 
 /// End-to-end sizes.
 ///
@@ -42,7 +42,7 @@ const FILL_SIZES: [usize; 4] = [1_000, 4_000, 16_000, 50_000];
 /// at before the metadata refresh was made incremental — 3,200 transactions took
 /// a second — and are kept so the two revisions of this page compare directly.
 /// The last two are only reachable now, and are what pins the exponent.
-const POOL_SIZES: [usize; 5] = [200, 800, 3_200, 12_800, 51_200];
+const POOL_SIZES: [u64; 5] = [200, 800, 3_200, 12_800, 51_200];
 
 fn spread_fee(seed: u64) -> u64 {
     // Not monotonic in the seed: an index fed entries already in priority order
@@ -80,7 +80,7 @@ fn bench_index_fill(c: &mut Criterion) {
     group.sample_size(10);
 
     for size in FILL_SIZES {
-        let entries = (0..size as u64).map(entry).collect::<Vec<_>>();
+        let entries = (0..size).map(entry).collect::<Vec<_>>();
 
         // Prove both arms index the same fixture before timing either. An arm
         // that dropped entries would be timed as a spectacular, meaningless win.
@@ -125,7 +125,7 @@ fn bench_mempool_fill(c: &mut Criterion) {
     group.sample_size(10);
 
     for size in POOL_SIZES {
-        let entries = (0..size as u64).map(entry).collect::<Vec<_>>();
+        let entries = (0..size).map(entry).collect::<Vec<_>>();
         group.bench_function(format!("fill/{size}"), |b| {
             b.iter(|| {
                 let mut pool = Mempool::new(MempoolLimits::default());
@@ -140,9 +140,58 @@ fn bench_mempool_fill(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_lowest_fee_rate_lookup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mempool_lowest_fee_rate");
+    group.sample_size(10);
+
+    let size: u64 = 51_200;
+    let entries = (0..size).map(entry).collect::<Vec<_>>();
+    let mut pool = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        max_total_bytes: 0,
+        ..MempoolLimits::default()
+    });
+    for item in &entries {
+        pool.insert_entry(item.clone())
+            .expect("lookup fixture insert");
+    }
+    assert_eq!(
+        pool.len(),
+        usize::try_from(size).expect("size fits usize"),
+        "lookup fixture must keep every entry"
+    );
+
+    let scanned = pool
+        .entries
+        .iter()
+        .map(|(_index, entry)| entry.fee_rate)
+        .min();
+    assert_eq!(
+        scanned,
+        pool.lowest_fee_rate(),
+        "matched lookup arms must observe the same floor"
+    );
+
+    group.bench_function("before_scan/lookup/51200", |b| {
+        b.iter(|| {
+            black_box(
+                pool.entries
+                    .iter()
+                    .map(|(_index, entry)| entry.fee_rate)
+                    .min(),
+            )
+        });
+    });
+    group.bench_function("after_maintained/lookup/51200", |b| {
+        b.iter(|| black_box(pool.lowest_fee_rate()));
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default();
-    targets = bench_index_fill, bench_mempool_fill
+    targets = bench_index_fill, bench_mempool_fill, bench_lowest_fee_rate_lookup
 }
 criterion_main!(benches);

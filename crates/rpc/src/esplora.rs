@@ -513,11 +513,14 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    block_transaction_values(ctx, &record, block.txdata.iter()).map_or_else(|r| r, json_response)
+    block_transaction_values(ctx, &record, block.txdata.iter().take(CHAIN_PAGE))
+        .map_or_else(|r| r, json_response)
 }
 
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
-    let max_txs = query_limit(query, "max_txs").unwrap_or(usize::MAX);
+    let max_txs = query_limit(query, "max_txs")
+        .unwrap_or(MEMPOOL_PAGE)
+        .min(MEMPOOL_PAGE);
     // Ordering needs every entry, the answer needs `max_txs` of them. The pool
     // payload stays behind its `Arc` until the page is cut, so a one-transaction
     // request no longer copies the whole mempool under the read lock.
@@ -532,13 +535,19 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
         ordered.sort_unstable_by(|left, right| {
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
-        let start = last
-            .and_then(|last| {
-                ordered
-                    .iter()
-                    .position(|(_, txid, _)| txid.to_string() == last)
-            })
-            .map_or(0, |position| position.saturating_add(1));
+        let start = match last {
+            None => 0,
+            Some(last) => match ordered
+                .iter()
+                .position(|(_, txid, _)| txid.to_string() == last)
+            {
+                Some(position) => position.saturating_add(1),
+                // The cursor transaction has left the mempool (evicted,
+                // replaced, or mined between pages). Return 404 so a paging
+                // client does not silently replay page one indefinitely.
+                None => return not_found(),
+            },
+        };
         ordered
             .into_iter()
             .skip(start)
@@ -558,6 +567,9 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
     let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
         return bad("transaction request body must be a JSON array of txids");
     };
+    if text_ids.len() > MEMPOOL_PAGE {
+        return bad("txid list exceeds the 50-transaction page limit");
+    }
     let ids = match text_ids
         .into_iter()
         .map(|id| Txid::from_str(&id).map_err(|_| bad("txid must be 64 hex characters")))
@@ -591,6 +603,9 @@ fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
     let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
         return bad("outspend request body must be a JSON array of txids");
     };
+    if text_ids.len() > MEMPOOL_PAGE {
+        return bad("txid list exceeds the 50-transaction page limit");
+    }
     let projection = Projection::new(ctx);
     text_ids
         .into_iter()
@@ -611,6 +626,9 @@ fn internal_outspends_by_outpoint(ctx: &Context, body: &[u8]) -> Response {
     let Ok(outpoints) = serde_json::from_slice::<Vec<String>>(body) else {
         return bad("outspend request body must be a JSON array of outpoints");
     };
+    if outpoints.len() > MEMPOOL_PAGE {
+        return bad("outpoint list exceeds the 50-transaction page limit");
+    }
     let projection = Projection::new(ctx);
     outpoints
         .into_iter()
@@ -696,13 +714,17 @@ fn mempool_recent(ctx: &Context) -> Response {
 fn fee_estimates(handler: &Handler) -> Response {
     let mut values = serde_json::Map::new();
     for target in (1_u32..=25).chain([144, 504, 1008]) {
-        let fee = handler
+        // Omit the target key when the estimator has no feerate (fresh node or
+        // dispatch failure) instead of fabricating a confident 1 sat/vB value
+        // that causes clients to underpay and produce stuck transactions.
+        if let Some(fee) = handler
             .dispatch("estimatesmartfee", &sonic_json!([target]))
             .ok()
             .and_then(|v| v.get("feerate").and_then(sonic_rs::JsonValueTrait::as_f64))
             .map(|v| v * 100_000_000.0 / 1000.0)
-            .unwrap_or(1.0);
-        values.insert(target.to_string(), json!(fee));
+        {
+            values.insert(target.to_string(), json!(fee));
+        }
     }
     json_response(values)
 }
@@ -835,7 +857,7 @@ fn parse_script(s: &str) -> Result<ScriptHash, Response> {
 fn query_error(e: TxQueryError) -> Response {
     match e {
         TxQueryError::Retry | TxQueryError::Unavailable(_) => unavailable(&e.to_string()),
-        TxQueryError::Storage(_) => internal(&e.to_string()),
+        TxQueryError::Storage(_) | TxQueryError::Decode(_) => internal(&e.to_string()),
     }
 }
 fn dispatch_error(e: crate::RpcError) -> Response {
@@ -898,6 +920,7 @@ fn internal(m: &str) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1201,6 +1224,8 @@ mod tests {
                     bits: 0x207f_ffff,
                     min_time: 1_700_000_001,
                     current_time: 1_700_000_010,
+                    csv_active: false,
+                    segwit_active: false,
                     max_weight: 4_000_000,
                     max_size: 4_000_000,
                     max_sigops: 80_000,
@@ -1722,6 +1747,163 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
+    fn internal_mempool_get_defaults_and_clamps_to_page_limit() {
+        let ctx = Arc::new(Context::new());
+        for value in 1_u64..=u64::try_from(MEMPOOL_PAGE + 1).expect("page fits u64") {
+            let transaction = transaction(
+                None,
+                TxOut {
+                    value: Amount::from_sat(value),
+                    script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                },
+            );
+            ctx.mempool
+                .write()
+                .insert_entry(MempoolEntry::new(
+                    Arc::new(transaction),
+                    100,
+                    1_000,
+                    value,
+                    0,
+                ))
+                .expect("mempool entry accepted");
+        }
+        let handler = Handler::new(Arc::clone(&ctx));
+
+        let defaulted = route(&handler, "/internal/mempool/txs", "");
+        assert_eq!(defaulted.status, 200);
+        let defaulted: Value =
+            serde_json::from_slice(&defaulted.body).expect("default mempool page json");
+        assert_eq!(defaulted.as_array().map(Vec::len), Some(MEMPOOL_PAGE));
+
+        let clamped = route(&handler, "/internal/mempool/txs", "max_txs=1000");
+        assert_eq!(clamped.status, 200);
+        let clamped: Value =
+            serde_json::from_slice(&clamped.body).expect("clamped mempool page json");
+        assert_eq!(clamped.as_array().map(Vec::len), Some(MEMPOOL_PAGE));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_block_txs_caps_at_chain_page() {
+        let transactions = (1_u64..=u64::try_from(CHAIN_PAGE + 1).expect("page fits u64"))
+            .map(|value| {
+                transaction(
+                    None,
+                    TxOut {
+                        value: Amount::from_sat(value),
+                        script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut block = Block {
+            header: bitcoin::block::Header {
+                version: Version::ONE,
+                prev_blockhash: BlockHash::all_zeros(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_700_000_000,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 1,
+            },
+            txdata: transactions,
+        };
+        block.header.merkle_root = block.compute_merkle_root().expect("fixture merkle root");
+        let record = crate::context::BlockRecord::from_block(0, &block);
+        let mut context = Context::new();
+        context.block_body_source = Some(Arc::new(SingleBlockSource {
+            height: 0,
+            hash: record.hash,
+            body: serialize(&block),
+        }));
+        context.add_block(record);
+        let tip = {
+            let mut tree = context.block_tree.write();
+            tree.insert_node(None, block.header, NodeStatus::Active)
+                .expect("insert block header");
+            tree.tip().expect("block tip")
+        };
+        context.set_applied_tip((*tip).clone());
+        let handler = Handler::new(Arc::new(context));
+        let response = route(
+            &handler,
+            &format!("/internal/block/{}/txs", block.block_hash()),
+            "",
+        );
+        assert_eq!(response.status, 200);
+        let values: Value = serde_json::from_slice(&response.body).expect("block txs json");
+        assert_eq!(values.as_array().map(Vec::len), Some(CHAIN_PAGE));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_post_lists_reject_oversized_bodies_before_query() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = Context::new();
+        ctx.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+            transactions: Vec::new(),
+            calls: Arc::clone(&calls),
+        }));
+        let handler = Handler::new(Arc::new(ctx));
+        let oversized: Vec<String> = (0..=MEMPOOL_PAGE)
+            .map(|index| format!("{index:064x}"))
+            .collect();
+        let exact: Vec<String> = (0..MEMPOOL_PAGE)
+            .map(|index| format!("{index:064x}"))
+            .collect();
+        let oversized_body = serde_json::to_vec(&oversized).expect("oversized list serializes");
+        let exact_body = serde_json::to_vec(&exact).expect("exact list serializes");
+        let oversized_outpoints: Vec<String> =
+            oversized.iter().map(|txid| format!("{txid}:0")).collect();
+        let exact_outpoints: Vec<String> = exact.iter().map(|txid| format!("{txid}:0")).collect();
+        let oversized_outpoint_body =
+            serde_json::to_vec(&oversized_outpoints).expect("oversized outpoints serialize");
+        let exact_outpoint_body =
+            serde_json::to_vec(&exact_outpoints).expect("exact outpoints serialize");
+
+        for path in [
+            "/internal/txs",
+            "/internal/mempool/txs",
+            "/internal/txs/outspends/by-txid",
+        ] {
+            let before = calls.load(Ordering::Relaxed);
+            let rejected =
+                route_post(&handler, path, &oversized_body).expect("internal POST route exists");
+            assert_eq!(rejected.status, 400, "oversized {path}");
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                before,
+                "no queries for oversized {path}"
+            );
+            let accepted =
+                route_post(&handler, path, &exact_body).expect("internal POST route exists");
+            assert_eq!(accepted.status, 200, "exact bound {path}");
+        }
+
+        let before = calls.load(Ordering::Relaxed);
+        let rejected = route_post(
+            &handler,
+            "/internal/txs/outspends/by-outpoint",
+            &oversized_outpoint_body,
+        )
+        .expect("outpoint POST route exists");
+        assert_eq!(rejected.status, 400);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            before,
+            "no queries for oversized outpoints"
+        );
+        let accepted = route_post(
+            &handler,
+            "/internal/txs/outspends/by-outpoint",
+            &exact_outpoint_body,
+        )
+        .expect("outpoint POST route exists");
+        assert_eq!(accepted.status, 200);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
     fn mempool_backend_extension_surface_uses_the_same_projections()
     -> Result<(), Box<dyn std::error::Error>> {
         let (handler, transaction, block, address) = contract_fixture()?;
@@ -1790,7 +1972,7 @@ mod tests {
         // submission would be, so the follow-up GET can render the prevout.
         commit_unspent(&context, &funding.compute_txid(), 0, &funding.output[0], 0)
             .expect("fixture utxo commit succeeds");
-        context.add_transaction(funding.clone());
+        context.add_transaction(funding);
         let handler = Handler::new(Arc::new(context));
         let raw = serialize(&spend).to_lower_hex_string();
         let broadcast = route_post(&handler, "/tx", raw.as_bytes()).expect("broadcast route");
@@ -2128,5 +2310,64 @@ mod tests {
         let rendered: Value = serde_json::from_slice(&response.body)?;
         assert_eq!(rendered[0]["status"], json!({"confirmed":false}));
         Ok(())
+    }
+
+    #[test]
+    fn fee_estimates_omits_targets_when_estimator_has_no_history() {
+        // A fresh node's estimatesmartfee returns {\"errors\":[...]} with no
+        // feerate member. /fee-estimates must omit those targets rather than
+        // fabricating 1 sat/vB.
+        let ctx = Arc::new(Context::new());
+        let handler = Handler::new(Arc::clone(&ctx));
+        let response = route(&handler, "/fee-estimates", "");
+        assert_eq!(response.status, 200);
+        let values: Value = serde_json::from_slice(&response.body).expect("fee-estimates json");
+        let object = values
+            .as_object()
+            .expect("fee-estimates must be a JSON object");
+        assert!(
+            object.is_empty(),
+            "fresh node must omit all fee targets, got: {values:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn internal_mempool_txs_returns_404_for_vanished_cursor() {
+        // When the `last` cursor txid has left the mempool (evicted, replaced,
+        // or mined between pages), the endpoint must return 404 instead of
+        // silently resetting to page one.
+        let tx = transaction(
+            None,
+            TxOut {
+                value: Amount::from_sat(125),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+        );
+        let txid = tx.compute_txid().to_string();
+        let ctx = Arc::new(Context::new());
+        ctx.mempool
+            .write()
+            .insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 0, 0))
+            .expect("mempool entry accepted");
+        let handler = Handler::new(Arc::clone(&ctx));
+
+        // Cursor references a txid that was never in the mempool.
+        let bogus_cursor = "0".repeat(64);
+        let response = route(
+            &handler,
+            &format!("/internal/mempool/txs/{bogus_cursor}"),
+            "",
+        );
+        assert_eq!(response.status, 404, "vanished cursor must return 404");
+
+        // Valid cursor (the one tx in the pool) returns 200 with an empty or
+        // next page — not a replay of page one.
+        let response = route(&handler, &format!("/internal/mempool/txs/{txid}"), "");
+        assert_eq!(response.status, 200, "valid cursor must succeed");
+        let values: Value = serde_json::from_slice(&response.body).expect("mempool page json");
+        let array = values.as_array().expect("mempool page is array");
+        // After the only tx, the next page is empty.
+        assert!(array.is_empty(), "page after last tx must be empty");
     }
 }

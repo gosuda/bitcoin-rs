@@ -1,4 +1,5 @@
 //! Descriptor parser, analysis, import, and watch-only scan coverage.
+#![allow(clippy::expect_used)]
 
 use std::collections::HashSet;
 
@@ -113,6 +114,7 @@ fn multipath_descriptors_expand_for_import_but_not_single_parse()
 }
 
 #[test]
+#[allow(clippy::reversed_empty_ranges)]
 fn derive_addresses_enforces_descriptor_range_rules() -> Result<(), Box<dyn std::error::Error>> {
     let signer = test_signer::TestSigner::new()?;
     let public_key = signer.public_key();
@@ -163,7 +165,7 @@ fn watcher_imports_public_descriptors_and_scans_derivation_ranges()
     assert_eq!(watcher.imports.len(), 1);
     assert!(watcher.imports[0].descriptor.contains("wpkh("));
     assert!(
-        !watcher.imports[0].descriptor.contains("["),
+        !watcher.imports[0].descriptor.contains('['),
         "no origin private material"
     );
     let branches = watcher.import_descriptor(&format!("wpkh({xpub}/<0;1>/*)"))?;
@@ -190,8 +192,12 @@ fn watcher_imports_public_descriptors_and_scans_derivation_ranges()
         txid: Txid::from_byte_array([3_u8; 32]),
         vout: 1,
     };
-    watcher.record_utxo(address.clone(), outpoint);
+    watcher.record_utxo(address.clone(), outpoint, bitcoin::Amount::from_sat(50_000));
     assert_eq!(watcher.utxos_for(&address), [outpoint]);
+    assert_eq!(
+        watcher.utxo_value(&outpoint),
+        Some(bitcoin::Amount::from_sat(50_000))
+    );
 
     Ok(())
 }
@@ -217,4 +223,56 @@ fn addr_descriptors_support_info_and_derive() -> Result<(), Box<dyn std::error::
         "bad addr checksums must be rejected"
     );
     Ok(())
+}
+
+#[test]
+fn watcher_omits_unknown_utxo_values() -> Result<(), Box<dyn std::error::Error>> {
+    let signer = test_signer::TestSigner::new()?;
+    let public_key = signer.public_key();
+    let mut watcher = Watcher::new(Vec::new());
+    watcher.import_descriptor(&format!("wpkh({public_key})"))?;
+    let address = watcher.derive_address(0, Network::Regtest, 0)?;
+    let outpoint = OutPoint {
+        txid: Txid::from_byte_array([4_u8; 32]),
+        vout: 0,
+    };
+    watcher.record_outpoint(address.clone(), outpoint);
+    assert_eq!(watcher.utxos_for(&address), [outpoint]);
+    assert_eq!(watcher.utxo_value(&outpoint), None);
+    Ok(())
+}
+
+#[test]
+fn encode_state_round_trips_imports_and_omits_utxos() -> Result<(), Box<dyn std::error::Error>> {
+    let signer = test_signer::TestSigner::new()?;
+    let public_key = signer.public_key();
+    let mut watcher = Watcher::new(Vec::new());
+    watcher.import_descriptor(&format!("wpkh({public_key})"))?;
+    let address = watcher.derive_address(0, Network::Regtest, 0)?;
+    let outpoint = OutPoint {
+        txid: Txid::from_byte_array([9_u8; 32]),
+        vout: 0,
+    };
+    watcher.record_utxo(address.clone(), outpoint, bitcoin::Amount::from_sat(12_345));
+    let encoded = watcher.encode_state()?;
+    assert!(
+        !encoded.windows(6).any(|w| w == b"utxos" || w == b"value"),
+        "utxo cache must not be persisted"
+    );
+    let restored = Watcher::decode_state(&encoded)?;
+    assert_eq!(restored.imports.len(), watcher.imports.len());
+    assert_eq!(restored.descriptors.len(), watcher.descriptors.len());
+    assert!(restored.utxos_for(&address).is_empty());
+    assert!(restored.utxo_value(&outpoint).is_none());
+    Ok(())
+}
+
+#[test]
+fn decode_state_rejects_unknown_version() {
+    let payload = br#"{"version":99,"imports":[]}"#;
+    let err = Watcher::decode_state(payload).expect_err("unknown version");
+    match err {
+        WalletError::State(message) => assert!(message.contains("version")),
+        other => panic!("expected state error, got {other}"),
+    }
 }

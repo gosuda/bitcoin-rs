@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Smoke tests for every required Task 16 RPC handler.
 extern crate alloc;
 
@@ -639,6 +640,8 @@ impl SmokeMiningControl {
                 max_size: 4_000_000,
                 max_sigops: 80_000,
                 mempool_sequence: 9,
+                csv_active: true,
+                segwit_active: true,
                 coinbase: Transaction {
                     version: bitcoin::transaction::Version::TWO,
                     lock_time: bitcoin::absolute::LockTime::ZERO,

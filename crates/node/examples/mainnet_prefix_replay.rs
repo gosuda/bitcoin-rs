@@ -354,10 +354,9 @@ fn main() -> Result<()> {
     config.blockfilterindex = args.blockfilterindex;
     config.assume_valid_height = args.assume_valid_height;
 
-    // In-memory recorder for the apply path's per-stage histograms; the bind
-    // address only names the future exporter endpoint and is never served.
+    // In-memory recorder for the apply path's per-stage histograms.
     let metrics_handle =
-        bitcoin_rs_node::metrics::install_metrics(Some(([127, 0, 0, 1], 0).into()))
+        bitcoin_rs_node::metrics::install_diagnostic_metrics(Some(([127, 0, 0, 1], 0).into()))
             .context("install metrics recorder")?;
 
     // Validate manifest identity, range, and archive size before opening state.

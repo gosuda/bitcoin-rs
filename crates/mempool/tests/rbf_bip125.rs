@@ -1,4 +1,7 @@
 //! BIP125 replacement-by-fee policy vectors.
+// A failed pool or fixture invariant is a test failure, and panicking reports
+// it with the offending call site. `expect` is deliberate.
+#![allow(clippy::expect_used)]
 
 extern crate alloc;
 
@@ -228,7 +231,7 @@ fn package_acceptance_surfaces_bip125_replacement_boundaries() -> Result<(), Box
         facts.results[0].reject_reason,
         Some(AcceptanceRejectReason::Replacement(RbfError::Rule1NoOptIn))
     );
-    assert!(!facts.results[0].allowed);
+    assert_eq!(facts.results[0].allowed, Some(false));
     assert_eq!(facts.results[0].sigop_cost, 4);
     Ok(())
 }

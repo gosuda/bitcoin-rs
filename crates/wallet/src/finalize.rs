@@ -1,9 +1,10 @@
 use bitcoin::ecdsa;
+use bitcoin::opcodes::all::{OP_CHECKMULTISIG, OP_PUSHNUM_1, OP_PUSHNUM_16};
 use bitcoin::psbt::Psbt;
-use bitcoin::script::{Builder, PushBytesBuf};
+use bitcoin::script::{Builder, Instruction, PushBytesBuf};
 use bitcoin::secp256k1::{Message, Secp256k1, VerifyOnly};
 use bitcoin::sighash::{Prevouts, SighashCache};
-use bitcoin::{PublicKey, ScriptBuf, Transaction, TxOut, Witness, XOnlyPublicKey};
+use bitcoin::{PublicKey, Script, ScriptBuf, Transaction, TxOut, Witness, XOnlyPublicKey};
 use thiserror::Error;
 
 /// PSBT finalization errors.
@@ -58,25 +59,37 @@ pub enum FinalizeError {
         /// Failure reason.
         reason: String,
     },
+    /// The witness does not contain enough signatures for the script threshold.
+    #[error("input {index} has insufficient signatures for threshold")]
+    InsufficientSignatures {
+        /// Input index.
+        index: usize,
+    },
 }
 
-/// Finalizes a signed PSBT into a transaction.
-pub fn finalize_signed(psbt: Psbt) -> Result<Transaction, FinalizeError> {
+/// Finalizes a signed PSBT in place, attaching `final_script_sig` /
+/// `final_script_witness` on every input that can be finalized.
+pub fn finalize_psbt(psbt: &mut Psbt) -> Result<(), FinalizeError> {
     if psbt.inputs.len() != psbt.unsigned_tx.input.len() {
         return Err(FinalizeError::InputCount);
     }
-    verify_signatures(&psbt)?;
+    verify_signatures(psbt)?;
 
-    let mut psbt = psbt;
     for index in 0..psbt.inputs.len() {
         if psbt.inputs[index].final_script_sig.is_some()
             || psbt.inputs[index].final_script_witness.is_some()
         {
             continue;
         }
-        finalize_input(&mut psbt, index)?;
+        finalize_input(psbt, index)?;
     }
+    Ok(())
+}
 
+/// Finalizes a signed PSBT into a transaction.
+pub fn finalize_signed(psbt: Psbt) -> Result<Transaction, FinalizeError> {
+    let mut psbt = psbt;
+    finalize_psbt(&mut psbt)?;
     Ok(psbt.extract_tx_unchecked_fee_rate())
 }
 
@@ -92,6 +105,16 @@ fn verify_signatures(psbt: &Psbt) -> Result<(), FinalizeError> {
         }
         if input.partial_sigs.is_empty() {
             return Err(FinalizeError::MissingSignature { index });
+        }
+        let script = spend_utxo(psbt, index)?.script_pubkey.clone();
+        if script.is_p2sh() {
+            let redeem = input
+                .redeem_script
+                .as_ref()
+                .ok_or(FinalizeError::MissingScript { index })?;
+            if !redeem.is_p2wpkh() {
+                return Err(FinalizeError::UnsupportedScript { index });
+            }
         }
         let (message, _hash_ty) =
             psbt.sighash_ecdsa(index, &mut cache)
@@ -151,7 +174,7 @@ fn finalize_input(psbt: &mut Psbt, index: usize) -> Result<(), FinalizeError> {
     } else if script.is_p2wpkh() {
         finalize_p2wpkh(psbt, index)
     } else if script.is_p2sh() {
-        finalize_p2sh_wpkh(psbt, index)
+        finalize_p2sh(psbt, index)
     } else if script.is_p2wsh() {
         finalize_p2wsh(psbt, index)
     } else if script.is_p2tr() {
@@ -178,12 +201,15 @@ fn finalize_p2wpkh(psbt: &mut Psbt, index: usize) -> Result<(), FinalizeError> {
     Ok(())
 }
 
-fn finalize_p2sh_wpkh(psbt: &mut Psbt, index: usize) -> Result<(), FinalizeError> {
-    let (public_key, signature) = first_partial_sig(psbt, index)?;
+fn finalize_p2sh(psbt: &mut Psbt, index: usize) -> Result<(), FinalizeError> {
     let redeem_script = psbt.inputs[index]
         .redeem_script
         .clone()
         .ok_or(FinalizeError::MissingScript { index })?;
+    if !redeem_script.is_p2wpkh() {
+        return Err(FinalizeError::UnsupportedScript { index });
+    }
+    let (public_key, signature) = first_partial_sig(psbt, index)?;
     psbt.inputs[index].final_script_sig = Some(push_script(redeem_script, index)?);
     psbt.inputs[index].final_script_witness = Some(signature_pubkey_witness(signature, public_key));
     Ok(())
@@ -194,14 +220,74 @@ fn finalize_p2wsh(psbt: &mut Psbt, index: usize) -> Result<(), FinalizeError> {
         .witness_script
         .clone()
         .ok_or(FinalizeError::MissingScript { index })?;
+    let (threshold, keys) =
+        parse_checkmultisig(&witness_script).ok_or(FinalizeError::UnsupportedScript { index })?;
+    let signatures = ordered_multisig_signatures(psbt, index, threshold, &keys)?;
     let mut witness = Witness::new();
     witness.push(Vec::<u8>::new());
-    for signature in psbt.inputs[index].partial_sigs.values() {
+    for signature in signatures {
         witness.push(signature.to_vec());
     }
     witness.push(witness_script.into_bytes());
     psbt.inputs[index].final_script_witness = Some(witness);
     Ok(())
+}
+
+fn ordered_multisig_signatures(
+    psbt: &Psbt,
+    index: usize,
+    threshold: usize,
+    keys: &[PublicKey],
+) -> Result<Vec<ecdsa::Signature>, FinalizeError> {
+    let mut signatures = Vec::new();
+    for key in keys {
+        if let Some(signature) = psbt.inputs[index].partial_sigs.get(key) {
+            signatures.push(*signature);
+            if signatures.len() == threshold {
+                return Ok(signatures);
+            }
+        }
+    }
+    Err(FinalizeError::InsufficientSignatures { index })
+}
+
+/// Parses a standard `OP_CHECKMULTISIG` script as `(m, keys)`.
+fn parse_checkmultisig(script: &Script) -> Option<(usize, Vec<PublicKey>)> {
+    let instructions: Vec<_> = script.instructions().collect::<Result<Vec<_>, _>>().ok()?;
+    let [
+        Instruction::Op(m_op),
+        key_ops @ ..,
+        Instruction::Op(n_op),
+        Instruction::Op(check),
+    ] = instructions.as_slice()
+    else {
+        return None;
+    };
+    if *check != OP_CHECKMULTISIG {
+        return None;
+    }
+    let threshold = small_int(*m_op)?;
+    let declared = small_int(*n_op)?;
+    if key_ops.len() != declared {
+        return None;
+    }
+    let mut keys = Vec::with_capacity(declared);
+    for instruction in key_ops {
+        let Instruction::PushBytes(bytes) = instruction else {
+            return None;
+        };
+        keys.push(PublicKey::from_slice(bytes.as_bytes()).ok()?);
+    }
+    Some((threshold, keys))
+}
+
+fn small_int(op: bitcoin::Opcode) -> Option<usize> {
+    let value = op.to_u8();
+    if (OP_PUSHNUM_1.to_u8()..=OP_PUSHNUM_16.to_u8()).contains(&value) {
+        Some(usize::from(value - OP_PUSHNUM_1.to_u8() + 1))
+    } else {
+        None
+    }
 }
 
 fn finalize_p2tr(psbt: &mut Psbt, index: usize) -> Result<(), FinalizeError> {

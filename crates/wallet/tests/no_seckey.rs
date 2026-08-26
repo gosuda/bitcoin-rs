@@ -36,15 +36,15 @@ fn wallet_src_stores_no_private_key_surface() {
     // the signer interface; no other source may mention them, and no source
     // may keep one in a field.
     for (name, source) in sources {
-        if name != "signer_iface.rs" {
-            assert!(
-                !source.contains("PrivateKey"),
-                "{name} handles caller keys outside the signer interface"
-            );
-        } else {
+        if name == "signer_iface.rs" {
             assert!(
                 !source.contains(": PrivateKey"),
                 "signer_iface.rs must not store caller keys in state"
+            );
+        } else {
+            assert!(
+                !source.contains("PrivateKey"),
+                "{name} handles caller keys outside the signer interface"
             );
         }
     }

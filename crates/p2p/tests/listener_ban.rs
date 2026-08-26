@@ -202,18 +202,14 @@ fn join_listener(
     }
 }
 
+type LoopbackPeer = (
+    Arc<NetworkControls>,
+    SocketAddr,
+    thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>,
+);
 /// Spawns a controls-driven listener and dials it with a controls-driven
 /// outbound connection; both sides register into the same shared state.
-fn loopback_peer_pair(
-    shutdown: &Arc<AtomicBool>,
-) -> Result<
-    (
-        Arc<NetworkControls>,
-        SocketAddr,
-        thread::JoinHandle<Result<(), bitcoin_rs_p2p::listener::ListenerError>>,
-    ),
-    Box<dyn Error>,
-> {
+fn loopback_peer_pair(shutdown: &Arc<AtomicBool>) -> Result<LoopbackPeer, Box<dyn Error>> {
     let bind_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     let helper = TcpListener::bind(bind_addr)?;
     let addr = helper.local_addr()?;

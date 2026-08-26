@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Focused behavioral coverage for R1 chain RPC methods via `Handler::dispatch`.
 
 use std::sync::Arc;
@@ -37,10 +38,10 @@ fn seed_genesis(ctx: &Arc<Context>) -> (Hash256, bitcoin::Block) {
     (hash, genesis)
 }
 
-fn dispatch(ctx: &Arc<Context>, method: &str, params: sonic_rs::Value) -> sonic_rs::Value {
+fn dispatch(ctx: &Arc<Context>, method: &str, params: &sonic_rs::Value) -> sonic_rs::Value {
     let handler = Handler::new(Arc::clone(ctx));
     handler
-        .dispatch(method, &params)
+        .dispatch(method, params)
         .unwrap_or_else(|err| panic!("{method} failed: {err}"))
 }
 
@@ -51,11 +52,7 @@ fn tip_methods_use_applied_not_header_only_state() {
     let applied_hex = applied_hash.to_string_be();
     {
         let mut tree = ctx.block_tree.write();
-        let genesis = tree
-            .node_by_hash(applied_hash)
-            .expect("genesis")
-            .header
-            .clone();
+        let genesis = tree.node_by_hash(applied_hash).expect("genesis").header;
         let child = bitcoin::block::Header {
             version: bitcoin::block::Version::ONE,
             prev_blockhash: genesis.block_hash(),
@@ -76,12 +73,15 @@ fn tip_methods_use_applied_not_header_only_state() {
         });
     }
 
-    assert_eq!(dispatch(&ctx, "getblockcount", json!([])).as_u64(), Some(0));
     assert_eq!(
-        dispatch(&ctx, "getbestblockhash", json!([])).as_str(),
+        dispatch(&ctx, "getblockcount", &json!([])).as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        dispatch(&ctx, "getbestblockhash", &json!([])).as_str(),
         Some(applied_hex.as_str())
     );
-    let info = dispatch(&ctx, "getblockchaininfo", json!([]));
+    let info = dispatch(&ctx, "getblockchaininfo", &json!([]));
     assert_eq!(info.get("blocks").and_then(JsonValueTrait::as_u64), Some(0));
     assert_eq!(
         info.get("bestblockhash").and_then(JsonValueTrait::as_str),
@@ -93,7 +93,7 @@ fn tip_methods_use_applied_not_header_only_state() {
 fn getblockheader_omits_nextblockhash_at_applied_tip() {
     let ctx = Arc::new(Context::new());
     let (hash, _) = seed_genesis(&ctx);
-    let header = dispatch(&ctx, "getblockheader", json!([hash.to_string_be(), true]));
+    let header = dispatch(&ctx, "getblockheader", &json!([hash.to_string_be(), true]));
     assert!(
         header.get("nextblockhash").is_none(),
         "tip header must omit nextblockhash: {header:?}"
@@ -131,7 +131,7 @@ fn getchaintxstats_rejects_window_covering_full_height() {
 fn gettxoutsetinfo_reports_accounted_disk_size() {
     let ctx = Arc::new(Context::new());
     let _ = seed_genesis(&ctx);
-    let info = dispatch(&ctx, "gettxoutsetinfo", json!([]));
+    let info = dispatch(&ctx, "gettxoutsetinfo", &json!([]));
     assert!(
         info.get("disk_size")
             .and_then(JsonValueTrait::as_u64)
@@ -202,7 +202,7 @@ fn getindexinfo_basic_filter_uses_best_indexed_block() {
     }));
     let ctx = Arc::new(ctx);
 
-    let info = dispatch(&ctx, "getindexinfo", json!(["basicblockfilterindex"]));
+    let info = dispatch(&ctx, "getindexinfo", &json!(["basicblockfilterindex"]));
     let entry = info
         .get("basicblockfilterindex")
         .expect("basicblockfilterindex entry");
@@ -227,6 +227,6 @@ fn getblockfilter_rejects_unknown_filtertype() {
 #[test]
 fn getdifficulty_is_registered() {
     let ctx = Arc::new(Context::new());
-    let value = dispatch(&ctx, "getdifficulty", json!([]));
+    let value = dispatch(&ctx, "getdifficulty", &json!([]));
     assert!(value.as_f64().is_some());
 }

@@ -419,7 +419,6 @@ impl<'a> Projection<'a> {
             mempool,
         })
     }
-
     pub(super) fn script_utxos(&self, script_hash: ScriptHash) -> Result<Vec<UtxoValue>, Response> {
         let mut confirmed = self
             .ctx
@@ -428,9 +427,21 @@ impl<'a> Projection<'a> {
             .ok_or_else(|| unavailable("script index is disabled"))?
             .unspent_outputs(script_hash)
             .map_err(query_error)?;
-        let pool = self.ctx.mempool.read();
+        // Collect spent outpoints under a brief mempool read lock, then drop
+        // the lock before resolving confirmation_at_height, which performs
+        // block-tree reads. Holding the mempool lock across those reads blocks
+        // mempool writers (sendrawtransaction, apply) for the duration of
+        // large script-UTXO renders.
+        let spent_outpoints: std::collections::HashSet<OutPoint> = {
+            let pool = self.ctx.mempool.read();
+            confirmed
+                .iter()
+                .filter(|record| pool.is_outpoint_spent(&OutPoint::new(record.txid, record.vout)))
+                .map(|record| OutPoint::new(record.txid, record.vout))
+                .collect()
+        };
         confirmed
-            .retain(|record| !pool.is_outpoint_spent(&OutPoint::new(record.txid, record.vout)));
+            .retain(|record| !spent_outpoints.contains(&OutPoint::new(record.txid, record.vout)));
         let mut outputs = confirmed
             .into_iter()
             .map(|record| {
@@ -446,7 +457,10 @@ impl<'a> Projection<'a> {
                 })
             })
             .collect::<Result<Vec<_>, Response>>()?;
+        // Re-acquire the mempool read lock briefly for the unconfirmed funding
+        // scan only.
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
+        let pool = self.ctx.mempool.read();
         for (_, entry_id) in pool.funding.range((
             Bound::Included((mempool_hash, 0)),
             Bound::Included((mempool_hash, u32::MAX)),

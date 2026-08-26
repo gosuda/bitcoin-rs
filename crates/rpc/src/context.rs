@@ -6,10 +6,10 @@ use arc_swap::ArcSwapOption;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex;
-use bitcoin::{Block, OutPoint, Transaction, Txid};
+use bitcoin::{Address, Block, OutPoint, ScriptBuf, Transaction, Txid};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
+use bitcoin_rs_mempool::standardness::{AcceptanceRejectReason, PackageAcceptanceFacts};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits, RbfError};
 use bitcoin_rs_primitives::{Hash256, Network};
 use compact_str::CompactString;
@@ -408,6 +408,20 @@ pub trait BlockBodySource: Send + Sync {
     }
 }
 
+/// Storage-backed decoded block undo reader used by transaction verbosity 2.
+pub trait BlockUndoSource: Send + Sync {
+    /// Returns the undo batch for `height` and `hash`, if it is still available.
+    ///
+    /// Absence is not an error: pruned or not-yet-persisted undo data leaves
+    /// verbosity-2 input metadata unresolved. Storage and decode failures must
+    /// be returned so callers do not mistake corruption for pruning.
+    fn block_undo(
+        &self,
+        height: u32,
+        hash: Hash256,
+    ) -> Result<Option<bitcoin_rs_utxo::UndoBatch>, TxQueryError>;
+}
+
 impl BlockRecord {
     /// Builds a record from a decoded Bitcoin block.
     ///
@@ -554,6 +568,12 @@ pub trait PruneService: Send + Sync {
     fn status(&self) -> PruneStatus;
 }
 
+/// Durable watch-only wallet snapshot used by descriptor RPCs.
+pub trait WalletPersistence: Send + Sync {
+    /// Writes `watcher` so a restart can restore imported descriptors.
+    fn persist(&self, watcher: &bitcoin_rs_wallet::Watcher) -> Result<(), CompactString>;
+}
+
 /// Node-owned control plane for consensus-affecting chain RPCs.
 pub trait ChainControl: Send + Sync {
     /// Invalidates a block and descendants and selects the best remaining chain.
@@ -571,6 +591,13 @@ pub trait TransactionAdmission: Send + Sync {
         tx: &Transaction,
         max_feerate_sat_per_kvb: Option<u64>,
     ) -> Result<Txid, TransactionAdmissionError>;
+
+    /// Evaluates `txs` as a package without mutating mempool state.
+    fn test_transactions(
+        &self,
+        txs: &[Transaction],
+        max_feerate_sat_per_kvb: Option<u64>,
+    ) -> Result<PackageAcceptanceFacts, TransactionAdmissionError>;
 }
 
 /// Failure from the canonical transaction admission pipeline.
@@ -861,6 +888,9 @@ pub enum TxQueryError {
     /// Durable index storage failed.
     #[error("transaction index storage error: {0}")]
     Storage(CompactString),
+    /// Stored undo or payload bytes failed to decode.
+    #[error("undo decode error: {0}")]
+    Decode(CompactString),
 }
 
 /// Lockless read-only adapter for complete transaction-index queries.
@@ -965,6 +995,9 @@ impl TxQueryError {
             Self::Storage(reason) => crate::error::RpcError::Internal(format!(
                 "transaction index storage error: {reason}"
             )),
+            Self::Decode(reason) => {
+                crate::error::RpcError::Internal(format!("undo decode error: {reason}"))
+            }
         }
     }
 }
@@ -990,6 +1023,8 @@ pub struct ChainHandles {
     pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
     /// In-memory block tree.
     pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
+    /// Decoded block undo source for confirmed transaction prevouts.
+    pub block_undo_source: Arc<dyn BlockUndoSource>,
     /// Consensus network.
     pub network: Network,
 }
@@ -1089,6 +1124,8 @@ pub struct Context {
     /// `None` until the node installs a shared [`bitcoin_rs_wallet::Watcher`]
     /// through [`Context::with_wallet`].
     pub wallet: Option<Arc<RwLock<bitcoin_rs_wallet::Watcher>>>,
+    /// Optional durable watch-only wallet snapshot writer.
+    pub wallet_persistence: Option<Arc<dyn WalletPersistence>>,
     /// Network selector used by handlers needing consensus parameters (e.g.
     /// difficulty calculation).
     pub chain_network: Network,
@@ -1096,6 +1133,8 @@ pub struct Context {
     pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
     /// Optional durable block body reader for metadata-only block records.
     pub block_body_source: Option<Arc<dyn BlockBodySource>>,
+    /// Optional decoded block undo reader for confirmed transaction prevouts.
+    pub block_undo_source: Option<Arc<dyn BlockUndoSource>>,
     /// Active ZMQ PUB notifications.
     pub zmq_notifications: Arc<[ZmqNotification]>,
     /// Optional shared RPC request lifecycle used by `getrpcinfo`.
@@ -1203,9 +1242,11 @@ impl Context {
             network: Arc::new(RwLock::new(NetworkState::default())),
             network_controls: None,
             wallet: None,
+            wallet_persistence: None,
             chain_network: Network::Mainnet,
             block_tree,
             block_body_source: None,
+            block_undo_source: None,
             zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
             rpc_lifecycle: None,
             debug_log_path: None,
@@ -1231,9 +1272,11 @@ impl Context {
             network: handles.network.state,
             network_controls: Some(handles.network.controls),
             wallet: None,
+            wallet_persistence: None,
             chain_network: handles.chain.network,
             block_tree: handles.chain.block_tree,
             block_body_source: None,
+            block_undo_source: Some(handles.chain.block_undo_source),
             prune_service: None,
             chain_control: None,
             mining_control: None,
@@ -1256,6 +1299,13 @@ impl Context {
     #[must_use]
     pub fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
         self.block_body_source = Some(source);
+        self
+    }
+
+    /// Returns `self` with a decoded block undo source.
+    #[must_use]
+    pub fn with_block_undo_source(mut self, source: Arc<dyn BlockUndoSource>) -> Self {
+        self.block_undo_source = Some(source);
         self
     }
 
@@ -1305,6 +1355,69 @@ impl Context {
     pub fn with_wallet(mut self, wallet: Arc<RwLock<bitcoin_rs_wallet::Watcher>>) -> Self {
         self.wallet = Some(wallet);
         self
+    }
+
+    /// Attaches durable watch-only wallet persistence.
+    #[must_use]
+    pub fn with_wallet_persistence(mut self, store: Arc<dyn WalletPersistence>) -> Self {
+        self.wallet_persistence = Some(store);
+        self
+    }
+
+    /// Writes the current watch-only wallet through the installed persistence.
+    pub fn persist_wallet(
+        &self,
+        watcher: &bitcoin_rs_wallet::Watcher,
+    ) -> Result<(), CompactString> {
+        match self.wallet_persistence.as_ref() {
+            Some(store) => store.persist(watcher),
+            None => Ok(()),
+        }
+    }
+
+    /// Seeds watch-only wallet coins from the live UTXO set.
+    pub fn populate_wallet_utxos(
+        &self,
+        watcher: &mut bitcoin_rs_wallet::Watcher,
+    ) -> Result<usize, CompactString> {
+        #[cfg(test)]
+        if fail_wallet_scan_requested() {
+            return Err(CompactString::from("forced wallet scan failure"));
+        }
+        watcher.clear_utxos();
+        let network = bitcoin_network(self.chain_network);
+        let mut scripts = Vec::new();
+        let mut addresses: HashMap<ScriptBuf, Address> = HashMap::new();
+        for (descriptor_index, import) in watcher.imports.iter().enumerate() {
+            for child in import.range.clone() {
+                let address = watcher
+                    .derive_address(descriptor_index, network, child)
+                    .map_err(|error| CompactString::from(error.to_string()))?;
+                let script = address.script_pubkey();
+                addresses.insert(script.clone(), address);
+                scripts.push(script);
+            }
+        }
+        if scripts.is_empty() {
+            return Ok(0);
+        }
+        let scan = self
+            .utxo
+            .scan_script_pubkeys(&scripts)
+            .map_err(|error| CompactString::from(error.to_string()))?;
+        let mut count = 0usize;
+        for utxo in scan.unspents {
+            let Some(address) = addresses.get(&utxo.txout.script_pubkey) else {
+                continue;
+            };
+            let outpoint = OutPoint {
+                txid: Txid::from_byte_array(utxo.outpoint.txid.to_le_bytes()),
+                vout: utxo.outpoint.vout,
+            };
+            watcher.record_utxo(address.clone(), outpoint, utxo.txout.value);
+            count += 1;
+        }
+        Ok(count)
     }
 
     /// Attaches the shared RPC lifecycle observed by `getrpcinfo`.
@@ -1683,11 +1796,29 @@ impl Context {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_WALLET_SCAN: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(false) };
+}
+
+/// Requests that the next [`Context::populate_wallet_utxos`] call fail.
+#[cfg(test)]
+pub fn fail_next_wallet_scan() {
+    FAIL_NEXT_WALLET_SCAN.with(|flag| flag.set(true));
+}
+
+#[cfg(test)]
+fn fail_wallet_scan_requested() -> bool {
+    FAIL_NEXT_WALLET_SCAN.with(core::cell::Cell::take)
+}
+
 fn bitcoin_network(network: Network) -> bitcoin::Network {
     crate::bitcoin_network(network)
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1893,6 +2024,17 @@ mod tests {
     fn production_context_shares_authoritative_handles() {
         use alloc::sync::Arc;
 
+        struct MissingUndo;
+        impl super::BlockUndoSource for MissingUndo {
+            fn block_undo(
+                &self,
+                _height: u32,
+                _hash: Hash256,
+            ) -> Result<Option<bitcoin_rs_utxo::UndoBatch>, super::TxQueryError> {
+                Ok(None)
+            }
+        }
+
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(0));
@@ -1922,6 +2064,7 @@ mod tests {
                 coin_stats: Arc::clone(&coin_stats),
                 filter_index: Arc::clone(&filter_index),
                 block_tree: Arc::clone(&block_tree),
+                block_undo_source: Arc::new(MissingUndo),
                 network: Network::Mainnet,
             },
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
@@ -2183,7 +2326,7 @@ mod tests {
         let record = ctx.record_for_hash(hash).expect("tree resolves the hash");
 
         assert_eq!(
-            record.header_bytes().map(|bytes| bytes.as_slice()),
+            record.header_bytes().map(<[u8; 80]>::as_slice),
             Some(serialize(&header).as_slice()),
             "the tree-derived record must carry the header the tree holds"
         );

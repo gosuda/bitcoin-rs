@@ -355,9 +355,8 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
 fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
     let chain = match info.network {
         bitcoin_rs_primitives::Network::Mainnet => "main",
-        bitcoin_rs_primitives::Network::Testnet3 | bitcoin_rs_primitives::Network::Testnet4 => {
-            "test"
-        }
+        bitcoin_rs_primitives::Network::Testnet3 => "test",
+        bitcoin_rs_primitives::Network::Testnet4 => "testnet4",
         bitcoin_rs_primitives::Network::Signet => "signet",
         bitcoin_rs_primitives::Network::Regtest => "regtest",
     };
@@ -424,6 +423,7 @@ fn map_mining_control_error(error: MiningControlError) -> RpcError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use alloc::sync::Arc;
@@ -476,7 +476,8 @@ mod tests {
             request: BlockTemplateRequest,
         ) -> Result<BlockTemplateResult, MiningControlError> {
             self.template_calls.fetch_add(1, Ordering::Relaxed);
-            if let Some(error) = self.fail.lock().clone() {
+            let fail = self.fail.lock().clone();
+            if let Some(error) = fail {
                 return Err(error);
             }
             *self.last_request.lock() = Some(request.clone());
@@ -500,7 +501,8 @@ mod tests {
 
         fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
             self.info_calls.fetch_add(1, Ordering::Relaxed);
-            if let Some(error) = self.fail.lock().clone() {
+            let fail = self.fail.lock().clone();
+            if let Some(error) = fail {
                 return Err(error);
             }
             Ok(self.info.lock().clone())
@@ -508,7 +510,8 @@ mod tests {
 
         fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
             self.submit_calls.fetch_add(1, Ordering::Relaxed);
-            if let Some(error) = self.fail.lock().clone() {
+            let fail = self.fail.lock().clone();
+            if let Some(error) = fail {
                 return Err(error);
             }
             Ok(self.submit.lock().clone())
@@ -527,6 +530,8 @@ mod tests {
             bits: 0x207f_ffff,
             min_time: 1_700_000_001,
             current_time: 1_700_000_010,
+            csv_active: true,
+            segwit_active: true,
             max_weight: 4_000_000,
             max_size: 4_000_000,
             max_sigops: 80_000,
@@ -964,6 +969,24 @@ mod tests {
                 .get("signet_challenge")
                 .and_then(JsonValueTrait::as_str),
             Some("51")
+        );
+    }
+
+    #[test]
+    fn getmininginfo_reports_testnet4_separately_from_testnet3() {
+        // Core's getmininginfo reports ChainTypeToString(TESTNET4) == "testnet4",
+        // matching getblockchaininfo. The old code collapsed both to "test".
+        let control = FakeMiningControl::with_template(sample_template());
+        {
+            let mut info = control.info.lock();
+            info.network = Network::Testnet4;
+        }
+        let ctx = ctx_with_control(control);
+        let result = getmininginfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("testnet4 mininginfo failed: {err}"));
+        assert_eq!(
+            result.get("chain").and_then(JsonValueTrait::as_str),
+            Some("testnet4")
         );
     }
 }

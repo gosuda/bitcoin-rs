@@ -20,7 +20,7 @@ use crossbeam_channel::{Receiver, Sender};
 use hashbrown::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
@@ -912,9 +912,6 @@ pub struct NodeState {
     mempool: Arc<RwLock<Mempool>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Cumulative transaction count through `applied_tip`, `0` when unknown.
-    /// Shared with `ApplyHandles`, which maintains it, and with the RPC context.
-    chain_tx_count: Arc<AtomicU64>,
     block_tree: Arc<RwLock<bitcoin_rs_chain::BlockTree>>,
     blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Transaction>>>,
@@ -1054,7 +1051,6 @@ impl NodeState {
             initial_coin_stats,
             block_tree_value,
             restored_applied_tip,
-            restored_chain_tx_count,
             resume_source,
         ) = match checkpoint_load {
             crate::checkpoint::CheckpointLoad::Cold { reason } => {
@@ -1066,7 +1062,6 @@ impl NodeState {
                     bitcoin_rs_coinstats::CoinStats::default(),
                     bitcoin_rs_chain::BlockTree::new(),
                     None,
-                    0,
                     ResumeSource::Cold,
                 )
             }
@@ -1077,7 +1072,6 @@ impl NodeState {
                     bitcoin_rs_coinstats::CoinStats::default(),
                     tree,
                     None,
-                    0,
                     ResumeSource::HeadersOnly,
                 )
             }
@@ -1092,7 +1086,6 @@ impl NodeState {
                     restored.coin_stats,
                     restored.tree,
                     Some(restored.applied_tip),
-                    restored.chain_tx_count,
                     ResumeSource::Checkpoint,
                 )
             }
@@ -1116,7 +1109,6 @@ impl NodeState {
             applied_tip.store(Some(Arc::new(restored_applied_tip)));
         }
         let blocks = Arc::new(RwLock::new(BlockLog::new()));
-        let chain_tx_count = Arc::new(AtomicU64::new(restored_chain_tx_count));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         let tx_index_open = open_tx_index(&config)?;
         let (tx_index_runtime, tx_index_worker, tx_index_query) = match tx_index_open {
@@ -1170,7 +1162,6 @@ impl NodeState {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
-            chain_tx_count: Arc::clone(&chain_tx_count),
             block_tree: Arc::clone(&block_tree),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
@@ -1245,7 +1236,6 @@ impl NodeState {
             mempool,
             chain_tip,
             applied_tip,
-            chain_tx_count: Arc::clone(&chain_tx_count),
             block_tree,
             blocks,
             transactions,
@@ -1323,8 +1313,6 @@ impl NodeState {
             &self.utxo,
             &self.coin_stats,
             applied_tip.as_deref(),
-            self.chain_tx_count
-                .load(core::sync::atomic::Ordering::Relaxed),
             self.config.g2_muhash_samples.is_some(),
         )?;
         // Remove the marker only after this checkpoint publishes the matching
@@ -1448,12 +1436,6 @@ impl NodeState {
     #[must_use]
     pub fn block_tree(&self) -> Arc<RwLock<bitcoin_rs_chain::BlockTree>> {
         Arc::clone(&self.block_tree)
-    }
-
-    /// Shares the cumulative chain transaction-count handle with the RPC layer.
-    #[must_use]
-    pub fn chain_tx_count_handle(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.chain_tx_count)
     }
 
     /// Returns the shared block-records handle exposed to RPC handlers.
@@ -2237,16 +2219,8 @@ mod tests {
         Ok(())
     }
 
-    /// Undo pruning must respect the durable tip, not the in-memory one.
-    ///
-    /// The applied tip can run far ahead of the last clean checkpoint. Pruning
-    /// undo to the in-memory tip deletes the record for the block the
-    /// checkpoint names, and a crash then restores a chainstate that cannot
-    /// disconnect its own tip.
     #[test]
     fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result<()> {
-        use std::sync::atomic::Ordering;
-
         let dir = tempfile::tempdir()?;
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
@@ -2254,16 +2228,15 @@ mod tests {
 
         let expected = {
             let state = NodeState::open(config.clone())?;
-            assert_eq!(
-                state.chain_tx_count_handle().load(Ordering::Relaxed),
-                0,
+            assert!(
+                state.block_tree().read().tip_id().is_none(),
                 "a node that has applied nothing cannot know the count"
             );
 
             let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
             let genesis_tx_count = u64::try_from(genesis.txdata.len())?;
-            let _tip = state.apply_block(&genesis)?;
-            let counted = state.chain_tx_count_handle().load(Ordering::Relaxed);
+            let tip = state.apply_block(&genesis)?;
+            let counted = state.block_tree().read().node(tip.tip_id)?.chain_tx_count;
             assert_eq!(counted, genesis_tx_count, "genesis establishes the count");
 
             assert!(matches!(
@@ -2283,13 +2256,23 @@ mod tests {
             resumed.blocks().read().is_empty(),
             "the record log really does start empty; the count cannot come from it"
         );
-        assert_eq!(
-            resumed.chain_tx_count_handle().load(Ordering::Relaxed),
-            expected
-        );
+        let resumed_count = {
+            let tip = resumed
+                .applied_tip()
+                .load_full()
+                .ok_or_else(|| anyhow::anyhow!("resumed node has no applied tip"))?;
+            resumed.block_tree().read().node(tip.tip_id)?.chain_tx_count
+        };
+        assert_eq!(resumed_count, expected);
         Ok(())
     }
 
+    /// Undo pruning must respect the durable tip, not the in-memory one.
+    ///
+    /// The applied tip can run far ahead of the last clean checkpoint. Pruning
+    /// undo to the in-memory tip deletes the record for the block the
+    /// checkpoint names, and a crash then restores a chainstate that cannot
+    /// disconnect its own tip.
     #[test]
     fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> anyhow::Result<()> {
         fn hash(height: u32) -> anyhow::Result<bitcoin_rs_primitives::Hash256> {

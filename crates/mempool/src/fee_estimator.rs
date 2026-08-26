@@ -366,6 +366,7 @@ fn build_buckets() -> Vec<Bucket> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use bitcoin::hashes::Hash as _;

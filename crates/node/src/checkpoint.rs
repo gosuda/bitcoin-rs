@@ -26,21 +26,23 @@ use crate::checkpoint_fs::{
 };
 
 const HEADER_MAGIC: [u8; 8] = *b"BRSHEAD\0";
-const HEADER_VERSION: u32 = 1;
+const HEADER_VERSION: u32 = 2;
 const HEADER_PREFIX_LEN: usize = 56;
 const HEADER_LEN: usize = 80;
-const BEST_CHAIN_DOMAIN: &[u8] = b"bitcoin-rs/headers-v1/best\0";
-const APPLIED_PREFIX_DOMAIN: &[u8] = b"bitcoin-rs/headers-v1/applied\0";
+const HEADER_COUNT_LEN: usize = 8;
+const HEADER_ROW_LEN: usize = HEADER_LEN + HEADER_COUNT_LEN;
+const BEST_CHAIN_DOMAIN: &[u8] = b"bitcoin-rs/headers-v2/best\0";
+const APPLIED_PREFIX_DOMAIN: &[u8] = b"bitcoin-rs/headers-v2/applied\0";
 
 const CHECKPOINT_ROOT: &str = "chainstate-checkpoints";
 const CURRENT_FILE: &str = "CURRENT";
 const MANIFEST_FILE: &str = "manifest-v1.json";
-const HEADERS_FILE: &str = "headers-v1.dat";
+const HEADERS_FILE: &str = "headers-v2.dat";
 const UTXO_FILE: &str = "utxo-v4.dat";
 const COINSTATS_FILE: &str = "coinstats-v1.dat";
 const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
 const MANIFEST_FORMAT: &str = "bitcoin-rs-chainstate-checkpoint";
-const HEADER_CODEC: &str = "bitcoin-rs-canonical-headers";
+const HEADER_CODEC: &str = "bitcoin-rs-canonical-headers-v2";
 const UTXO_CODEC: &str = "bitcoin-rs-utxo-spendable-v1";
 const COINSTATS_CODEC: &str = "bitcoin-rs-coinstats";
 const CURRENT_VERSION: u32 = 1;
@@ -220,10 +222,13 @@ fn write_headers_inner<W: Write>(
             return Err(HeaderCheckpointError::MalformedAncestry { height });
         }
         let encoded = encode_header(&node.header)?;
-        writer.write_all(&encoded)?;
-        best_hasher.update(encoded);
+        let mut row = [0_u8; HEADER_ROW_LEN];
+        row[..HEADER_LEN].copy_from_slice(&encoded);
+        row[HEADER_LEN..].copy_from_slice(&node.chain_tx_count.to_le_bytes());
+        writer.write_all(&row)?;
+        best_hasher.update(row);
         if node.height <= applied.height {
-            applied_hasher.update(encoded);
+            applied_hasher.update(row);
         }
     }
 
@@ -278,9 +283,9 @@ pub(crate) fn read_headers<R: Read + Seek>(
     {
         let height = u32::try_from(index)
             .map_err(|_| HeaderCheckpointError::CountExceedsHeightDomain { count })?;
-        let mut encoded = [0_u8; HEADER_LEN];
-        reader.read_exact(&mut encoded)?;
-        let header: Header = deserialize(&encoded)
+        let mut row = [0_u8; HEADER_ROW_LEN];
+        reader.read_exact(&mut row)?;
+        let header: Header = deserialize(&row[..HEADER_LEN])
             .map_err(|error| HeaderCheckpointError::Codec(error.to_string()))?;
         let ids = accept_headers(
             &mut tree,
@@ -293,9 +298,13 @@ pub(crate) fn read_headers<R: Read + Seek>(
         if node.height != height || tree.len() != index + 1 {
             return Err(HeaderCheckpointError::MalformedAncestry { height });
         }
-        best_hasher.update(encoded);
+        let chain_tx_count = u64::from_le_bytes(row[HEADER_LEN..].try_into().map_err(|_| {
+            HeaderCheckpointError::Codec("header row count is not 8 bytes".to_owned())
+        })?);
+        tree.restore_chain_tx_count(id, chain_tx_count)?;
+        best_hasher.update(row);
         if height <= expected.applied.height {
-            applied_hasher.update(encoded);
+            applied_hasher.update(row);
         }
         last_id = Some(id);
     }
@@ -353,7 +362,7 @@ fn checkpoint_size(count: u64) -> Result<u64, HeaderCheckpointError> {
     let prefix_len = u64::try_from(HEADER_PREFIX_LEN)
         .map_err(|_| HeaderCheckpointError::SizeOverflow { count })?;
     let header_len =
-        u64::try_from(HEADER_LEN).map_err(|_| HeaderCheckpointError::SizeOverflow { count })?;
+        u64::try_from(HEADER_ROW_LEN).map_err(|_| HeaderCheckpointError::SizeOverflow { count })?;
     prefix_len
         .checked_add(
             count
@@ -446,19 +455,6 @@ struct CheckpointTipV1 {
     height: u32,
     hash: String,
     chainwork: String,
-    /// Cumulative transaction count of the chain through this tip.
-    ///
-    /// `#[serde(default)]` so a manifest written before this field existed
-    /// still parses, restoring as `0` — Bitcoin Core's own "unset" encoding for
-    /// `m_chain_tx_count`. Those chains cannot recover the number without
-    /// re-reading every block body, and this project does not do in-place
-    /// migrations (see `docs/policies/db-migration.md`), so they stay unknown
-    /// until the node is resynced.
-    ///
-    /// Only meaningful for the applied tip; the best-header tip records `0`,
-    /// since headers carry no transactions.
-    #[serde(default)]
-    chain_tx_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -539,9 +535,6 @@ pub(crate) struct RestoredChainstate {
     pub(crate) utxo: UtxoSet,
     pub(crate) coin_stats: CoinStats,
     pub(crate) applied_tip: TipSnapshot,
-    /// Cumulative transaction count through `applied_tip`, or `0` when the
-    /// manifest predates the field.
-    pub(crate) chain_tx_count: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -783,7 +776,6 @@ pub(crate) fn write_checkpoint_from_dir(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
-    chain_tx_count: u64,
     rolling_stats: bool,
 ) -> Result<CheckpointWrite, CheckpointError> {
     write_checkpoint_inner(
@@ -793,7 +785,6 @@ pub(crate) fn write_checkpoint_from_dir(
         utxo,
         coin_stats,
         applied_tip,
-        chain_tx_count,
         rolling_stats,
         test_failpoint(),
     )
@@ -816,7 +807,6 @@ fn write_checkpoint(
         utxo,
         coin_stats,
         applied_tip,
-        0,
         rolling_stats,
     )
 }
@@ -911,7 +901,6 @@ fn write_checkpoint_inner(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
-    chain_tx_count: u64,
     rolling_stats: bool,
     #[cfg_attr(not(test), allow(unused_variables))] failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointWrite, CheckpointError> {
@@ -1039,8 +1028,8 @@ fn write_checkpoint_inner(
         network: network_name(config.network).to_owned(),
         network_magic: hex_encode(&config.network.magic()),
         genesis_hash: config.genesis.to_string_be(),
-        applied_tip: manifest_tip(headers_write.metadata.applied, chain_tx_count),
-        best_header_tip: manifest_tip(headers_write.metadata.best, 0),
+        applied_tip: manifest_tip(headers_write.metadata.applied),
+        best_header_tip: manifest_tip(headers_write.metadata.best),
         headers: HeadersArtifactV1 {
             file: HEADERS_FILE.to_owned(),
             codec: HEADER_CODEC.to_owned(),
@@ -1165,7 +1154,6 @@ pub(crate) fn write_checkpoint_with_failpoint(
         utxo,
         coin_stats,
         applied_tip,
-        0,
         rolling_stats,
         Some(failpoint),
     )
@@ -1394,7 +1382,6 @@ fn load_payloads(
     manifest: &CheckpointManifestV1,
     headers: RestoredHeaders,
 ) -> Result<RestoredChainstate, Box<(BlockTree, CheckpointError)>> {
-    let chain_tx_count = manifest.applied_tip.chain_tx_count;
     match load_payloads_inner(generation_dir, manifest, &headers) {
         Ok((utxo, coin_stats)) => {
             let applied_node = match headers.tree.node(headers.applied_tip_id) {
@@ -1417,7 +1404,6 @@ fn load_payloads(
                 utxo,
                 coin_stats,
                 applied_tip,
-                chain_tx_count,
             })
         }
         Err(error) => Err(Box::new((headers.tree, error))),
@@ -1786,13 +1772,12 @@ fn require_filename(actual: &str, expected: &str) -> Result<(), CheckpointError>
     Ok(())
 }
 
-fn manifest_tip(tip: HeaderCheckpointTip, chain_tx_count: u64) -> CheckpointTipV1 {
+fn manifest_tip(tip: HeaderCheckpointTip) -> CheckpointTipV1 {
     let chainwork: [u8; 32] = tip.chainwork.to_be_bytes();
     CheckpointTipV1 {
         height: tip.height,
         hash: tip.hash.to_string_be(),
         chainwork: hex_encode(&chainwork),
-        chain_tx_count,
     }
 }
 
@@ -1854,27 +1839,6 @@ fn decode_nibble(byte: u8) -> u8 {
 #[cfg(test)]
 mod tests {
 
-    /// The migration guarantee. `docs/policies/db-migration.md` rules out
-    /// in-place migrations, so a field added to the manifest has to be readable
-    /// as absent — otherwise every existing datadir fails to load and resyncs
-    /// from genesis for the sake of one number.
-    #[test]
-    fn a_manifest_tip_written_before_the_count_existed_reads_as_unknown() {
-        let without = r#"{"height":7,"hash":"00","chainwork":"01"}"#;
-        let Ok(parsed) = serde_json::from_str::<super::CheckpointTipV1>(without) else {
-            panic!("a pre-existing manifest tip must still parse");
-        };
-        assert_eq!(
-            parsed.chain_tx_count, 0,
-            "absent must decode as Core's unset encoding, not as a wrong total"
-        );
-
-        let with = r#"{"height":7,"hash":"00","chainwork":"01","chain_tx_count":42}"#;
-        let Ok(parsed) = serde_json::from_str::<super::CheckpointTipV1>(with) else {
-            panic!("a manifest tip carrying the count must parse");
-        };
-        assert_eq!(parsed.chain_tx_count, 42);
-    }
     use std::fs;
     use std::io::Cursor;
     use std::path::Path;
@@ -1892,10 +1856,11 @@ mod tests {
 
     use super::{
         CHECKPOINT_ROOT, COINSTATS_FILE, CURRENT_FILE, CheckpointFailpoint, CheckpointLoad,
-        CheckpointManifestV1, CheckpointWrite, CurrentV1, HEADER_PREFIX_LEN, HEADERS_FILE,
-        HeaderCheckpointConfig, HeaderCheckpointError, HeaderCheckpointPoint, HeaderCheckpointTip,
-        HeaderCheckpointWrite, MANIFEST_FILE, UTXO_FILE, encode_header, load_checkpoint,
-        read_headers, write_checkpoint_with_failpoint, write_headers,
+        CheckpointManifestV1, CheckpointWrite, CurrentV1, HEADER_LEN, HEADER_PREFIX_LEN,
+        HEADER_ROW_LEN, HEADERS_FILE, HeaderCheckpointConfig, HeaderCheckpointError,
+        HeaderCheckpointPoint, HeaderCheckpointTip, HeaderCheckpointWrite, MANIFEST_FILE,
+        UTXO_FILE, encode_header, load_checkpoint, read_headers, write_checkpoint_with_failpoint,
+        write_headers,
     };
 
     const NETWORK: Network = Network::Regtest;
@@ -1920,6 +1885,50 @@ mod tests {
             applied.hash,
             "the applied checkpoint tip is reconstructed from the accepted prefix"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn round_trip_preserves_every_active_node_count() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, best_tip_id, applied) = chain_with_applied_height(3, 1)?;
+        let ancestry = {
+            let mut ids = tree.ancestor_chain(best_tip_id)?;
+            ids.reverse();
+            ids
+        };
+        for (index, id) in ancestry.iter().copied().enumerate() {
+            tree.restore_chain_tx_count(id, u64::try_from(index + 1)?)?;
+        }
+        let written = write_checkpoint(&tree, best_tip_id, applied)?;
+        let restored = read_headers(&mut Cursor::new(written.0), config(), written.1.metadata)?;
+        let restored_ids = {
+            let mut ids = restored
+                .tree
+                .ancestor_chain(restored.tree.tip_id().ok_or("missing tip")?)?;
+            ids.reverse();
+            ids
+        };
+        assert_eq!(restored_ids.len(), ancestry.len());
+        for (index, id) in restored_ids.iter().copied().enumerate() {
+            assert_eq!(
+                restored.tree.node(id)?.chain_tx_count,
+                u64::try_from(index + 1)?,
+                "count at height {index}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mutated_count_bytes_fail_authentication() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut tree, best_tip_id, applied) = chain_with_applied_height(1, 0)?;
+        tree.restore_chain_tx_count(best_tip_id, 9)?;
+        let (mut bytes, written) = write_checkpoint(&tree, best_tip_id, applied)?;
+        bytes[HEADER_PREFIX_LEN + HEADER_LEN] ^= 1;
+        assert!(matches!(
+            read_headers(&mut Cursor::new(bytes), config(), written.metadata),
+            Err(HeaderCheckpointError::CommitmentMismatch)
+        ));
         Ok(())
     }
 
@@ -1993,26 +2002,27 @@ mod tests {
         let (bytes, written) = write_checkpoint(&tree, best_tip_id, applied)?;
 
         let mut bad_prev = bytes.clone();
-        bad_prev[HEADER_PREFIX_LEN + 80 + 4] ^= 1;
+        bad_prev[HEADER_PREFIX_LEN + HEADER_ROW_LEN + 4] ^= 1;
         assert!(read_headers(&mut Cursor::new(bad_prev), config(), written.metadata).is_err());
 
         let mut bad_pow = bytes.clone();
-        let header_offset = HEADER_PREFIX_LEN + 80;
-        let mut invalid = header_from_row(&bad_pow[header_offset..header_offset + 80])?;
+        let header_offset = HEADER_PREFIX_LEN + HEADER_ROW_LEN;
+        let mut invalid = header_from_row(&bad_pow[header_offset..header_offset + HEADER_LEN])?;
         while invalid.validate_pow(invalid.target()).is_ok() {
             invalid.nonce = invalid.nonce.checked_add(1).ok_or("nonce exhausted")?;
         }
-        bad_pow[header_offset..header_offset + 80].copy_from_slice(&encode_header(&invalid)?);
+        bad_pow[header_offset..header_offset + HEADER_LEN]
+            .copy_from_slice(&encode_header(&invalid)?);
         assert!(read_headers(&mut Cursor::new(bad_pow), config(), written.metadata).is_err());
 
         let mut bad_nbits = bytes;
-        let previous = header_from_row(&bad_nbits[header_offset..header_offset + 80])?;
+        let previous = header_from_row(&bad_nbits[header_offset..header_offset + HEADER_LEN])?;
         let mut nbits_mismatch = Header {
             bits: CompactTarget::from_consensus(0x207f_fffe),
             ..previous
         };
         mine_header_to_declared_target(&mut nbits_mismatch)?;
-        bad_nbits[header_offset..header_offset + 80]
+        bad_nbits[header_offset..header_offset + HEADER_LEN]
             .copy_from_slice(&encode_header(&nbits_mismatch)?);
         assert!(read_headers(&mut Cursor::new(bad_nbits), config(), written.metadata).is_err());
         Ok(())
@@ -2469,14 +2479,14 @@ mod tests {
             false,
         )?;
         mutate_authenticated_artifact(dir.path(), HEADERS_FILE, |bytes| {
-            bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+            bytes[8..12].copy_from_slice(&3_u32.to_le_bytes());
         })?;
 
         assert!(matches!(
             load_checkpoint(dir.path(), config()),
             Err(super::IncompatibleCheckpoint::UnsupportedVersion {
                 component: "headers",
-                version: 2
+                version: 3
             })
         ));
         Ok(())
@@ -2499,7 +2509,7 @@ mod tests {
             false,
         )?;
         mutate_authenticated_artifact(dir.path(), HEADERS_FILE, |bytes| {
-            bytes[HEADER_PREFIX_LEN + 80 + 4] ^= 1;
+            bytes[HEADER_PREFIX_LEN + HEADER_ROW_LEN + 4] ^= 1;
         })?;
 
         assert!(matches!(

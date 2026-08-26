@@ -1,10 +1,11 @@
 //! Top-level orchestration: wire subsystems, spin the event loop, drain.
 
 use crate as bitcoin_rs_node;
+use std::io::Write as _;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, TrySendError, bounded};
@@ -66,8 +67,170 @@ type OutboundConnectionHandle =
     std::thread::JoinHandle<core::result::Result<(), bitcoin_rs_p2p::PeerError>>;
 
 #[derive(Clone)]
+struct NodeRpcWarnings;
+
+impl bitcoin_rs_rpc::RpcWarnings for NodeRpcWarnings {
+    fn messages(&self) -> Vec<String> {
+        crate::metrics::node_warnings().messages()
+    }
+}
+
+struct WatchOnlyStore {
+    path: std::path::PathBuf,
+    tmp_counter: AtomicU64,
+}
+
+impl WatchOnlyStore {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            tmp_counter: AtomicU64::new(0),
+        }
+    }
+
+    /// Loads the persisted watcher. `NotFound` yields a new empty watcher; every
+    /// other failure (corrupt bytes, wrong version, permission, IO) aborts startup.
+    fn load(&self) -> core::result::Result<bitcoin_rs_wallet::Watcher, compact_str::CompactString> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => bitcoin_rs_wallet::Watcher::decode_state(&bytes)
+                .map_err(|error| compact_str::CompactString::from(error.to_string())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(bitcoin_rs_wallet::Watcher::new(Vec::new()))
+            }
+            Err(error) => Err(compact_str::CompactString::from(format!(
+                "failed to read watch-only wallet state {}: {error}",
+                self.path.display()
+            ))),
+        }
+    }
+}
+
+impl bitcoin_rs_rpc::context::WalletPersistence for WatchOnlyStore {
+    fn persist(
+        &self,
+        watcher: &bitcoin_rs_wallet::Watcher,
+    ) -> core::result::Result<(), compact_str::CompactString> {
+        let bytes = watcher
+            .encode_state()
+            .map_err(|error| compact_str::CompactString::from(error.to_string()))?;
+        let Some(parent) = self.path.parent() else {
+            return Err(compact_str::CompactString::from(
+                "wallet path has no parent",
+            ));
+        };
+        std::fs::create_dir_all(parent)
+            .map_err(|error| compact_str::CompactString::from(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| compact_str::CompactString::from(error.to_string()))?;
+        }
+        let pid = std::process::id();
+        let stem = self
+            .path
+            .file_name()
+            .map(std::ffi::OsStr::to_string_lossy)
+            .unwrap_or_default();
+        let mut attempt = 0_u8;
+        let tmp = loop {
+            let id = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!("{stem}.tmp.{pid}.{id}"));
+            let mut open = std::fs::OpenOptions::new();
+            open.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                open.mode(0o600);
+            }
+            match open.open(&candidate) {
+                Ok(file) => break (candidate, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    attempt += 1;
+                    if attempt >= 16 {
+                        return Err(compact_str::CompactString::from(
+                            "temp file collision after 16 attempts",
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(compact_str::CompactString::from(format!(
+                        "failed to create temp wallet state: {error}"
+                    )));
+                }
+            }
+        };
+        let (tmp, mut tmp_file) = tmp;
+        if let Err(error) = tmp_file
+            .write_all(&bytes)
+            .and_then(|()| tmp_file.sync_all())
+        {
+            drop(tmp_file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(compact_str::CompactString::from(format!(
+                "failed to write wallet state: {error}"
+            )));
+        }
+        drop(tmp_file);
+        if let Err(error) = std::fs::rename(&tmp, &self.path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(compact_str::CompactString::from(format!(
+                "failed to rename wallet state into place: {error}"
+            )));
+        }
+        let dir = std::fs::File::open(parent)
+            .map_err(|error| compact_str::CompactString::from(error.to_string()))?;
+        dir.sync_all()
+            .map_err(|error| compact_str::CompactString::from(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct SilentMining;
+
+#[cfg(test)]
+impl bitcoin_rs_rpc::context::MiningControl for SilentMining {
+    fn get_block_template(
+        &self,
+        _request: bitcoin_rs_rpc::context::BlockTemplateRequest,
+    ) -> core::result::Result<
+        bitcoin_rs_rpc::context::BlockTemplateResult,
+        bitcoin_rs_rpc::context::MiningControlError,
+    > {
+        Err(bitcoin_rs_rpc::context::MiningControlError::Unavailable(
+            "silent mining".into(),
+        ))
+    }
+
+    fn mining_info(
+        &self,
+    ) -> core::result::Result<
+        bitcoin_rs_rpc::context::MiningInfo,
+        bitcoin_rs_rpc::context::MiningControlError,
+    > {
+        Err(bitcoin_rs_rpc::context::MiningControlError::Unavailable(
+            "silent mining".into(),
+        ))
+    }
+
+    fn submit_block(
+        &self,
+        _block: bitcoin::Block,
+    ) -> core::result::Result<
+        bitcoin_rs_rpc::context::BlockValidationResult,
+        bitcoin_rs_rpc::context::MiningControlError,
+    > {
+        Err(bitcoin_rs_rpc::context::MiningControlError::Unavailable(
+            "silent mining".into(),
+        ))
+    }
+
+    fn publish_generation(&self) {}
+}
+
 struct RpcChainControl {
     handles: crate::apply::ApplyHandles,
+    mining: Arc<dyn bitcoin_rs_rpc::context::MiningControl>,
 }
 
 impl bitcoin_rs_rpc::context::ChainControl for RpcChainControl {
@@ -83,17 +246,23 @@ impl bitcoin_rs_rpc::context::ChainControl for RpcChainControl {
                 bitcoin_rs_rpc::context::ChainControlError::Genesis
             }
             other => bitcoin_rs_rpc::context::ChainControlError::Failed(other.to_string()),
-        })
+        })?;
+        self.mining.publish_generation();
+        Ok(())
     }
 }
 
 pub(crate) struct RpcTransactionAdmission {
     transition_owner: crate::apply::ApplyHandles,
     handles: bitcoin_rs_rpc::admission::AdmissionHandles,
+    mining: Arc<dyn bitcoin_rs_rpc::context::MiningControl>,
 }
 
 impl RpcTransactionAdmission {
-    pub(crate) fn new(handles: &crate::apply::ApplyHandles) -> Self {
+    pub(crate) fn new(
+        handles: &crate::apply::ApplyHandles,
+        mining: Arc<dyn bitcoin_rs_rpc::context::MiningControl>,
+    ) -> Self {
         Self {
             transition_owner: handles.clone(),
             handles: bitcoin_rs_rpc::admission::AdmissionHandles {
@@ -103,6 +272,7 @@ impl RpcTransactionAdmission {
                 block_tree: Arc::clone(&handles.block_tree),
                 transactions: Arc::clone(&handles.transactions),
             },
+            mining,
         }
     }
 }
@@ -122,13 +292,86 @@ impl bitcoin_rs_rpc::context::TransactionAdmission for RpcTransactionAdmission {
                     error.to_string().into(),
                 )
             })?;
-        let result = bitcoin_rs_rpc::admission::admit_transaction(
+        let result = bitcoin_rs_rpc::admission::admit_transaction_commit(
             &self.handles,
             tx,
             max_feerate_sat_per_kvb,
         );
+        if let Ok(bitcoin_rs_rpc::admission::AdmissionCommit::Admitted(txid)) = &result {
+            let publisher = &self.transition_owner.zmq_publisher;
+            if publisher.wants_notifications() {
+                publisher.publish_hashtx(*txid);
+                if publisher.wants_rawtx() {
+                    publisher.publish_rawtx(&bitcoin::consensus::encode::serialize(tx));
+                }
+            }
+            self.mining.publish_generation();
+        }
         drop(transition);
-        result
+        result.map(bitcoin_rs_rpc::admission::AdmissionCommit::txid)
+    }
+
+    fn test_transactions(
+        &self,
+        txs: &[bitcoin::Transaction],
+        max_feerate_sat_per_kvb: Option<u64>,
+    ) -> core::result::Result<
+        bitcoin_rs_mempool::standardness::PackageAcceptanceFacts,
+        bitcoin_rs_rpc::context::TransactionAdmissionError,
+    > {
+        let transition = self
+            .transition_owner
+            .begin_chain_transition()
+            .map_err(|error| {
+                bitcoin_rs_rpc::context::TransactionAdmissionError::Unavailable(
+                    error.to_string().into(),
+                )
+            })?;
+        let facts = bitcoin_rs_rpc::admission::evaluate_admission(
+            &self.handles,
+            txs,
+            max_feerate_sat_per_kvb,
+        );
+        drop(transition);
+        Ok(facts)
+    }
+}
+
+/// Production undo adapter: reads stored undo bytes and decodes them against the block hash.
+pub struct RpcBlockUndoSource {
+    store: Arc<dyn crate::apply::UndoStore>,
+}
+
+impl RpcBlockUndoSource {
+    /// Builds an adapter over the apply pipeline's undo store.
+    #[must_use]
+    pub fn new(handles: &crate::apply::ApplyHandles) -> Self {
+        Self {
+            store: Arc::clone(&handles.undo_store),
+        }
+    }
+}
+
+impl bitcoin_rs_rpc::context::BlockUndoSource for RpcBlockUndoSource {
+    fn block_undo(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> core::result::Result<
+        Option<bitcoin_rs_utxo::UndoBatch>,
+        bitcoin_rs_rpc::context::TxQueryError,
+    > {
+        let bytes = self.store.load_undo(height, hash).map_err(|error| {
+            bitcoin_rs_rpc::context::TxQueryError::Storage(error.to_string().into())
+        })?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        bitcoin_rs_utxo::decode_undo(&bytes, hash)
+            .map(Some)
+            .map_err(|error| {
+                bitcoin_rs_rpc::context::TxQueryError::Decode(error.to_string().into())
+            })
     }
 }
 
@@ -577,11 +820,15 @@ fn spawn_fixed_peer_bootstrap(
 /// 7. Publish one immutable clean-shutdown chainstate checkpoint.
 #[allow(clippy::too_many_lines)]
 pub fn run(mut config: Config) -> Result<()> {
+    let process_start = Instant::now();
     logging::install_tracing(&config.log_level)?;
     cap_global_thread_pool();
 
     let injected_shutdown = config.shutdown_signal.take();
     let state = NodeState::open(config)?;
+    crate::metrics::record_process_start(process_start);
+    let metrics_server =
+        crate::metrics::start_metrics(state.config().metrics_bind, state.shutdown())?;
     if state.resume_source() != crate::state::ResumeSource::Checkpoint {
         crash_recovery::recover_if_needed(&state)?;
     }
@@ -593,16 +840,14 @@ pub fn run(mut config: Config) -> Result<()> {
         "bitcoin-rs node booting"
     );
 
+    let shutdown = state.shutdown();
     let shutdown_rx: Receiver<()> = if let Some(rx) = injected_shutdown {
         rx
     } else {
         let (tx, rx) = bounded(1);
-        // Forwards process signals into our channel; the JoinHandle outlives `run`.
-        let _signal_thread = crate::signal::install_shutdown_handler(tx)?;
+        let _signal_thread = crate::signal::install_shutdown_handler(Arc::clone(&shutdown), tx)?;
         rx
     };
-
-    let shutdown = state.shutdown();
     let network = state.config().network;
     let banned = state.banned_subnets();
     let peers = state.peers();
@@ -630,7 +875,10 @@ pub fn run(mut config: Config) -> Result<()> {
     );
 
     // One shared RPC lifecycle drives both the serve loop and `getrpcinfo`.
-    let rpc_lifecycle = Arc::new(bitcoin_rs_rpc::RpcLifecycle::new(Arc::clone(&shutdown)));
+    let rpc_lifecycle = Arc::new(
+        bitcoin_rs_rpc::RpcLifecycle::new(Arc::clone(&shutdown), process_start)
+            .with_warnings(Arc::new(NodeRpcWarnings)),
+    );
 
     // One shared mining coordinator serves template assembly, solved-block
     // submission, and (installed on `BlockSync`) generation publication after
@@ -656,13 +904,14 @@ pub fn run(mut config: Config) -> Result<()> {
             chain: bitcoin_rs_rpc::context::ChainHandles {
                 chain_tip: state.chain_tip(),
                 applied_tip: state.applied_tip(),
-                chain_tx_count: state.chain_tx_count_handle(),
+                chain_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 blocks: state.blocks(),
                 transactions: state.transactions(),
                 utxo: state.utxo(),
                 coin_stats: state.coin_stats(),
                 filter_index: state.filter_index(),
                 block_tree: state.block_tree(),
+                block_undo_source: Arc::new(RpcBlockUndoSource::new(&state.apply_handles())),
                 network,
             },
             mempool: state.mempool(),
@@ -684,16 +933,28 @@ pub fn run(mut config: Config) -> Result<()> {
         .with_block_body_source(block_body_source)
         .with_chain_control(Arc::new(RpcChainControl {
             handles: apply_handles.clone(),
+            mining: Arc::clone(&mining_control),
         }))
-        .with_transaction_admission(Arc::new(RpcTransactionAdmission::new(&apply_handles)))
-        .with_zmq_notifications(state.active_zmq_notifications())
-        .with_wallet(Arc::new(parking_lot::RwLock::new(
-            bitcoin_rs_wallet::Watcher::new(Vec::new()),
+        .with_transaction_admission(Arc::new(RpcTransactionAdmission::new(
+            &apply_handles,
+            Arc::clone(&mining_control),
         )))
+        .with_zmq_notifications(state.active_zmq_notifications())
         .with_rpc_lifecycle(Arc::clone(&rpc_lifecycle))
         .with_mining_control(Arc::clone(&mining_control))
-        // `getrpcinfo` reports Core's conventional `<datadir>/debug.log` path.
         .with_debug_log_path(state.data_dir().join("debug.log"));
+    let wallet_store = Arc::new(WatchOnlyStore::new(
+        state.data_dir().join("wallet").join("watch_only.json"),
+    ));
+    let mut watcher = wallet_store
+        .load()
+        .map_err(|error| anyhow::anyhow!("watch-only wallet load failed: {error}"))?;
+    rpc_context
+        .populate_wallet_utxos(&mut watcher)
+        .map_err(|error| anyhow::anyhow!("watch-only wallet scan failed: {error}"))?;
+    rpc_context = rpc_context
+        .with_wallet(Arc::new(parking_lot::RwLock::new(watcher)))
+        .with_wallet_persistence(wallet_store);
 
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
@@ -762,6 +1023,9 @@ pub fn run(mut config: Config) -> Result<()> {
         tracing::info!("P2P outbound drain exited cleanly");
     } else {
         tracing::error!("P2P outbound drain panicked");
+    }
+    if let Some(server) = metrics_server {
+        server.join();
     }
     shutdown::drain_and_shutdown(DRAIN_DEADLINE)?;
     // Attempt the clean checkpoint before joining the bootstrap worker, but defer
@@ -852,6 +1116,188 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
+
+    fn sample_wpkh_watcher() -> bitcoin_rs_wallet::Watcher {
+        let signer_key = bitcoin::PrivateKey {
+            compressed: true,
+            network: bitcoin::NetworkKind::Main,
+            inner: bitcoin::secp256k1::SecretKey::from_slice(&[9_u8; 32])
+                .unwrap_or_else(|error| panic!("secret: {error}")),
+        };
+        let public = bitcoin::PublicKey::from_private_key(
+            &bitcoin::secp256k1::Secp256k1::new(),
+            &signer_key,
+        );
+        let mut watcher = bitcoin_rs_wallet::Watcher::new(Vec::new());
+        watcher
+            .import_descriptor(&format!("wpkh({public})"))
+            .unwrap_or_else(|error| panic!("import: {error}"));
+        watcher
+    }
+
+    fn unix_mode(path: &std::path::Path) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::metadata(path)
+                .unwrap_or_else(|error| panic!("metadata: {error}"))
+                .permissions()
+                .mode()
+                & 0o777
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            0
+        }
+    }
+
+    #[test]
+    fn watch_only_load_not_found_returns_empty() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let store = WatchOnlyStore::new(temp.path().join("missing").join("watch_only.json"));
+        let watcher = store
+            .load()
+            .unwrap_or_else(|error| panic!("not found is empty: {error}"));
+        assert!(watcher.descriptors.is_empty());
+        assert!(watcher.imports.is_empty());
+    }
+
+    #[test]
+    fn watch_only_load_malformed_json_fails() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = temp.path().join("watch_only.json");
+        std::fs::write(&path, b"{not-json").unwrap_or_else(|error| panic!("write: {error}"));
+        let Err(err) = WatchOnlyStore::new(path).load() else {
+            panic!("corrupt");
+        };
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn watch_only_load_unsupported_version_fails() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = temp.path().join("watch_only.json");
+        std::fs::write(&path, br#"{"version":99,"imports":[]}"#)
+            .unwrap_or_else(|error| panic!("write: {error}"));
+        let Err(err) = WatchOnlyStore::new(path).load() else {
+            panic!("version");
+        };
+        assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn watch_only_load_invalid_descriptor_fails() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = temp.path().join("watch_only.json");
+        std::fs::write(
+            &path,
+            br#"{"version":1,"imports":[{"descriptor":"not-a-descriptor","timestamp":"Now","range_start":0,"range_end":0,"active":false,"internal":false,"label":null}]}"#,
+        )
+        .unwrap_or_else(|error| panic!("write: {error}"));
+        let Err(_) = WatchOnlyStore::new(path).load() else {
+            panic!("invalid descriptor");
+        };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_only_load_permission_denied_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = temp.path().join("watch_only.json");
+        std::fs::write(&path, br#"{"version":1,"imports":[]}"#)
+            .unwrap_or_else(|error| panic!("write: {error}"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .unwrap_or_else(|error| panic!("chmod: {error}"));
+        let result = WatchOnlyStore::new(path.clone()).load();
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let Err(_) = result else {
+            panic!("permission denied must fail for unreadable state");
+        };
+    }
+
+    #[test]
+    fn watch_only_persist_round_trip_and_modes() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let dir = temp.path().join("wallet");
+        let path = dir.join("watch_only.json");
+        let store = WatchOnlyStore::new(path.clone());
+        let watcher = sample_wpkh_watcher();
+        bitcoin_rs_rpc::context::WalletPersistence::persist(&store, &watcher)
+            .unwrap_or_else(|error| panic!("persist: {error}"));
+        #[cfg(unix)]
+        {
+            assert_eq!(unix_mode(&dir), 0o700);
+            assert_eq!(unix_mode(&path), 0o600);
+        }
+        let loaded = store.load().unwrap_or_else(|error| panic!("load: {error}"));
+        assert_eq!(loaded.imports.len(), 1);
+        assert_eq!(loaded.imports[0].descriptor, watcher.imports[0].descriptor);
+        let stray = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("read_dir: {error}"))
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".tmp."));
+        assert!(!stray, "clean persist must not leave temp files");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_only_persist_retries_unique_temp_on_collision() {
+        let temp = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let dir = temp.path().join("wallet");
+        std::fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("mkdir: {error}"));
+        let path = dir.join("watch_only.json");
+        let pid = std::process::id();
+        let colliding = dir.join(format!("watch_only.json.tmp.{pid}.0"));
+        std::fs::write(&colliding, b"occupied").unwrap_or_else(|error| panic!("occupy: {error}"));
+        let store = WatchOnlyStore::new(path.clone());
+        bitcoin_rs_rpc::context::WalletPersistence::persist(&store, &sample_wpkh_watcher())
+            .unwrap_or_else(|error| panic!("persist after collision: {error}"));
+        assert!(path.is_file());
+        assert_eq!(unix_mode(&path), 0o600);
+        assert!(
+            colliding.is_file(),
+            "must not remove a temp that is not ours"
+        );
+    }
+
+    #[test]
+    fn run_aborts_on_corrupt_watch_only_state() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut config = Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = temp.path().join("node-wallet-corrupt");
+        config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        config.rpc_auth = crate::Auth::basic("user", "password");
+        config.script_index = false;
+        config.p2p_listen.clear();
+        config.metrics_bind = None;
+
+        let state = crate::state::NodeState::open(config.clone())?;
+        state.apply_block(&bitcoin::blockdata::constants::genesis_block(
+            bitcoin::Network::Regtest,
+        ))?;
+        state.write_clean_checkpoint()?;
+        drop(state);
+        let wallet_path = config.data_dir.join("wallet").join("watch_only.json");
+        let Some(parent) = wallet_path.parent() else {
+            panic!("parent");
+        };
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(&wallet_path, b"not-json")?;
+
+        let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+        shutdown_tx.send(())?;
+        config = config.with_shutdown_receiver(shutdown_rx);
+        let Err(error) = run(config) else {
+            panic!("corrupt wallet must fail startup");
+        };
+        assert!(
+            error.to_string().contains("watch-only"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
 
     // ---------------------------------------------------------------------------
     // Shared mock resolvers

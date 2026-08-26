@@ -88,7 +88,6 @@ checksig-census = [
 ]
 mimalloc = ["dep:mimalloc"]
 utreexo = ["dep:bitcoin-rs-utreexo"]
-prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
 hashbrown.workspace = true

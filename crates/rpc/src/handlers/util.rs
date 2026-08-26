@@ -185,8 +185,8 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         serde_json::Value::Bool(script.is_p2sh() || script.is_p2wsh()),
     );
     response.insert(
-        "iswitness".to_owned(),
-        serde_json::Value::Bool(script.is_witness_program()),
+        "isscript".to_owned(),
+        serde_json::Value::Bool(script.is_p2sh() || script.is_p2wsh() || script.is_p2tr()),
     );
     if let Some(version) = script.witness_version() {
         response.insert(
@@ -276,7 +276,10 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::atomic::AtomicBool;
 
-        let lifecycle = Arc::new(crate::RpcLifecycle::new(Arc::new(AtomicBool::new(false))));
+        let lifecycle = Arc::new(crate::RpcLifecycle::new(
+            Arc::new(AtomicBool::new(false)),
+            Instant::now(),
+        ));
         let ctx = Arc::new(
             Context::new()
                 .with_rpc_lifecycle(Arc::clone(&lifecycle))
@@ -392,5 +395,57 @@ mod validateaddress_tests {
             panic!("isvalid missing: {result:?}");
         };
         assert!(isvalid, "expected valid: {result:?}");
+    }
+
+    #[test]
+    fn validateaddress_reports_isscript_true_for_p2tr() {
+        // Core's DescribeAddressVisitor returns isscript=true for
+        // WitnessV1Taproot. The old predicate is_p2sh() || is_p2wsh() missed
+        // P2TR entirely.
+        let ctx = Arc::new(Context::new());
+        // bc1p is a P2TR (Taproot) mainnet address.
+        let result = validateaddress(
+            &ctx,
+            &json!(["bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"]),
+        )
+        .unwrap_or_else(|err| panic!("validateaddress failed: {err}"));
+        let Some(isvalid) = result
+            .get("isvalid")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+        else {
+            panic!("isvalid missing: {result:?}");
+        };
+        assert!(isvalid, "expected valid: {result:?}");
+        let Some(isscript) = result
+            .get("isscript")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+        else {
+            panic!("isscript missing: {result:?}");
+        };
+        assert!(isscript, "P2TR must report isscript=true: {result:?}");
+    }
+
+    #[test]
+    fn validateaddress_reports_isscript_false_for_p2wpkh() {
+        // Core's DescribeAddressVisitor returns isscript=false for
+        // WitnessV0KeyHash (P2WPKH). The predicate must not match P2WPKH.
+        let ctx = Arc::new(Context::new());
+        // bc1q is a P2WPKH mainnet address.
+        let result = validateaddress(&ctx, &json!(["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"]))
+            .unwrap_or_else(|err| panic!("validateaddress failed: {err}"));
+        let Some(isvalid) = result
+            .get("isvalid")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+        else {
+            panic!("isvalid missing: {result:?}");
+        };
+        assert!(isvalid, "expected valid: {result:?}");
+        let Some(isscript) = result
+            .get("isscript")
+            .and_then(sonic_rs::JsonValueTrait::as_bool)
+        else {
+            panic!("isscript missing: {result:?}");
+        };
+        assert!(!isscript, "P2WPKH must report isscript=false: {result:?}");
     }
 }

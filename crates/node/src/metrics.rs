@@ -5,8 +5,12 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
-use std::net::SocketAddr;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -26,7 +30,7 @@ pub struct MetricsHandle {
 }
 
 impl MetricsHandle {
-    /// Address requested for the future Prometheus exporter.
+    /// Address associated with this diagnostic recorder.
     #[must_use]
     pub const fn bind(&self) -> SocketAddr {
         self.bind
@@ -190,8 +194,8 @@ static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 /// Idempotent and earliest-wins: the first caller fixes the uptime origin,
 /// mirroring Core's static initialization. `run` records this before wiring
 /// subsystems so the clock covers the whole node lifecycle.
-pub fn record_process_start() {
-    PROCESS_START.get_or_init(Instant::now);
+pub fn record_process_start(start: Instant) {
+    let _ = PROCESS_START.set(start);
 }
 
 /// Returns the recorded process start instant, or `None` before
@@ -355,16 +359,16 @@ pub fn node_warnings() -> &'static Warnings {
     &NODE_WARNINGS
 }
 
-/// Installs in-memory process metrics and returns its handle when configured.
+/// Installs the in-memory diagnostic recorder and returns its handle when a
+/// bind address is provided.
 ///
-/// The workspace pins `metrics-exporter-prometheus` without its HTTP listener.
-/// This recorder keeps v1 metrics in process; wiring the Prometheus endpoint is
-/// left to the follow-up feature that enables the exporter listener.
-pub fn install_metrics(bind: Option<SocketAddr>) -> Result<Option<MetricsHandle>> {
-    install_metrics_with(bind, metrics::set_global_recorder)
+/// This path does not serve HTTP. Production scrape exposition uses
+/// [`start_metrics`] / [`MetricsServer`].
+pub fn install_diagnostic_metrics(bind: Option<SocketAddr>) -> Result<Option<MetricsHandle>> {
+    install_diagnostic_metrics_with(bind, metrics::set_global_recorder)
 }
 
-fn install_metrics_with(
+fn install_diagnostic_metrics_with(
     bind: Option<SocketAddr>,
     install_recorder: impl FnOnce(
         InMemoryRecorder,
@@ -378,7 +382,11 @@ fn install_metrics_with(
     install_recorder(recorder.clone())?;
 
     let handle = MetricsHandle { bind, recorder };
+    describe_node_metrics();
+    Ok(Some(handle))
+}
 
+fn describe_node_metrics() {
     metrics::describe_counter!("node.event_loop.mempool_ticks", "mempool maintenance ticks");
     metrics::describe_counter!("node.event_loop.metrics_scrapes", "metrics scrape ticks");
     metrics::describe_counter!("node.event_loop.sync_ticks", "block sync ticks");
@@ -394,8 +402,125 @@ fn install_metrics_with(
         "node.event_loop.tick_seconds",
         "event loop tick latency seconds"
     );
+}
 
-    Ok(Some(handle))
+static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
+
+fn prometheus_handle() -> Result<PrometheusHandle> {
+    let mut slot = PROMETHEUS_HANDLE.lock();
+    if let Some(handle) = slot.as_ref() {
+        return Ok(handle.clone());
+    }
+    let handle = PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|error| anyhow::anyhow!("install prometheus recorder: {error}"))?;
+    *slot = Some(handle.clone());
+    Ok(handle)
+}
+
+/// Process-global Prometheus scrape listener bound by [`start_metrics`].
+pub struct MetricsServer {
+    local_addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl MetricsServer {
+    /// Binds `addr` before installing the recorder, then serves Prometheus text.
+    ///
+    /// Listener-first ordering keeps an occupied-address failure from consuming
+    /// the process-global recorder slot, so a later in-process retry cannot hit
+    /// `SetRecorderError`.
+    pub fn bind(addr: SocketAddr, shutdown: Arc<AtomicBool>) -> Result<Self> {
+        let listener = TcpListener::bind(addr)?;
+        let local_addr = listener.local_addr()?;
+        let handle = prometheus_handle()?;
+        describe_node_metrics();
+        listener.set_nonblocking(true)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::Builder::new()
+            .name("bitcoin-rs-metrics".into())
+            .spawn(move || serve_metrics(&listener, &handle, &thread_stop, &shutdown))?;
+        Ok(Self {
+            local_addr,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// Address the scrape thread is listening on.
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Signals the scrape thread and waits for it to exit.
+    pub fn join(mut self) {
+        self.stop_and_join();
+    }
+
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for MetricsServer {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
+
+/// Starts the production scrape listener when `metrics_bind` is configured.
+///
+/// This is the entry `run` uses after [`crate::state::NodeState::open`].
+pub(crate) fn start_metrics(
+    bind: Option<SocketAddr>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<Option<MetricsServer>> {
+    bind.map(|addr| MetricsServer::bind(addr, shutdown))
+        .transpose()
+}
+
+fn serve_metrics(
+    listener: &TcpListener,
+    handle: &PrometheusHandle,
+    stop: &Arc<AtomicBool>,
+    shutdown: &Arc<AtomicBool>,
+) {
+    loop {
+        if stop.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                serve_scrape(&mut stream, handle);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+}
+
+fn serve_scrape(stream: &mut TcpStream, handle: &PrometheusHandle) {
+    let mut buf = [0_u8; 1024];
+    let _ = stream.read(&mut buf);
+    let body = handle.render();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
 }
 
 #[cfg(test)]
@@ -409,7 +534,11 @@ pub(crate) fn test_recorder() -> (impl Recorder, MetricsHandle) {
 }
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -515,10 +644,10 @@ Threads:\t17
     }
 
     #[test]
-    fn install_metrics_returns_error_when_global_recorder_install_fails() {
+    fn install_diagnostic_metrics_returns_error_when_global_recorder_install_fails() {
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 
-        let result = install_metrics_with(Some(bind), |recorder| {
+        let result = install_diagnostic_metrics_with(Some(bind), |recorder| {
             Err(metrics::SetRecorderError(recorder))
         });
 
@@ -530,14 +659,14 @@ Threads:\t17
         use std::thread;
         use std::time::Duration;
 
-        record_process_start();
+        record_process_start(Instant::now());
         let first = process_start();
         let before = process_uptime();
 
         thread::sleep(Duration::from_millis(25));
         // A second record must not move the clock — earliest-wins is what
         // makes the node, rather than the latest caller, own the origin.
-        record_process_start();
+        record_process_start(Instant::now());
 
         assert_eq!(
             process_start(),
@@ -635,5 +764,142 @@ Threads:\t17
             snapshot.get("node.test.repeat_histogram"),
             Some(&MetricValue::Histogram { count: 2, sum: 5.0 })
         );
+    }
+
+    fn unused_ephemeral() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    }
+
+    fn scrape(addr: SocketAddr) -> (u16, String) {
+        let mut last = None;
+        for _ in 0..50 {
+            match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+                Ok(mut stream) => {
+                    stream
+                        .write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                        .unwrap_or_else(|error| panic!("write scrape request: {error}"));
+                    stream
+                        .flush()
+                        .unwrap_or_else(|error| panic!("flush scrape request: {error}"));
+                    let mut body = String::new();
+                    stream
+                        .read_to_string(&mut body)
+                        .unwrap_or_else(|error| panic!("read scrape response: {error}"));
+                    let status = body
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|token| token.parse().ok())
+                        .unwrap_or(0);
+                    return (status, body);
+                }
+                Err(error) => last = Some(error),
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("scrape connect failed: {last:?}");
+    }
+
+    #[test]
+    fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let occupied = TcpListener::bind(unused_ephemeral())
+            .unwrap_or_else(|error| panic!("occupy port: {error}"));
+        let addr = occupied
+            .local_addr()
+            .unwrap_or_else(|error| panic!("occupied local addr: {error}"));
+        let installed_before = PROMETHEUS_HANDLE.lock().is_some();
+
+        let first = start_metrics(Some(addr), Arc::clone(&shutdown));
+        assert!(first.is_err(), "occupied bind must fail");
+        assert_eq!(
+            PROMETHEUS_HANDLE.lock().is_some(),
+            installed_before,
+            "failed bind must not install the process recorder"
+        );
+
+        drop(occupied);
+        let server = start_metrics(Some(unused_ephemeral()), shutdown)
+            .unwrap_or_else(|error| panic!("retry after occupied bind: {error}"))
+            .unwrap_or_else(|| panic!("metrics server"));
+        metrics::counter!("node_metrics_retry_probe").increment(1);
+        let (status, body) = scrape(server.local_addr());
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("node_metrics_retry_probe"),
+            "retry scrape missing recorded metric: {body}"
+        );
+        server.join();
+    }
+
+    #[test]
+    fn scrape_returns_prometheus_text_with_recorded_metrics() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server = MetricsServer::bind(unused_ephemeral(), shutdown)
+            .unwrap_or_else(|error| panic!("bind metrics: {error}"));
+        metrics::counter!("node_metrics_scrape_probe").increment(1);
+        let (status, body) = scrape(server.local_addr());
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("text/plain"),
+            "content-type must be prometheus text: {body}"
+        );
+        assert!(
+            body.contains("node_metrics_scrape_probe"),
+            "body must include recorded metric: {body}"
+        );
+        server.join();
+    }
+
+    #[test]
+    fn two_sequential_servers_in_one_process_both_serve() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let first = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown))
+            .unwrap_or_else(|error| panic!("first: {error}"));
+        metrics::counter!("node_metrics_sequential_probe").increment(1);
+        let (status, body) = scrape(first.local_addr());
+        assert_eq!(status, 200);
+        assert!(body.contains("node_metrics_sequential_probe"));
+        first.join();
+
+        let second = MetricsServer::bind(unused_ephemeral(), shutdown)
+            .unwrap_or_else(|error| panic!("second: {error}"));
+        metrics::counter!("node_metrics_sequential_probe").increment(1);
+        let (status, body) = scrape(second.local_addr());
+        assert_eq!(status, 200);
+        assert!(body.contains("node_metrics_sequential_probe"));
+        second.join();
+    }
+
+    #[test]
+    fn shutdown_exits_the_listener_thread() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown))
+            .unwrap_or_else(|error| panic!("bind: {error}"));
+        let addr = server.local_addr();
+        shutdown.store(true, Ordering::Release);
+        server.join();
+        TcpListener::bind(addr)
+            .unwrap_or_else(|error| panic!("port released after listener join: {error}"));
+    }
+
+    #[test]
+    fn run_retries_metrics_bind_after_occupied_address() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let occupied =
+            TcpListener::bind(unused_ephemeral()).unwrap_or_else(|error| panic!("occupy: {error}"));
+        let busy = occupied
+            .local_addr()
+            .unwrap_or_else(|error| panic!("busy addr: {error}"));
+        assert!(
+            start_metrics(Some(busy), Arc::clone(&shutdown)).is_err(),
+            "run-path bind must fail on an occupied address"
+        );
+        drop(occupied);
+        let server = start_metrics(Some(unused_ephemeral()), shutdown)
+            .unwrap_or_else(|error| panic!("run-path retry: {error}"))
+            .unwrap_or_else(|| panic!("server"));
+        let (status, _) = scrape(server.local_addr());
+        assert_eq!(status, 200);
+        server.join();
     }
 }

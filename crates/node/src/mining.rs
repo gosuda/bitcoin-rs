@@ -34,6 +34,9 @@ use crate::bip9_context::MiningChainContext;
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
+/// Finite bound on generation-key races during candidate assembly.
+const CANDIDATE_GENERATION_RETRIES: usize = 8;
+const GENERATION_RACE: &str = "generation key changed during candidate assembly";
 /// Bitcoin Core's mempool-only long-poll cooldown before returning a new template.
 const DEFAULT_MEMPOOL_UPDATE_WAIT: Duration = Duration::from_secs(10);
 /// Upper bound for a single long-poll wait slice while rechecking predicates.
@@ -278,6 +281,33 @@ impl MiningCoordinator {
         }
     }
 
+    fn live_candidate(&self) -> Result<Arc<Candidate>, MiningControlError> {
+        let mut last_race = None;
+        for attempt in 0..CANDIDATE_GENERATION_RETRIES {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let key = {
+                let mut state = self.state.lock();
+                self.ensure_published(&mut state)
+            };
+            match self.candidate_for_key(key) {
+                Ok(candidate) => {
+                    if self.live_generation_key() == key {
+                        return Ok(candidate);
+                    }
+                    last_race = Some(generation_race());
+                }
+                Err(error) if is_generation_race(&error) => last_race = Some(error),
+                Err(error) => return Err(error),
+            }
+            let _ = attempt;
+        }
+        Err(last_race.unwrap_or_else(generation_race))
+    }
+
     fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
         let template_id = key.template_id();
         let mut state = self.state.lock();
@@ -319,12 +349,13 @@ impl MiningCoordinator {
                     state.last_candidate = Some(LastCandidateInfo {
                         weight: candidate.weight,
                         transactions: u64::try_from(candidate.transactions.len())
-                            .unwrap_or(u64::MAX)
-                            .saturating_add(1),
+                            .unwrap_or(u64::MAX),
                     });
                     state.published = Some(key);
+                    Ok(Arc::clone(candidate))
+                } else {
+                    Err(generation_race())
                 }
-                Ok(Arc::clone(candidate))
             }
             Err(error) => Err(error.clone()),
         };
@@ -349,16 +380,12 @@ impl MiningCoordinator {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
         if tip.hash != key.tip_hash {
-            return Err(MiningControlError::Unavailable(CompactString::from(
-                "applied tip changed during candidate assembly",
-            )));
+            return Err(generation_race());
         }
         let snapshot = {
             let mempool = self.mempool.read();
             if mempool.sequence_number() != key.mempool_sequence {
-                return Err(MiningControlError::Unavailable(CompactString::from(
-                    "mempool sequence changed during candidate assembly",
-                )));
+                return Err(generation_race());
             }
             mempool.mining_snapshot()
         };
@@ -378,6 +405,7 @@ impl MiningCoordinator {
             current_time: current_time.max(chain.min_time),
             locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
             network: self.network,
+            csv_active: chain.csv_active,
             segwit_active: chain.segwit_active,
             max_weight: MAX_BLOCK_WEIGHT,
             max_size: MAX_BLOCK_SIZE,
@@ -394,26 +422,15 @@ impl MiningCoordinator {
     }
 
     fn template_from_candidate(
-        &self,
         candidate: Arc<Candidate>,
         request: &BlockTemplateRequest,
         submit_old: Option<bool>,
-    ) -> Result<BlockTemplate, MiningControlError> {
-        let tip = self.applied_tip.load_full().ok_or_else(|| {
-            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
-        })?;
-        let chain = {
-            let tree = self.block_tree.read();
-            MiningChainContext::resolve(&tree, self.network, tip.tip_id, candidate.current_time)
-                .map_err(|error| {
-                    MiningControlError::Failed(CompactString::from(error.to_string()))
-                })?
-        };
+    ) -> BlockTemplate {
         let mut rules = Vec::new();
-        if chain.segwit_active {
+        if candidate.segwit_active {
             rules.push(MiningRule::new("segwit"));
         }
-        if chain.csv_active {
+        if candidate.csv_active {
             rules.push(MiningRule::new("csv"));
         }
         let mut capabilities = vec![
@@ -428,7 +445,7 @@ impl MiningCoordinator {
                 capabilities.push(capability.clone());
             }
         }
-        Ok(BlockTemplate {
+        BlockTemplate {
             candidate,
             rules,
             version_bits_available: Vec::<AvailableMiningRule>::new(),
@@ -441,7 +458,7 @@ impl MiningCoordinator {
             ],
             submit_old,
             work_id: None,
-        })
+        }
     }
 
     fn propose(&self, block: &bitcoin::Block) -> BlockValidationResult {
@@ -455,31 +472,17 @@ impl MiningCoordinator {
         use bitcoin::hashes::Hash as _;
 
         let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
-        if let Some(tip) = self.applied_tip.load_full()
-            && tip.hash == block_hash
-        {
-            return Ok(BlockValidationResult::Duplicate);
-        }
         {
             let tree = self.block_tree.read();
             if let Some(node_id) = tree.lookup(block_hash) {
+                let node = tree.node(node_id).map_err(|error| {
+                    MiningControlError::Failed(CompactString::from(error.to_string()))
+                })?;
+                if node.status == bitcoin_rs_chain::NodeStatus::Invalid {
+                    return Ok(BlockValidationResult::DuplicateInvalid);
+                }
                 let on_applied = self.applied_tip.load_full().is_some_and(|tip| {
-                    if tip.tip_id == node_id {
-                        return true;
-                    }
-                    let mut cursor = tip.tip_id;
-                    loop {
-                        let Ok(node) = tree.node(cursor) else {
-                            return false;
-                        };
-                        let Some(parent) = node.parent else {
-                            return false;
-                        };
-                        if parent == node_id {
-                            return true;
-                        }
-                        cursor = parent;
-                    }
+                    tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id)
                 });
                 if on_applied {
                     return Ok(BlockValidationResult::Duplicate);
@@ -548,7 +551,11 @@ impl MiningCoordinator {
             next_difficulty,
             minimum_fee_rate,
             signet: signet_info(self.network),
-            warnings: Vec::new(),
+            warnings: crate::metrics::node_warnings()
+                .messages()
+                .into_iter()
+                .map(CompactString::from)
+                .collect(),
         })
     }
 }
@@ -563,8 +570,7 @@ impl MiningControl for MiningCoordinator {
                 Ok(BlockTemplateResult::Proposal(self.propose(&block)))
             }
             BlockTemplateMode::Template => {
-                let mut submit_old = None;
-                if let Some(long_poll_id) = request.long_poll_id.as_deref() {
+                let waited = if let Some(long_poll_id) = request.long_poll_id.as_deref() {
                     let waited = parse_long_poll_id(long_poll_id).ok_or_else(|| {
                         MiningControlError::InvalidRequest(CompactString::from(
                             "longpollid is malformed",
@@ -575,23 +581,21 @@ impl MiningControl for MiningCoordinator {
                         self.ensure_published(&mut state)
                     };
                     if live == waited {
-                        let after = self.wait_for_generation_change(waited)?;
-                        submit_old = Some(after.tip_hash == waited.tip_hash);
-                    } else {
-                        submit_old = Some(live.tip_hash == waited.tip_hash);
+                        self.wait_for_generation_change(waited)?;
                     }
-                }
+                    Some(waited)
+                } else {
+                    None
+                };
                 if self.applied_tip.load_full().is_none() {
                     return Err(MiningControlError::Unavailable(CompactString::from(
                         "applied tip is not available",
                     )));
                 }
-                let key = {
-                    let mut state = self.state.lock();
-                    self.ensure_published(&mut state)
-                };
-                let candidate = self.candidate_for_key(key)?;
-                let template = self.template_from_candidate(candidate, &request, submit_old)?;
+                let candidate = self.live_candidate()?;
+                let submit_old =
+                    waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
+                let template = Self::template_from_candidate(candidate, &request, submit_old);
                 Ok(BlockTemplateResult::Template(template))
             }
         }
@@ -667,14 +671,25 @@ fn estimate_network_hashps(block_tree: &RwLock<BlockTree>, tip: Option<&TipSnaps
     let work_delta = tip_node.chainwork.saturating_sub(earliest_node.chainwork);
     let time_delta_secs =
         i64::from(tip_node.header.time).saturating_sub(i64::from(earliest_node.header.time));
+    hashes_per_second(work_delta.to_be_bytes(), time_delta_secs)
+}
+
+fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
     if time_delta_secs <= 0 {
         return 0.0;
     }
-    let bytes: [u8; 32] = work_delta.to_be_bytes();
-    let work = bytes
+    let work = work_be_bytes
         .iter()
         .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)));
     work / f64::from(u32::try_from(time_delta_secs).unwrap_or(u32::MAX))
+}
+
+fn generation_race() -> MiningControlError {
+    MiningControlError::Unavailable(CompactString::from(GENERATION_RACE))
+}
+
+fn is_generation_race(error: &MiningControlError) -> bool {
+    matches!(error, MiningControlError::Unavailable(message) if message.as_str() == GENERATION_RACE)
 }
 
 fn signet_info(network: Network) -> Option<SignetMiningInfo> {
@@ -696,7 +711,8 @@ fn signet_info(network: Network) -> Option<SignetMiningInfo> {
 #[cfg(test)]
 mod generation_key_tests {
     use super::{GenerationKey, parse_long_poll_id};
-    use bitcoin_rs_mining::TemplateId;
+    use alloc::sync::Arc;
+    use bitcoin_rs_mining::{Candidate, TemplateId};
     use bitcoin_rs_primitives::Hash256;
 
     #[test]
@@ -712,5 +728,202 @@ mod generation_key_tests {
         };
         assert_eq!(parsed, key);
         assert_eq!(TemplateId::new(&tip, 7).as_str(), id.as_str());
+    }
+
+    #[test]
+    fn hashes_per_second_divides_work_by_elapsed_seconds() {
+        let mut work = [0_u8; 32];
+        work[31] = 120;
+        let rate = super::hashes_per_second(work, 60);
+        assert!(
+            (rate - 2.0).abs() < f64::EPSILON,
+            "120 work over 60s must be 2.0 hashes/s, got {rate}"
+        );
+        let zero_elapsed = super::hashes_per_second(work, 0);
+        assert!(
+            zero_elapsed.abs() < f64::EPSILON,
+            "zero elapsed must report 0.0 hashes/s, got {zero_elapsed}"
+        );
+        let negative_elapsed = super::hashes_per_second(work, -1);
+        assert!(
+            negative_elapsed.abs() < f64::EPSILON,
+            "negative elapsed must report 0.0 hashes/s, got {negative_elapsed}"
+        );
+    }
+
+    #[test]
+    fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
+        use alloc::sync::Arc;
+        use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
+        use bitcoin_rs_mining::Candidate;
+
+        let mut state = super::CoordinatorState::new();
+        let coinbase = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(50),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let mut first_id = None;
+        for seq in 0..=super::CANDIDATE_CACHE_LIMIT {
+            let seq = u64::try_from(seq).unwrap_or(u64::MAX);
+            let hash = Hash256::from_le_bytes(&[u8::try_from(seq).unwrap_or(0xff); 32]);
+            let id = TemplateId::new(&hash, seq);
+            if seq == 0 {
+                first_id = Some(id.clone());
+            }
+            let candidate = Arc::new(Candidate {
+                template_id: id.clone(),
+                previous_block_hash: hash,
+                height: 1,
+                version: 1,
+                bits: 0x207f_ffff,
+                min_time: 1,
+                current_time: 1,
+                csv_active: false,
+                segwit_active: false,
+                max_weight: 4_000_000,
+                max_size: 4_000_000,
+                max_sigops: 80_000,
+                mempool_sequence: seq,
+                coinbase: coinbase.clone(),
+                coinbase_value: 50,
+                fees: 0,
+                weight: 800,
+                size: 200,
+                sigop_cost: 0,
+                transactions: Vec::new(),
+                witness_merkle_root: None,
+                witness_reserved_value: None,
+                witness_commitment: None,
+            });
+            state.cache_insert(id, candidate);
+        }
+        assert_eq!(state.cache.len(), super::CANDIDATE_CACHE_LIMIT);
+        assert!(
+            !state
+                .cache
+                .contains_key(first_id.as_ref().unwrap_or_else(|| panic!("first id"))),
+            "oldest cached candidate must be evicted at the bound"
+        );
+    }
+
+    fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) -> Candidate {
+        use bitcoin::{Amount, ScriptBuf, Transaction, TxOut};
+        Candidate {
+            template_id: TemplateId::new(&previous, 1),
+            previous_block_hash: previous,
+            height: 1,
+            version: 1,
+            bits: 0x207f_ffff,
+            min_time: 1,
+            current_time: 1,
+            csv_active,
+            segwit_active,
+            max_weight: 4_000_000,
+            max_size: 4_000_000,
+            max_sigops: 80_000,
+            mempool_sequence: 1,
+            coinbase: Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: vec![TxOut {
+                    value: Amount::from_sat(50),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            },
+            coinbase_value: 50,
+            fees: 0,
+            weight: 800,
+            size: 200,
+            sigop_cost: 0,
+            transactions: Vec::new(),
+            witness_merkle_root: None,
+            witness_reserved_value: None,
+            witness_commitment: None,
+        }
+    }
+
+    fn empty_request() -> bitcoin_rs_rpc::context::BlockTemplateRequest {
+        bitcoin_rs_rpc::context::BlockTemplateRequest {
+            mode: bitcoin_rs_rpc::context::BlockTemplateMode::Template,
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+        }
+    }
+
+    #[test]
+    fn template_facts_follow_mutated_candidate_generation() {
+        use bitcoin_rs_rpc::context::MiningRule;
+
+        let first_prev = Hash256::from_le_bytes(&[0x11; 32]);
+        let first = super::MiningCoordinator::template_from_candidate(
+            Arc::new(sample_candidate(first_prev, false, true)),
+            &empty_request(),
+            Some(true),
+        );
+        assert_eq!(first.candidate.previous_block_hash, first_prev);
+        assert_eq!(
+            first
+                .rules
+                .iter()
+                .map(MiningRule::as_str)
+                .collect::<Vec<_>>(),
+            vec!["segwit"]
+        );
+
+        let mutated_prev = Hash256::from_le_bytes(&[0x22; 32]);
+        let mutated = super::MiningCoordinator::template_from_candidate(
+            Arc::new(sample_candidate(mutated_prev, true, false)),
+            &empty_request(),
+            Some(false),
+        );
+        assert_eq!(mutated.candidate.previous_block_hash, mutated_prev);
+        assert_ne!(mutated.candidate.template_id, first.candidate.template_id);
+        assert_eq!(
+            mutated
+                .rules
+                .iter()
+                .map(MiningRule::as_str)
+                .collect::<Vec<_>>(),
+            vec!["csv"]
+        );
+        assert_eq!(mutated.submit_old, Some(false));
+    }
+
+    #[test]
+    fn deployment_boundary_rules_follow_candidate_flags() {
+        use bitcoin_rs_rpc::context::MiningRule;
+
+        let prev = Hash256::from_le_bytes(&[0x33; 32]);
+        let request = empty_request();
+        let cases = [
+            (false, false, Vec::new()),
+            (true, false, vec!["csv"]),
+            (false, true, vec!["segwit"]),
+            (true, true, vec!["segwit", "csv"]),
+        ];
+        for (csv_active, segwit_active, expected) in cases {
+            let template = super::MiningCoordinator::template_from_candidate(
+                Arc::new(sample_candidate(prev, csv_active, segwit_active)),
+                &request,
+                None,
+            );
+            assert_eq!(template.candidate.csv_active, csv_active);
+            assert_eq!(template.candidate.segwit_active, segwit_active);
+            assert_eq!(
+                template
+                    .rules
+                    .iter()
+                    .map(MiningRule::as_str)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 }

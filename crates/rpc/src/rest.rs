@@ -231,20 +231,34 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
         return bad_request_owned(format!("Invalid hash: {hash_text}"));
     };
     let txid_text = txid.to_string();
-    // Verbose RPC projection reuses the canonical tx renderer, so REST and RPC
-    // agree on field names and units; hex/bin reuse its consensus hex.
-    let value = match getrawtransaction(ctx, &json!([txid_text, true])) {
-        Ok(value) => value,
-        Err(RpcError::NotFound(_)) => return not_found_owned(format!("{txid_text} not found")),
-        Err(error) => return json_response(Err(error)),
-    };
-    let hex = value.get("hex").and_then(Value::as_str).unwrap_or_default();
     match format {
-        "json" => text_response("application/json", sonic_bytes(&value)),
-        "hex" => text_response("text/plain", format!("{hex}\n").into_bytes()),
-        "bin" => {
-            let bytes: Vec<u8> = bitcoin::hex::FromHex::from_hex(hex).unwrap_or_default();
-            binary_response("application/octet-stream", &bytes)
+        "json" => {
+            // Verbose RPC projection reuses the canonical tx renderer, so REST
+            // and RPC agree on field names and units.
+            match getrawtransaction(ctx, &json!([txid_text, true])) {
+                Ok(value) => text_response("application/json", sonic_bytes(&value)),
+                Err(RpcError::NotFound(_)) => not_found_owned(format!("{txid_text} not found")),
+                Err(error) => json_response(Err(error)),
+            }
+        }
+        "hex" | "bin" => {
+            // Non-verbose path returns consensus hex directly, avoiding the
+            // full verbose JSON rendering (script disassembly, txid/wtxid
+            // recomputation) and the hex-decode round-trip back to bytes.
+            match getrawtransaction(ctx, &json!([txid_text, false])) {
+                Ok(value) => {
+                    let hex = value.as_str().unwrap_or_default();
+                    if format == "hex" {
+                        text_response("text/plain", format!("{hex}\n").into_bytes())
+                    } else {
+                        let bytes: Vec<u8> =
+                            bitcoin::hex::FromHex::from_hex(hex).unwrap_or_default();
+                        binary_response("application/octet-stream", &bytes)
+                    }
+                }
+                Err(RpcError::NotFound(_)) => not_found_owned(format!("{txid_text} not found")),
+                Err(error) => json_response(Err(error)),
+            }
         }
         _ => format_not_found(available_formats()),
     }
@@ -809,6 +823,7 @@ fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
             "deployments": {}
         })
     } else {
+        let hash_text = hash_text.strip_prefix('/').unwrap_or(hash_text);
         let Ok(hash) = Hash256::from_str(hash_text) else {
             return bad_request_owned(format!("Invalid hash: {hash_text}"));
         };

@@ -35,9 +35,13 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     let network = bitcoin_network(ctx.chain_network);
     let parsed = bitcoin_rs_wallet::Descriptor::parse(descriptor).map_err(map_wallet_error)?;
     let range = match params_array(params)?.get(1) {
-        Some(value) => parse_range_value(value)?,
-        None if parsed.is_ranged() => 0..=DEFAULT_RANGE_END,
-        None => 0..=0,
+        Some(value) if !value.is_null() => parse_range_value(value)?,
+        Some(_) | None if parsed.is_ranged() => {
+            return Err(RpcError::InvalidParameter(
+                "Range must be specified for a ranged descriptor".to_owned(),
+            ));
+        }
+        Some(_) | None => 0..=0,
     };
     let addresses = parsed
         .derive_addresses(network, range)
@@ -60,12 +64,42 @@ pub(crate) fn importdescriptors(ctx: &Arc<Context>, params: &Value) -> Result<Va
         return Err(RpcError::InvalidParams("requests must not be empty"));
     }
 
+    let mut published = wallet.write();
+    let mut prepared = published.clone();
     let mut results = Vec::with_capacity(requests.len());
-    let mut guard = wallet.write();
+    let mut changed = false;
     for request in requests {
-        results.push(import_one_descriptor(&mut guard, request));
+        let result = import_one_descriptor(&mut prepared, request);
+        if result.get("success").and_then(Value::as_bool) == Some(true) {
+            changed = true;
+        }
+        results.push(result);
+    }
+    if changed {
+        if let Err(error) = ctx.populate_wallet_utxos(&mut prepared) {
+            return Ok(fail_successful_import_rows(results, &error));
+        }
+        if let Err(error) = ctx.persist_wallet(&prepared) {
+            return Ok(fail_successful_import_rows(results, &error));
+        }
+        *published = prepared;
     }
     Ok(Value::from(results))
+}
+
+fn fail_successful_import_rows(results: Vec<Value>, error: &compact_str::CompactString) -> Value {
+    Value::from(
+        results
+            .into_iter()
+            .map(|row| {
+                if row.get("success").and_then(Value::as_bool) == Some(true) {
+                    descriptor_import_error(RpcError::CORE_MISC_ERROR, error.to_string())
+                } else {
+                    row
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(crate) fn scantxoutset(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -302,7 +336,7 @@ pub(crate) fn walletprocesspsbt(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let mut psbt = decode_psbt(raw)?;
     let _bip32derivs = optional_bool(params, 1, true)?;
     let keys = optional_process_keys(params)?;
-    let _finalize = match params_array(params)?.get(3) {
+    let finalize = match params_array(params)?.get(3) {
         Some(value) if !value.is_null() => value
             .as_bool()
             .ok_or(RpcError::InvalidType("finalize must be boolean"))?,
@@ -318,6 +352,9 @@ pub(crate) fn walletprocesspsbt(ctx: &Arc<Context>, params: &Value) -> Result<Va
     if !keys.is_empty() {
         psbt = bitcoin_rs_wallet::sign_psbt_with_caller_keys(&psbt, &keys)
             .map_err(|error| RpcError::Internal(format!("sign failed: {error}")))?;
+    }
+    if finalize {
+        let _ = bitcoin_rs_wallet::finalize_psbt(&mut psbt);
     }
 
     Ok(json!({
@@ -457,7 +494,7 @@ pub(crate) fn signrawtransactionwithkey(
     }
 
     let mut errors: Vec<Value> = Vec::new();
-    match bitcoin_rs_wallet::sign_psbt_with_caller_keys(&psbt, &keys) {
+    match bitcoin_rs_wallet::sign_psbt_with_explicit_prevouts(&psbt, &keys) {
         Ok(signed) => psbt = signed,
         Err(error) => {
             errors.push(json!({
@@ -537,7 +574,11 @@ fn apply_prevtxs_to_psbt(
                     .ok_or(RpcError::InvalidType("amount must be a number"))?;
                 Amount::from_btc(btc).map_err(|_| RpcError::InvalidParams("amount is invalid"))?
             }
-            _ => Amount::ZERO,
+            _ => {
+                return Err(RpcError::InvalidParameter(
+                    "amount is required for each prevtx".to_owned(),
+                ));
+            }
         };
         for (index, txin) in psbt.unsigned_tx.input.iter().enumerate() {
             if txin.previous_output.txid == txid && txin.previous_output.vout == vout {
@@ -551,31 +592,38 @@ fn apply_prevtxs_to_psbt(
     Ok(())
 }
 
+fn descriptor_import_error(code: i64, message: impl Into<String>) -> Value {
+    json!({
+        "success": false,
+        "error": {
+            "code": code,
+            "message": message.into(),
+        }
+    })
+}
+
 fn import_one_descriptor(watcher: &mut bitcoin_rs_wallet::Watcher, request: &Value) -> Value {
     let Some(descriptor) = request.get("desc").and_then(Value::as_str) else {
-        return json!({
-            "success": false,
-            "error": "Missing required parameter \"desc\"",
-            "code": RpcError::INVALID_PARAMS
-        });
+        return descriptor_import_error(
+            RpcError::CORE_INVALID_PARAMETER,
+            "Missing required parameter \"desc\"",
+        );
     };
     let timestamp = match request.get("timestamp") {
         None => {
-            return json!({
-                "success": false,
-                "error": "Missing required parameter \"timestamp\"",
-                "code": RpcError::INVALID_PARAMS
-            });
+            return descriptor_import_error(
+                RpcError::CORE_INVALID_PARAMETER,
+                "Missing required parameter \"timestamp\"",
+            );
         }
         Some(value) if value.as_str() == Some("now") => bitcoin_rs_wallet::DescriptorTimestamp::Now,
         Some(value) => match value.as_u64() {
             Some(time) => bitcoin_rs_wallet::DescriptorTimestamp::Time(time),
             None => {
-                return json!({
-                    "success": false,
-                    "error": "Expected number or \"now\" timestamp",
-                    "code": RpcError::CORE_INVALID_TYPE
-                });
+                return descriptor_import_error(
+                    RpcError::CORE_INVALID_TYPE,
+                    "Expected number or \"now\" timestamp",
+                );
             }
         },
     };
@@ -592,20 +640,15 @@ fn import_one_descriptor(watcher: &mut bitcoin_rs_wallet::Watcher, request: &Val
         .and_then(Value::as_str)
         .map(str::to_owned);
     if internal && label.is_some() {
-        return json!({
-            "success": false,
-            "error": "Internal addresses should not have a label",
-            "code": RpcError::INVALID_PARAMS
-        });
+        return descriptor_import_error(
+            RpcError::CORE_INVALID_PARAMETER,
+            "Internal addresses should not have a label",
+        );
     }
     let parsed = match bitcoin_rs_wallet::Descriptor::parse_all(descriptor) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return json!({
-                "success": false,
-                "error": error.to_string(),
-                "code": RpcError::CORE_INVALID_PARAMETER
-            });
+            return descriptor_import_error(RpcError::CORE_NOT_FOUND, error.to_string());
         }
     };
     let ranged = parsed.iter().any(bitcoin_rs_wallet::Descriptor::is_ranged);
@@ -613,11 +656,7 @@ fn import_one_descriptor(watcher: &mut bitcoin_rs_wallet::Watcher, request: &Val
         Some(value) => match parse_range_value(value) {
             Ok(range) => range,
             Err(error) => {
-                return json!({
-                    "success": false,
-                    "error": error.to_string(),
-                    "code": error.code()
-                });
+                return descriptor_import_error(error.code(), error.to_string());
             }
         },
         None if ranged => 0..=DEFAULT_RANGE_END,
@@ -632,11 +671,7 @@ fn import_one_descriptor(watcher: &mut bitcoin_rs_wallet::Watcher, request: &Val
         label,
     }) {
         Ok(_) => json!({ "success": true }),
-        Err(error) => json!({
-            "success": false,
-            "error": error.to_string(),
-            "code": RpcError::CORE_INVALID_PARAMETER
-        }),
+        Err(error) => descriptor_import_error(RpcError::CORE_NOT_FOUND, error.to_string()),
     }
 }
 
@@ -779,13 +814,14 @@ fn update_psbt_from_wallet(
                 let Ok(address) = descriptor.derive_address(network, child) else {
                     continue;
                 };
-                if watcher.utxos_for(&address).contains(&txin.previous_output) {
-                    if let Ok(script) = descriptor.script_pubkey_at(child) {
-                        input.witness_utxo = Some(TxOut {
-                            value: Amount::ZERO,
-                            script_pubkey: script,
-                        });
-                    }
+                if watcher.utxos_for(&address).contains(&txin.previous_output)
+                    && let Some(value) = watcher.utxo_value(&txin.previous_output)
+                    && let Ok(script_pubkey) = descriptor.script_pubkey_at(child)
+                {
+                    input.witness_utxo = Some(TxOut {
+                        value,
+                        script_pubkey,
+                    });
                 }
             }
         }
@@ -903,6 +939,7 @@ fn encode_base64(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use alloc::sync::Arc;
 
@@ -980,8 +1017,11 @@ mod tests {
 
     #[test]
     fn parse_range_rejects_end_above_core_limit() {
-        let error = parse_range_value(&json!([i32::MAX as u64, i32::MAX as u64 + 1]))
-            .expect_err("end above i32::MAX must fail");
+        let error = parse_range_value(&json!([
+            u64::from(i32::MAX.cast_unsigned()),
+            u64::from(i32::MAX.cast_unsigned()) + 1
+        ]))
+        .expect_err("end above i32::MAX must fail");
         assert!(matches!(
             error,
             RpcError::InvalidParams("range out of bounds")
@@ -1193,5 +1233,142 @@ mod tests {
         let err = importdescriptors(&ctx, &json!([[{"desc": "wpkh(02aa)", "timestamp": 0}]]))
             .expect_err("missing wallet");
         assert!(matches!(err, RpcError::Misc(_)));
+    }
+
+    struct RecordingStore {
+        path: std::path::PathBuf,
+        fail: bool,
+    }
+
+    impl crate::context::WalletPersistence for RecordingStore {
+        fn persist(
+            &self,
+            watcher: &bitcoin_rs_wallet::Watcher,
+        ) -> core::result::Result<(), compact_str::CompactString> {
+            if self.fail {
+                return Err(compact_str::CompactString::from("forced persist failure"));
+            }
+            let bytes = watcher
+                .encode_state()
+                .map_err(|error| compact_str::CompactString::from(error.to_string()))?;
+            std::fs::write(&self.path, bytes)
+                .map_err(|error| compact_str::CompactString::from(error.to_string()))
+        }
+    }
+
+    fn wpkh_desc(byte: u8) -> String {
+        let signer_key = bitcoin::PrivateKey {
+            compressed: true,
+            network: bitcoin::NetworkKind::Main,
+            inner: bitcoin::secp256k1::SecretKey::from_slice(&[byte; 32])
+                .unwrap_or_else(|err| panic!("secret: {err}")),
+        };
+        let public = bitcoin::PublicKey::from_private_key(
+            &bitcoin::secp256k1::Secp256k1::new(),
+            &signer_key,
+        );
+        format!("wpkh({public})")
+    }
+
+    #[test]
+    fn importdescriptors_scan_error_leaves_watcher_unchanged() {
+        crate::context::fail_next_wallet_scan();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("watch_only.json");
+        let ctx = Arc::new(
+            Context::new()
+                .with_wallet(Arc::new(RwLock::new(Watcher::new(Vec::new()))))
+                .with_wallet_persistence(Arc::new(RecordingStore {
+                    path: path.clone(),
+                    fail: false,
+                })),
+        );
+        let result = importdescriptors(
+            &ctx,
+            &json!([[{ "desc": wpkh_desc(11), "timestamp": "now" }]]),
+        )
+        .unwrap_or_else(|err| panic!("importdescriptors: {err}"));
+        let first = result
+            .as_array()
+            .and_then(|array| array.first())
+            .unwrap_or_else(|| panic!("missing result: {result:?}"));
+        assert_eq!(first.get("success").and_then(Value::as_bool), Some(false));
+        let wallet = ctx
+            .wallet
+            .as_ref()
+            .unwrap_or_else(|| panic!("wallet missing"));
+        assert!(wallet.read().imports.is_empty());
+        assert!(!path.exists(), "scan error must not persist");
+    }
+
+    #[test]
+    fn importdescriptors_persist_error_leaves_watcher_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("watch_only.json");
+        let ctx = Arc::new(
+            Context::new()
+                .with_wallet(Arc::new(RwLock::new(Watcher::new(Vec::new()))))
+                .with_wallet_persistence(Arc::new(RecordingStore { path, fail: true })),
+        );
+        let result = importdescriptors(
+            &ctx,
+            &json!([[{ "desc": wpkh_desc(12), "timestamp": "now" }]]),
+        )
+        .unwrap_or_else(|err| panic!("importdescriptors: {err}"));
+        let first = result
+            .as_array()
+            .and_then(|array| array.first())
+            .unwrap_or_else(|| panic!("missing result: {result:?}"));
+        assert_eq!(first.get("success").and_then(Value::as_bool), Some(false));
+        let wallet = ctx
+            .wallet
+            .as_ref()
+            .unwrap_or_else(|| panic!("wallet missing"));
+        assert!(wallet.read().imports.is_empty());
+    }
+
+    #[test]
+    fn importdescriptors_concurrent_imports_both_survive_and_reload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("watch_only.json");
+        let ctx = Arc::new(
+            Context::new()
+                .with_wallet(Arc::new(RwLock::new(Watcher::new(Vec::new()))))
+                .with_wallet_persistence(Arc::new(RecordingStore {
+                    path: path.clone(),
+                    fail: false,
+                })),
+        );
+        let left = wpkh_desc(13);
+        let right = wpkh_desc(14);
+        std::thread::scope(|scope| {
+            let ctx_left = Arc::clone(&ctx);
+            let left_desc = left.clone();
+            scope.spawn(move || {
+                importdescriptors(
+                    &ctx_left,
+                    &json!([[{ "desc": left_desc, "timestamp": "now" }]]),
+                )
+                .unwrap_or_else(|err| panic!("left import: {err}"));
+            });
+            let ctx_right = Arc::clone(&ctx);
+            let right_desc = right.clone();
+            scope.spawn(move || {
+                importdescriptors(
+                    &ctx_right,
+                    &json!([[{ "desc": right_desc, "timestamp": "now" }]]),
+                )
+                .unwrap_or_else(|err| panic!("right import: {err}"));
+            });
+        });
+        let wallet = ctx
+            .wallet
+            .as_ref()
+            .unwrap_or_else(|| panic!("wallet missing"));
+        let live = wallet.read().imports.len();
+        assert_eq!(live, 2, "serialized updates must retain both imports");
+        let bytes = std::fs::read(&path).expect("persisted");
+        let reloaded = Watcher::decode_state(&bytes).expect("decode");
+        assert_eq!(reloaded.imports.len(), 2);
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
@@ -9,15 +11,18 @@ use signal_hook::{
 
 /// Installs SIGINT/SIGTERM handling on a dedicated forwarding thread.
 ///
-/// The forwarding thread also trips the process-wide shutdown broadcast so
-/// waiters parked in [`crate::shutdown::wait_for_shutdown`] wake at signal
-/// receipt — even when the bounded channel into the event loop is already
-/// full and the `try_send` below would be dropped.
-pub fn install_shutdown_handler(shutdown_tx: Sender<()>) -> Result<JoinHandle<()>> {
+/// The forwarding thread trips the unified shutdown trigger so the node-owned
+/// flag is stored before the process-wide broadcast, then forwards into the
+/// event-loop channel. Waiters parked in [`crate::shutdown::wait_for_shutdown`]
+/// therefore wake at signal receipt even when that bounded channel is full.
+pub fn install_shutdown_handler(
+    shutdown: Arc<AtomicBool>,
+    shutdown_tx: Sender<()>,
+) -> Result<JoinHandle<()>> {
     let mut signals = Signals::new([SIGTERM, SIGINT])?;
     let handle = thread::spawn(move || {
         for _signal in signals.forever() {
-            crate::shutdown::request_shutdown();
+            crate::shutdown::trigger_shutdown(&shutdown);
             if shutdown_tx.try_send(()).is_err() {
                 break;
             }

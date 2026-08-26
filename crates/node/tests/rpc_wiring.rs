@@ -3,16 +3,20 @@
 //! typed no-custody errors, and fourteen REST registrations.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use bitcoin::ScriptBuf;
+use bitcoin::blockdata::constants::genesis_block;
+use bitcoin_rs_node::run::RpcBlockUndoSource;
 use bitcoin_rs_node::{Config, MiningCoordinator, state::NodeState};
 use bitcoin_rs_p2p::NetworkControls;
+use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::RpcError;
 use bitcoin_rs_rpc::RpcLifecycle;
 use bitcoin_rs_rpc::context::{
-    ChainHandles, Context, ContextHandles, IndexHandles, NetworkHandles,
+    BlockUndoSource, ChainHandles, Context, ContextHandles, IndexHandles, NetworkHandles,
 };
 use bitcoin_rs_rpc::rest::REGISTRATIONS;
 use bitcoin_rs_wallet::Watcher;
@@ -166,7 +170,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
 
     let chain_tip = state.chain_tip();
     let applied_tip = state.applied_tip();
-    let chain_tx_count = state.chain_tx_count_handle();
     let mempool = state.mempool();
     let blocks = state.blocks();
     let transactions = state.transactions();
@@ -185,7 +188,7 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         state.config().network.default_p2p_port(),
     ));
     let wallet = Arc::new(RwLock::new(Watcher::new(Vec::new())));
-    let lifecycle = Arc::new(RpcLifecycle::new(state.shutdown()));
+    let lifecycle = Arc::new(RpcLifecycle::new(state.shutdown(), Instant::now()));
     let mining = Arc::new(MiningCoordinator::new(
         state.config().network,
         Arc::clone(&applied_tip),
@@ -200,17 +203,20 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     };
 
     let mining_control: Arc<dyn bitcoin_rs_rpc::context::MiningControl> = mining;
+    let block_undo_source: Arc<dyn BlockUndoSource> =
+        Arc::new(RpcBlockUndoSource::new(&state.apply_handles()));
     let ctx = Context::production(ContextHandles {
         chain: ChainHandles {
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
-            chain_tx_count: Arc::clone(&chain_tx_count),
+            chain_tx_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             blocks: Arc::clone(&blocks),
             transactions: Arc::clone(&transactions),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
             filter_index: Arc::clone(&filter_index),
             block_tree: Arc::clone(&block_tree),
+            block_undo_source: Arc::clone(&block_undo_source),
             network: state.config().network,
         },
         mempool: Arc::clone(&mempool),
@@ -232,7 +238,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
 
     assert!(Arc::ptr_eq(&ctx.chain_tip, &chain_tip));
     assert!(Arc::ptr_eq(&ctx.applied_tip, &applied_tip));
-    assert!(Arc::ptr_eq(ctx.chain_tx_count_handle(), &chain_tx_count));
     assert!(Arc::ptr_eq(&ctx.mempool, &mempool));
     assert!(Arc::ptr_eq(&ctx.blocks, &blocks));
     assert!(Arc::ptr_eq(&ctx.transactions, &transactions));
@@ -273,6 +278,21 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         ctx.tx_index.is_some(),
         "txindex query adapter must be wired"
     );
+    let installed_undo = ctx
+        .block_undo_source
+        .as_ref()
+        .unwrap_or_else(|| panic!("block undo source missing"));
+    let missing = installed_undo.block_undo(99, Hash256::from_le_bytes(&[0x11; 32]))?;
+    assert!(
+        missing.is_none(),
+        "unknown undo records must be absence, not an error"
+    );
+    let genesis = genesis_block(bitcoin::Network::Bitcoin);
+    let tip = state.apply_block(&genesis)?;
+    let decoded = installed_undo
+        .block_undo(tip.height, tip.hash)?
+        .unwrap_or_else(|| panic!("production undo adapter must decode applied genesis undo"));
+    assert!(decoded.is_empty(), "genesis undo is an empty decoded batch");
     assert_eq!(ctx.chain_network, state.config().network);
     assert_eq!(
         ctx.debug_log_path,

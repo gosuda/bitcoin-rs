@@ -29,6 +29,9 @@ impl TestSigner {
 
     /// Returns the signer's key in the caller-supplied form used by
     /// transient signing calls.
+    // Usage varies per test binary sharing this fixture; item-level allow
+    // is the only form that holds across all of them.
+    #[allow(dead_code)]
     pub(crate) fn caller_key(&self) -> bitcoin::PrivateKey {
         bitcoin::PrivateKey {
             compressed: true,
@@ -38,6 +41,8 @@ impl TestSigner {
     }
 
     /// Returns a watch-only BIP32 account xpub for the signer's key.
+    #[allow(dead_code)]
+    #[allow(clippy::expect_used)]
     pub(crate) fn bip32_xpub(&self) -> bitcoin::bip32::Xpub {
         bitcoin::bip32::Xpub {
             network: bitcoin::NetworkKind::Main,

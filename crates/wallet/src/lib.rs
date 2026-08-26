@@ -30,9 +30,11 @@ pub mod watcher;
 pub use coin_selection::{Candidate, SelectStrategy, Selection, Target, select_coins};
 pub use descriptor::{BIP32Derivation, Descriptor, DescriptorInfo, analyse};
 pub use fee_bump::{FeeBumpPlan, bump_fee, bump_psbt, bump_psbt_with_rate_sat_per_kvb};
-pub use finalize::{FinalizeError, finalize_signed};
+pub use finalize::{FinalizeError, finalize_psbt, finalize_signed};
 pub use psbt::{PrevUtxo, PsbtBuilder};
-pub use signer_iface::{ExternalSigner, SignerError, sign_psbt_with_caller_keys};
+pub use signer_iface::{
+    ExternalSigner, SignerError, sign_psbt_with_caller_keys, sign_psbt_with_explicit_prevouts,
+};
 pub use watcher::{DescriptorImport, DescriptorTimestamp, Watcher};
 
 use thiserror::Error;
@@ -78,4 +80,7 @@ pub enum WalletError {
     /// Finalization failed.
     #[error(transparent)]
     Finalize(#[from] FinalizeError),
+    /// Durable watch-only state could not be encoded or decoded.
+    #[error("wallet state error: {0}")]
+    State(String),
 }

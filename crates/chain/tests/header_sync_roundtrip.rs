@@ -179,8 +179,9 @@ fn next_work_required_is_exactly_what_validate_header_nbits_enforces()
         candidate_time,
         CompactTarget::from_consensus(0x207e_fffe),
     );
-    let err = validate_header_nbits(&tree, parent_id, &wrong, Network::Regtest)
-        .expect_err("bits other than next_work_required must be rejected");
+    let Err(err) = validate_header_nbits(&tree, parent_id, &wrong, Network::Regtest) else {
+        return Err("bits other than next_work_required must be rejected".into());
+    };
     assert!(
         matches!(err, ChainError::NbitsMismatch { expected, .. } if expected == bits.to_consensus())
     );

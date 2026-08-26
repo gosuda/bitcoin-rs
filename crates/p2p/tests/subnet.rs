@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used)]
 //! Subnet primitive coverage: parsing, normalization, expiry, and matching.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
