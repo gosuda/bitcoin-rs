@@ -186,6 +186,28 @@ fn compute_state_at_boundary(
         DeploymentState::Failed => DeploymentState::Failed,
     }
 }
+/// Builds the version field for a candidate block from already-resolved BIP9 states.
+///
+/// Bitcoin Core signals a deployment while it is `STARTED` or `LOCKED_IN`.
+/// Active, failed, and not-yet-started deployments leave their bits clear. Invalid
+/// deployment bit numbers are ignored rather than shifting past the version field.
+#[must_use]
+pub fn versionbits_block_version(
+    deployments: impl IntoIterator<Item = (u8, DeploymentState)>,
+) -> i32 {
+    let mut version = VERSIONBITS_TOP_BITS;
+    for (bit, state) in deployments {
+        if !matches!(state, DeploymentState::Started | DeploymentState::LockedIn) {
+            continue;
+        }
+        if let Some(mask) = 1_u32.checked_shl(u32::from(bit))
+            && mask & !VERSIONBITS_TOP_MASK != 0
+        {
+            version |= mask;
+        }
+    }
+    i32::from_ne_bytes(version.to_ne_bytes())
+}
 
 /// Checks that a block version signals an active BIP9 deployment when required.
 pub fn check_bip9(
@@ -216,7 +238,8 @@ pub fn check_bip9(
 #[cfg(test)]
 mod tests {
     use super::{
-        Deployment, DeploymentContext, DeploymentParams, DeploymentState, check_bip9, compute_state,
+        Deployment, DeploymentContext, DeploymentParams, DeploymentState, check_bip9,
+        compute_state, versionbits_block_version,
     };
     use std::collections::BTreeMap;
 
@@ -359,6 +382,20 @@ mod tests {
             assert_eq!(DeploymentState::from_cache_tag(tag), Some(state));
         }
         assert_eq!(DeploymentState::from_cache_tag(5), None);
+    }
+
+    #[test]
+    fn candidate_version_signals_only_started_and_locked_in_deployments() {
+        let version = versionbits_block_version([
+            (0, DeploymentState::Defined),
+            (1, DeploymentState::Started),
+            (2, DeploymentState::LockedIn),
+            (3, DeploymentState::Active),
+            (4, DeploymentState::Failed),
+            (31, DeploymentState::Started),
+        ]);
+
+        assert_eq!(u32::from_ne_bytes(version.to_ne_bytes()), 0x2000_0006);
     }
 
     #[test]

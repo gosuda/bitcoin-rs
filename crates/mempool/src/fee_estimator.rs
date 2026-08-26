@@ -55,6 +55,7 @@ impl FeeRate {
 }
 
 /// Per-bucket confirmation statistics.
+#[derive(Debug)]
 struct Bucket {
     /// Lower-bound fee rate for this bucket (sat/kvB).
     fee_rate_sat_per_kvb: u64,
@@ -90,6 +91,7 @@ impl Bucket {
 }
 
 /// Metadata for a pending (unconfirmed) transaction.
+#[derive(Debug)]
 struct PendingEntry {
     /// Index into `buckets`.
     bucket_index: usize,
@@ -110,6 +112,7 @@ struct PendingEntry {
 /// and [`FeeEstimator::block_connected`] for each connected block. Then use
 /// [`FeeEstimator::estimate`] to obtain a fee-rate estimate for a given
 /// confirmation target.
+#[derive(Debug)]
 pub struct FeeEstimator {
     buckets: Vec<Bucket>,
     /// Height whose decay has already been applied, so a repeated

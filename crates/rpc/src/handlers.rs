@@ -10,11 +10,8 @@ pub(crate) mod mempool;
 pub(crate) mod mining;
 pub(crate) mod network;
 pub(crate) mod tx;
-pub(crate) mod tx_render;
 pub(crate) mod util;
 pub(crate) mod wallet;
-
-const NO_PRIVATE_KEYS: &str = "wallet has no private keys; use external signer";
 
 /// JSON-RPC method dispatcher backed by shared node context.
 #[derive(Clone, Debug)]
@@ -36,7 +33,13 @@ impl Handler {
     }
 
     /// Dispatches one Bitcoin Core-compatible JSON-RPC method.
+    ///
+    /// Registered surface is exactly 65 methods with the `zmq` feature and 64
+    /// without it. Four encryption/wallet-sign names remain registered and
+    /// return typed no-custody errors; `signrawtransactionwithkey` uses
+    /// transient caller keys only.
     pub fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        const NO_PRIVATE_KEYS: &str = "wallet has no private keys; use external signer";
         match method {
             "getblockchaininfo" => chain::getblockchaininfo(&self.ctx, params),
             "getdifficulty" => chain::getdifficulty(&self.ctx, params),
@@ -64,7 +67,6 @@ impl Handler {
             "getmempoolinfo" => mempool::getmempoolinfo(&self.ctx, params),
             "getmempoolentry" => mempool::getmempoolentry(&self.ctx, params),
             "getrawmempool" => mempool::getrawmempool(&self.ctx, params),
-            "clearmempool" => mempool::clearmempool(&self.ctx, params),
             "getmempoolancestors" => mempool::getmempoolancestors(&self.ctx, params),
             "getmempooldescendants" => mempool::getmempooldescendants(&self.ctx, params),
             "estimatesmartfee" => util::estimatesmartfee(&self.ctx, params),
@@ -72,6 +74,7 @@ impl Handler {
             "getrpcinfo" => util::getrpcinfo(&self.ctx, params),
             "getmemoryinfo" => util::getmemoryinfo(&self.ctx, params),
             "estimaterawfee" => util::estimaterawfee(&self.ctx, params),
+            #[cfg(feature = "zmq")]
             "getzmqnotifications" => util::getzmqnotifications(&self.ctx, params),
             "validateaddress" => util::validateaddress(&self.ctx, params),
             "getnetworkinfo" => network::getnetworkinfo(&self.ctx, params),
@@ -98,18 +101,12 @@ impl Handler {
             "finalizepsbt" => wallet::finalizepsbt(&self.ctx, params),
             "combinepsbt" => wallet::combinepsbt(&self.ctx, params),
             "bumpfee" => wallet::bumpfee(&self.ctx, params),
-            "signrawtransactionwithkey"
-            | "signrawtransactionwithwallet"
-            | "dumpprivkey"
-            | "dumpwallet"
-            | "importprivkey"
-            | "importwallet"
-            | "importmulti"
-            | "importdescriptors"
-            | "sethdseed"
+            "signrawtransactionwithkey" => wallet::signrawtransactionwithkey(&self.ctx, params),
+            "signrawtransactionwithwallet"
             | "walletpassphrase"
             | "walletpassphrasechange"
             | "encryptwallet" => Err(RpcError::method_disabled(NO_PRIVATE_KEYS)),
+            "importdescriptors" => wallet::importdescriptors(&self.ctx, params),
             _ => Err(RpcError::MethodNotFound(method.to_owned())),
         }
     }

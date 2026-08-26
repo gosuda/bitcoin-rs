@@ -18,7 +18,21 @@ pub enum FilterIndexError {
         /// Actual stored byte count.
         actual: usize,
     },
+    /// The stored best-block row had the wrong byte length.
+    #[error("stored best indexed block has {actual} bytes, expected 32")]
+    InvalidBestBlockLength {
+        /// Actual stored byte count.
+        actual: usize,
+    },
 }
+
+/// Reserved key holding the hash of the most recently indexed block.
+///
+/// It lives in the `FilterHeaders` family, which is otherwise addressed only
+/// by 32-byte block-hash keys, so a 4-byte key cannot collide with a data row
+/// on any backend. Unlike the `Filters` family, it is never prefix-iterated,
+/// so the reserved row cannot disturb a scan.
+const BEST_INDEXED_BLOCK_KEY: &[u8] = b"best";
 
 /// Persistent BIP157/158 filter index over a backend-neutral key-value store.
 pub struct FilterIndex<S: KvStore> {
@@ -44,7 +58,12 @@ impl<S: KvStore> FilterIndex<S> {
         self.store
     }
 
-    /// Stores a block filter and its BIP157 chained filter header atomically.
+    /// Stores a block filter, its BIP157 chained filter header, and the
+    /// index's best-block pointer atomically.
+    ///
+    /// The best-block pointer names `block_hash`, so callers can tell an index
+    /// still catching up from one whose filters cover the chain tip; see
+    /// [`Self::best_indexed_block`].
     pub fn put_filter(
         &self,
         block_hash: Hash256,
@@ -56,6 +75,11 @@ impl<S: KvStore> FilterIndex<S> {
         let mut batch = self.store.new_batch();
         batch.put(ColumnFamily::Filters, &key, filter_bytes);
         batch.put(ColumnFamily::FilterHeaders, &key, header.as_byte_array());
+        batch.put(
+            ColumnFamily::FilterHeaders,
+            BEST_INDEXED_BLOCK_KEY,
+            block_hash.as_byte_array(),
+        );
         self.store.write(batch)?;
         tracing::trace!(%block_hash, filter_bytes = filter_bytes.len(), %header, "stored compact filter");
         Ok(header)
@@ -153,6 +177,33 @@ impl<S: KvStore> FilterIndex<S> {
         header.copy_from_slice(&bytes);
         Ok(Some(Hash256::from_le_bytes(&header)))
     }
+
+    /// Returns the hash of the most recently indexed block, if any.
+    ///
+    /// This is the index's own progress fact: it names the block whose filter
+    /// was written last, in the same atomic batch as that filter. Filter rows
+    /// are block-hash-addressed and deliberately survive disconnects, so after
+    /// a reorganization the pointer may still name a stale fork tip until the
+    /// new branch's filters are written. Callers detect catch-up by comparing
+    /// the returned hash against the authoritative chain tip: equal hashes
+    /// mean the index covers the tip, anything else means it is still
+    /// catching up. `None` means nothing has been indexed yet.
+    pub fn best_indexed_block(&self) -> Result<Option<Hash256>, FilterIndexError> {
+        let Some(bytes) = self
+            .store
+            .get(ColumnFamily::FilterHeaders, BEST_INDEXED_BLOCK_KEY)?
+        else {
+            return Ok(None);
+        };
+        if bytes.len() != 32 {
+            return Err(FilterIndexError::InvalidBestBlockLength {
+                actual: bytes.len(),
+            });
+        }
+        let mut hash = [0_u8; 32];
+        hash.copy_from_slice(&bytes);
+        Ok(Some(Hash256::from_le_bytes(&hash)))
+    }
 }
 
 /// Storage-agnostic compact-filter ingest interface.
@@ -189,6 +240,17 @@ pub trait FilterIndexLike: Send + Sync {
     ) -> Result<Vec<(bitcoin_rs_primitives::Hash256, Vec<u8>)>, FilterIndexError> {
         Ok(Vec::new())
     }
+
+    /// Returns the hash of the most recently indexed block, if the index tracks one.
+    ///
+    /// The default answers `None`, which covers both an index that has stored
+    /// nothing and one that does not track progress; callers must treat an
+    /// absent fact as not caught up, never as synced.
+    fn best_indexed_block(
+        &self,
+    ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError> {
+        Ok(None)
+    }
 }
 
 impl<S: KvStore + Send + Sync + 'static> FilterIndexLike for FilterIndex<S> {
@@ -219,6 +281,12 @@ impl<S: KvStore + Send + Sync + 'static> FilterIndexLike for FilterIndex<S> {
         &self,
     ) -> Result<Vec<(bitcoin_rs_primitives::Hash256, Vec<u8>)>, FilterIndexError> {
         Self::iter_filters(self)
+    }
+
+    fn best_indexed_block(
+        &self,
+    ) -> Result<Option<bitcoin_rs_primitives::Hash256>, FilterIndexError> {
+        Self::best_indexed_block(self)
     }
 }
 
@@ -359,6 +427,61 @@ mod iter_filters_tests {
             index.iter_filters()?,
             vec![(low_hash, b"low".to_vec()), (high_hash, b"high".to_vec()),]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn best_indexed_block_is_none_on_a_fresh_index() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, index) = filter_index()?;
+        assert_eq!(index.best_indexed_block()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn best_indexed_block_tracks_the_last_put_filter() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, index) = filter_index()?;
+        let prev_header = Hash256::from_le_bytes(&[0_u8; 32]);
+        let first = Hash256::from_le_bytes(&[1_u8; 32]);
+        let second = Hash256::from_le_bytes(&[2_u8; 32]);
+
+        index.put_filter(first, prev_header, b"first")?;
+        assert_eq!(index.best_indexed_block()?, Some(first));
+
+        index.put_filter(second, first, b"second")?;
+        assert_eq!(index.best_indexed_block()?, Some(second));
+
+        // The reserved pointer must not disturb data rows in the same family.
+        assert!(index.has_filter(first)?);
+        assert!(index.has_filter(second)?);
+        assert_eq!(index.filter_count()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn best_indexed_block_survives_reopening_the_store() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = TestDir::new()?;
+        let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
+        {
+            let store = RocksDbStore::open(dir.path())?;
+            let index = FilterIndex::new(store);
+            index.put_filter(block_hash, Hash256::default(), b"filter")?;
+        }
+
+        let store = RocksDbStore::open(dir.path())?;
+        let index = FilterIndex::new(store);
+        assert_eq!(index.best_indexed_block()?, Some(block_hash));
+        Ok(())
+    }
+
+    #[test]
+    fn best_indexed_block_answers_through_the_trait_object()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, index) = filter_index()?;
+        let block_hash = Hash256::from_le_bytes(&[5_u8; 32]);
+        index.put_filter(block_hash, Hash256::default(), b"filter")?;
+
+        let like: Box<dyn FilterIndexLike> = Box::new(index);
+        assert_eq!(like.best_indexed_block()?, Some(block_hash));
         Ok(())
     }
 }

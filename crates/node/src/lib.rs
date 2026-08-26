@@ -36,6 +36,8 @@ pub mod import;
 pub mod logging;
 /// Metrics instrumentation and optional exposition.
 pub mod metrics;
+/// Node-owned mining candidate lifecycle coordinator.
+pub mod mining;
 /// Node-side active-chain view for server-side P2P responders.
 pub mod p2p_chain;
 
@@ -63,12 +65,13 @@ pub use bip9_context::BlockTreeContext;
 pub use bitcoin_rs_primitives::Network;
 pub use block_source::NodeBlockSource;
 pub use config::{Auth, Config};
+pub use mining::{GenerationKey, MiningCoordinator};
 pub use p2p_chain::NodeP2pChainQuery;
 pub use run::run;
 pub use state::{ApplyError, DisconnectError};
 pub use sync::BlockSync;
 pub use txindex_worker::TxIndexRuntime;
 pub use utxo_view::UtxoSetView;
-pub use zmq_publisher::{
-    NoOpZmqPublisher, SequenceEvent, SocketZmqPublisher, TracingZmqPublisher, ZmqPublisher,
-};
+#[cfg(feature = "zmq")]
+pub use zmq_publisher::SocketZmqPublisher;
+pub use zmq_publisher::{NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqPublisher};

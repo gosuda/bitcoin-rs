@@ -53,8 +53,11 @@ pub enum SubnetParseError {
 }
 
 impl IpSubnet {
-    /// Constructs a subnet after validating the prefix and zeroing host bits.
+    /// Constructs a subnet after canonicalizing an IPv4-mapped IPv6 base to
+    /// its IPv4 form (Core `CNetAddr` normalization), validating the prefix
+    /// against the canonical family, and zeroing host bits.
     pub fn new(base: IpAddr, prefix: u8) -> Result<Self, SubnetParseError> {
+        let base = base.to_canonical();
         match base {
             IpAddr::V4(ip) => {
                 validate_prefix(prefix, 32)?;
@@ -75,6 +78,7 @@ impl IpSubnet {
 
     /// Constructs a single-address subnet for the IP address family.
     pub fn from_ip(ip: IpAddr) -> Self {
+        let ip = ip.to_canonical();
         match ip {
             IpAddr::V4(ip) => Self {
                 base: IpAddr::V4(ip),
@@ -97,8 +101,10 @@ impl IpSubnet {
         self.prefix
     }
 
-    /// Returns whether `ip` is in this subnet.
+    /// Returns whether `ip` is in this subnet; IPv4-mapped IPv6 queries are
+    /// canonicalized first.
     pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
         match (self.base, ip) {
             (IpAddr::V4(base), IpAddr::V4(ip)) => mask_v4(ip, self.prefix) == base,
             (IpAddr::V6(base), IpAddr::V6(ip)) => mask_v6(ip, self.prefix) == base,
@@ -127,8 +133,7 @@ impl FromStr for IpSubnet {
             }
             None => (raw, None),
         };
-
-        let ip = parse_ip(ip_part)?;
+        let ip = parse_ip(ip_part)?.to_canonical();
         let prefix = match prefix_part {
             Some(prefix_part) => parse_prefix(prefix_part)?,
             None => match ip {

@@ -1,3 +1,11 @@
+use bitcoin::key::{Keypair, TapTweak};
+use bitcoin::psbt::Psbt;
+use bitcoin::secp256k1::{All, Message, Secp256k1};
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::Signature as TaprootSignature;
+use bitcoin::{
+    PrivateKey, PublicKey, ScriptBuf, TapSighashType, Transaction, TxOut, XOnlyPublicKey,
+};
 use thiserror::Error;
 
 /// External signer errors surfaced to wallet callers.
@@ -17,5 +25,148 @@ pub enum SignerError {
 /// consume an unsigned PSBT and return a signed PSBT for wallet finalization.
 pub trait ExternalSigner: Send + Sync {
     /// Signs or annotates `psbt`, returning a PSBT with signatures attached.
-    fn sign_psbt(&self, psbt: &bitcoin::psbt::Psbt) -> Result<bitcoin::psbt::Psbt, SignerError>;
+    fn sign_psbt(&self, psbt: &Psbt) -> Result<Psbt, SignerError>;
+}
+
+/// Signs `psbt` with caller-provided keys.
+///
+/// The keys exist only for this call: they are never stored in wallet state
+/// and are dropped when the call returns. Only inputs whose scripts reference
+/// a supplied key are signed; every other input passes through unchanged.
+pub fn sign_psbt_with_caller_keys(
+    psbt: &Psbt,
+    caller_keys: &[PrivateKey],
+) -> Result<Psbt, SignerError> {
+    let secp = Secp256k1::new();
+    let mut signed = psbt.clone();
+    let tx = psbt.unsigned_tx.clone();
+    let mut cache = SighashCache::new(&tx);
+    for index in 0..psbt.inputs.len() {
+        let utxo = psbt
+            .spend_utxo(index)
+            .map_err(|error| SignerError::Rejected(error.to_string()))?;
+        if utxo.script_pubkey.is_p2tr() {
+            sign_taproot_input(psbt, &mut signed, &secp, &mut cache, index, caller_keys)?;
+        } else {
+            sign_ecdsa_input(psbt, &mut signed, &secp, &mut cache, index, caller_keys)?;
+        }
+    }
+    Ok(signed)
+}
+
+fn sign_ecdsa_input(
+    psbt: &Psbt,
+    signed: &mut Psbt,
+    secp: &Secp256k1<All>,
+    cache: &mut SighashCache<&Transaction>,
+    index: usize,
+    caller_keys: &[PrivateKey],
+) -> Result<(), SignerError> {
+    let (message, sighash_type) = psbt
+        .sighash_ecdsa(index, cache)
+        .map_err(|error| SignerError::Rejected(error.to_string()))?;
+    let script = signing_script(psbt, index)?;
+    for key in caller_keys {
+        let public = PublicKey::from_private_key(secp, key);
+        if !script_mentions_key(&public, script) {
+            continue;
+        }
+        let signature = secp.sign_ecdsa(&message, &key.inner);
+        signed.inputs[index].partial_sigs.insert(
+            public,
+            bitcoin::ecdsa::Signature {
+                signature,
+                sighash_type,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn sign_taproot_input(
+    psbt: &Psbt,
+    signed: &mut Psbt,
+    secp: &Secp256k1<All>,
+    cache: &mut SighashCache<&Transaction>,
+    index: usize,
+    caller_keys: &[PrivateKey],
+) -> Result<(), SignerError> {
+    let output_script = psbt
+        .spend_utxo(index)
+        .map_err(|error| SignerError::Rejected(error.to_string()))?
+        .script_pubkey
+        .clone();
+    for key in caller_keys {
+        let keypair = Keypair::from_secret_key(secp, &key.inner);
+        let (untweaked, _parity) = XOnlyPublicKey::from_keypair(&keypair);
+        let (output_key, _output_parity) = untweaked.tap_tweak(secp, None);
+        if ScriptBuf::new_p2tr_tweaked(output_key) != output_script {
+            continue;
+        }
+        let prevouts = all_prevouts(psbt)?;
+        let sighash = cache
+            .taproot_key_spend_signature_hash(
+                index,
+                &Prevouts::All(&prevouts),
+                TapSighashType::Default,
+            )
+            .map_err(|error| SignerError::Rejected(error.to_string()))?;
+        let message = Message::from(sighash);
+        let tweaked = keypair.tap_tweak(secp, None).to_keypair();
+        let signature = secp.sign_schnorr_no_aux_rand(&message, &tweaked);
+        signed.inputs[index].tap_key_sig = Some(TaprootSignature {
+            signature,
+            sighash_type: TapSighashType::Default,
+        });
+    }
+    Ok(())
+}
+
+/// Returns the script that carries the input's public keys: the witness
+/// script, the redeem script, or the spent script pubkey.
+fn signing_script(psbt: &Psbt, index: usize) -> Result<&bitcoin::Script, SignerError> {
+    let input = psbt
+        .inputs
+        .get(index)
+        .ok_or_else(|| SignerError::Rejected("psbt input missing".to_owned()))?;
+    if let Some(script) = &input.witness_script {
+        return Ok(script);
+    }
+    if let Some(script) = &input.redeem_script {
+        return Ok(script);
+    }
+    Ok(&psbt
+        .spend_utxo(index)
+        .map_err(|error| SignerError::Rejected(error.to_string()))?
+        .script_pubkey)
+}
+
+/// Returns whether `script` pays to or embeds `public`.
+///
+/// Miniscript witness scripts carry raw public keys, while P2PKH, P2WPKH,
+/// and P2SH-wrapped P2WPKH scripts carry its hash160 instead.
+fn script_mentions_key(public: &PublicKey, script: &bitcoin::Script) -> bool {
+    let serialized = public.to_bytes();
+    if script
+        .as_bytes()
+        .windows(serialized.len())
+        .any(|window| window == serialized.as_slice())
+    {
+        return true;
+    }
+    if ScriptBuf::new_p2pkh(&public.pubkey_hash()).as_script() == script {
+        return true;
+    }
+    public
+        .wpubkey_hash()
+        .is_ok_and(|hash| ScriptBuf::new_p2wpkh(&hash).as_script() == script)
+}
+
+fn all_prevouts(psbt: &Psbt) -> Result<Vec<&TxOut>, SignerError> {
+    (0..psbt.inputs.len())
+        .map(|index| {
+            psbt.spend_utxo(index)
+                .map_err(|error| SignerError::Rejected(error.to_string()))
+        })
+        .collect()
 }

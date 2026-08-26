@@ -1757,11 +1757,11 @@ fn prove_window(
                 Some(parent_id),
                 height,
             );
-            let cutoff = if softfork.csv_active {
-                tree.median_time_past_at(parent_id, 11).unwrap_or(0)
-            } else {
-                block.header.time
-            };
+            let cutoff = crate::bip9_context::locktime_cutoff(
+                softfork.csv_active,
+                tree.median_time_past_at(parent_id, 11).unwrap_or(0),
+                block.header.time,
+            );
             // The next block's context needs this one in the tree. Header-first
             // sync put it there; without it there is no window.
             let Some(node_id) = tree.lookup(hash) else {
@@ -2109,28 +2109,73 @@ fn apply_block_inner(
     apply_block_admitted(handles, block, provided_serialized, None, &transition)
 }
 
-/// The apply itself, with the admission permit and the transition lock held.
+/// Whether validation includes proof-of-work self-consistency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValidationPurpose {
+    /// Ordinary connect path: every consensus gate, including `PoW`.
+    Apply,
+    /// BIP22 proposal: identical gates without `PoW` self-consistency.
+    Proposal,
+}
+
+/// Read-only preparation shared by dry validation and the mutating apply path.
 ///
-/// Callers MUST hold both. `handles.chain_transition` is what serializes this
-/// against another connect or a disconnect; the admission permit only keeps a
-/// checkpoint close from cutting across it.
+/// Constructed only after every consensus gate below the first write succeeds.
+/// Holding one does not imply any durable or in-memory chain mutation.
+struct ValidatedBlock<'a> {
+    prior: Option<Arc<TipSnapshot>>,
+    height: u32,
+    block_hash: bitcoin_rs_primitives::Hash256,
+    scratch: ApplyScratch,
+    changes: BorrowedBlockChanges<'a>,
+    undo: bitcoin_rs_utxo::UndoBatch,
+    filter_bytes: Option<Vec<u8>>,
+    wants_rawblock: bool,
+    needs_g14_sample: bool,
+    pow_self_dur: core::time::Duration,
+    pow_limit_dur: core::time::Duration,
+    block_rules_dur: core::time::Duration,
+    bip30_bip34_dur: core::time::Duration,
+    script_verify_dur: core::time::Duration,
+    coinbase_maturity_dur: core::time::Duration,
+    bip68_dur: core::time::Duration,
+}
+
+/// Dry-runs the same consensus validation [`apply_block`] performs.
 ///
-/// Split from [`apply_block_inner`] so a window can take both once across its
-/// preparation and all of its ordered commits. Re-entering per block would be
-/// two read guards on the same lock, which deadlocks against a shutdown waiting
-/// on the write side, and would leave gaps in which another applier could move
-/// the chain out from under prepared state.
-#[allow(clippy::too_many_lines)]
-fn apply_block_admitted(
+/// Returns only after every consensus gate that precedes the first write has
+/// succeeded. Never persists undo/body bytes, never commits the UTXO set, and
+/// never publishes tips, mempool eviction, indexes, or notifications.
+///
+/// BIP22 proposal mode omits proof-of-work self-consistency while keeping every
+/// other contextual and transactional check identical to the apply path.
+pub fn validate_block(
     handles: &ApplyHandles,
     block: &bitcoin::Block,
+) -> core::result::Result<(), ApplyError> {
+    let transition = handles.begin_chain_transition()?;
+    validate_block_admitted(
+        handles,
+        block,
+        None,
+        None,
+        ValidationPurpose::Proposal,
+        &transition,
+    )
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_block_admitted<'a>(
+    handles: &ApplyHandles,
+    block: &'a bitcoin::Block,
     provided_serialized: Option<bytes::Bytes>,
     proven: Option<ProvenApply>,
+    purpose: ValidationPurpose,
     _transition: &ChainTransition<'_>,
-) -> core::result::Result<TipSnapshot, ApplyError> {
+) -> core::result::Result<ValidatedBlock<'a>, ApplyError> {
     use bitcoin::hashes::Hash as _;
 
-    let total_started = quanta::Instant::now();
     let block_hash =
         bitcoin_rs_primitives::Hash256::from_le_bytes(block.block_hash().as_byte_array());
     let prev_hash =
@@ -2142,15 +2187,24 @@ fn apply_block_admitted(
     // any structural checks. Contextual difficulty-adjustment validation
     // (verifying the declared target matches the network's expected
     // difficulty at this height) requires `BlockTree` state — deferred.
+    // BIP22 proposal validation omits this gate while keeping every other check.
     let pow_self_started = quanta::Instant::now();
-    let declared_target = block.header.target();
-    let pow_self_result = block.header.validate_pow(declared_target);
-    let pow_self_dur = pow_self_started.elapsed();
-    metrics::histogram!("node.apply_block.pow_self_consistency_seconds")
-        .record(pow_self_dur.as_secs_f64());
-    if pow_self_result.is_err() {
-        return Err(ApplyError::ProofOfWork { hash: block_hash });
-    }
+    let pow_self_dur = if purpose == ValidationPurpose::Apply {
+        let declared_target = block.header.target();
+        let pow_self_result = block.header.validate_pow(declared_target);
+        let pow_self_dur = pow_self_started.elapsed();
+        metrics::histogram!("node.apply_block.pow_self_consistency_seconds")
+            .record(pow_self_dur.as_secs_f64());
+        if pow_self_result.is_err() {
+            return Err(ApplyError::ProofOfWork { hash: block_hash });
+        }
+        pow_self_dur
+    } else {
+        let pow_self_dur = pow_self_started.elapsed();
+        metrics::histogram!("node.apply_block.pow_self_consistency_seconds")
+            .record(pow_self_dur.as_secs_f64());
+        pow_self_dur
+    };
 
     let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
         let tree = handles.block_tree.read();
@@ -2169,11 +2223,11 @@ fn apply_block_admitted(
             crate::bip9_context::contextual_softfork_state(&tree, handles.network, None, height),
         )
     };
-    let locktime_cutoff = if softfork_state.csv_active {
-        prev_median_time_past
-    } else {
-        block.header.time
-    };
+    let locktime_cutoff = crate::bip9_context::locktime_cutoff(
+        softfork_state.csv_active,
+        prev_median_time_past,
+        block.header.time,
+    );
     let verify_flags = compute_verify_flags(handles.network, height, block_hash, softfork_state);
     let validation_context = BlockValidationContext {
         hash: block_hash,
@@ -2197,7 +2251,7 @@ fn apply_block_admitted(
         }
         Some(ProvenApply::AssumeValidSkipped(prepared)) => (prepared, false),
         Some(ProvenApply::Proven(_)) | None => (
-            prepare_apply(block, provided_serialized.clone(), handles.utxo.as_ref())?,
+            prepare_apply(block, provided_serialized, handles.utxo.as_ref())?,
             false,
         ),
     };
@@ -2367,6 +2421,61 @@ fn apply_block_admitted(
         )?;
     }
 
+    Ok(ValidatedBlock {
+        prior,
+        height,
+        block_hash,
+        scratch,
+        changes,
+        undo,
+        filter_bytes,
+        wants_rawblock,
+        needs_g14_sample,
+        pow_self_dur,
+        pow_limit_dur,
+        block_rules_dur,
+        bip30_bip34_dur,
+        script_verify_dur,
+        coinbase_maturity_dur,
+        bip68_dur,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn apply_block_admitted(
+    handles: &ApplyHandles,
+    block: &bitcoin::Block,
+    provided_serialized: Option<bytes::Bytes>,
+    proven: Option<ProvenApply>,
+    transition: &ChainTransition<'_>,
+) -> core::result::Result<TipSnapshot, ApplyError> {
+    let total_started = quanta::Instant::now();
+    let ValidatedBlock {
+        prior,
+        height,
+        block_hash,
+        scratch,
+        changes,
+        undo,
+        filter_bytes,
+        wants_rawblock,
+        needs_g14_sample,
+        pow_self_dur,
+        pow_limit_dur,
+        block_rules_dur,
+        bip30_bip34_dur,
+        script_verify_dur,
+        coinbase_maturity_dur,
+        bip68_dur,
+    } = validate_block_admitted(
+        handles,
+        block,
+        provided_serialized.clone(),
+        proven,
+        ValidationPurpose::Apply,
+        transition,
+    )?;
+
     // Persist undo before the block body, the index, and the UTXO commit. All
     // three are derived state for a block that is about to apply; if the undo
     // record cannot be written the block must not apply at all, and leaving
@@ -2493,10 +2602,12 @@ fn apply_block_admitted(
     {
         let mut mempool = handles.mempool.write();
         if !mempool.is_empty() {
-            for txid in scratch.txids() {
-                let evicted_count = mempool.remove_by_txid(txid).len();
-                tracing::debug!(%txid, evicted_count, "apply_block: evicted transaction from mempool");
-            }
+            let block_txs: Vec<&Transaction> = block.txdata.iter().collect();
+            let removed = mempool.remove_for_block(&block_txs, scratch.txids(), height);
+            tracing::debug!(
+                removed = removed.len(),
+                "apply_block: removed confirmed/conflicted mempool entries for block"
+            );
         }
     }
     let mempool_evict_dur = mempool_evict_started.elapsed();
@@ -3873,6 +3984,46 @@ mod consensus_rule_tests {
         assert!(record.header.is_none());
         assert_eq!(record.tx_count, block.txdata.len());
         assert_eq!(record.time, block.header.time);
+    }
+
+    #[test]
+    fn validate_block_shares_apply_checks_without_persistence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let handles = empty_apply_handles_for_network(Network::Regtest);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_tip = apply_block(&handles, &genesis)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let before_height = handles.applied_tip.load_full().map(|tip| tip.height);
+        let before_undo = handles
+            .undo_store
+            .load_undo(1, Hash256::from_le_bytes(&[0; 32]))?;
+
+        let child = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )?;
+        validate_block(&handles, &child)?;
+
+        let after_height = handles.applied_tip.load_full().map(|tip| tip.height);
+        assert_eq!(
+            before_height, after_height,
+            "dry validation must not move the tip"
+        );
+        assert_eq!(
+            handles.blocks.read().len(),
+            1,
+            "dry validation must not append a block record"
+        );
+        let child_hash = Hash256::from_le_bytes(child.block_hash().as_byte_array());
+        assert!(
+            handles.undo_store.load_undo(1, child_hash)?.is_none(),
+            "dry validation must not persist an undo record"
+        );
+        assert_eq!(before_undo, None);
+        // The mutating path still accepts the same block afterward.
+        let applied = apply_block(&handles, &child)?;
+        assert_eq!(applied.height, 1);
+        Ok(())
     }
 
     #[test]
@@ -9769,6 +9920,148 @@ mod consensus_rule_tests {
             handles.block_tree.read().node(applied.tip_id)?.status,
             NodeStatus::Invalid
         );
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_admission_is_serialized_against_chain_transition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let utxo = Arc::new(UtxoSet::new());
+        let funding_txid = bitcoin::Txid::from_byte_array([0x44; 32]);
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(Hash256::from_le_bytes(funding_txid.as_byte_array()), 0),
+            TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: op_true_script(),
+            },
+            false,
+            1,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9_u8; 32]))?;
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let spend = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: funding_txid,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(40_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
+                    [0x42; 20],
+                )),
+            }],
+        };
+        let spend_txid = spend.compute_txid();
+        let admission = crate::run::RpcTransactionAdmission::new(&handles);
+
+        let contender_handles = handles.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let contender = scope.spawn(move || {
+                let transition = contender_handles.begin_chain_transition()?;
+                let _ = started_tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                drop(transition);
+                Ok::<(), ApplyError>(())
+            });
+            started_rx.recv_timeout(std::time::Duration::from_secs(5))?;
+
+            let admission = scope.spawn(move || {
+                let result = bitcoin_rs_rpc::context::TransactionAdmission::submit_transaction(
+                    &admission, &spend, None,
+                );
+                let _ = done_tx.send(());
+                result.map_err(|error| error.to_string())
+            });
+            assert!(
+                matches!(
+                    done_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ),
+                "admission completed while the contender held the transition"
+            );
+
+            contender
+                .join()
+                .map_err(|_| std::io::Error::other("transition contender panicked"))??;
+            done_rx.recv_timeout(std::time::Duration::from_secs(5))?;
+            let admitted = admission
+                .join()
+                .map_err(|_| std::io::Error::other("admission worker panicked"))??;
+            assert_eq!(admitted, spend_txid);
+            Ok(())
+        })?;
+        assert!(handles.mempool.read().contains_txid(&spend_txid));
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_admission_after_block_apply_rejects_spent_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let utxo = Arc::new(UtxoSet::new());
+        let funding_txid = bitcoin::Txid::from_byte_array([0x45; 32]);
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            OutPoint::new(Hash256::from_le_bytes(funding_txid.as_byte_array()), 0),
+            TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: op_true_script(),
+            },
+            false,
+            1,
+        ));
+        utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9_u8; 32]))?;
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+        let spend = spending_transaction_to_script(
+            bitcoin::OutPoint {
+                txid: funding_txid,
+                vout: 0,
+            },
+            Sequence::MAX.to_consensus_u32(),
+            op_true_script(),
+        );
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1), spend.clone()],
+        )?;
+        let raw = bytes::Bytes::from(bitcoin::consensus::encode::serialize(&block));
+        let _applied = apply_block_with_serialized(&handles, &block, raw)?;
+
+        let admission_handles = bitcoin_rs_rpc::admission::AdmissionHandles {
+            mempool: Arc::clone(&handles.mempool),
+            utxo: Arc::clone(&handles.utxo),
+            applied_tip: Arc::clone(&handles.applied_tip),
+            block_tree: Arc::clone(&handles.block_tree),
+            transactions: Arc::clone(&handles.transactions),
+        };
+        let transition = handles.begin_chain_transition()?;
+        let rejected =
+            bitcoin_rs_rpc::admission::admit_transaction(&admission_handles, &spend, None);
+        drop(transition);
+        assert!(
+            matches!(
+                rejected,
+                Err(bitcoin_rs_rpc::context::TransactionAdmissionError::Reject(
+                    bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs
+                ))
+            ),
+            "expected MissingInputs after the block spent the funding output, got {rejected:?}"
+        );
+        assert!(handles.mempool.read().is_empty());
         Ok(())
     }
 

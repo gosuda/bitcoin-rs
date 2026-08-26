@@ -23,7 +23,7 @@ workspace = true
 # Note: `--workspace --features "..."` in a virtual workspace (no root [package])
 # does NOT forward CLI features to library crates; always use -p when features
 # must reach a specific crate.
-default = ["fjall", "kernel"]
+default = ["fjall", "kernel", "zmq"]
 rocksdb = [
     "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-coinstats/rocksdb",
@@ -81,6 +81,7 @@ mdbx = [
     "bitcoin-rs-storage/mdbx",
 ]
 kernel = ["bitcoin-rs-consensus/kernel"]
+zmq = ["dep:zmq", "bitcoin-rs-rpc/zmq"]
 checksig-census = [
     "kernel",
     "bitcoin-rs-consensus/checksig-census",
@@ -130,7 +131,7 @@ quanta.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
-zmq.workspace = true
+zmq = { workspace = true, optional = true }
 sha2.workspace = true
 cap-std.workspace = true
 cap-fs-ext.workspace = true
@@ -141,6 +142,7 @@ tempfile = "3"
 proptest.workspace = true
 anyhow.workspace = true
 criterion.workspace = true
+sonic-rs.workspace = true
 
 [[bench]]
 name = "sync_pipeline"

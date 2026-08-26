@@ -148,6 +148,10 @@ pub struct BlockSync {
     block_stager: Arc<Mutex<BlockStager>>,
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
+    /// Optional mining coordinator. Installed by `run` after construction so
+    /// `NodeState::open` stays free of RPC types; every successful peer-driven
+    /// block apply publishes a fresh generation to its long-poll waiters.
+    mining_control: Mutex<Option<Arc<dyn bitcoin_rs_rpc::context::MiningControl>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -296,9 +300,9 @@ impl BlockSync {
             block_stager: Arc::new(Mutex::new(BlockStager::new(default_sync_budget()))),
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
+            mining_control: Mutex::new(None),
         }
     }
-
     /// Replaces the download window and block stager with ones configured by
     /// `budget`. Intended for tests and benchmarks that need to exercise
     /// non-default capacity limits.
@@ -307,9 +311,30 @@ impl BlockSync {
         *self.block_stager.lock() = BlockStager::new(budget);
     }
 
+    /// Installs an optional mining coordinator so successful peer-driven block
+    /// applies can publish a fresh generation to its long-poll waiters.
+    pub fn with_mining_control(
+        &self,
+        mining_control: Option<Arc<dyn bitcoin_rs_rpc::context::MiningControl>>,
+    ) {
+        *self.mining_control.lock() = mining_control;
+    }
+
+    /// Publishes a fresh generation after an authoritative applied-tip /
+    /// mempool mutation completes, so long-poll waiters observe the change
+    /// without polling. A no-op until `with_mining_control` installs a
+    /// coordinator.
+    fn publish_generation_after_mutation(&self) {
+        if let Some(control) = self.mining_control.lock().as_deref() {
+            control.publish_generation();
+        }
+    }
+
     /// Returns the sole production peer-registration operation. It preserves
     /// the window-then-outbound lock order and purges old-address state before
-    /// the new sender becomes visible.
+    /// the new sender becomes visible. Re-publishing the lease that the P2P
+    /// listener already registered at connection start must not cancel that
+    /// same connection, so only a genuinely different live lease is cancelled.
     #[must_use]
     pub fn peer_registration_handle(
         &self,
@@ -321,10 +346,15 @@ impl BlockSync {
         Arc::new(move |peer_addr, lease, info| {
             let mut window = window.lock();
             let mut outbound = outbound.write();
-            let replaced = outbound.remove(&peer_addr).is_some_and(|prior| {
-                prior.cancel();
-                true
-            });
+            let mut replaced = false;
+            if let Some(prior) = outbound.remove(&peer_addr) {
+                if prior.same_connection(&lease) {
+                    outbound.insert(peer_addr, prior);
+                } else {
+                    prior.cancel();
+                    replaced = true;
+                }
+            }
             window.forget_peer(peer_addr);
             outbound.insert(peer_addr, lease);
             let mut peers = peers.write();
@@ -907,6 +937,9 @@ impl BlockSync {
                 }
             }
             self.advance_expected_apply_cache(&applied_hashes, failed_hash.is_some());
+            if applied > 0 {
+                self.publish_generation_after_mutation();
+            }
             metrics::histogram!("node.sync.apply_buffered_blocks_seconds")
                 .record(started.elapsed().as_secs_f64());
         }
@@ -1439,6 +1472,7 @@ impl BlockSync {
                 if !had_chain_tip {
                     self.handles.chain_tip.store(Some(Arc::new(tip)));
                 }
+                self.publish_generation_after_mutation();
             }
             Err(error) => {
                 tracing::warn!(%error, "block sync: failed to bootstrap genesis");

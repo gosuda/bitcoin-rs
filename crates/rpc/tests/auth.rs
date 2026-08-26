@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bitcoin_rs_rpc::auth::constant_time_eq;
 use bitcoin_rs_rpc::context::Context;
-use bitcoin_rs_rpc::{Auth, Handler, RpcServer};
+use bitcoin_rs_rpc::{Auth, Handler, RpcLifecycle, RpcServer};
 use sonic_rs::json;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
@@ -50,7 +50,7 @@ fn legacy_error_has_core_envelope_and_http_error() -> Result<(), Box<dyn std::er
     let payload = response.split_once("\r\n\r\n").ok_or("missing body")?.1;
     let value: sonic_rs::Value = sonic_rs::from_str(payload)?;
 
-    assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     assert!(value.get("jsonrpc").is_none());
     assert!(value.get("error").is_some());
     assert!(value.get("result").is_some_and(|v| v.is_null()));
@@ -228,6 +228,9 @@ fn spawn_with_rest(
         max_connections: 8,
         idle_timeout: Duration::from_secs(2),
         rest_enabled,
+        lifecycle: Arc::new(RpcLifecycle::new(Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ))),
     };
     thread::spawn(move || {
         let _ignored = server.serve();

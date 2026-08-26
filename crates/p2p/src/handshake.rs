@@ -1,11 +1,14 @@
 use std::io::{Cursor, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::Arc;
+use std::time::Instant;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::Address;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin_rs_primitives::USER_AGENT;
 
+use crate::connection::PeerLease;
 use crate::dispatch::dispatch_inbound;
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PROTOCOL_VERSION, PeerError, read_message};
@@ -67,36 +70,117 @@ pub fn handshake_cursors(
 /// `Version`, sends our `Version` followed by feature-negotiation messages and
 /// `Verack`, then dispatches inbound messages until the peer is ready.
 ///
+/// Reads tolerate transient `WouldBlock`/`TimedOut` errors so the caller can
+/// poll a short stream timeout: the handshake fails with a timeout error once
+/// `deadline` passes and with a lease-revoked protocol error as soon as the
+/// connection is cancelled, leaving connection teardown to the caller.
+///
 /// # Errors
 ///
-/// Returns [`PeerError`] if reading or writing the wire stream fails, or if the
-/// finite-state machine rejects any inbound message.
+/// Returns [`PeerError`] if reading or writing the wire stream fails, if the
+/// finite-state machine rejects any inbound message, if `deadline` passes
+/// before the peer reaches the ready state, or if the connection's lease is
+/// revoked mid-handshake.
 pub fn run_inbound_handshake<S: Read + Write>(
     peer: &mut Peer<S>,
     our_nonce: u64,
     our_start_height: i32,
+    lease: &PeerLease,
+    totals: Option<&Arc<crate::TrafficTotals>>,
+    deadline: Instant,
 ) -> Result<(), PeerError> {
-    let (remote_version, _) = read_message(&mut peer.stream, peer.magic)?;
+    let (remote_version, _) = read_handshake_message(peer, lease, totals, deadline)?;
     let responses = dispatch_inbound(peer, &remote_version)?;
 
     peer.state = PeerState::VersionExchange;
-    peer.send(&Message::Version(version_message(
-        our_nonce,
-        our_start_height,
-    )))?;
+    send_handshake_message(
+        peer,
+        &Message::Version(version_message(our_nonce, our_start_height)),
+        lease,
+        totals,
+    )?;
     for response in responses {
-        peer.send(&response)?;
+        send_handshake_message(peer, &response, lease, totals)?;
     }
 
     while peer.state != PeerState::Ready {
-        let (inbound, _) = read_message(&mut peer.stream, peer.magic)?;
+        let (inbound, _) = read_handshake_message(peer, lease, totals, deadline)?;
         let responses = dispatch_inbound(peer, &inbound)?;
         for response in responses {
-            peer.send(&response)?;
+            send_handshake_message(peer, &response, lease, totals)?;
         }
     }
 
     Ok(())
+}
+
+/// Sends one handshake message, accounting its wire bytes on the connection.
+///
+/// Handshake writes leave the connection thread directly, before the
+/// per-connection writer exists, so this phase's telemetry owner is the
+/// connection itself: bytes land on the lease's [`crate::PeerStats`] and,
+/// when the entry point was built from a `NetworkControls` instance, on the
+/// shared aggregate totals.
+pub(crate) fn send_handshake_message<S: Read + Write>(
+    peer: &mut Peer<S>,
+    message: &Message,
+    lease: &PeerLease,
+    totals: Option<&Arc<crate::TrafficTotals>>,
+) -> Result<(), PeerError> {
+    peer.send(message)?;
+    let wire_len =
+        u64::try_from(crate::wire::HEADER_LEN + crate::wire::encode_payload(message)?.len())
+            .unwrap_or(u64::MAX);
+    lease.stats().record_sent(wire_len);
+    lease.stats().record_msg_sent();
+    if let Some(totals) = totals {
+        totals.record_sent(wire_len);
+    }
+    Ok(())
+}
+
+/// Reads one handshake message, retrying transient poll timeouts.
+///
+/// Wire bytes of every message read are accounted on the connection's
+/// telemetry and, when present, the shared aggregate totals, mirroring the
+/// message loop's reader accounting so handshake traffic is observable.
+pub(crate) fn read_handshake_message<S: Read>(
+    peer: &mut Peer<S>,
+    lease: &PeerLease,
+    totals: Option<&Arc<crate::TrafficTotals>>,
+    deadline: Instant,
+) -> Result<(Message, bytes::Bytes), PeerError> {
+    loop {
+        if lease.is_cancelled() {
+            return Err(PeerError::Protocol("peer lease revoked during handshake"));
+        }
+        if Instant::now() >= deadline {
+            return Err(PeerError::Io(std::io::Error::from(
+                std::io::ErrorKind::TimedOut,
+            )));
+        }
+        match read_message(&mut peer.stream, peer.magic) {
+            Ok((message, raw)) => {
+                let wire_len =
+                    u64::try_from(raw.len() + crate::wire::HEADER_LEN).unwrap_or(u64::MAX);
+                lease.stats().record_recv(wire_len);
+                lease.stats().record_msg_recv();
+                if let Some(totals) = totals {
+                    totals.record_recv(wire_len);
+                }
+                return Ok((message, raw));
+            }
+            Err(PeerError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn exchange<A, B>(
@@ -173,7 +257,17 @@ mod tests {
         let stream = ScriptedStream::new(remote_outbound);
         let mut peer = Peer::new(stream, magic);
 
-        run_inbound_handshake(&mut peer, 1, 0)?;
+        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_inbound(lease_tx);
+
+        run_inbound_handshake(
+            &mut peer,
+            1,
+            0,
+            &lease,
+            None,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )?;
 
         assert_eq!(peer.state, PeerState::Ready, "inbound peer reaches Ready");
         assert!(

@@ -5,12 +5,10 @@
 pub mod coinbase;
 /// Transaction selection policy.
 pub mod policy;
-/// BIP22/23 block template serialization.
+/// Transport-neutral candidate assembly.
 pub mod template;
 
-pub use coinbase::{
-    CoinbaseTemplateConfig, MiningError, block_subsidy, build_coinbase_template,
-    witness_commitment_script,
+pub use coinbase::{MiningError, WITNESS_RESERVED_VALUE, witness_commitment_script};
+pub use template::{
+    Candidate, CandidateContext, CandidateTransaction, TemplateId, assemble_candidate,
 };
-pub use policy::MiningPolicy;
-pub use template::{BlockTemplate, BlockTemplateParams, TemplateTransaction};

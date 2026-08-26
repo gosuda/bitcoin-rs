@@ -28,7 +28,8 @@ pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 pub const MAX_LOCATOR_HASHES: usize = 101;
 /// Maximum address entries accepted in one `addr` or `addrv2` message.
 pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
-const HEADER_LEN: usize = 24;
+/// Fixed size of a Bitcoin v1 network message header.
+pub(crate) const HEADER_LEN: usize = 24;
 const COMMAND_LEN: usize = 12;
 
 /// Bitcoin P2P message payload type.
@@ -72,11 +73,14 @@ pub enum PeerError {
 }
 
 /// Write a Bitcoin v1 network message.
+///
+/// Returns the number of bytes written to the wire (header plus payload) so
+/// callers can account per-connection and aggregate traffic.
 pub fn write_message<W: Write>(
     writer: &mut W,
     magic: Magic,
     message: &Message,
-) -> Result<(), PeerError> {
+) -> Result<usize, PeerError> {
     let command = message.command();
     let payload = encode_payload(message)?;
     if payload.len() > MAX_MESSAGE_PAYLOAD {
@@ -90,7 +94,7 @@ pub fn write_message<W: Write>(
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&checksum(&payload))?;
     writer.write_all(&payload)?;
-    Ok(())
+    Ok(HEADER_LEN + payload.len())
 }
 
 /// Read and validate a Bitcoin v1 network message.

@@ -3,68 +3,56 @@ use alloc::vec::Vec;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use bitcoin::Amount;
 use sonic_rs::{JsonValueTrait, Value, json};
 
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{params_array, required_str, required_u64, serde_to_sonic};
+use crate::tx_render::btc_amount_json;
 
 static SERVER_START: OnceLock<Instant> = OnceLock::new();
 
-const BLOCK_VSIZE_TARGET: u64 = 1_000_000;
-const DEFAULT_MIN_FEERATE_SAT_PER_KVB: u64 = 1_000; // 1 sat/vB
-
-fn estimate_feerate_sat_per_kvb(ctx: &Context, conf_target: u64) -> u64 {
-    let mempool = ctx.mempool.read();
-    if mempool.entries.is_empty() {
-        return DEFAULT_MIN_FEERATE_SAT_PER_KVB;
-    }
-
-    let mut buckets: Vec<(u64, u64)> = Vec::new();
-    for (_id, entry) in &mempool.entries {
-        let Some((_, bucket_vsize)) = buckets
-            .iter_mut()
-            .find(|(bucket_rate, _)| *bucket_rate == entry.fee_rate)
-        else {
-            buckets.push((entry.fee_rate, u64::from(entry.vsize)));
-            continue;
-        };
-        *bucket_vsize = bucket_vsize.saturating_add(u64::from(entry.vsize));
-    }
-
-    buckets.sort_unstable_by_key(|bucket| core::cmp::Reverse(bucket.0));
-
-    let target_vsize = BLOCK_VSIZE_TARGET.saturating_mul(conf_target.max(1));
-    let mut cumulative: u64 = 0;
-    let mut threshold = DEFAULT_MIN_FEERATE_SAT_PER_KVB;
-    for (rate, vsize) in &buckets {
-        cumulative = cumulative.saturating_add(*vsize);
-        threshold = *rate;
-        if cumulative >= target_vsize {
-            break;
-        }
-    }
-
-    threshold.max(DEFAULT_MIN_FEERATE_SAT_PER_KVB)
+fn conf_target_blocks(conf_target: u64) -> u32 {
+    u32::try_from(conf_target).unwrap_or(u32::MAX)
 }
 
-fn sat_per_kvb_to_btc_per_kvb(sat: u64) -> f64 {
-    f64::from(u32::try_from(sat).unwrap_or(u32::MAX)) / 100_000_000.0_f64
-}
-
-pub(crate) fn uptime(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn uptime(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
-    let start = SERVER_START.get_or_init(Instant::now);
-    let secs = start.elapsed().as_secs();
+    let secs = if let Some(lifecycle) = ctx.rpc_lifecycle.as_ref() {
+        lifecycle.uptime_secs()
+    } else {
+        // Isolated unit tests construct `Context::new` without a lifecycle.
+        SERVER_START.get_or_init(Instant::now).elapsed().as_secs()
+    };
     Ok(json!(secs))
 }
 
-pub(crate) fn getrpcinfo(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn getrpcinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
-    // TODO(logpath): wire from Config.log_file once configured.
+    let Some(lifecycle) = ctx.rpc_lifecycle.as_ref() else {
+        return Err(RpcError::Internal(
+            "rpc lifecycle is not configured".to_owned(),
+        ));
+    };
+    let Some(path) = ctx.debug_log_path.as_ref() else {
+        return Err(RpcError::Misc(
+            "debug log path is not configured".to_owned(),
+        ));
+    };
+    let active_commands: Vec<Value> = lifecycle
+        .active_commands()
+        .into_iter()
+        .map(|(method, duration)| {
+            json!({
+                "method": method,
+                "duration": duration
+            })
+        })
+        .collect();
     Ok(json!({
-        "active_commands": Vec::<String>::new(),
-        "logpath": ""
+        "active_commands": active_commands,
+        "logpath": path.display().to_string()
     }))
 }
 
@@ -108,6 +96,7 @@ fn read_linux_rss_bytes() -> Option<u64> {
     None
 }
 
+#[cfg(feature = "zmq")]
 pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
     let notifications: Vec<_> = ctx
@@ -126,23 +115,42 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
 
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
-    let rate_sat_per_kvb = estimate_feerate_sat_per_kvb(ctx, conf_target);
-    let feerate = sat_per_kvb_to_btc_per_kvb(rate_sat_per_kvb);
-    Ok(json!({
-        "feerate": feerate,
-        "blocks": conf_target
-    }))
+    let pool = ctx.mempool.read();
+    match pool.estimate_fee_rate(conf_target_blocks(conf_target)) {
+        Some(rate) => {
+            let mut object = sonic_rs::Object::new();
+            let _ = object.insert(
+                "feerate",
+                btc_amount_json(Amount::from_sat(rate.as_sat_per_kvb())),
+            );
+            let _ = object.insert("blocks", json!(conf_target));
+            Ok(Value::from(object))
+        }
+        None => Ok(json!({
+            "errors": ["Insufficient data or no feerate found"],
+            "blocks": conf_target
+        })),
+    }
 }
 
 pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
-    let rate_sat_per_kvb = estimate_feerate_sat_per_kvb(ctx, conf_target);
-    let feerate = sat_per_kvb_to_btc_per_kvb(rate_sat_per_kvb);
-    Ok(json!({
-        "short": {"feerate": feerate, "decay": 0.962, "scale": 1},
-        "medium": {"feerate": feerate, "decay": 0.962, "scale": 1},
-        "long": {"feerate": feerate, "decay": 0.962, "scale": 1}
-    }))
+    let pool = ctx.mempool.read();
+    let Some(rate) = pool.estimate_fee_rate(conf_target_blocks(conf_target)) else {
+        return Ok(json!({}));
+    };
+    let feerate = btc_amount_json(Amount::from_sat(rate.as_sat_per_kvb()));
+    let mut short = sonic_rs::Object::new();
+    let _ = short.insert("feerate", feerate.clone());
+    let mut medium = sonic_rs::Object::new();
+    let _ = medium.insert("feerate", feerate.clone());
+    let mut long = sonic_rs::Object::new();
+    let _ = long.insert("feerate", feerate);
+    let mut object = sonic_rs::Object::new();
+    let _ = object.insert("short", Value::from(short));
+    let _ = object.insert("medium", Value::from(medium));
+    let _ = object.insert("long", Value::from(long));
+    Ok(Value::from(object))
 }
 
 pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -151,13 +159,7 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     use bitcoin::hex::DisplayHex as _;
 
     let address_str = required_str(params, 0, "address is required")?;
-    let network = match ctx.chain_network {
-        bitcoin_rs_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
-        bitcoin_rs_primitives::Network::Testnet3 => bitcoin::Network::Testnet,
-        bitcoin_rs_primitives::Network::Testnet4 => bitcoin::Network::Testnet4,
-        bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
-        bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
-    };
+    let network = crate::bitcoin_network(ctx.chain_network);
     let Ok(unchecked) = bitcoin::Address::from_str(address_str) else {
         return Ok(json!({ "isvalid": false }));
     };
@@ -203,6 +205,7 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 
     serde_to_sonic(&serde_json::Value::Object(response))
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,17 +213,38 @@ mod tests {
     use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
     #[test]
-    fn estimate_returns_default_when_mempool_empty() {
+    fn estimatesmartfee_reports_unavailable_when_estimator_has_no_history() {
         let ctx = Arc::new(Context::new());
         let result = estimatesmartfee(&ctx, &json!([3]))
             .unwrap_or_else(|err| panic!("estimatesmartfee failed: {err}"));
-        let Some(feerate) = result.get("feerate").and_then(JsonValueTrait::as_f64) else {
-            panic!("feerate missing: {result:?}");
-        };
-        // Default min: 1000 sat/kvB / 100_000_000 = 0.00001
         assert!(
-            feerate > 0.0,
-            "empty mempool should still return a min feerate: {result:?}"
+            result.get("feerate").is_none(),
+            "unavailable estimator must omit feerate: {result:?}"
+        );
+        let Some(errors) = result.get("errors").and_then(JsonContainerTrait::as_array) else {
+            panic!("errors missing: {result:?}");
+        };
+        assert_eq!(
+            errors.first().and_then(JsonValueTrait::as_str),
+            Some("Insufficient data or no feerate found")
+        );
+        assert_eq!(
+            result.get("blocks").and_then(JsonValueTrait::as_u64),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn estimaterawfee_returns_empty_object_when_estimator_unavailable() {
+        let ctx = Arc::new(Context::new());
+        let result = estimaterawfee(&ctx, &json!([2]))
+            .unwrap_or_else(|err| panic!("estimaterawfee failed: {err}"));
+        let Some(object) = result.as_object() else {
+            panic!("expected object, got {result:?}");
+        };
+        assert!(
+            object.is_empty(),
+            "unavailable raw estimate must be empty: {result:?}"
         );
     }
 
@@ -235,8 +259,29 @@ mod tests {
     }
 
     #[test]
-    fn getrpcinfo_returns_active_commands_array_and_logpath() {
+    fn getrpcinfo_errors_without_lifecycle_or_log_path() {
         let ctx = Arc::new(Context::new());
+        let err = match getrpcinfo(&ctx, &json!([])) {
+            Err(err) => err,
+            Ok(value) => panic!("getrpcinfo must require wiring: {value:?}"),
+        };
+        match err {
+            RpcError::Internal(_) | RpcError::Misc(_) => {}
+            other => panic!("expected Internal/Misc, got {other}"),
+        }
+    }
+
+    #[test]
+    fn getrpcinfo_returns_active_commands_and_logpath_when_wired() {
+        use std::path::PathBuf;
+        use std::sync::atomic::AtomicBool;
+
+        let lifecycle = Arc::new(crate::RpcLifecycle::new(Arc::new(AtomicBool::new(false))));
+        let ctx = Arc::new(
+            Context::new()
+                .with_rpc_lifecycle(Arc::clone(&lifecycle))
+                .with_debug_log_path(PathBuf::from("/tmp/debug.log")),
+        );
         let result =
             getrpcinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getrpcinfo failed: {err}"));
         let Some(active) = result.get("active_commands").and_then(|v| v.as_array()) else {
@@ -246,7 +291,7 @@ mod tests {
         let Some(logpath) = result.get("logpath").and_then(|v| v.as_str()) else {
             panic!("logpath missing: {result:?}");
         };
-        assert_eq!(logpath, "");
+        assert_eq!(logpath, "/tmp/debug.log");
     }
 
     #[test]
@@ -273,6 +318,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "zmq")]
     #[test]
     fn getzmqnotifications_returns_empty_array() {
         use alloc::sync::Arc;
@@ -286,6 +332,7 @@ mod tests {
         assert!(arr.is_empty());
     }
 
+    #[cfg(feature = "zmq")]
     #[test]
     fn getzmqnotifications_returns_active_metadata() {
         use alloc::sync::Arc;

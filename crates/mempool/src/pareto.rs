@@ -4,7 +4,8 @@ use tinyvec::TinyVec;
 
 use crate::{EntryId, MempoolEntry};
 
-/// Priority index ordered by fee rate, ancestor fee rate, then age.
+/// Priority index ordered by signed modified fee rate, modified ancestor fee
+/// rate, then age.
 ///
 /// Ordering lives in [`ParetoKey`]'s [`Ord`], and the set is kept in that order
 /// rather than re-sorted. Insertion and removal are both `O(log n)`.
@@ -31,13 +32,19 @@ pub struct ParetoFront {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ParetoKey {
     id: EntryId,
-    fee_rate: u64,
-    ancestor_fee_rate: u64,
+    modified_fee_rate: i128,
+    modified_ancestor_fee_rate: i128,
     time: u64,
 }
 
 impl Ord for ParetoKey {
-    /// Highest fee rate first, then highest ancestor fee rate, then oldest.
+    /// Highest modified fee rate first, then highest modified ancestor fee
+    /// rate, then oldest.
+    ///
+    /// The rates are the actual fee rate plus the signed mining-only overlay
+    /// ([`MempoolEntry::modified_fee_rate`]), so `prioritisetransaction`
+    /// moves entries without touching their actual fees. The rates are signed
+    /// because a negative overlay can push a modified fee below zero.
     ///
     /// The final tiebreak on `id` is what makes this a *total* order, and that
     /// is load-bearing rather than cosmetic: the ordered set stores keys, so two
@@ -46,9 +53,13 @@ impl Ord for ParetoKey {
     /// unique, so no two distinct entries can compare equal.
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         other
-            .fee_rate
-            .cmp(&self.fee_rate)
-            .then_with(|| other.ancestor_fee_rate.cmp(&self.ancestor_fee_rate))
+            .modified_fee_rate
+            .cmp(&self.modified_fee_rate)
+            .then_with(|| {
+                other
+                    .modified_ancestor_fee_rate
+                    .cmp(&self.modified_ancestor_fee_rate)
+            })
             .then_with(|| self.time.cmp(&other.time))
             .then_with(|| self.id.cmp(&other.id))
     }
@@ -64,8 +75,8 @@ impl ParetoKey {
     fn new(id: EntryId, entry: &MempoolEntry) -> Self {
         Self {
             id,
-            fee_rate: entry.fee_rate,
-            ancestor_fee_rate: entry.ancestor_fee_rate(),
+            modified_fee_rate: entry.modified_fee_rate(),
+            modified_ancestor_fee_rate: entry.modified_ancestor_fee_rate(),
             time: entry.time,
         }
     }
@@ -189,9 +200,13 @@ impl SortedParetoFront {
 /// See [`SortedParetoFront`].
 fn legacy_compare_keys(left: &ParetoKey, right: &ParetoKey) -> core::cmp::Ordering {
     right
-        .fee_rate
-        .cmp(&left.fee_rate)
-        .then_with(|| right.ancestor_fee_rate.cmp(&left.ancestor_fee_rate))
+        .modified_fee_rate
+        .cmp(&left.modified_fee_rate)
+        .then_with(|| {
+            right
+                .modified_ancestor_fee_rate
+                .cmp(&left.modified_ancestor_fee_rate)
+        })
         .then_with(|| left.time.cmp(&right.time))
         .then_with(|| left.id.cmp(&right.id))
 }

@@ -1,20 +1,56 @@
-//! Small Bitcoin Core-compatible REST surface used by remote clients.
+//! Bitcoin Core-compatible REST surface used by remote clients.
+//!
+//! The fourteen route prefixes mirror Core's `StartREST` registration table.
+//! JSON projections come from [`crate::render`] and [`crate::tx_render`]; hex
+//! and binary payloads use consensus serialization. Applied-chain membership is
+//! always resolved through [`crate::context::Context`] ancestry facts — never
+//! from the header tip alone.
 
 use alloc::sync::Arc;
+use core::ops::Deref;
 use std::str::FromStr;
 
 use bitcoin::block::Header;
-use bitcoin::consensus::encode::serialize;
+use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex as _;
+use bitcoin::{Block, Network, Txid};
 use bitcoin_rs_primitives::Hash256;
-use sonic_rs::{Value, json};
+use sonic_rs::{JsonValueTrait as _, Value, json};
 
-use crate::context::Context;
+use crate::context::{BlockRecord, Context};
 use crate::error::RpcError;
+use crate::handlers::chain::getblockchaininfo;
+use crate::handlers::mempool::{getmempoolinfo, getrawmempool};
+use crate::handlers::tx::getrawtransaction;
+use crate::render::{BlockChainContext, BlockTxVerbosity};
+use crate::tx_render;
 
 const DEFAULT_HEADER_COUNT: u32 = 5;
 const MAX_HEADER_COUNT: u32 = 2_000;
+/// Core's `MAX_GETUTXOS_OUTPOINTS`.
+const MAX_GETUTXOS_OUTPOINTS: usize = 15;
+
+/// The Bitcoin Core REST prefixes registered by `StartREST`.
+pub const REGISTRATIONS: [&str; 14] = [
+    "/rest/tx/",
+    "/rest/block/notxdetails/",
+    "/rest/block/",
+    "/rest/blockpart/",
+    "/rest/blockfilter/",
+    "/rest/blockfilterheaders/",
+    "/rest/chaininfo",
+    "/rest/mempool/",
+    "/rest/headers/",
+    "/rest/getutxos",
+    "/rest/deploymentinfo/",
+    "/rest/deploymentinfo",
+    "/rest/blockhashbyheight/",
+    "/rest/spenttxouts/",
+];
+
+const CACHE_IMMUTABLE: &str = "public, immutable, max-age=86400";
+const CACHE_NO_STORE: &str = "no-store";
 
 /// HTTP response produced by a REST route.
 #[derive(Debug, Eq, PartialEq)]
@@ -29,6 +65,38 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+/// REST-specific transport metadata layered over the shared HTTP response.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RestResponse {
+    response: Response,
+    /// Cache policy emitted as `Cache-Control`.
+    pub cache_control: &'static str,
+    /// Length of the corresponding GET body (also used for HEAD).
+    pub content_length: usize,
+}
+
+impl Deref for RestResponse {
+    type Target = Response;
+
+    fn deref(&self) -> &Self::Target {
+        &self.response
+    }
+}
+
+impl RestResponse {
+    fn new(mut response: Response, cache_control: &'static str, head: bool) -> Self {
+        let content_length = response.body.len();
+        if head {
+            response.body.clear();
+        }
+        Self {
+            response,
+            cache_control,
+            content_length,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct HeaderRecord {
     hash: Hash256,
@@ -36,31 +104,382 @@ struct HeaderRecord {
     header: Header,
 }
 
-/// Routes one REST request.
-///
-/// REST is deliberately distinct from unknown routes: a disabled gateway and
-/// a genuinely unknown path return 404, while malformed header parameters
-/// return 400. The enforcer uses 404 on `/rest/*` to diagnose a disabled
-/// gateway, so an unknown but well-formed block hash returns an empty 200
-/// response instead of a misleading 404. Header query parameters other than
-/// `count` are ignored, matching Core's cache-buster-friendly behavior.
+/// Routes one REST GET request.
 #[must_use]
-pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Response {
-    if !enabled {
-        return not_found();
-    }
-    if path == "/rest/chaininfo.json" {
-        return json_response(crate::handlers::chain::getblockchaininfo(ctx, &json!([])));
-    }
-    if let Some(rest) = path.strip_prefix("/rest/headers/") {
-        return route_headers(ctx, rest, query);
-    }
-    not_found()
+pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> RestResponse {
+    route_method(ctx, path, query, enabled, "GET")
 }
 
+/// Routes one REST request, preserving GET metadata for HEAD.
+#[must_use]
+pub fn route_method(
+    ctx: &Arc<Context>,
+    path: &str,
+    query: &str,
+    enabled: bool,
+    method: &str,
+) -> RestResponse {
+    let head = method == "HEAD";
+    if !enabled {
+        return RestResponse::new(not_found(), CACHE_NO_STORE, head);
+    }
+    if !matches!(method, "GET" | "HEAD") {
+        return RestResponse::new(method_not_allowed(), CACHE_NO_STORE, head);
+    }
+
+    let (response, cache) = dispatch(ctx, path, query);
+    let cache = if response.status == 200 {
+        cache
+    } else {
+        CACHE_NO_STORE
+    };
+    RestResponse::new(response, cache, head)
+}
+
+fn dispatch(ctx: &Arc<Context>, path: &str, query: &str) -> (Response, &'static str) {
+    if let Some(suffix) = path.strip_prefix("/rest/tx/") {
+        return (route_tx(ctx, suffix), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/block/notxdetails/") {
+        return (
+            route_block(ctx, suffix, false),
+            cache_for_block_format(suffix),
+        );
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/blockpart/") {
+        return (
+            route_block_part(ctx, suffix),
+            cache_for_block_format(suffix),
+        );
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/blockfilterheaders/") {
+        return (route_filter_headers(ctx, suffix, query), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/blockfilter/") {
+        return (route_block_filter(ctx, suffix), CACHE_IMMUTABLE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/block/") {
+        return (
+            route_block(ctx, suffix, true),
+            cache_for_block_format(suffix),
+        );
+    }
+    if path.starts_with("/rest/chaininfo") {
+        return (route_chaininfo(ctx, path), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/mempool/") {
+        return (route_mempool(ctx, suffix, query), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/headers/") {
+        return (route_headers(ctx, suffix, query), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/getutxos") {
+        return (route_getutxos(ctx, suffix), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/deploymentinfo") {
+        return (route_deploymentinfo(ctx, suffix), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/blockhashbyheight/") {
+        return (route_blockhash_by_height(ctx, suffix), CACHE_NO_STORE);
+    }
+    if let Some(suffix) = path.strip_prefix("/rest/spenttxouts/") {
+        return (route_spent_txouts(suffix), CACHE_IMMUTABLE);
+    }
+    (not_found(), CACHE_NO_STORE)
+}
+
+fn cache_for_block_format(suffix: &str) -> &'static str {
+    if ends_with_format(suffix, "bin") || ends_with_format(suffix, "hex") {
+        CACHE_IMMUTABLE
+    } else {
+        CACHE_NO_STORE
+    }
+}
+
+fn ends_with_format(suffix: &str, format: &str) -> bool {
+    match suffix.rsplit_once('.') {
+        Some((_, ext)) => ext == format,
+        None => false,
+    }
+}
+
+/// Splits an endpoint suffix into its text portion and trailing data format.
+fn split_format(suffix: &str) -> (&str, Option<&'static str>) {
+    match suffix.rsplit_once('.') {
+        Some((base, "json")) => (base, Some("json")),
+        Some((base, "hex")) => (base, Some("hex")),
+        Some((base, "bin")) => (base, Some("bin")),
+        _ => (suffix, None),
+    }
+}
+
+fn available_formats() -> &'static str {
+    ".bin, .hex, .json"
+}
+
+fn format_not_found(available: &str) -> Response {
+    not_found_owned(format!("output format not found (available: {available})"))
+}
+
+/// Core: `/rest/tx/<txid>.<ext>`.
+fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
+    let (hash_text, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
+    };
+    let Ok(txid) = Txid::from_str(hash_text) else {
+        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+    };
+    let txid_text = txid.to_string();
+    // Verbose RPC projection reuses the canonical tx renderer, so REST and RPC
+    // agree on field names and units; hex/bin reuse its consensus hex.
+    let value = match getrawtransaction(ctx, &json!([txid_text, true])) {
+        Ok(value) => value,
+        Err(RpcError::NotFound(_)) => return not_found_owned(format!("{txid_text} not found")),
+        Err(error) => return json_response(Err(error)),
+    };
+    let hex = value.get("hex").and_then(Value::as_str).unwrap_or_default();
+    match format {
+        "json" => text_response("application/json", sonic_bytes(&value)),
+        "hex" => text_response("text/plain", format!("{hex}\n").into_bytes()),
+        "bin" => {
+            let bytes: Vec<u8> = bitcoin::hex::FromHex::from_hex(hex).unwrap_or_default();
+            binary_response("application/octet-stream", &bytes)
+        }
+        _ => format_not_found(available_formats()),
+    }
+}
+
+/// Core: `/rest/block/<hash>.<ext>` (full tx details) and
+/// `/rest/block/notxdetails/<hash>.<ext>` (txid-only).
+fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response {
+    let (hash_text, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
+    };
+    let Ok(hash) = Hash256::from_str(hash_text) else {
+        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+    };
+    let Some(record) = ctx.record_for_hash(hash) else {
+        return not_found_owned(format!("{hash_text} not found"));
+    };
+    let Some(body) = ctx.block_body_bytes(&record) else {
+        return not_found_owned(format!("{hash_text} not available (pruned data)"));
+    };
+    match format {
+        "bin" => binary_response("application/octet-stream", &body),
+        "hex" => text_response(
+            "text/plain",
+            format!("{}\n", body.to_lower_hex_string()).into_bytes(),
+        ),
+        "json" => {
+            let block = match deserialize::<Block>(&body) {
+                Ok(block) => block,
+                Err(_) => return not_found_owned(format!("{hash_text} not found")),
+            };
+            let context = build_chain_context(ctx, &record, &block.header);
+            let verbosity = if with_details {
+                BlockTxVerbosity::Full
+            } else {
+                BlockTxVerbosity::Ids
+            };
+            let value = crate::render::block_json(
+                &block,
+                &context,
+                verbosity,
+                bitcoin_network(ctx.chain_network),
+            );
+            text_response("application/json", sonic_bytes(&value))
+        }
+        _ => format_not_found(available_formats()),
+    }
+}
+
+/// Core `/rest/blockpart/<hash>.<ext>` serves raw block payload bytes (hex or
+/// binary only), matching Core's original part endpoint which rejected JSON.
+fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
+    let (hash_text, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
+    };
+    let Ok(hash) = Hash256::from_str(hash_text) else {
+        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+    };
+    let Some(record) = ctx.record_for_hash(hash) else {
+        return not_found_owned(format!("{hash_text} not found"));
+    };
+    let Some(body) = ctx.block_body_bytes(&record) else {
+        return not_found_owned(format!("{hash_text} not available (pruned data)"));
+    };
+    match format {
+        "bin" => binary_response("application/octet-stream", &body),
+        "hex" => text_response(
+            "text/plain",
+            format!("{}\n", body.to_lower_hex_string()).into_bytes(),
+        ),
+        _ => format_not_found(available_formats()),
+    }
+}
+
+/// Core `/rest/blockfilter/<filtertype>/<hash>.<ext>`.
+fn route_block_filter(ctx: &Arc<Context>, suffix: &str) -> Response {
+    let (rest, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
+    };
+    let mut parts = rest.split('/');
+    let filter_type = parts.next().unwrap_or_default();
+    let hash_text = parts.next().unwrap_or_default();
+    if parts.next().is_some() || hash_text.is_empty() {
+        return bad_request(
+            "Invalid URI format. Expected /rest/blockfilter/<filtertype>/<blockhash>",
+        );
+    }
+    if filter_type != "basic" {
+        return bad_request_owned(format!("Unknown filtertype {filter_type}"));
+    }
+    let Ok(hash) = Hash256::from_str(hash_text) else {
+        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+    };
+    if !ctx.filter_index.wants_filters() {
+        return bad_request_owned(format!("Index is not enabled for filtertype {filter_type}"));
+    }
+    if ctx.record_for_hash(hash).is_none() {
+        return not_found_owned(format!("{hash_text} not found"));
+    }
+    let filter = match ctx.filter_index.filter(hash) {
+        Ok(Some(filter)) => filter,
+        Ok(None) | Err(_) => return not_found_owned("Filter not found.".to_owned()),
+    };
+    match format {
+        "bin" => binary_response("application/octet-stream", &filter),
+        "hex" => text_response(
+            "text/plain",
+            format!("{}\n", filter.to_lower_hex_string()).into_bytes(),
+        ),
+        "json" => text_response(
+            "application/json",
+            sonic_bytes(&json!({"filter": filter.to_lower_hex_string()})),
+        ),
+        _ => format_not_found(available_formats()),
+    }
+}
+
+/// Core `/rest/blockfilterheaders/<filtertype>/<hash>.<ext>?count=<count>`.
+fn route_filter_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
+    let (rest, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
+    };
+    let mut parts = rest.split('/');
+    let filter_type = parts.next().unwrap_or_default();
+    let hash_text = parts.next().unwrap_or_default();
+    if parts.next().is_some() || hash_text.is_empty() {
+        return bad_request(
+            "Invalid URI format. Expected /rest/blockfilterheaders/<filtertype>/<blockhash>",
+        );
+    }
+    if filter_type != "basic" {
+        return bad_request_owned(format!("Unknown filtertype {filter_type}"));
+    }
+    let count = match parse_count(query) {
+        Ok(count) => count,
+        Err(response) => return response,
+    };
+    let Ok(hash) = Hash256::from_str(hash_text) else {
+        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+    };
+    let headers = header_records(ctx, hash, count);
+    let mut filter_headers = Vec::with_capacity(headers.len());
+    for record in &headers {
+        match ctx.filter_index.filter_header(record.hash) {
+            Ok(Some(header)) => filter_headers.push(header),
+            Ok(None) | Err(_) => {
+                return not_found_owned(
+                    "Filter not found. Block filters are still in the process of being indexed."
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    let body = filter_headers.iter().fold(
+        Vec::with_capacity(filter_headers.len() * 32),
+        |mut body, header| {
+            body.extend_from_slice(&header.to_le_bytes());
+            body
+        },
+    );
+    match format {
+        "bin" => binary_response("application/octet-stream", &body),
+        "hex" => text_response(
+            "text/plain",
+            format!("{}\n", body.to_lower_hex_string()).into_bytes(),
+        ),
+        "json" => {
+            let values = filter_headers
+                .iter()
+                .map(|header| json!(header.to_string_be()))
+                .collect::<Vec<_>>();
+            text_response("application/json", sonic_bytes(&Value::from(values)))
+        }
+        _ => format_not_found(available_formats()),
+    }
+}
+
+/// Core `/rest/chaininfo.json` (JSON only).
+fn route_chaininfo(ctx: &Arc<Context>, path: &str) -> Response {
+    let (_, format) = split_format(path);
+    if format != Some("json") {
+        return format_not_found("json");
+    }
+    json_response(getblockchaininfo(ctx, &json!([])))
+}
+
+/// Core `/rest/mempool/<info|contents>.json`.
+fn route_mempool(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
+    let (kind, format) = split_format(suffix);
+    if format != Some("json") {
+        return format_not_found("json");
+    }
+    match kind {
+        "info" => json_response(getmempoolinfo(ctx, &json!([]))),
+        "contents" => {
+            let verbose = match query_param(query, "verbose") {
+                Some(raw) => match raw {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return bad_request(
+                            "The \"verbose\" query parameter must be either \"true\" or \"false\".",
+                        );
+                    }
+                },
+                None => true,
+            };
+            match query_param(query, "mempool_sequence") {
+                Some(raw) if raw != "true" && raw != "false" => {
+                    return bad_request(
+                        "The \"mempool_sequence\" query parameter must be either \"true\" or \"false\".",
+                    );
+                }
+                Some("true") if verbose => {
+                    return bad_request(
+                        "Verbose results cannot contain mempool sequence values. (hint: set \"verbose=false\")",
+                    );
+                }
+                _ => {}
+            }
+            json_response(getrawmempool(ctx, &json!([verbose])))
+        }
+        _ => bad_request("Invalid URI format. Expected /rest/mempool/<info|contents>.json"),
+    }
+}
+
+/// Core `/rest/headers/<hash>.<ext>?count=<count>`.
 fn route_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
-    let Some((hash_text, format)) = suffix.rsplit_once('.') else {
-        return not_found_with("output format not found");
+    let (hash_text, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
     };
     if !matches!(format, "json" | "hex" | "bin") {
         return bad_request_owned(format!("Invalid hash: {hash_text}"));
@@ -75,8 +494,13 @@ fn route_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
     let records = header_records(ctx, hash, count);
     match format {
         "json" => {
-            let values = records.iter().map(header_json).collect::<Vec<_>>();
-            json_response(Ok(Value::from(values)))
+            let values = records
+                .iter()
+                .map(|record| {
+                    crate::render::header_json(&record.header, &header_chain_context(ctx, record))
+                })
+                .collect::<Vec<_>>();
+            text_response("application/json", sonic_bytes(&Value::from(values)))
         }
         "hex" => {
             let body = records
@@ -193,25 +617,313 @@ fn invalid_count(value: &str) -> Response {
     ))
 }
 
-fn header_json(record: &HeaderRecord) -> Value {
-    json!({
-        "hash": record.hash.to_string_be(),
-        "height": record.height,
-        "version": record.header.version.to_consensus(),
-        "previousblockhash": if record.height == 0 { None::<String> } else { Some(record.header.prev_blockhash.to_string()) },
-        "merkleroot": record.header.merkle_root.to_string(),
-        "time": record.header.time,
-        "bits": format!("{:08x}", record.header.bits.to_consensus()),
-        "nonce": record.header.nonce,
-    })
+/// Core `/rest/getutxos[/checkmempool]/<txid>-<n>....{bin,hex,json}`.
+///
+/// Only the URI-scheme input form is implemented (Core's raw-body form is not
+/// served). Responses follow Core's BIP64-ish shape.
+fn parse_getutxos_outpoints(path: &str) -> Result<(bool, Vec<(Hash256, u32)>), Response> {
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let check_mempool = segments.clone().next() == Some("checkmempool");
+    if check_mempool {
+        let _ = segments.next();
+    }
+
+    let mut outpoints = Vec::new();
+    for segment in segments {
+        let Some((txid_text, vout_text)) = segment.split_once('-') else {
+            return Err(bad_request("Parse error"));
+        };
+        let Ok(txid) = Hash256::from_str(txid_text) else {
+            return Err(bad_request("Parse error"));
+        };
+        let Ok(vout) = vout_text.parse::<u32>() else {
+            return Err(bad_request("Parse error"));
+        };
+        outpoints.push((txid, vout));
+    }
+    if outpoints.is_empty() {
+        return Err(bad_request("Error: empty request"));
+    }
+    if outpoints.len() > MAX_GETUTXOS_OUTPOINTS {
+        return Err(bad_request_owned(format!(
+            "Error: max outpoints exceeded (max: {MAX_GETUTXOS_OUTPOINTS}, tried: {})",
+            outpoints.len()
+        )));
+    }
+    Ok((check_mempool, outpoints))
+}
+
+fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
+    let (path, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
+    };
+    let (check_mempool, outpoints) = match parse_getutxos_outpoints(path) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    let active_height = ctx.applied_height();
+    let active_hash = ctx.applied_hash();
+
+    let mut bitmap = vec![0_u8; outpoints.len().div_ceil(8)];
+    let mut outs = Vec::with_capacity(outpoints.len());
+    let mut hits = Vec::with_capacity(outpoints.len());
+    let pool = ctx.mempool.read();
+    for (txid, vout) in &outpoints {
+        let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
+        let bitcoin_outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array(txid.to_le_bytes()),
+            vout: *vout,
+        };
+        let mempool_spent = check_mempool && pool.is_outpoint_spent(&bitcoin_outpoint);
+        let live = if mempool_spent {
+            None
+        } else {
+            ctx.utxo.get_entry(&outpoint)
+        };
+        hits.push(live.is_some());
+        if let Some(entry) = live {
+            outs.push((entry.height, entry.txout));
+        }
+    }
+    // Bitmap packs the least-significant hit bit first per byte, matching Core.
+    for (index, hit) in hits.iter().enumerate() {
+        if *hit {
+            bitmap[index / 8] |= 1 << (index % 8);
+        }
+    }
+
+    let bitmap_text = hits
+        .iter()
+        .map(|hit| if *hit { '1' } else { '0' })
+        .collect::<String>();
+
+    match format {
+        "json" => {
+            let utxos = outs
+                .iter()
+                .map(|(height, txout)| {
+                    json!({
+                        "height": height,
+                        "value": tx_render::btc_amount_json(txout.value),
+                        "scriptPubKey": tx_render::script_pub_key_json(&txout.script_pubkey, bitcoin_network(ctx.chain_network))
+                    })
+                })
+                .collect::<Vec<_>>();
+            text_response(
+                "application/json",
+                sonic_bytes(&json!({
+                    "chainHeight": active_height,
+                    "chaintipHash": active_hash.to_string_be(),
+                    "bitmap": bitmap_text,
+                    "utxos": utxos
+                })),
+            )
+        }
+        "hex" => text_response(
+            "text/plain",
+            format!(
+                "{}\n",
+                serialize_getutxos_bin(active_height, active_hash, &bitmap, &outs)
+                    .to_lower_hex_string()
+            )
+            .into_bytes(),
+        ),
+        "bin" => binary_response(
+            "application/octet-stream",
+            &serialize_getutxos_bin(active_height, active_hash, &bitmap, &outs),
+        ),
+        _ => format_not_found(available_formats()),
+    }
+}
+
+/// Serializes the getutxos response body: active height, active hash, packed
+/// bitmap, then one `CCoin` (version, height, txout) per unspent output.
+fn serialize_getutxos_bin(
+    active_height: u32,
+    active_hash: Hash256,
+    bitmap: &[u8],
+    outs: &[(u32, bitcoin::TxOut)],
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&active_height.to_le_bytes());
+    body.extend_from_slice(&active_hash.to_le_bytes());
+    append_compact_size(&mut body, bitmap.len());
+    body.extend_from_slice(bitmap);
+    append_compact_size(&mut body, outs.len());
+    for (height, txout) in outs {
+        body.extend_from_slice(&0_u32.to_le_bytes()); // CCoin version dummy
+        body.extend_from_slice(&height.to_le_bytes());
+        body.extend_from_slice(&serialize(txout));
+    }
+    body
+}
+
+fn append_compact_size(body: &mut Vec<u8>, len: usize) {
+    match len {
+        0..=252 => {
+            let Ok(value) = u8::try_from(len) else {
+                unreachable!("compact-size byte arm exceeded u8");
+            };
+            body.push(value);
+        }
+        253..=0xffff => {
+            let Ok(value) = u16::try_from(len) else {
+                unreachable!("compact-size u16 arm exceeded u16");
+            };
+            body.push(253);
+            body.extend_from_slice(&value.to_le_bytes());
+        }
+        0x1_0000..=0xffff_ffff => {
+            let Ok(value) = u32::try_from(len) else {
+                unreachable!("compact-size u32 arm exceeded u32");
+            };
+            body.push(254);
+            body.extend_from_slice(&value.to_le_bytes());
+        }
+        _ => {
+            let Ok(value) = u64::try_from(len) else {
+                panic!("compact-size length exceeds u64");
+            };
+            body.push(255);
+            body.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+/// Core `/rest/deploymentinfo[/<blockhash>].json` (JSON only).
+///
+/// No RPC handler exists for this surface, so the projection is Core-shaped
+/// from applied-chain facts with an empty `deployments` map.
+fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
+    let (hash_text, format) = split_format(suffix);
+    if format != Some("json") {
+        return format_not_found("json");
+    }
+    let object = if hash_text.is_empty() {
+        json!({
+            "hash": ctx.applied_hash().to_string_be(),
+            "height": ctx.applied_height(),
+            "deployments": {}
+        })
+    } else {
+        let Ok(hash) = Hash256::from_str(hash_text) else {
+            return bad_request_owned(format!("Invalid hash: {hash_text}"));
+        };
+        let Some(record) = ctx.record_for_hash(hash) else {
+            return bad_request_owned("Block not found".to_owned());
+        };
+        json!({
+            "hash": hash.to_string_be(),
+            "height": record.height,
+            "deployments": {}
+        })
+    };
+    text_response("application/json", sonic_bytes(&object))
+}
+
+/// Core `/rest/blockhashbyheight/<height>.<ext>`.
+fn route_blockhash_by_height(ctx: &Arc<Context>, suffix: &str) -> Response {
+    let (height_text, format) = split_format(suffix);
+    let Some(format) = format else {
+        return format_not_found(available_formats());
+    };
+    let Ok(height) = height_text.parse::<u32>() else {
+        return bad_request_owned(format!("Invalid height: {height_text}"));
+    };
+    let Some(hash) = ctx.block_hash_at_height(height) else {
+        return not_found_owned("Block height out of range".to_owned());
+    };
+    match format {
+        "bin" => binary_response("application/octet-stream", hash.to_le_bytes().as_slice()),
+        "hex" => text_response(
+            "text/plain",
+            format!("{}\n", hash.to_string_be()).into_bytes(),
+        ),
+        "json" => text_response(
+            "application/json",
+            sonic_bytes(&json!({"blockhash": hash.to_string_be()})),
+        ),
+        _ => format_not_found(available_formats()),
+    }
+}
+
+/// Core `/rest/spenttxouts/<hash>.<ext>`.
+///
+/// This node does not retain undo data, so every well-formed request answers
+/// Core's undo-unavailable error.
+fn route_spent_txouts(suffix: &str) -> Response {
+    let (hash_text, format) = split_format(suffix);
+    if format.is_none() {
+        return format_not_found(available_formats());
+    }
+    if Hash256::from_str(hash_text).is_err() {
+        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+    }
+    not_found_owned(format!("{hash_text} undo not available"))
+}
+
+/// Builds the applied-chain facts [`crate::render`] needs to project a block or
+/// header.
+fn build_chain_context(ctx: &Context, record: &BlockRecord, header: &Header) -> BlockChainContext {
+    let applied_height = ctx.applied_height();
+    let on_active = ctx.active_hash_at_height(record.height) == Some(record.hash);
+    let n_tx = u32::try_from(record.tx_count).unwrap_or(u32::MAX);
+    BlockChainContext {
+        height: record.height,
+        confirmations: crate::render::confirmations(applied_height, record.height, on_active),
+        mediantime: ctx.median_time_past_for_hash(record.hash).unwrap_or(0),
+        difficulty: ctx.difficulty_for_bits(header.bits),
+        chainwork_hex: ctx
+            .chain_work_hex_for_hash(record.hash)
+            .unwrap_or_else(|| "00".to_owned()),
+        n_tx,
+        next_block_hash: ctx
+            .next_block_hash_for_height(record.height)
+            .map(|hash| bitcoin::BlockHash::from_byte_array(hash.to_le_bytes())),
+    }
+}
+
+/// Applied-chain facts for a header record, resolving the real record (and its
+/// transaction count) through the tree/log when available.
+fn header_chain_context(ctx: &Context, record: &HeaderRecord) -> BlockChainContext {
+    let real = ctx.record_for_hash(record.hash).unwrap_or(BlockRecord {
+        hash: record.hash,
+        height: record.height,
+        body_size: 0,
+        header: None,
+        tx_count: 0,
+        time: record.header.time,
+    });
+    build_chain_context(ctx, &real, &record.header)
+}
+
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    for pair in query.split('&') {
+        if let Some((k, value)) = pair.split_once('=') {
+            if k == key {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn bitcoin_network(network: bitcoin_rs_primitives::Network) -> Network {
+    crate::bitcoin_network(network)
+}
+
+fn sonic_bytes(value: &Value) -> Vec<u8> {
+    sonic_rs::to_string(value)
+        .unwrap_or_else(|_| "null".to_owned())
+        .into_bytes()
 }
 
 fn json_response(result: Result<Value, RpcError>) -> Response {
     match result {
-        Ok(value) => {
-            let body = sonic_rs::to_string(&value).unwrap_or_else(|_| "null".to_owned());
-            text_response("application/json", body.into_bytes())
-        }
+        Ok(value) => text_response("application/json", sonic_bytes(&value)),
         Err(error) => match error {
             RpcError::InvalidParams(message) => bad_request(message),
             RpcError::NotFound(message) => not_found_with(message),
@@ -261,605 +973,23 @@ fn not_found() -> Response {
 }
 
 fn not_found_with(message: &'static str) -> Response {
+    not_found_owned(message.to_owned())
+}
+
+fn not_found_owned(message: String) -> Response {
     Response {
         status: 404,
         reason: "Not Found",
         content_type: "text/plain",
-        body: message.as_bytes().to_vec(),
+        body: message.into_bytes(),
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod tests {
-    use super::*;
-    use crate::context::BlockRecord;
-    use bitcoin::{BlockHash, CompactTarget, TxMerkleNode, block::Version};
-    use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
-    use sonic_rs::JsonValueTrait;
-
-    fn publish_active_chain(ctx: &Context, headers: &[Header]) -> Vec<Hash256> {
-        let (tip_id, hashes) = {
-            let mut tree = ctx.block_tree.write();
-            let mut parent = None;
-            let mut ids = Vec::with_capacity(headers.len());
-            let mut hashes = Vec::with_capacity(headers.len());
-            for header in headers {
-                let id = tree
-                    .insert_node(parent, *header, NodeStatus::Active)
-                    .expect("active header");
-                hashes.push(Hash256::from_le_bytes(header.block_hash().as_byte_array()));
-                ids.push(id);
-                parent = Some(id);
-            }
-            let tip_id = *ids.last().expect("active tip");
-            (tip_id, hashes)
-        };
-        let tree = ctx.block_tree.read();
-        let tip_node = tree.node(tip_id).expect("tip node");
-        let tip = TipSnapshot {
-            tip_id,
-            height: tip_node.height,
-            chainwork: tip_node.chainwork,
-            hash: tip_node.hash,
-        };
-        drop(tree);
-        ctx.set_applied_tip(tip.clone());
-        ctx.set_chain_tip(tip);
-        hashes
-    }
-
-    #[test]
-    fn disabled_rest_is_not_found() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/chaininfo.json", "", false);
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
-    fn chaininfo_json_uses_enforcer_field_names() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/chaininfo.json", "", true);
-        assert_eq!(response.status, 200);
-        let value: Value = sonic_rs::from_slice(&response.body).expect("chaininfo JSON");
-        for field in ["chain", "blocks", "headers", "bestblockhash"] {
-            assert!(value.get(field).is_some(), "missing {field}");
-        }
-    }
-
-    #[test]
-    fn route_rejects_unknown_formats_and_bad_hashes() {
-        let ctx = Arc::new(Context::new());
-        let response = route(
-            &ctx,
-            "/rest/headers/0000000000000000000000000000000000000000000000000000000000000000.txt",
-            "",
-            true,
-        );
-        assert_eq!(response.status, 400);
-        assert_eq!(
-            String::from_utf8(response.body).expect("error body"),
-            "Invalid hash: 0000000000000000000000000000000000000000000000000000000000000000"
-        );
-        let response = route(&ctx, "/rest/headers/not-a-hash.json", "", true);
-        assert_eq!(response.status, 400);
-        assert_eq!(
-            String::from_utf8(response.body).expect("error body"),
-            "Invalid hash: not-a-hash"
-        );
-        let response = route(&ctx, "/rest/headers/not-a-hash", "", true);
-        assert_eq!(response.status, 404);
-        assert_eq!(
-            String::from_utf8(response.body).expect("error body"),
-            "output format not found"
-        );
-        let response = route(&ctx, "/rest/headers/not-a-hash.json", "count=0", true);
-        assert_eq!(response.status, 400);
-        assert_eq!(
-            String::from_utf8(response.body).expect("error body"),
-            "Header count is invalid or out of acceptable range (1-2000): 0"
-        );
-    }
-
-    #[test]
-    fn count_boundaries_and_errors() {
-        assert_eq!(parse_count("").expect("default"), 5);
-        assert_eq!(parse_count("count=1").expect("lower boundary"), 1);
-        assert_eq!(parse_count("count=2000").expect("upper boundary"), 2_000);
-        assert_eq!(
-            parse_count("count=2001").expect_err("above range").status,
-            400
-        );
-        assert_eq!(parse_count("count=0").expect_err("zero count").status, 400);
-        assert_eq!(
-            parse_count("count=-1").expect_err("negative count").status,
-            400
-        );
-        assert_eq!(parse_count("count=bad").expect_err("bad count").status, 400);
-        assert_eq!(
-            parse_count("count=18446744073709551616")
-                .expect_err("overflow count")
-                .status,
-            400
-        );
-        assert_eq!(parse_count("limit=5").expect("unknown query"), 5);
-        assert_eq!(parse_count("count").expect("bare query key"), 5);
-        assert_eq!(parse_count("count=3&foo=1").expect("unknown query"), 3);
-        assert_eq!(parse_count("foo=1&count=3").expect("unknown query"), 3);
-    }
-
-    #[test]
-    fn unknown_hash_returns_empty_success_for_all_formats() {
-        let ctx = Arc::new(Context::new());
-        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-        for format in ["json", "hex", "bin"] {
-            let path = format!("/rest/headers/{hash}.{format}");
-            let response = route(&ctx, &path, "count=1", true);
-            assert_eq!(response.status, 200, "{format}");
-            assert!(
-                response.body.is_empty() || response.body == b"[]",
-                "{format}"
-            );
-        }
-        let with_unknown_param = route(
-            &ctx,
-            &format!("/rest/headers/{hash}.json"),
-            "count=3&foo=1",
-            true,
-        );
-        let without_count = route(&ctx, &format!("/rest/headers/{hash}.json"), "limit=5", true);
-        assert_eq!(with_unknown_param.status, 200);
-        assert_eq!(without_count.status, 200);
-        assert_eq!(with_unknown_param.body, b"[]");
-        assert_eq!(without_count.body, b"[]");
-    }
-
-    #[test]
-    fn headers_json_returns_ordered_active_chain_headers() {
-        use bitcoin::hashes::Hash as _;
-        use bitcoin::{Block, BlockHash, CompactTarget, TxMerkleNode, block::Version};
-
-        let ctx = Arc::new(Context::new());
-        let bits = CompactTarget::from_consensus(0x1d00_ffff);
-        let genesis_header = Header {
-            version: Version::ONE,
-            prev_blockhash: BlockHash::all_zeros(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 1,
-            bits,
-            nonce: 1,
-        };
-        let genesis = Block {
-            header: genesis_header,
-            txdata: Vec::new(),
-        };
-        let child_header = Header {
-            version: Version::ONE,
-            prev_blockhash: genesis.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 2,
-            bits,
-            nonce: 2,
-        };
-        let child = Block {
-            header: child_header,
-            txdata: Vec::new(),
-        };
-        let tip_header = Header {
-            version: Version::ONE,
-            prev_blockhash: child.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 3,
-            bits,
-            nonce: 3,
-        };
-        let tip = Block {
-            header: tip_header,
-            txdata: Vec::new(),
-        };
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-        ctx.add_block(BlockRecord::from_block(1, &child));
-        ctx.add_block(BlockRecord::from_block(2, &tip));
-        publish_active_chain(&ctx, &[genesis.header, child.header, tip.header]);
-
-        let path = format!("/rest/headers/{}.json", child.block_hash());
-        let response = route(&ctx, &path, "count=2000", true);
-        assert_eq!(response.status, 200);
-        let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert_eq!(values.len(), 2);
-        assert_eq!(values[0].get("height").and_then(Value::as_u64), Some(1));
-        assert_eq!(values[1].get("height").and_then(Value::as_u64), Some(2));
-        let child_hash = child.block_hash().to_string();
-        assert_eq!(
-            values[0].get("hash").and_then(Value::as_str),
-            Some(child_hash.as_str())
-        );
-        let bits_text = values[0].get("bits").and_then(Value::as_str).expect("bits");
-        assert_eq!(
-            CompactTarget::from_unprefixed_hex(bits_text).expect("bits round-trip"),
-            bits
-        );
-    }
-
-    #[test]
-    fn headers_do_not_walk_past_applied_tip() {
-        let ctx = Arc::new(Context::new());
-        let bits = CompactTarget::from_consensus(0x1d00_ffff);
-        let genesis = Header {
-            version: Version::ONE,
-            prev_blockhash: BlockHash::all_zeros(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 1,
-            bits,
-            nonce: 1,
-        };
-        let applied = Header {
-            version: Version::ONE,
-            prev_blockhash: genesis.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 2,
-            bits,
-            nonce: 2,
-        };
-        let header_tip = Header {
-            version: Version::ONE,
-            prev_blockhash: applied.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 3,
-            bits,
-            nonce: 3,
-        };
-        let applied_tip = {
-            let mut tree = ctx.block_tree.write();
-            let genesis_id = tree
-                .insert_node(None, genesis, NodeStatus::Active)
-                .expect("genesis header");
-            let applied_id = tree
-                .insert_node(Some(genesis_id), applied, NodeStatus::Active)
-                .expect("applied header");
-            let applied_tip = tree.tip().expect("applied tip").as_ref().clone();
-            tree.insert_node(Some(applied_id), header_tip, NodeStatus::Active)
-                .expect("header tip");
-            applied_tip
-        };
-        ctx.set_applied_tip(applied_tip);
-        let header_tip_hash = Hash256::from_le_bytes(header_tip.block_hash().as_byte_array());
-
-        let response = route(
-            &ctx,
-            &format!("/rest/headers/{header_tip_hash}.json"),
-            "count=2000",
-            true,
-        );
-        let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert!(values.is_empty());
-    }
-
-    #[test]
-    fn headers_json_returns_genesis_and_remaining_headers() {
-        let ctx = Arc::new(Context::new());
-        let bits = CompactTarget::from_consensus(0x1d00_ffff);
-        let genesis = Header {
-            version: Version::ONE,
-            prev_blockhash: BlockHash::all_zeros(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 1,
-            bits,
-            nonce: 1,
-        };
-        let child = Header {
-            version: Version::ONE,
-            prev_blockhash: genesis.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 2,
-            bits,
-            nonce: 2,
-        };
-        let tip = Header {
-            version: Version::ONE,
-            prev_blockhash: child.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 3,
-            bits,
-            nonce: 3,
-        };
-        publish_active_chain(&ctx, &[genesis, child, tip]);
-
-        let response = route(
-            &ctx,
-            &format!("/rest/headers/{}.json", genesis.block_hash()),
-            "count=2000",
-            true,
-        );
-        let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert_eq!(values.len(), 3);
-        assert!(
-            values[0]
-                .get("previousblockhash")
-                .is_some_and(Value::is_null)
-        );
-        assert_eq!(values[0].get("height").and_then(Value::as_u64), Some(0));
-        assert_eq!(values[2].get("height").and_then(Value::as_u64), Some(2));
-    }
-
-    #[test]
-    fn headers_side_branch_returns_empty() {
-        let ctx = Arc::new(Context::new());
-        let bits = CompactTarget::from_consensus(0x1d00_ffff);
-        let genesis = Header {
-            version: Version::ONE,
-            prev_blockhash: BlockHash::all_zeros(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 1,
-            bits,
-            nonce: 1,
-        };
-        let active_child = Header {
-            version: Version::ONE,
-            prev_blockhash: genesis.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 2,
-            bits,
-            nonce: 2,
-        };
-        let active_tip = Header {
-            version: Version::ONE,
-            prev_blockhash: active_child.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 3,
-            bits,
-            nonce: 3,
-        };
-        let side_child = Header {
-            version: Version::ONE,
-            prev_blockhash: genesis.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 4,
-            bits,
-            nonce: 4,
-        };
-        let ids = publish_active_chain(&ctx, &[genesis, active_child, active_tip]);
-        {
-            let mut tree = ctx.block_tree.write();
-            let parent = tree.lookup(ids[0]).expect("genesis node");
-            tree.insert_node(Some(parent), side_child, NodeStatus::Stale)
-                .expect("side branch header");
-        }
-
-        let response = route(
-            &ctx,
-            &format!(
-                "/rest/headers/{}.json",
-                Hash256::from_le_bytes(side_child.block_hash().as_byte_array())
-            ),
-            "count=2000",
-            true,
-        );
-        let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert!(values.is_empty());
-    }
-
-    #[test]
-    fn headers_truncate_when_linkage_breaks() {
-        use bitcoin::{Block, BlockHash, CompactTarget, TxMerkleNode, block::Version};
-
-        let ctx = Arc::new(Context::new());
-        let bits = CompactTarget::from_consensus(0x1d00_ffff);
-        let genesis = Block {
-            header: Header {
-                version: Version::ONE,
-                prev_blockhash: BlockHash::all_zeros(),
-                merkle_root: TxMerkleNode::all_zeros(),
-                time: 1,
-                bits,
-                nonce: 1,
-            },
-            txdata: Vec::new(),
-        };
-        let broken_child = Block {
-            header: Header {
-                version: Version::ONE,
-                prev_blockhash: BlockHash::all_zeros(),
-                merkle_root: TxMerkleNode::all_zeros(),
-                time: 2,
-                bits,
-                nonce: 2,
-            },
-            txdata: Vec::new(),
-        };
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-        ctx.add_block(BlockRecord::from_block(1, &broken_child));
-        let genesis_id = {
-            let mut tree = ctx.block_tree.write();
-            tree.insert_node(None, genesis.header, NodeStatus::Active)
-                .expect("genesis header")
-        };
-        let broken_id = {
-            let mut tree = ctx.block_tree.write();
-            let valid_child = Header {
-                prev_blockhash: genesis.block_hash(),
-                ..broken_child.header
-            };
-            tree.insert_node(Some(genesis_id), valid_child, NodeStatus::Active)
-                .expect("broken child header")
-        };
-        ctx.block_tree
-            .write()
-            .node_mut(broken_id)
-            .expect("broken child node")
-            .header
-            .prev_blockhash = BlockHash::all_zeros();
-        let tree = ctx.block_tree.read();
-        let broken_node = tree.node(broken_id).expect("broken tip");
-        let tip = TipSnapshot {
-            tip_id: broken_id,
-            height: broken_node.height,
-            chainwork: broken_node.chainwork,
-            hash: broken_node.hash,
-        };
-        drop(tree);
-        ctx.set_applied_tip(tip.clone());
-        ctx.set_chain_tip(tip);
-
-        let path = format!("/rest/headers/{}.json", genesis.block_hash());
-        let response = route(&ctx, &path, "count=2", true);
-        assert_eq!(response.status, 200);
-        let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0].get("height").and_then(Value::as_u64), Some(0));
-    }
-
-    #[test]
-    fn headers_truncate_the_tail_after_a_middle_linkage_break() {
-        let ctx = Arc::new(Context::new());
-        let bits = CompactTarget::from_consensus(0x1d00_ffff);
-        let genesis = Header {
-            version: Version::ONE,
-            prev_blockhash: BlockHash::all_zeros(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 1,
-            bits,
-            nonce: 1,
-        };
-        let first = Header {
-            version: Version::ONE,
-            prev_blockhash: genesis.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 2,
-            bits,
-            nonce: 2,
-        };
-        let middle = Header {
-            version: Version::ONE,
-            prev_blockhash: first.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 3,
-            bits,
-            nonce: 3,
-        };
-        let tail = Header {
-            version: Version::ONE,
-            prev_blockhash: middle.block_hash(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 4,
-            bits,
-            nonce: 4,
-        };
-        let hashes = publish_active_chain(&ctx, &[genesis, first, middle, tail]);
-        let middle_id = ctx
-            .block_tree
-            .read()
-            .lookup(hashes[2])
-            .expect("middle node");
-        ctx.block_tree
-            .write()
-            .node_mut(middle_id)
-            .expect("middle node")
-            .header
-            .prev_blockhash = BlockHash::all_zeros();
-
-        let response = route(
-            &ctx,
-            &format!("/rest/headers/{}.json", hashes[0]),
-            "count=2000",
-            true,
-        );
-        let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert_eq!(values.len(), 2);
-        assert_eq!(values[0].get("height").and_then(Value::as_u64), Some(0));
-        assert_eq!(values[1].get("height").and_then(Value::as_u64), Some(1));
-    }
-
-    /// `/rest/headers/` must serve bytes identical to the block's own header.
-    ///
-    /// The three formats all serialize `HeaderRecord.header`, which comes from
-    /// the block tree. This pins the bytes rather than a field count, so a
-    /// header sourced from the wrong place fails here even if every JSON key is
-    /// still present.
-    #[test]
-    fn headers_serve_the_block_header_bytes_verbatim() {
-        let ctx = Arc::new(Context::new());
-        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-        let _ = publish_active_chain(&ctx, &[genesis.header]);
-
-        let expected = serialize(&genesis.header);
-        let path = format!("/rest/headers/{}.bin", genesis.block_hash());
-        let response = route(&ctx, &path, "count=1", true);
-        assert_eq!(response.status, 200);
-        assert_eq!(
-            response.body, expected,
-            "the served header bytes must be the block's own"
-        );
-
-        let path = format!("/rest/headers/{}.hex", genesis.block_hash());
-        let response = route(&ctx, &path, "count=1", true);
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body, expected.to_lower_hex_string().into_bytes());
-    }
-
-    /// A log-only hash remains an empty success in every REST format.
-    ///
-    /// The deleted fallback consulted `block_by_hash`, which used to recover
-    /// this fixture through its full-log scan. Removing both paths must preserve
-    /// REST's established unknown-hash 200 contract rather than turn it into a
-    /// 404 or leak cached data.
-    #[test]
-    fn headers_for_a_record_the_tree_does_not_know_serve_nothing() {
-        let ctx = Arc::new(Context::new());
-        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-
-        for (format, expected) in [
-            ("json", b"[]".as_slice()),
-            ("hex", b"".as_slice()),
-            ("bin", b"".as_slice()),
-        ] {
-            let path = format!("/rest/headers/{}.{format}", genesis.block_hash());
-            let response = route(&ctx, &path, "count=1", true);
-            assert_eq!(response.status, 200);
-            assert_eq!(response.body, expected);
-        }
-    }
-
-    #[test]
-    fn header_json_uses_enforcer_field_names() {
-        let record = BlockRecord {
-            hash: Hash256::from_str(
-                "0000000000000000000000000000000000000000000000000000000000000001",
-            )
-            .expect("hash"),
-            height: 1,
-            body_size: 0,
-            header: None,
-            tx_count: 0,
-            time: 123,
-        };
-        let header = Header {
-            version: Version::from_consensus(1),
-            prev_blockhash: BlockHash::all_zeros(),
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: 123,
-            bits: CompactTarget::from_consensus(0x1d00_ffff),
-            nonce: 7,
-        };
-        let value = header_json(&HeaderRecord {
-            hash: record.hash,
-            height: record.height,
-            header,
-        });
-        for field in [
-            "hash",
-            "height",
-            "version",
-            "previousblockhash",
-            "merkleroot",
-            "time",
-            "bits",
-            "nonce",
-        ] {
-            assert!(value.get(field).is_some(), "missing {field}");
-        }
-        assert_eq!(value.get("bits").and_then(Value::as_str), Some("1d00ffff"));
+fn method_not_allowed() -> Response {
+    Response {
+        status: 405,
+        reason: "Method Not Allowed",
+        content_type: "text/plain",
+        body: b"method not allowed".to_vec(),
     }
 }

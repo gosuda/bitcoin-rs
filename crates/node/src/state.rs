@@ -1026,22 +1026,29 @@ impl NodeState {
             storage.block_body_store(Arc::clone(&block_files), &config.data_dir)?;
 
         let filter_index = open_filter_index(&config)?;
+        #[cfg(feature = "zmq")]
         let zmq_publications = config.zmq_publications();
-        let active_zmq_notifications: Vec<_> = zmq_publications
-            .iter()
-            .map(|publication| {
-                ZmqNotification::new(
-                    publication.topic.notifier_type(),
-                    publication.endpoint.clone(),
-                    publication.hwm,
-                )
-            })
-            .collect();
+        #[cfg(feature = "zmq")]
         let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_publications.is_empty() {
             Arc::new(crate::NoOpZmqPublisher)
         } else {
             Arc::new(crate::SocketZmqPublisher::bind(&zmq_publications)?)
         };
+        #[cfg(not(feature = "zmq"))]
+        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(crate::NoOpZmqPublisher);
+        // Live notifier facts come from the bound publisher so exact
+        // `(type, address)` uniqueness owned there is what RPC reports.
+        let active_zmq_notifications: Vec<ZmqNotification> = zmq_publisher
+            .active_notifiers()
+            .into_iter()
+            .map(|notifier| {
+                ZmqNotification::new(
+                    notifier.topic.notifier_type(),
+                    notifier.endpoint,
+                    notifier.hwm,
+                )
+            })
+            .collect();
         let (
             mut utxo_set,
             initial_coin_stats,
@@ -1917,6 +1924,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "zmq")]
     #[test]
     fn zmq_publisher_handle_reports_active_metadata() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -1947,6 +1955,42 @@ mod tests {
             ["pubhashblock", "pubhashtx", "pubrawblock", "pubrawtx"]
         );
         assert_eq!(hwms, [17, 18, 19, 20]);
+        Ok(())
+    }
+
+    #[cfg(feature = "zmq")]
+    #[test]
+    fn zmq_active_metadata_deduplicates_exact_type_address_pairs() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        let shared = "inproc://state-zmq-dedupe-shared".to_owned();
+        config.zmqpubhashblock = vec![shared.clone(), shared.clone()];
+        config.zmqpubrawtx = vec![shared.clone()];
+        config.zmqpubhashblockhwm = Some(7);
+        config.zmqpubrawtxhwm = Some(7);
+        let state = NodeState::open(config)?;
+
+        let notifications = state.active_zmq_notifications();
+        let reported: Vec<_> = notifications
+            .iter()
+            .map(|notification| {
+                (
+                    notification.notification_type.as_str(),
+                    notification.address.as_str(),
+                    notification.hwm,
+                )
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            [
+                ("pubhashblock", shared.as_str(), 7),
+                ("pubrawtx", shared.as_str(), 7),
+            ],
+            "getzmqnotifications path must report each type/address once while keeping distinct topics"
+        );
         Ok(())
     }
 

@@ -23,7 +23,7 @@ fn bump_fee_preserves_inputs_and_satisfies_bip125_fee_rules()
             .script_pubkey(),
     };
     let mut builder = PsbtBuilder::new(core::slice::from_ref(&descriptor));
-    builder.add_input(PrevUtxo::new(outpoint, prev_txout), 0)?;
+    builder.add_input(PrevUtxo::new(outpoint, prev_txout), 0, 0)?;
     builder.add_output(
         descriptor.derive_address(Network::Regtest, 1)?,
         Amount::from_sat(90_000),

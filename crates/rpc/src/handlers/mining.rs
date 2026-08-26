@@ -1,183 +1,70 @@
 use alloc::sync::Arc;
-use core::time::Duration;
+use core::str::FromStr as _;
 
-use sonic_rs::{JsonValueTrait, Value, json};
+use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::hex::{DisplayHex as _, FromHex};
+use bitcoin::{Block, CompactTarget, Target};
+use bitcoin_rs_mining::witness_commitment_script;
+use compact_str::CompactString;
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use crate::context::Context;
+use crate::context::{
+    AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
+    BlockTemplateResult, BlockValidationResult, MiningCapability, MiningControlError, MiningInfo,
+    MiningRule, TemplateMutation,
+};
 use crate::error::RpcError;
-use crate::handlers::{ensure_no_params, params_array, required_str};
+use crate::handlers::{ensure_no_params, params_array, required_str, serde_to_sonic};
 
-const NETWORK_HASHPS_WINDOW: u32 = 120;
+const NONCE_RANGE: &str = "00000000ffffffff";
 
 pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    if !params.is_null() {
-        let request = params_array(params)?.first();
-        if let Some(request) = request {
-            if let Some(longpollid) = request.get("longpollid").and_then(|value| value.as_str()) {
-                let current = ctx.mining_template_id.load();
-                if longpollid == current.as_str() {
-                    let _result = ctx
-                        .mining_notifications
-                        .recv_timeout(Duration::from_mins(1));
-                }
-            }
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    let request = parse_block_template_request(params)?;
+    let client_rules = request.rules.clone();
+    match control.get_block_template(request) {
+        Ok(BlockTemplateResult::Template(template)) => {
+            ensure_client_supports_mandatory_rules(&template, &client_rules)?;
+            render_block_template(&template)
         }
+        Ok(BlockTemplateResult::Proposal(result)) => Ok(render_validation_result(result)),
+        Err(error) => Err(map_mining_control_error(error)),
     }
-    let tip_hash = ctx.best_hash().to_string_be();
-    let template_id = ctx.mining_template_id.load().to_string();
-    Ok(json!({
-        "version": 0,
-        "rules": ["segwit"],
-        "vbavailable": {},
-        "vbrequired": 0,
-        "previousblockhash": tip_hash,
-        "transactions": [],
-        "coinbaseaux": {},
-        "coinbasevalue": 0,
-        "longpollid": template_id,
-        "target": "0000000000000000000000000000000000000000000000000000000000000000",
-        "mintime": 0,
-        "mutable": ["time", "transactions", "prevblock"],
-        "noncerange": "00000000ffffffff",
-        "sigoplimit": 0,
-        "sizelimit": 4_000_000,
-        "weightlimit": 4_000_000,
-        "curtime": 0,
-        "bits": "00000000",
-        "height": ctx.height().saturating_add(1),
-        "default_witness_commitment": ""
-    }))
 }
 
 pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let (current_block_weight, current_block_tx) = estimate_current_block(ctx);
-
-    let blocks = ctx.applied_height();
-    let pooledtx = ctx.mempool.read().stats().txs;
-    let tip_bits = {
-        let tree = ctx.block_tree.read();
-        let snapshot = ctx.applied_tip.load_full();
-        snapshot.and_then(|tip| tree.node(tip.tip_id).ok().map(|node| node.header.bits))
-    };
-    let difficulty = tip_bits.map_or(0.0, |bits| ctx.difficulty_for_bits(bits));
-    let chain = match ctx.chain_network {
-        bitcoin_rs_primitives::Network::Mainnet => "main",
-        bitcoin_rs_primitives::Network::Testnet3 | bitcoin_rs_primitives::Network::Testnet4 => {
-            "test"
-        }
-        bitcoin_rs_primitives::Network::Signet => "signet",
-        bitcoin_rs_primitives::Network::Regtest => "regtest",
-    };
-
-    Ok(json!({
-        "blocks": blocks,
-        "currentblockweight": current_block_weight,
-        "currentblocktx": current_block_tx,
-        "difficulty": difficulty,
-        "networkhashps": estimate_network_hashps(ctx),
-        "pooledtx": pooledtx,
-        "chain": chain,
-        "warnings": ""
-    }))
-}
-
-fn estimate_current_block(ctx: &Context) -> (u64, u64) {
-    const MAX_BLOCK_WEIGHT: u32 = 4_000_000;
-
-    let policy = bitcoin_rs_mining::MiningPolicy;
-    let pool = ctx.mempool.read();
-    let selected = policy.select_transactions(&pool, MAX_BLOCK_WEIGHT);
-    let mut weight: u64 = 0;
-    let mut count: u64 = 0;
-    for entry_id in &selected {
-        let Some(entry) = pool.entry(*entry_id) else {
-            continue;
-        };
-        weight = weight.saturating_add(u64::from(entry.vsize).saturating_mul(4));
-        count = count.saturating_add(1);
-    }
-    (weight, count)
-}
-
-fn estimate_network_hashps(ctx: &Context) -> f64 {
-    let tree = ctx.block_tree.read();
-    let Some(tip_snapshot) = ctx.applied_tip.load_full() else {
-        return 0.0;
-    };
-    let tip_id = tip_snapshot.tip_id;
-    let Ok(tip_node) = tree.node(tip_id) else {
-        return 0.0;
-    };
-    let target_height = tip_node.height.saturating_sub(NETWORK_HASHPS_WINDOW);
-    let Some(earliest_id) = tree.node_at_height_from(tip_id, target_height) else {
-        return 0.0;
-    };
-    let Ok(earliest_node) = tree.node(earliest_id) else {
-        return 0.0;
-    };
-    if earliest_node.height == tip_node.height {
-        return 0.0;
-    }
-
-    let work_delta = tip_node.chainwork.saturating_sub(earliest_node.chainwork);
-    let time_delta_secs =
-        i64::from(tip_node.header.time).saturating_sub(i64::from(earliest_node.header.time));
-    if time_delta_secs <= 0 {
-        return 0.0;
-    }
-
-    chainwork_to_f64(work_delta) / f64::from(u32::try_from(time_delta_secs).unwrap_or(u32::MAX))
-}
-
-fn chainwork_to_f64(work: bitcoin_rs_chain::ChainWork) -> f64 {
-    let bytes: [u8; 32] = work.to_be_bytes();
-    bytes
-        .iter()
-        .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)))
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    let info = control.mining_info().map_err(map_mining_control_error)?;
+    render_mining_info(&info)
 }
 
 pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    use bitcoin::consensus::encode::deserialize;
-    use bitcoin::hex::FromHex;
-
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     let hex = required_str(params, 0, "block hex is required")?;
-    let bytes = <Vec<u8> as FromHex>::from_hex(hex)
+    let bytes = Vec::<u8>::from_hex(hex)
         .map_err(|_| RpcError::InvalidParams("block hex is not valid hexadecimal"))?;
-    let block: bitcoin::Block = match deserialize(&bytes) {
-        Ok(b) => b,
+    let block: Block = match deserialize(&bytes) {
+        Ok(block) => block,
         Err(_) => return Ok(json!("bad-block-encoding")),
     };
-    let target = block.header.target();
-    if block.header.validate_pow(target).is_err() {
-        return Ok(json!("high-hash"));
+    match control.submit_block(block) {
+        Ok(result) => Ok(render_validation_result(result)),
+        Err(error) => Err(map_mining_control_error(error)),
     }
-    if let Some(sender) = &ctx.inbound_blocks_sender {
-        // The inbound-block channel is bounded, so a sustained peer-driven flood
-        // could park this RPC worker on a blocking send. Wait briefly for a slot
-        // (the drain frees one within a tick under normal load) so a locally
-        // submitted block is not dropped, then report busy rather than blocking
-        // the connection indefinitely.
-        match sender.send_timeout(
-            bitcoin_rs_p2p::InboundBlock::from_decoded(block),
-            core::time::Duration::from_secs(2),
-        ) {
-            Ok(()) => {}
-            Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => {
-                return Ok(json!("inbound-busy"));
-            }
-            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
-                return Ok(json!("channel-closed"));
-            }
-        }
-    }
-    // Successful enqueue (or no-sender accept path) returns null.
-    Ok(Value::new_null())
 }
 
 pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    use core::str::FromStr as _;
-
     let txid_str = required_str(params, 0, "txid is required")?;
     let txid = bitcoin::Txid::from_str(txid_str)
         .map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))?;
@@ -190,148 +77,893 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         .and_then(JsonValueTrait::as_i64)
         .or_else(|| array.get(1).and_then(JsonValueTrait::as_i64))
         .ok_or(RpcError::InvalidParams("fee_delta is required"))?;
-    let bumped = ctx.mempool.write().prioritise(txid, fee_delta);
-    Ok(json!(bumped))
+    {
+        let mut pool = ctx.mempool.write();
+        pool.prioritise(txid, fee_delta)
+            .map_err(|error| RpcError::InvalidParameter(error.to_string()))?;
+    }
+    if let Some(control) = ctx.mining_control.as_ref() {
+        control.publish_generation();
+    }
+    Ok(json!(true))
 }
+
+fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, RpcError> {
+    if params.is_null() {
+        return Ok(BlockTemplateRequest {
+            mode: BlockTemplateMode::Template,
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+        });
+    }
+    let array = params_array(params)?;
+    let Some(request) = array.first() else {
+        return Ok(BlockTemplateRequest {
+            mode: BlockTemplateMode::Template,
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+        });
+    };
+    if request.is_null() {
+        return Ok(BlockTemplateRequest {
+            mode: BlockTemplateMode::Template,
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+        });
+    }
+    if !request.is_object() {
+        return Err(RpcError::InvalidType("template request must be an object"));
+    }
+
+    let capabilities = parse_string_list(request.get("capabilities"), "capabilities")?;
+    let rules = parse_string_list(request.get("rules"), "rules")?;
+    let long_poll_id = match request.get("longpollid") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) => {
+            let Some(text) = value.as_str() else {
+                return Err(RpcError::InvalidType("longpollid must be a string"));
+            };
+            Some(CompactString::from(text))
+        }
+    };
+
+    let mode_text = match request.get("mode") {
+        None => "template",
+        Some(value) if value.is_null() => "template",
+        Some(value) => value
+            .as_str()
+            .ok_or(RpcError::InvalidType("mode must be a string"))?,
+    };
+
+    let mode = match mode_text {
+        "template" => BlockTemplateMode::Template,
+        "proposal" => {
+            if !capabilities
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case("proposal"))
+            {
+                return Err(RpcError::InvalidParameter(
+                    "proposal mode requires the proposal capability".to_owned(),
+                ));
+            }
+            let data = request.get("data").and_then(JsonValueTrait::as_str).ok_or(
+                RpcError::InvalidParams("proposal mode requires hex-encoded block data"),
+            )?;
+            let bytes = Vec::<u8>::from_hex(data)
+                .map_err(|_| RpcError::InvalidParams("block data is not valid hexadecimal"))?;
+            let block: Block = deserialize(&bytes)
+                .map_err(|_| RpcError::InvalidParams("block data could not be decoded"))?;
+            BlockTemplateMode::Proposal(block)
+        }
+        _ => {
+            return Err(RpcError::InvalidParameter(
+                "mode must be template or proposal".to_owned(),
+            ));
+        }
+    };
+
+    Ok(BlockTemplateRequest {
+        mode,
+        capabilities: capabilities
+            .into_iter()
+            .map(MiningCapability::new)
+            .collect(),
+        rules: rules.into_iter().map(MiningRule::new).collect(),
+        long_poll_id,
+    })
+}
+
+fn parse_string_list(
+    value: Option<&Value>,
+    field: &'static str,
+) -> Result<Vec<CompactString>, RpcError> {
+    match value {
+        None => Ok(Vec::new()),
+        Some(value) if value.is_null() => Ok(Vec::new()),
+        Some(value) => {
+            let Some(array) = value.as_array() else {
+                return Err(RpcError::InvalidType(match field {
+                    "capabilities" => "capabilities must be an array of strings",
+                    "rules" => "rules must be an array of strings",
+                    _ => "field must be an array of strings",
+                }));
+            };
+            let mut out = Vec::with_capacity(array.len());
+            for entry in array {
+                let Some(text) = entry.as_str() else {
+                    return Err(RpcError::InvalidType(match field {
+                        "capabilities" => "capabilities must be an array of strings",
+                        "rules" => "rules must be an array of strings",
+                        _ => "field must be an array of strings",
+                    }));
+                };
+                out.push(CompactString::from(text));
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn ensure_client_supports_mandatory_rules(
+    template: &BlockTemplate,
+    client_rules: &[MiningRule],
+) -> Result<(), RpcError> {
+    for rule in &template.rules {
+        if !rule_is_mandatory(rule.as_str()) {
+            continue;
+        }
+        if !client_rules
+            .iter()
+            .any(|supported| supported.as_str() == rule.as_str())
+        {
+            return Err(RpcError::InvalidParameter(format!(
+                "Support for '{}' rule requires explicit client support",
+                rule.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn rule_is_mandatory(rule: &str) -> bool {
+    rule == "segwit"
+}
+
+fn render_template_transactions(
+    transactions: &[bitcoin_rs_mining::CandidateTransaction],
+) -> Vec<serde_json::Value> {
+    transactions
+        .iter()
+        .map(|tx| {
+            serde_json::json!({
+                "data": serialize(tx.tx.as_ref()).to_lower_hex_string(),
+                "txid": tx.txid.to_string(),
+                "hash": tx.wtxid.to_string(),
+                "depends": tx.depends,
+                "fee": tx.fee,
+                "sigops": tx.sigop_cost,
+                "weight": tx.weight,
+            })
+        })
+        .collect()
+}
+
+fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
+    let candidate = &template.candidate;
+    let rules = template
+        .rules
+        .iter()
+        .map(|rule| {
+            if rule_is_mandatory(rule.as_str()) {
+                format!("!{}", rule.as_str())
+            } else {
+                rule.as_str().to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut vbavailable = serde_json::Map::new();
+    for AvailableMiningRule { rule, bit } in &template.version_bits_available {
+        vbavailable.insert(rule.as_str().to_owned(), serde_json::json!(bit));
+    }
+    let mutable = template
+        .mutable
+        .iter()
+        .map(|mutation| match mutation {
+            TemplateMutation::Time => "time",
+            TemplateMutation::Transactions => "transactions",
+            TemplateMutation::PreviousBlock => "prevblock",
+        })
+        .collect::<Vec<_>>();
+    let transactions = render_template_transactions(&candidate.transactions);
+    let target = Target::from(CompactTarget::from_consensus(candidate.bits));
+    let mut object = serde_json::Map::new();
+    object.insert("version".to_owned(), serde_json::json!(candidate.version));
+    object.insert("rules".to_owned(), serde_json::json!(rules));
+    object.insert(
+        "vbavailable".to_owned(),
+        serde_json::Value::Object(vbavailable),
+    );
+    object.insert(
+        "vbrequired".to_owned(),
+        serde_json::json!(template.version_bits_required),
+    );
+    object.insert(
+        "previousblockhash".to_owned(),
+        serde_json::json!(candidate.previous_block_hash.to_string_be()),
+    );
+    object.insert("transactions".to_owned(), serde_json::json!(transactions));
+    object.insert("coinbaseaux".to_owned(), serde_json::json!({}));
+    object.insert(
+        "coinbasevalue".to_owned(),
+        serde_json::json!(candidate.coinbase_value),
+    );
+    object.insert(
+        "longpollid".to_owned(),
+        serde_json::json!(candidate.template_id.as_str()),
+    );
+    object.insert(
+        "target".to_owned(),
+        serde_json::json!(target.to_be_bytes().to_lower_hex_string()),
+    );
+    object.insert("mintime".to_owned(), serde_json::json!(candidate.min_time));
+    object.insert("mutable".to_owned(), serde_json::json!(mutable));
+    object.insert("noncerange".to_owned(), serde_json::json!(NONCE_RANGE));
+    object.insert(
+        "sigoplimit".to_owned(),
+        serde_json::json!(candidate.max_sigops),
+    );
+    object.insert(
+        "sizelimit".to_owned(),
+        serde_json::json!(candidate.max_size),
+    );
+    object.insert(
+        "weightlimit".to_owned(),
+        serde_json::json!(candidate.max_weight),
+    );
+    object.insert(
+        "curtime".to_owned(),
+        serde_json::json!(candidate.current_time),
+    );
+    object.insert(
+        "bits".to_owned(),
+        serde_json::json!(format!("{:08x}", candidate.bits)),
+    );
+    object.insert("height".to_owned(), serde_json::json!(candidate.height));
+    if let Some(commitment) = candidate.witness_commitment.as_ref() {
+        object.insert(
+            "default_witness_commitment".to_owned(),
+            serde_json::json!(
+                witness_commitment_script(commitment)
+                    .as_bytes()
+                    .to_lower_hex_string()
+            ),
+        );
+    }
+    if let Some(submit_old) = template.submit_old {
+        object.insert("submitold".to_owned(), serde_json::json!(submit_old));
+    }
+    if let Some(work_id) = template.work_id.as_ref() {
+        object.insert("workid".to_owned(), serde_json::json!(work_id.as_str()));
+    }
+    serde_to_sonic(&serde_json::Value::Object(object))
+}
+
+fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
+    let chain = match info.network {
+        bitcoin_rs_primitives::Network::Mainnet => "main",
+        bitcoin_rs_primitives::Network::Testnet3 | bitcoin_rs_primitives::Network::Testnet4 => {
+            "test"
+        }
+        bitcoin_rs_primitives::Network::Signet => "signet",
+        bitcoin_rs_primitives::Network::Regtest => "regtest",
+    };
+    let warnings = if info.warnings.is_empty() {
+        String::new()
+    } else {
+        info.warnings
+            .iter()
+            .map(CompactString::as_str)
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let mut object = serde_json::Map::new();
+    object.insert("blocks".to_owned(), serde_json::json!(info.blocks));
+    if let Some(candidate) = info.last_candidate {
+        object.insert(
+            "currentblockweight".to_owned(),
+            serde_json::json!(candidate.weight),
+        );
+        object.insert(
+            "currentblocktx".to_owned(),
+            serde_json::json!(candidate.transactions),
+        );
+    }
+    object.insert("difficulty".to_owned(), serde_json::json!(info.difficulty));
+    object.insert(
+        "networkhashps".to_owned(),
+        serde_json::json!(info.network_hashes_per_second),
+    );
+    object.insert(
+        "pooledtx".to_owned(),
+        serde_json::json!(info.pooled_transactions),
+    );
+    object.insert("chain".to_owned(), serde_json::json!(chain));
+    object.insert("warnings".to_owned(), serde_json::json!(warnings));
+    if let Some(signet) = info.signet.as_ref() {
+        object.insert(
+            "signet_challenge".to_owned(),
+            serde_json::json!(signet.challenge.as_bytes().to_lower_hex_string()),
+        );
+    }
+    serde_to_sonic(&serde_json::Value::Object(object))
+}
+
+fn render_validation_result(result: BlockValidationResult) -> Value {
+    match result {
+        BlockValidationResult::Accepted => Value::new_null(),
+        BlockValidationResult::Duplicate => json!("duplicate"),
+        BlockValidationResult::DuplicateInvalid => json!("duplicate-invalid"),
+        BlockValidationResult::DuplicateInconclusive => json!("duplicate-inconclusive"),
+        BlockValidationResult::Inconclusive => json!("inconclusive"),
+        BlockValidationResult::Rejected(reason) => json!(reason.as_str()),
+    }
+}
+
+fn map_mining_control_error(error: MiningControlError) -> RpcError {
+    match error {
+        MiningControlError::InvalidRequest(message) => {
+            RpcError::InvalidParameter(message.to_string())
+        }
+        MiningControlError::Unavailable(message) => RpcError::Misc(message.to_string()),
+        MiningControlError::Failed(message) => RpcError::Internal(message.to_string()),
+    }
+}
+
 #[cfg(test)]
-mod submitblock_tests {
+mod tests {
     use super::*;
     use alloc::sync::Arc;
-    use bitcoin::consensus::encode::serialize;
-    use bitcoin::hex::DisplayHex as _;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use bitcoin::absolute;
+    use bitcoin::transaction;
+    use bitcoin::{ScriptBuf, Transaction};
+    use bitcoin_rs_mining::{Candidate, CandidateTransaction, TemplateId};
+    use bitcoin_rs_primitives::{Hash256, Network};
+    use parking_lot::Mutex;
+
+    use crate::context::{
+        AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
+        BlockTemplateResult, BlockValidationResult, LastCandidateInfo, MiningControl,
+        MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation,
+    };
+
+    struct FakeMiningControl {
+        template: Mutex<Option<BlockTemplate>>,
+        proposal: Mutex<BlockValidationResult>,
+        submit: Mutex<BlockValidationResult>,
+        info: Mutex<MiningInfo>,
+        last_request: Mutex<Option<BlockTemplateRequest>>,
+        template_calls: AtomicUsize,
+        submit_calls: AtomicUsize,
+        info_calls: AtomicUsize,
+        fail: Mutex<Option<MiningControlError>>,
+    }
+
+    impl FakeMiningControl {
+        fn with_template(template: BlockTemplate) -> Arc<Self> {
+            Arc::new(Self {
+                template: Mutex::new(Some(template)),
+                proposal: Mutex::new(BlockValidationResult::Accepted),
+                submit: Mutex::new(BlockValidationResult::Accepted),
+                info: Mutex::new(sample_mining_info()),
+                last_request: Mutex::new(None),
+                template_calls: AtomicUsize::new(0),
+                submit_calls: AtomicUsize::new(0),
+                info_calls: AtomicUsize::new(0),
+                fail: Mutex::new(None),
+            })
+        }
+    }
+
+    impl MiningControl for FakeMiningControl {
+        fn get_block_template(
+            &self,
+            request: BlockTemplateRequest,
+        ) -> Result<BlockTemplateResult, MiningControlError> {
+            self.template_calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(error) = self.fail.lock().clone() {
+                return Err(error);
+            }
+            *self.last_request.lock() = Some(request.clone());
+            match request.mode {
+                BlockTemplateMode::Proposal(_) => {
+                    Ok(BlockTemplateResult::Proposal(self.proposal.lock().clone()))
+                }
+                BlockTemplateMode::Template => {
+                    let mut template = self
+                        .template
+                        .lock()
+                        .clone()
+                        .expect("template configured for fake control");
+                    if request.long_poll_id.is_some() {
+                        template.submit_old = Some(true);
+                    }
+                    Ok(BlockTemplateResult::Template(template))
+                }
+            }
+        }
+
+        fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+            self.info_calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(error) = self.fail.lock().clone() {
+                return Err(error);
+            }
+            Ok(self.info.lock().clone())
+        }
+
+        fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
+            self.submit_calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(error) = self.fail.lock().clone() {
+                return Err(error);
+            }
+            Ok(self.submit.lock().clone())
+        }
+
+        fn publish_generation(&self) {}
+    }
+
+    fn sample_candidate() -> Candidate {
+        let previous = Hash256::from_le_bytes(&[0x11; 32]);
+        Candidate {
+            template_id: TemplateId::new(&previous, 9),
+            previous_block_hash: previous,
+            height: 101,
+            version: 0x2000_0000,
+            bits: 0x207f_ffff,
+            min_time: 1_700_000_001,
+            current_time: 1_700_000_010,
+            max_weight: 4_000_000,
+            max_size: 4_000_000,
+            max_sigops: 80_000,
+            mempool_sequence: 9,
+            coinbase: Transaction {
+                version: transaction::Version(2),
+                lock_time: absolute::LockTime::ZERO,
+                input: Vec::new(),
+                output: Vec::new(),
+            },
+            coinbase_value: 5_000_000_000,
+            fees: 0,
+            weight: 1_000,
+            size: 250,
+            sigop_cost: 0,
+            transactions: Vec::new(),
+            witness_merkle_root: None,
+            witness_reserved_value: None,
+            witness_commitment: Some(Hash256::from_le_bytes(&[0xab; 32])),
+        }
+    }
+
+    fn sample_template() -> BlockTemplate {
+        BlockTemplate {
+            candidate: Arc::new(sample_candidate()),
+            rules: vec![MiningRule::new("segwit"), MiningRule::new("csv")],
+            version_bits_available: Vec::new(),
+            version_bits_required: 0,
+            capabilities: vec![
+                MiningCapability::new("proposal"),
+                MiningCapability::new("longpoll"),
+            ],
+            mutable: vec![
+                TemplateMutation::Time,
+                TemplateMutation::Transactions,
+                TemplateMutation::PreviousBlock,
+            ],
+            submit_old: None,
+            work_id: None,
+        }
+    }
+
+    fn sample_mining_info() -> MiningInfo {
+        MiningInfo {
+            blocks: 12,
+            last_candidate: Some(LastCandidateInfo {
+                weight: 2_500,
+                transactions: 3,
+            }),
+            difficulty: 1.0,
+            network_hashes_per_second: 42.5,
+            pooled_transactions: 4,
+            network: Network::Regtest,
+            next_bits: 0x207f_ffff,
+            next_difficulty: 1.0,
+            minimum_fee_rate: 1_000,
+            signet: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn ctx_with_control(control: Arc<dyn MiningControl>) -> Arc<Context> {
+        Arc::new(Context::new().with_mining_control(control))
+    }
 
     #[test]
-    fn submitblock_accepts_regtest_genesis() {
+    fn getblocktemplate_requires_mining_control() {
         let ctx = Arc::new(Context::new());
-        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        let block_payload_hex = serialize(&genesis).to_lower_hex_string();
-        let result = submitblock(&ctx, &json!([block_payload_hex]))
-            .unwrap_or_else(|err| panic!("submitblock failed: {err}"));
+        let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .expect_err("missing control must fail");
+        assert!(matches!(
+            error,
+            RpcError::MethodDisabled("mining is unavailable")
+        ));
+    }
+
+    #[test]
+    fn getblocktemplate_renders_candidate_and_reuses_control_result() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let first = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .unwrap_or_else(|err| panic!("getblocktemplate failed: {err}"));
+        let second = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .unwrap_or_else(|err| panic!("getblocktemplate failed: {err}"));
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            first.get("longpollid").and_then(JsonValueTrait::as_str),
+            second.get("longpollid").and_then(JsonValueTrait::as_str)
+        );
+        assert_eq!(
+            first.get("longpollid").and_then(JsonValueTrait::as_str),
+            Some(sample_candidate().template_id.as_str())
+        );
+        assert_eq!(
+            first.get("height").and_then(JsonValueTrait::as_u64),
+            Some(101)
+        );
+        assert_eq!(
+            first.get("coinbasevalue").and_then(JsonValueTrait::as_u64),
+            Some(5_000_000_000)
+        );
+        let rules = first
+            .get("rules")
+            .and_then(JsonContainerTrait::as_array)
+            .expect("rules array");
+        assert_eq!(rules[0].as_str(), Some("!segwit"));
+        assert_eq!(rules[1].as_str(), Some("csv"));
         assert!(
-            result.is_null(),
-            "expected null accept signal, got {result:?}"
+            first
+                .get("default_witness_commitment")
+                .and_then(JsonValueTrait::as_str)
+                .is_some_and(|script| script.starts_with("6a24aa21a9ed"))
+        );
+        assert!(
+            control
+                .last_request
+                .lock()
+                .as_ref()
+                .is_some_and(|request| matches!(request.mode, BlockTemplateMode::Template))
         );
     }
 
     #[test]
-    fn submitblock_pushes_to_channel_when_present() {
-        let (tx, rx) = crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundBlock>();
-        let mut ctx = Context::new();
-        ctx.inbound_blocks_sender = Some(tx);
-        let ctx = Arc::new(ctx);
+    fn getblocktemplate_forwards_longpollid_and_surfaces_submitold() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let longpoll = sample_candidate().template_id.as_str().to_owned();
+        let result = getblocktemplate(
+            &ctx,
+            &json!([{
+                "rules": ["segwit"],
+                "longpollid": longpoll,
+            }]),
+        )
+        .unwrap_or_else(|err| panic!("longpoll getblocktemplate failed: {err}"));
+        let request = control
+            .last_request
+            .lock()
+            .clone()
+            .expect("request recorded");
+        assert_eq!(
+            request.long_poll_id.as_deref(),
+            Some(sample_candidate().template_id.as_str())
+        );
+        assert_eq!(
+            result.get("submitold").and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn getblocktemplate_proposal_accepted_returns_null() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.proposal.lock() = BlockValidationResult::Accepted;
+        let ctx = ctx_with_control(control.clone());
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let hex = serialize(&genesis).to_lower_hex_string();
-        let result = submitblock(&ctx, &json!([hex]))
-            .unwrap_or_else(|err| panic!("submitblock failed: {err}"));
+        let result = getblocktemplate(
+            &ctx,
+            &json!([{
+                "mode": "proposal",
+                "capabilities": ["proposal"],
+                "data": hex,
+            }]),
+        )
+        .unwrap_or_else(|err| panic!("proposal failed: {err}"));
         assert!(result.is_null());
-        let received = rx
-            .try_recv()
-            .unwrap_or_else(|err| panic!("channel did not receive block: {err}"));
-        assert_eq!(received.block.block_hash(), genesis.block_hash());
+        assert!(matches!(
+            control
+                .last_request
+                .lock()
+                .as_ref()
+                .map(|request| &request.mode),
+            Some(BlockTemplateMode::Proposal(_))
+        ));
     }
 
     #[test]
-    fn submitblock_rejects_garbage() {
-        let ctx = Arc::new(Context::new());
+    fn getblocktemplate_rejects_missing_mandatory_rule_support() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let error = getblocktemplate(&ctx, &json!([{"rules":["csv"]}]))
+            .expect_err("missing segwit support must fail");
+        assert!(matches!(error, RpcError::InvalidParameter(message) if message.contains("segwit")));
+    }
+
+    #[test]
+    fn getblocktemplate_rejects_malformed_rules_and_capabilities() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let rules_error = getblocktemplate(&ctx, &json!([{"rules":"segwit"}]))
+            .expect_err("rules must be an array");
+        assert!(matches!(rules_error, RpcError::InvalidType(_)));
+        let capabilities_error = getblocktemplate(&ctx, &json!([{"capabilities":[1]}]))
+            .expect_err("capabilities entries must be strings");
+        assert!(matches!(capabilities_error, RpcError::InvalidType(_)));
+    }
+
+    #[test]
+    fn submitblock_maps_accepted_rejected_and_duplicate_results() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let hex = serialize(&genesis).to_lower_hex_string();
+
+        *control.submit.lock() = BlockValidationResult::Accepted;
+        assert!(
+            submitblock(&ctx, &json!([hex.as_str()]))
+                .unwrap_or_else(|err| panic!("submit failed: {err}"))
+                .is_null()
+        );
+
+        *control.submit.lock() = BlockValidationResult::Duplicate;
+        assert_eq!(
+            submitblock(&ctx, &json!([hex.as_str()]))
+                .unwrap_or_else(|err| panic!("submit failed: {err}"))
+                .as_str(),
+            Some("duplicate")
+        );
+
+        *control.submit.lock() = BlockValidationResult::Rejected(CompactString::from("high-hash"));
+        assert_eq!(
+            submitblock(&ctx, &json!([hex.as_str()]))
+                .unwrap_or_else(|err| panic!("submit failed: {err}"))
+                .as_str(),
+            Some("high-hash")
+        );
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
+        let missing = Arc::new(Context::new());
+        let error = submitblock(&missing, &json!(["00"]))
+            .expect_err("submitblock without control must fail");
+        assert!(matches!(
+            error,
+            RpcError::MethodDisabled("mining is unavailable")
+        ));
+
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
         let result = submitblock(&ctx, &json!(["deadbeef"]))
-            .unwrap_or_else(|err| panic!("submitblock failed: {err}"));
-        let Some(s) = result.as_str() else {
-            panic!("expected string rejection, got {result:?}");
-        };
-        assert_eq!(s, "bad-block-encoding");
+            .unwrap_or_else(|err| panic!("garbage should stay a result string: {err}"));
+        assert_eq!(result.as_str(), Some("bad-block-encoding"));
     }
-}
-
-#[cfg(test)]
-mod getmininginfo_tests {
-    use super::*;
-    use alloc::sync::Arc;
 
     #[test]
-    fn getmininginfo_returns_core_shape_on_fresh_context() {
-        let ctx = Arc::new(Context::new());
+    fn getmininginfo_projects_control_state() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
         let result = getmininginfo(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
-        let Some(chain) = result.get("chain").and_then(JsonValueTrait::as_str) else {
-            panic!("chain missing: {result:?}");
-        };
-        assert_eq!(chain, "main");
-        let Some(blocks) = result.get("blocks").and_then(JsonValueTrait::as_u64) else {
-            panic!("blocks missing: {result:?}");
-        };
-        assert_eq!(blocks, 0);
-        let Some(pooledtx) = result.get("pooledtx").and_then(JsonValueTrait::as_u64) else {
-            panic!("pooledtx missing: {result:?}");
-        };
-        assert_eq!(pooledtx, 0);
+        assert_eq!(
+            result.get("blocks").and_then(JsonValueTrait::as_u64),
+            Some(12)
+        );
+        assert_eq!(
+            result
+                .get("currentblockweight")
+                .and_then(JsonValueTrait::as_u64),
+            Some(2_500)
+        );
+        assert_eq!(
+            result
+                .get("currentblocktx")
+                .and_then(JsonValueTrait::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            result.get("pooledtx").and_then(JsonValueTrait::as_u64),
+            Some(4)
+        );
+        assert_eq!(
+            result.get("chain").and_then(JsonValueTrait::as_str),
+            Some("regtest")
+        );
+        assert_eq!(control.info_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
-    fn getmininginfo_currentblockweight_reflects_mempool_when_populated() {
+    fn getmininginfo_requires_mining_control() {
+        let ctx = Arc::new(Context::new());
+        let error = getmininginfo(&ctx, &json!([])).expect_err("missing control must fail");
+        assert!(matches!(
+            error,
+            RpcError::MethodDisabled("mining is unavailable")
+        ));
+    }
+
+    #[test]
+    fn prioritisetransaction_calls_mempool_prioritise_directly() {
         use bitcoin_rs_mempool::MempoolEntry;
 
         let ctx = Arc::new(Context::new());
+        let tx = Transaction {
+            version: transaction::Version(2),
+            lock_time: absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let txid = tx.compute_txid();
         {
             let mut pool = ctx.mempool.write();
-            let tx = bitcoin::Transaction {
-                version: bitcoin::transaction::Version(2),
-                lock_time: bitcoin::absolute::LockTime::ZERO,
-                input: Vec::new(),
-                output: Vec::new(),
-            };
-            let entry = MempoolEntry::new(Arc::new(tx), 250, 5_000, 1, 7);
-            pool.insert_entry(entry)
-                .unwrap_or_else(|err| panic!("insert_entry failed: {err}"));
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
         }
-
-        let result = getmininginfo(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
-        let Some(weight) = result
-            .get("currentblockweight")
-            .and_then(JsonValueTrait::as_u64)
-        else {
-            panic!("currentblockweight missing: {result:?}");
-        };
-        let Some(tx_count) = result
-            .get("currentblocktx")
-            .and_then(JsonValueTrait::as_u64)
-        else {
-            panic!("currentblocktx missing: {result:?}");
-        };
-
-        assert_eq!(weight, 1_000);
-        assert_eq!(tx_count, 1);
+        let txid_hex = txid.to_string();
+        let result = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500]))
+            .unwrap_or_else(|err| panic!("prioritisetransaction failed: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
+        let pool = ctx.mempool.read();
+        let entry = pool
+            .entry_by_txid(&txid)
+            .expect("entry remains after prioritise");
+        assert_eq!(entry.fee_delta, 500);
+        assert_eq!(entry.fee, 1_000);
     }
 
     #[test]
-    fn getmininginfo_currentblocktx_zero_when_mempool_empty() {
-        let ctx = Arc::new(Context::new());
-        let result = getmininginfo(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
-        let Some(weight) = result
-            .get("currentblockweight")
-            .and_then(JsonValueTrait::as_u64)
-        else {
-            panic!("currentblockweight missing");
+    fn getblocktemplate_includes_selected_transactions() {
+        let mut template = sample_template();
+        let tx = Transaction {
+            version: transaction::Version(2),
+            lock_time: absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
         };
-        let Some(count) = result
-            .get("currentblocktx")
-            .and_then(JsonValueTrait::as_u64)
-        else {
-            panic!("currentblocktx missing");
-        };
-        assert_eq!(weight, 0);
-        assert_eq!(count, 0);
+        let txid = tx.compute_txid();
+        let wtxid = tx.compute_wtxid();
+        let mut candidate = sample_candidate();
+        candidate.transactions.push(CandidateTransaction {
+            tx: Arc::new(tx.clone()),
+            txid,
+            wtxid,
+            fee: 100,
+            fee_delta: 0,
+            modified_fee: 100,
+            sigop_cost: 2,
+            weight: 400,
+            size: 100,
+            depends: vec![],
+        });
+        template.candidate = Arc::new(candidate);
+        let control = FakeMiningControl::with_template(template);
+        let ctx = ctx_with_control(control);
+        let result = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .unwrap_or_else(|err| panic!("template with txs failed: {err}"));
+        let transactions = result
+            .get("transactions")
+            .and_then(JsonContainerTrait::as_array)
+            .expect("transactions array");
+        assert_eq!(transactions.len(), 1);
+        let txid_hex = txid.to_string();
+        let tx_hex = serialize(&tx).to_lower_hex_string();
+        assert_eq!(
+            transactions[0].get("txid").and_then(JsonValueTrait::as_str),
+            Some(txid_hex.as_str())
+        );
+        assert_eq!(
+            transactions[0].get("data").and_then(JsonValueTrait::as_str),
+            Some(tx_hex.as_str())
+        );
     }
 
     #[test]
-    fn getmininginfo_networkhashps_zero_when_no_applied_tip() {
-        let ctx = Arc::new(Context::new());
+    fn getblocktemplate_renders_version_bits_workid_and_forced_rules() {
+        let mut template = sample_template();
+        template.version_bits_available = vec![
+            AvailableMiningRule {
+                rule: MiningRule::new("taproot"),
+                bit: 2,
+            },
+            AvailableMiningRule {
+                rule: MiningRule::new("testdummy"),
+                bit: 28,
+            },
+        ];
+        template.version_bits_required = 1 << 2;
+        template.work_id = Some(CompactString::from("work-abc"));
+        let control = FakeMiningControl::with_template(template);
+        let ctx = ctx_with_control(control);
+        let result = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .unwrap_or_else(|err| panic!("version-bits template failed: {err}"));
+
+        let vbavailable = result.get("vbavailable").expect("vbavailable object");
+        assert_eq!(
+            vbavailable.get("taproot").and_then(JsonValueTrait::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            vbavailable
+                .get("testdummy")
+                .and_then(JsonValueTrait::as_u64),
+            Some(28)
+        );
+        assert_eq!(
+            result.get("vbrequired").and_then(JsonValueTrait::as_u64),
+            Some(1 << 2)
+        );
+        assert_eq!(
+            result.get("workid").and_then(JsonValueTrait::as_str),
+            Some("work-abc")
+        );
+        let rules = result
+            .get("rules")
+            .and_then(JsonContainerTrait::as_array)
+            .expect("rules array");
+        assert_eq!(rules[0].as_str(), Some("!segwit"));
+        assert_eq!(rules[1].as_str(), Some("csv"));
+    }
+
+    #[test]
+    fn getmininginfo_can_include_signet_challenge() {
+        let control = FakeMiningControl::with_template(sample_template());
+        {
+            let mut info = control.info.lock();
+            info.network = Network::Signet;
+            info.signet = Some(SignetMiningInfo {
+                challenge: ScriptBuf::from_bytes(vec![0x51]),
+            });
+        }
+        let ctx = ctx_with_control(control);
         let result = getmininginfo(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
-        let Some(rate) = result.get("networkhashps").and_then(JsonValueTrait::as_f64) else {
-            panic!("networkhashps missing: {result:?}");
-        };
-        assert!(rate.abs() < f64::EPSILON, "expected zero, got {rate}");
+            .unwrap_or_else(|err| panic!("signet mininginfo failed: {err}"));
+        assert_eq!(
+            result.get("chain").and_then(JsonValueTrait::as_str),
+            Some("signet")
+        );
+        assert_eq!(
+            result
+                .get("signet_challenge")
+                .and_then(JsonValueTrait::as_str),
+            Some("51")
+        );
     }
 }

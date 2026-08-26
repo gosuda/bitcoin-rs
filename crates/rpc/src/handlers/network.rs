@@ -4,9 +4,8 @@ use core::str::FromStr;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
+use bitcoin_rs_p2p::{AddNodeError, BanError, ConnectedPeer, IpSubnet, NetworkControls};
 use bitcoin_rs_primitives::USER_AGENT;
-use crossbeam_channel::TrySendError;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use crate::context::Context;
@@ -22,6 +21,7 @@ const LOCAL_SERVICES_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 3) | (1_u64 << 6);
 const LOCAL_SERVICES_HEX: &str = "0000000000000049";
 
 const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x49);
+
 /// Decodes a Bitcoin service-flags bitmask into a list of name strings.
 ///
 /// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
@@ -53,7 +53,12 @@ fn services_names_from_flags(flags: u64) -> Vec<String> {
 
 const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 const DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB: f64 = 0.00001;
-const DEFAULT_BAN_TIME_SECS: u64 = 24 * 60 * 60;
+
+fn require_controls(ctx: &Context) -> Result<&NetworkControls, RpcError> {
+    ctx.network_controls
+        .as_deref()
+        .ok_or(RpcError::MethodDisabled("network controls are unavailable"))
+}
 
 fn parse_setban_target(raw: &str) -> Result<IpSubnet, RpcError> {
     if let Ok(subnet) = IpSubnet::from_str(raw) {
@@ -79,20 +84,19 @@ fn epoch_seconds(time: SystemTime) -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Option<SystemTime> {
-    if absolute {
-        return UNIX_EPOCH.checked_add(Duration::from_secs(bantime));
-    }
-
-    let duration = if bantime == 0 {
-        Duration::from_secs(DEFAULT_BAN_TIME_SECS)
-    } else {
-        Duration::from_secs(bantime)
-    };
-    now.checked_add(duration)
+fn epoch_millis(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).ok().map_or(0, |duration| {
+        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+    })
 }
 
-fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
+fn epoch_micros(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).ok().map_or(0, |duration| {
+        u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+    })
+}
+
+fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
     let Some(array) = params.as_array() else {
         return Ok(default);
     };
@@ -103,16 +107,98 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
         return Ok(default);
     }
     value
-        .as_u64()
-        .ok_or(RpcError::InvalidType("parameter must be unsigned integer"))
+        .as_i64()
+        .ok_or(RpcError::InvalidType("parameter must be integer"))
 }
 
+fn map_ban_error(error: BanError) -> RpcError {
+    RpcError::Misc(error.to_string())
+}
+
+fn map_add_node_error(error: AddNodeError) -> RpcError {
+    RpcError::Misc(error.to_string())
+}
+
+fn duration_secs(duration: Option<Duration>) -> f64 {
+    duration.map_or(0.0, |value| value.as_secs_f64())
+}
+
+fn peer_json(peer: &ConnectedPeer) -> Value {
+    let stats = peer.stats.as_ref();
+    let (version, services, user_agent, start_height, conn_time) = match &peer.info {
+        Some(info) => (
+            info.version,
+            info.services,
+            info.user_agent.clone(),
+            info.start_height,
+            info.conn_time,
+        ),
+        None => (0, 0, String::new(), 0, 0),
+    };
+    let services_names = match &peer.info {
+        Some(info) => info
+            .services_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        None => services_names_from_flags(services),
+    };
+    json!({
+        "id": peer.node_id,
+        "addr": peer.addr.to_string(),
+        "addrbind": peer.addr.to_string(),
+        "services": format!("{services:016x}"),
+        "servicesnames": services_names,
+        "relaytxes": true,
+        "lastsend": 0,
+        "lastrecv": 0,
+        "bytessent": stats.bytes_sent(),
+        "bytesrecv": stats.bytes_recv(),
+        "conntime": conn_time,
+        "timeoffset": stats.time_offset().unwrap_or(0),
+        "pingtime": duration_secs(stats.ping_time()),
+        "minping": duration_secs(stats.min_ping()),
+        "version": version,
+        "subver": user_agent,
+        "inbound": peer.inbound,
+        "startingheight": start_height,
+        "presynced_headers": -1,
+        "synced_headers": -1,
+        "synced_blocks": -1,
+        "inflight": Vec::<u32>::new(),
+        "addr_processed": 0,
+        "addr_rate_limited": 0,
+        "permissions": Vec::<String>::new(),
+        "minfeefilter": 0.0,
+        "bytessent_per_msg": serde_json::Map::<String, serde_json::Value>::new(),
+        "bytesrecv_per_msg": serde_json::Map::<String, serde_json::Value>::new(),
+        "connection_type": if peer.inbound { "inbound" } else { "outbound-full-relay" },
+    })
+}
+
+fn added_node_json(info: &bitcoin_rs_p2p::AddedNodeInfo) -> Value {
+    let addresses = if info.connected {
+        info.resolved
+            .map(|addr| {
+                vec![json!({
+                    "address": addr.to_string(),
+                    "connected": "outbound",
+                })]
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::<Value>::new()
+    };
+    json!({
+        "addednode": info.spec,
+        "connected": info.connected,
+        "addresses": addresses,
+    })
+}
 pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let peers = ctx.peers.read();
-    let total = peers.len();
-    let inbound = peers.iter().filter(|p| p.inbound).count();
-    let outbound = total.saturating_sub(inbound);
+    let controls = require_controls(ctx)?;
+    let counts = controls.connection_counts();
     Ok(json!({
         "version": 10000,
         "subversion": USER_AGENT,
@@ -120,11 +206,11 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         "localservices": LOCAL_SERVICES_HEX,
         "localservicesnames": services_names_from_flags(LOCAL_SERVICES_FLAGS),
         "localrelay": true,
-        "timeoffset": 0,
-        "networkactive": true,
-        "connections": total,
-        "connections_in": inbound,
-        "connections_out": outbound,
+        "timeoffset": controls.time_offset().unwrap_or(0),
+        "networkactive": controls.network_active(),
+        "connections": counts.total(),
+        "connections_in": counts.inbound,
+        "connections_out": counts.outbound,
         "networks": [
             {"name": "ipv4", "limited": false, "reachable": true, "proxy": "", "proxy_randomize_credentials": false},
             {"name": "ipv6", "limited": false, "reachable": true, "proxy": "", "proxy_randomize_credentials": false},
@@ -139,71 +225,39 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
 pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let peers = ctx.peers.read();
-    let mut array = Vec::with_capacity(peers.len());
-    for (id, peer) in peers.iter().enumerate() {
-        array.push(json!({
-            "id": id,
-            "addr": peer.addr.to_string(),
-            "addrbind": peer.addr.to_string(),
-            "services": format!("{:016x}", peer.services),
-            "servicesnames": peer.services_names().into_iter().map(str::to_owned).collect::<Vec<_>>(),
-            "relaytxes": true,
-            "lastsend": 0,
-            "lastrecv": 0,
-            "bytessent": 0,
-            "bytesrecv": 0,
-            "conntime": peer.conn_time,
-            "timeoffset": 0,
-            "pingtime": 0.0,
-            "minping": 0.0,
-            "version": peer.version,
-            "subver": peer.user_agent.clone(),
-            "inbound": peer.inbound,
-            "startingheight": peer.start_height,
-            "presynced_headers": -1,
-            "synced_headers": -1,
-            "synced_blocks": -1,
-            "inflight": Vec::<u32>::new(),
-            "addr_processed": 0,
-            "addr_rate_limited": 0,
-            "permissions": Vec::<String>::new(),
-            "minfeefilter": 0.0,
-            "bytessent_per_msg": serde_json::Map::<String, serde_json::Value>::new(),
-            "bytesrecv_per_msg": serde_json::Map::<String, serde_json::Value>::new(),
-            "connection_type": if peer.inbound { "inbound" } else { "outbound" },
-        }));
-    }
+    let controls = require_controls(ctx)?;
+    let peers = controls.connected_peers();
+    let array: Vec<Value> = peers.iter().map(peer_json).collect();
     Ok(json!(array))
 }
 
 pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let _ = params_array(params)?;
-    let added = ctx.added_nodes.read();
-    let entries: Vec<sonic_rs::Value> = added
-        .iter()
-        .map(|addr| {
-            json!({
-                "addednode": addr.to_string(),
-                "connected": false,
-                "addresses": Vec::<sonic_rs::Value>::new(),
-            })
-        })
-        .collect();
+    let array = params_array(params)?;
+    let controls = require_controls(ctx)?;
+    let mut infos = controls.added_node_infos();
+    if let Some(node) = array.first().and_then(JsonValueTrait::as_str) {
+        infos.retain(|entry| entry.spec == node);
+        if infos.is_empty() {
+            return Err(RpcError::Misc("Error: Node has not been added.".to_owned()));
+        }
+    }
+    let entries: Vec<Value> = infos.iter().map(added_node_json).collect();
     Ok(json!(entries))
 }
 
 pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let banned = ctx.banned.read();
-    let entries: Vec<sonic_rs::Value> = banned
-        .iter()
+    let controls = require_controls(ctx)?;
+    let now = SystemTime::now();
+    let entries: Vec<Value> = controls
+        .banned_list(now)
+        .into_iter()
         .map(|entry| {
             json!({
                 "address": entry.subnet.to_string(),
                 "banned_until": entry.banned_until.map_or(0, epoch_seconds),
                 "ban_created": epoch_seconds(entry.ban_created),
-                "ban_reason": entry.reason.clone(),
+                "ban_reason": entry.reason,
             })
         })
         .collect();
@@ -214,22 +268,17 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
     let subnet_str = required_str(params, 0, "subnet is required")?;
     let command = required_str(params, 1, "command is required")?;
     let subnet = parse_setban_target(subnet_str)?;
+    let controls = require_controls(ctx)?;
     match command {
         "add" => {
-            let now = SystemTime::now();
-            let bantime = optional_u64(params, 2, 0)?;
+            let bantime = optional_i64(params, 2, 0)?;
             let absolute = optional_bool(params, 3, false)?;
-            let mut banned = ctx.banned.write();
-            banned.retain(|entry| entry.subnet != subnet);
-            banned.push(BannedSubnet {
-                subnet,
-                banned_until: ban_until(now, bantime, absolute),
-                ban_created: now,
-                reason: "manual".to_owned(),
-            });
+            controls
+                .ban(subnet, bantime, absolute, SystemTime::now(), "manual")
+                .map_err(map_ban_error)?;
         }
         "remove" => {
-            ctx.banned.write().retain(|entry| entry.subnet != subnet);
+            controls.unban(&subnet).map_err(map_ban_error)?;
         }
         _ => return Err(RpcError::InvalidParams("command must be 'add' or 'remove'")),
     }
@@ -238,66 +287,37 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
 
 pub(crate) fn clearbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    ctx.banned.write().clear();
+    require_controls(ctx)?.clear_banned();
     Ok(Value::new_null())
 }
 
-pub(crate) fn setnetworkactive(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let state = array
         .first()
         .and_then(JsonValueTrait::as_bool)
         .ok_or(RpcError::InvalidParams("state must be a boolean"))?;
-    // No-op until P2P kill-switch is wired; echo back the requested state.
-    Ok(json!(state))
+    let controls = require_controls(ctx)?;
+    Ok(json!(controls.set_network_active(state)))
 }
-pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+
+pub(crate) fn ping(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    // Core's `ping` schedules a P2P ping; we don't have async-ping wiring yet,
-    // so we return null per the Core contract. Per-peer pingtime surfaces via
-    // getpeerinfo when measurements are available.
+    let controls = require_controls(ctx)?;
+    let _ = controls.send_pings(epoch_micros(SystemTime::now()));
     Ok(Value::new_null())
 }
 
 pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let node = required_str(params, 0, "node is required")?;
     let command = required_str(params, 1, "command is required")?;
-    let addr = SocketAddr::from_str(node)
-        .map_err(|_| RpcError::InvalidParams("node must be a valid host:port address"))?;
+    let controls = require_controls(ctx)?;
     match command {
-        "add" | "onetry" => {
-            let now = SystemTime::now();
-            let banned = ctx.banned.read();
-            if bitcoin_rs_p2p::subnet::is_banned(banned.as_slice(), addr.ip(), now) {
-                return Err(RpcError::InvalidParams("node is banned"));
-            }
-            drop(banned);
-
-            let persist = command == "add";
-            if persist {
-                let mut list = ctx.added_nodes.write();
-                if !list.contains(&addr) {
-                    list.push(addr);
-                }
-            }
-
-            if let Some(sender) = &ctx.p2p_outbound_sender {
-                match sender.try_send(addr) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => {}
-                    Err(TrySendError::Full(_)) => {
-                        return Err(RpcError::Internal("p2p outbound queue full".to_owned()));
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        return Err(RpcError::Internal("p2p outbound channel closed".to_owned()));
-                    }
-                }
-            }
-        }
-        "remove" => {
-            let mut list = ctx.added_nodes.write();
-            list.retain(|a| *a != addr);
-        }
+        "add" => controls.add_node(node).map_err(map_add_node_error)?,
+        "remove" => controls
+            .remove_added_node(node)
+            .map_err(map_add_node_error)?,
+        "onetry" => controls.try_node_connection(node),
         _ => {
             return Err(RpcError::InvalidParams(
                 "command must be one of: add, remove, onetry",
@@ -307,34 +327,58 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
     Ok(Value::new_null())
 }
 
-pub(crate) fn disconnectnode(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let address = required_str(params, 0, "address is required")?;
-    SocketAddr::from_str(address)
-        .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
-    // TODO(p2p-outbound): wire to a disconnection sender on Context.
+pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let array = params_array(params)?;
+    let address = array.first().and_then(JsonValueTrait::as_str).unwrap_or("");
+    let node_id = array.get(1).and_then(JsonValueTrait::as_i64);
+    let controls = require_controls(ctx)?;
+
+    let disconnected = if !address.is_empty() {
+        let addr = SocketAddr::from_str(address)
+            .map_err(|_| RpcError::InvalidParams("address must be a valid host:port"))?;
+        controls.disconnect_node(&addr)
+    } else if let Some(node_id) = node_id {
+        let node_id = u64::try_from(node_id)
+            .map_err(|_| RpcError::InvalidParams("nodeid must be non-negative"))?;
+        controls.disconnect_node_by_id(node_id)
+    } else {
+        return Err(RpcError::InvalidParams(
+            "No address provided for disconnectnode",
+        ));
+    };
+
+    if !disconnected {
+        return Err(RpcError::Misc(
+            "Node not found in connected nodes".to_owned(),
+        ));
+    }
     Ok(Value::new_null())
 }
 
 pub(crate) fn getconnectioncount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let count = ctx.peers.read().len();
-    Ok(json!(count))
+    let counts = require_controls(ctx)?.connection_counts();
+    Ok(json!(counts.total()))
 }
 
 pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let network = ctx.network.read();
+    let controls = require_controls(ctx)?;
+    let now = SystemTime::now();
+    let now_secs = i64::try_from(epoch_seconds(now)).unwrap_or(i64::MAX);
+    let totals = controls.totals();
+    let upload = totals.upload_target(now_secs);
     Ok(json!({
-        "totalbytesrecv": network.bytes_recv,
-        "totalbytessent": network.bytes_sent,
-        "timemillis": network.timestamp,
+        "totalbytesrecv": totals.total_bytes_recv(),
+        "totalbytessent": totals.total_bytes_sent(),
+        "timemillis": epoch_millis(now),
         "uploadtarget": {
-            "timeframe": 0,
-            "target": 0,
-            "target_reached": true,
-            "serve_historical_blocks": true,
-            "bytes_left_in_cycle": 0,
-            "time_left_in_cycle": 0
+            "timeframe": upload.timeframe_secs,
+            "target": upload.target_bytes,
+            "target_reached": upload.target_reached,
+            "serve_historical_blocks": upload.serve_historical_blocks,
+            "bytes_left_in_cycle": upload.bytes_left_in_cycle,
+            "time_left_in_cycle": upload.time_left_in_cycle_secs
         }
     }))
 }
@@ -345,9 +389,22 @@ mod tests {
     use alloc::sync::Arc;
     use sonic_rs::JsonValueTrait;
 
+    fn fresh_controls() -> Arc<NetworkControls> {
+        Arc::new(NetworkControls::new(
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new())),
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            8_333,
+        ))
+    }
+
+    fn ctx_with(controls: Arc<NetworkControls>) -> Arc<Context> {
+        Arc::new(Context::new().with_network_controls(controls))
+    }
+
     #[test]
     fn getnetworkinfo_reports_zero_connections_on_fresh_context() {
-        let ctx = Arc::new(Context::new());
+        let ctx = ctx_with(fresh_controls());
         let result = getnetworkinfo(&ctx, &json!(null))
             .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
         let Some(connections) = result.get("connections").and_then(JsonValueTrait::as_u64) else {
@@ -361,13 +418,17 @@ mod tests {
             panic!("connections_in missing: {result:?}");
         };
         assert_eq!(connections_in, 0);
+        assert_eq!(
+            result
+                .get("networkactive")
+                .and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
     }
 
     #[test]
     fn getnetworkinfo_emits_relayfee_default_of_one_sat_per_vbyte() {
-        use alloc::sync::Arc;
-
-        let ctx = Arc::new(Context::new());
+        let ctx = ctx_with(fresh_controls());
         let result = getnetworkinfo(&ctx, &json!(null))
             .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
         let Some(relayfee) = result.get("relayfee").and_then(JsonValueTrait::as_f64) else {
@@ -381,7 +442,7 @@ mod tests {
 
     #[test]
     fn getnetworkinfo_localservices_advertises_network_witness_filters() {
-        let ctx = Arc::new(Context::new());
+        let ctx = ctx_with(fresh_controls());
         let result = getnetworkinfo(&ctx, &json!(null))
             .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
         assert_eq!(
@@ -447,22 +508,53 @@ mod tests {
 
     #[test]
     fn services_names_from_flags_ignores_unknown_bits() {
-        // Bit 63 is not in the decoder's recognized set.
         let names = services_names_from_flags(1_u64 << 63);
         assert!(names.is_empty());
     }
+
+    #[test]
+    fn handlers_require_network_controls() {
+        let ctx = Arc::new(Context::new());
+        assert!(matches!(
+            getconnectioncount(&ctx, &json!(null)),
+            Err(RpcError::MethodDisabled("network controls are unavailable"))
+        ));
+    }
 }
+
 #[cfg(test)]
 mod ping_tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::JsonValueTrait;
+    use bitcoin_rs_p2p::{Message, PeerLease};
+
+    fn fresh_controls() -> Arc<NetworkControls> {
+        Arc::new(NetworkControls::new(
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new())),
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            8_333,
+        ))
+    }
 
     #[test]
-    fn ping_returns_null() {
-        let ctx = Arc::new(Context::new());
+    fn ping_queues_through_shared_controls() {
+        let controls = fresh_controls();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let lease = PeerLease::new(tx);
+        controls.peer_outbound().write().insert(addr, lease.clone());
+        let ctx = Arc::new(Context::new().with_network_controls(Arc::clone(&controls)));
+
         let result = ping(&ctx, &json!([])).unwrap_or_else(|err| panic!("ping failed: {err}"));
         assert!(result.is_null());
+        assert!(matches!(rx.try_recv(), Ok(Message::Ping(_))));
+        assert!(
+            lease
+                .stats()
+                .ping_wait(epoch_micros(SystemTime::now()))
+                .is_some()
+        );
     }
 }
 
@@ -470,36 +562,55 @@ mod ping_tests {
 mod addnode_validation_tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::JsonValueTrait;
 
-    #[test]
-    fn addnode_rejects_bad_address() {
-        let ctx = Arc::new(Context::new());
-        let result = addnode(&ctx, &json!(["definitely-not-an-address", "add"]));
-        assert!(result.is_err());
+    fn ctx_with_dial() -> (Arc<Context>, crossbeam_channel::Receiver<SocketAddr>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let controls = NetworkControls::new(
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new())),
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            8_333,
+        )
+        .with_dial_sender(tx);
+        (
+            Arc::new(Context::new().with_network_controls(Arc::new(controls))),
+            rx,
+        )
+    }
+
+    fn bare_ctx() -> Arc<Context> {
+        Arc::new(
+            Context::new().with_network_controls(Arc::new(NetworkControls::new(
+                Arc::new(parking_lot::RwLock::new(Vec::new())),
+                Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new())),
+                Arc::new(parking_lot::RwLock::new(Vec::new())),
+                8_333,
+            ))),
+        )
     }
 
     #[test]
     fn addnode_rejects_unknown_command() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "frobnicate"]));
         assert!(result.is_err());
     }
 
     #[test]
     fn addnode_accepts_well_formed_input() {
-        let ctx = Arc::new(Context::new());
+        let (ctx, rx) = ctx_with_dial();
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "onetry"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
         assert!(result.is_null());
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(SocketAddr::from(([127, 0, 0, 1], 8333)))
+        );
     }
 
     #[test]
     fn addnode_add_sends_outbound_request() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
-        let ctx = Arc::new(ctx);
+        let (ctx, rx) = ctx_with_dial();
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
 
@@ -507,80 +618,47 @@ mod addnode_validation_tests {
         let Ok(sent) = rx.try_recv() else {
             panic!("addnode did not send outbound request");
         };
-        assert_eq!(sent, std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        assert_eq!(sent, SocketAddr::from(([127, 0, 0, 1], 8333)));
     }
 
     #[test]
-    fn addnode_returns_error_when_outbound_queue_is_full() {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        tx.try_send(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
-            .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
-        let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
-        let ctx = Arc::new(ctx);
-
-        let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
-
-        assert!(matches!(
-            result,
-            Err(RpcError::Internal(message)) if message == "p2p outbound queue full"
-        ));
-        assert_eq!(rx.try_iter().count(), 1);
-    }
-
-    #[test]
-    fn addnode_add_persists_when_outbound_queue_is_full() {
-        let (tx, _rx) = crossbeam_channel::bounded(1);
-        tx.try_send(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
-            .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
-        let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
-        let ctx = Arc::new(ctx);
-
-        let result = addnode(&ctx, &json!(["127.0.0.2:8333", "add"]))
-            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
-
-        assert!(result.is_null());
-        let added = ctx.added_nodes.read();
-        assert_eq!(
-            added.as_slice(),
-            [std::net::SocketAddr::from(([127, 0, 0, 2], 8333))]
-        );
-    }
-
-    #[test]
-    fn addnode_rejects_manually_banned_subnet() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
-        let ctx = Arc::new(ctx);
-        if let Err(err) = setban(&ctx, &json!(["127.0.0.0/24", "add"])) {
-            panic!("setban failed: {err}");
-        }
-
+    fn addnode_duplicate_returns_exact_error() {
+        let ctx = bare_ctx();
+        addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
+            .unwrap_or_else(|err| panic!("first addnode failed: {err}"));
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]));
-
         assert!(matches!(
             result,
-            Err(RpcError::InvalidParams("node is banned"))
+            Err(RpcError::Misc(message)) if message == "node already added"
         ));
-        assert!(ctx.added_nodes.read().is_empty());
-        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn addnode_remove_missing_returns_exact_error() {
+        let ctx = bare_ctx();
+        let result = addnode(&ctx, &json!(["127.0.0.1:8333", "remove"]));
+        assert!(matches!(
+            result,
+            Err(RpcError::Misc(message))
+                if message == "node could not be removed. it has not been added previously."
+        ));
     }
 
     #[test]
     fn disconnectnode_rejects_bad_address() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         let result = disconnectnode(&ctx, &json!(["definitely-not-an-address"]));
         assert!(result.is_err());
     }
 
     #[test]
-    fn disconnectnode_accepts_well_formed_address() {
-        let ctx = Arc::new(Context::new());
-        let result = disconnectnode(&ctx, &json!(["127.0.0.1:8333"]))
-            .unwrap_or_else(|err| panic!("disconnectnode failed: {err}"));
-        assert!(result.is_null());
+    fn disconnectnode_missing_peer_returns_exact_error() {
+        let ctx = bare_ctx();
+        let result = disconnectnode(&ctx, &json!(["127.0.0.1:8333"]));
+        assert!(matches!(
+            result,
+            Err(RpcError::Misc(message)) if message == "Node not found in connected nodes"
+        ));
     }
 }
 
@@ -590,9 +668,20 @@ mod admin_rpc_tests {
     use alloc::sync::Arc;
     use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
+    fn bare_ctx() -> Arc<Context> {
+        Arc::new(
+            Context::new().with_network_controls(Arc::new(NetworkControls::new(
+                Arc::new(parking_lot::RwLock::new(Vec::new())),
+                Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new())),
+                Arc::new(parking_lot::RwLock::new(Vec::new())),
+                8_333,
+            ))),
+        )
+    }
+
     #[test]
     fn getaddednodeinfo_returns_empty_array() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         let result = getaddednodeinfo(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getaddednodeinfo failed: {err}"));
         let Some(arr) = result.as_array() else {
@@ -603,7 +692,7 @@ mod admin_rpc_tests {
 
     #[test]
     fn listbanned_returns_empty_array() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         let result =
             listbanned(&ctx, &json!(null)).unwrap_or_else(|err| panic!("listbanned failed: {err}"));
         let Some(arr) = result.as_array() else {
@@ -614,7 +703,7 @@ mod admin_rpc_tests {
 
     #[test]
     fn setban_accepts_add_and_remove() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         assert!(setban(&ctx, &json!(["10.0.0.1:8333", "add"])).is_ok());
         let result = match listbanned(&ctx, &json!(null)) {
             Ok(result) => result,
@@ -631,29 +720,63 @@ mod admin_rpc_tests {
             Some("10.0.0.1/32")
         );
         assert!(setban(&ctx, &json!(["10.0.0.1:8333", "remove"])).is_ok());
-        assert!(ctx.banned.read().is_empty());
+        assert!(
+            listbanned(&ctx, &json!(null))
+                .unwrap_or_else(|err| panic!("listbanned failed: {err}"))
+                .as_array()
+                .is_some_and(|arr| arr.is_empty())
+        );
     }
 
     #[test]
     fn setban_rejects_unknown_command() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         let result = setban(&ctx, &json!(["10.0.0.1:8333", "frobnicate"]));
         assert!(result.is_err());
     }
 
     #[test]
-    fn setnetworkactive_echoes_state() {
-        let ctx = Arc::new(Context::new());
+    fn setnetworkactive_toggles_shared_state() {
+        let controls = Arc::new(NetworkControls::new(
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new())),
+            Arc::new(parking_lot::RwLock::new(Vec::new())),
+            8_333,
+        ));
+        let ctx = Arc::new(Context::new().with_network_controls(Arc::clone(&controls)));
+        let result = setnetworkactive(&ctx, &json!([false]))
+            .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
+        assert_eq!(result.as_bool(), Some(false));
+        assert!(!controls.network_active());
+        let info = getnetworkinfo(&ctx, &json!(null))
+            .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
+        assert_eq!(
+            info.get("networkactive").and_then(JsonValueTrait::as_bool),
+            Some(false)
+        );
         let result = setnetworkactive(&ctx, &json!([true]))
             .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
         assert_eq!(result.as_bool(), Some(true));
+        assert!(controls.network_active());
     }
 }
+
 #[cfg(test)]
 mod ban_state_tests {
     use super::*;
     use alloc::sync::Arc;
     use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
+
+    fn bare_ctx() -> Arc<Context> {
+        Arc::new(
+            Context::new().with_network_controls(Arc::new(NetworkControls::new(
+                Arc::new(parking_lot::RwLock::new(Vec::new())),
+                Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new())),
+                Arc::new(parking_lot::RwLock::new(Vec::new())),
+                8_333,
+            ))),
+        )
+    }
 
     fn listbanned_ok(ctx: &Arc<Context>) -> Value {
         match listbanned(ctx, &json!(null)) {
@@ -695,16 +818,15 @@ mod ban_state_tests {
     }
 
     #[test]
-    fn setban_add_persists_in_context() {
-        let ctx = Arc::new(Context::new());
+    fn setban_add_persists_through_controls() {
+        let ctx = bare_ctx();
         setban_ok(&ctx, "127.0.0.1:8333", "add");
-        let banned = ctx.banned.read();
-        assert_eq!(banned.len(), 1);
+        assert_eq!(list_addresses(&ctx).len(), 1);
     }
 
     #[test]
     fn listbanned_returns_added_entries() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         setban_ok(&ctx, "192.168.1.1:8333", "add");
         let result = listbanned_ok(&ctx);
         let Some(arr) = result.as_array() else {
@@ -732,7 +854,7 @@ mod ban_state_tests {
 
     #[test]
     fn setban_cidr_add_list_roundtrip() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         setban_ok(&ctx, "10.0.0.0/8", "add");
 
         assert_eq!(sole_address(&ctx), "10.0.0.0/8");
@@ -740,7 +862,7 @@ mod ban_state_tests {
 
     #[test]
     fn setban_normalizes_host_bits() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         setban_ok(&ctx, "192.168.1.99/24", "add");
 
         assert_eq!(sole_address(&ctx), "192.168.1.0/24");
@@ -748,7 +870,7 @@ mod ban_state_tests {
 
     #[test]
     fn setban_bare_ip_stores_single_address_subnet() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         setban_ok(&ctx, "192.168.1.99", "add");
 
         assert_eq!(sole_address(&ctx), "192.168.1.99/32");
@@ -756,7 +878,7 @@ mod ban_state_tests {
 
     #[test]
     fn setban_ipv6_cidr_canonicalizes() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         setban_ok(&ctx, "2001:db8::1/64", "add");
 
         assert_eq!(sole_address(&ctx), "2001:db8::/64");
@@ -764,7 +886,7 @@ mod ban_state_tests {
 
     #[test]
     fn setban_rejects_invalid_subnet() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         let result = setban(&ctx, &json!(["10.0.0.1/33", "add"]));
 
         assert!(matches!(
@@ -776,8 +898,30 @@ mod ban_state_tests {
     }
 
     #[test]
+    fn setban_duplicate_returns_exact_error() {
+        let ctx = bare_ctx();
+        setban_ok(&ctx, "10.0.0.1", "add");
+        let result = setban(&ctx, &json!(["10.0.0.1", "add"]));
+        assert!(matches!(
+            result,
+            Err(RpcError::Misc(message)) if message == "ip/subnet already banned"
+        ));
+    }
+
+    #[test]
+    fn setban_remove_missing_returns_exact_error() {
+        let ctx = bare_ctx();
+        let result = setban(&ctx, &json!(["10.0.0.1", "remove"]));
+        assert!(matches!(
+            result,
+            Err(RpcError::Misc(message))
+                if message == "address/subnet was not previously manually banned"
+        ));
+    }
+
+    #[test]
     fn setban_remove_matches_exact_subnet() {
-        let ctx = Arc::new(Context::new());
+        let ctx = bare_ctx();
         setban_ok(&ctx, "10.0.0.0/24", "add");
         setban_ok(&ctx, "10.0.0.1", "add");
 
@@ -787,25 +931,16 @@ mod ban_state_tests {
     }
 
     #[test]
-    fn clearbanned_empties_vec() {
-        let ctx = Arc::new(Context::new());
+    fn clearbanned_empties_shared_state() {
+        let ctx = bare_ctx();
         setban_ok(&ctx, "192.168.1.1", "add");
         clearbanned_ok(&ctx);
-        assert!(ctx.banned.read().is_empty());
+        assert!(list_addresses(&ctx).is_empty());
     }
 
     #[test]
-    fn addnode_add_persists_in_added_nodes_list() {
-        let ctx = Arc::new(Context::new());
-        let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
-            .unwrap_or_else(|err| panic!("addnode failed: {err}"));
-        let added = ctx.added_nodes.read();
-        assert_eq!(added.len(), 1);
-    }
-
-    #[test]
-    fn getaddednodeinfo_returns_persisted_entries() {
-        let ctx = Arc::new(Context::new());
+    fn addnode_add_persists_for_getaddednodeinfo() {
+        let ctx = bare_ctx();
         let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
         let result = getaddednodeinfo(&ctx, &json!([]))
@@ -814,5 +949,9 @@ mod ban_state_tests {
             panic!("expected array: {result:?}");
         };
         assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0].get("addednode").and_then(JsonValueTrait::as_str),
+            Some("127.0.0.1:8333")
+        );
     }
 }

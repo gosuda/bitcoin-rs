@@ -1,18 +1,154 @@
-//! Integration test: `NodeState`'s source-of-truth handles share pointer
-//! identity with the `rpc::Context` constructed from them.
-//!
-//! The pointer-identity invariant is the contract that future
-//! validation-pipeline commits rely on — when the import pipeline
-//! writes to `NodeState`'s `chain_tip`, RPC handlers must observe the
-//! update without any additional plumbing.
+//! Integration proof for I1 RPC cutover: shared Arc identity, exact method
+//! accounting (65 with ZMQ / 64 without), seven `MethodNotFound` absences,
+//! typed no-custody errors, and fourteen REST registrations.
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use bitcoin_rs_node::{Config, state::NodeState};
-use bitcoin_rs_rpc::context::Context;
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin::ScriptBuf;
+use bitcoin_rs_node::{Config, MiningCoordinator, state::NodeState};
+use bitcoin_rs_p2p::NetworkControls;
+use bitcoin_rs_rpc::Handler;
+use bitcoin_rs_rpc::RpcError;
+use bitcoin_rs_rpc::RpcLifecycle;
+use bitcoin_rs_rpc::context::{
+    ChainHandles, Context, ContextHandles, IndexHandles, NetworkHandles,
+};
+use bitcoin_rs_rpc::rest::REGISTRATIONS;
+use bitcoin_rs_wallet::Watcher;
+use parking_lot::RwLock;
+use sonic_rs::{Value, json};
 use tempfile::tempdir;
+
+const CHAIN: &[&str] = &[
+    "getblockchaininfo",
+    "getdifficulty",
+    "getchaintips",
+    "getchaintxstats",
+    "getblockcount",
+    "getblockhash",
+    "getbestblockhash",
+    "getblock",
+    "getblockheader",
+    "getblockstats",
+    "verifychain",
+    "gettxoutsetinfo",
+    "getblockfilter",
+    "getindexinfo",
+    "pruneblockchain",
+    "invalidateblock",
+];
+
+const TX: &[&str] = &[
+    "getrawtransaction",
+    "gettxout",
+    "gettxoutproof",
+    "verifytxoutproof",
+    "sendrawtransaction",
+    "testmempoolaccept",
+    "decoderawtransaction",
+];
+
+const MEMPOOL: &[&str] = &[
+    "getmempoolinfo",
+    "getmempoolentry",
+    "getrawmempool",
+    "getmempoolancestors",
+    "getmempooldescendants",
+];
+
+const UTIL_BASE: &[&str] = &[
+    "estimatesmartfee",
+    "uptime",
+    "getrpcinfo",
+    "getmemoryinfo",
+    "estimaterawfee",
+    "validateaddress",
+];
+
+const NETWORK: &[&str] = &[
+    "getnetworkinfo",
+    "getpeerinfo",
+    "ping",
+    "addnode",
+    "disconnectnode",
+    "getconnectioncount",
+    "getnettotals",
+    "getaddednodeinfo",
+    "listbanned",
+    "setban",
+    "clearbanned",
+    "setnetworkactive",
+];
+
+const MINING: &[&str] = &[
+    "getblocktemplate",
+    "getmininginfo",
+    "submitblock",
+    "prioritisetransaction",
+];
+
+const WALLET: &[&str] = &[
+    "getdescriptorinfo",
+    "deriveaddresses",
+    "scantxoutset",
+    "walletcreatefundedpsbt",
+    "walletprocesspsbt",
+    "finalizepsbt",
+    "combinepsbt",
+    "bumpfee",
+    "signrawtransactionwithkey",
+    "signrawtransactionwithwallet",
+    "importdescriptors",
+    "walletpassphrase",
+    "walletpassphrasechange",
+    "encryptwallet",
+];
+
+const ABSENT: &[&str] = &[
+    "clearmempool",
+    "dumpprivkey",
+    "dumpwallet",
+    "importprivkey",
+    "importwallet",
+    "importmulti",
+    "sethdseed",
+    "waitfornewblock",
+    "waitforblock",
+    "waitforblockheight",
+    "createrawtransaction",
+    "analyzepsbt",
+    "joinpsbts",
+    "utxoupdatepsbt",
+    "getnodeaddresses",
+];
+
+const NO_CUSTODY: &[&str] = &[
+    "signrawtransactionwithwallet",
+    "walletpassphrase",
+    "walletpassphrasechange",
+    "encryptwallet",
+];
+
+const NO_PRIVATE_KEYS: &str = "wallet has no private keys; use external signer";
+
+fn expected_methods() -> Vec<&'static str> {
+    let mut methods = Vec::with_capacity(65);
+    methods.extend_from_slice(CHAIN);
+    methods.extend_from_slice(TX);
+    methods.extend_from_slice(MEMPOOL);
+    methods.extend_from_slice(UTIL_BASE);
+    #[cfg(feature = "zmq")]
+    methods.push("getzmqnotifications");
+    methods.extend_from_slice(NETWORK);
+    methods.extend_from_slice(MINING);
+    methods.extend_from_slice(WALLET);
+    methods
+}
+
+fn empty_params() -> Value {
+    json!([])
+}
 
 #[test]
 #[allow(clippy::arc_with_non_send_sync)]
@@ -30,121 +166,133 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
 
     let chain_tip = state.chain_tip();
     let applied_tip = state.applied_tip();
+    let chain_tx_count = state.chain_tx_count_handle();
     let mempool = state.mempool();
     let blocks = state.blocks();
     let transactions = state.transactions();
-    let utxo = Arc::new(UtxoSet::new());
+    let utxo = state.utxo();
     let coin_stats = state.coin_stats();
     let filter_index = state.filter_index();
     let network = state.network();
-    let chain_network = state.config().network;
-    let mining_template_id = state.mining_template_id();
-    let peers = state.peers();
     let block_tree = state.block_tree();
-    let inbound_blocks_sender = state.inbound_blocks_sender();
-    let p2p_outbound = Some(state.p2p_outbound_sender());
+    let peers = state.peers();
+    let peer_outbound = state.peer_outbound();
     let banned = state.banned_subnets();
-    let added_nodes = Arc::new(parking_lot::RwLock::new(Vec::new()));
+    let controls = Arc::new(NetworkControls::new(
+        Arc::clone(&peers),
+        Arc::clone(&peer_outbound),
+        Arc::clone(&banned),
+        state.config().network.default_p2p_port(),
+    ));
+    let wallet = Arc::new(RwLock::new(Watcher::new(Vec::new())));
+    let lifecycle = Arc::new(RpcLifecycle::new(state.shutdown()));
+    let mining = Arc::new(MiningCoordinator::new(
+        state.config().network,
+        Arc::clone(&applied_tip),
+        Arc::clone(&block_tree),
+        Arc::clone(&mempool),
+        state.apply_handles(),
+        ScriptBuf::new(),
+        state.shutdown(),
+    ));
     let Some(tx_index) = state.tx_index_query() else {
         panic!("txindex query engine missing when enabled");
     };
-    let ctx = Context::from_handles(
-        Arc::clone(&chain_tip),
-        Arc::clone(&applied_tip),
-        Arc::clone(&mempool),
-        Arc::clone(&blocks),
-        Arc::clone(&transactions),
-        Arc::clone(&utxo),
-        Arc::clone(&coin_stats),
-        Arc::clone(&filter_index),
-        Arc::clone(&network),
-        Arc::clone(&mining_template_id),
-        Arc::clone(&peers),
-        Arc::clone(&block_tree),
-        chain_network,
-        Some(inbound_blocks_sender),
-        p2p_outbound,
-        Arc::clone(&banned),
-        Arc::clone(&added_nodes),
-        Some(tx_index),
-        None,
-    )
-    .with_zmq_notifications(state.active_zmq_notifications());
 
-    assert!(
-        Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
-        "chain_tip must share identity"
-    );
-    assert!(
-        Arc::ptr_eq(&ctx.applied_tip, &applied_tip),
-        "applied_tip must share identity"
-    );
-    assert!(
-        Arc::ptr_eq(&ctx.mempool, &mempool),
-        "mempool must share identity"
-    );
-    assert!(
-        ctx.zmq_notifications()
-            .iter()
-            .any(|notification| notification.notification_type == "pubsequence")
-    );
-    assert!(
-        Arc::ptr_eq(&ctx.blocks, &blocks),
-        "blocks must share identity"
-    );
-    assert!(
-        Arc::ptr_eq(&ctx.transactions, &transactions),
-        "transactions must share identity"
-    );
-    assert!(Arc::ptr_eq(&ctx.utxo, &utxo), "utxo must share identity");
-    assert!(
-        Arc::ptr_eq(&ctx.coin_stats, &coin_stats),
-        "coin_stats must share identity"
-    );
-    assert!(
-        Arc::ptr_eq(&ctx.filter_index, &filter_index),
-        "filter_index must share identity"
-    );
+    let mining_control: Arc<dyn bitcoin_rs_rpc::context::MiningControl> = mining;
+    let ctx = Context::production(ContextHandles {
+        chain: ChainHandles {
+            chain_tip: Arc::clone(&chain_tip),
+            applied_tip: Arc::clone(&applied_tip),
+            chain_tx_count: Arc::clone(&chain_tx_count),
+            blocks: Arc::clone(&blocks),
+            transactions: Arc::clone(&transactions),
+            utxo: Arc::clone(&utxo),
+            coin_stats: Arc::clone(&coin_stats),
+            filter_index: Arc::clone(&filter_index),
+            block_tree: Arc::clone(&block_tree),
+            network: state.config().network,
+        },
+        mempool: Arc::clone(&mempool),
+        indexes: IndexHandles {
+            transactions: Some(tx_index),
+            esplora_transactions: state.esplora_tx_index_query(),
+            scripts: state.script_index_query(),
+        },
+        network: NetworkHandles {
+            state: Arc::clone(&network),
+            controls: Arc::clone(&controls),
+        },
+    })
+    .with_zmq_notifications(state.active_zmq_notifications())
+    .with_wallet(Arc::clone(&wallet))
+    .with_rpc_lifecycle(Arc::clone(&lifecycle))
+    .with_mining_control(Arc::clone(&mining_control))
+    .with_debug_log_path(state.data_dir().join("debug.log"));
+
+    assert!(Arc::ptr_eq(&ctx.chain_tip, &chain_tip));
+    assert!(Arc::ptr_eq(&ctx.applied_tip, &applied_tip));
+    assert!(Arc::ptr_eq(ctx.chain_tx_count_handle(), &chain_tx_count));
+    assert!(Arc::ptr_eq(&ctx.mempool, &mempool));
+    assert!(Arc::ptr_eq(&ctx.blocks, &blocks));
+    assert!(Arc::ptr_eq(&ctx.transactions, &transactions));
+    assert!(Arc::ptr_eq(&ctx.utxo, &utxo));
+    assert!(Arc::ptr_eq(&ctx.coin_stats, &coin_stats));
+    assert!(Arc::ptr_eq(&ctx.filter_index, &filter_index));
+    assert!(Arc::ptr_eq(&ctx.network, &network));
+    assert!(Arc::ptr_eq(&ctx.block_tree, &block_tree));
+    assert!(Arc::ptr_eq(
+        ctx.network_controls
+            .as_ref()
+            .unwrap_or_else(|| panic!("network controls missing")),
+        &controls
+    ));
+    assert!(Arc::ptr_eq(
+        ctx.wallet
+            .as_ref()
+            .unwrap_or_else(|| panic!("wallet missing")),
+        &wallet
+    ));
+    assert!(Arc::ptr_eq(
+        ctx.rpc_lifecycle
+            .as_ref()
+            .unwrap_or_else(|| panic!("RPC lifecycle missing")),
+        &lifecycle
+    ));
+    {
+        let installed = ctx
+            .mining_control
+            .as_ref()
+            .unwrap_or_else(|| panic!("mining control missing"));
+        assert!(
+            Arc::ptr_eq(installed, &mining_control),
+            "mining_control must share identity"
+        );
+    }
     assert!(
         ctx.tx_index.is_some(),
         "txindex query adapter must be wired"
     );
-    assert!(
-        Arc::ptr_eq(&ctx.network, &network),
-        "network must share identity"
-    );
+    assert_eq!(ctx.chain_network, state.config().network);
     assert_eq!(
-        ctx.chain_network,
-        state.config().network,
-        "chain_network must match"
+        ctx.debug_log_path,
+        Some(state.data_dir().join("debug.log")),
+        "debug_log_path must mirror <datadir>/debug.log"
     );
-    assert!(
-        Arc::ptr_eq(&ctx.mining_template_id, &mining_template_id),
-        "mining_template_id must share identity"
-    );
-    assert!(Arc::ptr_eq(&ctx.peers, &peers), "peers must share identity");
-    assert!(
-        Arc::ptr_eq(&ctx.block_tree, &block_tree),
-        "block_tree must share identity"
-    );
-    assert!(
-        ctx.inbound_blocks_sender.is_some(),
-        "inbound_blocks_sender must be Some"
-    );
-    assert!(
-        ctx.p2p_outbound_sender.is_some(),
-        "p2p_outbound_sender must be Some"
-    );
-    assert!(
-        Arc::ptr_eq(&ctx.banned, &banned),
-        "banned must share identity"
-    );
+
     let notifications = ctx.zmq_notifications();
-    assert_eq!(notifications.len(), 2);
-    assert_eq!(notifications[0].notification_type.as_str(), "pubhashblock");
-    assert_eq!(notifications[0].hwm, 21);
-    assert_eq!(notifications[1].notification_type.as_str(), "pubsequence");
-    assert_eq!(notifications[1].hwm, 22);
+    #[cfg(feature = "zmq")]
+    {
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].notification_type.as_str(), "pubhashblock");
+        assert_eq!(notifications[0].hwm, 21);
+        assert_eq!(notifications[1].notification_type.as_str(), "pubsequence");
+        assert_eq!(notifications[1].hwm, 22);
+    }
+    #[cfg(not(feature = "zmq"))]
+    {
+        assert!(notifications.is_empty());
+    }
 
     Ok(())
 }
@@ -159,4 +307,81 @@ fn rpc_context_omits_indexer_when_node_txindex_is_disabled() -> Result<()> {
 
     assert!(state.tx_index_query().is_none());
     Ok(())
+}
+
+#[test]
+#[cfg(feature = "zmq")]
+fn rpc_method_accounting_with_zmq() {
+    let expected = expected_methods();
+    assert_eq!(
+        expected.len(),
+        65,
+        "ZMQ build must register exactly 65 methods"
+    );
+    assert_eq!(REGISTRATIONS.len(), 14);
+
+    let handler = Handler::new(Arc::new(Context::new()));
+    let params = empty_params();
+    for method in &expected {
+        let err = match handler.dispatch(method, &params) {
+            Ok(_) => continue,
+            Err(error) => error,
+        };
+        assert!(
+            !matches!(err, RpcError::MethodNotFound(_)),
+            "{method} must be registered under zmq"
+        );
+    }
+    for method in ABSENT {
+        match handler.dispatch(method, &params) {
+            Err(RpcError::MethodNotFound(_)) => {}
+            other => panic!("{method} must be MethodNotFound, got {other:?}"),
+        }
+    }
+    for method in NO_CUSTODY {
+        match handler.dispatch(method, &params) {
+            Err(RpcError::MethodDisabled(message)) => {
+                assert_eq!(message, NO_PRIVATE_KEYS);
+            }
+            other => panic!("{method} must be MethodDisabled, got {other:?}"),
+        }
+    }
+    match handler.dispatch("getzmqnotifications", &params) {
+        Ok(_) | Err(_) => {}
+    }
+}
+
+#[test]
+#[cfg(not(feature = "zmq"))]
+fn rpc_method_accounting_without_zmq() {
+    let expected = expected_methods();
+    assert_eq!(
+        expected.len(),
+        64,
+        "non-ZMQ build must register exactly 64 methods"
+    );
+    assert_eq!(REGISTRATIONS.len(), 14);
+
+    let handler = Handler::new(Arc::new(Context::new()));
+    let params = empty_params();
+    for method in &expected {
+        let err = match handler.dispatch(method, &params) {
+            Ok(_) => continue,
+            Err(error) => error,
+        };
+        assert!(
+            !matches!(err, RpcError::MethodNotFound(_)),
+            "{method} must be registered without zmq"
+        );
+    }
+    for method in ABSENT {
+        match handler.dispatch(method, &params) {
+            Err(RpcError::MethodNotFound(_)) => {}
+            other => panic!("{method} must be MethodNotFound, got {other:?}"),
+        }
+    }
+    match handler.dispatch("getzmqnotifications", &params) {
+        Err(RpcError::MethodNotFound(_)) => {}
+        other => panic!("getzmqnotifications must be absent without zmq, got {other:?}"),
+    }
 }

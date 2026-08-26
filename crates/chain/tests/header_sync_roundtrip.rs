@@ -5,7 +5,7 @@ use bitcoin::{
     hashes::Hash as _,
     pow::CompactTarget,
 };
-use bitcoin_rs_chain::header_sync::validate_header_nbits;
+use bitcoin_rs_chain::header_sync::{next_work_required, validate_header_nbits};
 use bitcoin_rs_chain::{
     BlockTree, ChainError, Network, NodeStatus, accept_headers, current_unix_seconds,
 };
@@ -152,6 +152,66 @@ fn rejects_retarget_header_that_keeps_parent_bits_when_timespan_clamps()
     assert_ne!(
         expected, actual,
         "clamped retarget calculation must differ from parent nBits"
+    );
+    Ok(())
+}
+
+#[test]
+fn next_work_required_is_exactly_what_validate_header_nbits_enforces()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let bits = CompactTarget::from_consensus(0x207e_ffff);
+    let parent = raw_header_with(BlockHash::all_zeros(), 0, 0, bits);
+    let parent_id = tree.insert_node(None, parent, NodeStatus::HeaderValid)?;
+    let candidate_time = Network::Regtest.target_spacing_seconds();
+
+    // The one next-work source: the bits a candidate builder reads are the
+    // bits validation demands at the same parent and candidate time.
+    let expected = next_work_required(&tree, parent_id, candidate_time, Network::Regtest)?;
+    assert_eq!(expected, bits);
+
+    let candidate = raw_header_with(parent.block_hash(), 1, candidate_time, expected);
+    validate_header_nbits(&tree, parent_id, &candidate, Network::Regtest)?;
+
+    let wrong = raw_header_with(
+        parent.block_hash(),
+        1,
+        candidate_time,
+        CompactTarget::from_consensus(0x207e_fffe),
+    );
+    let err = validate_header_nbits(&tree, parent_id, &wrong, Network::Regtest)
+        .expect_err("bits other than next_work_required must be rejected");
+    assert!(
+        matches!(err, ChainError::NbitsMismatch { expected, .. } if expected == bits.to_consensus())
+    );
+    Ok(())
+}
+
+#[test]
+fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let bits = CompactTarget::from_consensus(0x1b0e_3ea6);
+    let parent = raw_header_with(BlockHash::all_zeros(), 0, 0, bits);
+    let parent_id = tree.insert_node(None, parent, NodeStatus::HeaderValid)?;
+    let spacing = Network::Testnet3.target_spacing_seconds();
+
+    // Within 2*spacing of the parent the difficulty carries over unchanged.
+    assert_eq!(
+        next_work_required(&tree, parent_id, spacing, Network::Testnet3)?,
+        bits
+    );
+
+    // Past the window the testnet minimum-difficulty rule returns the
+    // proof-of-work limit.
+    assert_eq!(
+        next_work_required(
+            &tree,
+            parent_id,
+            spacing.saturating_mul(2).saturating_add(1),
+            Network::Testnet3
+        )?,
+        CompactTarget::from_consensus(0x1d00_ffff)
     );
     Ok(())
 }

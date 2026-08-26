@@ -5,14 +5,25 @@ use alloc::sync::Arc;
 use std::collections::BTreeSet;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_p2p::NetworkControls;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
+use parking_lot::RwLock;
 use sonic_rs::{JsonValueTrait as _, json};
+
+fn empty_network_controls() -> Arc<NetworkControls> {
+    Arc::new(NetworkControls::new(
+        Arc::new(RwLock::new(Vec::new())),
+        Arc::new(RwLock::new(hashbrown::HashMap::new())),
+        Arc::new(RwLock::new(Vec::new())),
+        8_333,
+    ))
+}
 
 #[test]
 fn selected_methods_match_core_documented_key_sets() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Arc::new(Context::new());
+    let ctx = Arc::new(Context::new().with_network_controls(empty_network_controls()));
     ctx.set_chain_tip(TipSnapshot {
         tip_id: NodeId::new(0),
         height: 42,

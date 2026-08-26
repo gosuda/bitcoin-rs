@@ -19,7 +19,7 @@ repos:
         always_run: true
       - id: cargo-clippy-full-node
         name: cargo clippy (full node)
-        entry: cargo +1.95.0 clippy -p bitcoin-rs --all-targets --no-default-features --features rocksdb,fjall,redb,mdbx,kernel -- -D warnings
+        entry: cargo +1.95.0 clippy -p bitcoin-rs --all-targets --no-default-features --features rocksdb,fjall,redb,mdbx,kernel,zmq -- -D warnings
         language: unsupported
         pass_filenames: false
         always_run: true
@@ -37,7 +37,7 @@ repos:
         always_run: true
       - id: cargo-test-full-node
         name: cargo test (full node)
-        entry: cargo +1.95.0 test -p bitcoin-rs --no-fail-fast --no-default-features --features rocksdb,fjall,redb,mdbx,kernel
+        entry: cargo +1.95.0 test -p bitcoin-rs --no-fail-fast --no-default-features --features rocksdb,fjall,redb,mdbx,kernel,zmq
         language: unsupported
         pass_filenames: false
         always_run: true

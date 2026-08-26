@@ -4,10 +4,15 @@
 //! that fails these checks may still be valid; it simply will not be accepted
 //! to the mempool or relayed by default.
 
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
 use bitcoin::blockdata::script::Instruction;
 use bitcoin::opcodes::all::{OP_PUSHNUM_1, OP_PUSHNUM_16, OP_PUSHNUM_NEG1};
-use bitcoin::{FeeRate, Script, Transaction, TxOut, VarInt};
+use bitcoin::{FeeRate, Script, Transaction, TxOut, Txid, VarInt, Wtxid};
 use thiserror::Error;
+
+use crate::{Mempool, RbfError, ReplacementCandidate};
 
 /// Maximum weight of a standard transaction (400 000 weight units).
 const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
@@ -100,6 +105,212 @@ pub fn is_standard_tx(
     // carries a non-standard output reports the output.
     check_min_size(tx)?;
     Ok(())
+}
+
+/// Bitcoin Core `MAX_PACKAGE_COUNT` for package acceptance / `testmempoolaccept`.
+pub const MAX_PACKAGE_COUNT: usize = 25;
+
+/// Caller-resolved fee and prevout context for one package transaction.
+///
+/// Prevout lookup and fee accounting live outside this module. The acceptance
+/// seam records the already-computed prevout-aware `sigop_cost` so RPC and
+/// admission can project it without recomputing script costs here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackageTxContext {
+    /// Actual fee in satoshis.
+    pub fee: u64,
+    /// Policy virtual size in vbytes.
+    pub vsize: u32,
+    /// Prevout-aware sigop cost.
+    pub sigop_cost: u32,
+    /// At least one input is neither confirmed nor satisfied by the mempool /
+    /// earlier package transactions.
+    pub missing_inputs: bool,
+}
+
+/// Per-transaction package acceptance fact for RPC / admission consumers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TxAcceptanceFact {
+    /// Transaction id.
+    pub txid: Txid,
+    /// Witness transaction id.
+    pub wtxid: Wtxid,
+    /// Whether the transaction would be accepted under current policy.
+    pub allowed: bool,
+    /// Policy virtual size in vbytes.
+    pub vsize: u32,
+    /// Consensus weight.
+    pub weight: u64,
+    /// Prevout-aware sigop cost supplied by the caller.
+    pub sigop_cost: u32,
+    /// Base fee when acceptance accounting succeeded far enough to know it.
+    pub base_fee: Option<u64>,
+    /// Rejection reason when `allowed` is false.
+    pub reject_reason: Option<AcceptanceRejectReason>,
+}
+
+/// Package-level acceptance facts: optional package error plus per-tx rows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageAcceptanceFacts {
+    /// Package-wide failure (for example package count bounds).
+    pub package_error: Option<AcceptanceRejectReason>,
+    /// One row per submitted transaction, in input order.
+    pub results: Vec<TxAcceptanceFact>,
+}
+
+/// Policy rejection reason for dry-run package acceptance.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AcceptanceRejectReason {
+    /// Package length is outside `1..=MAX_PACKAGE_COUNT`.
+    #[error("package-too-large")]
+    PackageTooLarge,
+    /// Transaction is already present in the mempool.
+    #[error("txn-already-in-mempool")]
+    AlreadyInMempool,
+    /// One or more inputs are unavailable.
+    #[error("missing-inputs")]
+    MissingInputs,
+    /// Fee rate is below the live min-relay / mempool-min floor.
+    #[error("min relay fee not met")]
+    MinRelayFeeNotMet,
+    /// Fee rate exceeds the caller-supplied maximum.
+    #[error("max-fee-exceeded")]
+    MaxFeeExceeded,
+    /// Transaction fails standardness policy.
+    #[error(transparent)]
+    NonStandard(#[from] StandardnessError),
+    /// Conflicting replacement fails BIP125.
+    #[error(transparent)]
+    Replacement(#[from] RbfError),
+}
+
+/// Evaluates non-mutating package acceptance policy facts.
+///
+/// This is the mempool-owned seam behind `testmempoolaccept`: it composes
+/// standardness, presence, missing-input, min-relay / max-fee, and BIP125
+/// replacement checks against the live pool without inserting anything.
+/// Consensus script verification remains outside this module.
+///
+/// `contexts` must have the same length as `txs`. `incremental_relay_fee_sat_per_kvb`
+/// feeds the size-pressure mempool-min floor and BIP125 rule 4.
+#[must_use]
+pub fn evaluate_package_acceptance(
+    pool: &Mempool,
+    policy: &StandardnessPolicy,
+    txs: &[Transaction],
+    contexts: &[PackageTxContext],
+    max_feerate_sat_per_kvb: Option<u64>,
+    incremental_relay_fee_sat_per_kvb: u64,
+) -> PackageAcceptanceFacts {
+    assert_eq!(
+        txs.len(),
+        contexts.len(),
+        "package txs and contexts must align"
+    );
+
+    if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
+        return PackageAcceptanceFacts {
+            package_error: Some(AcceptanceRejectReason::PackageTooLarge),
+            results: Vec::new(),
+        };
+    }
+
+    let mempool_min_fee =
+        crate::eviction::mempool_min_fee_sat_per_kvb(pool, incremental_relay_fee_sat_per_kvb);
+
+    let mut results = Vec::with_capacity(txs.len());
+    let mut package_failed = false;
+
+    for (tx, context) in txs.iter().zip(contexts.iter()) {
+        if package_failed {
+            results.push(TxAcceptanceFact {
+                txid: tx.compute_txid(),
+                wtxid: tx.compute_wtxid(),
+                allowed: false,
+                vsize: context.vsize,
+                weight: tx.weight().to_wu(),
+                sigop_cost: context.sigop_cost,
+                base_fee: None,
+                reject_reason: None,
+            });
+            continue;
+        }
+
+        let fact = evaluate_one(
+            pool,
+            policy,
+            tx,
+            *context,
+            max_feerate_sat_per_kvb,
+            mempool_min_fee,
+            incremental_relay_fee_sat_per_kvb,
+        );
+        if !fact.allowed {
+            package_failed = true;
+        }
+        results.push(fact);
+    }
+
+    PackageAcceptanceFacts {
+        package_error: None,
+        results,
+    }
+}
+
+fn evaluate_one(
+    pool: &Mempool,
+    policy: &StandardnessPolicy,
+    tx: &Transaction,
+    context: PackageTxContext,
+    max_feerate_sat_per_kvb: Option<u64>,
+    mempool_min_fee_sat_per_kvb: u64,
+    incremental_relay_fee_sat_per_kvb: u64,
+) -> TxAcceptanceFact {
+    let txid = tx.compute_txid();
+    let wtxid = tx.compute_wtxid();
+    let weight = tx.weight().to_wu();
+    let vsize = context.vsize;
+    let fee_rate = if vsize == 0 {
+        0
+    } else {
+        context.fee.saturating_mul(1_000) / u64::from(vsize)
+    };
+
+    let reject = if pool.contains_txid(&txid) {
+        Some(AcceptanceRejectReason::AlreadyInMempool)
+    } else if context.missing_inputs {
+        Some(AcceptanceRejectReason::MissingInputs)
+    } else if let Err(err) = is_standard_tx(tx, policy) {
+        Some(AcceptanceRejectReason::NonStandard(err))
+    } else if fee_rate < mempool_min_fee_sat_per_kvb {
+        Some(AcceptanceRejectReason::MinRelayFeeNotMet)
+    } else if max_feerate_sat_per_kvb.is_some_and(|max| fee_rate > max) {
+        Some(AcceptanceRejectReason::MaxFeeExceeded)
+    } else if !pool.conflicts_for(tx).is_empty() {
+        let candidate = ReplacementCandidate::new(
+            Arc::new(tx.clone()),
+            vsize,
+            context.fee,
+            incremental_relay_fee_sat_per_kvb,
+        );
+        match pool.check_replacement(&candidate) {
+            Ok(_) => None,
+            Err(err) => Some(AcceptanceRejectReason::Replacement(err)),
+        }
+    } else {
+        None
+    };
+
+    TxAcceptanceFact {
+        txid,
+        wtxid,
+        allowed: reject.is_none(),
+        vsize,
+        weight,
+        sigop_cost: context.sigop_cost,
+        base_fee: Some(context.fee),
+        reject_reason: reject,
+    }
 }
 
 /// Minimum non-witness serialization Core relays, `tx-size-small`.
@@ -641,6 +852,131 @@ mod tests {
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::NonStandardOutput)
+        );
+    }
+
+    fn ctx(fee: u64, vsize: u32, missing_inputs: bool) -> PackageTxContext {
+        PackageTxContext {
+            fee,
+            vsize,
+            sigop_cost: 2,
+            missing_inputs,
+        }
+    }
+
+    #[test]
+    fn package_acceptance_rejects_empty_and_oversized_packages() {
+        let pool = crate::Mempool::new(crate::MempoolLimits::default());
+        let empty = evaluate_package_acceptance(&pool, &policy(), &[], &[], None, 1_000);
+        assert_eq!(
+            empty.package_error,
+            Some(AcceptanceRejectReason::PackageTooLarge)
+        );
+
+        let txs: Vec<Transaction> = (0..=MAX_PACKAGE_COUNT)
+            .map(|i| {
+                let mut tx = standard_tx(Version::ONE);
+                tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51, i as u8]);
+                tx
+            })
+            .collect();
+        let contexts: Vec<PackageTxContext> = txs.iter().map(|_| ctx(1_000, 100, false)).collect();
+        let oversized = evaluate_package_acceptance(&pool, &policy(), &txs, &contexts, None, 1_000);
+        assert_eq!(
+            oversized.package_error,
+            Some(AcceptanceRejectReason::PackageTooLarge)
+        );
+        assert!(oversized.results.is_empty());
+    }
+
+    #[test]
+    fn package_acceptance_allows_standard_tx_and_records_sigop_cost() {
+        let pool = crate::Mempool::new(crate::MempoolLimits {
+            min_relay_fee_sat_per_kvb: 1_000,
+            ..crate::MempoolLimits::default()
+        });
+        let tx = standard_tx(Version::ONE);
+        let facts = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            &[tx.clone()],
+            &[ctx(1_000, 100, false)],
+            None,
+            1_000,
+        );
+        assert!(facts.package_error.is_none());
+        let row = &facts.results[0];
+        assert!(row.allowed);
+        assert_eq!(row.sigop_cost, 2);
+        assert_eq!(row.base_fee, Some(1_000));
+        assert_eq!(row.txid, tx.compute_txid());
+        assert_eq!(row.wtxid, tx.compute_wtxid());
+    }
+
+    #[test]
+    fn package_acceptance_rejects_missing_inputs_and_stops_later_rows() {
+        let pool = crate::Mempool::new(crate::MempoolLimits::default());
+        let first = standard_tx(Version::ONE);
+        let mut second = standard_tx(Version::ONE);
+        second.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x51, 0x99]);
+        let facts = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            &[first, second.clone()],
+            &[ctx(1_000, 100, true), ctx(1_000, 100, false)],
+            None,
+            1_000,
+        );
+        assert_eq!(
+            facts.results[0].reject_reason,
+            Some(AcceptanceRejectReason::MissingInputs)
+        );
+        assert!(!facts.results[0].allowed);
+        assert!(!facts.results[1].allowed);
+        assert_eq!(facts.results[1].reject_reason, None);
+        assert_eq!(facts.results[1].base_fee, None);
+    }
+
+    #[test]
+    fn package_acceptance_rejects_max_feerate_and_already_in_mempool() {
+        let mut pool = crate::Mempool::new(crate::MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..crate::MempoolLimits::default()
+        });
+        let tx = standard_tx(Version::ONE);
+        let over = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            &[tx.clone()],
+            &[ctx(10_000, 100, false)],
+            Some(50_000),
+            1_000,
+        );
+        // fee_rate = 100_000 sat/kvB > 50_000
+        assert_eq!(
+            over.results[0].reject_reason,
+            Some(AcceptanceRejectReason::MaxFeeExceeded)
+        );
+
+        pool.insert_entry(crate::MempoolEntry::new(
+            alloc::sync::Arc::new(tx.clone()),
+            100,
+            1_000,
+            1,
+            1,
+        ))
+        .expect("insert");
+        let dup = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            &[tx],
+            &[ctx(1_000, 100, false)],
+            None,
+            1_000,
+        );
+        assert_eq!(
+            dup.results[0].reject_reason,
+            Some(AcceptanceRejectReason::AlreadyInMempool)
         );
     }
 }

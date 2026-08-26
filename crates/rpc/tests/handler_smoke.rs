@@ -13,10 +13,13 @@ use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, T
 use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_mempool::MempoolEntry;
+use bitcoin_rs_mining::{Candidate, TemplateId};
 use bitcoin_rs_p2p::PeerInfo;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, Network};
 use bitcoin_rs_rpc::context::{
-    BlockBodySource, BlockRecord, ChainControl, ChainControlError, Context,
+    BlockBodySource, BlockRecord, BlockTemplate, BlockTemplateRequest, BlockTemplateResult,
+    BlockValidationResult, ChainControl, ChainControlError, Context, LastCandidateInfo,
+    MiningCapability, MiningControl, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
 };
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
@@ -322,9 +325,9 @@ fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std
 
 #[test]
 fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>> {
-    let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
     let header = Hash256::from_le_bytes(&[8_u8; 32]);
     let mut ctx = Context::new();
+    let block_hash = add_applied_filter_block(&ctx);
     let filter_index: Box<dyn FilterIndexLike> = Box::new(StaticFilterIndex {
         block_hash,
         filter: vec![0xab, 0xcd],
@@ -347,17 +350,16 @@ fn getblockfilter_reads_filter_index() -> Result<(), Box<dyn std::error::Error>>
 #[test]
 fn getblockfilter_returns_not_found_for_missing_filter_row()
 -> Result<(), Box<dyn std::error::Error>> {
-    let block_hash = Hash256::from_le_bytes(&[9_u8; 32]);
     let header = Hash256::from_le_bytes(&[8_u8; 32]);
     let mut ctx = Context::new();
+    let missing_hash = add_applied_filter_block(&ctx);
     let filter_index: Box<dyn FilterIndexLike> = Box::new(StaticFilterIndex {
-        block_hash,
+        block_hash: Hash256::from_le_bytes(&[9_u8; 32]),
         filter: vec![0xab, 0xcd],
         header,
     });
     ctx.filter_index = Arc::new(filter_index);
     let handler = Handler::new(Arc::new(ctx));
-    let missing_hash = Hash256::from_le_bytes(&[7_u8; 32]);
     let missing_hash_hex = missing_hash.to_string_be();
 
     let error = handler
@@ -366,7 +368,7 @@ fn getblockfilter_returns_not_found_for_missing_filter_row()
         .ok_or("missing filter unexpectedly succeeded")?;
 
     assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
-    assert_eq!(error.to_string(), "not found: block filter not found");
+    assert_eq!(error.to_string(), "block filter not found");
     Ok(())
 }
 
@@ -399,6 +401,7 @@ fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), Box<dy
 {
     let mut ctx = Context::new();
     ctx.tx_index = Some(Arc::new(FakeTxIndex {
+        transactions: HashMap::new(),
         values: HashMap::new(),
         info: bitcoin_rs_rpc::context::TxIndexInfo {
             synced: false,
@@ -421,7 +424,7 @@ fn getblockstats_errors_without_indexer() {
     let (ctx, _low_tx, _high_tx) = fee_stats_context(None);
     let handler = Handler::new(ctx);
 
-    let result = handler.dispatch("getblockstats", &json!([7]));
+    let result = handler.dispatch("getblockstats", &json!([150]));
     assert!(
         matches!(result, Err(RpcError::Internal(_))),
         "expected unavailable index to be an explicit error, got {result:?}"
@@ -430,13 +433,10 @@ fn getblockstats_errors_without_indexer() {
 
 #[test]
 fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), Box<dyn std::error::Error>> {
-    let mut values = HashMap::new();
-    values.insert(outpoint(21), 10_000);
-    values.insert(outpoint(22), 10_000);
-    let (ctx, low_tx, high_tx) = fee_stats_context(Some(values));
+    let (ctx, low_tx, high_tx) = fee_stats_context(Some([true, true]));
     let handler = Handler::new(ctx);
 
-    let result = handler.dispatch("getblockstats", &json!([7]))?;
+    let result = handler.dispatch("getblockstats", &json!([150]))?;
     let low_rate = 1_000_u64.saturating_mul(4) / low_tx.weight().to_wu();
     let high_rate = 3_000_u64.saturating_mul(4) / high_tx.weight().to_wu();
     let total_weight = low_tx
@@ -446,6 +446,7 @@ fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), Box<dyn std::error:
     let avg_rate = 4_000_u64.saturating_mul(4) / total_weight;
 
     assert_eq!(result.get("totalfee").as_u64(), Some(4_000));
+    assert_eq!(result.get("subsidy").as_u64(), Some(2_500_000_000));
     assert_eq!(result.get("avgfee").as_u64(), Some(2_000));
     assert_eq!(result.get("avgfeerate").as_u64(), Some(avg_rate));
     assert_eq!(result.get("medianfee").as_u64(), Some(2_000));
@@ -462,12 +463,10 @@ fn getblockstats_uses_indexer_for_fee_fields() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn getblockstats_errors_when_any_prevout_missing() {
-    let mut values = HashMap::new();
-    values.insert(outpoint(21), 10_000);
-    let (ctx, _low_tx, _high_tx) = fee_stats_context(Some(values));
+    let (ctx, _low_tx, _high_tx) = fee_stats_context(Some([true, false]));
     let handler = Handler::new(ctx);
 
-    let result = handler.dispatch("getblockstats", &json!([7]));
+    let result = handler.dispatch("getblockstats", &json!([150]));
     assert!(
         matches!(result, Err(RpcError::Internal(_))),
         "expected incomplete fee inputs to be an explicit error, got {result:?}"
@@ -603,7 +602,109 @@ impl FilterIndexLike for StaticFilterIndex {
     }
 }
 
+fn add_applied_filter_block(ctx: &Context) -> Hash256 {
+    let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+    let tip = {
+        let mut tree = ctx.block_tree.write();
+        tree.insert_node(None, block.header, NodeStatus::Active)
+            .expect("insert filter fixture block");
+        tree.tip()
+            .expect("filter fixture tip missing")
+            .as_ref()
+            .clone()
+    };
+    let record = BlockRecord::from_block(0, &block);
+    let hash = record.hash;
+    ctx.set_chain_tip(tip.clone());
+    ctx.set_applied_tip(tip);
+    ctx.add_block(record);
+    hash
+}
+
+struct SmokeMiningControl;
+
+impl SmokeMiningControl {
+    fn template() -> BlockTemplate {
+        let previous = Hash256::from_le_bytes(&[0x11; 32]);
+        BlockTemplate {
+            candidate: Arc::new(Candidate {
+                template_id: TemplateId::new(&previous, 9),
+                previous_block_hash: previous,
+                height: 101,
+                version: 0x2000_0000,
+                bits: 0x207f_ffff,
+                min_time: 1_700_000_001,
+                current_time: 1_700_000_010,
+                max_weight: 4_000_000,
+                max_size: 4_000_000,
+                max_sigops: 80_000,
+                mempool_sequence: 9,
+                coinbase: Transaction {
+                    version: bitcoin::transaction::Version::TWO,
+                    lock_time: bitcoin::absolute::LockTime::ZERO,
+                    input: Vec::new(),
+                    output: Vec::new(),
+                },
+                coinbase_value: 5_000_000_000,
+                fees: 0,
+                weight: 1_000,
+                size: 250,
+                sigop_cost: 0,
+                transactions: Vec::new(),
+                witness_merkle_root: None,
+                witness_reserved_value: None,
+                witness_commitment: None,
+            }),
+            rules: vec![MiningRule::new("csv")],
+            version_bits_available: Vec::new(),
+            version_bits_required: 0,
+            capabilities: vec![MiningCapability::new("proposal")],
+            mutable: vec![TemplateMutation::Time, TemplateMutation::Transactions],
+            submit_old: None,
+            work_id: None,
+        }
+    }
+}
+
+impl MiningControl for SmokeMiningControl {
+    fn get_block_template(
+        &self,
+        _request: BlockTemplateRequest,
+    ) -> Result<BlockTemplateResult, MiningControlError> {
+        Ok(BlockTemplateResult::Template(Self::template()))
+    }
+
+    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+        Ok(MiningInfo {
+            blocks: 100,
+            last_candidate: Some(LastCandidateInfo {
+                weight: 1_000,
+                transactions: 1,
+            }),
+            difficulty: 1.0,
+            network_hashes_per_second: 0.0,
+            pooled_transactions: 0,
+            network: bitcoin_rs_primitives::Network::Regtest,
+            next_bits: 0x207f_ffff,
+            next_difficulty: 1.0,
+            minimum_fee_rate: 1_000,
+            signet: None,
+            warnings: Vec::new(),
+        })
+    }
+
+    fn submit_block(
+        &self,
+        _block: bitcoin::Block,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        Ok(BlockValidationResult::Accepted)
+    }
+
+    fn publish_generation(&self) {}
+}
+
 struct FakeTxIndex {
+    transactions: HashMap<Txid, Transaction>,
     values: HashMap<OutPoint, u64>,
     info: bitcoin_rs_rpc::context::TxIndexInfo,
 }
@@ -611,9 +712,9 @@ struct FakeTxIndex {
 impl bitcoin_rs_rpc::context::TxIndexQuery for FakeTxIndex {
     fn transaction(
         &self,
-        _txid: &Txid,
+        txid: &Txid,
     ) -> Result<Option<Transaction>, bitcoin_rs_rpc::context::TxQueryError> {
-        Ok(None)
+        Ok(self.transactions.get(txid).cloned())
     }
 
     fn outpoint_value(
@@ -632,23 +733,46 @@ impl bitcoin_rs_rpc::context::TxIndexQuery for FakeTxIndex {
 
 #[allow(clippy::arc_with_non_send_sync)]
 fn fee_stats_context(
-    values: Option<HashMap<OutPoint, u64>>,
+    indexed_parents: Option<[bool; 2]>,
 ) -> (Arc<Context>, Transaction, Transaction) {
-    let low_tx = fee_tx(21, 9_000);
-    let high_tx = fee_tx(22, 7_000);
+    let low_parent = tx(outpoint(21), 10_000, ScriptBuf::from_bytes(vec![0x51]));
+    let high_parent = tx(outpoint(22), 10_000, ScriptBuf::from_bytes(vec![0x51]));
+    let low_prevout = OutPoint {
+        txid: low_parent.compute_txid(),
+        vout: 0,
+    };
+    let high_prevout = OutPoint {
+        txid: high_parent.compute_txid(),
+        vout: 0,
+    };
+    let low_tx = fee_tx(low_prevout, 9_000);
+    let high_tx = fee_tx(high_prevout, 7_000);
     let block = fee_block(low_tx.clone(), high_tx.clone());
     let mut ctx = Context::new();
-    if let Some(values) = values {
+    ctx.chain_network = Network::Regtest;
+    if let Some(indexed_parents) = indexed_parents {
+        let mut transactions = HashMap::new();
+        let mut values = HashMap::new();
+        for (indexed, outpoint, parent) in [
+            (indexed_parents[0], low_prevout, low_parent),
+            (indexed_parents[1], high_prevout, high_parent),
+        ] {
+            if indexed {
+                values.insert(outpoint, parent.output[0].value.to_sat());
+                transactions.insert(parent.compute_txid(), parent);
+            }
+        }
         ctx.tx_index = Some(Arc::new(FakeTxIndex {
+            transactions,
             values,
             info: bitcoin_rs_rpc::context::TxIndexInfo {
                 synced: true,
-                best_block_height: 7,
+                best_block_height: 150,
             },
         }));
     }
-    let block = seed_tree_chain(&ctx, &block);
-    let record = BlockRecord::from_block(7, &block);
+    let block = seed_tree_chain(&ctx, &block, 150);
+    let record = BlockRecord::from_block(150, &block);
     ctx.block_body_source = Some(Arc::new(SingleBlockSource {
         height: record.height,
         hash: record.hash,
@@ -658,12 +782,12 @@ fn fee_stats_context(
     (Arc::new(ctx), low_tx, high_tx)
 }
 
-fn seed_tree_chain(ctx: &Context, block: &bitcoin::Block) -> bitcoin::Block {
+fn seed_tree_chain(ctx: &Context, block: &bitcoin::Block, tip_height: u32) -> bitcoin::Block {
     let mut tree = ctx.block_tree.write();
     let mut parent = None;
     let mut prev_blockhash = bitcoin::BlockHash::all_zeros();
 
-    for height in 0_u32..7 {
+    for height in 0_u32..tip_height {
         let header = bitcoin::block::Header {
             version: bitcoin::block::Version::ONE,
             prev_blockhash,
@@ -725,21 +849,12 @@ fn fee_block(low_tx: Transaction, high_tx: Transaction) -> bitcoin::Block {
     }
 }
 
-fn fee_tx(label: u8, output_sat: u64) -> Transaction {
-    Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: outpoint(label),
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(output_sat),
-            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-        }],
-    }
+fn fee_tx(previous_output: OutPoint, output_sat: u64) -> Transaction {
+    tx(
+        previous_output,
+        output_sat,
+        ScriptBuf::from_bytes(vec![0x51]),
+    )
 }
 
 fn assert_percentiles(
@@ -783,8 +898,36 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut ctx = Context::new();
-        let tx = tx(1, ScriptBuf::from_bytes(vec![0x51]));
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let peers = Arc::new(RwLock::new(vec![PeerInfo {
+            addr: peer_addr,
+            version: 70_016,
+            services: 0,
+            user_agent: "/test/".into(),
+            start_height: 0,
+            conn_time: 0,
+            inbound: false,
+        }]));
+        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+        peer_outbound
+            .write()
+            .insert(peer_addr, bitcoin_rs_p2p::PeerLease::new(lease_tx));
+        let controls = Arc::new(bitcoin_rs_p2p::NetworkControls::new(
+            peers,
+            peer_outbound,
+            Arc::new(RwLock::new(Vec::new())),
+            8_333,
+        ));
+        let mut ctx = Context::new()
+            .with_network_controls(controls)
+            .with_mining_control(Arc::new(SmokeMiningControl));
+        let parent = tx(outpoint(1), 6_000, ScriptBuf::from_bytes(vec![0x51]));
+        let previous_output = OutPoint {
+            txid: parent.compute_txid(),
+            vout: 0,
+        };
+        let tx = tx(previous_output, 5_000, ScriptBuf::from_bytes(vec![0x51]));
         let block = bitcoin::Block {
             header: bitcoin::block::Header {
                 version: bitcoin::block::Version::ONE,
@@ -802,7 +945,7 @@ impl Fixture {
             },
             txdata: vec![tx.clone()],
         };
-        let block = seed_tree_chain(&ctx, &block);
+        let block = seed_tree_chain(&ctx, &block, 7);
         let block_hash_bytes = block.block_hash();
         let block_hash = Hash256::from_le_bytes(block_hash_bytes.as_byte_array());
         ctx.filter_index = Arc::new(Box::new(StaticFilterIndex {
@@ -826,8 +969,11 @@ impl Fixture {
         }));
         ctx.add_block(BlockRecord::from_block(7, &block));
         let mut values = HashMap::new();
-        values.insert(outpoint(1), 6_000);
+        values.insert(previous_output, parent.output[0].value.to_sat());
+        let mut transactions = HashMap::new();
+        transactions.insert(parent.compute_txid(), parent);
         ctx.tx_index = Some(Arc::new(FakeTxIndex {
+            transactions,
             values,
             info: bitcoin_rs_rpc::context::TxIndexInfo {
                 synced: true,
@@ -848,23 +994,37 @@ impl Fixture {
 
 #[allow(clippy::arc_with_non_send_sync)]
 fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
-    let mut ctx = Context::new();
-    ctx.peers = peers;
-    Arc::new(ctx)
+    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+    for peer in peers.read().iter() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = if peer.inbound {
+            bitcoin_rs_p2p::PeerLease::new_inbound(tx)
+        } else {
+            bitcoin_rs_p2p::PeerLease::new(tx)
+        };
+        peer_outbound.write().insert(peer.addr, lease);
+    }
+    let controls = Arc::new(bitcoin_rs_p2p::NetworkControls::new(
+        peers,
+        peer_outbound,
+        Arc::new(RwLock::new(Vec::new())),
+        8_333,
+    ));
+    Arc::new(Context::new().with_network_controls(controls))
 }
 
-fn tx(label: u8, script_pubkey: ScriptBuf) -> Transaction {
+fn tx(previous_output: OutPoint, output_sat: u64, script_pubkey: ScriptBuf) -> Transaction {
     Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![TxIn {
-            previous_output: outpoint(label),
+            previous_output,
             script_sig: ScriptBuf::new(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         output: vec![TxOut {
-            value: Amount::from_sat(5_000),
+            value: Amount::from_sat(output_sat),
             script_pubkey,
         }],
     }

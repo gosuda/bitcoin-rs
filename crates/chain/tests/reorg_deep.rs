@@ -5,7 +5,7 @@ use bitcoin::{
     hashes::Hash as _,
     pow::CompactTarget,
 };
-use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, plan_reorg};
+use bitcoin_rs_chain::{BlockTree, CachedState, NodeId, NodeStatus, plan_reorg};
 
 #[test]
 fn plans_deep_reorg_to_common_fork() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,6 +41,49 @@ fn plans_deep_reorg_to_common_fork() -> Result<(), Box<dyn std::error::Error>> {
             .height,
         100
     );
+    Ok(())
+}
+
+#[test]
+fn invalidate_subtree_clears_bip9_cache_entries_of_the_invalid_branch_only()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let genesis = mine_header(BlockHash::all_zeros(), 0, 0);
+    let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+
+    let mut trunk_tip = genesis_id;
+    for height in 1..=3_u32 {
+        let header = mine_child(&tree, trunk_tip, height, 0)?;
+        trunk_tip = tree.insert_node(Some(trunk_tip), header, NodeStatus::HeaderValid)?;
+    }
+    let mut fork_tip = genesis_id;
+    for height in 1..=2_u32 {
+        let header = mine_child(&tree, fork_tip, height, 1)?;
+        fork_tip = tree.insert_node(Some(fork_tip), header, NodeStatus::HeaderValid)?;
+    }
+
+    // Seed the cache the way the one contextual source does: one entry per
+    // tracked deployment per node it resolved a state for.
+    for (node_id, deployment_id) in [(trunk_tip, 0_u32), (fork_tip, 0), (fork_tip, 1)] {
+        tree.cache_bip9_state(
+            node_id,
+            deployment_id,
+            CachedState {
+                tag: 1,
+                since_height: 0,
+            },
+        );
+    }
+    assert_eq!(tree.cached_bip9_state_len(), 3);
+
+    tree.invalidate_subtree(fork_tip)?;
+
+    // Entries anchored on permanently invalid blocks are dropped; the entries
+    // of the branch that remains active survive untouched.
+    assert_eq!(tree.cached_bip9_state_len(), 1);
+    assert!(tree.cached_bip9_state(trunk_tip, 0).is_some());
+    assert!(tree.cached_bip9_state(fork_tip, 0).is_none());
+    assert!(tree.cached_bip9_state(fork_tip, 1).is_none());
     Ok(())
 }
 

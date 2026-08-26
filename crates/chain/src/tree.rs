@@ -650,11 +650,16 @@ impl BlockTree {
         self.active_by_height.clear_tainted();
 
         // Mark the subtree invalid and collect the hashes in deterministic slab order.
+        // Permanently invalid blocks can never anchor a deployment-state lookup
+        // again, so their memoized states go with them.
         let mut hashes = Vec::with_capacity(invalid.iter().filter(|&&b| b).count());
         for (index, node) in &mut self.nodes {
             if invalid[index] {
                 node.status = NodeStatus::Invalid;
                 hashes.push(node.hash);
+                if let Ok(id) = u32::try_from(index) {
+                    self.bip9_cache.invalidate_node(NodeId::new(id));
+                }
             }
         }
 

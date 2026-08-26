@@ -2,19 +2,28 @@ use alloc::sync::Arc;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 use tracing::{debug, warn};
 
-use crate::auth::Auth;
+use crate::auth::{Auth, WWW_AUTHENTICATE};
 use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
 const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
-const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Delay before answering present-but-wrong credentials, mirroring Core's
+/// brute-force deterrence in `HTTPReq_JSONRPC`.
+const AUTH_FAILURE_DELAY: Duration = Duration::from_millis(250);
+/// Body of the 405 reply, exactly as Core's RPC handler writes it.
+const METHOD_NOT_ALLOWED_BODY: &[u8] = b"JSONRPC server handles only POST requests";
+/// Initial warmup status, matching Core's `rpcWarmupStatus` initializer.
+const WARMUP_DEFAULT_STATUS: &str = "RPC server started";
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
@@ -24,6 +33,8 @@ pub struct RpcServer {
     pub auth: Arc<Auth>,
     /// Shared JSON-RPC handler.
     pub handler: Arc<Handler>,
+    /// Shared request lifecycle observed by every worker and by `getrpcinfo`.
+    pub lifecycle: Arc<RpcLifecycle>,
     /// Maximum concurrent worker connections.
     pub max_connections: usize,
     /// Idle read timeout for each connection.
@@ -33,11 +44,12 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
-    /// Binds a new RPC server.
+    /// Binds a new RPC server that shares `lifecycle` with Context / getrpcinfo.
     pub fn bind<A: ToSocketAddrs>(
         address: A,
         auth: Arc<Auth>,
         handler: Arc<Handler>,
+        lifecycle: Arc<RpcLifecycle>,
         max_connections: usize,
         idle_timeout: Duration,
         rest_enabled: bool,
@@ -46,6 +58,7 @@ impl RpcServer {
             listener: TcpListener::bind(address)?,
             auth,
             handler,
+            lifecycle,
             max_connections,
             idle_timeout,
             rest_enabled,
@@ -58,6 +71,13 @@ impl RpcServer {
     }
 
     /// Runs the accept loop. Each accepted connection is handled by one bounded worker thread.
+    ///
+    /// One [`RpcLifecycle`] is shared by every worker of this loop, so warmup,
+    /// shutdown observation, and in-flight command tracking are owned in one
+    /// place. The server is constructed with its node state fully injected, so
+    /// serving starts with warmup already finished (Core's post-
+    /// `SetRPCWarmupFinished` state); `RpcLifecycle` still exposes Core's
+    /// warmup transitions for owners that sequence startup themselves.
     pub fn serve(self) -> io::Result<()> {
         let active = Arc::new(Mutex::new(0_usize));
         for stream in self.listener.incoming() {
@@ -71,17 +91,14 @@ impl RpcServer {
     /// Polls non-blocking accept on a fixed cadence so the loop can observe
     /// shutdown without parking on an open socket. Each accepted connection
     /// is restored to blocking mode and handed to a bounded worker thread,
-    /// preserving the configured `idle_timeout` per connection.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn serve_with_shutdown(
-        self,
-        shutdown: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
-    ) -> io::Result<()> {
-        use core::sync::atomic::Ordering;
-
+    /// preserving the configured `idle_timeout` per connection. The shared
+    /// lifecycle observes the same flag, so commands dispatched by draining
+    /// keep-alive workers after shutdown are rejected with Core's
+    /// "Shutting down" error instead of executing against a stopped node.
+    pub fn serve_with_shutdown(self) -> io::Result<()> {
         self.listener.set_nonblocking(true)?;
         let active = Arc::new(Mutex::new(0_usize));
-        while !shutdown.load(Ordering::Acquire) {
+        while !self.lifecycle.is_shutdown() {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
                     stream.set_nonblocking(false)?;
@@ -113,13 +130,19 @@ impl RpcServer {
 
         let auth = Arc::clone(&self.auth);
         let handler = Arc::clone(&self.handler);
+        let lifecycle = Arc::clone(&self.lifecycle);
         let rest_enabled = self.rest_enabled;
         let active = Arc::clone(active);
         let idle_timeout = self.idle_timeout;
         thread::spawn(move || {
-            if let Err(error) =
-                serve_connection(stream, &auth, &handler, rest_enabled, idle_timeout)
-            {
+            if let Err(error) = serve_connection(
+                stream,
+                &auth,
+                &handler,
+                &lifecycle,
+                rest_enabled,
+                idle_timeout,
+            ) {
                 debug!(%error, "rpc connection closed with error");
             }
             let mut count = active.lock();
@@ -129,10 +152,186 @@ impl RpcServer {
     }
 }
 
+/// Core `RPCCommandExecutionInfo`: one in-flight command record.
+struct CommandExecution {
+    /// Monotonic identity used to erase exactly this entry on drop.
+    id: u64,
+    method: String,
+    start: Instant,
+}
+
+/// Core's warmup guard fields (`fRPCInWarmup` plus `rpcWarmupStatus`).
+struct Warmup {
+    in_warmup: bool,
+    status: String,
+}
+
+/// Shared RPC request lifecycle state for one serve loop: warmup, shutdown
+/// observation, and authoritative in-flight command tracking for `getrpcinfo`.
+///
+/// This is the single request/error lifecycle owner demanded by the protocol
+/// ledger. It adapts Core's `g_rpc_warmup_mutex`/`fRPCInWarmup`, `g_rpc_running`
+/// (via the shutdown flag passed to [`RpcServer::serve_with_shutdown`]), and
+/// `g_rpc_server_info.active_commands` without any handler-domain behavior.
+pub struct RpcLifecycle {
+    /// Shutdown flag; commands observed after it is set are rejected.
+    shutdown: Arc<AtomicBool>,
+    /// Process start instant recorded before the serve loop begins work.
+    process_start: Instant,
+    warmup: Mutex<Warmup>,
+    active_commands: Mutex<Vec<CommandExecution>>,
+    next_command_id: AtomicU64,
+}
+
+impl RpcLifecycle {
+    /// Builds lifecycle state for a serve loop that observes `shutdown`.
+    ///
+    /// Records process start immediately. Warmup starts finished because this
+    /// server is constructed with fully injected node state; owners sequencing
+    /// a slower startup call [`Self::set_warmup_starting`] before serving.
+    #[must_use]
+    pub fn new(shutdown: Arc<AtomicBool>) -> Self {
+        Self {
+            shutdown,
+            process_start: Instant::now(),
+            warmup: Mutex::new(Warmup {
+                in_warmup: false,
+                status: WARMUP_DEFAULT_STATUS.to_owned(),
+            }),
+            active_commands: Mutex::new(Vec::new()),
+            next_command_id: AtomicU64::new(0),
+        }
+    }
+
+    /// Shared shutdown flag observed by the serve loop and mining waiters.
+    #[must_use]
+    pub fn shutdown_flag(&self) -> &Arc<AtomicBool> {
+        &self.shutdown
+    }
+
+    /// Returns whether shutdown has been requested.
+    #[must_use]
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Requests process shutdown and wakes waiters that observe the shared flag.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Seconds since process start was recorded.
+    #[must_use]
+    pub fn uptime_secs(&self) -> u64 {
+        self.process_start.elapsed().as_secs()
+    }
+
+    /// Core `SetRPCWarmupStatus`: updates the message reported by `-28`.
+    pub fn set_warmup_status(&self, status: impl Into<String>) {
+        self.warmup.lock().status = status.into();
+    }
+
+    /// Core `SetRPCWarmupStarting`: rejects commands with `-28`.
+    pub fn set_warmup_starting(&self) {
+        self.warmup.lock().in_warmup = true;
+    }
+
+    /// Core `SetRPCWarmupFinished` (which asserts warmup was active).
+    pub fn set_warmup_finished(&self) {
+        let mut warmup = self.warmup.lock();
+        debug_assert!(warmup.in_warmup, "RPC warmup was not started");
+        warmup.in_warmup = false;
+    }
+
+    /// Rejects work before method lookup, in Core's order: the warmup guard of
+    /// `CRPCTable::execute` first, then the `RpcInterruptionPoint` running
+    /// check.
+    fn readiness(&self) -> Result<(), RpcError> {
+        {
+            let warmup = self.warmup.lock();
+            if warmup.in_warmup {
+                return Err(RpcError::InWarmup(warmup.status.clone()));
+            }
+        }
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(RpcError::ClientNotConnected);
+        }
+        Ok(())
+    }
+
+    /// Executes one command with authoritative in-flight registration.
+    ///
+    /// Registration wraps the whole dispatch, so a method-lookup miss inserts
+    /// and immediately removes its entry, exactly as Core's per-command guard
+    /// bookends `ExecuteCommand`; only commands that are actually executing
+    /// stay observable.
+    fn execute(&self, handler: &Handler, method: &str, params: &Value) -> Result<Value, RpcError> {
+        self.readiness()?;
+        let _tracked = self.track_command(method);
+        handler.dispatch(method, params)
+    }
+
+    /// Inserts the command into the in-flight list; removal happens on drop.
+    ///
+    /// Public so `getrpcinfo` tests and any shared `Arc<RpcLifecycle>` holder can
+    /// register without inventing a second tracker. The serve loop still tracks
+    /// exclusively through [`Self::execute`].
+    #[must_use]
+    pub fn track_command(&self, method: &str) -> TrackedCommand<'_> {
+        let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
+        self.active_commands.lock().push(CommandExecution {
+            id,
+            method: method.to_owned(),
+            start: Instant::now(),
+        });
+        TrackedCommand {
+            lifecycle: self,
+            id,
+        }
+    }
+
+    /// Snapshot for `getrpcinfo`: `(method, duration in microseconds)` pairs
+    /// in registration order, matching Core's
+    /// `[{"method":…,"duration":…}]` result member.
+    #[must_use]
+    pub fn active_commands(&self) -> Vec<(String, u64)> {
+        let now = Instant::now();
+        self.active_commands
+            .lock()
+            .iter()
+            .map(|execution| {
+                (
+                    execution.method.clone(),
+                    u64::try_from(now.duration_since(execution.start).as_micros())
+                        .unwrap_or(u64::MAX),
+                )
+            })
+            .collect()
+    }
+}
+
+/// RAII in-flight registration, Core's `RPCCommandExecution` guard.
+pub struct TrackedCommand<'a> {
+    lifecycle: &'a RpcLifecycle,
+    id: u64,
+}
+
+impl Drop for TrackedCommand<'_> {
+    fn drop(&mut self) {
+        // Removes exactly this entry on every terminal path: success, handler
+        // error, and shutdown rejection alike.
+        self.lifecycle
+            .active_commands
+            .lock()
+            .retain(|execution| execution.id != self.id);
+    }
+}
+
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
     handler: &Handler,
+    lifecycle: &RpcLifecycle,
     rest_enabled: bool,
     idle_timeout: Duration,
 ) -> io::Result<()> {
@@ -146,21 +345,47 @@ fn serve_connection(
             Err(error) => {
                 let rpc_error = RpcError::InvalidRequest("malformed http request");
                 let response =
-                    JsonRpcVersion::Legacy.error_response(&rpc_error, &Value::new_null());
+                    JsonRpcVersion::Legacy.error_response(&rpc_error, Some(&Value::new_null()));
                 write_json(reader.get_mut(), 400, "Bad Request", &response, false)?;
                 return Err(error);
             }
         };
         let keep_alive = request.keep_alive;
 
+        let (path, query) = split_path_query(&request.path);
+        if path.starts_with("/rest/") && matches!(request.method.as_str(), "GET" | "HEAD") {
+            let response = crate::rest::route_method(
+                handler.context(),
+                path,
+                query,
+                rest_enabled,
+                &request.method,
+            );
+            write_rest_response(reader.get_mut(), &response, keep_alive)?;
+            if !keep_alive {
+                return Ok(());
+            }
+            continue;
+        }
+
         if request.method == "GET" {
-            let (path, query) = split_path_query(&request.path);
-            let response = if path.starts_with("/rest/") {
-                crate::rest::route(handler.context(), path, query, rest_enabled)
-            } else {
-                crate::esplora::route(handler, path, query)
-            };
+            let response = crate::esplora::route(handler, path, query);
             write_response(reader.get_mut(), &response, keep_alive)?;
+            if !keep_alive {
+                return Ok(());
+            }
+            continue;
+        }
+
+        if request.method != "POST" {
+            // Core's RPC handler answers every non-POST method with 405.
+            write_status(
+                reader.get_mut(),
+                405,
+                "Method Not Allowed",
+                METHOD_NOT_ALLOWED_BODY,
+                keep_alive,
+            )?;
             if !keep_alive {
                 return Ok(());
             }
@@ -176,17 +401,16 @@ fn serve_connection(
         }
 
         if !auth.validate_header(request.authorization.as_deref()) {
-            write_status(
-                reader.get_mut(),
-                401,
-                "Unauthorized",
-                b"unauthorized",
-                false,
-            )?;
+            if request.authorization.is_some() {
+                // Core delays the reply only for present-but-wrong
+                // credentials, never for a missing header.
+                thread::sleep(AUTH_FAILURE_DELAY);
+            }
+            write_unauthorized(reader.get_mut())?;
             return Ok(());
         }
 
-        let response = handle_json(handler, &request.body);
+        let response = handle_json(lifecycle, handler, &request.body);
         if let Some(body) = response.body.as_ref() {
             write_json(
                 reader.get_mut(),
@@ -239,12 +463,6 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid request method",
-        ));
-    }
     let mut header_bytes = request_line.len();
     let mut content_length = None;
     let mut authorization = None;
@@ -287,10 +505,13 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
         }
     }
 
-    let content_length = match (method, content_length) {
-        ("GET", length) => length.unwrap_or(0),
-        (_, Some(length)) => length,
-        (_, None) => {
+    // Any method token is framed here; routing decides GET, POST, and the
+    // 405 fallback, so unsupported methods still consume their declared body
+    // before the connection continues.
+    let content_length = match content_length {
+        Some(length) => length,
+        None if method != "POST" => 0,
+        None => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "missing content-length",
@@ -321,151 +542,267 @@ enum JsonRpcVersion {
 }
 
 impl JsonRpcVersion {
-    fn from_request(request: &Value) -> Self {
-        if request.get("jsonrpc").and_then(Value::as_str) == Some("2.0") {
-            Self::V2
-        } else {
-            Self::Legacy
+    /// Core `JSONRPCReplyObj`: v1 keeps a null counterpart field, v2 omits it,
+    /// and the `id` member is emitted only when the request carried one.
+    fn reply(self, outcome: Result<&Value, &RpcError>, id: Option<&Value>) -> Value {
+        let mut reply = match (self, outcome) {
+            (Self::Legacy, Ok(result)) => json!({"result": result, "error": null}),
+            (Self::Legacy, Err(error)) => {
+                json!({"result": null, "error": error_object(error)})
+            }
+            (Self::V2, Ok(result)) => json!({"jsonrpc": "2.0", "result": result}),
+            (Self::V2, Err(error)) => {
+                json!({"jsonrpc": "2.0", "error": error_object(error)})
+            }
+        };
+        if let Some(id) = id {
+            reply.insert("id", id.clone());
         }
+        reply
     }
 
-    fn success_response(self, result: &Value, id: &Value) -> Value {
-        match self {
-            Self::Legacy => json!({"result": result, "error": null, "id": id}),
-            Self::V2 => json!({"jsonrpc": "2.0", "result": result, "id": id}),
-        }
+    fn success_response(self, result: &Value, id: Option<&Value>) -> Value {
+        self.reply(Ok(result), id)
     }
 
-    fn error_response(self, error: &RpcError, id: &Value) -> Value {
-        match self {
-            Self::Legacy => json!({
-                "result": null,
-                "error": {"code": error.code(), "message": error.to_string()},
-                "id": id
-            }),
-            Self::V2 => json!({
-                "jsonrpc": "2.0",
-                "error": {"code": error.code(), "message": error.to_string()},
-                "id": id
-            }),
-        }
+    fn error_response(self, error: &RpcError, id: Option<&Value>) -> Value {
+        self.reply(Err(error), id)
     }
 
-    const fn error_status(self) -> u16 {
+    /// Core's error status selection: `JSONErrorReply` maps invalid requests
+    /// to 400 regardless of version (envelope failures throw before v2 error
+    /// catching) and legacy method-not-found to 404, while v2 execution errors
+    /// stay HTTP 200 and legacy execution errors stay 500.
+    fn error_status(self, error: &RpcError) -> u16 {
+        if error.code() == RpcError::INVALID_REQUEST {
+            return 400;
+        }
         match self {
+            Self::Legacy if error.code() == RpcError::METHOD_NOT_FOUND => 404,
             Self::Legacy => 500,
             Self::V2 => 200,
         }
     }
 }
 
-enum CallResponse {
+/// Core `JSONRPCError`: exactly `{code, message}` with no `data` member.
+fn error_object(error: &RpcError) -> Value {
+    json!({"code": error.code(), "message": error.wire_message()})
+}
+
+/// A parsed JSON-RPC request envelope, Core `JSONRPCRequest::parse`.
+struct ParsedRequest {
+    version: JsonRpcVersion,
+    /// `Some(null)` distinguishes an explicit null id from an absent id.
+    id: Option<Value>,
+    method: String,
+    /// Normalized to an empty array when absent or null, as Core does.
+    params: Value,
+}
+
+/// Envelope rejection carrying the reply context parsed so far: Core parses
+/// the id first, then the version, so rejections carry both partials.
+struct RequestError {
+    error: RpcError,
+    version: JsonRpcVersion,
+    id: Option<Value>,
+}
+
+/// Core `JSONRPCRequest::parse`: object shape, id presence, exact `jsonrpc`
+/// version rules, string method, and array/object/null params.
+fn parse_envelope(request: &Value) -> Result<ParsedRequest, RequestError> {
+    if !request.is_object() {
+        return Err(RequestError {
+            error: RpcError::InvalidRequest("Invalid Request object"),
+            version: JsonRpcVersion::Legacy,
+            id: Some(Value::new_null()),
+        });
+    }
+    let id = request.get("id").cloned();
+    let mut version = JsonRpcVersion::Legacy;
+    if let Some(jsonrpc) = request.get("jsonrpc").filter(|value| !value.is_null()) {
+        let Some(spec) = jsonrpc.as_str() else {
+            return Err(RequestError {
+                error: RpcError::InvalidRequest("jsonrpc field must be a string"),
+                version,
+                id,
+            });
+        };
+        version = match spec {
+            // Core keeps {"jsonrpc":"1.0"} requests in the legacy protocol
+            // and rejects every other version string.
+            "1.0" => JsonRpcVersion::Legacy,
+            "2.0" => JsonRpcVersion::V2,
+            _ => {
+                return Err(RequestError {
+                    error: RpcError::InvalidRequest("JSON-RPC version not supported"),
+                    version,
+                    id,
+                });
+            }
+        };
+    }
+    let Some(method_value) = request.get("method").filter(|value| !value.is_null()) else {
+        return Err(RequestError {
+            error: RpcError::InvalidRequest("Missing method"),
+            version,
+            id,
+        });
+    };
+    let Some(method) = method_value.as_str() else {
+        return Err(RequestError {
+            error: RpcError::InvalidRequest("Method must be a string"),
+            version,
+            id,
+        });
+    };
+    let params = match request.get("params") {
+        Some(params) if params.is_array() || params.is_object() => params.clone(),
+        Some(params) if params.is_null() => json!([]),
+        None => json!([]),
+        Some(_) => {
+            return Err(RequestError {
+                error: RpcError::InvalidRequest("Params must be an array or object"),
+                version,
+                id,
+            });
+        }
+    };
+    Ok(ParsedRequest {
+        version,
+        id,
+        method: method.to_owned(),
+        params,
+    })
+}
+
+enum CallOutcome {
     Reply {
         body: Value,
         version: JsonRpcVersion,
-        is_error: bool,
+        error: Option<RpcError>,
     },
     Notification,
 }
 
-impl CallResponse {
-    fn reply(body: Value, version: JsonRpcVersion, is_error: bool) -> Self {
-        Self::Reply {
+fn handle_json(lifecycle: &RpcLifecycle, handler: &Handler, body: &[u8]) -> JsonResponse {
+    let request = match parse_body(body) {
+        Ok(request) => request,
+        Err(error) => return transport_error_response(&error),
+    };
+    if let Some(requests) = request.as_array() {
+        return handle_batch(lifecycle, handler, requests);
+    }
+    if !request.is_object() {
+        return transport_error_response(&RpcError::Parse(
+            "Top-level object parse error".to_owned(),
+        ));
+    }
+    handle_single(lifecycle, handler, &request)
+}
+
+/// Reads the body as one JSON document, mirroring Core `request.read`.
+fn parse_body(body: &[u8]) -> Result<Value, RpcError> {
+    let text = match core::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(error) => {
+            debug!(%error, "rpc body is not valid utf-8");
+            return Err(RpcError::from(error));
+        }
+    };
+    match sonic_rs::from_str(text) {
+        Ok(request) => Ok(request),
+        Err(error) => {
+            debug!(%error, "rpc body is not valid json");
+            Err(RpcError::from(error))
+        }
+    }
+}
+
+/// Core's reply for requests that never parsed: the default request context is
+/// legacy with a present null id, so these replies are v1-shaped with
+/// `"id": null` and carry the `JSONErrorReply` status for their code.
+fn transport_error_response(error: &RpcError) -> JsonResponse {
+    let version = JsonRpcVersion::Legacy;
+    let status = version.error_status(error);
+    JsonResponse {
+        status,
+        reason: reason_for_status(status),
+        body: Some(version.error_response(error, Some(&Value::new_null()))),
+    }
+}
+
+/// Core `ExecuteHTTPRPC` singleton step.
+fn handle_single(lifecycle: &RpcLifecycle, handler: &Handler, request: &Value) -> JsonResponse {
+    match execute_request(lifecycle, handler, request) {
+        CallOutcome::Notification => no_content_response(),
+        CallOutcome::Reply {
             body,
             version,
-            is_error,
-        }
-    }
-
-    const fn http_status(&self) -> u16 {
-        match self {
-            Self::Reply {
-                version,
-                is_error: true,
-                ..
-            } => version.error_status(),
-            Self::Reply { .. } | Self::Notification => 200,
-        }
-    }
-}
-
-fn handle_json(handler: &Handler, body: &[u8]) -> JsonResponse {
-    let body = match core::str::from_utf8(body) {
-        Ok(body) => body,
-        Err(error) => {
-            return legacy_error_response(&RpcError::from(error), &Value::new_null());
-        }
-    };
-    let request = match sonic_rs::from_str::<Value>(body) {
-        Ok(request) => request,
-        Err(error) => {
-            return legacy_error_response(&RpcError::from(error), &Value::new_null());
-        }
-    };
-
-    if let Some(requests) = request.as_array() {
-        if requests.is_empty() {
-            return legacy_error_response(
-                &RpcError::InvalidRequest("batch must not be empty"),
-                &Value::new_null(),
-            );
-        }
-        let mut responses = Vec::with_capacity(requests.len());
-        let mut status = 200;
-        for request in requests {
-            let response = handle_single_json(handler, request);
-            status = status.max(response.http_status());
-            if let CallResponse::Reply { body, .. } = response {
-                responses.push(body);
+            error,
+        } => {
+            let status = match &error {
+                Some(error) => version.error_status(error),
+                None => 200,
+            };
+            JsonResponse {
+                status,
+                reason: reason_for_status(status),
+                body: Some(body),
             }
         }
-        if responses.is_empty() {
-            return no_content_response();
+    }
+}
+
+/// Core batch execution: every member executes, replies keep input order, the
+/// aggregate status is always 200, an all-notification batch yields 204, and
+/// an empty batch returns an empty array (Core's documented backwards-
+/// compatibility choice over the JSON-RPC 2.0 spec).
+fn handle_batch(lifecycle: &RpcLifecycle, handler: &Handler, requests: &[Value]) -> JsonResponse {
+    let mut bodies = Vec::with_capacity(requests.len());
+    for request in requests {
+        if let CallOutcome::Reply { body, .. } = execute_request(lifecycle, handler, request) {
+            bodies.push(body);
         }
-        return JsonResponse {
-            status,
-            reason: reason_for_status(status),
-            body: Some(json!(responses)),
-        };
     }
-
-    let response = handle_single_json(handler, &request);
-    let status = response.http_status();
-    match response {
-        CallResponse::Reply { body, .. } => JsonResponse {
-            status,
-            reason: reason_for_status(status),
-            body: Some(body),
-        },
-        CallResponse::Notification => no_content_response(),
+    if bodies.is_empty() && !requests.is_empty() {
+        return no_content_response();
     }
-}
-
-fn handle_single_json(handler: &Handler, request: &Value) -> CallResponse {
-    let id = request.get("id").cloned().unwrap_or_else(Value::new_null);
-    let version = JsonRpcVersion::from_request(request);
-    let Some(method) = request.get("method").and_then(Value::as_str) else {
-        let error = RpcError::InvalidRequest("method is required");
-        return CallResponse::reply(version.error_response(&error, &id), version, true);
-    };
-    let null_params = Value::new_null();
-    let params = request.get("params").unwrap_or(&null_params);
-    let result = handler.dispatch(method, params);
-    if version == JsonRpcVersion::V2 && request.get("id").is_none() {
-        return CallResponse::Notification;
-    }
-    match result {
-        Ok(result) => CallResponse::reply(version.success_response(&result, &id), version, false),
-        Err(error) => CallResponse::reply(version.error_response(&error, &id), version, true),
-    }
-}
-
-fn legacy_error_response(error: &RpcError, id: &Value) -> JsonResponse {
-    let version = JsonRpcVersion::Legacy;
     JsonResponse {
-        status: version.error_status(),
-        reason: reason_for_status(version.error_status()),
-        body: Some(version.error_response(error, id)),
+        status: 200,
+        reason: "OK",
+        body: Some(json!(bodies)),
+    }
+}
+
+/// Core's per-request step: parse the envelope, execute, and suppress the
+/// reply exactly when the request — or the partial request left by a rejected
+/// envelope — is a v2 notification.
+fn execute_request(lifecycle: &RpcLifecycle, handler: &Handler, request: &Value) -> CallOutcome {
+    let (version, id, outcome) = match parse_envelope(request) {
+        Err(reject) => (reject.version, reject.id, Err(reject.error)),
+        Ok(parsed) => {
+            let result = lifecycle.execute(handler, &parsed.method, &parsed.params);
+            (parsed.version, parsed.id, result)
+        }
+    };
+    if version == JsonRpcVersion::V2 && id.is_none() {
+        // Core executes notifications but never responds to them, even when
+        // execution fails or the envelope was rejected after the version and
+        // id were parsed.
+        return CallOutcome::Notification;
+    }
+    match outcome {
+        Ok(result) => CallOutcome::Reply {
+            body: version.success_response(&result, id.as_ref()),
+            version,
+            error: None,
+        },
+        Err(error) => CallOutcome::Reply {
+            body: version.error_response(&error, id.as_ref()),
+            version,
+            error: Some(error),
+        },
     }
 }
 
@@ -473,6 +810,8 @@ const fn reason_for_status(status: u16) -> &'static str {
     match status {
         200 => "OK",
         204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
         _ => "Internal Server Error",
     }
 }
@@ -485,6 +824,8 @@ const fn no_content_response() -> JsonResponse {
     }
 }
 
+/// Writes a JSON reply: `application/json` with the trailing newline Core
+/// appends (`reply.write() + "\n"`).
 fn write_json(
     stream: &mut TcpStream,
     status: u16,
@@ -492,13 +833,23 @@ fn write_json(
     value: &Value,
     keep_alive: bool,
 ) -> io::Result<()> {
-    let body = sonic_rs::to_string(value).map_err(|error| {
+    let mut body = sonic_rs::to_string(value).map_err(|error| {
         warn!(%error, "failed to serialize rpc response");
         io::Error::other("json serialization failed")
     })?;
-    write_status(stream, status, reason, body.as_bytes(), keep_alive)
+    body.push('\n');
+    let connection = if keep_alive { "keep-alive" } else { "close" };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body.as_bytes())?;
+    stream.flush()
 }
 
+/// Writes a status reply with no content type; Core only sets Content-Type on
+/// JSON replies.
 fn write_status(
     stream: &mut TcpStream,
     status: u16,
@@ -509,10 +860,20 @@ fn write_status(
     let connection = if keep_alive { "keep-alive" } else { "close" };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
+    stream.flush()
+}
+
+/// Writes Core's 401 challenge: the `WWW-Authenticate` header, no body, and a
+/// closed connection.
+fn write_unauthorized(stream: &mut TcpStream) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: {WWW_AUTHENTICATE}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )?;
     stream.flush()
 }
 
@@ -539,31 +900,57 @@ fn write_response(
     stream.flush()
 }
 
+fn write_rest_response(
+    stream: &mut TcpStream,
+    response: &crate::rest::RestResponse,
+    keep_alive: bool,
+) -> io::Result<()> {
+    let connection = if keep_alive { "keep-alive" } else { "close" };
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nConnection: {connection}\r\n\r\n",
+        response.status,
+        response.reason,
+        response.content_type,
+        response.content_length,
+        response.cache_control,
+    )?;
+    stream.write_all(&response.body)?;
+    stream.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::sync::atomic::{AtomicBool, Ordering};
-
     use crate::context::Context;
+
+    fn ready_lifecycle() -> RpcLifecycle {
+        RpcLifecycle::new(Arc::new(AtomicBool::new(false)))
+    }
+
+    fn test_handler() -> Handler {
+        Handler::new(Arc::new(Context::new()))
+    }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
         let auth = Arc::new(Auth::basic("alice", "secret"));
         let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown)));
         let server = RpcServer::bind(
             "127.0.0.1:0",
             auth,
             handler,
+            Arc::clone(&lifecycle),
             4,
             core::time::Duration::from_millis(500),
             false,
         )?;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_clone = Arc::clone(&shutdown);
-        let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+        let handle = std::thread::spawn(move || server.serve_with_shutdown());
         std::thread::sleep(core::time::Duration::from_millis(150));
-        shutdown.store(true, Ordering::Release);
+        lifecycle.request_shutdown();
         handle.join().expect("join serve thread")
     }
 
@@ -581,8 +968,10 @@ mod tests {
 
     #[test]
     fn json_rpc_2_success_omits_null_error_for_jsonrpsee_clients() {
-        let handler = Handler::new(Arc::new(Context::new()));
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
         let response = handle_json(
+            &lifecycle,
             &handler,
             br#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#,
         );
@@ -595,8 +984,10 @@ mod tests {
 
     #[test]
     fn bitcoin_core_1_success_keeps_null_error() {
-        let handler = Handler::new(Arc::new(Context::new()));
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
         let response = handle_json(
+            &lifecycle,
             &handler,
             br#"{"jsonrpc":"1.0","id":1,"method":"getblockchaininfo","params":[]}"#,
         );
@@ -609,8 +1000,10 @@ mod tests {
 
     #[test]
     fn json_rpc_2_error_omits_result_and_uses_http_200() {
-        let handler = Handler::new(Arc::new(Context::new()));
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
         let response = handle_json(
+            &lifecycle,
             &handler,
             br#"{"jsonrpc":"2.0","id":7,"method":"missing","params":[]}"#,
         );
@@ -624,20 +1017,246 @@ mod tests {
     }
 
     #[test]
-    fn json_rpc_2_notification_has_no_response_body() {
-        let handler = Handler::new(Arc::new(Context::new()));
+    fn legacy_method_not_found_maps_to_http_404() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
         let response = handle_json(
+            &lifecycle,
+            &handler,
+            br#"{"method":"missing","params":[],"id":7}"#,
+        );
+        let status = response.status;
+        let reason = response.reason;
+        let body = response.body.expect("JSON-RPC response body");
+        let error = body.get("error").expect("error member");
+
+        assert_eq!((status, reason), (404, "Not Found"));
+        assert!(body.get("jsonrpc").is_none());
+        assert!(body.get("result").is_some_and(Value::is_null));
+        assert_eq!(
+            error.get("code").and_then(Value::as_i64),
+            Some(RpcError::METHOD_NOT_FOUND)
+        );
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some("Method not found")
+        );
+        assert_eq!(body.get("id").and_then(Value::as_i64), Some(7));
+        assert!(error.get("data").is_none());
+    }
+
+    #[test]
+    fn invalid_request_envelopes_map_to_http_400() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let cases: [(&[u8], &str); 4] = [
+            (br#"{"id":3,"method":5}"#, "Method must be a string"),
+            (br#"{"id":3}"#, "Missing method"),
+            (
+                br#"{"id":3,"method":"getblockcount","params":5}"#,
+                "Params must be an array or object",
+            ),
+            (br#"{"id":3,"method":null}"#, "Missing method"),
+        ];
+
+        for (body, message) in cases {
+            let response = handle_json(&lifecycle, &handler, body);
+            let error = response
+                .body
+                .expect("JSON-RPC response body")
+                .get("error")
+                .cloned()
+                .unwrap_or_else(|| panic!("error member missing for {message}"));
+
+            assert_eq!(response.status, 400, "case {message}");
+            assert_eq!(response.reason, "Bad Request");
+            assert_eq!(
+                error.get("code").and_then(Value::as_i64),
+                Some(RpcError::INVALID_REQUEST)
+            );
+            assert_eq!(error.get("message").and_then(Value::as_str), Some(message));
+        }
+    }
+
+    #[test]
+    fn unsupported_or_malformed_jsonrpc_field_is_invalid_request() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let cases: [(&[u8], &str); 2] = [
+            (
+                br#"{"id":1,"jsonrpc":"3.0","method":"x"}"#,
+                "JSON-RPC version not supported",
+            ),
+            (
+                br#"{"id":1,"jsonrpc":2,"method":"x"}"#,
+                "jsonrpc field must be a string",
+            ),
+        ];
+
+        for (body, message) in cases {
+            let response = handle_json(&lifecycle, &handler, body);
+            let body = response.body.expect("JSON-RPC response body");
+
+            assert_eq!(response.status, 400, "case {message}");
+            assert!(body.get("jsonrpc").is_none(), "case {message}");
+            assert_eq!(
+                body.get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str),
+                Some(message)
+            );
+        }
+    }
+
+    #[test]
+    fn v2_invalid_request_keeps_v2_envelope_but_maps_to_http_400() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let response = handle_json(
+            &lifecycle,
+            &handler,
+            br#"{"jsonrpc":"2.0","id":1,"method":"x","params":5}"#,
+        );
+        let status = response.status;
+        let body = response.body.expect("JSON-RPC response body");
+
+        assert_eq!(status, 400);
+        assert_eq!(body.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+        assert_eq!(
+            body.get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(RpcError::INVALID_REQUEST)
+        );
+    }
+
+    #[test]
+    fn top_level_scalars_are_parse_errors() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+
+        for body in [br#"42"# as &[u8], br#""text""#] {
+            let response = handle_json(&lifecycle, &handler, body);
+            let parsed = response.body.expect("JSON-RPC response body");
+            let error = parsed.get("error").expect("error member");
+
+            assert_eq!(response.status, 500);
+            assert!(parsed.get("jsonrpc").is_none());
+            assert!(parsed.get("result").is_some_and(Value::is_null));
+            assert_eq!(
+                error.get("code").and_then(Value::as_i64),
+                Some(RpcError::PARSE_ERROR)
+            );
+            assert_eq!(
+                error.get("message").and_then(Value::as_str),
+                Some("Top-level object parse error")
+            );
+            assert!(parsed.get("id").is_some_and(Value::is_null));
+        }
+    }
+
+    #[test]
+    fn malformed_json_returns_core_parse_error_envelope() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let response = handle_json(&lifecycle, &handler, b"{");
+        let body = response.body.expect("JSON-RPC response body");
+        let error = body.get("error").expect("error member");
+
+        assert_eq!(response.status, 500);
+        assert_eq!(
+            error.get("code").and_then(Value::as_i64),
+            Some(RpcError::PARSE_ERROR)
+        );
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some("Parse error")
+        );
+        assert!(body.get("id").is_some_and(Value::is_null));
+    }
+
+    #[test]
+    fn absent_id_and_explicit_null_id_are_distinct() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+
+        let absent = handle_json(&lifecycle, &handler, br#"{"method":"getblockcount"}"#);
+        let absent = absent.body.expect("legacy replies without an id");
+        assert!(absent.get("result").is_some());
+        assert!(absent.get("error").is_some_and(Value::is_null));
+        assert!(absent.get("id").is_none(), "absent id must stay absent");
+
+        let explicit = handle_json(
+            &lifecycle,
+            &handler,
+            br#"{"jsonrpc":"2.0","id":null,"method":"getblockcount"}"#,
+        );
+        let explicit = explicit
+            .body
+            .expect("explicit null id is not a notification");
+        assert!(explicit.get("result").is_some());
+        assert!(explicit.get("id").is_some_and(Value::is_null));
+    }
+
+    #[test]
+    fn json_rpc_2_notification_has_no_response_body() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let response = handle_json(
+            &lifecycle,
             &handler,
             br#"{"jsonrpc":"2.0","method":"getblockcount","params":[]}"#,
         );
 
         assert!(response.body.is_none());
+        assert_eq!((response.status, response.reason), (204, "No Content"));
+    }
+
+    #[test]
+    fn empty_batch_returns_an_empty_array_with_http_200() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let response = handle_json(&lifecycle, &handler, b"[]");
+        let status = response.status;
+        let body = response.body.expect("empty batch reply body");
+
+        assert_eq!(status, 200);
+        assert_eq!(body.as_array().map(|a| a.len()), Some(0));
+    }
+
+    #[test]
+    fn all_notification_batch_returns_no_content() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let response = handle_json(
+            &lifecycle,
+            &handler,
+            br#"[
+                {"jsonrpc":"2.0","method":"getblockcount","params":[]},
+                {"jsonrpc":"2.0","method":"getblockchaininfo","params":[]}
+            ]"#,
+        );
+
+        assert!(response.body.is_none());
+        assert_eq!((response.status, response.reason), (204, "No Content"));
+    }
+
+    #[test]
+    fn invalid_v2_notification_members_are_suppressed() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let response = handle_json(&lifecycle, &handler, br#"[{"jsonrpc":"2.0","method":5}]"#);
+
+        assert!(response.body.is_none());
+        assert_eq!(response.status, 204);
     }
 
     #[test]
     fn json_rpc_batch_excludes_notifications() {
-        let handler = Handler::new(Arc::new(Context::new()));
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
         let response = handle_json(
+            &lifecycle,
             &handler,
             br#"[
                 {"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]},
@@ -653,5 +1272,213 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].get("result").is_some());
         assert!(rows[1].get("error").is_some());
+    }
+
+    #[test]
+    fn batch_replies_preserve_input_order_across_invalid_members() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        let response = handle_json(
+            &lifecycle,
+            &handler,
+            br#"[
+                {"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]},
+                5,
+                {"method":"missing","id":"a"}
+            ]"#,
+        );
+        let status = response.status;
+        let body = response.body.expect("JSON-RPC batch response body");
+        let rows = body.as_array().expect("batch response array");
+
+        assert_eq!(status, 200, "batches never carry member HTTP errors");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].get("id").and_then(Value::as_i64), Some(1));
+        assert!(rows[0].get("result").is_some());
+        assert_eq!(
+            rows[1]
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str),
+            Some("Invalid Request object")
+        );
+        assert!(rows[1].get("id").is_some_and(Value::is_null));
+        assert_eq!(
+            rows[2]
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(RpcError::METHOD_NOT_FOUND)
+        );
+        assert_eq!(rows[2].get("id").and_then(Value::as_str), Some("a"));
+    }
+
+    #[test]
+    fn warmup_rejects_commands_until_finished_and_reports_status() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+        lifecycle.set_warmup_starting();
+
+        let legacy = handle_json(
+            &lifecycle,
+            &handler,
+            br#"{"method":"getblockcount","id":1}"#,
+        );
+        let body = legacy.body.expect("warmup rejection body");
+        let error = body.get("error").expect("error member");
+        assert_eq!(legacy.status, 500);
+        assert_eq!(
+            error.get("code").and_then(Value::as_i64),
+            Some(RpcError::CORE_IN_WARMUP)
+        );
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some(WARMUP_DEFAULT_STATUS)
+        );
+
+        lifecycle.set_warmup_status("Loading block index");
+        let v2 = handle_json(
+            &lifecycle,
+            &handler,
+            br#"{"jsonrpc":"2.0","method":"getblockcount","id":1}"#,
+        );
+        let body = v2.body.expect("v2 warmup rejection body");
+        assert_eq!(v2.status, 200);
+        assert_eq!(
+            body.get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str),
+            Some("Loading block index")
+        );
+
+        lifecycle.set_warmup_finished();
+        let ready = handle_json(
+            &lifecycle,
+            &handler,
+            br#"{"method":"getblockcount","id":1}"#,
+        );
+        let body = ready.body.expect("ready reply body");
+        assert_eq!(ready.status, 200);
+        assert!(body.get("result").is_some());
+    }
+
+    #[test]
+    fn shutdown_observed_between_commands_rejects_with_client_not_connected() {
+        let lifecycle = RpcLifecycle::new(Arc::new(AtomicBool::new(true)));
+        let handler = test_handler();
+        let response = handle_json(
+            &lifecycle,
+            &handler,
+            br#"{"method":"getblockcount","id":1}"#,
+        );
+        let body = response.body.expect("shutdown rejection body");
+        let error = body.get("error").expect("error member");
+
+        assert_eq!(response.status, 500);
+        assert_eq!(
+            error.get("code").and_then(Value::as_i64),
+            Some(RpcError::CORE_CLIENT_NOT_CONNECTED)
+        );
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some("Shutting down")
+        );
+    }
+
+    #[test]
+    fn active_commands_track_registration_and_removal_in_order() {
+        let lifecycle = ready_lifecycle();
+        assert!(lifecycle.active_commands().is_empty());
+
+        let first = lifecycle.track_command("getblockcount");
+        {
+            let _second = lifecycle.track_command("getblockchaininfo");
+            let active = lifecycle.active_commands();
+            let methods: Vec<&str> = active.iter().map(|(method, _)| method.as_str()).collect();
+            assert_eq!(methods, ["getblockcount", "getblockchaininfo"]);
+            assert!(active.iter().all(|(_, duration)| *duration < 60_000_000));
+        }
+        let active = lifecycle.active_commands();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, "getblockcount");
+        drop(first);
+        assert!(lifecycle.active_commands().is_empty());
+    }
+
+    #[test]
+    fn failed_commands_remove_their_tracking_entry() {
+        let lifecycle = ready_lifecycle();
+        let handler = test_handler();
+
+        let result = lifecycle.execute(&handler, "missing_method", &json!([]));
+
+        assert!(result.is_err());
+        assert!(lifecycle.active_commands().is_empty());
+    }
+
+    #[test]
+    fn unauthorized_reply_carries_core_challenge_header() -> io::Result<()> {
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown)));
+        let server = RpcServer::bind(
+            "127.0.0.1:0",
+            auth,
+            handler,
+            Arc::clone(&lifecycle),
+            4,
+            Duration::from_millis(2_000),
+            false,
+        )?;
+        let address = server.local_addr()?;
+        let handle = std::thread::spawn(move || server.serve_with_shutdown());
+
+        let mut stream = TcpStream::connect(address)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.write_all(
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        )?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        lifecycle.request_shutdown();
+        let _ = handle.join();
+
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+        assert!(response.contains("WWW-Authenticate: Basic realm=\"jsonrpc\""));
+        Ok(())
+    }
+
+    #[test]
+    fn non_post_methods_receive_core_405_reply() -> io::Result<()> {
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let lifecycle = Arc::new(RpcLifecycle::new(Arc::clone(&shutdown)));
+        let server = RpcServer::bind(
+            "127.0.0.1:0",
+            auth,
+            handler,
+            Arc::clone(&lifecycle),
+            4,
+            Duration::from_millis(2_000),
+            false,
+        )?;
+        let address = server.local_addr()?;
+        let handle = std::thread::spawn(move || server.serve_with_shutdown());
+
+        let mut stream = TcpStream::connect(address)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.write_all(
+            b"DELETE / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        lifecycle.request_shutdown();
+        let _ = handle.join();
+
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+        assert!(response.ends_with("JSONRPC server handles only POST requests"));
+        Ok(())
     }
 }

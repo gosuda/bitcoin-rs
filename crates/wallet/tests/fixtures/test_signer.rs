@@ -26,6 +26,29 @@ impl TestSigner {
     pub(crate) const fn public_key(&self) -> PublicKey {
         self.public_key
     }
+
+    /// Returns the signer's key in the caller-supplied form used by
+    /// transient signing calls.
+    pub(crate) fn caller_key(&self) -> bitcoin::PrivateKey {
+        bitcoin::PrivateKey {
+            compressed: true,
+            network: bitcoin::NetworkKind::Main,
+            inner: self.key,
+        }
+    }
+
+    /// Returns a watch-only BIP32 account xpub for the signer's key.
+    pub(crate) fn bip32_xpub(&self) -> bitcoin::bip32::Xpub {
+        bitcoin::bip32::Xpub {
+            network: bitcoin::NetworkKind::Main,
+            depth: 0,
+            parent_fingerprint: bitcoin::bip32::Fingerprint::default(),
+            child_number: bitcoin::bip32::ChildNumber::from_normal_idx(0)
+                .expect("zero is a normal child"),
+            chain_code: bitcoin::bip32::ChainCode::from([0_u8; 32]),
+            public_key: self.public_key.inner,
+        }
+    }
 }
 
 impl ExternalSigner for TestSigner {

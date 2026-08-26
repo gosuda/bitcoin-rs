@@ -136,7 +136,42 @@ fn validate_empty_tree_root(
     })
 }
 
+/// Computes the compact target a block extending `parent_id` must carry.
+///
+/// This is the one next-work source: [`validate_header_nbits`] enforces
+/// exactly this value, and candidate or template building reads it instead of
+/// recomputing the difficulty arithmetic a second time. `candidate_time` is
+/// the timestamp the candidate would carry; testnet-style minimum-difficulty
+/// recovery keys off it.
+///
+/// # Errors
+///
+/// Returns [`ChainError::UnknownNode`] when `parent_id` is not in the tree and
+/// [`ChainError::HeightOverflow`] when the parent is at the last height.
+pub fn next_work_required(
+    tree: &BlockTree,
+    parent_id: NodeId,
+    candidate_time: u32,
+    network: Network,
+) -> Result<CompactTarget, ChainError> {
+    let parent = tree.node(parent_id)?;
+    let height = parent
+        .height
+        .checked_add(1)
+        .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
+    let retarget_interval = network.retarget_interval();
+    let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
+    if is_retarget {
+        expected_retarget_bits(network, tree, parent_id, height, retarget_interval)
+    } else {
+        expected_non_retarget_bits(network, tree, parent_id, candidate_time, retarget_interval)
+    }
+}
+
 /// Validates a candidate header's compact target against the contextual network difficulty rules.
+///
+/// Delegates to [`next_work_required`], so a header built from that source and
+/// a header accepted here are held to the same computation.
 pub fn validate_header_nbits(
     tree: &BlockTree,
     parent_id: NodeId,
@@ -148,13 +183,7 @@ pub fn validate_header_nbits(
         .height
         .checked_add(1)
         .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
-    let retarget_interval = network.retarget_interval();
-    let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
-    let expected = if is_retarget {
-        expected_retarget_bits(network, tree, parent_id, height, retarget_interval)?
-    } else {
-        expected_non_retarget_bits(network, tree, parent_id, header, retarget_interval)?
-    };
+    let expected = next_work_required(tree, parent_id, header.time, network)?;
     compare_expected_bits(header, height, expected)
 }
 
@@ -207,7 +236,7 @@ fn expected_non_retarget_bits(
     network: Network,
     tree: &BlockTree,
     parent_id: NodeId,
-    header: &BlockHeader,
+    candidate_time: u32,
     retarget_interval: u32,
 ) -> Result<CompactTarget, ChainError> {
     let parent = tree.node(parent_id)?;
@@ -219,7 +248,7 @@ fn expected_non_retarget_bits(
         .header
         .time
         .saturating_add(network.target_spacing_seconds().saturating_mul(2));
-    if header.time > min_difficulty_time {
+    if candidate_time > min_difficulty_time {
         return Ok(pow_limit_bits(network));
     }
 

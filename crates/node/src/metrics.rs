@@ -1,8 +1,13 @@
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use hashbrown::HashMap;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use metrics::{
@@ -170,6 +175,42 @@ impl HistogramFn for HistogramHandle {
     }
 }
 
+/// Monotonic process start, recorded once at node startup.
+///
+/// Core initializes its uptime clock at process start (`GetUptime`,
+/// `src/common/system.cpp`), so every later query reports true elapsed
+/// runtime. A lazily initialized clock would restart on first read, which is
+/// the first-call-reports-approximately-zero bug the utility parity audit
+/// records for `uptime`; the earliest-wins record here makes the node, not
+/// the first RPC caller, own the origin.
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+/// Records the authoritative process start instant for uptime accounting.
+///
+/// Idempotent and earliest-wins: the first caller fixes the uptime origin,
+/// mirroring Core's static initialization. `run` records this before wiring
+/// subsystems so the clock covers the whole node lifecycle.
+pub fn record_process_start() {
+    PROCESS_START.get_or_init(Instant::now);
+}
+
+/// Returns the recorded process start instant, or `None` before
+/// [`record_process_start`] has run.
+#[must_use]
+pub fn process_start() -> Option<Instant> {
+    PROCESS_START.get().copied()
+}
+
+/// Returns monotonic uptime since the recorded process start, or `None`
+/// before [`record_process_start`] has run.
+///
+/// `None` keeps the not-yet-started state observable instead of silently
+/// restarting the clock on read.
+#[must_use]
+pub fn process_uptime() -> Option<Duration> {
+    PROCESS_START.get().map(Instant::elapsed)
+}
+
 /// Resident set size of this process in bytes, or `None` where the platform
 /// cannot report it.
 ///
@@ -231,6 +272,87 @@ fn parse_proc_status_rss(status: &str) -> Option<u64> {
 )]
 fn parse_ps_rss(output: &str) -> Option<u64> {
     output.trim().parse::<u64>().ok()?.checked_mul(1024)
+}
+
+/// Warning kinds the node can raise, mirroring Core's kernel and node warning
+/// ids.
+///
+/// Declaration order is the report order: Core keys its registry by
+/// `std::variant<kernel::Warning, node::Warning>`, so kernel-issued warnings
+/// sort before node-issued ones.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WarningKind {
+    /// A versionbit unknown to this node activated on the network.
+    UnknownNewRulesActivated,
+    /// An invalid chain with substantially more work than the best chain was
+    /// found.
+    LargeWorkInvalidChain,
+    /// The system clock is far out of sync with peer clocks.
+    ClockOutOfSync,
+    /// An internal error put the node in a state it cannot recover from.
+    FatalInternalError,
+}
+
+/// Node warning registry, mirroring Core's `node::Warnings`.
+///
+/// At most one message per [`WarningKind`]: setting an already-active kind
+/// keeps the original message, and [`Warnings::messages`] reports in kind
+/// order. The registry is node-owned state; RPC projections read it live at
+/// call time instead of copying warnings into transport-owned storage.
+pub struct Warnings {
+    active: Mutex<BTreeMap<WarningKind, String>>,
+}
+
+impl Default for Warnings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Warnings {
+    /// Creates an empty registry.
+    pub const fn new() -> Self {
+        Self {
+            active: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Activates the warning for `kind` with `message`.
+    ///
+    /// Returns `true` when the warning was newly set. An already-active kind
+    /// keeps its original message and returns `false`, matching Core's
+    /// `Warnings::Set`.
+    pub fn set(&self, kind: WarningKind, message: impl Into<String>) -> bool {
+        let mut active = self.active.lock();
+        if active.contains_key(&kind) {
+            return false;
+        }
+        active.insert(kind, message.into());
+        true
+    }
+
+    /// Deactivates the warning for `kind`, returning whether one was active.
+    pub fn unset(&self, kind: WarningKind) -> bool {
+        self.active.lock().remove(&kind).is_some()
+    }
+
+    /// Returns the active warning messages ordered by kind.
+    #[must_use]
+    pub fn messages(&self) -> Vec<String> {
+        self.active.lock().values().cloned().collect()
+    }
+}
+
+static NODE_WARNINGS: Warnings = Warnings::new();
+
+/// Returns the process-wide node warning registry.
+///
+/// This is the authoritative warnings fact source: the `getblockchaininfo`,
+/// `getnetworkinfo`, and `getmininginfo` projections read it at invocation,
+/// the way Core reads `NodeContext::warnings` through `GetWarningsForRpc`.
+#[must_use]
+pub fn node_warnings() -> &'static Warnings {
+    &NODE_WARNINGS
 }
 
 /// Installs in-memory process metrics and returns its handle when configured.
@@ -401,6 +523,64 @@ Threads:\t17
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn process_start_is_recorded_once_and_uptime_advances() {
+        use std::thread;
+        use std::time::Duration;
+
+        record_process_start();
+        let first = process_start();
+        let before = process_uptime();
+
+        thread::sleep(Duration::from_millis(25));
+        // A second record must not move the clock — earliest-wins is what
+        // makes the node, rather than the latest caller, own the origin.
+        record_process_start();
+
+        assert_eq!(
+            process_start(),
+            first,
+            "a second record_process_start must not move the start instant"
+        );
+        let Some(before) = before else {
+            panic!("uptime must be observable after record_process_start");
+        };
+        let after = process_uptime().unwrap_or_else(|| panic!("uptime must stay observable"));
+        assert!(
+            after >= before + Duration::from_millis(20),
+            "uptime must advance with elapsed time: {before:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn warnings_keep_first_message_and_report_in_kind_order() {
+        let warnings = Warnings::new();
+        assert!(warnings.messages().is_empty());
+
+        assert!(warnings.set(WarningKind::ClockOutOfSync, "clock out of sync"));
+        // Core ignores a later message for an already-active kind.
+        assert!(!warnings.set(WarningKind::ClockOutOfSync, "superseded message"));
+        assert!(warnings.set(WarningKind::FatalInternalError, "fatal"));
+        assert!(warnings.set(WarningKind::UnknownNewRulesActivated, "unknown rules"));
+
+        assert_eq!(
+            warnings.messages(),
+            [
+                "unknown rules".to_owned(),
+                "clock out of sync".to_owned(),
+                "fatal".to_owned(),
+            ],
+            "kernel warnings must sort before node warnings regardless of set order"
+        );
+
+        assert!(warnings.unset(WarningKind::ClockOutOfSync));
+        assert!(!warnings.unset(WarningKind::ClockOutOfSync));
+        assert_eq!(
+            warnings.messages(),
+            ["unknown rules".to_owned(), "fatal".to_owned()]
+        );
     }
 
     #[test]

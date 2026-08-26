@@ -3,12 +3,14 @@
 
 //! Watch-only wallet primitives.
 //!
-//! # Safety note: no private keys
+//! # Safety note: watch-only, no custody
 //!
-//! This crate is intentionally watch-only. It parses public descriptors, builds
-//! unsigned PSBTs, accepts PSBTs returned by external signers, and finalizes
-//! those PSBTs. It does not expose, accept, store, derive, or sign with private
-//! key material anywhere in its public API.
+//! This crate is watch-only. It parses public descriptors, builds unsigned
+//! PSBTs, accepts PSBTs returned by external signers, and finalizes those
+//! PSBTs. It never generates, stores, or derives secret keys, and it rejects
+//! private material on descriptor import. The only secret material it touches
+//! is caller-supplied keys passed to a single `signer_iface` call; those keys
+//! are used for that call and immediately dropped.
 
 /// Coin selection wrappers.
 pub mod coin_selection;
@@ -26,12 +28,12 @@ pub mod signer_iface;
 pub mod watcher;
 
 pub use coin_selection::{Candidate, SelectStrategy, Selection, Target, select_coins};
-pub use descriptor::{BIP32Derivation, Descriptor};
+pub use descriptor::{BIP32Derivation, Descriptor, DescriptorInfo, analyse};
 pub use fee_bump::{FeeBumpPlan, bump_fee, bump_psbt, bump_psbt_with_rate_sat_per_kvb};
 pub use finalize::{FinalizeError, finalize_signed};
 pub use psbt::{PrevUtxo, PsbtBuilder};
-pub use signer_iface::{ExternalSigner, SignerError};
-pub use watcher::Watcher;
+pub use signer_iface::{ExternalSigner, SignerError, sign_psbt_with_caller_keys};
+pub use watcher::{DescriptorImport, DescriptorTimestamp, Watcher};
 
 use thiserror::Error;
 
@@ -41,6 +43,12 @@ pub enum WalletError {
     /// Descriptor parsing or derivation failed.
     #[error("descriptor error: {0}")]
     Descriptor(String),
+    /// The descriptor contains private key material.
+    #[error("descriptor contains private key material")]
+    PrivateDescriptor,
+    /// A derivation range was required, forbidden, or empty.
+    #[error("{0}")]
+    DescriptorRange(&'static str),
     /// PSBT construction failed.
     #[error("psbt error: {0}")]
     Psbt(String),

@@ -1,16 +1,17 @@
 # bitcoin-rs-mining
 
-Block-template construction: coinbase assembly, transaction selection, and BIP22/23
-block-template serialization.
+Transport-neutral block-candidate assembly for solo mining.
 
-`build_coinbase_template` assembles the coinbase transaction from a
-`CoinbaseTemplateConfig`, drawing on `block_subsidy` for the emission schedule and
-`witness_commitment_script` for the segwit witness commitment; failures surface as
-`MiningError`. `MiningPolicy` (module `policy`) is the transaction-selection policy
-that decides which mempool transactions a template carries — the mempool exposes its
-fee-rate cohorts to template builders for exactly this. The `template` module
-serializes the assembled result into a `BlockTemplate` of `TemplateTransaction`s,
-parameterized by `BlockTemplateParams`, in the BIP22/23 block-template shape.
+`assemble_candidate` builds a [`Candidate`](crate::Candidate) from a
+[`CandidateContext`](crate::CandidateContext) and a mempool mining snapshot.
+The `policy` module selects dependency-closed packages by modified fee rate
+within weight, serialized-size, and sigop limits. The `coinbase` module funds
+the coinbase (subsidy plus actual fees) and, when `SegWit` is active, attaches the
+witness commitment. Failures surface as [`MiningError`](crate::MiningError).
+
+The crate stops at the domain `Candidate`. BIP22/BIP23 JSON projection,
+long-poll waiting, and block submission live behind the node-owned
+`MiningControl` surface consumed by RPC — they are not part of this crate.
 
 ## Features
 - `rocksdb`: forwarding marker for the rocksdb storage backend; gates no code in

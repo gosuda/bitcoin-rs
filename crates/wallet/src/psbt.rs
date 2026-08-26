@@ -24,7 +24,7 @@ impl PrevUtxo {
 #[derive(Debug)]
 pub struct PsbtBuilder<'a> {
     descriptors: &'a [Descriptor],
-    inputs: Vec<(PrevUtxo, usize)>,
+    inputs: Vec<(PrevUtxo, usize, u32)>,
     outputs: Vec<TxOut>,
 }
 
@@ -39,18 +39,21 @@ impl<'a> PsbtBuilder<'a> {
         }
     }
 
-    /// Adds an input and records which descriptor controls it.
+    /// Adds an input and records which descriptor and derivation index
+    /// control it.
     pub fn add_input(
         &mut self,
         prev_utxo: PrevUtxo,
         descriptor_index: usize,
+        derivation_index: u32,
     ) -> Result<&mut Self, WalletError> {
         if self.descriptors.get(descriptor_index).is_none() {
             return Err(WalletError::Psbt(
                 "descriptor index out of range".to_owned(),
             ));
         }
-        self.inputs.push((prev_utxo, descriptor_index));
+        self.inputs
+            .push((prev_utxo, descriptor_index, derivation_index));
         Ok(self)
     }
 
@@ -94,7 +97,7 @@ impl<'a> PsbtBuilder<'a> {
             input: self
                 .inputs
                 .iter()
-                .map(|(prev, _descriptor_index)| TxIn {
+                .map(|(prev, _descriptor_index, _derivation_index)| TxIn {
                     previous_output: prev.outpoint,
                     script_sig: ScriptBuf::new(),
                     sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
@@ -107,25 +110,28 @@ impl<'a> PsbtBuilder<'a> {
             .map_err(|error| WalletError::Psbt(error.to_string()))?;
         psbt.version = 2;
 
-        for (input, (prev, descriptor_index)) in psbt.inputs.iter_mut().zip(self.inputs) {
+        for (input, (prev, descriptor_index, derivation_index)) in
+            psbt.inputs.iter_mut().zip(self.inputs)
+        {
             let descriptor = &self.descriptors[descriptor_index];
             input.witness_utxo = Some(prev.txout);
-            attach_descriptor_scripts(input, descriptor);
+            attach_descriptor_scripts(input, descriptor, derivation_index)?;
         }
 
         Ok(psbt)
     }
 }
 
-fn attach_descriptor_scripts(input: &mut Input, descriptor: &Descriptor) {
-    let script = descriptor.script_pubkey();
+fn attach_descriptor_scripts(
+    input: &mut Input,
+    descriptor: &Descriptor,
+    derivation_index: u32,
+) -> Result<(), WalletError> {
+    let script = descriptor.script_pubkey_at(derivation_index)?;
     if script.is_p2sh() {
-        if let Ok(redeem_script) = descriptor.inner.explicit_script() {
-            input.redeem_script = Some(redeem_script);
-        }
-    } else if script.is_p2wsh()
-        && let Ok(witness_script) = descriptor.inner.explicit_script()
-    {
-        input.witness_script = Some(witness_script);
+        input.redeem_script = Some(descriptor.explicit_script_at(derivation_index)?);
+    } else if script.is_p2wsh() {
+        input.witness_script = Some(descriptor.explicit_script_at(derivation_index)?);
     }
+    Ok(())
 }

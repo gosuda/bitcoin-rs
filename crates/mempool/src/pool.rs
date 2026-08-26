@@ -3,13 +3,14 @@ use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
 use bitcoin::hashes::{Hash as _, sha256};
-use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
+use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid, Wtxid};
 use bitcoin_rs_primitives::Hash256;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use slab::Slab;
 use thiserror::Error;
 
 use crate::entry::fee_rate;
+use crate::fee_estimator::{FeeEstimator, FeeRate};
 use crate::{EntryId, MempoolEntry, MempoolLimits, ParetoFront, PolicyError};
 
 /// Script-index key for funding index range scans.
@@ -60,6 +61,9 @@ pub enum MempoolError {
     /// The slab index can no longer fit the public `u32` entry id.
     #[error("mempool entry id space exhausted")]
     TooManyEntries,
+    /// The transaction spends an output created by an entry scheduled for eviction.
+    #[error("transaction spends an output of an evicted mempool entry")]
+    EvictedParent,
     /// The transaction violates mempool policy limits.
     #[error(transparent)]
     Policy(#[from] PolicyError),
@@ -67,6 +71,15 @@ pub enum MempoolError {
     /// entry whose transaction does not spend the indexed outpoint.
     #[error("mempool spending index is inconsistent")]
     InconsistentSpendingIndex,
+}
+
+/// Prioritisation overlay rejection reason.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum PrioritiseError {
+    /// Adding the delta to the signed overlay stored for a txid would leave
+    /// the satoshi range. The overlay is left exactly as it was.
+    #[error("fee delta would overflow the persistent overlay")]
+    FeeDeltaOverflow,
 }
 
 /// In-memory transaction pool with txid, funding, spending, and fee-priority indexes.
@@ -102,7 +115,21 @@ pub struct Mempool {
     /// Exact running sum of `fee` over `entries`. A `u32` entry id bounds the
     /// successful-entry sum below `u128::MAX`.
     total_fee: u128,
+    /// Signed additive mining-only fee overlay, keyed by txid. A delta may be
+    /// stored before its transaction is admitted, accumulates across calls,
+    /// survives ordinary removal and replacement, and is erased only when the
+    /// transaction is mined (see [`Mempool::remove_for_block`]). It adjusts
+    /// modified package ordering only — never an actual fee.
+    fee_deltas: HashMap<Txid, i64>,
+    /// Fee-rate history this pool owns and feeds from its own mutations:
+    /// admissions record arrivals, non-mined removals record departures, and
+    /// `remove_for_block` records confirmations.
+    estimator: FeeEstimator,
     sequence: core::sync::atomic::AtomicU64,
+}
+
+pub(crate) struct PreparedInsert {
+    entry: MempoolEntry,
 }
 
 /// The in-pool spender of one outpoint, resolved through the spending index.
@@ -126,6 +153,61 @@ pub struct MempoolStats {
     pub total_fee: u64,
 }
 
+/// One mempool entry copied into a [`MempoolMiningSnapshot`].
+///
+/// A pure record of what selection consumed at capture time. `ancestors`
+/// holds the snapshot positions of the entry's transitive unconfirmed
+/// ancestors — its in-pool parents, their parents, and so on — so package
+/// walks stay inside the snapshot; an entry with no in-pool parent chain
+/// carries an empty vector.
+#[derive(Clone, Debug)]
+pub struct SnapshotEntry {
+    /// Transaction payload, shared with the pool entry by `Arc`.
+    pub tx: Arc<Transaction>,
+    /// Transaction id.
+    pub txid: Txid,
+    /// Witness transaction id.
+    pub wtxid: Wtxid,
+    /// Policy-adjusted virtual size in vbytes.
+    pub vsize: u32,
+    /// BIP141 virtual size in vbytes.
+    pub bip141_vsize: u32,
+    /// Consensus serialization size, including witness, in bytes.
+    pub size: u32,
+    /// Consensus transaction weight in weight units.
+    pub weight: u64,
+    /// Consensus sigop cost, prevout-aware when admission supplied it.
+    pub sigop_cost: u32,
+    /// Actual transaction fee in satoshis. Prioritisation never changes it.
+    pub fee: u64,
+    /// Signed additive mining-only overlay applied to `fee` for ordering.
+    pub fee_delta: i64,
+    /// Mempool acceptance time in seconds.
+    pub time: u64,
+    /// Chain height at acceptance.
+    pub height: u32,
+    /// Total virtual size of this entry and all its unconfirmed ancestors.
+    pub ancestor_size: u64,
+    /// Total actual fee of this entry and all its unconfirmed ancestors.
+    pub ancestor_fee: u64,
+    /// Total signed overlay of this entry and all its unconfirmed ancestors.
+    pub ancestor_fee_delta: i128,
+    /// Snapshot positions of the transitive unconfirmed ancestors.
+    pub ancestors: Vec<u32>,
+}
+
+/// Immutable copy of everything block-template selection needs from the pool,
+/// captured by [`Mempool::mining_snapshot`] under one read.
+#[derive(Clone, Debug)]
+pub struct MempoolMiningSnapshot {
+    /// Pool sequence at capture. Every admission, removal, and in-pool
+    /// prioritisation moves it; template caches key on it.
+    pub sequence: u64,
+    /// Entries in modified-priority order. `ancestors` positions and the
+    /// order itself both refer to this vector.
+    pub entries: Vec<SnapshotEntry>,
+}
+
 impl Mempool {
     /// Creates an empty mempool with the supplied limits.
     #[must_use]
@@ -139,12 +221,16 @@ impl Mempool {
             limits,
             total_vsize: 0,
             total_fee: 0,
+            fee_deltas: HashMap::new(),
+            estimator: FeeEstimator::new(),
             sequence: core::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Removes all entries from the pool, clears every index, and bumps the
-    /// sequence counter to signal a wholesale invalidation to subscribers.
+    /// Removes all entries from the pool, clears every index and the
+    /// persistent prioritisation overlay, resets the fee history, and bumps
+    /// the sequence counter to signal a wholesale invalidation to
+    /// subscribers.
     pub fn clear(&mut self) {
         self.entries.clear();
         self.by_txid.clear();
@@ -153,10 +239,15 @@ impl Mempool {
         self.pareto = ParetoFront::new();
         self.total_vsize = 0;
         self.total_fee = 0;
+        self.fee_deltas.clear();
+        self.estimator = FeeEstimator::new();
         self.bump_sequence();
     }
 
-    /// Returns the current sequence number. Increments on every insert/remove.
+    /// Returns the current sequence number. Increments on every admission,
+    /// removal, wholesale clear, and in-pool prioritisation; a delta stored
+    /// for a txid not yet in the pool moves nothing observable and does not
+    /// count.
     #[must_use]
     pub fn sequence_number(&self) -> u64 {
         self.sequence.load(core::sync::atomic::Ordering::Acquire)
@@ -175,7 +266,16 @@ impl Mempool {
     }
 
     /// Inserts an entry after applying ancestor and descendant policy checks.
-    pub fn insert_entry(&mut self, mut entry: MempoolEntry) -> Result<EntryId, MempoolError> {
+    pub fn insert_entry(&mut self, entry: MempoolEntry) -> Result<EntryId, MempoolError> {
+        let prepared = self.validate_insert(entry, &HashSet::new())?;
+        Ok(self.commit_insert(prepared))
+    }
+
+    pub(crate) fn validate_insert(
+        &self,
+        mut entry: MempoolEntry,
+        excluded: &HashSet<EntryId>,
+    ) -> Result<PreparedInsert, MempoolError> {
         let txid = entry.txid;
         let min_rate = self.limits.min_relay_fee_sat_per_kvb;
         if min_rate > 0 && entry.fee_rate < min_rate {
@@ -190,9 +290,21 @@ impl Mempool {
             return Err(MempoolError::DuplicateTransaction);
         }
 
+        if entry.tx.input.iter().any(|input| {
+            self.by_txid
+                .get(&input.previous_output.txid)
+                .is_some_and(|id| excluded.contains(id))
+        }) {
+            return Err(MempoolError::EvictedParent);
+        }
+
         let ancestors = self.ancestor_ids_for_tx(&entry.tx);
         self.check_ancestor_limits(&ancestors, &entry)?;
-        self.check_descendant_limits(&ancestors)?;
+        self.check_descendant_limits_excluding(&ancestors, excluded)?;
+
+        if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
+            return Err(MempoolError::TooManyEntries);
+        }
 
         let ancestor_size = ancestors.iter().fold(u64::from(entry.vsize), |total, id| {
             total.saturating_add(
@@ -203,15 +315,30 @@ impl Mempool {
         let ancestor_fee = ancestors.iter().fold(entry.fee, |total, id| {
             total.saturating_add(self.entry(*id).map_or(0, |ancestor| ancestor.fee))
         });
+        // A delta stored before admission applies from the moment the
+        // transaction arrives. It adjusts modified package ordering only;
+        // the actual fee and fee rate that policy and accounting read are
+        // exactly what the caller supplied.
+        entry.fee_delta = self.fee_deltas.get(&txid).copied().unwrap_or(0);
         entry.ancestor_size = ancestor_size;
         entry.ancestor_fee = ancestor_fee;
+        entry.ancestor_fee_delta = i128::from(entry.fee_delta);
         entry.descendant_size = u64::from(entry.vsize);
         entry.descendant_fee = entry.fee;
+        entry.descendant_fee_delta = i128::from(entry.fee_delta);
 
+        Ok(PreparedInsert { entry })
+    }
+
+    pub(crate) fn commit_insert(&mut self, prepared: PreparedInsert) -> EntryId {
+        let entry = prepared.entry;
+        let txid = entry.txid;
         let added_vsize = u64::from(entry.vsize);
         let added_fee = entry.fee;
         let index = self.entries.insert(entry);
-        let id = EntryId::try_from(index).map_err(|_| MempoolError::TooManyEntries)?;
+        let Ok(id) = EntryId::try_from(index) else {
+            panic!("validate_insert accepted an entry id that does not fit u32");
+        };
         self.total_vsize = self.total_vsize.saturating_add(added_vsize);
         self.total_fee += u128::from(added_fee);
         self.by_txid.insert(txid, id);
@@ -226,7 +353,15 @@ impl Mempool {
         if self.limits.max_total_bytes > 0 && self.total_vsize() > self.limits.max_total_bytes {
             let _evicted = self.enforce_size_limit(self.limits.max_total_bytes);
         }
-        Ok(id)
+        // Fed last, after size-limit eviction: an acceptance that eviction
+        // immediately removed must not linger in the estimator's pending set.
+        // The scalars are copied out so the entry borrow ends before the
+        // estimator is borrowed mutably.
+        if let Some((fee_rate, height)) = self.entry(id).map(|entry| (entry.fee_rate, entry.height))
+        {
+            self.estimator.tx_entered(txid, fee_rate, height);
+        }
+        id
     }
 
     /// Returns the number of transactions in the mempool.
@@ -362,6 +497,76 @@ impl Mempool {
         }
     }
 
+    /// Estimates the fee rate that historically confirmed within
+    /// `conf_target_blocks`, from the admission and confirmation history this
+    /// pool feeds itself. Returns `None` when the history is too thin to
+    /// answer — an honest refusal rather than a fabricated rate.
+    #[must_use]
+    pub fn estimate_fee_rate(&self, conf_target_blocks: u32) -> Option<FeeRate> {
+        self.estimator.estimate(conf_target_blocks)
+    }
+
+    /// Copies the pool's mining state into one immutable snapshot.
+    ///
+    /// Everything block-template selection needs is read in this single
+    /// coherent pass — shared transaction payloads, per-entry fee, sigop,
+    /// weight, and size metadata, the signed overlay, ancestor-package
+    /// aggregates, ancestor topology, and the current sequence number — so
+    /// the caller's read critical section ends when this returns and
+    /// selection works on the owned copy with the lock released. Entries
+    /// appear in modified-priority order (the order [`ParetoFront`] ranks
+    /// them), and `ancestors` positions refer to this vector, so a consumer
+    /// can walk packages without re-consulting the pool.
+    #[must_use]
+    pub fn mining_snapshot(&self) -> MempoolMiningSnapshot {
+        let order: Vec<EntryId> = self.pareto.top_n(self.pareto.len()).collect();
+        debug_assert_eq!(
+            order.len(),
+            self.entries.len(),
+            "priority index and entry arena disagree on the pool contents"
+        );
+        let position: HashMap<EntryId, u32> = order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &id)| u32::try_from(index).ok().map(|slot| (id, slot)))
+            .collect();
+        let entries = order
+            .iter()
+            .map(|&id| {
+                let Some(entry) = self.entry(id) else {
+                    panic!("priority index names a missing entry");
+                };
+                let ancestors = self
+                    .ancestor_ids_for_entry(id)
+                    .into_iter()
+                    .filter_map(|ancestor| position.get(&ancestor).copied())
+                    .collect();
+                SnapshotEntry {
+                    tx: Arc::clone(&entry.tx),
+                    txid: entry.txid,
+                    wtxid: entry.wtxid,
+                    vsize: entry.vsize,
+                    bip141_vsize: entry.bip141_vsize,
+                    size: entry.size,
+                    weight: entry.weight,
+                    sigop_cost: entry.sigop_cost,
+                    fee: entry.fee,
+                    fee_delta: entry.fee_delta,
+                    time: entry.time,
+                    height: entry.height,
+                    ancestor_size: entry.ancestor_size,
+                    ancestor_fee: entry.ancestor_fee,
+                    ancestor_fee_delta: entry.ancestor_fee_delta,
+                    ancestors,
+                }
+            })
+            .collect();
+        MempoolMiningSnapshot {
+            sequence: self.sequence_number(),
+            entries,
+        }
+    }
+
     /// Returns an entry by public id.
     #[must_use]
     pub fn entry(&self, id: EntryId) -> Option<&MempoolEntry> {
@@ -373,9 +578,9 @@ impl Mempool {
     /// Returns mempool entry ids in order of descending `fee_rate` (sat/kvB).
     ///
     /// Walks `entries` and sorts; cost O(N log N) per call. Used by mining
-    /// template builders and fee estimators that want fee-ordered traversal
-    /// without going through `ParetoFront` (which uses ancestor-aware
-    /// scoring).
+    /// template builders and fee estimators that want actual-fee-ordered
+    /// traversal without going through `ParetoFront` (which ranks on signed
+    /// modified fees with ancestor-aware package scoring).
     #[must_use]
     pub fn iter_by_fee_rate_desc(&self) -> Vec<EntryId> {
         let mut pairs: Vec<(u64, EntryId)> = self
@@ -465,49 +670,55 @@ impl Mempool {
         }))
     }
 
-    /// Adjusts the effective fee of `txid` in the pool by `fee_delta` satoshis.
+    /// Adds `fee_delta` satoshis to `txid`'s signed mining-only fee overlay.
     ///
-    /// The delta can be negative (saturating at 0). Bumps the entry's `fee`,
-    /// recomputes `fee_rate` against the existing `vsize`, and propagates the
-    /// realized delta into ancestor and descendant aggregate fees. Returns
-    /// `true` when the txid was present and the adjustment was applied; `false`
-    /// when the txid was not in the mempool.
-    #[must_use]
-    pub fn prioritise(&mut self, txid: Txid, fee_delta: i64) -> bool {
-        let Some(&id) = self.by_txid.get(&txid) else {
-            return false;
-        };
+    /// The overlay is additive and persistent, matching Bitcoin Core's
+    /// `PrioritiseTransaction`: deltas accumulate across calls, may be stored
+    /// before the transaction is ever admitted, apply on admission, survive
+    /// ordinary removal and replacement, and are erased only when the
+    /// transaction is mined (see [`Mempool::remove_for_block`]). The overlay
+    /// changes modified package ordering only — the entry's actual fee, fee
+    /// rate, and every aggregate over actual fees stay exactly as they were,
+    /// so admission policy, RBF accounting, and fee reporting never observe
+    /// it.
+    ///
+    /// Returns [`PrioritiseError::FeeDeltaOverflow`] and leaves the overlay
+    /// untouched when the accumulated total would leave the signed satoshi
+    /// range; the alternative — saturating — would silently break
+    /// additivity, which is this operation's whole contract.
+    ///
+    /// The sequence counter moves only when the transaction is in the pool: a
+    /// pre-admission delta changes nothing a template or long-poll waiter can
+    /// observe yet.
+    pub fn prioritise(&mut self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
+        let accumulated = self
+            .fee_deltas
+            .get(&txid)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(fee_delta)
+            .ok_or(PrioritiseError::FeeDeltaOverflow)?;
+        self.fee_deltas.insert(txid, accumulated);
 
-        let actual_delta = {
-            let Some(entry) = self.entry_mut(id) else {
-                return false;
-            };
-            let new_fee = apply_fee_delta(entry.fee, fee_delta);
-            let actual_delta = i128::from(new_fee).saturating_sub(i128::from(entry.fee));
-            entry.fee = new_fee;
-            let denom = u64::from(entry.vsize).max(1);
-            entry.fee_rate = new_fee.saturating_mul(1_000) / denom;
-            actual_delta
+        let Some(&id) = self.by_txid.get(&txid) else {
+            return Ok(());
         };
-        if actual_delta >= 0 {
-            self.total_fee += actual_delta.unsigned_abs();
-        } else {
-            self.total_fee -= actual_delta.unsigned_abs();
+        if let Some(entry) = self.entry_mut(id) {
+            entry.fee_delta = accumulated;
         }
 
-        // The entry's own fee is the only thing that moved, so the package
-        // totals of its relatives follow from the graph — the same refresh an
-        // insertion does. This replaces three hand-applied delta loops, and
-        // fixes what they left behind: they updated each descendant's
-        // `ancestor_fee` but never reindexed it, so a descendant kept the
-        // priority key it had before its ancestor was bumped. Since
-        // `prioritisetransaction` exists to move transactions in the miner's
-        // template, leaving descendants ranked on the pre-bump figure defeated
-        // it for exactly the packages it was aimed at.
+        // The entry's overlay is the only thing that moved, so the modified
+        // package aggregates of its relatives follow from the graph — the
+        // same refresh an insertion does, which also reindexes every
+        // descendant whose modified ancestor fee rate the delta lifted.
+        // Without that reindex a descendant kept the priority key it had
+        // before its ancestor was bumped, and `prioritisetransaction` —
+        // which exists to move transactions in the miner's template — was
+        // defeated for exactly the packages it was aimed at.
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
         self.bump_sequence();
-        true
+        Ok(())
     }
 
     /// Removes an entry and all descendants that spend its outputs.
@@ -529,6 +740,53 @@ impl Mempool {
             return Vec::new();
         };
         self.remove_entry_and_descendants(id)
+    }
+
+    /// Removes the transactions a connected block confirmed, clears their
+    /// prioritisation overlays, and records the confirmations in the fee
+    /// history. Returns every removed entry id in stable order.
+    ///
+    /// For each block transaction, this mirrors Bitcoin Core's
+    /// `removeForBlock`: the entry and its descendants leave the pool, other
+    /// entries spending the same inputs — double spends the block just
+    /// settled — leave with their descendants, and the overlay stored for the
+    /// txid is erased whether or not the transaction was ever admitted (a
+    /// pre-admission delta for a directly mined transaction must not survive
+    /// into a later re-admission). Entries removed only because a parent or
+    /// conflict was mined were not confirmed themselves: they keep their
+    /// overlay and are recorded as departures, not confirmations.
+    ///
+    /// `block_txids` contains the validated txid for each transaction in
+    /// `block_txs`, in the same order. `height` is the connected block's
+    /// height; the fee history ages one height per call even when the block
+    /// confirms nothing the pool tracked.
+    pub fn remove_for_block(
+        &mut self,
+        block_txs: &[&Transaction],
+        block_txids: &[Txid],
+        height: u32,
+    ) -> Vec<EntryId> {
+        assert_eq!(
+            block_txs.len(),
+            block_txids.len(),
+            "block transactions and validated txids must stay aligned"
+        );
+        // Confirmations are recorded before the removals take the entries
+        // out: the removal path reports departures, and a confirmed txid must
+        // not be demoted to a departure before the estimator sees it.
+        self.estimator.block_connected(block_txids, height);
+
+        let mut removed = Vec::new();
+        for (tx, txid) in block_txs.iter().zip(block_txids) {
+            removed.extend(self.remove_by_txid(txid));
+            for conflict in self.conflicts_for(tx) {
+                removed.extend(self.remove_entry_and_descendants(conflict));
+            }
+            self.fee_deltas.remove(txid);
+        }
+        removed.sort_unstable();
+        removed.dedup();
+        removed
     }
 
     /// Removes every entry whose `fee_rate` (sat/kvB) is strictly below
@@ -632,6 +890,10 @@ impl Mempool {
             self.total_fee -= u128::from(entry.fee);
             removed_any = true;
             self.by_txid.remove(&entry.txid);
+            // A departure that is not a confirmation: eviction, replacement,
+            // conflict, and reorg removal all free the estimator's pending
+            // slot without saying anything about fee-rate success.
+            self.estimator.tx_left(&entry.txid);
             self.pareto.remove(*id);
             for (vout, output) in entry.tx.output.iter().enumerate() {
                 let Ok(_) = EntryId::try_from(vout) else {
@@ -675,13 +937,16 @@ impl Mempool {
         }
     }
 
-    /// Recomputes one entry's four package totals directly from the spend graph.
+    /// Recomputes one entry's six package totals directly from the spend
+    /// graph.
     ///
-    /// This is the invariant written out: an entry's ancestor totals are its own
-    /// plus every transitive in-mempool parent, and its descendant totals are
-    /// its own plus every transitive in-mempool child. `recompute_all_metadata`
-    /// arrives at the same numbers by a reset-then-accumulate pass over the
-    /// whole pool; this arrives at them for one entry.
+    /// This is the invariant written out: an entry's ancestor totals are its
+    /// own plus every transitive in-mempool parent, and its descendant totals
+    /// are its own plus every transitive in-mempool child — once for actual
+    /// fees, and once for the signed overlay that modified ordering reads.
+    /// `recompute_all_metadata` arrives at the same numbers by a
+    /// reset-then-accumulate pass over the whole pool; this arrives at them
+    /// for one entry.
     ///
     /// Cost is bounded by the ancestor and descendant *policy* limits — 25 each
     /// by default — not by the number of entries in the pool.
@@ -691,33 +956,44 @@ impl Mempool {
         };
         let own_size = u64::from(entry.vsize);
         let own_fee = entry.fee;
+        let own_delta = i128::from(entry.fee_delta);
 
-        let (ancestor_size, ancestor_fee) = self
+        let (ancestor_size, ancestor_fee, ancestor_fee_delta) = self
             .ancestor_ids_for_entry(id)
             .into_iter()
             .filter_map(|ancestor| self.entry(ancestor))
-            .fold((own_size, own_fee), |(size, fee), ancestor| {
-                (
-                    size.saturating_add(u64::from(ancestor.vsize)),
-                    fee.saturating_add(ancestor.fee),
-                )
-            });
-        let (descendant_size, descendant_fee) = self
+            .fold(
+                (own_size, own_fee, own_delta),
+                |(size, fee, delta), ancestor| {
+                    (
+                        size.saturating_add(u64::from(ancestor.vsize)),
+                        fee.saturating_add(ancestor.fee),
+                        delta.saturating_add(i128::from(ancestor.fee_delta)),
+                    )
+                },
+            );
+        let (descendant_size, descendant_fee, descendant_fee_delta) = self
             .descendant_ids_for_entry(id)
             .into_iter()
             .filter_map(|descendant| self.entry(descendant))
-            .fold((own_size, own_fee), |(size, fee), descendant| {
-                (
-                    size.saturating_add(u64::from(descendant.vsize)),
-                    fee.saturating_add(descendant.fee),
-                )
-            });
+            .fold(
+                (own_size, own_fee, own_delta),
+                |(size, fee, delta), descendant| {
+                    (
+                        size.saturating_add(u64::from(descendant.vsize)),
+                        fee.saturating_add(descendant.fee),
+                        delta.saturating_add(i128::from(descendant.fee_delta)),
+                    )
+                },
+            );
 
         if let Some(entry) = self.entry_mut(id) {
             entry.ancestor_size = ancestor_size;
             entry.ancestor_fee = ancestor_fee;
+            entry.ancestor_fee_delta = ancestor_fee_delta;
             entry.descendant_size = descendant_size;
             entry.descendant_fee = descendant_fee;
+            entry.descendant_fee_delta = descendant_fee_delta;
         }
     }
 
@@ -790,17 +1066,24 @@ impl Mempool {
             let ancestors = self.ancestor_ids_for_entry(*id);
             let mut ancestor_size = self.entry(*id).map_or(0, |entry| u64::from(entry.vsize));
             let mut ancestor_fee = self.entry(*id).map_or(0, |entry| entry.fee);
+            let mut ancestor_fee_delta = self
+                .entry(*id)
+                .map_or(0, |entry| i128::from(entry.fee_delta));
             for ancestor in ancestors {
                 if let Some(entry) = self.entry(ancestor) {
                     ancestor_size = ancestor_size.saturating_add(u64::from(entry.vsize));
                     ancestor_fee = ancestor_fee.saturating_add(entry.fee);
+                    ancestor_fee_delta =
+                        ancestor_fee_delta.saturating_add(i128::from(entry.fee_delta));
                 }
             }
             if let Some(entry) = self.entry_mut(*id) {
                 entry.ancestor_size = ancestor_size;
                 entry.ancestor_fee = ancestor_fee;
+                entry.ancestor_fee_delta = ancestor_fee_delta;
                 entry.descendant_size = u64::from(entry.vsize);
                 entry.descendant_fee = entry.fee;
+                entry.descendant_fee_delta = i128::from(entry.fee_delta);
             }
         }
 
@@ -810,12 +1093,16 @@ impl Mempool {
             };
             let size = u64::from(entry.vsize);
             let fee = entry.fee;
+            let fee_delta = i128::from(entry.fee_delta);
             for ancestor in self.ancestor_ids_for_entry(*id) {
                 if let Some(ancestor_entry) = self.entry_mut(ancestor) {
                     ancestor_entry.descendant_size =
                         ancestor_entry.descendant_size.saturating_add(size);
                     ancestor_entry.descendant_fee =
                         ancestor_entry.descendant_fee.saturating_add(fee);
+                    ancestor_entry.descendant_fee_delta = ancestor_entry
+                        .descendant_fee_delta
+                        .saturating_add(fee_delta);
                 }
             }
         }
@@ -853,9 +1140,24 @@ impl Mempool {
         Ok(())
     }
 
-    fn check_descendant_limits(&self, ancestors: &[EntryId]) -> Result<(), PolicyError> {
+    fn check_descendant_limits_excluding(
+        &self,
+        ancestors: &[EntryId],
+        excluded: &HashSet<EntryId>,
+    ) -> Result<(), PolicyError> {
         for ancestor in ancestors {
-            let descendant_count = self.descendant_count_inclusive(*ancestor).saturating_add(1);
+            if excluded.contains(ancestor) {
+                continue;
+            }
+            let mut descendants = Vec::new();
+            self.collect_descendants_inclusive(*ancestor, &mut descendants);
+            let remaining = descendants
+                .iter()
+                .filter(|id| !excluded.contains(*id))
+                .count();
+            let descendant_count = u32::try_from(remaining)
+                .unwrap_or(u32::MAX)
+                .saturating_add(1);
             if descendant_count > self.limits.max_descendants {
                 return Err(PolicyError::TooManyDescendants);
             }
@@ -989,14 +1291,6 @@ impl Mempool {
 
 pub(crate) fn tx_fee_rate(fee: u64, vsize: u32) -> u64 {
     fee_rate(fee, u64::from(vsize))
-}
-
-fn apply_fee_delta(fee: u64, delta: i64) -> u64 {
-    if delta >= 0 {
-        fee.saturating_add(delta.unsigned_abs())
-    } else {
-        fee.saturating_sub(delta.unsigned_abs())
-    }
 }
 
 const fn outpoint_range(outpoint: OutPoint) -> RangeInclusive<(OutPoint, EntryId)> {
@@ -1145,8 +1439,11 @@ mod tests {
         assert_eq!(pool.aggregate_fees(), u64::MAX);
         assert!(!pool.remove_by_txid(&removed_txid).is_empty());
         assert_eq!(pool.aggregate_fees(), u64::MAX);
-        assert!(pool.prioritise(prioritised_txid, -100));
-        assert_eq!(pool.aggregate_fees(), u64::MAX - 1);
+        pool.prioritise(prioritised_txid, -100)
+            .expect("overlay delta applies");
+        // The overlay is mining-only: actual fees — and therefore the
+        // aggregate — never move for it.
+        assert_eq!(pool.aggregate_fees(), u64::MAX);
         Ok(())
     }
 
@@ -1448,6 +1745,7 @@ mod tests {
         assert!(pool.funding.is_empty());
         assert!(pool.spending.is_empty());
         assert!(pool.pareto.is_empty());
+        assert!(pool.fee_deltas.is_empty(), "clear is a wholesale reset");
         assert!(pool.sequence_number() > seq_before_clear);
         Ok(())
     }
@@ -1706,49 +2004,102 @@ mod tests {
     }
 
     #[test]
-    fn prioritise_bumps_fee_and_rate() -> Result<(), MempoolError> {
+    fn prioritise_moves_modified_fee_without_touching_actual_fees() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
         let tx = tx(1, Vec::new());
         let txid = tx.compute_txid();
-        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
-        let _id = pool.insert_entry(entry)?;
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
 
-        assert!(pool.prioritise(txid, 500));
+        pool.prioritise(txid, 500).expect("overlay delta applies");
 
-        let Some(id) = pool.entry_id_by_txid(&txid) else {
+        let Some(entry) = pool.entry_by_txid(&txid) else {
             panic!("tx missing after prioritise");
         };
-        let Some(entry) = pool.entry(id) else {
-            panic!("entry missing");
-        };
-        assert_eq!(entry.fee, 1_500);
-        assert_eq!(entry.fee_rate, 15_000);
+        assert_eq!(
+            entry.fee, 1_000,
+            "the actual fee is what the transaction pays"
+        );
+        assert_eq!(
+            entry.fee_rate, 10_000,
+            "the actual fee rate is policy input"
+        );
+        assert_eq!(entry.fee_delta, 500);
+        assert_eq!(entry.modified_fee(), 1_500);
+        assert_eq!(entry.modified_fee_rate(), 15_000);
+        assert_eq!(
+            pool.aggregate_fees(),
+            1_000,
+            "aggregates read actual fees only"
+        );
         Ok(())
     }
 
     #[test]
-    fn prioritise_saturates_negative_delta_at_zero() -> Result<(), MempoolError> {
+    fn prioritise_keeps_the_actual_fee_when_modified_fee_goes_negative() -> Result<(), MempoolError>
+    {
         let mut pool = Mempool::new(MempoolLimits::default());
         let tx = tx(2, Vec::new());
         let txid = tx.compute_txid();
-        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
-        let _id = pool.insert_entry(entry)?;
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
 
-        assert!(pool.prioritise(txid, -2_000));
+        pool.prioritise(txid, -2_000)
+            .expect("negative overlay applies");
 
-        let Some(id) = pool.entry_id_by_txid(&txid) else {
+        let Some(entry) = pool.entry_by_txid(&txid) else {
             panic!("tx missing after prioritise");
         };
-        let Some(entry) = pool.entry(id) else {
-            panic!("entry missing");
-        };
-        assert_eq!(entry.fee, 0);
-        assert_eq!(entry.fee_rate, 0);
+        assert_eq!(entry.fee, 1_000);
+        assert_eq!(entry.fee_rate, 10_000);
+        assert_eq!(entry.modified_fee(), -1_000);
+        // A negative modified fee ranks below every actual fee, including
+        // zero — that is the signed order the priority index keeps.
+        assert_eq!(
+            pool.pareto.len(),
+            1,
+            "a negative overlay still indexes the entry"
+        );
         Ok(())
     }
 
     #[test]
-    fn prioritise_propagates_delta_to_ancestor_descendant_fees() -> Result<(), MempoolError> {
+    fn prioritise_accumulates_additively_and_rejects_overflow() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let entry_tx = tx(3, Vec::new());
+        let txid = entry_tx.compute_txid();
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(entry_tx), 100, 1_000, 1, 7))?;
+
+        pool.prioritise(txid, 2_000).expect("first delta applies");
+        pool.prioritise(txid, 3_000)
+            .expect("second delta accumulates");
+        pool.prioritise(txid, -1_200)
+            .expect("a negative delta subtracts");
+        assert_eq!(
+            pool.entry_by_txid(&txid).map(|entry| entry.fee_delta),
+            Some(3_800),
+            "deltas are additive, not replacements"
+        );
+
+        let other = tx(4, Vec::new());
+        let other_txid = other.compute_txid();
+        let _other_id = pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 1, 7))?;
+        pool.prioritise(other_txid, i64::MAX)
+            .expect("the signed range edge itself is storable");
+        assert_eq!(
+            pool.prioritise(other_txid, 1),
+            Err(PrioritiseError::FeeDeltaOverflow)
+        );
+        assert_eq!(
+            pool.entry_by_txid(&other_txid).map(|entry| entry.fee_delta),
+            Some(i64::MAX),
+            "a rejected delta leaves the overlay exactly as it was"
+        );
+        pool.prioritise(other_txid, -1)
+            .expect("recovery from the edge works");
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_propagates_the_overlay_through_package_deltas() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
         let parent = tx(5, Vec::new());
         let parent_txid = parent.compute_txid();
@@ -1760,60 +2111,143 @@ mod tests {
         let grandchild_id =
             pool.insert_entry(MempoolEntry::new(Arc::new(grandchild), 100, 3_000, 0, 0))?;
 
-        let Some(parent_before) = pool.entry(parent_id) else {
-            panic!("missing parent");
-        };
-        let parent_descendant_fee = parent_before.descendant_fee;
-        let Some(child_before) = pool.entry(child_id) else {
-            panic!("missing child");
-        };
-        let child_ancestor_fee = child_before.ancestor_fee;
-        let Some(grandchild_before) = pool.entry(grandchild_id) else {
-            panic!("missing grandchild");
-        };
-        let grandchild_ancestor_fee = grandchild_before.ancestor_fee;
-
-        assert!(pool.prioritise(child_txid, 500));
+        pool.prioritise(child_txid, 500)
+            .expect("overlay delta applies");
 
         let Some(parent_after) = pool.entry(parent_id) else {
             panic!("missing parent");
         };
         assert_eq!(
-            parent_after.descendant_fee,
-            parent_descendant_fee.saturating_add(500)
+            parent_after.descendant_fee, 6_000,
+            "actual fees do not move"
         );
+        assert_eq!(parent_after.descendant_fee_delta, 500);
         let Some(child_after) = pool.entry(child_id) else {
             panic!("missing child");
         };
-        assert_eq!(
-            child_after.ancestor_fee,
-            child_ancestor_fee.saturating_add(500)
-        );
+        assert_eq!(child_after.ancestor_fee, 3_000, "actual fees do not move");
+        assert_eq!(child_after.ancestor_fee_delta, 500);
+        assert_eq!(child_after.modified_ancestor_fee_rate(), 17_500);
         let Some(grandchild_after) = pool.entry(grandchild_id) else {
             panic!("missing grandchild");
         };
         assert_eq!(
-            grandchild_after.ancestor_fee,
-            grandchild_ancestor_fee.saturating_add(500)
+            grandchild_after.ancestor_fee, 6_000,
+            "actual fees do not move"
+        );
+        assert_eq!(grandchild_after.ancestor_fee_delta, 500);
+        Ok(())
+    }
+
+    #[test]
+    fn a_delta_may_predate_admission() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(8, Vec::new());
+        let txid = tx.compute_txid();
+        let before = pool.sequence_number();
+
+        pool.prioritise(txid, 1_500)
+            .expect("an absent txid stores its delta");
+        // Nothing a template or long-poll waiter can observe changed yet, so
+        // the sequence — the invalidation key they ride on — must not move.
+        assert!(!pool.contains_txid(&txid));
+        assert_eq!(pool.sequence_number(), before);
+
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
+
+        let Some(entry) = pool.entry_by_txid(&txid) else {
+            panic!("insert failed");
+        };
+        assert_eq!(entry.fee_delta, 1_500);
+        assert_eq!(
+            entry.fee, 1_000,
+            "a pre-admission delta adjusts ordering only"
+        );
+        assert_eq!(entry.modified_fee(), 2_500);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_removal_keeps_the_overlay_for_readmission() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(9, Vec::new());
+        let txid = tx.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7))?;
+        pool.prioritise(txid, 700).expect("delta applies");
+
+        assert!(!pool.remove_by_txid(&txid).is_empty());
+
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
+        let Some(entry) = pool.entry_by_txid(&txid) else {
+            panic!("readmission failed");
+        };
+        assert_eq!(entry.fee_delta, 700, "ordinary removal keeps the overlay");
+        assert_eq!(entry.fee, 1_000);
+        Ok(())
+    }
+
+    #[test]
+    fn mined_removal_clears_only_the_overlays_of_block_transactions() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(10, Vec::new());
+        let parent_txid = parent.compute_txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(parent.clone()),
+            100,
+            1_000,
+            1,
+            7,
+        ))?;
+        let child = tx(11, vec![OutPoint::new(parent_txid, 0)]);
+        let child_txid = child.compute_txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(child.clone()), 100, 1_000, 1, 7))?;
+        // A delta stored for a transaction that never reached the pool.
+        let stranger = tx(12, Vec::new());
+        let stranger_txid = stranger.compute_txid();
+
+        pool.prioritise(parent_txid, 100)
+            .expect("parent delta applies");
+        pool.prioritise(child_txid, 200)
+            .expect("child delta applies");
+        pool.prioritise(stranger_txid, 50)
+            .expect("stranger delta applies");
+
+        let removed =
+            pool.remove_for_block(&[&parent, &stranger], &[parent_txid, stranger_txid], 8);
+
+        assert_eq!(removed.len(), 2, "the parent leaves with its descendant");
+        assert!(!pool.fee_deltas.contains_key(&parent_txid));
+        assert!(!pool.fee_deltas.contains_key(&stranger_txid));
+        assert_eq!(
+            pool.fee_deltas.get(&child_txid).copied(),
+            Some(200),
+            "a descendant removed for a mined parent was not confirmed itself"
+        );
+
+        // Readmission answers from the surviving state alone.
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7))?;
+        assert_eq!(
+            pool.entry_by_txid(&child_txid).map(|entry| entry.fee_delta),
+            Some(200)
+        );
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7))?;
+        assert_eq!(
+            pool.entry_by_txid(&parent_txid)
+                .map(|entry| entry.fee_delta),
+            Some(0),
+            "a mined transaction's overlay is erased"
         );
         Ok(())
     }
 
     #[test]
-    fn prioritise_returns_false_for_unknown_txid() {
-        let mut pool = Mempool::new(MempoolLimits::default());
-
-        assert!(!pool.prioritise(Txid::all_zeros(), 100));
-    }
-
-    #[test]
     fn prioritise_reorders_priority_index() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
-        let lower_fee_tx = tx(3, Vec::new());
+        let lower_fee_tx = tx(13, Vec::new());
         let lower_fee_txid = lower_fee_tx.compute_txid();
         let lower_fee_id =
             pool.insert_entry(MempoolEntry::new(Arc::new(lower_fee_tx), 100, 1_000, 1, 7))?;
-        let higher_fee_tx = tx(4, Vec::new());
+        let higher_fee_tx = tx(14, Vec::new());
         let higher_fee_id =
             pool.insert_entry(MempoolEntry::new(Arc::new(higher_fee_tx), 100, 2_000, 2, 7))?;
 
@@ -1821,9 +2255,148 @@ mod tests {
             pool.pareto.top_n(1).collect::<Vec<_>>(),
             vec![higher_fee_id]
         );
-        assert!(pool.prioritise(lower_fee_txid, 2_000));
+        pool.prioritise(lower_fee_txid, 2_000)
+            .expect("delta applies");
 
         assert_eq!(pool.pareto.top_n(1).collect::<Vec<_>>(), vec![lower_fee_id]);
+        Ok(())
+    }
+
+    #[test]
+    fn mining_snapshot_copies_metadata_topology_and_sequence() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = Arc::new(tx(15, Vec::new()));
+        let parent_txid = parent.compute_txid();
+        let _parent_id =
+            pool.insert_entry(MempoolEntry::new(Arc::clone(&parent), 100, 1_000, 1, 7))?;
+        let child = Arc::new(tx(16, vec![OutPoint::new(parent_txid, 0)]));
+        let child_txid = child.compute_txid();
+        let _child_id =
+            pool.insert_entry(MempoolEntry::new(Arc::clone(&child), 100, 2_000, 2, 7))?;
+
+        let snapshot = pool.mining_snapshot();
+        assert_eq!(snapshot.sequence, pool.sequence_number());
+        assert_eq!(snapshot.entries.len(), 2);
+        // The child pays the higher actual fee rate, so it ranks first.
+        let [child_entry, parent_entry] = &snapshot.entries[..] else {
+            panic!("snapshot must hold both entries");
+        };
+        assert_eq!(child_entry.txid, child_txid);
+        assert_eq!(parent_entry.txid, parent_txid);
+        assert_eq!(child_entry.ancestors, vec![1], "positions are in-snapshot");
+        assert!(parent_entry.ancestors.is_empty());
+        // Metadata fidelity: copied scalars are the ones derived from the
+        // transaction itself, not policy reconstructions of them.
+        assert_eq!(child_entry.fee, 2_000);
+        assert_eq!(child_entry.fee_delta, 0);
+        assert_eq!(child_entry.vsize, 100);
+        assert_eq!(
+            child_entry.bip141_vsize,
+            u32::try_from(child.vsize()).unwrap_or(u32::MAX)
+        );
+        assert_eq!(
+            child_entry.size,
+            u32::try_from(child.total_size()).unwrap_or(u32::MAX)
+        );
+        assert_eq!(child_entry.weight, child.weight().to_wu());
+        assert_eq!(
+            child_entry.sigop_cost,
+            u32::try_from(child.total_sigop_cost(|_| None)).unwrap_or(u32::MAX)
+        );
+        assert_eq!(child_entry.wtxid, child.compute_wtxid());
+        assert_eq!(child_entry.ancestor_size, 200);
+        assert_eq!(child_entry.ancestor_fee, 3_000);
+        assert_eq!(child_entry.ancestor_fee_delta, 0);
+
+        pool.prioritise(parent_txid, 2_000).expect("delta applies");
+        let bumped = pool.mining_snapshot();
+        assert!(bumped.sequence > snapshot.sequence);
+        let [bumped_parent, bumped_child] = &bumped.entries[..] else {
+            panic!("bumped snapshot must hold both entries");
+        };
+        assert_eq!(
+            bumped_parent.txid, parent_txid,
+            "the overlay lifted the parent"
+        );
+        assert_eq!(bumped_child.ancestors, vec![0]);
+        assert_eq!(
+            bumped_child.ancestor_fee, 3_000,
+            "actual package fees hold still"
+        );
+        assert_eq!(bumped_child.ancestor_fee_delta, 2_000);
+        Ok(())
+    }
+
+    #[test]
+    fn a_snapshot_outlives_pool_mutation() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let tx = tx(17, Vec::new());
+        let txid = tx.compute_txid();
+        let shared = Arc::new(tx);
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&shared), 100, 1_000, 1, 7))?;
+
+        let snapshot = pool.mining_snapshot();
+        pool.clear();
+        pool.prioritise(txid, 5_000)
+            .expect("delta applies after the clear");
+
+        let Some(entry) = snapshot.entries.first() else {
+            panic!("the snapshot holds what it captured");
+        };
+        assert_eq!(entry.txid, txid);
+        assert_eq!(entry.fee, 1_000);
+        assert_eq!(entry.fee_delta, 0);
+        assert!(
+            Arc::ptr_eq(&entry.tx, &shared),
+            "payloads are shared, not copied"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn admissions_and_mined_confirmations_feed_the_pool_owned_estimator() -> Result<(), MempoolError>
+    {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        assert_eq!(pool.estimate_fee_rate(2), None, "no history yet");
+
+        let first = tx(18, Vec::new());
+        let first_txid = first.compute_txid();
+        let second = tx(19, Vec::new());
+        let second_txid = second.compute_txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(first.clone()),
+            100,
+            10_000,
+            1,
+            7,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(second.clone()),
+            100,
+            10_000,
+            1,
+            7,
+        ))?;
+        assert_eq!(
+            pool.estimate_fee_rate(2),
+            None,
+            "arrivals alone are not confirmation evidence"
+        );
+
+        // Two confirmations, not one: every sample is stored post-decay, so a
+        // single confirmation decays to 0.998 within its own block — under
+        // the estimator's one-decayed-observation minimum. The test feeds
+        // that gate rather than weakening it.
+        pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8);
+        assert!(
+            pool.estimate_fee_rate(2).is_some(),
+            "the confirmations this pool observed itself answer the estimate"
+        );
+        assert!(!pool.contains_txid(&first_txid));
+        assert!(
+            !pool.contains_txid(&second_txid),
+            "the mined transactions left the pool"
+        );
         Ok(())
     }
 
@@ -2166,13 +2739,12 @@ mod tests {
         let Some(root) = outs.first().map(|out| out.txid) else {
             panic!("fixture must hold entries");
         };
-        assert!(pool.prioritise(root, 250_000), "prioritise up must apply");
+        pool.prioritise(root, 250_000)
+            .expect("prioritise up must apply");
         check(&pool, "a positive fee delta");
 
-        assert!(
-            pool.prioritise(root, -100_000),
-            "prioritise down must apply"
-        );
+        pool.prioritise(root, -100_000)
+            .expect("prioritise down must apply");
         check(&pool, "a negative fee delta");
 
         // `mid`: removing it takes the rest of the chain with it and leaves
@@ -2205,7 +2777,8 @@ mod tests {
         let Some(txid) = outs.first().map(|out| out.txid) else {
             panic!("fixture must hold entries");
         };
-        assert!(pool.prioritise(txid, 5_000_000), "prioritise must apply");
+        pool.prioritise(txid, 5_000_000)
+            .expect("prioritise must apply");
 
         let after_prioritise = pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>();
         let totals_after = totals(&pool);

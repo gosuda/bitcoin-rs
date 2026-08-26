@@ -61,7 +61,6 @@ const DNS_BOOTSTRAP_FAST_REFILL_LIMIT: u8 = 2;
 type PeerRegistry = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>;
 type PeerOutboundMap =
     Arc<parking_lot::RwLock<hashbrown::HashMap<SocketAddr, bitcoin_rs_p2p::PeerLease>>>;
-type BannedSubnets = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>;
 type P2pChainQuery = Arc<dyn bitcoin_rs_p2p::ChainQuery>;
 type OutboundConnectionHandle =
     std::thread::JoinHandle<core::result::Result<(), bitcoin_rs_p2p::PeerError>>;
@@ -85,6 +84,51 @@ impl bitcoin_rs_rpc::context::ChainControl for RpcChainControl {
             }
             other => bitcoin_rs_rpc::context::ChainControlError::Failed(other.to_string()),
         })
+    }
+}
+
+pub(crate) struct RpcTransactionAdmission {
+    transition_owner: crate::apply::ApplyHandles,
+    handles: bitcoin_rs_rpc::admission::AdmissionHandles,
+}
+
+impl RpcTransactionAdmission {
+    pub(crate) fn new(handles: &crate::apply::ApplyHandles) -> Self {
+        Self {
+            transition_owner: handles.clone(),
+            handles: bitcoin_rs_rpc::admission::AdmissionHandles {
+                mempool: Arc::clone(&handles.mempool),
+                utxo: Arc::clone(&handles.utxo),
+                applied_tip: Arc::clone(&handles.applied_tip),
+                block_tree: Arc::clone(&handles.block_tree),
+                transactions: Arc::clone(&handles.transactions),
+            },
+        }
+    }
+}
+
+impl bitcoin_rs_rpc::context::TransactionAdmission for RpcTransactionAdmission {
+    fn submit_transaction(
+        &self,
+        tx: &bitcoin::Transaction,
+        max_feerate_sat_per_kvb: Option<u64>,
+    ) -> core::result::Result<bitcoin::Txid, bitcoin_rs_rpc::context::TransactionAdmissionError>
+    {
+        let transition = self
+            .transition_owner
+            .begin_chain_transition()
+            .map_err(|error| {
+                bitcoin_rs_rpc::context::TransactionAdmissionError::Unavailable(
+                    error.to_string().into(),
+                )
+            })?;
+        let result = bitcoin_rs_rpc::admission::admit_transaction(
+            &self.handles,
+            tx,
+            max_feerate_sat_per_kvb,
+        );
+        drop(transition);
+        result
     }
 }
 
@@ -133,9 +177,7 @@ fn build_rpc_auth(node_auth: &crate::Auth) -> Result<bitcoin_rs_rpc::Auth> {
 fn spawn_p2p_listeners(
     config: &bitcoin_rs_node::Config,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    peers: &PeerRegistry,
-    peer_outbound: &PeerOutboundMap,
-    banned: BannedSubnets,
+    network_controls: Arc<bitcoin_rs_p2p::NetworkControls>,
     inbound_headers_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundHeaders>,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
     sync_wake_tx: crossbeam_channel::Sender<()>,
@@ -152,9 +194,7 @@ fn spawn_p2p_listeners(
     for addr in &config.p2p_listen {
         let listener_addr = *addr;
         let listener_shutdown = std::sync::Arc::clone(shutdown);
-        let listener_peers = Arc::clone(peers);
-        let listener_peer_outbound = Arc::clone(peer_outbound);
-        let listener_banned = Arc::clone(&banned);
+        let listener_controls = Arc::clone(&network_controls);
         let listener_inbound_headers_tx = inbound_headers_tx.clone();
         let listener_inbound_blocks_tx = inbound_blocks_tx.clone();
         let listener_sync_wake_tx = sync_wake_tx.clone();
@@ -163,15 +203,13 @@ fn spawn_p2p_listeners(
         let handle = std::thread::Builder::new()
             .name(format!("bitcoin-rs-p2p-{listener_addr}"))
             .spawn(move || {
-                bitcoin_rs_p2p::listener::serve_with_shutdown_with_chain_and_sync_wake(
+                bitcoin_rs_p2p::listener::serve_with_controls(
                     listener_addr,
                     listener_shutdown,
                     magic,
-                    listener_peers,
-                    listener_peer_outbound,
+                    listener_controls,
                     listener_inbound_headers_tx,
                     listener_inbound_blocks_tx,
-                    listener_banned,
                     Some(listener_chain_query),
                     Some(listener_sync_wake_tx),
                     Some(listener_peer_registered),
@@ -226,6 +264,7 @@ fn spawn_p2p_outbound_drain(
     state: &NodeState,
     shutdown: &Arc<AtomicBool>,
     sync_wake_tx: crossbeam_channel::Sender<()>,
+    network_controls: Arc<bitcoin_rs_p2p::NetworkControls>,
     chain_query: P2pChainQuery,
     peer_registered: Arc<
         dyn Fn(SocketAddr, bitcoin_rs_p2p::PeerLease, bitcoin_rs_p2p::PeerInfo) -> bool
@@ -235,15 +274,15 @@ fn spawn_p2p_outbound_drain(
 ) -> anyhow::Result<std::thread::JoinHandle<()>> {
     let outbound_rx = state.p2p_outbound_receiver();
     let magic = bitcoin::p2p::Magic::from_bytes(state.config().p2p_magic());
-    let outbound_registry = state.peers();
-    let outbound_peer_outbound = state.peer_outbound();
-    let outbound_banned = state.banned_subnets();
+    let outbound_registry = Arc::clone(network_controls.peer_registry());
+    let outbound_peer_outbound = Arc::clone(network_controls.peer_outbound());
     let outbound_headers_tx = state.inbound_headers_sender();
     let outbound_peer_registered = Arc::clone(&peer_registered);
     let outbound_blocks_tx = state.inbound_blocks_sender();
     let outbound_sync_wake_tx = sync_wake_tx;
     let outbound_shutdown = Arc::clone(shutdown);
     let outbound_chain_query = Arc::clone(&chain_query);
+    let outbound_controls = network_controls;
 
     Ok(std::thread::Builder::new()
         .name("bitcoin-rs-p2p-outbound-drain".to_owned())
@@ -272,14 +311,12 @@ fn spawn_p2p_outbound_drain(
                             tracing::debug!(addr = %addr, "p2p outbound request skipped: already active");
                             continue;
                         }
-                        let handle = bitcoin_rs_p2p::listener::spawn_outbound_connection_with_chain_and_sync_wake(
+                        let handle = bitcoin_rs_p2p::listener::spawn_outbound_connection_with_controls(
                             addr,
                             magic,
-                            Arc::clone(&outbound_registry),
-                            Arc::clone(&outbound_peer_outbound),
+                            Arc::clone(&outbound_controls),
                             outbound_headers_tx.clone(),
                             outbound_blocks_tx.clone(),
-                            Arc::clone(&outbound_banned),
                             Some(Arc::clone(&outbound_chain_query)),
                             Some(outbound_sync_wake_tx.clone()),
                             Some(Arc::clone(&outbound_peer_registered)),
@@ -566,7 +603,10 @@ pub fn run(mut config: Config) -> Result<()> {
     };
 
     let shutdown = state.shutdown();
+    let network = state.config().network;
     let banned = state.banned_subnets();
+    let peers = state.peers();
+    let peer_outbound = state.peer_outbound();
     let block_body_source = state.block_body_source();
     let p2p_chain_query: P2pChainQuery = Arc::new(
         crate::NodeP2pChainQuery::new(state.block_tree())
@@ -575,62 +615,105 @@ pub fn run(mut config: Config) -> Result<()> {
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();
     let peer_registered = sync.peer_registration_handle();
-    let loop_handle = EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx);
+
+    // One shared control plane: the P2P listeners, the outbound dial drain,
+    // the RPC `addnode` surface, and `Context` observe the same
+    // `NetworkControls`, so network-activity and peer registration agree.
+    let network_controls = Arc::new(
+        bitcoin_rs_p2p::NetworkControls::new(
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+            Arc::clone(&banned),
+            network.default_p2p_port(),
+        )
+        .with_dial_sender(state.p2p_outbound_sender()),
+    );
+
+    // One shared RPC lifecycle drives both the serve loop and `getrpcinfo`.
+    let rpc_lifecycle = Arc::new(bitcoin_rs_rpc::RpcLifecycle::new(Arc::clone(&shutdown)));
+
+    // One shared mining coordinator serves template assembly, solved-block
+    // submission, and (installed on `BlockSync`) generation publication after
+    // peer-driven applies. The empty `ScriptBuf` is for transport-only GBT
+    // assembly: RPC exposes `coinbasevalue` / `default_witness_commitment`, not
+    // a node-owned payout.
+    let mining_control: Arc<dyn bitcoin_rs_rpc::context::MiningControl> =
+        Arc::new(crate::MiningCoordinator::new(
+            network,
+            state.applied_tip(),
+            state.block_tree(),
+            state.mempool(),
+            state.apply_handles(),
+            bitcoin::ScriptBuf::new(),
+            Arc::clone(&shutdown),
+        ));
+    sync.with_mining_control(Some(Arc::clone(&mining_control)));
+    let loop_handle = EventLoop::with_sync_wake(shutdown_rx, Arc::clone(&sync), sync_wake_rx);
+
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
-    let mut rpc_context = bitcoin_rs_rpc::context::Context::from_handles(
-        state.chain_tip(),
-        state.applied_tip(),
-        state.mempool(),
-        state.blocks(),
-        state.transactions(),
-        state.utxo(),
-        state.coin_stats(),
-        state.filter_index(),
-        state.network(),
-        state.mining_template_id(),
-        state.peers(),
-        state.block_tree(),
-        state.config().network,
-        Some(state.inbound_blocks_sender()),
-        Some(state.p2p_outbound_sender()),
-        Arc::clone(&banned),
-        Arc::new(parking_lot::RwLock::new(Vec::new())),
-        state.tx_index_query(),
-        state.script_index_query(),
-    )
-    .with_esplora_tx_index(state.esplora_tx_index_query());
-    rpc_context = rpc_context.with_block_body_source(block_body_source);
-    rpc_context = rpc_context.with_chain_tx_count(state.chain_tx_count_handle());
+    let mut rpc_context =
+        bitcoin_rs_rpc::context::Context::production(bitcoin_rs_rpc::context::ContextHandles {
+            chain: bitcoin_rs_rpc::context::ChainHandles {
+                chain_tip: state.chain_tip(),
+                applied_tip: state.applied_tip(),
+                chain_tx_count: state.chain_tx_count_handle(),
+                blocks: state.blocks(),
+                transactions: state.transactions(),
+                utxo: state.utxo(),
+                coin_stats: state.coin_stats(),
+                filter_index: state.filter_index(),
+                block_tree: state.block_tree(),
+                network,
+            },
+            mempool: state.mempool(),
+            indexes: bitcoin_rs_rpc::context::IndexHandles {
+                transactions: state.tx_index_query(),
+                esplora_transactions: state.esplora_tx_index_query(),
+                scripts: state.script_index_query(),
+            },
+            network: bitcoin_rs_rpc::context::NetworkHandles {
+                state: state.network(),
+                controls: Arc::clone(&network_controls),
+            },
+        });
     if let Some(prune_service) = state.prune_service() {
         rpc_context = rpc_context.with_prune_service(prune_service);
     }
-    rpc_context = rpc_context.with_chain_control(Arc::new(RpcChainControl {
-        handles: state.apply_handles(),
-    }));
-    rpc_context = rpc_context.with_zmq_notifications(state.active_zmq_notifications());
+    let apply_handles = state.apply_handles();
+    rpc_context = rpc_context
+        .with_block_body_source(block_body_source)
+        .with_chain_control(Arc::new(RpcChainControl {
+            handles: apply_handles.clone(),
+        }))
+        .with_transaction_admission(Arc::new(RpcTransactionAdmission::new(&apply_handles)))
+        .with_zmq_notifications(state.active_zmq_notifications())
+        .with_wallet(Arc::new(parking_lot::RwLock::new(
+            bitcoin_rs_wallet::Watcher::new(Vec::new()),
+        )))
+        .with_rpc_lifecycle(Arc::clone(&rpc_lifecycle))
+        .with_mining_control(Arc::clone(&mining_control))
+        // `getrpcinfo` reports Core's conventional `<datadir>/debug.log` path.
+        .with_debug_log_path(state.data_dir().join("debug.log"));
+
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::new(rpc_context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
         state.config().rpc_bind,
         rpc_auth,
         rpc_handler,
+        Arc::clone(&rpc_lifecycle),
         RPC_MAX_CONNECTIONS,
         RPC_IDLE_TIMEOUT,
         state.config().rest,
     )?;
     let rpc_local_addr = rpc_server.local_addr()?;
     tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
-    let rpc_shutdown = Arc::clone(&shutdown);
     let rpc_thread = std::thread::Builder::new()
         .name("bitcoin-rs-rpc".into())
-        .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
-    let peers = state.peers();
-    let peer_outbound = state.peer_outbound();
+        .spawn(move || rpc_server.serve_with_shutdown())?;
     let p2p_threads = spawn_p2p_listeners(
         state.config(),
         &shutdown,
-        &peers,
-        &peer_outbound,
-        Arc::clone(&banned),
+        Arc::clone(&network_controls),
         state.inbound_headers_sender(),
         state.inbound_blocks_sender(),
         sync_wake_tx.clone(),
@@ -641,6 +724,7 @@ pub fn run(mut config: Config) -> Result<()> {
         &state,
         &shutdown,
         sync_wake_tx,
+        Arc::clone(&network_controls),
         Arc::clone(&p2p_chain_query),
         Arc::clone(&peer_registered),
     )?;

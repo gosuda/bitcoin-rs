@@ -1,0 +1,716 @@
+//! Node-owned mining candidate lifecycle coordinator.
+//!
+//! Generation is keyed by `(applied_tip_hash, mempool_sequence)`. Template
+//! assembly is single-flight per key, cached by [`TemplateId`], and woken by
+//! explicit generation publication. Proposal mode dry-runs the ordinary apply
+//! validation path without persistence; solved-block submission returns only
+//! after validation, persistence, and chain-state application complete.
+
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+use arc_swap::ArcSwapOption;
+use bitcoin::ScriptBuf;
+use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_mempool::Mempool;
+use bitcoin_rs_mining::{Candidate, CandidateContext, TemplateId, assemble_candidate};
+use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_rpc::context::{
+    AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
+    BlockTemplateResult, BlockValidationResult, LastCandidateInfo, MiningCapability, MiningControl,
+    MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation,
+    difficulty_for_bits,
+};
+use compact_str::CompactString;
+use hashbrown::HashMap;
+use parking_lot::{Condvar, Mutex, RwLock};
+
+use crate::ApplyError;
+use crate::apply::{self, ApplyHandles};
+use crate::bip9_context::MiningChainContext;
+
+/// Default number of cached candidates retained by template id.
+const CANDIDATE_CACHE_LIMIT: usize = 8;
+/// Bitcoin Core's mempool-only long-poll cooldown before returning a new template.
+const DEFAULT_MEMPOOL_UPDATE_WAIT: Duration = Duration::from_secs(10);
+/// Upper bound for a single long-poll wait slice while rechecking predicates.
+const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
+/// Consensus maximum block weight / serialized size.
+const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
+const MAX_BLOCK_SIZE: u64 = 4_000_000;
+
+/// Applied-tip hash plus mempool sequence that identify one candidate generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct GenerationKey {
+    /// Applied tip hash in consensus little-endian storage order.
+    pub tip_hash: Hash256,
+    /// Mempool sequence captured with the tip.
+    pub mempool_sequence: u64,
+}
+
+impl GenerationKey {
+    /// Opaque BIP22/BIP23 long-poll identity for this generation.
+    #[must_use]
+    pub fn template_id(self) -> TemplateId {
+        TemplateId::new(&self.tip_hash, self.mempool_sequence)
+    }
+}
+
+#[derive(Debug)]
+struct InFlight {
+    key: GenerationKey,
+    result: Option<Result<Arc<Candidate>, MiningControlError>>,
+}
+
+struct CoordinatorState {
+    /// Last generation published to long-poll waiters.
+    published: Option<GenerationKey>,
+    /// Bounded LRU of assembled candidates keyed by template id.
+    cache: HashMap<TemplateId, Arc<Candidate>>,
+    /// Insertion order for deterministic eviction of the oldest entry.
+    cache_order: VecDeque<TemplateId>,
+    /// Single in-flight assembly, if any.
+    in_flight: Option<InFlight>,
+    /// Facts from the most recently assembled candidate.
+    last_candidate: Option<LastCandidateInfo>,
+}
+
+impl CoordinatorState {
+    fn new() -> Self {
+        Self {
+            published: None,
+            cache: HashMap::new(),
+            cache_order: VecDeque::new(),
+            in_flight: None,
+            last_candidate: None,
+        }
+    }
+
+    fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
+        self.cache.get(id).cloned()
+    }
+
+    fn cache_insert(&mut self, id: TemplateId, candidate: Arc<Candidate>) {
+        if self.cache.contains_key(&id) {
+            self.cache.insert(id, candidate);
+            return;
+        }
+        while self.cache.len() >= CANDIDATE_CACHE_LIMIT {
+            let Some(oldest) = self.cache_order.pop_front() else {
+                break;
+            };
+            self.cache.remove(&oldest);
+        }
+        self.cache_order.push_back(id.clone());
+        self.cache.insert(id, candidate);
+    }
+
+    fn invalidate_key(&mut self, key: GenerationKey) {
+        let id = key.template_id();
+        if self.cache.remove(&id).is_some() {
+            self.cache_order.retain(|cached| cached != &id);
+        }
+        if self
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.key == key)
+        {
+            self.in_flight = None;
+        }
+    }
+}
+/// Production mining coordinator owned by the node process.
+///
+/// `coinbase_script` is immutable coordinator configuration captured at
+/// construction. There is no wallet coupling and no default miner address:
+/// callers must pass the template coinbase `ScriptBuf` explicitly. Callers may
+/// pass an empty script for transport-only GBT assembly (RPC exposes
+/// `coinbasevalue` / `default_witness_commitment`, not a node-owned payout).
+pub struct MiningCoordinator {
+    network: Network,
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    block_tree: Arc<RwLock<BlockTree>>,
+    mempool: Arc<RwLock<Mempool>>,
+    apply_handles: ApplyHandles,
+    coinbase_script: ScriptBuf,
+    shutdown: Arc<AtomicBool>,
+    /// Wall clock used for long-poll cooldowns.
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    /// Controllable mempool-only long-poll cooldown (Core default: 10s).
+    mempool_update_wait: Duration,
+    state: Mutex<CoordinatorState>,
+    wake: Condvar,
+}
+
+impl MiningCoordinator {
+    /// Builds a coordinator over the shared applied-chain and mempool handles.
+    ///
+    /// `coinbase_script` is required and stored immutably. Pass
+    /// [`ScriptBuf::new`] for transport-only template assembly when the node
+    /// does not own a miner payout script.
+    #[must_use]
+    pub fn new(
+        network: Network,
+        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        block_tree: Arc<RwLock<BlockTree>>,
+        mempool: Arc<RwLock<Mempool>>,
+        apply_handles: ApplyHandles,
+        coinbase_script: ScriptBuf,
+        shutdown: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            network,
+            applied_tip,
+            block_tree,
+            mempool,
+            apply_handles,
+            coinbase_script,
+            shutdown,
+            clock: Arc::new(Instant::now),
+            mempool_update_wait: DEFAULT_MEMPOOL_UPDATE_WAIT,
+            state: Mutex::new(CoordinatorState::new()),
+            wake: Condvar::new(),
+        }
+    }
+
+    /// Overrides the wall clock. Intended for deterministic tests.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Overrides the mempool-only long-poll cooldown. Tests may set this to zero.
+    #[must_use]
+    pub const fn with_mempool_update_wait(mut self, wait: Duration) -> Self {
+        self.mempool_update_wait = wait;
+        self
+    }
+
+    /// Publishes the live generation key and wakes every long-poll / single-flight waiter.
+    ///
+    /// Callers must invoke this after every authoritative applied-tip or mempool
+    /// mutation and before any dependent notification. The published key is
+    /// captured from live applied-tip / mempool state under the coordinator lock.
+    pub fn publish_generation(&self) {
+        let key = self.live_generation_key();
+        let mut state = self.state.lock();
+        if let Some(previous) = state.published
+            && previous != key
+        {
+            state.invalidate_key(previous);
+        }
+        state.published = Some(key);
+        self.wake.notify_all();
+    }
+
+    /// Reduces shutdown latency after the caller sets the shared shutdown flag.
+    ///
+    /// Correctness does not depend on this notification: every wait is bounded
+    /// and rechecks the shutdown predicate.
+    pub fn notify_shutdown(&self) {
+        self.wake.notify_all();
+    }
+
+    fn live_generation_key(&self) -> GenerationKey {
+        let tip_hash = self
+            .applied_tip
+            .load_full()
+            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash);
+        let mempool_sequence = self.mempool.read().sequence_number();
+        GenerationKey {
+            tip_hash,
+            mempool_sequence,
+        }
+    }
+
+    fn current_time_secs() -> u32 {
+        u32::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs()),
+        )
+        .unwrap_or(u32::MAX)
+    }
+
+    fn ensure_published(&self, state: &mut CoordinatorState) -> GenerationKey {
+        let live = self.live_generation_key();
+        if state.published != Some(live) {
+            if let Some(previous) = state.published
+                && previous != live
+            {
+                state.invalidate_key(previous);
+            }
+            state.published = Some(live);
+        }
+        live
+    }
+
+    fn wait_for_generation_change(
+        &self,
+        waited: GenerationKey,
+    ) -> Result<GenerationKey, MiningControlError> {
+        let started = (self.clock)();
+        let mut state = self.state.lock();
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let live = self.ensure_published(&mut state);
+            if live != waited {
+                if live.tip_hash != waited.tip_hash {
+                    return Ok(live);
+                }
+                if started.elapsed() >= self.mempool_update_wait {
+                    return Ok(live);
+                }
+                let remaining = self.mempool_update_wait.saturating_sub(started.elapsed());
+                let wait = remaining.min(LONG_POLL_SLICE);
+                let _ = self.wake.wait_for(&mut state, wait);
+                continue;
+            }
+            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+        }
+    }
+
+    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
+        let template_id = key.template_id();
+        let mut state = self.state.lock();
+        if let Some(cached) = state.cache_get(&template_id) {
+            return Ok(cached);
+        }
+
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let Some(flight) = state.in_flight.as_ref() else {
+                break;
+            };
+            if flight.key != key {
+                break;
+            }
+            if let Some(result) = flight.result.clone() {
+                return result;
+            }
+            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+        }
+        if let Some(cached) = state.cache_get(&template_id) {
+            return Ok(cached);
+        }
+
+        state.in_flight = Some(InFlight { key, result: None });
+        drop(state);
+
+        let assembled = self.assemble_for_key(key);
+        let mut state = self.state.lock();
+        let returned = match &assembled {
+            Ok(candidate) => {
+                let live = self.live_generation_key();
+                if live == key {
+                    state.cache_insert(template_id, Arc::clone(candidate));
+                    state.last_candidate = Some(LastCandidateInfo {
+                        weight: candidate.weight,
+                        transactions: u64::try_from(candidate.transactions.len())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(1),
+                    });
+                    state.published = Some(key);
+                }
+                Ok(Arc::clone(candidate))
+            }
+            Err(error) => Err(error.clone()),
+        };
+        if let Some(flight) = state.in_flight.as_mut()
+            && flight.key == key
+        {
+            flight.result = Some(returned.clone());
+        }
+        self.wake.notify_all();
+        if state
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.key == key && flight.result.is_some())
+        {
+            state.in_flight = None;
+        }
+        returned
+    }
+
+    fn assemble_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
+        let tip = self.applied_tip.load_full().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
+        })?;
+        if tip.hash != key.tip_hash {
+            return Err(MiningControlError::Unavailable(CompactString::from(
+                "applied tip changed during candidate assembly",
+            )));
+        }
+        let snapshot = {
+            let mempool = self.mempool.read();
+            if mempool.sequence_number() != key.mempool_sequence {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "mempool sequence changed during candidate assembly",
+                )));
+            }
+            mempool.mining_snapshot()
+        };
+        let current_time = Self::current_time_secs().max(1);
+        let chain = {
+            let tree = self.block_tree.read();
+            MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time).map_err(
+                |error| MiningControlError::Failed(CompactString::from(error.to_string())),
+            )?
+        };
+        let context = CandidateContext {
+            previous_block_hash: chain.previous_block_hash,
+            height: chain.height,
+            version: chain.version,
+            bits: chain.bits.to_consensus(),
+            min_time: chain.min_time,
+            current_time: current_time.max(chain.min_time),
+            locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
+            network: self.network,
+            segwit_active: chain.segwit_active,
+            max_weight: MAX_BLOCK_WEIGHT,
+            max_size: MAX_BLOCK_SIZE,
+            max_sigops: u64::from(bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST),
+        };
+        let candidate = assemble_candidate(&context, &snapshot, &self.coinbase_script)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        if candidate.template_id != key.template_id() {
+            return Err(MiningControlError::Failed(CompactString::from(
+                "assembled candidate template id does not match generation key",
+            )));
+        }
+        Ok(Arc::new(candidate))
+    }
+
+    fn template_from_candidate(
+        &self,
+        candidate: Arc<Candidate>,
+        request: &BlockTemplateRequest,
+        submit_old: Option<bool>,
+    ) -> Result<BlockTemplate, MiningControlError> {
+        let tip = self.applied_tip.load_full().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
+        })?;
+        let chain = {
+            let tree = self.block_tree.read();
+            MiningChainContext::resolve(&tree, self.network, tip.tip_id, candidate.current_time)
+                .map_err(|error| {
+                    MiningControlError::Failed(CompactString::from(error.to_string()))
+                })?
+        };
+        let mut rules = Vec::new();
+        if chain.segwit_active {
+            rules.push(MiningRule::new("segwit"));
+        }
+        if chain.csv_active {
+            rules.push(MiningRule::new("csv"));
+        }
+        let mut capabilities = vec![
+            MiningCapability::new("proposal"),
+            MiningCapability::new("longpoll"),
+        ];
+        for capability in &request.capabilities {
+            if !capabilities
+                .iter()
+                .any(|known| known.as_str() == capability.as_str())
+            {
+                capabilities.push(capability.clone());
+            }
+        }
+        Ok(BlockTemplate {
+            candidate,
+            rules,
+            version_bits_available: Vec::<AvailableMiningRule>::new(),
+            version_bits_required: 0,
+            capabilities,
+            mutable: vec![
+                TemplateMutation::Time,
+                TemplateMutation::Transactions,
+                TemplateMutation::PreviousBlock,
+            ],
+            submit_old,
+            work_id: None,
+        })
+    }
+
+    fn propose(&self, block: &bitcoin::Block) -> BlockValidationResult {
+        match apply::validate_block(&self.apply_handles, block) {
+            Ok(()) => BlockValidationResult::Accepted,
+            Err(error) => map_apply_error(error),
+        }
+    }
+
+    fn submit(&self, block: &bitcoin::Block) -> Result<BlockValidationResult, MiningControlError> {
+        use bitcoin::hashes::Hash as _;
+
+        let block_hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+        if let Some(tip) = self.applied_tip.load_full()
+            && tip.hash == block_hash
+        {
+            return Ok(BlockValidationResult::Duplicate);
+        }
+        {
+            let tree = self.block_tree.read();
+            if let Some(node_id) = tree.lookup(block_hash) {
+                let on_applied = self.applied_tip.load_full().is_some_and(|tip| {
+                    if tip.tip_id == node_id {
+                        return true;
+                    }
+                    let mut cursor = tip.tip_id;
+                    loop {
+                        let Ok(node) = tree.node(cursor) else {
+                            return false;
+                        };
+                        let Some(parent) = node.parent else {
+                            return false;
+                        };
+                        if parent == node_id {
+                            return true;
+                        }
+                        cursor = parent;
+                    }
+                });
+                if on_applied {
+                    return Ok(BlockValidationResult::Duplicate);
+                }
+                return Ok(BlockValidationResult::DuplicateInconclusive);
+            }
+        }
+
+        match apply::apply_block(&self.apply_handles, block) {
+            Ok(tip) => {
+                let visible = self.applied_tip.load_full().ok_or_else(|| {
+                    MiningControlError::Failed(CompactString::from(
+                        "applied tip missing after accepted submission",
+                    ))
+                })?;
+                if visible.hash != tip.hash {
+                    return Err(MiningControlError::Failed(CompactString::from(
+                        "applied tip was not published before submit_block returned",
+                    )));
+                }
+                self.publish_generation();
+                Ok(BlockValidationResult::Accepted)
+            }
+            Err(error) => Ok(map_apply_error(error)),
+        }
+    }
+
+    fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
+        let tip = self.applied_tip.load_full();
+        let blocks = tip.as_ref().map_or(0, |tip| tip.height);
+        let (difficulty, next_bits, next_difficulty) = match tip.as_ref() {
+            Some(tip) => {
+                let tree = self.block_tree.read();
+                let tip_bits =
+                    tree.node(tip.tip_id)
+                        .map(|node| node.header.bits)
+                        .map_err(|error| {
+                            MiningControlError::Failed(CompactString::from(error.to_string()))
+                        })?;
+                let current_time = Self::current_time_secs().max(1);
+                let next =
+                    MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time)
+                        .map_err(|error| {
+                            MiningControlError::Failed(CompactString::from(error.to_string()))
+                        })?;
+                (
+                    difficulty_for_bits(tip_bits),
+                    next.bits.to_consensus(),
+                    difficulty_for_bits(next.bits),
+                )
+            }
+            None => (0.0, 0, 0.0),
+        };
+        let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
+        let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
+        let last_candidate = self.state.lock().last_candidate;
+        let network_hashes_per_second = estimate_network_hashps(&self.block_tree, tip.as_deref());
+        Ok(MiningInfo {
+            blocks,
+            last_candidate,
+            difficulty,
+            network_hashes_per_second,
+            pooled_transactions,
+            network: self.network,
+            next_bits,
+            next_difficulty,
+            minimum_fee_rate,
+            signet: signet_info(self.network),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+impl MiningControl for MiningCoordinator {
+    fn get_block_template(
+        &self,
+        request: BlockTemplateRequest,
+    ) -> Result<BlockTemplateResult, MiningControlError> {
+        match request.mode {
+            BlockTemplateMode::Proposal(block) => {
+                Ok(BlockTemplateResult::Proposal(self.propose(&block)))
+            }
+            BlockTemplateMode::Template => {
+                let mut submit_old = None;
+                if let Some(long_poll_id) = request.long_poll_id.as_deref() {
+                    let waited = parse_long_poll_id(long_poll_id).ok_or_else(|| {
+                        MiningControlError::InvalidRequest(CompactString::from(
+                            "longpollid is malformed",
+                        ))
+                    })?;
+                    let live = {
+                        let mut state = self.state.lock();
+                        self.ensure_published(&mut state)
+                    };
+                    if live == waited {
+                        let after = self.wait_for_generation_change(waited)?;
+                        submit_old = Some(after.tip_hash == waited.tip_hash);
+                    } else {
+                        submit_old = Some(live.tip_hash == waited.tip_hash);
+                    }
+                }
+                if self.applied_tip.load_full().is_none() {
+                    return Err(MiningControlError::Unavailable(CompactString::from(
+                        "applied tip is not available",
+                    )));
+                }
+                let key = {
+                    let mut state = self.state.lock();
+                    self.ensure_published(&mut state)
+                };
+                let candidate = self.candidate_for_key(key)?;
+                let template = self.template_from_candidate(candidate, &request, submit_old)?;
+                Ok(BlockTemplateResult::Template(template))
+            }
+        }
+    }
+
+    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+        self.mining_info_snapshot()
+    }
+
+    fn submit_block(
+        &self,
+        block: bitcoin::Block,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        self.submit(&block)
+    }
+
+    fn publish_generation(&self) {
+        Self::publish_generation(self);
+    }
+}
+
+fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
+    if id.len() < 65 {
+        return None;
+    }
+    let (hash_hex, sequence) = id.split_at(64);
+    let tip_hash = Hash256::from_str_be(hash_hex).ok()?;
+    let mempool_sequence = sequence.parse().ok()?;
+    Some(GenerationKey {
+        tip_hash,
+        mempool_sequence,
+    })
+}
+
+fn map_apply_error(error: ApplyError) -> BlockValidationResult {
+    match error {
+        ApplyError::ProofOfWork { .. } => {
+            BlockValidationResult::Rejected(CompactString::from("high-hash"))
+        }
+        ApplyError::PrevHashMismatch { .. } => {
+            BlockValidationResult::Rejected(CompactString::from("inconclusive-not-best-prevblk"))
+        }
+        ApplyError::TargetAboveLimit | ApplyError::NbitsNonRetargetMismatch { .. } => {
+            BlockValidationResult::Rejected(CompactString::from("bad-diffbits"))
+        }
+        ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
+            BlockValidationResult::Rejected(CompactString::from("bad-cb-amount"))
+        }
+        ApplyError::Shutdown => BlockValidationResult::Inconclusive,
+        other => BlockValidationResult::Rejected(CompactString::from(other.to_string())),
+    }
+}
+
+fn estimate_network_hashps(block_tree: &RwLock<BlockTree>, tip: Option<&TipSnapshot>) -> f64 {
+    const WINDOW: u32 = 120;
+    let Some(tip) = tip else {
+        return 0.0;
+    };
+    let tree = block_tree.read();
+    let Ok(tip_node) = tree.node(tip.tip_id) else {
+        return 0.0;
+    };
+    let target_height = tip_node.height.saturating_sub(WINDOW);
+    let Some(earliest_id) = tree.node_at_height_from(tip.tip_id, target_height) else {
+        return 0.0;
+    };
+    let Ok(earliest_node) = tree.node(earliest_id) else {
+        return 0.0;
+    };
+    if earliest_node.height == tip_node.height {
+        return 0.0;
+    }
+    let work_delta = tip_node.chainwork.saturating_sub(earliest_node.chainwork);
+    let time_delta_secs =
+        i64::from(tip_node.header.time).saturating_sub(i64::from(earliest_node.header.time));
+    if time_delta_secs <= 0 {
+        return 0.0;
+    }
+    let bytes: [u8; 32] = work_delta.to_be_bytes();
+    let work = bytes
+        .iter()
+        .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)));
+    work / f64::from(u32::try_from(time_delta_secs).unwrap_or(u32::MAX))
+}
+
+fn signet_info(network: Network) -> Option<SignetMiningInfo> {
+    const DEFAULT_SIGNET_CHALLENGE: &str = concat!(
+        "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
+        "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
+    );
+
+    if network != Network::Signet {
+        return None;
+    }
+    let challenge = match ScriptBuf::from_hex(DEFAULT_SIGNET_CHALLENGE) {
+        Ok(challenge) => challenge,
+        Err(error) => panic!("Bitcoin Core's default Signet challenge is invalid: {error}"),
+    };
+    Some(SignetMiningInfo { challenge })
+}
+
+#[cfg(test)]
+mod generation_key_tests {
+    use super::{GenerationKey, parse_long_poll_id};
+    use bitcoin_rs_mining::TemplateId;
+    use bitcoin_rs_primitives::Hash256;
+
+    #[test]
+    fn long_poll_round_trips_template_id() {
+        let tip = Hash256::from_le_bytes(&[0x11; 32]);
+        let key = GenerationKey {
+            tip_hash: tip,
+            mempool_sequence: 7,
+        };
+        let id = key.template_id();
+        let Some(parsed) = parse_long_poll_id(id.as_str()) else {
+            panic!("generated long-poll id did not parse");
+        };
+        assert_eq!(parsed, key);
+        assert_eq!(TemplateId::new(&tip, 7).as_str(), id.as_str());
+    }
+}

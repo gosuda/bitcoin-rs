@@ -908,7 +908,15 @@ mod tests {
     };
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_mempool::MempoolEntry;
+    use bitcoin_rs_mining::{Candidate, TemplateId};
+    use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoError};
     use serde_json::Value;
+
+    use crate::context::{
+        BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
+        LastCandidateInfo, MiningCapability, MiningControl, MiningControlError, MiningInfo,
+        MiningRule, TemplateMutation,
+    };
 
     use super::*;
 
@@ -1146,6 +1154,118 @@ mod tests {
         }
     }
 
+    /// Commits one confirmed unspent output into the authoritative UTXO set so
+    /// mempool admission resolves a real prevout instead of rejecting a
+    /// spender for missing inputs.
+    fn commit_unspent(
+        ctx: &Context,
+        txid: &Txid,
+        vout: u32,
+        output: &TxOut,
+        height: u32,
+    ) -> Result<(), UtxoError> {
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            bitcoin_rs_primitives::OutPoint::new(
+                Hash256::from_le_bytes(txid.as_byte_array()),
+                vout,
+            ),
+            bitcoin_rs_primitives::TxOut {
+                value: output.value,
+                script_pubkey: output.script_pubkey.clone(),
+            },
+            false,
+            height,
+        ));
+        ctx.utxo
+            .commit_block(&changes, &Hash256::from_le_bytes(&[9_u8; 32]))
+    }
+
+    /// Deterministic local [`MiningControl`] fixture.
+    ///
+    /// Serves one fixed semantic candidate, a coherent mining-info snapshot,
+    /// and an accepting submit result. The template carries no mandatory
+    /// rules, so the unparametrized `/block-template` request needs no caller
+    /// capability negotiation to project it.
+    struct FixtureMiningControl;
+
+    impl FixtureMiningControl {
+        fn template() -> BlockTemplate {
+            let previous = Hash256::from_le_bytes(&[0x11; 32]);
+            BlockTemplate {
+                candidate: Arc::new(Candidate {
+                    template_id: TemplateId::new(&previous, 9),
+                    previous_block_hash: previous,
+                    height: 101,
+                    version: 0x2000_0000,
+                    bits: 0x207f_ffff,
+                    min_time: 1_700_000_001,
+                    current_time: 1_700_000_010,
+                    max_weight: 4_000_000,
+                    max_size: 4_000_000,
+                    max_sigops: 80_000,
+                    mempool_sequence: 9,
+                    coinbase: Transaction {
+                        version: transaction::Version(2),
+                        lock_time: absolute::LockTime::ZERO,
+                        input: Vec::new(),
+                        output: Vec::new(),
+                    },
+                    coinbase_value: 5_000_000_000,
+                    fees: 0,
+                    weight: 1_000,
+                    size: 250,
+                    sigop_cost: 0,
+                    transactions: Vec::new(),
+                    witness_merkle_root: None,
+                    witness_reserved_value: None,
+                    witness_commitment: None,
+                }),
+                rules: vec![MiningRule::new("csv")],
+                version_bits_available: Vec::new(),
+                version_bits_required: 0,
+                capabilities: vec![MiningCapability::new("proposal")],
+                mutable: vec![TemplateMutation::Time, TemplateMutation::Transactions],
+                submit_old: None,
+                work_id: None,
+            }
+        }
+    }
+
+    impl MiningControl for FixtureMiningControl {
+        fn get_block_template(
+            &self,
+            _request: BlockTemplateRequest,
+        ) -> Result<BlockTemplateResult, MiningControlError> {
+            Ok(BlockTemplateResult::Template(Self::template()))
+        }
+
+        fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+            Ok(MiningInfo {
+                blocks: 100,
+                last_candidate: Some(LastCandidateInfo {
+                    weight: 1_000,
+                    transactions: 1,
+                }),
+                difficulty: 1.0,
+                network_hashes_per_second: 0.0,
+                pooled_transactions: 0,
+                network: bitcoin_rs_primitives::Network::Regtest,
+                next_bits: 0x207f_ffff,
+                next_difficulty: 1.0,
+                minimum_fee_rate: 1_000,
+                signet: None,
+                warnings: Vec::new(),
+            })
+        }
+
+        fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
+            Ok(BlockValidationResult::Accepted)
+        }
+
+        fn publish_generation(&self) {}
+    }
+
     fn contract_fixture()
     -> Result<(Handler, Transaction, Block, String), Box<dyn std::error::Error>> {
         let target = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([2; 20]));
@@ -1158,6 +1278,10 @@ mod tests {
                 script_pubkey: target,
             },
         );
+        transaction.output.push(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        });
         transaction.input.push(TxIn {
             previous_output: OutPoint::null(),
             script_sig: ScriptBuf::from_bytes(vec![1, 1]),
@@ -1209,6 +1333,11 @@ mod tests {
             funding: funding.clone(),
             unspent: funding,
         }));
+        // Output zero drives the address routes. Output one is a portable
+        // consensus-valid OP_TRUE coin for the broadcast route.
+        commit_unspent(&context, &txid, 0, &transaction.output[0], 0)?;
+        commit_unspent(&context, &txid, 1, &transaction.output[1], 0)?;
+        let context = context.with_mining_control(Arc::new(FixtureMiningControl));
         Ok((Handler::new(Arc::new(context)), transaction, block, address))
     }
 
@@ -1231,10 +1360,10 @@ mod tests {
     #[allow(clippy::expect_used, clippy::too_many_lines)]
     fn bitcoin_esplora_surface_matches_documented_routes_and_content_types()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (handler, transaction, block, address) = contract_fixture()?;
-        let txid = transaction.compute_txid().to_string();
+        let (handler, confirmed_tx, block, address) = contract_fixture()?;
+        let txid = confirmed_tx.compute_txid().to_string();
         let block_hash = block.block_hash().to_string();
-        let script_hash = ScriptHash::new(&transaction.output[0].script_pubkey)
+        let script_hash = ScriptHash::new(&confirmed_tx.output[0].script_pubkey)
             .to_byte_array()
             .to_lower_hex_string();
         let routes = [
@@ -1339,9 +1468,27 @@ mod tests {
             );
         }
 
-        let raw = serialize(&transaction).to_lower_hex_string();
+        // Broadcast must clear real admission: spend the fixture's confirmed
+        // unspent output — also committed to the UTXO set — rather than
+        // replaying the coinbase-shaped null-input fixture transaction.
+        let spend = transaction(
+            Some(OutPoint {
+                txid: confirmed_tx.compute_txid(),
+                vout: 1,
+            }),
+            TxOut {
+                value: Amount::from_sat(90_000),
+                script_pubkey: confirmed_tx.output[0].script_pubkey.clone(),
+            },
+        );
+        let raw = serialize(&spend).to_lower_hex_string();
         let broadcast = route_post(&handler, "/tx", raw.as_bytes()).expect("POST /tx is routed");
-        assert_eq!(broadcast.status, 200);
+        assert_eq!(
+            broadcast.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&broadcast.body)
+        );
         assert_eq!(broadcast.content_type, "text/plain");
 
         // Package relay is conditional in API.md (Bitcoin Core 28+). This node
@@ -1616,18 +1763,47 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn broadcast_transaction_is_immediately_visible_as_unconfirmed() {
-        let transaction = transaction(
+        let target = ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([2; 20]));
+        let funding = transaction(
             None,
             TxOut {
-                value: Amount::from_sat(125),
+                value: Amount::from_sat(50_000),
                 script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
             },
         );
-        let txid = transaction.compute_txid();
-        let handler = Handler::new(Arc::new(Context::new()));
-        let raw = serialize(&transaction).to_lower_hex_string();
+        let spend = transaction(
+            Some(OutPoint {
+                txid: funding.compute_txid(),
+                vout: 0,
+            }),
+            TxOut {
+                value: Amount::from_sat(30_000),
+                script_pubkey: target,
+            },
+        );
+        let txid = spend.compute_txid();
+        let context = Context::new();
+        // Admission resolves the prevout from the authoritative UTXO set: the
+        // funding output is committed as a confirmed height-0 coin, so the
+        // spend is a genuinely funded transaction. The funding transaction is
+        // staged in the broadcast cache the way an earlier accepted
+        // submission would be, so the follow-up GET can render the prevout.
+        commit_unspent(&context, &funding.compute_txid(), 0, &funding.output[0], 0)
+            .expect("fixture utxo commit succeeds");
+        context.add_transaction(funding.clone());
+        let handler = Handler::new(Arc::new(context));
+        let raw = serialize(&spend).to_lower_hex_string();
         let broadcast = route_post(&handler, "/tx", raw.as_bytes()).expect("broadcast route");
-        assert_eq!(broadcast.status, 200);
+        assert_eq!(
+            broadcast.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&broadcast.body)
+        );
+        assert_eq!(
+            String::from_utf8(broadcast.body).expect("txid body is UTF-8"),
+            txid.to_string()
+        );
 
         let response = route(&handler, &format!("/tx/{txid}"), "");
         assert_eq!(response.status, 200);
