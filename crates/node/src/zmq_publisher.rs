@@ -9,8 +9,10 @@ use crate::config::ZmqPublication;
 #[cfg(feature = "zmq")]
 use anyhow::{Context as _, Result, bail};
 use bitcoin::Txid;
+#[cfg(any(feature = "zmq", test))]
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_primitives::Hash256;
+#[cfg(feature = "zmq")]
 use core::fmt;
 #[cfg(feature = "zmq")]
 use hashbrown::{HashMap, HashSet};
@@ -59,6 +61,7 @@ impl ZmqTopic {
         }
     }
 
+    #[cfg(feature = "zmq")]
     const fn index(self) -> usize {
         match self {
             Self::HashBlock => 0,
@@ -451,12 +454,14 @@ impl ZmqPublisher for SocketZmqPublisher {
     }
 }
 
+#[cfg(any(feature = "zmq", test))]
 pub(crate) fn hash_body_from_hash(hash: Hash256) -> [u8; 32] {
     let mut body = hash.to_le_bytes();
     body.reverse();
     body
 }
 
+#[cfg(any(feature = "zmq", test))]
 pub(crate) fn sequence_payload(event: SequenceEvent) -> [u8; 33] {
     let mut body = [0_u8; 33];
     body[..32].copy_from_slice(&hash_body_from_hash(event.hash()));
@@ -464,16 +469,19 @@ pub(crate) fn sequence_payload(event: SequenceEvent) -> [u8; 33] {
     body
 }
 
+#[cfg(feature = "zmq")]
 pub(crate) fn hash_body_from_txid(txid: Txid) -> [u8; 32] {
     let mut body = *txid.as_byte_array();
     body.reverse();
     body
 }
 
+#[cfg(any(feature = "zmq", test))]
 pub(crate) const fn sequence_body(sequence: u32) -> [u8; 4] {
     sequence.to_le_bytes()
 }
 
+#[cfg(any(feature = "zmq", test))]
 fn is_ipv6_tcp_endpoint(endpoint: &str) -> bool {
     let Some(rest) = endpoint.strip_prefix("tcp://[") else {
         return false;
@@ -487,7 +495,9 @@ fn is_ipv6_tcp_endpoint(endpoint: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "zmq")]
     use std::thread;
+    #[cfg(feature = "zmq")]
     use std::time::{Duration, Instant};
 
     #[test]
