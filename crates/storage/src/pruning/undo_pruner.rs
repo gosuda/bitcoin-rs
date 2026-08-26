@@ -1,10 +1,10 @@
 use alloc::sync::Arc;
 
+use crate::{ColumnFamily, KvStore};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
-use crate::block_pruner::prune_prefixed_rows;
-use crate::{PruneError, PruneOutcome, PrunePolicy};
+use crate::pruning::block_pruner::prune_prefixed_rows;
+use crate::pruning::{PruneError, PruneOutcome, PrunePolicy};
 
 const BLOCK_UNDO_PREFIX: u8 = b'u';
 /// Undo records live in their own family, not alongside the block tree.

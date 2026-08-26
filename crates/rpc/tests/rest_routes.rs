@@ -76,8 +76,8 @@ fn genesis_fixture() -> (Arc<Context>, Block, Hash256) {
 }
 
 #[test]
-fn registrations_are_exactly_the_fourteen_core_prefixes() {
-    assert_eq!(REGISTRATIONS.len(), 14);
+fn registrations_are_exactly_the_twelve_core_prefixes() {
+    assert_eq!(REGISTRATIONS.len(), 12);
     assert_eq!(
         REGISTRATIONS,
         [
@@ -85,8 +85,6 @@ fn registrations_are_exactly_the_fourteen_core_prefixes() {
             "/rest/block/notxdetails/",
             "/rest/block/",
             "/rest/blockpart/",
-            "/rest/blockfilter/",
-            "/rest/blockfilterheaders/",
             "/rest/chaininfo",
             "/rest/mempool/",
             "/rest/headers/",
@@ -109,8 +107,6 @@ fn every_registration_is_reachable_without_falling_through_to_generic_404() {
         format!("/rest/block/notxdetails/{hash_hex}.json"),
         format!("/rest/block/{hash_hex}.json"),
         format!("/rest/blockpart/{hash_hex}.bin"),
-        format!("/rest/blockfilter/basic/{hash_hex}.json"),
-        format!("/rest/blockfilterheaders/basic/{hash_hex}.json"),
         "/rest/chaininfo.json".to_owned(),
         "/rest/mempool/info.json".to_owned(),
         format!("/rest/headers/{hash_hex}.json"),
@@ -311,18 +307,6 @@ fn malformed_and_disabled_errors() {
         true,
     );
     assert_eq!(bad_count.status, 400);
-
-    let filter_index_off = route(
-        &ctx,
-        "/rest/blockfilter/basic/0000000000000000000000000000000000000000000000000000000000000001.json",
-        "",
-        true,
-    );
-    assert!(
-        filter_index_off.status == 400 || filter_index_off.status == 404,
-        "{}",
-        filter_index_off.status
-    );
 }
 
 #[test]

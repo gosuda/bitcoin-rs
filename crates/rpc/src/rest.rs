@@ -32,13 +32,11 @@ const MAX_HEADER_COUNT: u32 = 2_000;
 const MAX_GETUTXOS_OUTPOINTS: usize = 15;
 
 /// The Bitcoin Core REST prefixes registered by `StartREST`.
-pub const REGISTRATIONS: [&str; 14] = [
+pub const REGISTRATIONS: [&str; 12] = [
     "/rest/tx/",
     "/rest/block/notxdetails/",
     "/rest/block/",
     "/rest/blockpart/",
-    "/rest/blockfilter/",
-    "/rest/blockfilterheaders/",
     "/rest/chaininfo",
     "/rest/mempool/",
     "/rest/headers/",
@@ -151,12 +149,6 @@ fn dispatch(ctx: &Arc<Context>, path: &str, query: &str) -> (Response, &'static 
             route_block_part(ctx, suffix),
             cache_for_block_format(suffix),
         );
-    }
-    if let Some(suffix) = path.strip_prefix("/rest/blockfilterheaders/") {
-        return (route_filter_headers(ctx, suffix, query), CACHE_NO_STORE);
-    }
-    if let Some(suffix) = path.strip_prefix("/rest/blockfilter/") {
-        return (route_block_filter(ctx, suffix), CACHE_IMMUTABLE);
     }
     if let Some(suffix) = path.strip_prefix("/rest/block/") {
         return (
@@ -331,111 +323,6 @@ fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
             "text/plain",
             format!("{}\n", body.to_lower_hex_string()).into_bytes(),
         ),
-        _ => format_not_found(available_formats()),
-    }
-}
-
-/// Core `/rest/blockfilter/<filtertype>/<hash>.<ext>`.
-fn route_block_filter(ctx: &Arc<Context>, suffix: &str) -> Response {
-    let (rest, format) = split_format(suffix);
-    let Some(format) = format else {
-        return format_not_found(available_formats());
-    };
-    let mut parts = rest.split('/');
-    let filter_type = parts.next().unwrap_or_default();
-    let hash_text = parts.next().unwrap_or_default();
-    if parts.next().is_some() || hash_text.is_empty() {
-        return bad_request(
-            "Invalid URI format. Expected /rest/blockfilter/<filtertype>/<blockhash>",
-        );
-    }
-    if filter_type != "basic" {
-        return bad_request_owned(format!("Unknown filtertype {filter_type}"));
-    }
-    let Ok(hash) = Hash256::from_str(hash_text) else {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
-    };
-    if !ctx.filter_index.wants_filters() {
-        return bad_request_owned(format!("Index is not enabled for filtertype {filter_type}"));
-    }
-    if ctx.record_for_hash(hash).is_none() {
-        return not_found_owned(format!("{hash_text} not found"));
-    }
-    let filter = match ctx.filter_index.filter(hash) {
-        Ok(Some(filter)) => filter,
-        Ok(None) | Err(_) => return not_found_owned("Filter not found.".to_owned()),
-    };
-    match format {
-        "bin" => binary_response("application/octet-stream", &filter),
-        "hex" => text_response(
-            "text/plain",
-            format!("{}\n", filter.to_lower_hex_string()).into_bytes(),
-        ),
-        "json" => text_response(
-            "application/json",
-            sonic_bytes(&json!({"filter": filter.to_lower_hex_string()})),
-        ),
-        _ => format_not_found(available_formats()),
-    }
-}
-
-/// Core `/rest/blockfilterheaders/<filtertype>/<hash>.<ext>?count=<count>`.
-fn route_filter_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
-    let (rest, format) = split_format(suffix);
-    let Some(format) = format else {
-        return format_not_found(available_formats());
-    };
-    let mut parts = rest.split('/');
-    let filter_type = parts.next().unwrap_or_default();
-    let hash_text = parts.next().unwrap_or_default();
-    if parts.next().is_some() || hash_text.is_empty() {
-        return bad_request(
-            "Invalid URI format. Expected /rest/blockfilterheaders/<filtertype>/<blockhash>",
-        );
-    }
-    if filter_type != "basic" {
-        return bad_request_owned(format!("Unknown filtertype {filter_type}"));
-    }
-    let count = match parse_count(query) {
-        Ok(count) => count,
-        Err(response) => return response,
-    };
-    let Ok(hash) = Hash256::from_str(hash_text) else {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
-    };
-    let headers = header_records(ctx, hash, count);
-    let mut filter_headers = Vec::with_capacity(headers.len());
-    for record in &headers {
-        match ctx.filter_index.filter_header(record.hash) {
-            Ok(Some(header)) => filter_headers.push(header),
-            Ok(None) | Err(_) => {
-                return not_found_owned(
-                    "Filter not found. Block filters are still in the process of being indexed."
-                        .to_owned(),
-                );
-            }
-        }
-    }
-    let body = filter_headers.iter().fold(
-        Vec::with_capacity(filter_headers.len() * 32),
-        |mut body, header| {
-            body.extend_from_slice(&header.to_le_bytes());
-            body
-        },
-    );
-    match format {
-        "bin" => binary_response("application/octet-stream", &body),
-        "hex" => text_response(
-            "text/plain",
-            format!("{}\n", body.to_lower_hex_string()).into_bytes(),
-        ),
-        "json" => {
-            let values = filter_headers
-                .iter()
-                .map(|header| json!(header.to_string_be()))
-                .collect::<Vec<_>>();
-            text_response("application/json", sonic_bytes(&Value::from(values)))
-        }
         _ => format_not_found(available_formats()),
     }
 }

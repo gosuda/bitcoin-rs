@@ -150,12 +150,8 @@ pub struct Config {
     pub connect: Vec<String>,
     /// Pruning target in MiB. Zero disables pruning.
     pub prune_target_mb: u64,
-    /// Whether utreexo mode is enabled.
-    pub utreexo_mode: bool,
     /// Whether the transaction index is enabled.
     pub txindex: bool,
-    /// Whether the compact block filter index is enabled.
-    pub blockfilterindex: bool,
     /// Database cache target in MiB.
     pub dbcache_mb: u64,
     /// Tracing filter level used when `RUST_LOG` is unset.
@@ -224,9 +220,7 @@ impl fmt::Debug for Config {
             .field("dns_seeds_enabled", &self.dns_seeds_enabled)
             .field("connect", &self.connect)
             .field("prune_target_mb", &self.prune_target_mb)
-            .field("utreexo_mode", &self.utreexo_mode)
             .field("txindex", &self.txindex)
-            .field("blockfilterindex", &self.blockfilterindex)
             .field("dbcache_mb", &self.dbcache_mb)
             .field("log_level", &self.log_level)
             .field("metrics_bind", &self.metrics_bind)
@@ -287,9 +281,7 @@ impl Config {
             dns_seeds_enabled: true,
             connect: Vec::new(),
             prune_target_mb: 0,
-            utreexo_mode: false,
             txindex: false,
-            blockfilterindex: false,
             dbcache_mb: DEFAULT_DBCACHE_MB,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             metrics_bind: None,
@@ -546,14 +538,8 @@ impl Config {
         if let Some(prune_target_mb) = layer.prune_target_mb {
             self.prune_target_mb = prune_target_mb;
         }
-        if let Some(utreexo_mode) = layer.utreexo_mode {
-            self.utreexo_mode = utreexo_mode;
-        }
         if let Some(txindex) = layer.txindex {
             self.txindex = txindex;
-        }
-        if let Some(blockfilterindex) = layer.blockfilterindex {
-            self.blockfilterindex = blockfilterindex;
         }
         if let Some(dbcache_mb) = layer.dbcache_mb {
             self.dbcache_mb = dbcache_mb;
@@ -695,12 +681,8 @@ pub(crate) struct ConfigLayer {
     pub(crate) connect: Option<Vec<String>>,
     #[arg(long = "prune-target-mb")]
     pub(crate) prune_target_mb: Option<u64>,
-    #[arg(long = "utreexo-mode")]
-    pub(crate) utreexo_mode: Option<bool>,
     #[arg(long)]
     pub(crate) txindex: Option<bool>,
-    #[arg(long)]
-    pub(crate) blockfilterindex: Option<bool>,
     #[arg(long = "dbcache-mb")]
     pub(crate) dbcache_mb: Option<u64>,
     #[arg(long = "log-level")]
@@ -779,9 +761,7 @@ impl ConfigLayer {
                 }
                 "BITCOIN_RS_CONNECT" => layer.connect = Some(parse_connect_list(value)?),
                 "BITCOIN_RS_PRUNE_TARGET_MB" => layer.prune_target_mb = Some(value.parse()?),
-                "BITCOIN_RS_UTREEXO_MODE" => layer.utreexo_mode = Some(parse_bool(value)?),
                 "BITCOIN_RS_TXINDEX" => layer.txindex = Some(parse_bool(value)?),
-                "BITCOIN_RS_BLOCKFILTERINDEX" => layer.blockfilterindex = Some(parse_bool(value)?),
                 "BITCOIN_RS_DBCACHE_MB" => layer.dbcache_mb = Some(value.parse()?),
                 "BITCOIN_RS_LOG_LEVEL" => layer.log_level = Some(value.to_owned()),
                 "BITCOIN_RS_METRICS_BIND" => layer.metrics_bind = Some(value.parse()?),

@@ -12,8 +12,6 @@ use bitcoin::{
     Txid, Witness, absolute, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
-use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
-use bitcoin_rs_filters::{FilterIndexError, FilterIndexLike};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
     BlockSync, Config, Network, apply::ApplyHandles, event_loop::EventLoop, state::NodeState,
@@ -21,6 +19,7 @@ use bitcoin_rs_node::{
 use bitcoin_rs_p2p::{Message, PeerInfo};
 use bitcoin_rs_primitives::{Hash256, OutPoint};
 use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::{bounded, unbounded};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
@@ -570,43 +569,12 @@ fn apply_handles_with_coin_stats_and_utxo(
         Arc::clone(&utxo),
         Arc::clone(&coin_stats),
         None,
-        noop_filter_index(),
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Arc::new(RwLock::new(bitcoin_rs_rpc::context::BlockLog::new())),
         Arc::new(RwLock::new(HashMap::<Txid, Transaction>::new())),
         Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
     );
     (handles, coin_stats, utxo)
-}
-
-struct NoopFilterIndex;
-
-impl FilterIndexLike for NoopFilterIndex {
-    fn wants_filters(&self) -> bool {
-        false
-    }
-
-    fn put_filter(
-        &self,
-        _block_hash: Hash256,
-        _prev_header: Hash256,
-        _filter_bytes: &[u8],
-    ) -> Result<Hash256, FilterIndexError> {
-        Ok(Hash256::default())
-    }
-
-    fn filter_header(&self, _block_hash: Hash256) -> Result<Option<Hash256>, FilterIndexError> {
-        Ok(None)
-    }
-
-    fn filter(&self, _block_hash: Hash256) -> Result<Option<Vec<u8>>, FilterIndexError> {
-        Ok(None)
-    }
-}
-
-fn noop_filter_index() -> Arc<Box<dyn FilterIndexLike>> {
-    let filter_index: Box<dyn FilterIndexLike> = Box::new(NoopFilterIndex);
-    Arc::new(filter_index)
 }
 
 fn regtest_genesis_block() -> Result<bitcoin::Block, Box<dyn std::error::Error>> {

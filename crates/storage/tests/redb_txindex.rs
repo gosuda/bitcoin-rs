@@ -425,8 +425,6 @@ fn txindex_unsupported_column_families_rejected() -> TestResult<()> {
 
     for cf in [
         ColumnFamily::TxMempool,
-        ColumnFamily::Filters,
-        ColumnFamily::FilterHeaders,
         ColumnFamily::Coinstats,
         ColumnFamily::BlockTree,
         ColumnFamily::BlockBodies,

@@ -19,6 +19,7 @@ redb = ["dep:redb"]
 mdbx = ["dep:signet-libmdbx"]
 
 [dependencies]
+bitcoin-rs-primitives.workspace = true
 bytemuck.workspace = true
 bytes.workspace = true
 crossbeam-channel.workspace = true

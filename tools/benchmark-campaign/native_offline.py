@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TypeIs
 
 CELL_PROOF_SCHEMA = "benchmark-campaign-cell-proof-v1"
-REPLAY_SCHEMA = "mainnet-prefix-replay-v2"
+REPLAY_SCHEMA = "mainnet-prefix-replay-v3"
 PROOF_SCOPE = "role_cell_product"
 MAINNET_MAGIC = "f9beb4d9"
 MAINNET_GENESIS = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
@@ -43,7 +43,6 @@ _REPLAY_KEYS = frozenset(
         "archive",
         "block_bytes",
         "block_source",
-        "blockfilterindex",
         "blocks_per_second",
         "checkpoint_generation",
         "data_dir",
@@ -57,6 +56,8 @@ _REPLAY_KEYS = frozenset(
         "storage_backend",
         "tx_count",
         "txindex",
+        "txindex_worker_catchup_seconds",
+        "txindex_total_elapsed_seconds",
     }
 )
 
@@ -66,7 +67,7 @@ class ContractError(ValueError):
 
 
 class AdapterKind(str, Enum):
-    BITCOIN_RS_REPLAY = "bitcoin_rs_replay_v2"
+    BITCOIN_RS_REPLAY = "bitcoin_rs_replay_v3"
     BITCOIN_CORE_LOADBLOCK = "bitcoin_core_loadblock_v31"
 
 
@@ -196,6 +197,11 @@ def _finite_float(value: object, field: str) -> float:
     if not math.isfinite(value) or value < 0.0:
         raise ContractError(f"{field} must be finite and nonnegative")
     return value
+
+
+def _optional_finite_float(value: object, field: str) -> None:
+    if value is not None:
+        _finite_float(value, field)
 
 
 def _hash(value: object, field: str) -> str:
@@ -464,6 +470,14 @@ def parse_candidate_file(path: Path, expected: CandidateExpectation) -> NativeAr
         "fetch_seconds",
     ):
         _finite_float(item[field], f"replay.{field}")
+    _optional_finite_float(
+        item["txindex_worker_catchup_seconds"],
+        "replay.txindex_worker_catchup_seconds",
+    )
+    _optional_finite_float(
+        item["txindex_total_elapsed_seconds"],
+        "replay.txindex_total_elapsed_seconds",
+    )
     _validate_stage_seconds(item["stage_seconds"])
     correctness = all(
         (
@@ -500,7 +514,6 @@ def parse_candidate_file(path: Path, expected: CandidateExpectation) -> NativeAr
             ),
             _text(item["block_source"], "replay.block_source") == "file",
             not _boolean(item["txindex"], "replay.txindex"),
-            not _boolean(item["blockfilterindex"], "replay.blockfilterindex"),
             _text(item["storage_backend"], "replay.storage_backend")
             == expected.backend,
             _text(item["data_dir"], "replay.data_dir") == expected.data_dir,

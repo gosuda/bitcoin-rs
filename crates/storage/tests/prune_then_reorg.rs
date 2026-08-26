@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use std::collections::BTreeMap;
 
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_pruning::{
+use bitcoin_rs_storage::pruning::{
     BLOCK_DATA_CF, BlockPruner, PrunePolicy, block_body_key, reclaim_staged_flat_block_files,
     stage_block_and_undo_prune,
 };
@@ -149,7 +149,12 @@ fn target_pruning_deletes_old_indexes_in_the_current_flat_file()
         &block_files,
         1_000,
         1_000,
-        PrunePolicy::utreexo_only(),
+        // Aggressive policy: prune everything below the requested height;
+        // retention_depth still floors at the 288-block reorg margin.
+        PrunePolicy {
+            target_size_mb: 0,
+            keep_below_tip: 0,
+        },
     )?;
     assert!(file_numbers.is_empty());
     assert_eq!(block_outcome.blocks_removed, 1);

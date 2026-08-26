@@ -19,8 +19,9 @@ Four storage backends are selectable at runtime: fjall, RocksDB, MDBX, and
 redb. An equivalence test replays the same chain through all four and requires
 an identical aggregate hash.
 
-The wallet is PSBT only. The node never handles a private key; signing happens
-behind an external signer trait.
+There is no in-tree wallet and the node never handles a private key. The RPC
+surface keeps the key-free PSBT utilities and descriptor helpers for
+external-signer workflows.
 
 ## Quick start
 
@@ -81,12 +82,12 @@ Against [GoCoin](https://github.com/piotrnar/gocoin) on the same harness:
 - Block application in windows: consecutive blocks share one script
   verification dispatch, while each block still commits in order, so every rule
   that depends on committed state sees the real chain.
-- Optional utreexo (Pollard, Stump, MemForest) for stateless validation.
-- A native ScriptIndex with an Esplora HTTP surface, BIP157/158 filters, coinstats over MuHash, and
+- A native ScriptIndex with an Esplora HTTP surface, coinstats over MuHash, and
   pruning with Core's 288-block reorg-safety floor.
 - `getblocktemplate` for mining.
-- Synchronous HTTP/1.1 JSON-RPC over sonic-rs using Core's method names.
-  Signing methods return -32603, "wallet has no private keys; use external signer".
+- Synchronous HTTP/1.1 JSON-RPC over sonic-rs using Core's method names. There
+  is no wallet: private-key methods are absent, and the key-free PSBT
+  utilities (`combinepsbt`, `finalizepsbt`) remain for external signers.
 - mimalloc as the global allocator, over a crossbeam-channel event loop.
 
 ## Default posture
@@ -99,9 +100,7 @@ The defaults target mainnet initial block download.
 | database cache | 450 MiB, matching Bitcoin Core |
 | multi-peer download | on: 8 outbound peers, 128-block pending budget, 16 blocks in flight per peer |
 | transaction index | off |
-| block filter index | off |
 | pruning | off |
-| utreexo | off |
 
 Mainnet also skips historical script verification up to height 938343, block
 `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`. Checks are

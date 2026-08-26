@@ -4,7 +4,7 @@ This document defines the toolchain requirements, dependency management rules, s
 
 ## 1. Scope and Authority
 
-This policy applies to all 18 crates in the `bitcoin-rs` workspace (`crates/*`) and the node binary (`bin/bitcoin-rs`).
+This policy applies to every crate in the `bitcoin-rs` workspace (`crates/*`) and the node binary (`bin/bitcoin-rs`).
 
 ## 2. Toolchain and Language Edition
 
@@ -50,17 +50,12 @@ All crates in `bitcoin-rs` share a single workspace version managed by `[workspa
 | `bitcoin-rs-primitives` | `crates/primitives` | Core types and byte primitives |
 | `bitcoin-rs-consensus` | `crates/consensus` | Block and transaction verification |
 | `bitcoin-rs-script` | `crates/script` | Script execution and evaluation |
-| `bitcoin-rs-storage` | `crates/storage` | Key-value store abstraction and implementations |
-| `bitcoin-rs-utxo` | `crates/utxo` | In-memory UTXO set management and snapshots |
-| `bitcoin-rs-utreexo` | `crates/utreexo` | Utreexo accumulator implementation |
+| `bitcoin-rs-storage` | `crates/storage` | Key-value store abstraction, implementations, and block/undo pruning |
+| `bitcoin-rs-utxo` | `crates/utxo` | In-memory UTXO set management, snapshots, and UTXO statistics / MuHash |
 | `bitcoin-rs-chain` | `crates/chain` | Block tree and chain index tracking |
 | `bitcoin-rs-index` | `crates/index` | Transaction and address indexing |
-| `bitcoin-rs-filters` | `crates/filters` | BIP157/158 compact block filters |
-| `bitcoin-rs-coinstats` | `crates/coinstats` | UTXO statistics and MuHash computation |
-| `bitcoin-rs-pruning` | `crates/pruning` | Block file and state pruning logic |
 | `bitcoin-rs-mempool` | `crates/mempool` | Memory pool transaction storage |
 | `bitcoin-rs-p2p` | `crates/p2p` | Peer-to-peer network protocol |
-| `bitcoin-rs-wallet` | `crates/wallet` | Watch-only descriptor tracking, coin selection, PSBT construction, fee bumping |
 | `bitcoin-rs-mining` | `crates/mining` | Block template construction |
 | `bitcoin-rs-rpc` | `crates/rpc` | JSON-RPC HTTP server |
 | `bitcoin-rs-node` | `crates/node` | Full node state machine and event loop |

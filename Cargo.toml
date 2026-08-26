@@ -6,15 +6,11 @@ members = [
     "crates/script",
     "crates/storage",
     "crates/utxo",
-    "crates/utreexo",
     "crates/chain",
     "crates/index",
-    "crates/filters",
-    "crates/coinstats",
-    "crates/pruning",
+
     "crates/mempool",
     "crates/p2p",
-    "crates/wallet",
     "crates/mining",
     "crates/rpc",
     "crates/node",
@@ -45,15 +41,11 @@ bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.4.0", default
 bitcoin-rs-script     = { path = "crates/script",     version = "0.4.0", default-features = false }
 bitcoin-rs-storage    = { path = "crates/storage",    version = "0.4.0", default-features = false }
 bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.4.0" }
-bitcoin-rs-utreexo    = { path = "crates/utreexo",    version = "0.4.0" }
 bitcoin-rs-chain      = { path = "crates/chain",      version = "0.4.0" }
 bitcoin-rs-index      = { path = "crates/index",      version = "0.4.0" }
-bitcoin-rs-filters    = { path = "crates/filters",    version = "0.4.0" }
-bitcoin-rs-coinstats  = { path = "crates/coinstats",  version = "0.4.0" }
-bitcoin-rs-pruning    = { path = "crates/pruning",    version = "0.4.0" }
+
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.4.0" }
 bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.4.0" }
-bitcoin-rs-wallet     = { path = "crates/wallet",     version = "0.4.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.4.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.4.0" }
 bitcoin-rs-node       = { path = "crates/node",       version = "0.4.0", default-features = false }
@@ -91,30 +83,14 @@ bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features
     "std",
 ] }
 
-# Miniscript: descriptors + BIP380/381/382.
-miniscript = { version = ">=13, <14", default-features = false, features = [
-    "std", "serde",
-] }
-
-# rustreexo 0.5 line. `with-serde` is the alias that enables `serde`.
-# rustreexo 0.5 pulls a second rust-bitcoin stack (bitcoin-io 0.3, bitcoin_hashes
-# 0.20, bitcoin-consensus-encoding). bitcoin-io 0.3.0 requires `encoding ^1.0.0-rc.2`,
-# but that range wrongly admits encoding 1.0.0, whose `Decode`/`Encode` trait rename
-# bitcoin-io 0.3.0 never adopted. Pin rc.3 explicitly (via utreexo) until rustreexo/
-# bitcoin-io ship a 0.3.x compatible with encoding 1.0.0.
-bitcoin-consensus-encoding = { version = "=1.0.0-rc.3" }
-rustreexo = { version = ">=0.5, <0.6", default-features = false, features = [
-    "std", "with-serde",
-] }
+# Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.
+miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
 
 # bitcoin_slices: zero-alloc block visitor. Default features list is empty;
 # enable bitcoin + sha2 explicitly.
 bitcoin_slices = { version = ">=0.11, <0.12", default-features = false, features = [
     "bitcoin", "sha2",
 ] }
-
-# Coin selection — BnB + knapsack + waste-metric. `default = [std]`.
-bdk_coin_select = { version = ">=0.4.1, <0.5" }
 
 # Note: `payjoin` is intentionally NOT declared at the workspace level. Task 14
 # adds it with feature names verified against the version current at that time;

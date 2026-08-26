@@ -1,11 +1,10 @@
 //! Synchronous Bitcoin Core-compatible JSON-RPC surface for `bitcoin-rs`.
 //!
-//! This crate intentionally exposes only watch-only wallet behavior. RPCs that
-//! would reveal, import, create, or use private keys are disabled and return a
-//! JSON-RPC internal-error response with the message
-//! `wallet has no private keys; use external signer`. PSBT construction,
-//! combination, analysis, and finalization stay available because they can be
-//! driven by external signers without this process holding private key material.
+//! This node ships no wallet. RPCs that would fund, sign, or otherwise
+//! require private key material are not implemented and answer
+//! `method not found`. Descriptor utilities, `scantxoutset`, and PSBT
+//! combination/finalization remain for watch-only workflows driven by
+//! external signers without this process holding private key material.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 

@@ -1,12 +1,12 @@
 //! Coinstats persistence round-trip tests.
 
 use bitcoin::{Amount, ScriptBuf};
-use bitcoin_rs_coinstats::stats::COIN_STATS_ENCODED_LEN;
-use bitcoin_rs_coinstats::{
-    CoinStats, CoinStatsDecodeError, CoinStatsListener, load_coin_stats, store_coin_stats,
-};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch};
+use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
+use bitcoin_rs_utxo::stats::{
+    CoinStats, CoinStatsDecodeError, CoinStatsListener, load_coin_stats, store_coin_stats,
+};
 
 type Row = ((ColumnFamily, Vec<u8>), Vec<u8>);
 

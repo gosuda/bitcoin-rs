@@ -8,6 +8,7 @@ use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin::{Amount, OutPoint as BitcoinOutPoint, Transaction, TxOut, Txid};
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_primitives::{Hash256, OutPoint};
+use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::context::{BlockRecord, Context, TransactionAdmissionError};
@@ -620,6 +621,162 @@ fn decode_package_tx(raw: &str) -> Result<Transaction, RpcError> {
 
 fn parse_txid(value: &str) -> Result<Txid, RpcError> {
     Txid::from_str(value).map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))
+}
+
+pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let raw = required_str(params, 0, "psbt is required")?;
+    let extract = optional_bool(params, 1, true)?;
+    let decoded = decode_base64(raw)?;
+    let Ok(mut psbt) = bitcoin::psbt::Psbt::deserialize(&decoded) else {
+        return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+    };
+    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    // The finalizer mutates every input it can satisfy and reports the rest.
+    // Incomplete inputs are part of the RPC result, not an RPC-level failure.
+    let _incomplete = psbt.finalize_mut(&secp);
+    let finalized_tx = if psbt.inputs.is_empty() {
+        None
+    } else {
+        psbt.extract(&secp).ok()
+    };
+    let complete = finalized_tx.is_some();
+    if extract && let Some(tx) = finalized_tx {
+        let hex = bitcoin::consensus::encode::serialize(&tx).to_lower_hex_string();
+        Ok(json!({
+            "hex": hex,
+            "complete": true,
+        }))
+    } else {
+        let serialized = encode_base64(&psbt.serialize());
+        Ok(json!({
+            "psbt": serialized,
+            "complete": complete,
+        }))
+    }
+}
+
+pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let array = params_array(params)?
+        .first()
+        .and_then(|value| value.as_array())
+        .ok_or(RpcError::InvalidParams("psbts must be an array"))?;
+    if array.is_empty() {
+        return Err(RpcError::InvalidParams("psbts array must not be empty"));
+    }
+
+    let mut iter = array.iter();
+    let Some(first_val) = iter.next() else {
+        return Err(RpcError::InvalidParams("psbts array must not be empty"));
+    };
+    let Some(first_str) = first_val.as_str() else {
+        return Err(RpcError::InvalidType("each psbt must be a string"));
+    };
+    let mut psbt = bitcoin::psbt::Psbt::deserialize(&decode_base64(first_str)?)
+        .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
+
+    for value in iter {
+        let Some(s) = value.as_str() else {
+            return Err(RpcError::InvalidType("each psbt must be a string"));
+        };
+        let other = bitcoin::psbt::Psbt::deserialize(&decode_base64(s)?)
+            .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
+        psbt.combine(other)
+            .map_err(|err| RpcError::Internal(format!("combine failed: {err}")))?;
+    }
+
+    Ok(json!(encode_base64(&psbt.serialize())))
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, RpcError> {
+    let bytes = input.as_bytes();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+    }
+
+    let chunk_count = bytes.len() / 4;
+    let mut out = Vec::with_capacity(chunk_count * 3);
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let last = index + 1 == chunk_count;
+        let pad2 = chunk[2] == b'=';
+        let pad3 = chunk[3] == b'=';
+        if chunk[0] == b'=' || chunk[1] == b'=' || pad2 && !pad3 || pad3 && !last {
+            return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+        }
+
+        let Some(a) = base64_value(chunk[0]) else {
+            return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+        };
+        let Some(b) = base64_value(chunk[1]) else {
+            return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+        };
+        let c = if pad2 {
+            0
+        } else {
+            let Some(value) = base64_value(chunk[2]) else {
+                return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+            };
+            value
+        };
+        let d = if pad3 {
+            0
+        } else {
+            let Some(value) = base64_value(chunk[3]) else {
+                return Err(RpcError::InvalidParams("invalid base64 PSBT"));
+            };
+            value
+        };
+
+        out.push((a << 2) | (b >> 4));
+        if !pad2 {
+            out.push((b << 4) | (c >> 2));
+        }
+        if !pad3 {
+            out.push((c << 6) | d);
+        }
+    }
+
+    Ok(out)
+}
+
+const fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+
+        out.push(char::from(BASE64_ALPHABET[usize::from(b0 >> 2)]));
+        out.push(char::from(
+            BASE64_ALPHABET[usize::from(((b0 & 0b0000_0011) << 4) | (b1 >> 4))],
+        ));
+        if chunk.len() > 1 {
+            out.push(char::from(
+                BASE64_ALPHABET[usize::from(((b1 & 0b0000_1111) << 2) | (b2 >> 6))],
+            ));
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(char::from(BASE64_ALPHABET[usize::from(b2 & 0b0011_1111)]));
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 const fn bitcoin_network(chain_network: bitcoin_rs_primitives::Network) -> bitcoin::Network {
@@ -1716,5 +1873,165 @@ mod gettxout_via_utxo_tests {
             value.is_null(),
             "expected null for output absent from UTXO set, got {value:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod combinepsbt_tests {
+    use alloc::sync::Arc;
+
+    use sonic_rs::JsonValueTrait as _;
+
+    use super::*;
+
+    fn empty_psbt_str() -> String {
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(tx)
+            .unwrap_or_else(|err| panic!("from_unsigned_tx: {err}"));
+        encode_base64(&psbt.serialize())
+    }
+
+    #[test]
+    fn combinepsbt_single_input_returns_same_psbt() {
+        let ctx = Arc::new(Context::new());
+        let psbt_str = empty_psbt_str();
+        let result = combinepsbt(&ctx, &json!([[psbt_str.as_str()]]))
+            .unwrap_or_else(|err| panic!("combinepsbt: {err}"));
+        let Some(out) = result.as_str() else {
+            panic!("expected string: {result:?}");
+        };
+        assert_eq!(out, psbt_str);
+    }
+
+    #[test]
+    fn combinepsbt_empty_array_errors() {
+        let ctx = Arc::new(Context::new());
+        let result = combinepsbt(&ctx, &json!([[]]));
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod finalizepsbt_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::sighash::SighashCache;
+    use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+    use sonic_rs::JsonValueTrait as _;
+
+    use super::*;
+
+    fn empty_psbt() -> String {
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let psbt =
+            bitcoin::psbt::Psbt::from_unsigned_tx(tx).unwrap_or_else(|err| panic!("psbt: {err}"));
+        encode_base64(&psbt.serialize())
+    }
+
+    #[test]
+    fn finalizepsbt_returns_incomplete_for_unfinalized_inputs() {
+        let ctx = Arc::new(Context::new());
+        let raw = empty_psbt();
+        let result = finalizepsbt(&ctx, &json!([raw.as_str()]))
+            .unwrap_or_else(|err| panic!("finalizepsbt failed: {err}"));
+        let Some(complete) = result.get("complete").and_then(Value::as_bool) else {
+            panic!("complete missing: {result:?}");
+        };
+        assert!(!complete);
+        assert!(result.get("hex").is_none());
+        assert!(result.get("psbt").and_then(Value::as_str).is_some());
+    }
+
+    fn signed_p2wpkh_psbts() -> (String, String) {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let secret = bitcoin::secp256k1::SecretKey::from_slice(&[7_u8; 32])
+            .unwrap_or_else(|err| panic!("secret key: {err}"));
+        let public_key = bitcoin::PublicKey::new(bitcoin::secp256k1::PublicKey::from_secret_key(
+            &secp, &secret,
+        ));
+        let witness_hash = public_key
+            .wpubkey_hash()
+            .unwrap_or_else(|err| panic!("compressed public key: {err}"));
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: ScriptBuf::new_p2wpkh(&witness_hash),
+        };
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::new(bitcoin::Txid::all_zeros(), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(40_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let mut metadata =
+            bitcoin::psbt::Psbt::from_unsigned_tx(tx).unwrap_or_else(|err| panic!("psbt: {err}"));
+        metadata.inputs[0].witness_utxo = Some(prevout);
+        let mut signatures = metadata.clone();
+        let mut cache = SighashCache::new(&metadata.unsigned_tx);
+        let (message, sighash_type) = metadata
+            .sighash_ecdsa(0, &mut cache)
+            .unwrap_or_else(|err| panic!("sighash: {err}"));
+        signatures.inputs[0].witness_utxo = None;
+        signatures.inputs[0].partial_sigs.insert(
+            public_key,
+            bitcoin::ecdsa::Signature {
+                signature: secp.sign_ecdsa(&message, &secret),
+                sighash_type,
+            },
+        );
+        (
+            encode_base64(&metadata.serialize()),
+            encode_base64(&signatures.serialize()),
+        )
+    }
+
+    #[test]
+    fn finalizepsbt_honors_extract_false_for_complete_psbt() {
+        let ctx = Arc::new(Context::new());
+        let (metadata, signatures) = signed_p2wpkh_psbts();
+        let combined = combinepsbt(&ctx, &json!([[metadata, signatures]]))
+            .unwrap_or_else(|err| panic!("combinepsbt failed: {err}"));
+        let combined = combined
+            .as_str()
+            .unwrap_or_else(|| panic!("combined PSBT missing: {combined:?}"));
+        let result = finalizepsbt(&ctx, &json!([combined, false]))
+            .unwrap_or_else(|err| panic!("finalizepsbt failed: {err}"));
+        assert_eq!(result.get("complete").and_then(Value::as_bool), Some(true));
+        assert!(result.get("hex").is_none());
+        assert!(result.get("psbt").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn combinepsbt_then_finalizepsbt_extracts_signed_transaction() {
+        let ctx = Arc::new(Context::new());
+        let (metadata, signatures) = signed_p2wpkh_psbts();
+        let combined = combinepsbt(&ctx, &json!([[metadata, signatures]]))
+            .unwrap_or_else(|err| panic!("combinepsbt failed: {err}"));
+        let combined = combined
+            .as_str()
+            .unwrap_or_else(|| panic!("combined PSBT missing: {combined:?}"));
+        let result = finalizepsbt(&ctx, &json!([combined]))
+            .unwrap_or_else(|err| panic!("finalizepsbt failed: {err}"));
+        assert_eq!(result.get("complete").and_then(Value::as_bool), Some(true));
+        assert!(result.get("psbt").is_none());
+        assert!(result.get("hex").and_then(Value::as_str).is_some());
     }
 }

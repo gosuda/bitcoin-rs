@@ -1,6 +1,6 @@
 //! Integration proof for I1 RPC cutover: shared Arc identity, exact method
-//! accounting (65 with ZMQ / 64 without), seven `MethodNotFound` absences,
-//! typed no-custody errors, and fourteen REST registrations.
+//! accounting (55 with ZMQ / 54 without), `MethodNotFound` absences, and
+//! twelve REST registrations.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,8 +19,6 @@ use bitcoin_rs_rpc::context::{
     BlockUndoSource, ChainHandles, Context, ContextHandles, IndexHandles, NetworkHandles,
 };
 use bitcoin_rs_rpc::rest::REGISTRATIONS;
-use bitcoin_rs_wallet::Watcher;
-use parking_lot::RwLock;
 use sonic_rs::{Value, json};
 use tempfile::tempdir;
 
@@ -37,7 +35,6 @@ const CHAIN: &[&str] = &[
     "getblockstats",
     "verifychain",
     "gettxoutsetinfo",
-    "getblockfilter",
     "getindexinfo",
     "pruneblockchain",
     "invalidateblock",
@@ -92,21 +89,15 @@ const MINING: &[&str] = &[
     "prioritisetransaction",
 ];
 
-const WALLET: &[&str] = &[
+/// The node-side descriptor, UTXO-scan, and PSBT-assembly RPCs kept when the
+/// in-tree wallet implementation was removed (#165). Wallet-only methods are
+/// gone from the surface entirely and belong in `ABSENT`.
+const DESCRIPTOR_PSBT: &[&str] = &[
     "getdescriptorinfo",
     "deriveaddresses",
     "scantxoutset",
-    "walletcreatefundedpsbt",
-    "walletprocesspsbt",
     "finalizepsbt",
     "combinepsbt",
-    "bumpfee",
-    "signrawtransactionwithkey",
-    "signrawtransactionwithwallet",
-    "importdescriptors",
-    "walletpassphrase",
-    "walletpassphrasechange",
-    "encryptwallet",
 ];
 
 const ABSENT: &[&str] = &[
@@ -116,6 +107,7 @@ const ABSENT: &[&str] = &[
     "importprivkey",
     "importwallet",
     "importmulti",
+    "importdescriptors",
     "sethdseed",
     "waitfornewblock",
     "waitforblock",
@@ -125,19 +117,18 @@ const ABSENT: &[&str] = &[
     "joinpsbts",
     "utxoupdatepsbt",
     "getnodeaddresses",
-];
-
-const NO_CUSTODY: &[&str] = &[
+    "walletcreatefundedpsbt",
+    "walletprocesspsbt",
+    "bumpfee",
+    "signrawtransactionwithkey",
     "signrawtransactionwithwallet",
     "walletpassphrase",
     "walletpassphrasechange",
     "encryptwallet",
 ];
 
-const NO_PRIVATE_KEYS: &str = "wallet has no private keys; use external signer";
-
 fn expected_methods() -> Vec<&'static str> {
-    let mut methods = Vec::with_capacity(65);
+    let mut methods = Vec::with_capacity(55);
     methods.extend_from_slice(CHAIN);
     methods.extend_from_slice(TX);
     methods.extend_from_slice(MEMPOOL);
@@ -146,7 +137,7 @@ fn expected_methods() -> Vec<&'static str> {
     methods.push("getzmqnotifications");
     methods.extend_from_slice(NETWORK);
     methods.extend_from_slice(MINING);
-    methods.extend_from_slice(WALLET);
+    methods.extend_from_slice(DESCRIPTOR_PSBT);
     methods
 }
 
@@ -175,7 +166,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     let transactions = state.transactions();
     let utxo = state.utxo();
     let coin_stats = state.coin_stats();
-    let filter_index = state.filter_index();
     let network = state.network();
     let block_tree = state.block_tree();
     let peers = state.peers();
@@ -187,7 +177,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         Arc::clone(&banned),
         state.config().network.default_p2p_port(),
     ));
-    let wallet = Arc::new(RwLock::new(Watcher::new(Vec::new())));
     let lifecycle = Arc::new(RpcLifecycle::new(state.shutdown(), Instant::now()));
     let mining = Arc::new(MiningCoordinator::new(
         state.config().network,
@@ -214,7 +203,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
             transactions: Arc::clone(&transactions),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
-            filter_index: Arc::clone(&filter_index),
             block_tree: Arc::clone(&block_tree),
             block_undo_source: Arc::clone(&block_undo_source),
             network: state.config().network,
@@ -231,7 +219,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
         },
     })
     .with_zmq_notifications(state.active_zmq_notifications())
-    .with_wallet(Arc::clone(&wallet))
     .with_rpc_lifecycle(Arc::clone(&lifecycle))
     .with_mining_control(Arc::clone(&mining_control))
     .with_debug_log_path(state.data_dir().join("debug.log"));
@@ -243,7 +230,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
     assert!(Arc::ptr_eq(&ctx.transactions, &transactions));
     assert!(Arc::ptr_eq(&ctx.utxo, &utxo));
     assert!(Arc::ptr_eq(&ctx.coin_stats, &coin_stats));
-    assert!(Arc::ptr_eq(&ctx.filter_index, &filter_index));
     assert!(Arc::ptr_eq(&ctx.network, &network));
     assert!(Arc::ptr_eq(&ctx.block_tree, &block_tree));
     assert!(Arc::ptr_eq(
@@ -251,12 +237,6 @@ fn rpc_context_shares_arc_identity_with_node_state() -> Result<()> {
             .as_ref()
             .unwrap_or_else(|| panic!("network controls missing")),
         &controls
-    ));
-    assert!(Arc::ptr_eq(
-        ctx.wallet
-            .as_ref()
-            .unwrap_or_else(|| panic!("wallet missing")),
-        &wallet
     ));
     assert!(Arc::ptr_eq(
         ctx.rpc_lifecycle
@@ -335,10 +315,10 @@ fn rpc_method_accounting_with_zmq() {
     let expected = expected_methods();
     assert_eq!(
         expected.len(),
-        65,
-        "ZMQ build must register exactly 65 methods"
+        55,
+        "ZMQ build must register exactly 55 methods"
     );
-    assert_eq!(REGISTRATIONS.len(), 14);
+    assert_eq!(REGISTRATIONS.len(), 12);
 
     let handler = Handler::new(Arc::new(Context::new()));
     let params = empty_params();
@@ -358,14 +338,7 @@ fn rpc_method_accounting_with_zmq() {
             other => panic!("{method} must be MethodNotFound, got {other:?}"),
         }
     }
-    for method in NO_CUSTODY {
-        match handler.dispatch(method, &params) {
-            Err(RpcError::MethodDisabled(message)) => {
-                assert_eq!(message, NO_PRIVATE_KEYS);
-            }
-            other => panic!("{method} must be MethodDisabled, got {other:?}"),
-        }
-    }
+
     match handler.dispatch("getzmqnotifications", &params) {
         Ok(_) | Err(_) => {}
     }
@@ -377,10 +350,10 @@ fn rpc_method_accounting_without_zmq() {
     let expected = expected_methods();
     assert_eq!(
         expected.len(),
-        64,
-        "non-ZMQ build must register exactly 64 methods"
+        54,
+        "non-ZMQ build must register exactly 54 methods"
     );
-    assert_eq!(REGISTRATIONS.len(), 14);
+    assert_eq!(REGISTRATIONS.len(), 12);
 
     let handler = Handler::new(Arc::new(Context::new()));
     let params = empty_params();

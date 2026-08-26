@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value};
 
 use crate::context::Context;
 use crate::error::RpcError;
@@ -11,7 +11,6 @@ pub(crate) mod mining;
 pub(crate) mod network;
 pub(crate) mod tx;
 pub(crate) mod util;
-pub(crate) mod wallet;
 
 /// JSON-RPC method dispatcher backed by shared node context.
 #[derive(Clone, Debug)]
@@ -34,12 +33,9 @@ impl Handler {
 
     /// Dispatches one Bitcoin Core-compatible JSON-RPC method.
     ///
-    /// Registered surface is exactly 65 methods with the `zmq` feature and 64
-    /// without it. Four encryption/wallet-sign names remain registered and
-    /// return typed no-custody errors; `signrawtransactionwithkey` uses
-    /// transient caller keys only.
+    /// Registered surface is exactly 55 methods with the `zmq` feature and 54
+    /// without it.
     pub fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
-        const NO_PRIVATE_KEYS: &str = "wallet has no private keys; use external signer";
         match method {
             "getblockchaininfo" => chain::getblockchaininfo(&self.ctx, params),
             "getdifficulty" => chain::getdifficulty(&self.ctx, params),
@@ -53,10 +49,10 @@ impl Handler {
             "getblockstats" => chain::getblockstats(&self.ctx, params),
             "verifychain" => chain::verifychain(&self.ctx, params),
             "gettxoutsetinfo" => chain::gettxoutsetinfo(&self.ctx, params),
-            "getblockfilter" => chain::getblockfilter(&self.ctx, params),
             "getindexinfo" => chain::getindexinfo(&self.ctx, params),
             "pruneblockchain" => chain::pruneblockchain(&self.ctx, params),
             "invalidateblock" => chain::invalidateblock(&self.ctx, params),
+            "scantxoutset" => chain::scantxoutset(&self.ctx, params),
             "getrawtransaction" => tx::getrawtransaction(&self.ctx, params),
             "gettxout" => tx::gettxout(&self.ctx, params),
             "gettxoutproof" => tx::gettxoutproof(&self.ctx, params),
@@ -64,6 +60,8 @@ impl Handler {
             "sendrawtransaction" => tx::sendrawtransaction(&self.ctx, params),
             "testmempoolaccept" => tx::testmempoolaccept(&self.ctx, params),
             "decoderawtransaction" => tx::decoderawtransaction(&self.ctx, params),
+            "combinepsbt" => tx::combinepsbt(&self.ctx, params),
+            "finalizepsbt" => tx::finalizepsbt(&self.ctx, params),
             "getmempoolinfo" => mempool::getmempoolinfo(&self.ctx, params),
             "getmempoolentry" => mempool::getmempoolentry(&self.ctx, params),
             "getrawmempool" => mempool::getrawmempool(&self.ctx, params),
@@ -77,6 +75,8 @@ impl Handler {
             #[cfg(feature = "zmq")]
             "getzmqnotifications" => util::getzmqnotifications(&self.ctx, params),
             "validateaddress" => util::validateaddress(&self.ctx, params),
+            "getdescriptorinfo" => util::getdescriptorinfo(&self.ctx, params),
+            "deriveaddresses" => util::deriveaddresses(&self.ctx, params),
             "getnetworkinfo" => network::getnetworkinfo(&self.ctx, params),
             "getpeerinfo" => network::getpeerinfo(&self.ctx, params),
             "ping" => network::ping(&self.ctx, params),
@@ -93,20 +93,7 @@ impl Handler {
             "getmininginfo" => mining::getmininginfo(&self.ctx, params),
             "submitblock" => mining::submitblock(&self.ctx, params),
             "prioritisetransaction" => mining::prioritisetransaction(&self.ctx, params),
-            "getdescriptorinfo" => wallet::getdescriptorinfo(&self.ctx, params),
-            "deriveaddresses" => wallet::deriveaddresses(&self.ctx, params),
-            "scantxoutset" => wallet::scantxoutset(&self.ctx, params),
-            "walletcreatefundedpsbt" => wallet::walletcreatefundedpsbt(&self.ctx, params),
-            "walletprocesspsbt" => wallet::walletprocesspsbt(&self.ctx, params),
-            "finalizepsbt" => wallet::finalizepsbt(&self.ctx, params),
-            "combinepsbt" => wallet::combinepsbt(&self.ctx, params),
-            "bumpfee" => wallet::bumpfee(&self.ctx, params),
-            "signrawtransactionwithkey" => wallet::signrawtransactionwithkey(&self.ctx, params),
-            "signrawtransactionwithwallet"
-            | "walletpassphrase"
-            | "walletpassphrasechange"
-            | "encryptwallet" => Err(RpcError::method_disabled(NO_PRIVATE_KEYS)),
-            "importdescriptors" => wallet::importdescriptors(&self.ctx, params),
+
             _ => Err(RpcError::MethodNotFound(method.to_owned())),
         }
     }
@@ -167,10 +154,6 @@ pub(crate) fn required_u64(
         .get(index)
         .and_then(JsonValueTrait::as_u64)
         .ok_or(RpcError::InvalidParams(name))
-}
-
-pub(crate) fn invalid_psbt() -> Value {
-    json!({"psbt": "", "complete": false})
 }
 
 pub(crate) fn serde_to_sonic(value: &serde_json::Value) -> Result<Value, RpcError> {

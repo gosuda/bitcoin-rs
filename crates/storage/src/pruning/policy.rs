@@ -31,25 +31,10 @@ impl PrunePolicy {
         }
     }
 
-    /// Returns a Utreexo-only policy that discards block bodies immediately.
-    #[must_use]
-    pub const fn utreexo_only() -> Self {
-        Self {
-            target_size_mb: 0,
-            keep_below_tip: 0,
-        }
-    }
-
     /// Returns true when this policy disables pruning.
     #[must_use]
     pub const fn is_full_node(self) -> bool {
         self.target_size_mb == u64::MAX
-    }
-
-    /// Returns true when this policy requests immediate Utreexo-only block deletion.
-    #[must_use]
-    pub const fn is_utreexo_only(self) -> bool {
-        self.target_size_mb == 0 && self.keep_below_tip == 0
     }
 
     /// Returns the byte target used by pruning passes.

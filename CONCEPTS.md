@@ -4,6 +4,18 @@ Shared domain vocabulary for this project: entities, named processes, and status
 
 ## Node interfaces
 
+### Wallet-free RPC boundary
+The node has no in-tree wallet and owns no private keys. Wallet funding,
+signing, import, and fee-bump methods are absent. Key-free descriptor helpers,
+`scantxoutset`, `combinepsbt`, and `finalizepsbt` remain node RPCs so an external
+signer can drive a PSBT workflow without giving key custody to the node.
+
+### Stable chainstate RPC read
+A whole-UTXO RPC read that shares the node's chain-transition mutex. The mutex
+spans both UTXO mutation and applied-tip publication, so `scantxoutset` cannot
+combine outputs from one committed state with height, hash, or confirmation
+metadata from another.
+
 ### REST gateway
 The optional, unauthenticated Bitcoin Core-compatible HTTP surface served on
 the existing JSON-RPC listener. It is enabled with `rest=1`; JSON-RPC requests
@@ -42,7 +54,7 @@ A validation mode that skips script-signature verification for blocks at or belo
 The mainnet consensus checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`) used by default on mainnet to gate historical script verification. The node skips script verification for blocks at or below height 938343 only after validating that the active header chain contains this exact anchor hash. Sub-anchor header tips and diverged chains remain untrusted and trigger full script verification. Passing `--assume-valid-height 0` explicitly requests full verification across all blocks. Custom nonzero heights skip script checks up to that height without hash gating. Non-mainnet networks default to height 0. Replay measurement tools like `mainnet_prefix_replay` retain a default of 0 to ensure full-validation benchmark fidelity.
 
 ### Optimized default posture
-The standard node operational configuration tuned for mainnet sync: `fjall` storage backend, multi-peer block download active (outbound peer target 8, pending block budget 128, 16 in-flight requests per peer), hash-pinned assume-valid active on mainnet (height 938343), 450 MiB database cache (`dbcache`, matching Bitcoin Core parity), with secondary indexes (`txindex`, `blockfilterindex`), pruning, and `utreexo` stateless validation disabled by default.
+The standard node operational configuration tuned for mainnet sync: `fjall` storage backend, multi-peer block download active (outbound peer target 8, pending block budget 128, 16 in-flight requests per peer), hash-pinned assume-valid active on mainnet (height 938343), 450 MiB database cache (`dbcache`, matching Bitcoin Core parity), with the secondary `txindex` and pruning disabled by default.
 
 ### Container deployment posture
 The checked-in Docker Compose specialization of the optimized default posture. The image compiles only the production `fjall` storage and `bitcoinkernel` verifier features and runs as an unprivileged user. The BIP300/301 integration Compose publishes P2P on the configured host port, keeps JSON-RPC on the host loopback interface, leaves `txindex` and `scriptindex` disabled, supplies local-development RPC credential fallbacks that deployments should override, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK` so incompatible P2P networks never reuse runtime state. Esplora shares the node HTTP listener rather than adding a second bind surface. Shutdown allows up to 5 minutes because the bounded subsystem drain is followed by an unbounded, synchronous full-UTXO clean checkpoint; this is an operational SIGKILL guard, not a checkpoint-duration guarantee.
@@ -283,7 +295,7 @@ The native reference baseline for script verification, calculated by running the
 
 On mainnet 0..150,000, all 2,868,199 input checks are ordinary legacy bare P2PKH spends that execute exactly one `OP_CHECKSIG` and one successful ECDSA verification ($a = 1.0$). `eval_script_entries` equals 5,736,398 ($2 \times 2,868,199$, two evaluator passes per input check: scriptSig + scriptPubKey). All 11 special context counters (`p2sh_redeem_spends`, `native_witness_v0_spends`, `p2sh_wrapped_witness_v0_spends`, `bare_multisig_checks`, `p2sh_multisig_checks`, `native_witness_v0_multisig_checks`, `p2sh_wrapped_witness_v0_multisig_checks`, `taproot_key_path_spends`, `tapscript_spends`, `tapscript_schnorr_checks`, `tapscript_checksigadd_checks`) and all 13 complementary execution counters are zero. The strict `classify-corpus-v2` classifier evaluates the exact product predicate (`_c150_passed`), yielding `all_passed: true` and `c150_passed: true`.
 
-Authoritative C150/Cmodern certification requires file-bound binary streams, strict `mainnet-prefix-replay-v2` inputs, and exact classifier validation. The Cmodern product contract is pinned to mainnet height `709635` and block hash `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`, selected by the recovered diagnostic candidate and independently matched against Bitcoin Core REST. This pin selects the corpus boundary; it does not certify the diagnostic run. Cmodern certification still requires a fresh file-bound replay at that exact tip, valid custody and counter arithmetic, and positive counts for all 11 context classes. Direct Core REST export can export raw blocks before replay, but live REST export cannot replace file-bound census evidence. Sampled evidence (such as `kernel_verify_spike`) cannot certify a product corpus.
+Authoritative C150/Cmodern certification requires file-bound binary streams, strict `mainnet-prefix-replay-v3` inputs, and exact classifier validation. Version 3 makes the replay's always-present txindex timing keys part of the exact contract; their values are nullable when txindex is disabled. The Cmodern product contract is pinned to mainnet height `709635` and block hash `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`, selected by the recovered diagnostic candidate and independently matched against Bitcoin Core REST. This pin selects the corpus boundary; it does not certify the diagnostic run. Cmodern certification still requires a fresh file-bound replay at that exact tip, valid custody and counter arithmetic, and positive counts for all 11 context classes. Direct Core REST export can export raw blocks before replay, but live REST export cannot replace file-bound census evidence. Sampled evidence (such as `kernel_verify_spike`) cannot certify a product corpus.
 
 Native `CPubKey::Verify` execution averages 39.32 µs per attempt ($Y$), while width-1 kernel verification takes 73.62 µs per check ($X$). The residual $R = X - Y = 34.30\ \mu\text{s/check}$ represents non-ECDSA overhead (legacy sighash re-serialization, script parsing/evaluation, and FFI wrapper costs). The residual is a ceiling over non-native per-check work, not a promised or wholly removable gain. At 46.59% of per-check verification cost, this residual exceeds the 27.73% threshold required for a 5% total wall-time improvement (a 5.85s ceiling within the 12.55s script stage), keeping the non-crypto script optimization lever open.
 

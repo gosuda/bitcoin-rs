@@ -11,8 +11,8 @@ static GLOBAL_MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::hint::black_box;
 
 use bitcoin::{Amount, ScriptBuf};
-use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener, MuHash3072};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, MuHash3072};
 use bitcoin_rs_utxo::{
     BlockChanges, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoRemoved, UtxoSet,
 };

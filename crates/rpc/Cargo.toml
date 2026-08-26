@@ -13,9 +13,9 @@ workspace = true
 
 [features]
 default = []
-rocksdb = ["bitcoin-rs-coinstats/rocksdb", "bitcoin-rs-storage/rocksdb", "bitcoin-rs-p2p/rocksdb"]
-fjall = ["bitcoin-rs-coinstats/fjall", "bitcoin-rs-storage/fjall", "bitcoin-rs-p2p/fjall"]
-redb = ["bitcoin-rs-coinstats/redb", "bitcoin-rs-storage/redb", "bitcoin-rs-p2p/redb"]
+rocksdb = ["bitcoin-rs-utxo/rocksdb", "bitcoin-rs-storage/rocksdb", "bitcoin-rs-p2p/rocksdb"]
+fjall = ["bitcoin-rs-utxo/fjall", "bitcoin-rs-storage/fjall", "bitcoin-rs-p2p/fjall"]
+redb = ["bitcoin-rs-utxo/redb", "bitcoin-rs-storage/redb", "bitcoin-rs-p2p/redb"]
 mdbx = ["bitcoin-rs-storage/mdbx"]
 zmq = []
 
@@ -27,14 +27,11 @@ bitcoin-rs-index.workspace = true
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-p2p.workspace = true
 bitcoin-rs-utxo.workspace = true
-bitcoin-rs-filters.workspace = true
-bitcoin-rs-coinstats.workspace = true
 bitcoin-rs-mining.workspace = true
-bitcoin-rs-wallet.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-pruning.workspace = true
 bitcoin.workspace = true
+miniscript.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

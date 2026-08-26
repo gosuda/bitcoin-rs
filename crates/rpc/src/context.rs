@@ -6,7 +6,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::hex::DisplayHex;
-use bitcoin::{Address, Block, OutPoint, ScriptBuf, Transaction, Txid};
+use bitcoin::{Block, OutPoint, Transaction, Txid};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::standardness::{AcceptanceRejectReason, PackageAcceptanceFacts};
@@ -14,7 +14,7 @@ use bitcoin_rs_mempool::{Mempool, MempoolLimits, RbfError};
 use bitcoin_rs_primitives::{Hash256, Network};
 use compact_str::CompactString;
 use hashbrown::HashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::server::RpcLifecycle;
 
@@ -568,12 +568,6 @@ pub trait PruneService: Send + Sync {
     fn status(&self) -> PruneStatus;
 }
 
-/// Durable watch-only wallet snapshot used by descriptor RPCs.
-pub trait WalletPersistence: Send + Sync {
-    /// Writes `watcher` so a restart can restore imported descriptors.
-    fn persist(&self, watcher: &bitcoin_rs_wallet::Watcher) -> Result<(), CompactString>;
-}
-
 /// Node-owned control plane for consensus-affecting chain RPCs.
 pub trait ChainControl: Send + Sync {
     /// Invalidates a block and descendants and selects the best remaining chain.
@@ -834,39 +828,6 @@ pub trait MiningControl: Send + Sync {
     fn publish_generation(&self);
 }
 
-#[derive(Debug, Default)]
-struct NoopFilterIndex;
-
-impl bitcoin_rs_filters::FilterIndexLike for NoopFilterIndex {
-    fn put_filter(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-        _prev_header: bitcoin_rs_primitives::Hash256,
-        _filter_bytes: &[u8],
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_filters::FilterIndexError> {
-        Ok(bitcoin_rs_primitives::Hash256::default())
-    }
-
-    fn filter_header(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<bitcoin_rs_primitives::Hash256>, bitcoin_rs_filters::FilterIndexError> {
-        Ok(None)
-    }
-
-    fn filter(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_filters::FilterIndexError> {
-        Ok(None)
-    }
-}
-
-fn noop_filter_index() -> Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>> {
-    let filter_index: Box<dyn bitcoin_rs_filters::FilterIndexLike> = Box::new(NoopFilterIndex);
-    Arc::new(filter_index)
-}
-
 /// Actual progress reported by the node-owned transaction index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TxIndexInfo {
@@ -1018,9 +979,7 @@ pub struct ChainHandles {
     /// Authoritative UTXO set.
     pub utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
     /// Incremental UTXO statistics.
-    pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    /// Compact-filter index.
-    pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+    pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
     /// In-memory block tree.
     pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
     /// Decoded block undo source for confirmed transaction prevouts.
@@ -1068,6 +1027,8 @@ pub struct Context {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best-applied-block tip snapshot published after block application.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Serializes whole-chainstate RPC reads with node-owned connect/disconnect transitions.
+    chain_transition: Arc<Mutex<()>>,
     /// Cumulative transaction count of the applied chain, `0` when unknown.
     ///
     /// Maintained by block application and restored from the chainstate
@@ -1094,9 +1055,7 @@ pub struct Context {
     /// UTXO set snapshot handle used by chain metadata RPCs.
     pub utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
     /// Incremental UTXO-set statistics.
-    pub coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
-    /// BIP157/158 compact-filter index used by filter RPCs.
-    pub filter_index: Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>,
+    pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
     /// Optional storage pruning mutator.
     pub prune_service: Option<Arc<dyn PruneService>>,
     /// Optional node-owned chain mutation service.
@@ -1119,13 +1078,6 @@ pub struct Context {
     pub network: Arc<RwLock<NetworkState>>,
     /// Optional authoritative P2P control plane shared with the live listener.
     pub network_controls: Option<Arc<bitcoin_rs_p2p::NetworkControls>>,
-    /// Optional watch-only wallet state for descriptor/PSBT RPCs.
-    ///
-    /// `None` until the node installs a shared [`bitcoin_rs_wallet::Watcher`]
-    /// through [`Context::with_wallet`].
-    pub wallet: Option<Arc<RwLock<bitcoin_rs_wallet::Watcher>>>,
-    /// Optional durable watch-only wallet snapshot writer.
-    pub wallet_persistence: Option<Arc<dyn WalletPersistence>>,
     /// Network selector used by handlers needing consensus parameters (e.g.
     /// difficulty calculation).
     pub chain_network: Network,
@@ -1201,8 +1153,8 @@ impl Context {
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
         let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(0));
-        let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(
-            bitcoin_rs_coinstats::CoinStats::default(),
+        let coin_stats_listener = bitcoin_rs_utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_utxo::stats::CoinStats::default(),
         );
         let mut utxo = bitcoin_rs_utxo::UtxoSet::new();
         utxo.set_listener(Box::new(coin_stats_listener.clone()));
@@ -1224,6 +1176,7 @@ impl Context {
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip,
+            chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count,
             left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool,
@@ -1231,7 +1184,6 @@ impl Context {
             transactions,
             utxo,
             coin_stats,
-            filter_index: noop_filter_index(),
             tx_index: None,
             esplora_tx_index: None,
             script_index: None,
@@ -1241,9 +1193,8 @@ impl Context {
             transaction_admission,
             network: Arc::new(RwLock::new(NetworkState::default())),
             network_controls: None,
-            wallet: None,
-            wallet_persistence: None,
             chain_network: Network::Mainnet,
+
             block_tree,
             block_body_source: None,
             block_undo_source: None,
@@ -1258,6 +1209,7 @@ impl Context {
         Self {
             chain_tip: handles.chain.chain_tip,
             applied_tip: handles.chain.applied_tip,
+            chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count: handles.chain.chain_tx_count,
             left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool: handles.mempool,
@@ -1265,14 +1217,11 @@ impl Context {
             transactions: handles.chain.transactions,
             utxo: handles.chain.utxo,
             coin_stats: handles.chain.coin_stats,
-            filter_index: handles.chain.filter_index,
             tx_index: handles.indexes.transactions,
             esplora_tx_index: handles.indexes.esplora_transactions,
             script_index: handles.indexes.scripts,
             network: handles.network.state,
             network_controls: Some(handles.network.controls),
-            wallet: None,
-            wallet_persistence: None,
             chain_network: handles.chain.network,
             block_tree: handles.chain.block_tree,
             block_body_source: None,
@@ -1350,76 +1299,6 @@ impl Context {
         self
     }
 
-    /// Attaches the shared watch-only wallet state used by descriptor/PSBT RPCs.
-    #[must_use]
-    pub fn with_wallet(mut self, wallet: Arc<RwLock<bitcoin_rs_wallet::Watcher>>) -> Self {
-        self.wallet = Some(wallet);
-        self
-    }
-
-    /// Attaches durable watch-only wallet persistence.
-    #[must_use]
-    pub fn with_wallet_persistence(mut self, store: Arc<dyn WalletPersistence>) -> Self {
-        self.wallet_persistence = Some(store);
-        self
-    }
-
-    /// Writes the current watch-only wallet through the installed persistence.
-    pub fn persist_wallet(
-        &self,
-        watcher: &bitcoin_rs_wallet::Watcher,
-    ) -> Result<(), CompactString> {
-        match self.wallet_persistence.as_ref() {
-            Some(store) => store.persist(watcher),
-            None => Ok(()),
-        }
-    }
-
-    /// Seeds watch-only wallet coins from the live UTXO set.
-    pub fn populate_wallet_utxos(
-        &self,
-        watcher: &mut bitcoin_rs_wallet::Watcher,
-    ) -> Result<usize, CompactString> {
-        #[cfg(test)]
-        if fail_wallet_scan_requested() {
-            return Err(CompactString::from("forced wallet scan failure"));
-        }
-        watcher.clear_utxos();
-        let network = bitcoin_network(self.chain_network);
-        let mut scripts = Vec::new();
-        let mut addresses: HashMap<ScriptBuf, Address> = HashMap::new();
-        for (descriptor_index, import) in watcher.imports.iter().enumerate() {
-            for child in import.range.clone() {
-                let address = watcher
-                    .derive_address(descriptor_index, network, child)
-                    .map_err(|error| CompactString::from(error.to_string()))?;
-                let script = address.script_pubkey();
-                addresses.insert(script.clone(), address);
-                scripts.push(script);
-            }
-        }
-        if scripts.is_empty() {
-            return Ok(0);
-        }
-        let scan = self
-            .utxo
-            .scan_script_pubkeys(&scripts)
-            .map_err(|error| CompactString::from(error.to_string()))?;
-        let mut count = 0usize;
-        for utxo in scan.unspents {
-            let Some(address) = addresses.get(&utxo.txout.script_pubkey) else {
-                continue;
-            };
-            let outpoint = OutPoint {
-                txid: Txid::from_byte_array(utxo.outpoint.txid.to_le_bytes()),
-                vout: utxo.outpoint.vout,
-            };
-            watcher.record_utxo(address.clone(), outpoint, utxo.txout.value);
-            count += 1;
-        }
-        Ok(count)
-    }
-
     /// Attaches the shared RPC lifecycle observed by `getrpcinfo`.
     #[must_use]
     pub fn with_rpc_lifecycle(mut self, lifecycle: Arc<RpcLifecycle>) -> Self {
@@ -1432,6 +1311,19 @@ impl Context {
     pub fn with_debug_log_path(mut self, path: PathBuf) -> Self {
         self.debug_log_path = Some(path);
         self
+    }
+
+    /// Shares the node's authoritative connect/disconnect lock with RPC readers.
+    #[must_use]
+    pub fn with_chain_transition(mut self, chain_transition: Arc<Mutex<()>>) -> Self {
+        self.chain_transition = chain_transition;
+        self
+    }
+
+    /// Runs a read while authoritative UTXO and applied-tip transitions are excluded.
+    pub fn with_stable_chainstate<R>(&self, read: impl FnOnce() -> R) -> R {
+        let _transition = self.chain_transition.lock();
+        read()
     }
 
     /// Attaches active ZMQ notification metadata reported by `getzmqnotifications`.
@@ -1796,23 +1688,6 @@ impl Context {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static FAIL_NEXT_WALLET_SCAN: core::cell::Cell<bool> =
-        const { core::cell::Cell::new(false) };
-}
-
-/// Requests that the next [`Context::populate_wallet_utxos`] call fail.
-#[cfg(test)]
-pub fn fail_next_wallet_scan() {
-    FAIL_NEXT_WALLET_SCAN.with(|flag| flag.set(true));
-}
-
-#[cfg(test)]
-fn fail_wallet_scan_requested() -> bool {
-    FAIL_NEXT_WALLET_SCAN.with(core::cell::Cell::take)
-}
-
 fn bitcoin_network(network: Network) -> bitcoin::Network {
     crate::bitcoin_network(network)
 }
@@ -2039,10 +1914,9 @@ mod tests {
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(0));
         let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
-        let coin_stats = Arc::new(bitcoin_rs_coinstats::CoinStatsListener::new(
-            bitcoin_rs_coinstats::CoinStats::default(),
+        let coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_utxo::stats::CoinStats::default(),
         ));
-        let filter_index = noop_filter_index();
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
         let peers = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
@@ -2062,7 +1936,6 @@ mod tests {
                 transactions: Arc::new(RwLock::new(HashMap::new())),
                 utxo: Arc::clone(&utxo),
                 coin_stats: Arc::clone(&coin_stats),
-                filter_index: Arc::clone(&filter_index),
                 block_tree: Arc::clone(&block_tree),
                 block_undo_source: Arc::new(MissingUndo),
                 network: Network::Mainnet,
@@ -2079,7 +1952,6 @@ mod tests {
         assert!(Arc::ptr_eq(ctx.chain_tx_count_handle(), &chain_tx_count));
         assert!(Arc::ptr_eq(&ctx.utxo, &utxo));
         assert!(Arc::ptr_eq(&ctx.coin_stats, &coin_stats));
-        assert!(Arc::ptr_eq(&ctx.filter_index, &filter_index));
         assert!(Arc::ptr_eq(&ctx.block_tree, &block_tree));
         assert!(Arc::ptr_eq(
             ctx.network_controls.as_ref().expect("network controls"),

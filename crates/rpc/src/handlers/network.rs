@@ -15,13 +15,11 @@ use crate::handlers::{ensure_no_params, optional_bool, params_array, required_st
 // Local service flags this node advertises:
 // - NODE_NETWORK (1 << 0) = 1 — full block serving.
 // - NODE_WITNESS (1 << 3) = 8 — segwit data.
-// - NODE_COMPACT_FILTERS (1 << 6) = 64 — BIP157 filters.
-// Sum = 73 = 0x49.
-const LOCAL_SERVICES_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 3) | (1_u64 << 6);
-const LOCAL_SERVICES_HEX: &str = "0000000000000049";
+// Sum = 9 = 0x09.
+const LOCAL_SERVICES_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 3);
+const LOCAL_SERVICES_HEX: &str = "0000000000000009";
 
-const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x49);
-
+const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x09);
 /// Decodes a Bitcoin service-flags bitmask into a list of name strings.
 ///
 /// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
@@ -38,9 +36,6 @@ fn services_names_from_flags(flags: u64) -> Vec<String> {
     }
     if flags & (1_u64 << 3) != 0 {
         names.push("WITNESS".to_owned());
-    }
-    if flags & (1_u64 << 6) != 0 {
-        names.push("COMPACT_FILTERS".to_owned());
     }
     if flags & (1_u64 << 10) != 0 {
         names.push("NETWORK_LIMITED".to_owned());
@@ -445,13 +440,13 @@ mod tests {
     }
 
     #[test]
-    fn getnetworkinfo_localservices_advertises_network_witness_filters() {
+    fn getnetworkinfo_localservices_advertises_only_supported_services() {
         let ctx = ctx_with(fresh_controls());
         let result = getnetworkinfo(&ctx, &json!(null))
             .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
         assert_eq!(
             result.get("localservices").and_then(|v| v.as_str()),
-            Some("0000000000000049")
+            Some("0000000000000009")
         );
         let names: Vec<String> = result
             .get("localservicesnames")
@@ -464,7 +459,7 @@ mod tests {
             .unwrap_or_default();
         assert!(names.contains(&"NETWORK".to_owned()));
         assert!(names.contains(&"WITNESS".to_owned()));
-        assert!(names.contains(&"COMPACT_FILTERS".to_owned()));
+        assert!(!names.contains(&"COMPACT_FILTERS".to_owned()));
     }
 
     #[test]
@@ -480,14 +475,12 @@ mod tests {
         let names = services_names_from_flags((1_u64 << 0) | (1_u64 << 3));
         assert_eq!(names, vec!["NETWORK".to_owned(), "WITNESS".to_owned()]);
 
-        let names =
-            services_names_from_flags((1_u64 << 0) | (1_u64 << 3) | (1_u64 << 6) | (1_u64 << 10));
+        let names = services_names_from_flags((1_u64 << 0) | (1_u64 << 3) | (1_u64 << 10));
         assert_eq!(
             names,
             vec![
                 "NETWORK".to_owned(),
                 "WITNESS".to_owned(),
-                "COMPACT_FILTERS".to_owned(),
                 "NETWORK_LIMITED".to_owned()
             ]
         );

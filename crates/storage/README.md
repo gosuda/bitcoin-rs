@@ -4,6 +4,14 @@ The backend-neutral storage layer every persisted index and chain-state store si
 
 `KvStore` is the central trait: `get`, ordered `iter_prefix` iteration, bounded `scan_prefix_bounded` scans under a `PrefixScanLimit`, and point-in-time `snapshot` reads, with all mutations going through backend-specific `WriteBatch` types applied by `write`, by `write_deferred` (visible immediately, crash durability deferred to `flush`), or by `write_durable`. `ColumnFamily` names the logical column families shared by every backend and `StorageError` is the common error type. Concrete backends are feature-gated and exported from the crate root: `FjallStore` (the default), `RocksDbStore`, `RedbStore`, and `MdbxStore`; the implementation modules themselves are private. The specialized redb transaction index has no public concrete type: it is constructed only through the redb-gated `open_redb_tx_index_store` factory, which hides the store behind an opaque `impl KvStore`. Immutable block bodies bypass key-value storage entirely: `FlatFileBlockStore` and `FlatFileBlockReader` manage the append-only flat files with `BlockFilePosition` addressing, and the `corpus` module streams length-prefixed Core frames through `CoreFrameReader` and `CoreFrameWriter`.
 
+## Pruning
+
+`pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It is here rather than in a crate of its own (issue #164) because it is a retention policy over rows this crate already owns -- the former `bitcoin-rs-pruning` declared `bitcoin-rs-utxo`, `bitcoin-rs-chain` and `bitcoin` and referenced none of them.
+
+`stage_block_and_undo_prune` stages block-body and undo-row deletion together with prune-height metadata into one caller-owned atomic batch, so node wiring commits them in a single backend commit; `reclaim_staged_flat_block_files` then deletes the staged flat block files, and `PruneOutcome` reports the bytes and rows freed. Undo rows are pruned against the durable tip rather than the in-memory tip, because a crash restores to the last durable checkpoint and must still be able to disconnect back through it -- block bodies are re-downloadable and are not held to that constraint. The per-row machinery is `block_pruner` (`BlockPruner`, `block_body_key`, `BLOCK_DATA_CF`) and `undo_pruner` (`UndoPruner`, `block_undo_key`); `PrunePolicy` carries no behaviour of its own, and the node builds one from configuration and hands it in.
+
+Note that `block_body_key` and `BLOCK_DATA_CF` are not only pruning concerns: they are the block-body key schema, and the node reads bodies through them on the ordinary path.
+
 ## Features
 
 - `fjall` (default): enables the fjall-backed `FjallStore`.

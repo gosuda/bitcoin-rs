@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
 /// Compact encodings for UTXO record fields.
 mod compress;
 /// UTXO hash-table key.
@@ -19,6 +21,8 @@ pub mod set;
 pub mod shard;
 /// Native bitcoin-rs UTXO snapshot format.
 pub mod snapshot;
+/// Running UTXO-set statistics over the live set above.
+pub mod stats;
 /// Versioned on-disk encoding for undo records.
 pub mod undo_codec;
 

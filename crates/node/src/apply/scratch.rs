@@ -1,11 +1,11 @@
+use bitcoin::Txid;
+#[cfg(test)]
 use bitcoin::hashes::Hash as _;
-use bitcoin::{ScriptBuf, Txid};
-use bitcoin_rs_primitives::{Hash256, OutPoint};
-use hashbrown::{HashMap, HashSet};
+#[cfg(test)]
+use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::OutPoint;
+use hashbrown::HashSet;
 
-use crate::state::ApplyError;
-
-type SameBlockScriptMap = HashMap<OutPoint, ScriptBuf>;
 pub(super) type SameBlockSpentSet = HashSet<OutPoint>;
 
 #[derive(Clone, Copy)]
@@ -17,7 +17,6 @@ pub(super) struct ApplyScratchCapacities {
 pub(super) struct ApplyScratch {
     txids: Vec<Txid>,
     raw_txs: Option<Vec<Vec<u8>>>,
-    same_block_spent_output_scripts: Option<SameBlockScriptMap>,
     same_block_spent: Option<SameBlockSpentSet>,
     utxo_add_capacity: usize,
     utxo_remove_capacity: usize,
@@ -25,34 +24,21 @@ pub(super) struct ApplyScratch {
 
 impl ApplyScratch {
     #[cfg(test)]
-    pub(super) fn new(
-        block: &bitcoin::Block,
-        height: u32,
-        include_raw_txs: bool,
-        include_same_block_output_scripts: bool,
-    ) -> Result<Self, ApplyError> {
+    pub(super) fn new(block: &bitcoin::Block, include_raw_txs: bool) -> Self {
         let txids = block
             .txdata
             .iter()
             .map(bitcoin::Transaction::compute_txid)
             .collect();
-        Self::with_txids(
-            block,
-            height,
-            include_raw_txs,
-            include_same_block_output_scripts,
-            txids,
-        )
+        Self::with_txids(block, include_raw_txs, txids)
     }
 
     #[cfg(test)]
     pub(super) fn with_txids(
         block: &bitcoin::Block,
-        height: u32,
         include_raw_txs: bool,
-        include_same_block_output_scripts: bool,
         txids: Vec<Txid>,
-    ) -> Result<Self, ApplyError> {
+    ) -> Self {
         let capacities = ApplyScratchCapacities {
             created_outputs: block.txdata.iter().map(|tx| tx.output.len()).sum(),
             spent_inputs: block
@@ -66,9 +52,7 @@ impl ApplyScratch {
             detect_same_block_spends(block, &txids, capacities.spent_inputs);
         Self::from_prepared_parts(
             block,
-            height,
             include_raw_txs,
-            include_same_block_output_scripts,
             txids,
             capacities,
             same_block_spent,
@@ -78,20 +62,16 @@ impl ApplyScratch {
 
     pub(super) fn from_prepared_parts(
         block: &bitcoin::Block,
-        height: u32,
         include_raw_txs: bool,
-        include_same_block_output_scripts: bool,
         txids: Vec<Txid>,
         capacities: ApplyScratchCapacities,
         same_block_spent: Option<SameBlockSpentSet>,
         same_block_spent_input_count: usize,
-    ) -> Result<Self, ApplyError> {
+    ) -> Self {
         debug_assert_eq!(txids.len(), block.txdata.len());
         let mut raw_txs = include_raw_txs.then(|| Vec::with_capacity(block.txdata.len()));
         let created_capacity = capacities.created_outputs;
         let spent_capacity = capacities.spent_inputs;
-        let track_same_block_spends = spent_capacity != 0;
-        let track_same_block_scripts = include_same_block_output_scripts && track_same_block_spends;
 
         if let Some(raw_txs) = &mut raw_txs {
             for tx in &block.txdata {
@@ -101,24 +81,15 @@ impl ApplyScratch {
         let same_block_spent_len = same_block_spent
             .as_ref()
             .map_or(0_usize, SameBlockSpentSet::len);
-        let same_block_spent_output_scripts = if track_same_block_scripts {
-            same_block_spent
-                .as_ref()
-                .map(|spent| same_block_spent_scripts(block, height, &txids, spent))
-                .transpose()?
-        } else {
-            None
-        };
         let utxo_add_capacity = created_capacity.saturating_sub(same_block_spent_len);
         let utxo_remove_capacity = spent_capacity.saturating_sub(same_block_spent_input_count);
-        Ok(Self {
+        Self {
             txids,
             raw_txs,
-            same_block_spent_output_scripts,
             same_block_spent,
             utxo_add_capacity,
             utxo_remove_capacity,
-        })
+        }
     }
 
     pub(super) fn txids(&self) -> &[Txid] {
@@ -143,13 +114,6 @@ impl ApplyScratch {
 
     pub(super) fn utxo_change_capacity(&self) -> (usize, usize) {
         (self.utxo_add_capacity, self.utxo_remove_capacity)
-    }
-
-    pub(super) fn same_block_spent_output_script(&self, outpoint: &OutPoint) -> Option<ScriptBuf> {
-        self.same_block_spent_output_scripts
-            .as_ref()?
-            .get(outpoint)
-            .cloned()
     }
 }
 
@@ -182,28 +146,6 @@ fn detect_same_block_spends(
         seen_txids.insert(Hash256::from_le_bytes(txid.as_byte_array()));
     }
     (same_block_spent, same_block_spent_input_count)
-}
-
-fn same_block_spent_scripts(
-    block: &bitcoin::Block,
-    height: u32,
-    txids: &[Txid],
-    same_block_spent: &SameBlockSpentSet,
-) -> Result<SameBlockScriptMap, ApplyError> {
-    let mut scripts = HashMap::with_capacity(same_block_spent.len());
-    for (tx, txid) in block.txdata.iter().zip(txids) {
-        let txid = Hash256::from_le_bytes(txid.as_byte_array());
-        for (vout, txout) in tx.output.iter().enumerate() {
-            let outpoint = OutPoint::new(
-                txid,
-                u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(height))?,
-            );
-            if same_block_spent.contains(&outpoint) {
-                scripts.insert(outpoint, txout.script_pubkey.clone());
-            }
-        }
-    }
-    Ok(scripts)
 }
 
 #[cfg(test)]

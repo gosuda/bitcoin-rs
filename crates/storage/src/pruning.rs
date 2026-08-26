@@ -1,7 +1,30 @@
-#![doc = include_str!("../README.md")]
-#![forbid(unsafe_op_in_unsafe_fn)]
-
-extern crate alloc;
+//! Deletion of historical block bodies and undo records, once the active
+//! chain no longer needs them.
+//!
+//! This lives in `storage` rather than in a crate of its own (issue #164)
+//! because it is a retention policy over the rows this crate already owns.
+//! Its former crate declared `bitcoin-rs-utxo`, `bitcoin-rs-chain` and
+//! `bitcoin` as dependencies and referenced none of them: the only things it
+//! ever touched were this crate and `Hash256`.
+//!
+//! [`stage_block_and_undo_prune`] is the main entry point. It stages
+//! block-body and undo-row deletion together with prune-height metadata into
+//! one caller-owned atomic batch, so node wiring commits them in a single
+//! backend commit. Undo rows are pruned against the durable tip rather than
+//! the in-memory tip -- a crash restores to the last durable checkpoint and
+//! must still be able to disconnect back through it, while block bodies are
+//! re-downloadable and are not held to that constraint. After the index rows
+//! commit, [`reclaim_staged_flat_block_files`] deletes the staged flat block
+//! files, and [`PruneOutcome`] reports the bytes and row counts freed.
+//!
+//! [`PrunePolicy`] carries no behaviour of its own: the node builds one from
+//! configuration and hands it in, which is the policy/mechanism split this
+//! module keeps.
+//!
+//! Note that [`block_body_key`] and [`BLOCK_DATA_CF`] are not only pruning
+//! concerns -- they are the block-body key schema, and the node reads bodies
+//! through them on the ordinary path. That is the sharper reason this is a
+//! storage module: the schema was living in the crate that deletes rows.
 
 /// Block-body pruning over persisted block rows.
 pub mod block_pruner;
@@ -9,15 +32,12 @@ pub mod block_pruner;
 pub mod policy;
 /// Undo-data pruning over persisted undo rows.
 pub mod undo_pruner;
-/// Utreexo-only block body deletion coordinator.
-pub mod utreexo_only;
 
 pub use block_pruner::{BLOCK_DATA_CF, BlockPruner, block_body_key};
 pub use policy::PrunePolicy;
 pub use undo_pruner::{UndoPruner, block_undo_key};
-pub use utreexo_only::{BlockProcessed, UtreexoOnlyCoordinator};
 
-use bitcoin_rs_storage::{StorageError, WriteBatch as _};
+use crate::{StorageError, WriteBatch as _};
 use thiserror::Error;
 
 /// Stages block-body and undo-row pruning into a caller-owned atomic batch.
@@ -34,10 +54,10 @@ use thiserror::Error;
 /// cannot disconnect its own tip: the reorg fails with `UndoRecordMissing`.
 /// Block bodies do not need this — they are re-downloadable, and undo records
 /// are not.
-pub fn stage_block_and_undo_prune<S: bitcoin_rs_storage::KvStore>(
+pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     store: &S,
     batch: &mut S::WriteBatch,
-    block_files: &bitcoin_rs_storage::FlatFileBlockStore,
+    block_files: &crate::FlatFileBlockStore,
     current_tip_height: u32,
     durable_tip_height: u32,
     policy: PrunePolicy,
@@ -73,9 +93,9 @@ pub fn stage_block_and_undo_prune<S: bitcoin_rs_storage::KvStore>(
 
 /// Deletes staged flat block files after their block-index rows are committed.
 #[doc(hidden)]
-pub fn reclaim_staged_flat_block_files<S: bitcoin_rs_storage::KvStore>(
+pub fn reclaim_staged_flat_block_files<S: crate::KvStore>(
     store: &S,
-    block_files: &bitcoin_rs_storage::FlatFileBlockStore,
+    block_files: &crate::FlatFileBlockStore,
     file_numbers: &[u32],
 ) -> Result<(), PruneError> {
     let mut batch = store.new_batch();
@@ -87,7 +107,7 @@ pub fn reclaim_staged_flat_block_files<S: bitcoin_rs_storage::KvStore>(
         let _ = block_files.delete_file_if_not_current(file_no)?;
         batch.delete(
             block_pruner::BLOCK_DATA_CF,
-            &bitcoin_rs_storage::block_file_max_height_key(file_no),
+            &crate::block_file_max_height_key(file_no),
         );
         removed_metadata = true;
     }

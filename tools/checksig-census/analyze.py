@@ -1321,7 +1321,6 @@ def _launch_diagnostic_child(
     counters_path: Path,
     storage_backend: str,
     txindex: bool,
-    blockfilterindex: bool,
 ) -> tuple[subprocess.Popen, BinaryIO]:
     env = os.environ.copy()
     env.update({
@@ -1345,8 +1344,6 @@ def _launch_diagnostic_child(
     ]
     if txindex:
         command.append("--txindex")
-    if blockfilterindex:
-        command.append("--blockfilterindex")
 
     stderr_file = stderr_path.open("xb")
     try:
@@ -1371,7 +1368,6 @@ def _validate_replay_diagnostic(
     ceiling: int,
     storage_backend: str,
     txindex: bool,
-    blockfilterindex: bool,
     data_dir: str,
 ) -> None:
     try:
@@ -1394,7 +1390,6 @@ def _validate_replay_diagnostic(
         "stop_reason",
         "storage_backend",
         "txindex",
-        "blockfilterindex",
         "data_dir",
         "elapsed_seconds",
     }
@@ -1457,11 +1452,6 @@ def _validate_replay_diagnostic(
     if raw["txindex"] is not txindex:
         raise AnalyzerError(
             f"DIAG-CUSTODY: txindex {raw['txindex']!r} != {txindex!r}"
-        )
-    if raw["blockfilterindex"] is not blockfilterindex:
-        raise AnalyzerError(
-            f"DIAG-CUSTODY: blockfilterindex {raw['blockfilterindex']!r} "
-            f"!= {blockfilterindex!r}"
         )
     if raw["data_dir"] != data_dir:
         raise AnalyzerError(
@@ -1639,7 +1629,6 @@ def _finalize_candidate(
     output_path: Path,
     storage_backend: str,
     txindex: bool,
-    blockfilterindex: bool,
     data_dir: str,
     teardown: DiagnosticTeardown,
     recovery_signatures: dict[str, tuple[int, int, int, int, int]] | None = None,
@@ -1666,7 +1655,6 @@ def _finalize_candidate(
         ceiling,
         storage_backend,
         txindex,
-        blockfilterindex,
         data_dir,
     )
     _validate_native_counters(paths["counters"], final)
@@ -1906,7 +1894,6 @@ def _run_diagnostic_scan(
     output_path: Path,
     storage_backend: str = "fjall",
     txindex: bool = False,
-    blockfilterindex: bool = False,
     *,
     stop_deadline_seconds: float = 10.0,
     reap_deadline_seconds: float = 5.0,
@@ -1933,7 +1920,6 @@ def _run_diagnostic_scan(
         proc, stderr_file = _launch_diagnostic_child(
             binary, rest_url, ceiling, work_dir, paths["replay"], data_dir,
             paths["stderr"], paths["counters"], storage_backend, txindex,
-            blockfilterindex,
         )
         if proc.stdout is None:
             raise AnalyzerError("DIAG-SETUP: child stdout is not piped")
@@ -2007,7 +1993,6 @@ def _run_diagnostic_scan(
             output_path,
             storage_backend,
             txindex,
-            blockfilterindex,
             str(data_dir),
             teardown,
         )
@@ -2528,7 +2513,6 @@ def _salvage_diagnostic_scan(
     data_dir: str,
     storage_backend: str = "fjall",
     txindex: bool = False,
-    blockfilterindex: bool = False,
 ) -> None:
     """Recover terminal proof without changing the failed source directory."""
     source_dir = source_dir.resolve()
@@ -2607,7 +2591,6 @@ def _salvage_diagnostic_scan(
             output_path,
             storage_backend,
             txindex,
-            blockfilterindex,
             data_dir,
             teardown,
             recovery_signatures,
@@ -2662,7 +2645,6 @@ def cmd_salvage_cmodern_height(args: argparse.Namespace) -> int:
         args.data_dir,
         storage_backend=args.storage_backend,
         txindex=args.txindex,
-        blockfilterindex=args.blockfilterindex,
     )
     return 0
 
@@ -2694,7 +2676,6 @@ def cmd_find_cmodern_height(args: argparse.Namespace) -> int:
         output,
         storage_backend=args.storage_backend,
         txindex=args.txindex,
-        blockfilterindex=args.blockfilterindex,
     )
     return 0
 
@@ -3914,7 +3895,7 @@ def _require_int_field(value: object, field: str) -> int:
 
 
 def _validate_replay_artifact(path: Path) -> dict[str, object]:
-    """Validate a mainnet-prefix-replay-v2 JSON artifact and return flat fields.
+    """Validate a mainnet-prefix-replay-v3 JSON artifact and return flat fields.
 
     Required root keys (exactly): schema, network, network_magic, genesis_hash,
     start_height, start_hash, stop_height, stop_hash, block_count, window,
@@ -3932,18 +3913,19 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
         "start_height", "start_hash", "stop_height", "stop_hash",
         "block_count", "window", "assume_valid_height",
         "window_verify_success_total", "corpus_manifest", "archive",
-        "block_bytes", "block_source", "blockfilterindex",
+        "block_bytes", "block_source",
         "blocks_per_second", "checkpoint_generation", "data_dir",
         "decode_seconds", "elapsed_seconds", "fetch_seconds",
         "git_head", "measurement_target", "rss_high_water_bytes",
         "stage_seconds", "storage_backend", "tx_count", "txindex",
+        "txindex_worker_catchup_seconds", "txindex_total_elapsed_seconds",
     }
     _require_exact_keys(raw, _REPLAY_KEYS, "replay artifact root")
 
-    if raw["schema"] != "mainnet-prefix-replay-v2":
+    if raw["schema"] != "mainnet-prefix-replay-v3":
         raise AnalyzerError(
             f"CTX-CUSTODY: replay schema is {raw['schema']!r}, "
-            f"expected 'mainnet-prefix-replay-v2'"
+            f"expected 'mainnet-prefix-replay-v3'"
         )
 
     network = raw["network"]
@@ -4039,8 +4021,6 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
             f"got {block_source!r}"
         )
 
-    if not isinstance(raw["blockfilterindex"], bool):
-        raise AnalyzerError("CTX-CUSTODY: replay.blockfilterindex must be a boolean")
     if not isinstance(raw["txindex"], bool):
         raise AnalyzerError("CTX-CUSTODY: replay.txindex must be a boolean")
 
@@ -4058,6 +4038,19 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
     decode_seconds = _require_float(raw["decode_seconds"], "replay.decode_seconds", ge=0.0)
     elapsed_seconds = _require_float(raw["elapsed_seconds"], "replay.elapsed_seconds", ge=0.0)
     fetch_seconds = _require_float(raw["fetch_seconds"], "replay.fetch_seconds", ge=0.0)
+
+    def _require_optional_float(value: object, field: str) -> None:
+        if value is not None:
+            _require_float(value, field, ge=0.0)
+
+    _require_optional_float(
+        raw["txindex_worker_catchup_seconds"],
+        "replay.txindex_worker_catchup_seconds",
+    )
+    _require_optional_float(
+        raw["txindex_total_elapsed_seconds"],
+        "replay.txindex_total_elapsed_seconds",
+    )
 
     git_head = _require_hex_str(raw["git_head"], "replay.git_head", 40)
 
@@ -4114,7 +4107,7 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
         raise AnalyzerError(f"CTX-CUSTODY: replay.tx_count must be >= 0, got {tx_count}")
 
     return {
-        "schema": "mainnet-prefix-replay-v2",
+        "schema": "mainnet-prefix-replay-v3",
         "network": network,
         "network_magic": network_magic,
         "genesis_hash": genesis_hash,
@@ -4130,7 +4123,6 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
         "archive": archive,
         "block_bytes": block_bytes,
         "block_source": block_source,
-        "blockfilterindex": raw["blockfilterindex"],
         "blocks_per_second": blocks_per_second,
         "checkpoint_generation": checkpoint_generation,
         "data_dir": data_dir,
@@ -4144,6 +4136,8 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
         "storage_backend": storage_backend,
         "tx_count": tx_count,
         "txindex": raw["txindex"],
+        "txindex_worker_catchup_seconds": raw["txindex_worker_catchup_seconds"],
+        "txindex_total_elapsed_seconds": raw["txindex_total_elapsed_seconds"],
         "custody": {
             "bytes": len(replay_bytes),
             "sha256": hashlib.sha256(replay_bytes).hexdigest(),
@@ -5325,7 +5319,7 @@ def build_parser() -> argparse.ArgumentParser:
     cc.add_argument(
         "--replay",
         required=True,
-        help="mainnet-prefix-replay-v2 JSON artifact",
+        help="mainnet-prefix-replay-v3 JSON artifact",
     )
     cc.add_argument(
         "--corpus-manifest",
@@ -5372,7 +5366,6 @@ def build_parser() -> argparse.ArgumentParser:
     fc.add_argument("--output", required=True, help="candidate output JSON path")
     fc.add_argument("--storage-backend", default="fjall", help="storage backend for replay state")
     fc.add_argument("--txindex", action="store_true", default=False, help="enable txindex")
-    fc.add_argument("--blockfilterindex", action="store_true", default=False, help="enable blockfilterindex")
     fc.set_defaults(func=cmd_find_cmodern_height)
     sc = sub.add_parser(
         "salvage-cmodern-height",
@@ -5390,12 +5383,6 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--output", required=True, help="new candidate output JSON path")
     sc.add_argument("--storage-backend", default="fjall", help="original storage backend")
     sc.add_argument("--txindex", action="store_true", default=False, help="original txindex setting")
-    sc.add_argument(
-        "--blockfilterindex",
-        action="store_true",
-        default=False,
-        help="original blockfilterindex setting",
-    )
     sc.set_defaults(func=cmd_salvage_cmodern_height)
 
     return parser

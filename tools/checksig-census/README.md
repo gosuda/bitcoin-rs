@@ -169,7 +169,7 @@ python3 analyze.py classify-corpus \
   --contract c150
 ```
 
-The replay produces the authoritative `c150.counters.json` (24 fixed-order u64 counters + 3 counts), `c150.contexts.bin` (`BRSCTX1\0`), `c150.journal.bin` (`BRSJRN1\0`), and `c150.records.bin` (`BRSREC1\0`) artifacts in one process using same-open parse-stream custody. The strict classifier (`classify-corpus-v2`) validates each stream's magic and framing, the exact native count equations, strict `mainnet-prefix-replay-v2` inputs, and every context, record, and journal join.
+The replay produces the authoritative `c150.counters.json` (24 fixed-order u64 counters + 3 counts), `c150.contexts.bin` (`BRSCTX1\0`), `c150.journal.bin` (`BRSJRN1\0`), and `c150.records.bin` (`BRSREC1\0`) artifacts in one process using same-open parse-stream custody. The strict classifier (`classify-corpus-v2`) validates each stream's magic and framing, the exact native count equations, strict `mainnet-prefix-replay-v3` inputs, and every context, record, and journal join.
 
 Expected: `context_count == 2,868,199`, `ffi_verify_entries == 2,868,199`, `eval_script_entries == 5,736,398` (exactly twice the ordinary total due to scriptSig + scriptPubKey passes per ordinary P2PKH check), all verdicts true, all 11 special context counters zero (`p2sh_redeem_spends`, `native_witness_v0_spends`, `p2sh_wrapped_witness_v0_spends`, `bare_multisig_checks`, `p2sh_multisig_checks`, `native_witness_v0_multisig_checks`, `p2sh_wrapped_witness_v0_multisig_checks`, `taproot_key_path_spends`, `tapscript_spends`, `tapscript_schnorr_checks`, `tapscript_checksigadd_checks`), and all 13 complementary execution counters zero. Result: `all_passed: true` and `c150_passed: true`.
 Any sink open, write, stream, or close failure forces a nonzero process exit. Live REST streams or sampled evidence (such as `kernel_verify_spike`) cannot certify C150 or Cmodern product corpora.
@@ -222,7 +222,7 @@ python3 analyze.py classify-corpus \
 ```
 
 The classifier requires the exact height and hash above, strict
-`mainnet-prefix-replay-v2` file custody, a successful window dispatch, all
+`mainnet-prefix-replay-v3` file custody, a successful window dispatch, all
 counter arithmetic invariants, and positive counts for all 11 Cmodern context
 classes. A certifying result has `all_passed: true`, `cmodern_frozen: true`, and
 `cmodern_passed: true`. Here, `cmodern_frozen` means the product tip is fixed;
@@ -383,7 +383,7 @@ python3 analyze.py classify-corpus \
   --contract c150
 ```
 
-Checks INV-1 through INV-7, zero-input evidence precedence, `mainnet-prefix-replay-v2` framing, and exact C150 predicate semantics (`_c150_passed`).
+Checks INV-1 through INV-7, zero-input evidence precedence, `mainnet-prefix-replay-v3` framing, and exact C150 predicate semantics (`_c150_passed`).
 For legacy KSPIKE1 capture cross-checks, `python3 analyze.py validate-census` validates Run A/B counters and journal agreement (EXP-1 through EXP-4).
 
 ### Generate integrity JSON (INV-14 source-identity proof)

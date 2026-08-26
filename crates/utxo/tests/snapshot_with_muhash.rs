@@ -1,7 +1,7 @@
 //! Snapshot trailer integration tests for coinstats.
 use bitcoin::{Amount, ScriptBuf};
-use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{
     BlockChanges, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoKey, UtxoRemoved,
     UtxoSet, aggregate_hash, write_snapshot,

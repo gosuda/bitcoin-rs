@@ -35,7 +35,7 @@ impl G2MuhashSampler {
         })
     }
 
-    pub(crate) fn record(&self, stats: &bitcoin_rs_coinstats::CoinStats) -> Result<()> {
+    pub(crate) fn record(&self, stats: &bitcoin_rs_utxo::stats::CoinStats) -> Result<()> {
         if !self.wants_height(stats.height) {
             return Ok(());
         }
@@ -240,7 +240,7 @@ fn is_lower_hex_hash(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_coinstats::CoinStats;
+    use bitcoin_rs_utxo::stats::CoinStats;
 
     #[test]
     fn writes_env_compatible_interval_samples() -> Result<()> {

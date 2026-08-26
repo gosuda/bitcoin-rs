@@ -1,17 +1,17 @@
 use alloc::sync::Arc;
 use core::convert::Infallible;
 
-use bitcoin_rs_primitives::{OutPoint, TxOut};
-use bitcoin_rs_utxo::{
+use crate::{
     SnapshotCoin, SnapshotCoinObserver, UtxoChangeEvents, UtxoChangeListener, UtxoCommittedEvent,
     UtxoInserted, UtxoRemoved,
 };
+use bitcoin_rs_primitives::{OutPoint, TxOut};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use zerocopy::IntoBytes;
 
-use crate::MuHash3072;
+use crate::stats::MuHash3072;
 
 const OUTPOINT_BYTES: usize = 36;
 const COIN_HEADER_BYTES: u64 = 4;
@@ -208,10 +208,10 @@ impl Default for CoinStats {
 /// `want_muhash` controls the expensive per-coin `MuHash` pass; callers needing
 /// only `total_amount`/`bogo_size`/`utxo_count` pass `false`.
 pub fn scan_coin_stats(
-    view: &bitcoin_rs_utxo::UtxoSetView<'_>,
+    view: &crate::UtxoSetView<'_>,
     height: u32,
     want_muhash: bool,
-) -> Result<CoinStats, bitcoin_rs_utxo::UtxoError> {
+) -> Result<CoinStats, crate::UtxoError> {
     let mut accumulator = if want_muhash {
         CoinStatsAccumulator::with_muhash(height)
     } else {
@@ -930,10 +930,12 @@ const fn compact_size_len(len: usize) -> usize {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+// A test pool that will not build has failed the test; panicking names the
+// reason. Matches the convention already used in `compress.rs`.
+#[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
+    use crate::{SnapshotCoin, SnapshotCoinObserver};
     use bitcoin::{Amount, ScriptBuf};
-    use bitcoin_rs_utxo::{SnapshotCoin, SnapshotCoinObserver};
     use proptest::prelude::*;
 
     use super::{CoinStats, CoinStatsRewindError, TxOut, encode_txout_into};
@@ -1028,8 +1030,8 @@ mod tests {
 
     #[test]
     fn scan_coin_stats_matches_rolling_listener() {
+        use crate::{BlockChanges, SnapshotCoin, SnapshotCoinObserver, UtxoAdd, UtxoSet};
         use bitcoin_rs_primitives::{Hash256, OutPoint};
-        use bitcoin_rs_utxo::{BlockChanges, SnapshotCoin, SnapshotCoinObserver, UtxoAdd, UtxoSet};
 
         let mut utxo = UtxoSet::new();
         let listener = super::CoinStatsListener::new(super::CoinStats::new());

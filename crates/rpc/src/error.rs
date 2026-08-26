@@ -74,7 +74,7 @@ impl RpcError {
     /// Bitcoin Core deserialization error code.
     pub const CORE_DESERIALIZATION_ERROR: i64 = -22;
 
-    /// Builds the no-private-keys policy error used by signing RPCs.
+    /// Builds the policy-disabled error for methods unavailable by configuration.
     #[must_use]
     pub const fn method_disabled(message: &'static str) -> Self {
         Self::MethodDisabled(message)

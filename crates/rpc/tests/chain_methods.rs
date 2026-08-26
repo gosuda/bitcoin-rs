@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
-use bitcoin_rs_filters::FilterIndexLike;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_rpc::context::{BlockRecord, Context};
 use bitcoin_rs_rpc::error::RpcError;
@@ -138,90 +137,6 @@ fn gettxoutsetinfo_reports_accounted_disk_size() {
             .is_some(),
         "disk_size must be present: {info:?}"
     );
-}
-
-struct LaggingFilterIndex {
-    best: Option<Hash256>,
-}
-
-impl FilterIndexLike for LaggingFilterIndex {
-    fn put_filter(
-        &self,
-        _block_hash: Hash256,
-        _prev_header: Hash256,
-        _filter_bytes: &[u8],
-    ) -> Result<Hash256, bitcoin_rs_filters::FilterIndexError> {
-        Ok(Hash256::default())
-    }
-
-    fn filter_header(
-        &self,
-        _block_hash: Hash256,
-    ) -> Result<Option<Hash256>, bitcoin_rs_filters::FilterIndexError> {
-        Ok(None)
-    }
-
-    fn filter(
-        &self,
-        _block_hash: Hash256,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_filters::FilterIndexError> {
-        Ok(None)
-    }
-
-    fn best_indexed_block(&self) -> Result<Option<Hash256>, bitcoin_rs_filters::FilterIndexError> {
-        Ok(self.best)
-    }
-}
-
-#[test]
-fn getindexinfo_basic_filter_uses_best_indexed_block() {
-    let mut ctx = Context::new();
-    let (applied_hash, _) = {
-        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        let hash = Hash256::from_le_bytes(genesis.block_hash().as_byte_array());
-        let tip_id = {
-            let mut tree = ctx.block_tree.write();
-            tree.insert_node(None, genesis.header, NodeStatus::Active)
-                .expect("genesis")
-        };
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-        publish_tip(
-            &ctx,
-            TipSnapshot {
-                tip_id,
-                height: 0,
-                chainwork: ChainWork::ZERO,
-                hash,
-            },
-        );
-        (hash, genesis)
-    };
-    let lagging = Hash256::from_le_bytes(&[1; 32]);
-    ctx.filter_index = Arc::new(Box::new(LaggingFilterIndex {
-        best: Some(lagging),
-    }));
-    let ctx = Arc::new(ctx);
-
-    let info = dispatch(&ctx, "getindexinfo", &json!(["basicblockfilterindex"]));
-    let entry = info
-        .get("basicblockfilterindex")
-        .expect("basicblockfilterindex entry");
-    assert_eq!(
-        entry.get("synced").and_then(JsonValueTrait::as_bool),
-        Some(false),
-        "lagging filter index must not report synced against applied tip {applied_hash}"
-    );
-}
-
-#[test]
-fn getblockfilter_rejects_unknown_filtertype() {
-    let ctx = Arc::new(Context::new());
-    let handler = Handler::new(ctx);
-    let hash = "0".repeat(64);
-    let err = handler
-        .dispatch("getblockfilter", &json!([hash.as_str(), "invalid"]))
-        .expect_err("unknown filtertype");
-    assert!(matches!(err, RpcError::InvalidParams("Unknown filtertype")));
 }
 
 #[test]

@@ -12,20 +12,16 @@ pub enum ColumnFamily {
     Funding = 3,
     /// Transaction spending rows.
     Spending = 4,
-    /// BIP157/158 compact filter rows.
-    Filters = 5,
-    /// BIP157/158 filter-header rows.
-    FilterHeaders = 6,
     /// Coinstats index rows.
-    Coinstats = 7,
+    Coinstats = 5,
     /// Block-tree node rows.
-    BlockTree = 8,
+    BlockTree = 6,
     /// UTXO snapshot metadata rows.
-    UtxoMeta = 9,
+    UtxoMeta = 7,
     /// Serialized block body rows.
-    BlockBodies = 10,
+    BlockBodies = 8,
     /// Per-block UTXO undo records, needed to disconnect a block during a reorg.
-    UndoData = 11,
+    UndoData = 9,
 }
 
 impl ColumnFamily {
@@ -36,8 +32,6 @@ impl ColumnFamily {
         Self::BlockHeaders,
         Self::Funding,
         Self::Spending,
-        Self::Filters,
-        Self::FilterHeaders,
         Self::Coinstats,
         Self::BlockTree,
         Self::UtxoMeta,
@@ -53,8 +47,6 @@ impl ColumnFamily {
             Self::BlockHeaders => "block_headers",
             Self::Funding => "funding",
             Self::Spending => "spending",
-            Self::Filters => "filters",
-            Self::FilterHeaders => "filter_headers",
             Self::Coinstats => "coinstats",
             Self::BlockTree => "block_tree",
             Self::UtxoMeta => "utxo_meta",
@@ -76,13 +68,11 @@ impl ColumnFamily {
             2 => Some(Self::BlockHeaders),
             3 => Some(Self::Funding),
             4 => Some(Self::Spending),
-            5 => Some(Self::Filters),
-            6 => Some(Self::FilterHeaders),
-            7 => Some(Self::Coinstats),
-            8 => Some(Self::BlockTree),
-            9 => Some(Self::UtxoMeta),
-            10 => Some(Self::BlockBodies),
-            11 => Some(Self::UndoData),
+            5 => Some(Self::Coinstats),
+            6 => Some(Self::BlockTree),
+            7 => Some(Self::UtxoMeta),
+            8 => Some(Self::BlockBodies),
+            9 => Some(Self::UndoData),
             _ => None,
         }
     }
@@ -95,13 +85,11 @@ impl ColumnFamily {
             Self::BlockHeaders => 2,
             Self::Funding => 3,
             Self::Spending => 4,
-            Self::Filters => 5,
-            Self::FilterHeaders => 6,
-            Self::Coinstats => 7,
-            Self::BlockTree => 8,
-            Self::UtxoMeta => 9,
-            Self::BlockBodies => 10,
-            Self::UndoData => 11,
+            Self::Coinstats => 5,
+            Self::BlockTree => 6,
+            Self::UtxoMeta => 7,
+            Self::BlockBodies => 8,
+            Self::UndoData => 9,
         }
     }
 }

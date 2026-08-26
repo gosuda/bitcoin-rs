@@ -1499,6 +1499,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "kernel")]
     fn prepared_unit<'b>(
         txs: &'b [Transaction],
         resolved: Vec<Vec<Option<TxOut>>>,

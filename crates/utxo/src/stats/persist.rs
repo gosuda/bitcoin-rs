@@ -1,6 +1,6 @@
 use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError, WriteBatch};
 
-use crate::{CoinStats, CoinStatsDecodeError};
+use crate::stats::{CoinStats, CoinStatsDecodeError};
 
 /// Persistence error for coinstats rows.
 #[derive(Debug, thiserror::Error)]

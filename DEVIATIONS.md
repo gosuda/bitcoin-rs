@@ -156,17 +156,38 @@ port). The `sighash.json` vector runner skips rows whose script-code contains
 `OP_CODESEPARATOR` and reports the count in the test output. The skipped rows
 are a known v1 gap covered by the same `hand-rolled` follow-up.
 
-## 3. Task 9 — BIP157/158 vector-compatible byte order and SipHash rounds
+## 3. Task 9 — BIP157/158 compact-filter index removed
 
-Task 9 says filter headers are `sha256d(prev_header || sha256d(filter_bytes))`
-and names `SipHash-1-3` for GCS element hashing. Bitcoin Core's
-`blockfilters.json` vectors and implementation use
-`sha256d(sha256d(filter_bytes) || prev_header)` for BIP157 filter headers and
-`CSipHasher`, Core's SipHash-2-4 implementation, for BIP158 range hashing.
+Task 9 specced `crates/filters` (BIP157 cfheaders + BIP158 GCS filter index),
+the `-blockfilterindex` option, and the `getblockfilter` RPC. The
+implementation is removed (issue #143): the node never advertised
+`NODE_COMPACT_FILTERS` and had no P2P handler for `getcfilters`/`getcfheaders`/
+`getcfcheckpt`, so the index was unreachable by BIP157 light clients and served
+only `getblockfilter`. Derived optional state with no in-tree consumer does not
+earn its storage, configuration, and maintenance cost.
 
-The filters crate follows Bitcoin Core's vector-compatible behavior because the
-Task 9 acceptance test explicitly requires byte-identical filter and header
-matches against `bitcoin/src/test/data/blockfilters.json`.
+Compatibility deltas after removal:
+
+- `getblockfilter` RPC: method not found (Core serves it only with
+  `-blockfilterindex=1` anyway).
+- `getindexinfo` no longer reports a `basicblockfilterindex` entry; Core also
+  omits indexes that are not enabled, so the previous unconditional entry
+  over-reported.
+- `-blockfilterindex` is no longer recognized by the CLI: clap rejects the
+  unknown option and exits. The `bitcoin.conf` compatibility reader and
+  environment layer ignore the removed `blockfilterindex` /
+  `BITCOIN_RS_BLOCKFILTERINDEX` keys, like other unsupported keys in those
+  layers.
+- Storage: the `filters`/`filter_headers` column families are gone and the
+  surviving `ColumnFamily` discriminants were renumbered — a breaking change
+  under `docs/policies/db-migration.md` §3.1. fjall, MDBX, and redb open
+  tables by name and ignore the retired ones, so those datadirs reopen
+  unchanged; a RocksDB datadir from a binary that created the retired families
+  must be wiped and resynced per §6.2, and an orphaned `<datadir>/filters`
+  directory from an old binary is simply unused.
+
+If a concrete BIP157/158 consumer appears, reintroduce the feature around that
+requirement rather than the speculative shape Task 9 defined.
 
 ## §4 — T18 node lifecycle scaffold
 
@@ -192,9 +213,11 @@ Subsystem wiring lands in a follow-up.
 `node::run`. `Config::load_from_args` distinguishes `clap::Error` kinds
 `DisplayHelp` / `DisplayVersion` and calls `err.exit()` so `bitcoin-rs
 --help` and `--version` return exit code 0 — the standard clap idiom.
-A `utreexo` feature was added to `crates/node/Cargo.toml` as a
-passthrough to `dep:bitcoin-rs-utreexo` to make the bin's feature table
-resolvable.
+A `utreexo` feature passthrough existed in `crates/node/Cargo.toml`; it was
+removed together with the whole Utreexo node mode (issue #144): the node
+never shipped a proof transport, accumulator lifecycle, or compact-mode
+recovery, so the partial integration carried a second validation and pruning
+architecture with no consumer.
 
 - Files: `bin/bitcoin-rs/{Cargo.toml,src/main.rs,tests/cli_help.rs}`, `crates/node/{Cargo.toml,src/config.rs}`
 - Commit: 47af93b
@@ -279,7 +302,8 @@ serving remains deferred.
 
 - **No historical DAA fixture parity.** Header acceptance and active-chain retarget calculation are unit-covered, but they are not yet checked against historical mainnet/testnet retarget windows.
 - **Contextual transaction checks remain node-local.** BIP113 MTP nLocktime, BIP68 sequence locks, and BIP9 CSV/Segwit activation are wired through the node apply path, but the lower-level consensus crate still exposes `verify_transaction(tx, prevouts, height, flags)` rather than a reusable context-rich transaction API.
-- **Electrum index updates are not triggered by tip advance.** Coinstats (`handles.coin_stats.finish_block`) and BIP158 filter generation (`handles.filter_index.put_filter`) are wired into `apply_block` (`crates/node/src/apply.rs`); only the Electrum index still waits on a listener.
+- **No persisted block-body serving path for P2P.** P2P `getdata` can serve bodies still present in the in-memory `BlockRecord` cache, but it does not read persisted pruned-body rows after restart or cache eviction; unavailable inventory is reported with `notfound`.
+- **Electrum index updates are not triggered by tip advance.** Coinstats (`handles.coin_stats.finish_block`) is wired into `apply_block` (`crates/node/src/apply.rs`); only the Electrum index still waits on a listener.
 - **G14 empirical validation still deferred.** The `faster than Bitcoin
   Core` claim requires multi-day same-window live mainnet IBD against
   `bitcoin-rs` and `bitcoind`. Operator responsibility.

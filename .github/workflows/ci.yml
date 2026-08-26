@@ -4,7 +4,24 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Every pull request, not only those based on `main`. A stacked PR targets
+    # the branch below it, and `branches: [main]` excluded those by
+    # construction -- five open PRs had never been built or tested, while
+    # reporting no failing checks, which reads exactly like green.
+    branches: ['**']
+
+# Bounded because the trigger above is wider: a superseded pull-request run is
+# cancelled when a newer commit lands on the same PR.
+#
+# `main` pushes are put in a group of their own, keyed by `run_id`, rather than
+# relying on `cancel-in-progress: false`. That flag only protects a run that is
+# already executing: with a shared group, a `main` run that is still *pending*
+# behind an in-progress one is cancelled when a third push arrives, and its
+# commit then has no CI record at all. A unique group per run means `main`
+# pushes never queue against each other and so are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: never
@@ -15,13 +32,6 @@ env:
   FULL_NODE_FEATURES: "rocksdb,fjall,redb,mdbx,kernel,zmq"
 
 jobs:
-  wallet-no-seckey:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          ! grep -r 'SecretKey\|secp256k1::Secret\|seckey' crates/wallet/src
-
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -90,9 +100,9 @@ jobs:
       # Crate-level bench targets are unreachable from -p bitcoin-rs; compile
       # them in both allocator configurations so bench-mimalloc breakage is
       # visible to CI.
-      - run: cargo bench -p bitcoin-rs-coinstats -p bitcoin-rs-utxo --no-run
+      - run: cargo bench -p bitcoin-rs-utxo --no-run
       - run: |
-          cargo bench -p bitcoin-rs-coinstats -p bitcoin-rs-utxo --no-run \
+          cargo bench -p bitcoin-rs-utxo --no-run \
             --features bench-mimalloc
 
   deny:

@@ -125,7 +125,7 @@ txids may break. Core-style script compression, the other 3 B/output, is
 untouched.
 
 At 83% of budget on the UTXO path alone — before `txindex` and
-`blockfilterindex`, which the G14 budget requires — that 12-point margin is
+the remaining derived indexes, which the G14 budget requires — that 12-point margin is
 worth having, but it does not by itself settle the gate.
 
 **Step 2.2 is justified and done. Step 2.4 is not**: fragmentation measured 5%
@@ -201,7 +201,7 @@ instead of 433 fixture ones.
 
 What this does **not** measure is full-node tip RSS: it loads the UTXO set alone,
 with no fjall, CoinStats, block-record log or runtime alongside it. The G14 gate
-still needs a synced tip node with `txindex` and `blockfilterindex`.
+still needs a synced tip node with `txindex` and the remaining derived indexes.
 
 ```
 cargo run -p bitcoin-rs-utxo --example snapshot_memory --release -- \
@@ -417,6 +417,6 @@ first.
   encoding table above is used to make a decision.
 - The script mix is representative, not measured from chainstate.
 - System allocator, not the mimalloc production links.
-- Whether the 13.83 GiB run had `txindex` and `blockfilterindex` enabled is not
+- Whether the 13.83 GiB run had `txindex` and all remaining derived indexes enabled is not
   recorded, so the ~7 GiB residual cannot yet be split between index structures
   and everything else.

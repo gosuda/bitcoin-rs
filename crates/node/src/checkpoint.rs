@@ -4,11 +4,11 @@ use std::path::Path;
 use bitcoin::block::Header;
 use bitcoin::consensus::{Encodable, encode::deserialize};
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot, accept_headers};
-use bitcoin_rs_coinstats::{
-    CoinStats, CoinStatsAccumulator, CoinStatsListener, scan_coin_stats,
-    stats::COIN_STATS_ENCODED_LEN,
-};
 use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_utxo::stats::{
+    CoinStats, CoinStatsAccumulator, CoinStatsListener, coin_stats::COIN_STATS_ENCODED_LEN,
+    scan_coin_stats,
+};
 use bitcoin_rs_utxo::{
     UtxoSet, read_snapshot_strict_v4_observed, snapshot::read_snapshot_strict_v4,
     write_snapshot_observed,
@@ -44,6 +44,12 @@ const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
 const MANIFEST_FORMAT: &str = "bitcoin-rs-chainstate-checkpoint";
 const HEADER_CODEC: &str = "bitcoin-rs-canonical-headers-v2";
 const UTXO_CODEC: &str = "bitcoin-rs-utxo-spendable-v1";
+// This identifier is written into `manifest-v1.json` and matched on load, so it
+// is an on-disk value, not a crate reference. `bitcoin-rs-coinstats` was merged
+// into `bitcoin-rs-utxo` (issue #164) and no longer exists as a crate; the
+// string must stay as it is anyway. Renaming it to match the new module would
+// make every existing checkpoint fail its codec check and fall back to a full
+// resync -- see `docs/policies/db-migration.md` §2.4.
 const COINSTATS_CODEC: &str = "bitcoin-rs-coinstats";
 const CURRENT_VERSION: u32 = 1;
 const MANIFEST_VERSION: u32 = 1;
@@ -565,7 +571,7 @@ pub(crate) enum CheckpointError {
     #[error("UTXO checkpoint failed: {0}")]
     Utxo(#[from] bitcoin_rs_utxo::UtxoError),
     #[error("CoinStats checkpoint decode failed: {0}")]
-    CoinStats(#[from] bitcoin_rs_coinstats::CoinStatsDecodeError),
+    CoinStats(#[from] bitcoin_rs_utxo::stats::CoinStatsDecodeError),
     #[error("checkpoint JSON failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("checkpoint invariant failed: {0}")]
@@ -1839,6 +1845,34 @@ fn decode_nibble(byte: u8) -> u8 {
 #[cfg(test)]
 mod tests {
 
+    /// The checkpoint manifest's codec identifiers are on-disk values.
+    ///
+    /// Pinned as literals rather than through the constants, because comparing a
+    /// constant to itself proves nothing: the writer and the reader use the same
+    /// three names, so renaming one keeps a single binary perfectly
+    /// self-consistent while every checkpoint already on disk stops loading and
+    /// falls back to a full resync (`docs/policies/db-migration.md` 2.4). That
+    /// failure is invisible to a round-trip test and expensive in production.
+    ///
+    /// `bitcoin-rs-coinstats` is the case that motivated this: the crate of that
+    /// name was merged into `bitcoin-rs-utxo` (issue #164), so the identifier now
+    /// spells something that no longer exists and reads like leftovers. It is
+    /// not. Changing it to match the new module is the mistake this test exists
+    /// to stop.
+    ///
+    /// `HEADER_CODEC` carries a `-v2` suffix because the header row gained the
+    /// cumulative transaction count, which is a deliberate format change that
+    /// must invalidate older rows. Only such a format change may move a literal
+    /// here.
+    #[test]
+    fn manifest_codec_identifiers_are_frozen() {
+        assert_eq!(super::HEADER_CODEC, "bitcoin-rs-canonical-headers-v2");
+        assert_eq!(super::UTXO_CODEC, "bitcoin-rs-utxo-spendable-v1");
+        assert_eq!(super::COINSTATS_CODEC, "bitcoin-rs-coinstats");
+        assert_eq!(super::CURRENT_FORMAT, "bitcoin-rs-chainstate-current");
+        assert_eq!(super::MANIFEST_FORMAT, "bitcoin-rs-chainstate-checkpoint");
+    }
+
     use std::fs;
     use std::io::Cursor;
     use std::path::Path;
@@ -1848,8 +1882,8 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::{Amount, BlockHash, CompactTarget, ScriptBuf, TxMerkleNode, TxOut};
     use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot, accept_headers};
-    use bitcoin_rs_coinstats::{CoinStats, CoinStatsListener, scan_coin_stats};
     use bitcoin_rs_primitives::{Hash256, Network, OutPoint};
+    use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
     use parking_lot::RwLock;
     use sha2::{Digest, Sha256};

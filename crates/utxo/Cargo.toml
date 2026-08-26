@@ -36,6 +36,7 @@ nohash-hasher.workspace = true
 rayon.workspace = true
 bytemuck.workspace = true
 zerocopy.workspace = true
+ruint.workspace = true
 tinyvec.workspace = true
 smallvec.workspace = true
 lz4_flex.workspace = true
@@ -60,4 +61,8 @@ harness = false
 
 [[bench]]
 name = "record_codec"
+harness = false
+
+[[bench]]
+name = "coin_stats_hotpath"
 harness = false

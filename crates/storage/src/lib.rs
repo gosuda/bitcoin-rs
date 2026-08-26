@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+extern crate alloc;
+
 /// Append-only flat files for immutable block bodies.
 pub mod block_file;
 /// Logical column-family names shared by all storage backends.
@@ -9,6 +11,8 @@ pub mod column_families;
 pub mod corpus;
 /// Storage error type.
 pub mod error;
+/// Retention and deletion of block bodies and undo rows.
+pub mod pruning;
 /// Backend-neutral key-value store traits.
 pub mod trait_;
 

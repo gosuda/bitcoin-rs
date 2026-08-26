@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_pruning::policy::CORE_REORG_SAFETY_MARGIN;
-use bitcoin_rs_pruning::{
+use bitcoin_rs_storage::pruning::policy::CORE_REORG_SAFETY_MARGIN;
+use bitcoin_rs_storage::pruning::{
     PrunePolicy, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{ColumnFamily, FlatFileBlockStore, KvStore, WriteBatch};
@@ -33,36 +33,6 @@ use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 
 use crate::Config;
-
-type FilterIndexHandle = Arc<Box<dyn bitcoin_rs_filters::FilterIndexLike>>;
-
-struct DisabledFilterIndex;
-
-impl bitcoin_rs_filters::FilterIndexLike for DisabledFilterIndex {
-    fn wants_filters(&self) -> bool {
-        false
-    }
-
-    fn put_filter(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-        _prev_header: bitcoin_rs_primitives::Hash256,
-        _filter_bytes: &[u8],
-    ) -> std::result::Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_filters::FilterIndexError>
-    {
-        Ok(bitcoin_rs_primitives::Hash256::default())
-    }
-
-    fn filter_header(
-        &self,
-        _block_hash: bitcoin_rs_primitives::Hash256,
-    ) -> std::result::Result<
-        Option<bitcoin_rs_primitives::Hash256>,
-        bitcoin_rs_filters::FilterIndexError,
-    > {
-        Ok(None)
-    }
-}
 
 // One active generation of outbound requests is enough to keep the drain fed;
 // extra backlog is overload and must fail fast at producers.
@@ -196,12 +166,6 @@ pub enum ApplyError {
         /// Block whose body was rejected.
         hash: bitcoin_rs_primitives::Hash256,
     },
-    /// Reading a BIP157 filter header failed.
-    ///
-    /// A broken backend, not a missing row: an absent header is answered by
-    /// skipping the filter write, which keeps the chain moving.
-    #[error("filter header lookup: {0}")]
-    FilterHeaderLookup(#[source] bitcoin_rs_filters::FilterIndexError),
     /// Rewinding the block-level coinstats failed.
     ///
     /// The per-coin fields ride the UTXO change listener and are already
@@ -209,7 +173,7 @@ pub enum ApplyError {
     /// directly, and a refusal here means they do not describe the block being
     /// disconnected.
     #[error("coinstats rewind: {0}")]
-    CoinStatsRewind(#[source] bitcoin_rs_coinstats::CoinStatsRewindError),
+    CoinStatsRewind(#[source] bitcoin_rs_utxo::stats::CoinStatsRewindError),
 }
 
 /// The outcome of a refused or failed block disconnect.
@@ -444,16 +408,18 @@ impl NodeStorage {
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>> {
-        let key = bitcoin_rs_pruning::block_body_key(height, hash);
+        let key = bitcoin_rs_storage::pruning::block_body_key(height, hash);
         match self {
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
+            Self::RocksDb(store) => {
+                Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?)
+            }
             #[cfg(feature = "fjall")]
-            Self::Fjall(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
+            Self::Fjall(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
             #[cfg(feature = "redb")]
-            Self::Redb(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
+            Self::Redb(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
             #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => Ok(store.get(bitcoin_rs_pruning::BLOCK_DATA_CF, &key)?),
+            Self::Mdbx(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
         }
     }
 
@@ -463,7 +429,7 @@ impl NodeStorage {
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>> {
-        let key = bitcoin_rs_pruning::block_undo_key(height, hash);
+        let key = bitcoin_rs_storage::pruning::block_undo_key(height, hash);
         match self {
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
@@ -854,39 +820,6 @@ fn open_tx_index(config: &Config) -> Result<Option<OpenTxIndex>> {
     }
 }
 
-fn open_filter_index(config: &Config) -> Result<FilterIndexHandle> {
-    if !config.blockfilterindex {
-        let filter_index: Box<dyn bitcoin_rs_filters::FilterIndexLike> =
-            Box::new(DisabledFilterIndex);
-        return Ok(Arc::new(filter_index));
-    }
-
-    let filters_dir = config.data_dir.join("filters");
-    std::fs::create_dir_all(&filters_dir)
-        .with_context(|| format!("create filters_dir {}", filters_dir.display()))?;
-    let filter_index: Box<dyn bitcoin_rs_filters::FilterIndexLike> =
-        match config.storage_backend.as_str() {
-            #[cfg(feature = "rocksdb")]
-            "rocksdb" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::RocksDbStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            #[cfg(feature = "fjall")]
-            "fjall" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::FjallStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            #[cfg(feature = "redb")]
-            "redb" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::RedbStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            #[cfg(feature = "mdbx")]
-            "mdbx" => Box::new(bitcoin_rs_filters::FilterIndex::new(
-                bitcoin_rs_storage::MdbxStore::open(&filters_dir).map_err(anyhow::Error::new)?,
-            )),
-            other => bail!("unsupported storage backend for filter index: {other}"),
-        };
-    Ok(Arc::new(filter_index))
-}
-
 /// Aggregate handle to a running node.
 pub struct NodeState {
     /// Height the last clean checkpoint would restore to, 0 when none exists.
@@ -901,11 +834,10 @@ pub struct NodeState {
     storage: NodeStorage,
     block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
     utxo: Arc<UtxoSet>,
-    coin_stats: Arc<bitcoin_rs_coinstats::CoinStatsListener>,
+    coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
     tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
     tx_index_worker: Option<crate::txindex_worker::TxIndexWorker>,
     tx_index_query: Option<Arc<crate::txindex_worker::TxIndexQueryEngine>>,
-    filter_index: FilterIndexHandle,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
@@ -1022,7 +954,6 @@ impl NodeState {
         let block_body_store =
             storage.block_body_store(Arc::clone(&block_files), &config.data_dir)?;
 
-        let filter_index = open_filter_index(&config)?;
         #[cfg(feature = "zmq")]
         let zmq_publications = config.zmq_publications();
         #[cfg(feature = "zmq")]
@@ -1059,7 +990,7 @@ impl NodeState {
                 }
                 (
                     bitcoin_rs_utxo::UtxoSet::new(),
-                    bitcoin_rs_coinstats::CoinStats::default(),
+                    bitcoin_rs_utxo::stats::CoinStats::default(),
                     bitcoin_rs_chain::BlockTree::new(),
                     None,
                     ResumeSource::Cold,
@@ -1069,7 +1000,7 @@ impl NodeState {
                 tracing::warn!(%reason, "chainstate payload rejected; retaining validated headers only");
                 (
                     bitcoin_rs_utxo::UtxoSet::new(),
-                    bitcoin_rs_coinstats::CoinStats::default(),
+                    bitcoin_rs_utxo::stats::CoinStats::default(),
                     tree,
                     None,
                     ResumeSource::HeadersOnly,
@@ -1090,7 +1021,8 @@ impl NodeState {
                 )
             }
         };
-        let coin_stats_listener = bitcoin_rs_coinstats::CoinStatsListener::new(initial_coin_stats);
+        let coin_stats_listener =
+            bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
         // The rolling coin-stats listener does per-coin MuHash + event work on
         // the block-apply hot path. Bitcoin Core does not maintain rolling UTXO
         // stats during IBD by default; gettxoutsetinfo scans on demand instead
@@ -1166,12 +1098,10 @@ impl NodeState {
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
             tx_index_runtime: tx_index_runtime.clone(),
-            filter_index: Arc::clone(&filter_index),
             mempool: Arc::clone(&mempool),
             blocks: Arc::clone(&blocks),
             transactions: Arc::clone(&transactions),
             zmq_publisher: Arc::clone(&zmq_publisher),
-            filter_header_cache: Arc::new(Mutex::new(None)),
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
             g2_muhash_sampler,
@@ -1229,7 +1159,6 @@ impl NodeState {
             tx_index_runtime,
             tx_index_worker,
             tx_index_query,
-            filter_index,
             prune_service,
             zmq_publisher,
             active_zmq_notifications,
@@ -1345,7 +1274,7 @@ impl NodeState {
 
     /// Returns the shared coinstats listener handle.
     #[must_use]
-    pub fn coin_stats(&self) -> Arc<bitcoin_rs_coinstats::CoinStatsListener> {
+    pub fn coin_stats(&self) -> Arc<bitcoin_rs_utxo::stats::CoinStatsListener> {
         Arc::clone(&self.coin_stats)
     }
 
@@ -1383,12 +1312,6 @@ impl NodeState {
             let adapter: Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery> = query.clone();
             adapter
         })
-    }
-
-    /// Returns the shared compact-filter index handle.
-    #[must_use]
-    pub fn filter_index(&self) -> FilterIndexHandle {
-        Arc::clone(&self.filter_index)
     }
 
     /// Returns the manual pruning service when pruning is enabled.
@@ -1789,49 +1712,6 @@ mod tests {
     }
 
     #[test]
-    fn open_skips_filter_index_when_disabled() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        let state = NodeState::open(config)?;
-        let a = state.filter_index();
-        let b = state.filter_index();
-        assert!(!a.wants_filters(), "blockfilterindex disabled by default");
-        assert!(
-            !state.data_dir().join("filters").exists(),
-            "disabled blockfilterindex must not create storage"
-        );
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "filter_index handle stable across calls"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn open_constructs_filter_index_when_enabled() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.blockfilterindex = true;
-        let state = NodeState::open(config)?;
-        let a = state.filter_index();
-        let b = state.filter_index();
-        assert!(a.wants_filters(), "enabled blockfilterindex builds filters");
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "filter_index handle stable across calls"
-        );
-        assert!(
-            state.data_dir().join("filters").exists(),
-            "enabled blockfilterindex must create storage"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn open_constructs_block_sync_orchestrator() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::Config::default_for_network(crate::Network::Regtest);
@@ -2160,8 +2040,8 @@ mod tests {
         std::fs::create_dir_all(config.data_dir.join("chainstate"))?;
         let store = bitcoin_rs_storage::FjallStore::open(config.data_dir.join("chainstate"))?;
         store.put(
-            bitcoin_rs_pruning::BLOCK_DATA_CF,
-            &bitcoin_rs_pruning::block_body_key(
+            bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
+            &bitcoin_rs_storage::pruning::block_body_key(
                 1,
                 bitcoin_rs_primitives::Hash256::from_le_bytes(&[1_u8; 32]),
             ),
@@ -2411,12 +2291,12 @@ mod tests {
             };
             let mut batch = store.new_batch();
             batch.put(
-                bitcoin_rs_pruning::BLOCK_DATA_CF,
-                &bitcoin_rs_pruning::block_body_key(height, hash),
+                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
+                &bitcoin_rs_storage::pruning::block_body_key(height, hash),
                 &position.encode(),
             );
             batch.put(
-                bitcoin_rs_pruning::BLOCK_DATA_CF,
+                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
                 &bitcoin_rs_storage::block_file_max_height_key(0),
                 &bitcoin_rs_storage::encode_block_file_max_height(height),
             );
@@ -2427,7 +2307,7 @@ mod tests {
         fn metadata_exists<S: KvStore>(store: &S) -> anyhow::Result<bool> {
             Ok(store
                 .get(
-                    bitcoin_rs_pruning::BLOCK_DATA_CF,
+                    bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
                     &bitcoin_rs_storage::block_file_max_height_key(0),
                 )?
                 .is_some())
@@ -2500,7 +2380,7 @@ mod tests {
         fn seed_file_height<S: KvStore>(store: &S, height: u32) -> anyhow::Result<()> {
             let mut batch = store.new_batch();
             batch.put(
-                bitcoin_rs_pruning::BLOCK_DATA_CF,
+                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
                 &bitcoin_rs_storage::block_file_max_height_key(0),
                 &bitcoin_rs_storage::encode_block_file_max_height(height),
             );
@@ -2954,7 +2834,7 @@ mod tests {
         );
         let listener_after_apply = resumed.coin_stats().snapshot();
         let mut rescanned = resumed.utxo().with_stable_view(|view| {
-            bitcoin_rs_coinstats::scan_coin_stats(view, next_tip.height, true)
+            bitcoin_rs_utxo::stats::scan_coin_stats(view, next_tip.height, true)
         })?;
         rescanned.tx_count = listener_after_apply.tx_count;
         assert_ne!(
@@ -3046,7 +2926,7 @@ mod tests {
         resumed.apply_block(&mined_regtest_child(genesis.block_hash())?)?;
         let rolling = resumed.coin_stats().snapshot();
         let mut scanned = resumed.utxo().with_stable_view(|view| {
-            bitcoin_rs_coinstats::scan_coin_stats(view, rolling.height, true)
+            bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
         })?;
         scanned.tx_count = rolling.tx_count;
         assert_eq!(rolling, scanned);

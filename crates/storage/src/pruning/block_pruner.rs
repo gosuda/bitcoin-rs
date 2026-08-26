@@ -1,12 +1,12 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_storage::{
+use crate::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvStore, StorageError, WriteBatch,
     decode_block_file_max_height,
 };
+use bitcoin_rs_primitives::Hash256;
 
-use crate::{PruneError, PruneOutcome, PrunePolicy, row_len_u64};
+use crate::pruning::{PruneError, PruneOutcome, PrunePolicy, row_len_u64};
 
 const BLOCK_BODY_PREFIX: u8 = b'b';
 pub(crate) const BLOCK_BODY_PREFIX_BYTES: &[u8] = b"b";

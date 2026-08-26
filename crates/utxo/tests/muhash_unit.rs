@@ -1,5 +1,5 @@
 //! `MuHash3072` unit tests.
-use bitcoin_rs_coinstats::MuHash3072;
+use bitcoin_rs_utxo::stats::MuHash3072;
 
 const IDENTITY: [u8; 384] = {
     let mut bytes = [0_u8; 384];
