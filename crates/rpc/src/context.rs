@@ -1392,6 +1392,11 @@ impl Context {
     /// The count is read from the authoritative block-tree node at the applied
     /// tip. Block application maintains it there, and the chainstate checkpoint
     /// restores it on restart, so it survives across process boundaries.
+    ///
+    /// Takes a `block_tree` read lock, so a caller must not already hold one:
+    /// `parking_lot` read locks are not reentrant, and a writer queued between
+    /// the two acquisitions would deadlock the thread against itself. The one
+    /// caller, `getblockchaininfo`, drops its guard before calling this.
     #[must_use]
     pub fn chain_tx_count(&self) -> Option<u64> {
         let tip = self.applied_tip.load_full()?;
