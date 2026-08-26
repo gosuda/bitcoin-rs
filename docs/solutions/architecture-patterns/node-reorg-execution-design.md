@@ -65,6 +65,10 @@ Done:
   absent tip can commit the complete prepared prefix; the next pass repairs it.
 * A fatal disconnect closes apply admission and sets the process shutdown token.
   The durable marker prevents a restart on torn authoritative state.
+* Whole-UTXO RPC scans share the node's chain-transition mutex. In particular,
+  `scantxoutset` captures its UTXO view and applied-tip metadata while connects
+  and disconnects are excluded, so response height, hash, confirmations, and
+  unspents describe one authoritative state.
 
 Still open: transaction reconsideration, filter-index backfill, real crash
 replay, and the ignored live `g10_reorg_deep` gate. ZMQ now publishes block
@@ -182,6 +186,7 @@ Done:
 | Body acquisition | Each attempt loads all disconnect bodies and the contiguous connect prefix from bounded staging first, then the fallible `PruneBodyStore`; there is no applied-record body cache. The first missing connect body prevents mutation. A later missing body follows a coherent committed prefix. Each committed connect retires its exact staging and download-window entry; invalid subtree ownership is purged. |
 | Fatal lifecycle | `Fatal` and `MarkerStuck` close apply admission while the transition lock is held; sync sets the shared process shutdown token |
 | RPC invalidation | `invalidateblock` delegates through `ChainControl`; unknown blocks map to Core not-found, genesis is refused, required bodies are preflighted before header mutation, one transition witness spans invalidation and branch switching, and a successful active-tip rollback emits `pubsequence D` |
+| Whole-chainstate RPC reads | `scantxoutset` shares the chain-transition mutex and reads its UTXO scan plus applied-tip identity under that guard; it cannot publish metadata from the opposite side of a connect or disconnect. |
 
 Open:
 

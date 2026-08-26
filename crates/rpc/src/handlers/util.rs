@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::str::FromStr as _;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -224,12 +225,9 @@ pub(crate) fn getdescriptorinfo(_ctx: &Arc<Context>, params: &Value) -> Result<V
     }))
 }
 
-pub(crate) fn deriveaddresses(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let descriptor = required_str(params, 0, "descriptor is required")?;
-    // Strip optional #checksum suffix.
-    let payload = descriptor
-        .rsplit_once('#')
-        .map_or(descriptor, |(body, _)| body);
+    let payload = required_checked_descriptor_payload(descriptor)?;
     // Match addr(...) wrapper.
     if let Some(inner) = strip_addr_wrapper(payload) {
         if inner.contains('*') {
@@ -237,11 +235,40 @@ pub(crate) fn deriveaddresses(_ctx: &Arc<Context>, params: &Value) -> Result<Val
             // is wired. For now return empty since we cannot enumerate.
             return Ok(json!([]));
         }
-        return Ok(json!([inner]));
+        let address = bitcoin::Address::from_str(inner)
+            .map_err(|_| RpcError::InvalidParams("addr() contains an invalid address"))?;
+        let address = address
+            .require_network(bitcoin_network(ctx.chain_network))
+            .map_err(|_| RpcError::InvalidParams("addr() address is for the wrong network"))?;
+        return Ok(json!([address.to_string()]));
     }
     // TODO(miniscript): other wrappers (pkh, sh, wpkh, tr, wsh, multi, ...) need
     // miniscript-based key derivation. Return empty until then.
     Ok(json!([]))
+}
+
+fn required_checked_descriptor_payload(descriptor: &str) -> Result<&str, RpcError> {
+    let Some((body, checksum)) = descriptor.rsplit_once('#') else {
+        return Err(RpcError::InvalidParams("descriptor checksum is required"));
+    };
+    let expected = descriptor_checksum(body).ok_or(RpcError::InvalidParams(
+        "descriptor contains invalid characters",
+    ))?;
+    if checksum == expected {
+        Ok(body)
+    } else {
+        Err(RpcError::InvalidParams("descriptor checksum mismatch"))
+    }
+}
+
+const fn bitcoin_network(network: bitcoin_rs_primitives::Network) -> bitcoin::Network {
+    match network {
+        bitcoin_rs_primitives::Network::Mainnet => bitcoin::Network::Bitcoin,
+        bitcoin_rs_primitives::Network::Testnet3 => bitcoin::Network::Testnet,
+        bitcoin_rs_primitives::Network::Testnet4 => bitcoin::Network::Testnet4,
+        bitcoin_rs_primitives::Network::Signet => bitcoin::Network::Signet,
+        bitcoin_rs_primitives::Network::Regtest => bitcoin::Network::Regtest,
+    }
 }
 
 /// Returns the payload inside an `addr(...)` descriptor, if `payload` is one.
@@ -513,7 +540,10 @@ mod deriveaddresses_tests {
     #[test]
     fn deriveaddresses_returns_addr_argument_for_single_addr_descriptor() {
         let ctx = Arc::new(Context::new());
-        let result = deriveaddresses(&ctx, &json!(["addr(1111111111111111111114oLvT2)"]))
+        let payload = "addr(1111111111111111111114oLvT2)";
+        let checksum = descriptor_checksum(payload).unwrap_or_else(|| panic!("checksum failed"));
+        let descriptor = format!("{payload}#{checksum}");
+        let result = deriveaddresses(&ctx, &json!([descriptor]))
             .unwrap_or_else(|err| panic!("deriveaddresses failed: {err}"));
         let Some(arr) = result.as_array() else {
             panic!("expected array: {result:?}");
@@ -526,20 +556,40 @@ mod deriveaddresses_tests {
     }
 
     #[test]
-    fn deriveaddresses_handles_checksum_suffix() {
+    fn deriveaddresses_rejects_missing_checksum() {
         let ctx = Arc::new(Context::new());
-        let result = deriveaddresses(&ctx, &json!(["addr(bc1qfoo)#aaaaaaaa"]))
-            .unwrap_or_else(|err| panic!("deriveaddresses failed: {err}"));
-        let Some(arr) = result.as_array() else {
-            panic!("expected array: {result:?}");
-        };
-        assert_eq!(arr.len(), 1);
+        let result = deriveaddresses(&ctx, &json!(["addr(1111111111111111111114oLvT2)"]));
+        assert!(
+            matches!(result, Err(RpcError::InvalidParams(message)) if message.contains("checksum is required"))
+        );
+    }
+
+    #[test]
+    fn deriveaddresses_rejects_bad_checksum() {
+        let ctx = Arc::new(Context::new());
+        let result = deriveaddresses(&ctx, &json!(["addr(1111111111111111111114oLvT2)#aaaaaaaa"]));
+        assert!(
+            matches!(result, Err(RpcError::InvalidParams(message)) if message.contains("checksum mismatch"))
+        );
+    }
+
+    #[test]
+    fn deriveaddresses_rejects_fake_address_with_valid_descriptor_checksum() {
+        let ctx = Arc::new(Context::new());
+        let payload = "addr(not-an-address)";
+        let checksum = descriptor_checksum(payload).unwrap_or_else(|| panic!("checksum failed"));
+        let result = deriveaddresses(&ctx, &json!([format!("{payload}#{checksum}")]));
+        assert!(
+            matches!(result, Err(RpcError::InvalidParams(message)) if message.contains("invalid address"))
+        );
     }
 
     #[test]
     fn deriveaddresses_empty_for_ranged_descriptors() {
         let ctx = Arc::new(Context::new());
-        let result = deriveaddresses(&ctx, &json!(["wpkh(xpub.../0/*)"]))
+        let payload = "wpkh(xpub.../0/*)";
+        let checksum = descriptor_checksum(payload).unwrap_or_else(|| panic!("checksum failed"));
+        let result = deriveaddresses(&ctx, &json!([format!("{payload}#{checksum}")]))
             .unwrap_or_else(|err| panic!("deriveaddresses failed: {err}"));
         let Some(arr) = result.as_array() else {
             panic!("expected array: {result:?}");

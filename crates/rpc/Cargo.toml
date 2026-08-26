@@ -31,6 +31,7 @@ bitcoin-rs-mining.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-pruning.workspace = true
 bitcoin.workspace = true
+miniscript.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

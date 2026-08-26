@@ -13,7 +13,7 @@ use bitcoin_rs_primitives::{Hash256, Network};
 use compact_str::CompactString;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use hashbrown::HashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
@@ -708,6 +708,8 @@ pub struct Context {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best-applied-block tip snapshot published after block application.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Serializes whole-chainstate RPC reads with node-owned connect/disconnect transitions.
+    chain_transition: Arc<Mutex<()>>,
     /// Cumulative transaction count of the applied chain, `0` when unknown.
     ///
     /// Maintained by block application and restored from the chainstate
@@ -817,6 +819,7 @@ impl Context {
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip: Arc::new(ArcSwapOption::empty()),
+            chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
             left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool: Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
@@ -876,6 +879,7 @@ impl Context {
         Self {
             chain_tip,
             applied_tip,
+            chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
             left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool,
@@ -931,6 +935,19 @@ impl Context {
     pub fn with_chain_control(mut self, chain_control: Arc<dyn ChainControl>) -> Self {
         self.chain_control = Some(chain_control);
         self
+    }
+
+    /// Shares the node's authoritative connect/disconnect lock with RPC readers.
+    #[must_use]
+    pub fn with_chain_transition(mut self, chain_transition: Arc<Mutex<()>>) -> Self {
+        self.chain_transition = chain_transition;
+        self
+    }
+
+    /// Runs a read while authoritative UTXO and applied-tip transitions are excluded.
+    pub fn with_stable_chainstate<R>(&self, read: impl FnOnce() -> R) -> R {
+        let _transition = self.chain_transition.lock();
+        read()
     }
 
     /// Attaches active ZMQ notification metadata reported by `getzmqnotifications`.

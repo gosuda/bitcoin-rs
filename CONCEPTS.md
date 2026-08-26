@@ -4,6 +4,18 @@ Shared domain vocabulary for this project: entities, named processes, and status
 
 ## Node interfaces
 
+### Wallet-free RPC boundary
+The node has no in-tree wallet and owns no private keys. Wallet funding,
+signing, import, and fee-bump methods are absent. Key-free descriptor helpers,
+`scantxoutset`, `combinepsbt`, and `finalizepsbt` remain node RPCs so an external
+signer can drive a PSBT workflow without giving key custody to the node.
+
+### Stable chainstate RPC read
+A whole-UTXO RPC read that shares the node's chain-transition mutex. The mutex
+spans both UTXO mutation and applied-tip publication, so `scantxoutset` cannot
+combine outputs from one committed state with height, hash, or confirmation
+metadata from another.
+
 ### REST gateway
 The optional, unauthenticated Bitcoin Core-compatible HTTP surface served on
 the existing JSON-RPC listener. It is enabled with `rest=1`; JSON-RPC requests

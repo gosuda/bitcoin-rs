@@ -85,6 +85,9 @@ bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features
     "std",
 ] }
 
+# Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.
+miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
+
 # bitcoin_slices: zero-alloc block visitor. Default features list is empty;
 # enable bitcoin + sha2 explicitly.
 bitcoin_slices = { version = ">=0.11, <0.12", default-features = false, features = [

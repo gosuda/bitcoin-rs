@@ -1,6 +1,5 @@
 use alloc::sync::Arc;
 use bitcoin::consensus::encode::deserialize;
-#[cfg(test)]
 use bitcoin::hex::DisplayHex as _;
 use core::str::FromStr as _;
 use core::{fmt, fmt::Write as _};
@@ -897,17 +896,21 @@ fn scantxoutset_addr_scan(
         .iter()
         .map(|scan| scan.script_pubkey.clone())
         .collect::<Vec<_>>();
-    let scan = ctx
-        .utxo
-        .scan_script_pubkeys(&scripts)
-        .map_err(|error| RpcError::Internal(error.to_string()))?;
-    let (unspents, total_amount) = scan_unspents(&scan, &scan_scripts, ctx.applied_height());
+    let (tip, scan) = ctx.with_stable_chainstate(|| {
+        let tip = ctx.applied_tip.load_full();
+        let scan = ctx.utxo.scan_script_pubkeys(&scripts);
+        (tip, scan)
+    });
+    let scan = scan.map_err(|error| RpcError::Internal(error.to_string()))?;
+    let height = tip.as_ref().map_or(0, |tip| tip.height);
+    let bestblock = tip.as_ref().map_or_else(Hash256::default, |tip| tip.hash);
+    let (unspents, total_amount) = scan_unspents(&scan, &scan_scripts, height);
 
     Ok(json!({
         "success": true,
         "txouts": scan.txouts,
-        "height": ctx.applied_height(),
-        "bestblock": ctx.applied_hash().to_string_be(),
+        "height": height,
+        "bestblock": bestblock.to_string_be(),
         "unspents": unspents,
         "total_amount": bitcoin::Amount::from_sat(total_amount).to_btc()
     }))
@@ -3470,6 +3473,7 @@ mod scantxoutset_tests {
     use core::str::FromStr as _;
 
     use bitcoin::{Amount, ScriptBuf};
+    use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
     use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::JsonValueTrait as _;
@@ -3562,6 +3566,92 @@ mod scantxoutset_tests {
             panic!("desc missing: {first:?}");
         };
         assert!(desc.starts_with("addr(1111111111111111111114oLvT2)#"));
+    }
+
+    #[test]
+    fn scantxoutset_waits_for_one_consistent_utxo_and_tip_transition() {
+        let transition = Arc::new(parking_lot::Mutex::new(()));
+        let context = Context::new().with_chain_transition(Arc::clone(&transition));
+        let old_tip = TipSnapshot {
+            tip_id: NodeId::new(0),
+            height: 0,
+            chainwork: ChainWork::ZERO,
+            hash: test_txid(100),
+        };
+        context.set_applied_tip(old_tip);
+        let ctx = Arc::new(context);
+        let address = "1111111111111111111114oLvT2";
+        let script = bitcoin::Address::from_str(address)
+            .unwrap_or_else(|err| panic!("address parse failed: {err}"))
+            .require_network(bitcoin::Network::Bitcoin)
+            .unwrap_or_else(|err| panic!("network check failed: {err}"))
+            .script_pubkey();
+        commit_test_utxo(
+            &ctx,
+            OutPoint::new(test_txid(101), 0),
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: script.clone(),
+            },
+            false,
+            0,
+        );
+
+        let transition_guard = transition.lock();
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let scan_ctx = Arc::clone(&ctx);
+        let scanner = std::thread::spawn(move || {
+            started_tx
+                .send(())
+                .unwrap_or_else(|err| panic!("started signal failed: {err}"));
+            scantxoutset(&scan_ctx, &json!(["start", [format!("addr({address})")]]))
+        });
+        started_rx
+            .recv()
+            .unwrap_or_else(|err| panic!("started receive failed: {err}"));
+
+        commit_test_utxo(
+            &ctx,
+            OutPoint::new(test_txid(102), 0),
+            TxOut {
+                value: Amount::from_sat(20_000),
+                script_pubkey: script,
+            },
+            false,
+            1,
+        );
+        let new_tip = TipSnapshot {
+            tip_id: NodeId::new(1),
+            height: 1,
+            chainwork: ChainWork::from(1_u64),
+            hash: test_txid(103),
+        };
+        ctx.set_applied_tip(new_tip.clone());
+        drop(transition_guard);
+
+        let result = scanner
+            .join()
+            .unwrap_or_else(|_| panic!("scanner thread panicked"))
+            .unwrap_or_else(|err| panic!("scantxoutset failed: {err}"));
+        assert_eq!(result.get("txouts").and_then(Value::as_u64), Some(2));
+        assert_eq!(result.get("height").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            result.get("bestblock").and_then(Value::as_str),
+            Some(new_tip.hash.to_string_be().as_str())
+        );
+        let unspents = result
+            .get("unspents")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("unspents missing: {result:?}"));
+        assert_eq!(unspents.len(), 2);
+        assert!(unspents.iter().any(|entry| {
+            entry.get("height").and_then(Value::as_u64) == Some(0)
+                && entry.get("confirmations").and_then(Value::as_u64) == Some(2)
+        }));
+        assert!(unspents.iter().any(|entry| {
+            entry.get("height").and_then(Value::as_u64) == Some(1)
+                && entry.get("confirmations").and_then(Value::as_u64) == Some(1)
+        }));
     }
 
     #[test]

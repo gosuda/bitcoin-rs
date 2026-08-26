@@ -30,6 +30,13 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
     let valid_psbt = build_valid_base64_psbt(&fixture.tx)?;
     let txid = fixture.txid.to_string();
     let block_hash = fixture.block_hash.to_string_be();
+    let descriptor = "addr(1111111111111111111114oLvT2)";
+    let descriptor_info = handler.dispatch("getdescriptorinfo", &json!([descriptor]))?;
+    let checksummed_descriptor = descriptor_info
+        .get("descriptor")
+        .as_str()
+        .ok_or("getdescriptorinfo omitted descriptor")?
+        .to_owned();
 
     let calls = [
         ("getblockchaininfo", json!([])),
@@ -63,14 +70,8 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         ("getblocktemplate", json!([{}])),
         ("submitblock", json!([""])),
         ("prioritisetransaction", json!([txid.as_str(), 0, 0])),
-        (
-            "getdescriptorinfo",
-            json!(["addr(1111111111111111111114oLvT2)"]),
-        ),
-        (
-            "deriveaddresses",
-            json!(["addr(1111111111111111111114oLvT2)"]),
-        ),
+        ("getdescriptorinfo", json!([descriptor])),
+        ("deriveaddresses", json!([checksummed_descriptor.as_str()])),
         (
             "scantxoutset",
             json!(["start", ["addr(1111111111111111111114oLvT2)"]]),
@@ -500,7 +501,7 @@ fn network_peer_methods_read_shared_peer_registry() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn removed_wallet_methods_return_method_not_found() -> Result<(), Box<dyn std::error::Error>> {
+fn removed_wallet_methods_return_method_not_found() {
     let handler = Handler::new(Arc::new(Context::new()));
     for method in [
         "walletcreatefundedpsbt",
@@ -529,7 +530,6 @@ fn removed_wallet_methods_return_method_not_found() -> Result<(), Box<dyn std::e
             "{method} must map to MethodNotFound, got {error:?}"
         );
     }
-    Ok(())
 }
 
 struct FakeTxIndex {
