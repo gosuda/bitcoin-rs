@@ -486,7 +486,7 @@ fn file_replay_artifact(
     checkpoint_generation: u64,
 ) -> serde_json::Value {
     json!({
-        "schema": "mainnet-prefix-replay-v2",
+        "schema": "mainnet-prefix-replay-v3",
         "measurement_target": "mainnet-prefix-replay",
         "git_head": git_head().ok(),
         "network": "mainnet",

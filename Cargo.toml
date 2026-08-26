@@ -225,7 +225,7 @@ metrics-exporter-prometheus = { version = ">=0.18, <0.19", default-features = fa
 quanta                      = { version = ">=0.12.6, <0.13", default-features = false }
 
 # --- Signals ------------------------------------------------------------------
-ctrlc = { version = ">=3.5.2, <4", default-features = false, features = ["termination"] }
+signal-hook = { version = ">=0.4.4, <0.5", default-features = false }
 
 # --- Errors -------------------------------------------------------------------
 thiserror = { version = ">=2, <3",        default-features = false, features = ["std"] }

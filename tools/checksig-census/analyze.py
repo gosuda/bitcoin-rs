@@ -3895,7 +3895,7 @@ def _require_int_field(value: object, field: str) -> int:
 
 
 def _validate_replay_artifact(path: Path) -> dict[str, object]:
-    """Validate a mainnet-prefix-replay-v2 JSON artifact and return flat fields.
+    """Validate a mainnet-prefix-replay-v3 JSON artifact and return flat fields.
 
     Required root keys (exactly): schema, network, network_magic, genesis_hash,
     start_height, start_hash, stop_height, stop_hash, block_count, window,
@@ -3918,13 +3918,14 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
         "decode_seconds", "elapsed_seconds", "fetch_seconds",
         "git_head", "measurement_target", "rss_high_water_bytes",
         "stage_seconds", "storage_backend", "tx_count", "txindex",
+        "txindex_worker_catchup_seconds", "txindex_total_elapsed_seconds",
     }
     _require_exact_keys(raw, _REPLAY_KEYS, "replay artifact root")
 
-    if raw["schema"] != "mainnet-prefix-replay-v2":
+    if raw["schema"] != "mainnet-prefix-replay-v3":
         raise AnalyzerError(
             f"CTX-CUSTODY: replay schema is {raw['schema']!r}, "
-            f"expected 'mainnet-prefix-replay-v2'"
+            f"expected 'mainnet-prefix-replay-v3'"
         )
 
     network = raw["network"]
@@ -4038,6 +4039,19 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
     elapsed_seconds = _require_float(raw["elapsed_seconds"], "replay.elapsed_seconds", ge=0.0)
     fetch_seconds = _require_float(raw["fetch_seconds"], "replay.fetch_seconds", ge=0.0)
 
+    def _require_optional_float(value: object, field: str) -> None:
+        if value is not None:
+            _require_float(value, field, ge=0.0)
+
+    _require_optional_float(
+        raw["txindex_worker_catchup_seconds"],
+        "replay.txindex_worker_catchup_seconds",
+    )
+    _require_optional_float(
+        raw["txindex_total_elapsed_seconds"],
+        "replay.txindex_total_elapsed_seconds",
+    )
+
     git_head = _require_hex_str(raw["git_head"], "replay.git_head", 40)
 
     measurement_target = raw["measurement_target"]
@@ -4093,7 +4107,7 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
         raise AnalyzerError(f"CTX-CUSTODY: replay.tx_count must be >= 0, got {tx_count}")
 
     return {
-        "schema": "mainnet-prefix-replay-v2",
+        "schema": "mainnet-prefix-replay-v3",
         "network": network,
         "network_magic": network_magic,
         "genesis_hash": genesis_hash,
@@ -4122,6 +4136,8 @@ def _validate_replay_artifact(path: Path) -> dict[str, object]:
         "storage_backend": storage_backend,
         "tx_count": tx_count,
         "txindex": raw["txindex"],
+        "txindex_worker_catchup_seconds": raw["txindex_worker_catchup_seconds"],
+        "txindex_total_elapsed_seconds": raw["txindex_total_elapsed_seconds"],
         "custody": {
             "bytes": len(replay_bytes),
             "sha256": hashlib.sha256(replay_bytes).hexdigest(),
@@ -5303,7 +5319,7 @@ def build_parser() -> argparse.ArgumentParser:
     cc.add_argument(
         "--replay",
         required=True,
-        help="mainnet-prefix-replay-v2 JSON artifact",
+        help="mainnet-prefix-replay-v3 JSON artifact",
     )
     cc.add_argument(
         "--corpus-manifest",

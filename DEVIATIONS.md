@@ -173,9 +173,11 @@ Compatibility deltas after removal:
 - `getindexinfo` no longer reports a `basicblockfilterindex` entry; Core also
   omits indexes that are not enabled, so the previous unconditional entry
   over-reported.
-- `-blockfilterindex` / `bitcoin.conf` `blockfilterindex` /
-  `BITCOIN_RS_BLOCKFILTERINDEX`: no longer recognized; the option is ignored
-  exactly like any other unsupported `bitcoin.conf` key.
+- `-blockfilterindex` is no longer recognized by the CLI: clap rejects the
+  unknown option and exits. The `bitcoin.conf` compatibility reader and
+  environment layer ignore the removed `blockfilterindex` /
+  `BITCOIN_RS_BLOCKFILTERINDEX` keys, like other unsupported keys in those
+  layers.
 - Storage: the `filters`/`filter_headers` column families are gone and the
   surviving `ColumnFamily` discriminants were renumbered — a breaking change
   under `docs/policies/db-migration.md` §3.1. fjall, MDBX, and redb open

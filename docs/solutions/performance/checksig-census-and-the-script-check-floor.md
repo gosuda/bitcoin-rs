@@ -63,7 +63,7 @@ Across 2,868,199 input checks, the 24 u64 counters yielded:
 
 **Key Census Fact**: Exactly $a = 1.0$ ECDSA attempts occur per kernel script check ($2,868,199 / 2,868,199$). Every input in mainnet blocks 0..150,000 is an ordinary legacy bare P2PKH spend. All 11 special context counters (`p2sh_redeem_spends`, `native_witness_v0_spends`, `p2sh_wrapped_witness_v0_spends`, `bare_multisig_checks`, `p2sh_multisig_checks`, `native_witness_v0_multisig_checks`, `p2sh_wrapped_witness_v0_multisig_checks`, `taproot_key_path_spends`, `tapscript_spends`, `tapscript_schnorr_checks`, `tapscript_checksigadd_checks`) are zero. `eval_script_entries` is exactly $2 \times 2,868,199 = 5,736,398$. The exact product predicate (`_c150_passed`) evaluates to `all_passed: true` and `c150_passed: true`.
 
-**Certification Pipeline and Rule**: Authoritative certification requires strict `mainnet-prefix-replay-v2` inputs, file-bound binary streams, and exact classifier (`classify-corpus-v2`) validation. Direct Core REST export can export raw blocks prior to replay, but live REST export cannot replace file-bound census evidence for certification. Sampled evidence (such as `kernel_verify_spike`) cannot certify a product corpus.
+**Certification Pipeline and Rule**: Authoritative certification requires strict `mainnet-prefix-replay-v3` inputs, file-bound binary streams, and exact classifier (`classify-corpus-v2`) validation. Version 3 includes the replay producer's always-present txindex timing keys; they are nullable when txindex is disabled. Direct Core REST export can export raw blocks prior to replay, but live REST export cannot replace file-bound census evidence for certification. Sampled evidence (such as `kernel_verify_spike`) cannot certify a product corpus.
 
 ## Recover terminal proof after slow process teardown
 
@@ -88,7 +88,7 @@ candidate has all 11 context classes, and its last first-occurrence height is
 
 This result freezes the product tip only. It does not certify the recovered
 diagnostic run. The classifier accepts Cmodern only when a fresh
-`mainnet-prefix-replay-v2` file replay stops at the exact tip, passes archive
+`mainnet-prefix-replay-v3` file replay stops at the exact tip, passes archive
 and stream custody, passes counter arithmetic, and has a positive count for
 each Cmodern context class. Report field `cmodern_frozen` means that the tip is
 fixed. Report field `cmodern_passed` means that the new file-bound corpus

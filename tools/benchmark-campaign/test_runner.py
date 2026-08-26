@@ -134,7 +134,7 @@ if {malformed!r}:
     output.write_text('{{bad json', encoding='utf-8')
     raise SystemExit(0)
 record = {{
-    'schema': 'mainnet-prefix-replay-v2',
+    'schema': 'mainnet-prefix-replay-v3',
     'measurement_target': 'mainnet-prefix-replay',
     'git_head': '{COMMIT}',
     'network': 'mainnet',
@@ -173,6 +173,8 @@ record = {{
     'rss_high_water_bytes': 1024,
     'block_source': 'file',
     'data_dir': str(data_dir),
+    'txindex_worker_catchup_seconds': None,
+    'txindex_total_elapsed_seconds': None,
 }}
 output.write_text(json.dumps(record), encoding='utf-8')
 """

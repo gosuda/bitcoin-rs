@@ -636,7 +636,7 @@ def _make_replay_v2(
     tx_count: int = 0,
     txindex: bool = False,
 ) -> bytes:
-    """Write a mainnet-prefix-replay-v2 JSON and return the raw bytes.
+    """Write a mainnet-prefix-replay-v3 JSON and return the raw bytes.
 
     Defaults to mainnet canonical values: network="mainnet",
     network_magic="f9beb4d9", genesis_hash=mainnet genesis,
@@ -652,7 +652,7 @@ def _make_replay_v2(
     if stage_seconds is None:
         stage_seconds = []
     replay = {
-        "schema": "mainnet-prefix-replay-v2",
+        "schema": "mainnet-prefix-replay-v3",
         "network": network,
         "network_magic": network_magic,
         "genesis_hash": genesis_hash,
@@ -681,6 +681,8 @@ def _make_replay_v2(
         "blocks_per_second": blocks_per_second,
         "checkpoint_generation": checkpoint_generation,
         "data_dir": data_dir,
+        "txindex_worker_catchup_seconds": None,
+        "txindex_total_elapsed_seconds": None,
         "decode_seconds": decode_seconds,
         "elapsed_seconds": elapsed_seconds,
         "fetch_seconds": fetch_seconds,
@@ -3930,6 +3932,27 @@ def test_replay_rejects_extra_stage_key() -> None:
             "extra stage key",
             "CTX-CUSTODY",
             "unknown key",
+        )
+
+
+def test_replay_rejects_invalid_txindex_timing_field() -> None:
+    """Replay v3 requires nullable-or-float txindex timing fields."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        txid_le = b"\xee" * 32
+        args = _make_classify_args(
+            tmp,
+            [_bare_p2pkh(txid_le)],
+            [_make_record_bytes(txid_le, 0)],
+            [_make_journal_bytes(txid_le, 0)],
+            "c150",
+            replay_overrides={"txindex_total_elapsed_seconds": "not-a-float"},
+        )
+        _raises_with(
+            AnalyzerError,
+            lambda: cmd_classify_corpus(args),
+            "invalid txindex timing field",
+            "replay.txindex_total_elapsed_seconds must be a float",
         )
 
 
