@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
+use parking_lot::RwLock;
 
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -320,6 +321,139 @@ impl OutboundBudget {
     }
 }
 
+/// Sole mutation boundary for live peer leases and ready-peer metadata.
+///
+/// Connection threads register, publish, replace, and remove peers through
+/// this handle. Higher layers may observe snapshots and request an
+/// identity-checked disconnect, but never mutate the shared maps directly.
+#[derive(Clone, Debug)]
+pub struct PeerLifecycle {
+    registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    leases: Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>>,
+}
+
+impl PeerLifecycle {
+    /// Wraps the shared stores used by the listener and its observers.
+    #[must_use]
+    pub const fn new(
+        registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+        leases: Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>>,
+    ) -> Self {
+        Self { registry, leases }
+    }
+
+    /// Registers a connection before its handshake, cancelling a genuinely
+    /// different predecessor and hiding its ready metadata.
+    pub fn register(&self, addr: SocketAddr, lease: &PeerLease) -> bool {
+        let mut leases = self.leases.write();
+        let prior = leases.insert(addr, lease.clone());
+        if prior
+            .as_ref()
+            .is_some_and(|prior| prior.same_connection(lease))
+        {
+            return false;
+        }
+        let replaced = prior.is_some();
+        if let Some(prior) = prior {
+            prior.cancel();
+        }
+        self.registry.write().retain(|peer| peer.addr != addr);
+        replaced
+    }
+
+    /// Publishes handshake metadata only while `lease` remains current.
+    pub fn publish_ready(
+        &self,
+        addr: SocketAddr,
+        lease: &PeerLease,
+        info: crate::PeerInfo,
+    ) -> bool {
+        let leases = self.leases.read();
+        if !leases
+            .get(&addr)
+            .is_some_and(|current| current.same_connection(lease))
+        {
+            return false;
+        }
+        let mut registry = self.registry.write();
+        registry.retain(|peer| peer.addr != addr);
+        registry.push(info);
+        true
+    }
+
+    /// Removes `lease` only if it is still the current connection.
+    pub fn remove_current(&self, addr: SocketAddr, lease: &PeerLease) -> bool {
+        self.disconnect_if(addr, |current| current.same_connection(lease))
+    }
+
+    /// Disconnects the connection that produced `source`, preserving any
+    /// newer same-address replacement.
+    pub fn disconnect_source(&self, source: PeerSource) -> bool {
+        self.disconnect_if(source.addr, |current| current.is_current(source))
+    }
+
+    fn disconnect_if(&self, addr: SocketAddr, predicate: impl FnOnce(&PeerLease) -> bool) -> bool {
+        let mut leases = self.leases.write();
+        if !leases.get(&addr).is_some_and(predicate) {
+            return false;
+        }
+        if let Some(removed) = leases.remove(&addr) {
+            removed.cancel();
+        }
+        self.registry.write().retain(|peer| peer.addr != addr);
+        true
+    }
+
+    /// Returns the current connection source at `addr`.
+    #[must_use]
+    pub fn source(&self, addr: SocketAddr) -> Option<PeerSource> {
+        self.leases
+            .read()
+            .get(&addr)
+            .map(|lease| lease.source(addr))
+    }
+
+    /// Returns the current connection source only when `addr` is published as
+    /// ready. Registration hides predecessor metadata before replacing it, so
+    /// a handshaking replacement cannot inherit an old scheduler decision.
+    #[must_use]
+    pub fn ready_source(&self, addr: SocketAddr) -> Option<PeerSource> {
+        let leases = self.leases.read();
+        let lease = leases.get(&addr)?;
+        if !self.registry.read().iter().any(|peer| peer.addr == addr) {
+            return None;
+        }
+        Some(lease.source(addr))
+    }
+
+    /// Returns whether `source` still identifies the current connection.
+    #[must_use]
+    pub fn is_current(&self, source: PeerSource) -> bool {
+        self.leases
+            .read()
+            .get(&source.addr)
+            .is_some_and(|lease| lease.is_current(source))
+    }
+
+    /// Clones the current lease at `addr` for message delivery.
+    #[must_use]
+    pub fn lease(&self, addr: SocketAddr) -> Option<PeerLease> {
+        self.leases.read().get(&addr).cloned()
+    }
+
+    /// Snapshots ready-peer metadata.
+    #[must_use]
+    pub fn ready_peers(&self) -> Vec<crate::PeerInfo> {
+        self.registry.read().clone()
+    }
+
+    /// Snapshots every live connection address, including handshaking peers.
+    #[must_use]
+    pub fn live_addresses(&self) -> Vec<SocketAddr> {
+        self.leases.read().keys().copied().collect()
+    }
+}
+
 /// Cloneable handle for one live peer connection.
 #[derive(Clone, Debug)]
 pub struct PeerLease {
@@ -481,8 +615,38 @@ impl PeerLease {
 
 #[cfg(test)]
 mod tests {
-    use super::PeerLease;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+
+    use super::{PeerLease, PeerLifecycle};
     use crossbeam_channel::SendError;
+
+    type PeerRegistry = Arc<RwLock<Vec<crate::PeerInfo>>>;
+    type PeerLeases = Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>>;
+
+    fn peer_info(addr: SocketAddr, conn_time: u64) -> crate::PeerInfo {
+        crate::PeerInfo {
+            addr,
+            version: 70_016,
+            services: 0,
+            user_agent: String::from("/test/"),
+            start_height: 0,
+            conn_time,
+            inbound: false,
+        }
+    }
+
+    fn lifecycle() -> (PeerLifecycle, PeerRegistry, PeerLeases) {
+        let registry = Arc::new(RwLock::new(Vec::new()));
+        let leases = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        (
+            PeerLifecycle::new(Arc::clone(&registry), Arc::clone(&leases)),
+            registry,
+            leases,
+        )
+    }
 
     #[test]
     fn lease_ids_are_unique_and_clones_keep_identity() {
@@ -524,6 +688,60 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         assert!(!PeerLease::new(tx.clone()).is_inbound());
         assert!(PeerLease::new_inbound(tx).is_inbound());
+    }
+
+    #[test]
+    fn stale_connection_cannot_publish_over_replacement() {
+        let (lifecycle, registry, leases) = lifecycle();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 18_450));
+        let (old_tx, _old_rx) = crossbeam_channel::unbounded();
+        let old = PeerLease::new(old_tx);
+        assert!(!lifecycle.register(addr, &old));
+        assert!(lifecycle.publish_ready(addr, &old, peer_info(addr, 1)));
+
+        let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
+        let replacement = PeerLease::new(replacement_tx);
+        assert!(lifecycle.register(addr, &replacement));
+        assert!(old.is_cancelled());
+        assert!(registry.read().is_empty());
+        assert_eq!(lifecycle.ready_source(addr), None);
+        assert!(!lifecycle.publish_ready(addr, &old, peer_info(addr, 2)));
+        assert!(registry.read().is_empty());
+
+        assert!(lifecycle.publish_ready(addr, &replacement, peer_info(addr, 3)));
+        assert_eq!(&*registry.read(), &[peer_info(addr, 3)]);
+        assert_eq!(lifecycle.ready_source(addr), Some(replacement.source(addr)));
+        assert!(
+            leases
+                .read()
+                .get(&addr)
+                .is_some_and(|current| current.same_connection(&replacement))
+        );
+    }
+
+    #[test]
+    fn stale_disconnect_source_preserves_replacement() {
+        let (lifecycle, registry, leases) = lifecycle();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 18_451));
+        let (old_tx, _old_rx) = crossbeam_channel::unbounded();
+        let old = PeerLease::new(old_tx);
+        lifecycle.register(addr, &old);
+        let stale_source = old.source(addr);
+
+        let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
+        let replacement = PeerLease::new(replacement_tx);
+        lifecycle.register(addr, &replacement);
+        lifecycle.publish_ready(addr, &replacement, peer_info(addr, 2));
+
+        assert!(!lifecycle.disconnect_source(stale_source));
+        assert!(!replacement.is_cancelled());
+        assert!(leases.read().contains_key(&addr));
+        assert_eq!(&*registry.read(), &[peer_info(addr, 2)]);
+
+        assert!(lifecycle.disconnect_source(replacement.source(addr)));
+        assert!(replacement.is_cancelled());
+        assert!(leases.read().is_empty());
+        assert!(registry.read().is_empty());
     }
 
     #[test]

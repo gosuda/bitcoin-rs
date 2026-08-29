@@ -1,8 +1,8 @@
 //! Block download orchestrator.
 //!
-//! Reads the shared apply handles / peer registry / outbound-channel handles
-//! and, when a peer reports a longer chain, sends `getheaders` toward
-//! that peer. Inbound `headers` batches are drained into the shared
+//! Reads shared apply handles and P2P-owned peer lifecycle snapshots and, when
+//! a peer reports a longer chain, sends `getheaders` toward that peer. Inbound
+//! `headers` batches are drained into the shared
 //! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
 //! [`crate::apply::apply_block`].
 
@@ -48,8 +48,7 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 /// Block download orchestrator.
 pub struct BlockSync {
     handles: crate::apply::ApplyHandles,
-    peers: Arc<RwLock<Vec<PeerInfo>>>,
-    peer_outbound: Arc<RwLock<HashMap<SocketAddr, PeerLease>>>,
+    peer_lifecycle: Arc<bitcoin_rs_p2p::PeerLifecycle>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
     download_window: Arc<Mutex<DownloadWindow>>,
@@ -132,8 +131,7 @@ impl BlockSync {
     ) -> Self {
         Self {
             handles,
-            peers,
-            peer_outbound,
+            peer_lifecycle: Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(peers, peer_outbound)),
             inbound_headers_rx,
             inbound_blocks_rx,
             download_window: Arc::new(Mutex::new(DownloadWindow::new(default_sync_budget()))),
@@ -151,36 +149,35 @@ impl BlockSync {
         *self.block_stager.lock() = BlockStager::new(budget);
     }
 
-    /// Returns the sole production peer-registration operation. It preserves
-    /// the window-then-outbound lock order and purges old-address state before
-    /// the new sender becomes visible.
+    /// Returns the post-handshake readiness notification consumed by sync.
+    ///
+    /// P2P owns lease and metadata publication. This callback only forgets
+    /// address-scoped scheduler state that must not cross connections.
     #[must_use]
-    pub fn peer_registration_handle(
-        &self,
-    ) -> Arc<dyn Fn(SocketAddr, PeerLease, PeerInfo) -> bool + Send + Sync> {
+    pub fn peer_ready_handle(&self) -> Arc<dyn Fn(SocketAddr) + Send + Sync> {
         let window = Arc::clone(&self.download_window);
-        let outbound = Arc::clone(&self.peer_outbound);
-        let peers = Arc::clone(&self.peers);
         let pending_getheaders = Arc::clone(&self.pending_getheaders);
-        Arc::new(move |peer_addr, lease, info| {
+        Arc::new(move |peer_addr| {
             let mut window = window.lock();
-            let mut outbound = outbound.write();
-            let replaced = match outbound.remove(&peer_addr) {
-                Some(prior) if prior.same_connection(&lease) => false,
-                Some(prior) => {
-                    prior.cancel();
-                    true
-                }
-                None => false,
-            };
             window.forget_peer(peer_addr);
-            outbound.insert(peer_addr, lease);
-            let mut peers = peers.write();
-            peers.retain(|peer| peer.addr != peer_addr);
-            peers.push(info);
             let mut pending = pending_getheaders.lock();
             if pending.is_some_and(|request| request.peer_addr == peer_addr) {
                 *pending = None;
+            }
+        })
+    }
+
+    #[cfg(test)]
+    fn peer_registration_handle(
+        &self,
+    ) -> Arc<dyn Fn(SocketAddr, PeerLease, PeerInfo) -> bool + Send + Sync> {
+        let lifecycle = Arc::clone(&self.peer_lifecycle);
+        let ready = self.peer_ready_handle();
+        Arc::new(move |peer_addr, lease, info| {
+            let replaced = lifecycle.register(peer_addr, &lease);
+            if lifecycle.is_current(lease.source(peer_addr)) {
+                ready(peer_addr);
+                lifecycle.publish_ready(peer_addr, &lease, info);
             }
             replaced
         })
@@ -282,11 +279,7 @@ impl BlockSync {
             // A response consumes the current peer's request even when header
             // acceptance rejects it; otherwise sync stalls until timeout.
             if let Some(source) = source {
-                let outbound = self.peer_outbound.read();
-                if outbound
-                    .get(&source.addr)
-                    .is_some_and(|lease| lease.is_current(source))
-                {
+                if self.peer_lifecycle.is_current(source) {
                     let mut pending = self.pending_getheaders.lock();
                     if pending.is_some_and(|request| request.peer_addr == source.addr) {
                         *pending = None;
@@ -316,15 +309,7 @@ impl BlockSync {
                     let mut blamed_peer = None;
                     if let Some(source) = source {
                         let mut window = self.download_window.lock();
-                        let mut outbound = self.peer_outbound.write();
-                        if outbound
-                            .get(&source.addr)
-                            .is_some_and(|lease| lease.is_current(source))
-                        {
-                            if let Some(removed) = outbound.remove(&source.addr) {
-                                removed.cancel();
-                            }
-                            self.peers.write().retain(|peer| peer.addr != source.addr);
+                        if self.peer_lifecycle.disconnect_source(source) {
                             window.mark_peer_unresponsive(source.addr, Instant::now());
                             blamed_peer = Some(source.addr);
                         }
@@ -374,9 +359,9 @@ impl BlockSync {
         let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let header_peer = {
-            let peers = self.peers.read();
+            let peers = self.peer_lifecycle.ready_peers();
             let mut best: Option<SyncPeer> = None;
-            for peer in peers.iter() {
+            for peer in &peers {
                 let Ok(height) = u32::try_from(peer.start_height) else {
                     continue;
                 };
@@ -546,14 +531,9 @@ impl BlockSync {
         let staged_count = staged_blocks.len();
         {
             let mut window = self.download_window.lock();
-            let outbound = self.peer_outbound.read();
             for (hash, source, staged) in staged_blocks {
                 let source_peer = source
-                    .filter(|source| {
-                        outbound
-                            .get(&source.addr)
-                            .is_some_and(|lease| lease.is_current(*source))
-                    })
+                    .filter(|source| self.peer_lifecycle.is_current(*source))
                     .map(|source| source.addr);
                 match staged {
                     StagedBlock::AlreadyStaged => {
@@ -1013,9 +993,9 @@ impl BlockSync {
         let mut header_peer: Option<SyncPeer> = None;
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
         {
-            let peers = self.peers.read();
+            let peers = self.peer_lifecycle.ready_peers();
             candidates.reserve(peers.len());
-            for peer in peers.iter() {
+            for peer in &peers {
                 // Height clause of the fan-out eligibility predicate (KTD6) and
                 // the pre-existing candidate filter: the peer's known chain must
                 // reach past our applied tip, i.e. cover the window front being
@@ -1129,7 +1109,7 @@ impl BlockSync {
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
         for peer in candidates {
             let peer_addr = peer.addr;
-            let Some(tx) = self.peer_outbound.read().get(&peer_addr).cloned() else {
+            let Some(tx) = self.peer_lifecycle.lease(peer_addr) else {
                 continue;
             };
             let inventory = hashes
@@ -1221,10 +1201,7 @@ impl BlockSync {
         }
         let msg = Message::GetData(inventory);
 
-        let tx = {
-            let outbound = self.peer_outbound.read();
-            outbound.get(&request.peer_addr()).cloned()
-        };
+        let tx = self.peer_lifecycle.lease(request.peer_addr());
         let Some(tx) = tx else {
             tracing::trace!(
                 peer_addr = %request.peer_addr(),
@@ -1288,10 +1265,7 @@ impl BlockSync {
             locator_hashes,
             bitcoin::BlockHash::all_zeros(),
         ));
-        let tx = {
-            let outbound = self.peer_outbound.read();
-            outbound.get(&sync_peer_addr).cloned()
-        };
+        let tx = self.peer_lifecycle.lease(sync_peer_addr);
         let Some(tx) = tx else {
             tracing::warn!(
                 peer_addr = %sync_peer_addr,
@@ -1369,7 +1343,7 @@ impl BlockSync {
     }
 
     fn release_disconnected_peer_budget(&self) {
-        let live: SmallVec<[SocketAddr; 8]> = self.peer_outbound.read().keys().copied().collect();
+        let live = self.peer_lifecycle.live_addresses();
         self.download_window
             .lock()
             .release_disconnected_peers(|peer| live.contains(peer));
@@ -1387,9 +1361,9 @@ impl BlockSync {
         now: Instant,
     ) -> Option<SocketAddr> {
         let candidates: SmallVec<[SocketAddr; 8]> = self
-            .peers
-            .read()
-            .iter()
+            .peer_lifecycle
+            .ready_peers()
+            .into_iter()
             .filter(|peer| {
                 peer.addr != owner
                     && statically_fanout_eligible(peer)
@@ -1411,7 +1385,7 @@ impl BlockSync {
             bitcoin::BlockHash::from_byte_array(*front_hash.as_byte_array()),
         )]);
         for peer_addr in candidates {
-            let tx = self.peer_outbound.read().get(&peer_addr).cloned();
+            let tx = self.peer_lifecycle.lease(peer_addr);
             let Some(tx) = tx else {
                 continue;
             };
@@ -1531,21 +1505,18 @@ impl BlockSync {
         metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
     }
 
-    /// Selects and evicts a download-window owner without letting a
-    /// same-address registration replace the lease in the middle.
-    ///
-    /// The lock order is window, outbound, peer registry, then pending headers.
-    /// Registration uses the same order, so once selection succeeds the removed
-    /// lease is necessarily the selected connection.
+    /// Selects a download-window owner and requests an identity-checked P2P
+    /// disconnect, preserving any newer same-address replacement.
     fn select_and_evict_window_peer(
         &self,
         select: impl FnOnce(&mut DownloadWindow) -> Option<SocketAddr>,
     ) -> Option<SocketAddr> {
         let mut window = self.download_window.lock();
         let peer_addr = select(&mut window)?;
-        let removed = self.peer_outbound.write().remove(&peer_addr)?;
-        removed.cancel();
-        self.peers.write().retain(|peer| peer.addr != peer_addr);
+        let source = self.peer_lifecycle.ready_source(peer_addr)?;
+        if !self.peer_lifecycle.disconnect_source(source) {
+            return None;
+        }
         let mut pending = self.pending_getheaders.lock();
         if pending.is_some_and(|request| request.peer_addr == peer_addr) {
             *pending = None;

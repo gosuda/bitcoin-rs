@@ -22,8 +22,7 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 type SyncWakeHandle = Option<Sender<()>>;
-type PeerRegistrationHandle =
-    Option<Arc<dyn Fn(SocketAddr, crate::PeerLease, crate::PeerInfo) -> bool + Send + Sync>>;
+type PeerReadyHandle = Option<Arc<dyn Fn(SocketAddr) + Send + Sync>>;
 
 /// State shared by the listener and every connection thread it spawns.
 ///
@@ -33,13 +32,12 @@ type PeerRegistrationHandle =
 /// entry point was built from a [`crate::NetworkControls`] instance.
 #[derive(Clone)]
 struct ConnectionShared {
-    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+    peer_lifecycle: Arc<crate::PeerLifecycle>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     activity: Option<Arc<crate::NetworkActivity>>,
     totals: Option<Arc<crate::TrafficTotals>>,
     chain_query: ChainQueryHandle,
-    peer_registered: PeerRegistrationHandle,
+    peer_ready: PeerReadyHandle,
 }
 
 impl ConnectionShared {
@@ -48,32 +46,33 @@ impl ConnectionShared {
         peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
         banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
         chain_query: ChainQueryHandle,
-        peer_registered: PeerRegistrationHandle,
+        peer_ready: PeerReadyHandle,
     ) -> Self {
         Self {
-            peer_registry,
-            peer_outbound,
+            peer_lifecycle: Arc::new(crate::PeerLifecycle::new(peer_registry, peer_outbound)),
             banned,
             activity: None,
             totals: None,
             chain_query,
-            peer_registered,
+            peer_ready,
         }
     }
 
     fn from_controls(
         controls: &Arc<crate::NetworkControls>,
         chain_query: ChainQueryHandle,
-        peer_registered: PeerRegistrationHandle,
+        peer_ready: PeerReadyHandle,
     ) -> Self {
         Self {
-            peer_registry: Arc::clone(controls.peer_registry()),
-            peer_outbound: Arc::clone(controls.peer_outbound()),
+            peer_lifecycle: Arc::new(crate::PeerLifecycle::new(
+                Arc::clone(controls.peer_registry()),
+                Arc::clone(controls.peer_outbound()),
+            )),
             banned: Arc::clone(controls.banned()),
             activity: Some(Arc::clone(controls.activity())),
             totals: Some(Arc::clone(controls.totals())),
             chain_query,
-            peer_registered,
+            peer_ready,
         }
     }
 }
@@ -83,71 +82,37 @@ impl ConnectionShared {
 ///
 /// Registration happens before the handshake so live-connection accounting
 /// covers handshaking peers exactly like Core's connection manager.
-fn register_connection(
-    peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>,
-    peer_addr: SocketAddr,
-    lease: crate::PeerLease,
-) -> bool {
-    let mut outbound = peer_outbound.write();
-    outbound.insert(peer_addr, lease).is_some_and(|prior| {
-        prior.cancel();
-        true
-    })
-}
-
 /// Publishes handshake metadata for an already-registered connection.
 fn publish_peer_info(
-    peer_registry: &RwLock<Vec<crate::PeerInfo>>,
-    peer_registered: Option<
-        &(dyn Fn(SocketAddr, crate::PeerLease, crate::PeerInfo) -> bool + Send + Sync),
-    >,
+    peer_lifecycle: &crate::PeerLifecycle,
+    peer_ready: Option<&(dyn Fn(SocketAddr) + Send + Sync)>,
     peer_addr: SocketAddr,
-    lease: crate::PeerLease,
+    lease: &crate::PeerLease,
     info: crate::PeerInfo,
-) {
-    if let Some(peer_registered) = peer_registered {
-        peer_registered(peer_addr, lease, info);
-        return;
+) -> bool {
+    if !peer_lifecycle.is_current(lease.source(peer_addr)) {
+        return false;
     }
-    let mut registry = peer_registry.write();
-    registry.retain(|peer| peer.addr != peer_addr);
-    registry.push(info);
+    // Reset address-scoped consumers before making this connection visible as
+    // ready. `publish_ready` rechecks identity in case the callback raced a
+    // same-address replacement.
+    if let Some(peer_ready) = peer_ready {
+        peer_ready(peer_addr);
+    }
+    peer_lifecycle.publish_ready(peer_addr, lease, info)
 }
 
 #[cfg(test)]
 fn register_peer(
-    peer_registry: &RwLock<Vec<crate::PeerInfo>>,
-    peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>,
-    peer_registered: Option<
-        &(dyn Fn(SocketAddr, crate::PeerLease, crate::PeerInfo) -> bool + Send + Sync),
-    >,
-    peer_addr: SocketAddr,
-    lease: crate::PeerLease,
-    info: crate::PeerInfo,
-) -> bool {
-    let replaced = register_connection(peer_outbound, peer_addr, lease.clone());
-    publish_peer_info(peer_registry, peer_registered, peer_addr, lease, info);
-    replaced
-}
-
-fn remove_current_peer(
-    peer_registry: &RwLock<Vec<crate::PeerInfo>>,
-    peer_outbound: &RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>,
+    peer_lifecycle: &crate::PeerLifecycle,
+    peer_ready: Option<&(dyn Fn(SocketAddr) + Send + Sync)>,
     peer_addr: SocketAddr,
     lease: &crate::PeerLease,
+    info: crate::PeerInfo,
 ) -> bool {
-    let mut outbound = peer_outbound.write();
-    if !outbound
-        .get(&peer_addr)
-        .is_some_and(|current| current.same_connection(lease))
-    {
-        return false;
-    }
-    if let Some(removed) = outbound.remove(&peer_addr) {
-        removed.cancel();
-    }
-    peer_registry.write().retain(|peer| peer.addr != peer_addr);
-    true
+    let replaced = peer_lifecycle.register(peer_addr, lease);
+    publish_peer_info(peer_lifecycle, peer_ready, peer_addr, lease, info);
+    replaced
 }
 
 #[derive(Clone)]
@@ -263,14 +228,14 @@ pub fn serve_with_shutdown_with_chain_and_sync_wake(
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
-    peer_registered: PeerRegistrationHandle,
+    peer_ready: PeerReadyHandle,
 ) -> Result<(), ListenerError> {
     let mut shared = ConnectionShared::from_parts(
         peer_registry,
         peer_outbound,
         banned,
         chain_query,
-        peer_registered,
+        peer_ready,
     );
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
@@ -374,9 +339,9 @@ pub fn serve_with_controls(
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
-    peer_registered: PeerRegistrationHandle,
+    peer_ready: PeerReadyHandle,
 ) -> Result<(), ListenerError> {
-    let shared = ConnectionShared::from_controls(&controls, chain_query, peer_registered);
+    let shared = ConnectionShared::from_controls(&controls, chain_query, peer_ready);
     let inbound_sync_sinks = InboundSyncSinks {
         headers_tx: inbound_headers_tx,
         blocks_tx: inbound_blocks_tx,
@@ -429,14 +394,14 @@ pub fn spawn_outbound_connection_with_chain_and_sync_wake(
     network_active: Arc<AtomicBool>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
-    peer_registered: PeerRegistrationHandle,
+    peer_ready: PeerReadyHandle,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let mut shared = ConnectionShared::from_parts(
         peer_registry,
         peer_outbound,
         banned,
         chain_query,
-        peer_registered,
+        peer_ready,
     );
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
@@ -467,9 +432,9 @@ pub fn spawn_outbound_connection_with_controls(
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
-    peer_registered: PeerRegistrationHandle,
+    peer_ready: PeerReadyHandle,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    let shared = ConnectionShared::from_controls(&controls, chain_query, peer_registered);
+    let shared = ConnectionShared::from_controls(&controls, chain_query, peer_ready);
     spawn_outbound(
         addr,
         magic,
@@ -536,7 +501,7 @@ fn run_outbound_connection(
     // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
     let lease = crate::PeerLease::new(outbound_tx);
-    register_connection(&shared.peer_outbound, addr, lease.clone());
+    shared.peer_lifecycle.register(addr, &lease);
 
     let nonce = generate_nonce(addr);
     let mut peer = Peer::new(stream, magic);
@@ -549,7 +514,7 @@ fn run_outbound_connection(
         shared.totals.as_ref(),
         handshake_deadline,
     ) {
-        remove_current_peer(&shared.peer_registry, &shared.peer_outbound, addr, &lease);
+        shared.peer_lifecycle.remove_current(addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
         if lease.is_cancelled() {
             tracing::debug!(peer_addr = %addr, "p2p outbound lease revoked during handshake");
@@ -559,7 +524,7 @@ fn run_outbound_connection(
     }
 
     let Some(remote_version) = peer.remote_version.as_ref() else {
-        remove_current_peer(&shared.peer_registry, &shared.peer_outbound, addr, &lease);
+        shared.peer_lifecycle.remove_current(addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
         return Err(crate::wire::PeerError::Protocol(
             "missing remote version after outbound handshake",
@@ -662,7 +627,7 @@ fn run_handshake(
     // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
     let lease = crate::PeerLease::new_inbound(outbound_tx);
-    register_connection(&shared.peer_outbound, peer_addr, lease.clone());
+    shared.peer_lifecycle.register(peer_addr, &lease);
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::new(stream, magic);
@@ -675,12 +640,7 @@ fn run_handshake(
         shared.totals.as_ref(),
         handshake_deadline,
     ) {
-        remove_current_peer(
-            &shared.peer_registry,
-            &shared.peer_outbound,
-            peer_addr,
-            &lease,
-        );
+        shared.peer_lifecycle.remove_current(peer_addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
         if lease.is_cancelled() {
             tracing::debug!(peer_addr = %peer_addr, "p2p inbound lease revoked during handshake");
@@ -690,12 +650,7 @@ fn run_handshake(
     }
 
     let Some(remote_version) = peer.remote_version.as_ref() else {
-        remove_current_peer(
-            &shared.peer_registry,
-            &shared.peer_outbound,
-            peer_addr,
-            &lease,
-        );
+        shared.peer_lifecycle.remove_current(peer_addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
         return Err(crate::wire::PeerError::Protocol(
             "missing remote version after successful handshake",
@@ -769,25 +724,25 @@ fn run_connected_session(
             // handshake time.  Run the same cleanup the normal exit path
             // does so a spawn failure (e.g. EAGAIN under thread/fd
             // pressure) does not leave a phantom peer registered.
-            remove_current_peer(
-                &shared.peer_registry,
-                &shared.peer_outbound,
-                peer_addr,
-                &lease,
-            );
-            lease.cancel();
+            shared.peer_lifecycle.remove_current(peer_addr, &lease);
             let _ = peer.stream.shutdown(std::net::Shutdown::Both);
             drop(lease);
             return Err(error);
         }
     };
-    publish_peer_info(
-        &shared.peer_registry,
-        shared.peer_registered.as_deref(),
+    let published = publish_peer_info(
+        &shared.peer_lifecycle,
+        shared.peer_ready.as_deref(),
         peer_addr,
-        lease.clone(),
+        &lease,
         info,
     );
+    if !published {
+        let _ = peer.stream.shutdown(std::net::Shutdown::Both);
+        drop(lease);
+        let _ = writer.join();
+        return Ok(());
+    }
 
     let inbound = lease.is_inbound();
     tracing::info!(
@@ -810,18 +765,12 @@ fn run_connected_session(
         )
     })();
 
-    let removed_current = remove_current_peer(
-        &shared.peer_registry,
-        &shared.peer_outbound,
-        peer_addr,
-        &lease,
-    );
+    let removed_current = shared.peer_lifecycle.remove_current(peer_addr, &lease);
     debug_assert!(
         removed_current
             || shared
-                .peer_outbound
-                .read()
-                .get(&peer_addr)
+                .peer_lifecycle
+                .lease(peer_addr)
                 .is_none_or(|current| !current.same_connection(&lease))
     );
     lease.cancel();
@@ -1145,8 +1094,7 @@ mod lease_tests {
     }
 
     struct ReplacingStream {
-        registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-        outbound: OutboundMap,
+        lifecycle: Arc<crate::PeerLifecycle>,
         addr: SocketAddr,
         replacement: Option<crate::PeerLease>,
         bytes: io::Cursor<Vec<u8>>,
@@ -1156,11 +1104,10 @@ mod lease_tests {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if let Some(replacement) = self.replacement.take() {
                 super::register_peer(
-                    &self.registry,
-                    &self.outbound,
+                    &self.lifecycle,
                     None,
                     self.addr,
-                    replacement,
+                    &replacement,
                     peer_info(self.addr, 2),
                 );
             }
@@ -1248,6 +1195,10 @@ mod lease_tests {
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = crate::PeerLease::new(old_tx);
         outbound.write().insert(addr, old.clone());
+        let lifecycle = Arc::new(crate::PeerLifecycle::new(
+            Arc::clone(&registry),
+            Arc::clone(&outbound),
+        ));
         let (replacement_tx, _replacement_rx) = crossbeam_channel::unbounded();
         let replacement = crate::PeerLease::new(replacement_tx);
         let mut bytes = Vec::new();
@@ -1267,8 +1218,7 @@ mod lease_tests {
         };
         let mut peer = Peer::new(
             ReplacingStream {
-                registry: Arc::clone(&registry),
-                outbound: Arc::clone(&outbound),
+                lifecycle,
                 addr,
                 replacement: Some(replacement.clone()),
                 bytes: io::Cursor::new(bytes),
@@ -1307,8 +1257,9 @@ mod lease_tests {
     #[test]
     fn registration_cancels_replaced_lease() {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_447));
-        let registry = RwLock::new(vec![peer_info(addr, 1)]);
-        let outbound = RwLock::new(hashbrown::HashMap::new());
+        let registry = Arc::new(RwLock::new(vec![peer_info(addr, 1)]));
+        let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let lifecycle = crate::PeerLifecycle::new(Arc::clone(&registry), Arc::clone(&outbound));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = crate::PeerLease::new(old_tx);
         outbound.write().insert(addr, old.clone());
@@ -1316,11 +1267,10 @@ mod lease_tests {
         let replacement = crate::PeerLease::new(replacement_tx);
 
         assert!(super::register_peer(
-            &registry,
-            &outbound,
+            &lifecycle,
             None,
             addr,
-            replacement.clone(),
+            &replacement,
             peer_info(addr, 2)
         ));
         assert!(old.is_cancelled());
@@ -1336,17 +1286,16 @@ mod lease_tests {
     #[test]
     fn stale_release_preserves_replacement_and_current_release_removes_it() {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_448));
-        let registry = RwLock::new(vec![peer_info(addr, 2)]);
-        let outbound = RwLock::new(hashbrown::HashMap::new());
+        let registry = Arc::new(RwLock::new(vec![peer_info(addr, 2)]));
+        let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let lifecycle = crate::PeerLifecycle::new(Arc::clone(&registry), Arc::clone(&outbound));
         let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
         let stale = crate::PeerLease::new(stale_tx);
         let (current_tx, _current_rx) = crossbeam_channel::unbounded();
         let current = crate::PeerLease::new(current_tx);
         outbound.write().insert(addr, current.clone());
 
-        assert!(!super::remove_current_peer(
-            &registry, &outbound, addr, &stale
-        ));
+        assert!(!lifecycle.remove_current(addr, &stale));
         assert!(!current.is_cancelled());
         assert!(
             outbound
@@ -1356,9 +1305,7 @@ mod lease_tests {
         );
         assert_eq!(&*registry.read(), &[peer_info(addr, 2)]);
 
-        assert!(super::remove_current_peer(
-            &registry, &outbound, addr, &current
-        ));
+        assert!(lifecycle.remove_current(addr, &current));
         assert!(current.is_cancelled());
         assert!(outbound.read().is_empty());
         assert!(registry.read().is_empty());
@@ -1476,10 +1423,7 @@ mod writer_setup_cleanup_tests {
     use bitcoin::p2p::Magic;
     use parking_lot::RwLock;
 
-    use super::{
-        ConnectionShared, InboundSyncSinks, WRITER_SETUP_FAIL, register_connection,
-        run_connected_session,
-    };
+    use super::{ConnectionShared, InboundSyncSinks, WRITER_SETUP_FAIL, run_connected_session};
     use crate::peer::Peer;
 
     type OutboundMap = Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>;
@@ -1524,8 +1468,7 @@ mod writer_setup_cleanup_tests {
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);
-        let lease_probe = lease.clone();
-        register_connection(&shared.peer_outbound, peer_addr, lease.clone());
+        shared.peer_lifecycle.register(peer_addr, &lease);
 
         // Lease must be registered before the failure.
         assert!(
