@@ -19,22 +19,22 @@ use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
 use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource};
 #[cfg(test)]
 use bitcoin_rs_p2p::PeerLease;
+use bitcoin_rs_p2p::{DownloadWindow, P2pService};
 use bitcoin_rs_primitives::{Block, Hash256};
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 
 use self::stage::{BlockStager, DrainedBlock, StagedBlock};
-#[allow(unused_imports)]
-use bitcoin_rs_p2p::download_window::{
-    DownloadWindow, GETDATA_BATCH_SIZE,
+use bitcoin_rs_p2p::download::{
+    GETDATA_BATCH_SIZE,
     INBOUND_BLOCK_STAGE_CHUNK, MAX_BLOCKS_IN_TRANSIT_PER_PEER, MAX_SERIALIZED_BLOCK_SIZE,
     PENDING_BLOCK_BYTE_ESTIMATE, PENDING_BUDGET, PENDING_BYTE_BUDGET,
     PENDING_TIMEOUT, PEER_INFLIGHT_BUDGET, RECEIVED_BLOCK_BUDGET, RECEIVED_BLOCK_BYTE_BUDGET,
     RECEIVED_BLOCK_TIMEOUT, BLOCK_STALLING_TIMEOUT, BLOCK_STALLING_TIMEOUT_MAX, STALLER_COOLDOWN,
 };
-pub use bitcoin_rs_p2p::download_window::SyncBudget;
-pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
+pub use bitcoin_rs_p2p::SyncBudget;
+pub(crate) use bitcoin_rs_p2p::download::MIN_PEERS_FOR_FANOUT;
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
@@ -45,88 +45,26 @@ const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
+fn default_sync_budget() -> SyncBudget {
+    SyncBudget::default()
+}
+
 /// Block download orchestrator.
 pub struct BlockSync {
     handles: crate::apply::ApplyHandles,
+    p2p: Option<Arc<P2pService>>,
     peer_lifecycle: Arc<bitcoin_rs_p2p::PeerLifecycle>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    #[cfg(test)]
     download_window: Arc<Mutex<DownloadWindow>>,
     block_stager: Arc<Mutex<BlockStager>>,
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct SyncPeer {
-    source: PeerSource,
-    start_height: i32,
-}
-
-impl SyncPeer {
-    const fn addr(self) -> SocketAddr {
-        self.source.addr
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-struct SyncPeerSelection {
-    header_peer: Option<SyncPeer>,
-    request_peers: Vec<SyncPeer>,
-    probe_peers: Vec<SyncPeer>,
-}
-
-/// A height-eligible sync candidate annotated with its fan-out eligibility
-/// (KTD6 predicate, finalized across `statically_fanout_eligible` and the
-/// window's soft-demotion check) and with whether the window currently
-/// soft-blocks it for block requests (expired pendings or staller cooldown).
-#[derive(Clone, Copy, Debug)]
-struct FanoutCandidate {
-    peer: SyncPeer,
-    fanout_eligible: bool,
-    soft_blocked: bool,
-}
-
-/// Connection-level clauses of the fan-out eligibility predicate (KTD6):
-/// outbound and witness-serving (`NODE_WITNESS`), per Bitcoin Core's
-/// block-download peer criteria in `net_processing.cpp` (Core requests blocks
-/// only from witness peers post-segwit, and inbound peers are
-/// attacker-chosen — counting them toward fan-out is the recorded under-fill
-/// regression). The height clause lives in the candidate filter and the
-/// soft-demotion clause in [`DownloadWindow::peer_has_expired_pending`].
-fn statically_fanout_eligible(peer: &PeerInfo) -> bool {
-    let witness = bitcoin::p2p::ServiceFlags::WITNESS.to_u64();
-    !peer.inbound && peer.services & witness != 0
-}
-
-fn configure_request_mode(
-    window: &mut DownloadWindow,
-    candidates: &[FanoutCandidate],
-    now: Instant,
-) -> Option<SyncPeer> {
-    let eligible = candidates
-        .iter()
-        .filter(|candidate| candidate.fanout_eligible)
-        .count();
-    let preferred_addr = window.preferred_peer();
-    let preferred_candidate = preferred_addr.and_then(|addr| {
-        candidates
-            .iter()
-            .find(|candidate| candidate.peer.addr() == addr)
-    });
-    let preferred = preferred_candidate
-        .filter(|candidate| !candidate.soft_blocked)
-        .map(|candidate| candidate.peer);
-    if eligible < window.min_peers_for_fanout() && preferred_candidate.is_some() {
-        window.set_fanout_eligible_peers(0, now);
-        return preferred;
-    }
-    if preferred_addr.is_some() {
-        window.clear_preferred_peer();
-    }
-    window.set_fanout_eligible_peers(eligible, now);
-    None
-}
+type SyncPeer = bitcoin_rs_p2p::SyncPeer;
+type SyncPeerSelection = bitcoin_rs_p2p::SyncPeerSelection;
 
 #[derive(Clone, Copy, Debug)]
 struct PendingHeaderRequest {
@@ -191,7 +129,8 @@ fn is_peer_fault(error: &ChainError) -> bool {
 }
 
 impl BlockSync {
-    /// Constructs an orchestrator over the node's shared lifecycle handle.
+    /// Constructs the test coordinator over an externally supplied lifecycle.
+    #[cfg(test)]
     #[must_use]
     pub fn new_with_lifecycle(
         handles: crate::apply::ApplyHandles,
@@ -201,6 +140,7 @@ impl BlockSync {
     ) -> Self {
         Self {
             handles,
+            p2p: None,
             peer_lifecycle,
             inbound_headers_rx,
             inbound_blocks_rx,
@@ -211,12 +151,57 @@ impl BlockSync {
         }
     }
 
+    /// Constructs the production coordinator over the P2P-owned download
+    /// policy and connection lifecycle.
+    #[must_use]
+    pub fn new_with_p2p(
+        handles: crate::apply::ApplyHandles,
+        p2p: Arc<P2pService>,
+        inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
+        inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    ) -> Self {
+        let budget = default_sync_budget();
+        Self {
+            handles,
+            p2p: Some(Arc::clone(&p2p)),
+            peer_lifecycle: p2p.lifecycle(),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+            block_stager: Arc::new(Mutex::new(BlockStager::new(budget))),
+            pending_getheaders: Arc::new(Mutex::new(None)),
+            expected_apply_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// Replaces the download window and block stager with ones configured by
     /// `budget`. Intended for tests and benchmarks that need to exercise
     /// non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
-        *self.download_window.lock() = DownloadWindow::new(budget);
+        if let Some(p2p) = &self.p2p {
+            p2p.install_download_budget(budget);
+        } else {
+            #[cfg(test)]
+            {
+                *self.download_window.lock() = DownloadWindow::new(budget);
+            }
+            #[cfg(not(test))]
+            unreachable!("production BlockSync always has a P2pService");
+        }
         *self.block_stager.lock() = BlockStager::new(budget);
+    }
+
+    fn with_download_window<R>(&self, operation: impl FnOnce(&mut DownloadWindow) -> R) -> R {
+        match self.p2p.as_ref() {
+            Some(p2p) => p2p.with_download_window(operation),
+            None => {
+                #[cfg(test)]
+                {
+                    operation(&mut self.download_window.lock())
+                }
+                #[cfg(not(test))]
+                unreachable!("production BlockSync always has a P2pService");
+            }
+        }
     }
 
     /// Returns the post-handshake readiness notification consumed by sync.
@@ -225,11 +210,12 @@ impl BlockSync {
     /// connection-scoped scheduler state that must not cross connections.
     #[must_use]
     pub fn peer_ready_handle(&self) -> Arc<dyn Fn(PeerSource) + Send + Sync> {
-        let window = Arc::clone(&self.download_window);
         let pending_getheaders = Arc::clone(&self.pending_getheaders);
+        #[cfg(test)]
+        let window = Arc::clone(&self.download_window);
         Arc::new(move |source| {
-            let mut window = window.lock();
-            window.forget_peer(source.addr);
+            #[cfg(test)]
+            window.lock().forget_peer(source.addr);
             let mut pending = pending_getheaders.lock();
             if pending.is_some_and(|request| request.source == source) {
                 *pending = None;
@@ -379,10 +365,10 @@ impl BlockSync {
                     drop(tree);
                     let mut blamed_peer = None;
                     if let Some(source) = source {
-                        if self.peer_lifecycle.disconnect_source(source) {
-                            self.download_window
-                                .lock()
-                                .mark_peer_unresponsive(source.addr, Instant::now());
+                        if self.disconnect_source(source) {
+                            self.with_download_window(|window| {
+                                window.mark_peer_unresponsive(source.addr, Instant::now());
+                            });
                             blamed_peer = Some(source.addr);
                         }
                     }
@@ -430,7 +416,9 @@ impl BlockSync {
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        let header_peer = {
+        let header_peer = if let Some(p2p) = &self.p2p {
+            p2p.best_header_peer(applied_height)
+        } else {
             let peers = self.peer_lifecycle.ready_peers();
             let mut best: Option<SyncPeer> = None;
             for peer in &peers {
@@ -497,13 +485,14 @@ impl BlockSync {
                 })
                 .collect();
             drop(tree);
-            let mut window = self.download_window.lock();
-            for (hash, height) in height_updates {
-                window.update_received_height(&hash, height);
-            }
-            for dropped in dropped {
-                window.drop_received_for_retry(&dropped.hash);
-            }
+            self.with_download_window(|window| {
+                for (hash, height) in height_updates {
+                    window.update_received_height(&hash, height);
+                }
+                for dropped in dropped {
+                    window.drop_received_for_retry(&dropped.hash);
+                }
+            });
         }
 
         self.switch_branch_if_outweighed();
@@ -610,8 +599,7 @@ impl BlockSync {
                 (hash, source_peer, staged)
             })
             .collect();
-        {
-            let mut window = self.download_window.lock();
+        self.with_download_window(|window| {
             for (hash, source_peer, staged) in staged_blocks {
                 match staged {
                     StagedBlock::AlreadyStaged => {
@@ -634,7 +622,7 @@ impl BlockSync {
                     }
                 }
             }
-        }
+        });
         if retry_count > 0 {
             metrics::counter!("node.sync.retry_count").increment(retry_count);
         }
@@ -700,10 +688,11 @@ impl BlockSync {
                         }
                     }
                     {
-                        let mut window = self.download_window.lock();
-                        for invalid_hash in &invalidated {
-                            window.drop_for_retry(invalid_hash);
-                        }
+                        self.with_download_window(|window| {
+                            for invalid_hash in &invalidated {
+                                window.drop_for_retry(invalid_hash);
+                            }
+                        });
                     }
                     // Invalidation can move the active branch away from the
                     // pinned assume-valid anchor.
@@ -735,7 +724,7 @@ impl BlockSync {
     }
 
     fn retire_applied_reorg_body(&self, hash: Hash256) {
-        self.download_window.lock().mark_received_applied(&hash);
+        self.with_download_window(|window| window.mark_received_applied(&hash));
         self.block_stager.lock().retire_applied(&hash);
     }
 
@@ -875,13 +864,14 @@ impl BlockSync {
         }
         if !applied_hashes.is_empty() || failed_hash.is_some() {
             {
-                let mut window = self.download_window.lock();
-                for hash in &applied_hashes {
-                    window.mark_received_applied(hash);
-                }
-                if let Some(hash) = failed_hash {
-                    window.drop_received_for_retry(&hash);
-                }
+                self.with_download_window(|window| {
+                    for hash in &applied_hashes {
+                        window.mark_received_applied(hash);
+                    }
+                    if let Some(hash) = failed_hash {
+                        window.drop_received_for_retry(&hash);
+                    }
+                });
             }
             self.advance_expected_apply_cache(&applied_hashes, failed_hash.is_some());
             metrics::histogram!("node.sync.apply_buffered_blocks_seconds")
@@ -905,7 +895,7 @@ impl BlockSync {
     fn expected_apply_horizon(&self, staged_count: usize) -> usize {
         // Snapshot the cap and release the window lock before any tree read so we
         // never invert the tree -> window lock order used elsewhere.
-        let max_pending_blocks = self.download_window.lock().max_pending_blocks();
+        let max_pending_blocks = self.with_download_window(|window| window.max_pending_blocks());
         staged_count.max(max_pending_blocks)
     }
 
@@ -1068,107 +1058,33 @@ impl BlockSync {
     }
 
     fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
-        let mut header_peer: Option<SyncPeer> = None;
-        let mut candidates: Vec<FanoutCandidate> = Vec::new();
-        {
-            let peers = self.peer_lifecycle.ready_peers();
-            candidates.reserve(peers.len());
-            for peer in &peers {
-                // Height clause of the fan-out eligibility predicate (KTD6) and
-                // the pre-existing candidate filter: the peer's known chain must
-                // reach past our applied tip, i.e. cover the window front being
-                // requested. Delta vs Core: Core tracks a continuously updated
-                // per-peer best header (`pindexBestKnownBlock`, fed by headers/
-                // inv processing); this codebase only has the handshake-time
-                // `start_height`, so that is the proxy used — per-request
-                // truncation by `peer_best_height` bounds the damage of a stale
-                // value.
-                if u32::try_from(peer.info.start_height)
-                    .ok()
-                    .is_none_or(|height| height <= our_height)
-                {
-                    continue;
-                }
-                let sync_peer = SyncPeer {
-                    source: peer.source,
-                    start_height: peer.info.start_height,
-                };
-                if header_peer
-                    .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
-                {
-                    header_peer = Some(sync_peer);
-                }
-                candidates.push(FanoutCandidate {
-                    peer: sync_peer,
-                    fanout_eligible: statically_fanout_eligible(&peer.info),
-                    soft_blocked: false,
-                });
-            }
+        if let Some(p2p) = &self.p2p {
+            return p2p.select_download_peers(our_height, now);
         }
-        let (request_peer_limit, fanout_active, cold_preferred) = {
-            let mut window = self.download_window.lock();
-            for candidate in &mut candidates {
-                candidate.soft_blocked = window
-                    .peer_has_expired_pending(candidate.peer.addr(), now)
-                    || window.peer_in_staller_cooldown(candidate.peer.addr(), now);
-                candidate.fanout_eligible = candidate.fanout_eligible && !candidate.soft_blocked;
-            }
-            let cold_preferred = configure_request_mode(&mut window, &candidates, now);
-            (
-                window.request_peer_scan_limit(now),
-                window.fanout_active(),
-                cold_preferred,
-            )
-        };
-        let probe_peers = candidates
-            .iter()
-            .filter(|candidate| candidate.fanout_eligible)
-            .map(|candidate| candidate.peer)
-            .collect();
-        let mut request_peers: Vec<SyncPeer> = if let Some(preferred) = cold_preferred {
-            alloc::vec![preferred]
-        } else if fanout_active {
-            candidates
-                .iter()
-                .filter(|candidate| candidate.fanout_eligible)
-                .map(|candidate| candidate.peer)
-                .collect()
-        } else if request_peer_limit > 1 {
-            candidates.iter().map(|candidate| candidate.peer).collect()
-        } else {
-            // Fallback, single deep peer: the highest peer that the window
-            // does not currently soft-block (expired pendings / staller
-            // cooldown) fills the window; a soft-blocked peer serves only as
-            // the last resort when no alternative exists. Without the
-            // preference, a disconnected staller that reconnects with an
-            // inflated start_height would out-sort every honest peer and
-            // re-acquire the window front (RE-ADV-2 / first-audit ADV-2).
-            let mut preferred: Option<SyncPeer> = None;
-            for candidate in candidates
-                .iter()
-                .filter(|candidate| !candidate.soft_blocked)
-            {
-                // First-wins on equal heights, matching the header-peer fold.
-                if preferred
-                    .is_none_or(|current| current.start_height < candidate.peer.start_height)
-                {
-                    preferred = Some(candidate.peer);
-                }
-            }
-            preferred
-                .or(header_peer)
-                .into_iter()
-                .take(request_peer_limit)
-                .collect()
-        };
-        if request_peers.len() > 1 {
-            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+        // `start_height`, so that is the proxy used — per-request
+        // truncation by `peer_best_height` bounds the damage of a stale
+        // value.
+        let ready_peers = self.peer_lifecycle.ready_peers();
+        self.with_download_window(|window| {
+            bitcoin_rs_p2p::select_download_peers(&ready_peers, window, our_height, now)
+        })
+    }
+
+    fn send_message(
+        &self,
+        source: PeerSource,
+        message: bitcoin_rs_p2p::Message,
+    ) -> Result<(), bitcoin_rs_p2p::Message> {
+        match self.p2p.as_ref() {
+            Some(p2p) => p2p.send(source, message),
+            None => self.peer_lifecycle.send(source, message),
         }
-        request_peers.truncate(request_peer_limit);
-        SyncPeerSelection {
-            header_peer,
-            request_peers,
-            probe_peers,
+    }
+
+    fn disconnect_source(&self, source: PeerSource) -> bool {
+        match self.p2p.as_ref() {
+            Some(p2p) => p2p.disconnect(source),
+            None => self.peer_lifecycle.disconnect_source(source),
         }
     }
 
@@ -1177,12 +1093,10 @@ impl BlockSync {
     /// Every alternate receives the same earliest hashes, so the probe cannot
     /// create a unique out-of-order height hole. It runs once per deep owner.
     fn send_prefix_probes(&self, probe_peers: &[SyncPeer], now: Instant) {
-        let (owner, hashes, required_height) = {
-            let window = self.download_window.lock();
-            let Some(plan) = window.prefix_probe_plan() else {
-                return;
-            };
-            plan
+        let Some((owner, hashes, required_height)) =
+            self.with_download_window(|window| window.prefix_probe_plan())
+        else {
+            return;
         };
         let candidates = probe_peers.iter().filter(|peer| {
             peer.addr() != owner
@@ -1191,9 +1105,6 @@ impl BlockSync {
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
         for peer in candidates {
             let peer_addr = peer.addr();
-            let Some(tx) = self.peer_lifecycle.lease_source(peer.source) else {
-                continue;
-            };
             let inventory = hashes
                 .iter()
                 .map(|hash| {
@@ -1202,7 +1113,10 @@ impl BlockSync {
                     ))
                 })
                 .collect();
-            if tx.send(Message::GetData(inventory)).is_ok() {
+            if self
+                .send_message(peer.source, Message::GetData(inventory))
+                .is_ok()
+            {
                 successful.push(peer_addr);
             }
         }
@@ -1210,8 +1124,9 @@ impl BlockSync {
             return;
         }
         let block_count = hashes.len();
-        let mut window = self.download_window.lock();
-        window.confirm_prefix_probe(owner, hashes, &successful, now);
+        self.with_download_window(|window| {
+            window.confirm_prefix_probe(owner, hashes, &successful, now);
+        });
         metrics::counter!("node.sync.prefix_probe_peers")
             .increment(u64::try_from(successful.len()).unwrap_or(u64::MAX));
         tracing::info!(
@@ -1273,8 +1188,7 @@ impl BlockSync {
         };
         let request_start_height = first_connect.height;
 
-        let request = {
-            let mut window = self.download_window.lock();
+        let request = self.with_download_window(|window| {
             window.next_peer_request(
                 source,
                 allow_expired_retry_from_peer,
@@ -1284,7 +1198,7 @@ impl BlockSync {
                 &tree,
                 now,
             )
-        };
+        });
         drop(tree);
         let Some(request) = request else {
             return GetdataRequestOutcome::default();
@@ -1313,15 +1227,7 @@ impl BlockSync {
         }
         let msg = Message::GetData(inventory);
 
-        let tx = self.peer_lifecycle.lease_source(request.source());
-        let Some(tx) = tx else {
-            tracing::trace!(
-                peer_addr = %request.peer_addr(),
-                "block sync: target peer has no outbound channel (getdata skipped)"
-            );
-            return GetdataRequestOutcome::default();
-        };
-        if tx.send(msg).is_err() {
+        if self.send_message(request.source(), msg).is_err() {
             tracing::warn!(
                 peer_addr = %request.peer_addr(),
                 "block sync: outbound channel disconnected (getdata)"
@@ -1337,7 +1243,8 @@ impl BlockSync {
                 hashes: expected_hashes,
             });
         }
-        let has_request_capacity = self.download_window.lock().mark_requested(&request, now);
+        let has_request_capacity =
+            self.with_download_window(|window| window.mark_requested(&request, now));
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
         tracing::debug!(
             peer_addr = %request.peer_addr(),
@@ -1377,15 +1284,7 @@ impl BlockSync {
             locator_hashes,
             bitcoin::BlockHash::all_zeros(),
         ));
-        let tx = self.peer_lifecycle.lease_source(source);
-        let Some(tx) = tx else {
-            tracing::warn!(
-                peer_addr = %sync_peer_addr,
-                "block sync: target peer no longer has outbound channel"
-            );
-            return;
-        };
-        if tx.send(msg).is_err() {
+        if self.send_message(source, msg).is_err() {
             tracing::warn!(
                 peer_addr = %sync_peer_addr,
                 "block sync: outbound channel disconnected"
@@ -1457,10 +1356,14 @@ impl BlockSync {
     }
 
     fn release_disconnected_peer_budget(&self) {
+        if let Some(p2p) = &self.p2p {
+            p2p.release_disconnected_download_peers();
+            return;
+        }
         let live = self.peer_lifecycle.live_addresses();
-        self.download_window
-            .lock()
-            .release_disconnected_peers(|peer| live.contains(peer));
+        self.with_download_window(|window| {
+            window.release_disconnected_peers(|peer| live.contains(peer));
+        });
     }
 
     /// Sends one untracked duplicate request for a cold-start stalled front.
@@ -1474,41 +1377,42 @@ impl BlockSync {
         front_height: u32,
         now: Instant,
     ) -> Option<SocketAddr> {
-        let candidates: SmallVec<[SyncPeer; 8]> = self
-            .peer_lifecycle
-            .ready_peers()
-            .into_iter()
-            .filter(|peer| {
-                peer.source.addr != owner
-                    && statically_fanout_eligible(&peer.info)
-                    && u32::try_from(peer.info.start_height)
-                        .is_ok_and(|height| height >= front_height)
-            })
-            .map(|peer| SyncPeer {
-                source: peer.source,
-                start_height: peer.info.start_height,
-            })
-            .collect();
-        let candidates: SmallVec<[SyncPeer; 8]> = {
-            let window = self.download_window.lock();
-            candidates
+        let candidates: SmallVec<[SyncPeer; 8]> = if let Some(p2p) = &self.p2p {
+            p2p.cold_front_hedge_peers(owner, front_height, now)
+                .into_iter()
+                .collect()
+        } else {
+            let candidates: Vec<_> = self
+                .peer_lifecycle
+                .ready_peers()
                 .into_iter()
                 .filter(|peer| {
-                    !window.peer_has_expired_pending(peer.addr(), now)
-                        && !window.peer_in_staller_cooldown(peer.addr(), now)
+                    peer.source.addr != owner
+                        && bitcoin_rs_p2p::statically_fanout_eligible(&peer.info)
+                        && u32::try_from(peer.info.start_height)
+                            .is_ok_and(|height| height >= front_height)
                 })
-                .collect()
+                .map(|peer| SyncPeer {
+                    source: peer.source,
+                    start_height: peer.info.start_height,
+                })
+                .collect();
+            self.with_download_window(|window| {
+                candidates
+                    .into_iter()
+                    .filter(|peer| {
+                        !window.peer_has_expired_pending(peer.addr(), now)
+                            && !window.peer_in_staller_cooldown(peer.addr(), now)
+                    })
+                    .collect()
+            })
         };
         let mut message = Message::GetData(vec![Inventory::WitnessBlock(
             bitcoin::BlockHash::from_byte_array(*front_hash.as_byte_array()),
         )]);
         for peer in candidates {
             let peer_addr = peer.addr();
-            let tx = self.peer_lifecycle.lease_source(peer.source);
-            let Some(tx) = tx else {
-                continue;
-            };
-            match tx.send(message) {
+            match self.send_message(peer.source, message) {
                 Ok(()) => {
                     metrics::counter!("node.sync.cold_front_hedges").increment(1);
                     tracing::info!(
@@ -1521,7 +1425,7 @@ impl BlockSync {
                     return Some(peer_addr);
                 }
                 Err(error) => {
-                    message = error.0;
+                    message = error;
                 }
             }
         }
@@ -1576,9 +1480,9 @@ impl BlockSync {
             && let Some(alternate) =
                 self.send_cold_front_hedge(owner, front_hash, next_apply_height, now)
         {
-            self.download_window
-                .lock()
-                .confirm_cold_front_hedge(owner, alternate, front_hash);
+            self.with_download_window(|window| {
+                window.confirm_cold_front_hedge(owner, alternate, front_hash);
+            });
         }
         false
     }
@@ -1601,10 +1505,11 @@ impl BlockSync {
     }
 
     fn record_sync_metrics(&self) {
-        let window = self.download_window.lock();
+        let (pending_blocks, pending_bytes) =
+            self.with_download_window(|window| (window.pending_len(), window.pending_bytes()));
         let stager = self.block_stager.lock();
-        metrics::gauge!("node.sync.pending_blocks").set(metric_count(window.pending_len()));
-        metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
+        metrics::gauge!("node.sync.pending_blocks").set(metric_count(pending_blocks));
+        metrics::gauge!("node.sync.pending_bytes").set(metric_count(pending_bytes));
         metrics::gauge!("node.sync.received_blocks").set(metric_count(stager.received_len()));
         metrics::gauge!("node.sync.received_bytes").set(metric_count(stager.received_bytes()));
         let (pending_blocks_high_water, pending_bytes_high_water) = window.pending_high_water();
@@ -1619,9 +1524,10 @@ impl BlockSync {
     }
 
     fn record_pending_sync_metrics(&self) {
-        let window = self.download_window.lock();
-        metrics::gauge!("node.sync.pending_blocks").set(metric_count(window.pending_len()));
-        metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
+        let (pending_blocks, pending_bytes) =
+            self.with_download_window(|window| (window.pending_len(), window.pending_bytes()));
+        metrics::gauge!("node.sync.pending_blocks").set(metric_count(pending_blocks));
+        metrics::gauge!("node.sync.pending_bytes").set(metric_count(pending_bytes));
     }
 
     /// Selects a download-window owner and requests an identity-checked P2P
@@ -1630,14 +1536,17 @@ impl BlockSync {
         &self,
         select: impl FnOnce(&mut DownloadWindow) -> Option<SocketAddr>,
     ) -> Option<SocketAddr> {
-        let peer_addr = {
-            let mut window = self.download_window.lock();
-            select(&mut window)?
+        let (peer_addr, source) = match self.p2p.as_ref() {
+            Some(p2p) => p2p.select_and_disconnect_download_peer(select)?,
+            None => {
+                let peer_addr = self.with_download_window(select)?;
+                let source = self.peer_lifecycle.ready_source(peer_addr)?;
+                if !self.disconnect_source(source) {
+                    return None;
+                }
+                (peer_addr, source)
+            }
         };
-        let source = self.peer_lifecycle.ready_source(peer_addr)?;
-        if !self.peer_lifecycle.disconnect_source(source) {
-            return None;
-        }
         let mut pending = self.pending_getheaders.lock();
         if pending.is_some_and(|request| request.source == source) {
             *pending = None;
@@ -1650,23 +1559,9 @@ fn metric_count(value: usize) -> f64 {
     f64::from(u32::try_from(value).unwrap_or(u32::MAX))
 }
 
-/// Returns the production `SyncBudget` used by [`BlockSync::new_with_lifecycle`].
-pub const fn default_sync_budget() -> SyncBudget {
-    SyncBudget {
-        max_pending_blocks: PENDING_BUDGET,
-        max_pending_bytes: PENDING_BYTE_BUDGET,
-        max_received_blocks: RECEIVED_BLOCK_BUDGET,
-        max_received_bytes: RECEIVED_BLOCK_BYTE_BUDGET,
-        max_peer_inflight: PEER_INFLIGHT_BUDGET,
-        fanout_peer_inflight: MAX_BLOCKS_IN_TRANSIT_PER_PEER,
-        min_peers_for_fanout: MIN_PEERS_FOR_FANOUT,
-        getdata_batch_limit: GETDATA_BATCH_SIZE,
-        pending_timeout: PENDING_TIMEOUT,
-        received_timeout: RECEIVED_BLOCK_TIMEOUT,
-        stall_timeout_initial: BLOCK_STALLING_TIMEOUT,
-        stall_timeout_max: BLOCK_STALLING_TIMEOUT_MAX,
-        staller_cooldown: STALLER_COOLDOWN,
-    }
+/// Returns the production `SyncBudget` owned by the P2P download policy.
+pub fn default_sync_budget() -> SyncBudget {
+    SyncBudget::default()
 }
 
 #[cfg(test)]
@@ -3883,12 +3778,12 @@ mod tests {
     /// eligible count reaches the threshold on a following tick while the
     /// probe is still fresh, then fanout must engage once the injected time
     /// crosses the `stall_timeout_initial` deadline. Exercises the real
-    /// `tick()` / `configure_request_mode` / `set_fanout_eligible_peers`
+    /// `tick()` / P2P download policy / `set_fanout_eligible_peers`
     /// path for probe creation and the deferral, then injects a future
     /// `Instant` (the only available time seam, since `tick()` reads
     /// `Instant::now()`) to cross the deadline. This is the exact cross-tick
     /// boundary test; the direct window-boundary test lives in
-    /// `window::tests::fanout_cancels_prefix_probe_without_rearming_it`. No
+    /// P2P download-window boundary test. No
     /// sleeps, no network.
     #[test]
     fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()

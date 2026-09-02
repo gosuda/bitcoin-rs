@@ -496,12 +496,50 @@ impl PeerLifecycle {
     /// Clones the lease only when it is still the connection identified by
     /// `source`.
     #[must_use]
-    pub fn lease_source(&self, source: PeerSource) -> Option<PeerLease> {
+    pub(crate) fn lease_source(&self, source: PeerSource) -> Option<PeerLease> {
         self.leases
             .read()
             .get(&source.addr)
             .filter(|lease| lease.is_current(source))
             .cloned()
+    }
+
+    /// Selects and disconnects a ready address while excluding same-address
+    /// replacement registration from the selection through the removal.
+    pub(crate) fn disconnect_selected_ready(
+        &self,
+        select: impl FnOnce() -> Option<SocketAddr>,
+    ) -> Option<(SocketAddr, PeerSource)> {
+        let mut leases = self.leases.write();
+        let addr = select()?;
+        let lease = leases.get(&addr)?;
+        if !self.registry.read().iter().any(|peer| peer.addr == addr) {
+            return None;
+        }
+        let source = lease.source(addr);
+        let removed = leases.remove(&addr)?;
+        removed.cancel();
+        self.registry.write().retain(|peer| peer.addr != addr);
+        Some((addr, source))
+    }
+
+    /// Sends a message only while `source` remains the current connection.
+    ///
+    /// The source check and lease lookup share one read-side critical section,
+    /// so callers never send through a same-address replacement selected after
+    /// an earlier address lookup.
+    #[allow(clippy::result_large_err)]
+    pub fn send(&self, source: PeerSource, message: crate::Message) -> Result<(), crate::Message> {
+        let Some(lease) = self
+            .leases
+            .read()
+            .get(&source.addr)
+            .filter(|lease| lease.is_current(source))
+            .cloned()
+        else {
+            return Err(message);
+        };
+        lease.send(message).map_err(|error| error.0)
     }
 
     /// Snapshots ready-peer metadata.

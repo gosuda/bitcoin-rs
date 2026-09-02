@@ -639,12 +639,16 @@ impl NodeServices {
         // wakes immediately through its retained channel when it owns one.
         if let Some(state) = state {
             state.shutdown().store(true, Ordering::Release);
+            state.p2p().shutdown();
         }
         if let Some(tx) = self.event_loop_signal.take() {
             let _ = tx.send(());
         }
 
         let mut first_error: Option<anyhow::Error> = None;
+        if let Some(state) = state {
+            state.p2p().join();
+        }
         self.join_core_services(&mut first_error);
 
         if let Err(error) = shutdown::drain_and_shutdown(DRAIN_DEADLINE) {
@@ -1022,40 +1026,17 @@ pub(crate) fn start_node(
         .name("bitcoin-rs-rpc".into())
         .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
     guard.services.rpc_thread = Some(rpc_thread);
-    let peer_lifecycle = state.peer_lifecycle();
-    spawn_p2p_listeners(
-        state.config(),
-        &shutdown,
-        &network_active,
-        &peer_lifecycle,
-        Arc::clone(&banned),
-        state.inbound_headers_sender(),
-        state.inbound_blocks_sender(),
-        sync_wake_tx.clone(),
-        Arc::clone(&p2p_chain_query),
-        Arc::clone(&peer_ready),
-        &mut guard.services,
-    )?;
-    let outbound_worker = spawn_p2p_outbound_drain(
-        state,
-        &shutdown,
-        sync_wake_tx,
-        Arc::clone(&p2p_chain_query),
-        Arc::clone(&peer_ready),
-    )?;
-    guard.services.outbound_worker = Some(outbound_worker);
-    let bootstrap_worker = if state.config().connect.is_empty() {
-        spawn_dns_peer_maintenance(
-            state.config(),
-            Arc::clone(&shutdown),
-            Arc::clone(&network_active),
-            state.peer_lifecycle(),
-            state.p2p_outbound_sender(),
-        )?
-    } else {
-        spawn_fixed_peer_bootstrap(state, &shutdown)?
-    };
-    guard.services.bootstrap_worker = bootstrap_worker;
+    // P2pService is the single owner of listener, outbound, bootstrap, and
+    // download-window workers. The node supplies only chain reads and sync
+    // wake delivery.
+    state
+        .p2p()
+        .start(
+            Some(&p2p_chain_query),
+            Some(&sync_wake_tx),
+            &peer_ready,
+        )
+        .map_err(anyhow::Error::from)?;
     // Periodic chainstate checkpoint worker: publishes a checkpoint every
     // CHECKPOINT_INTERVAL_BLOCKS or CHECKPOINT_INTERVAL_SECS so a node
     // killed mid-sync restarts from a recent anchor, not the last clean

@@ -22,7 +22,8 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 type SyncWakeHandle = Option<Sender<()>>;
-type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
+/// Optional notification invoked after a connection completes its handshake.
+pub type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 
 /// State shared by the listener and every connection thread it spawns.
 ///

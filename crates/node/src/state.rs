@@ -1158,6 +1158,8 @@ pub struct NodeState {
     blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
     network: Arc<RwLock<NetworkState>>,
+    /// Sole runtime owner of P2P workers and mutable P2P control state.
+    p2p: Arc<bitcoin_rs_p2p::P2pService>,
     /// Shared P2P admission switch controlled by `setnetworkactive`.
     network_active: Arc<AtomicBool>,
     /// Single lifecycle authority shared by sync, RPC, and P2P connections.
@@ -1472,23 +1474,38 @@ impl NodeState {
             },
         ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
-        let network_active = Arc::new(AtomicBool::new(true));
-        let peers = Arc::new(RwLock::new(Vec::new()));
-        let banned = Arc::new(RwLock::new(Vec::new()));
-        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
-        let peer_lifecycle = Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(
-            Arc::clone(&peers),
-            Arc::clone(&peer_outbound),
+        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig {
+                listen_addrs: config.p2p_listen.clone(),
+                magic: bitcoin::p2p::Magic::from_bytes(config.p2p_magic),
+                dns_seeds_enabled: config.dns_seeds_enabled,
+                dns_seeds: config
+                    .network
+                    .dns_seeds()
+                    .iter()
+                    .map(|seed| (*seed).to_owned())
+                    .collect(),
+                dns_port: config.network.default_p2p_port(),
+                fixed_peers: config.connect.clone(),
+                outbound_active_limit: P2P_OUTBOUND_QUEUE_LIMIT,
+                outbound_peer_target: P2P_OUTBOUND_QUEUE_LIMIT,
+                outbound_queue_limit: P2P_OUTBOUND_QUEUE_LIMIT,
+                inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
+                download_budget: bitcoin_rs_p2p::SyncBudget::default(),
+            },
+            Arc::clone(&shutdown),
         ));
-        let (p2p_outbound_tx, p2p_outbound_rx_raw) =
-            crossbeam_channel::bounded(P2P_OUTBOUND_QUEUE_LIMIT);
-        let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
-        let (inbound_headers_tx, inbound_headers_rx_raw) =
-            crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
-            crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundBlock>(INBOUND_BLOCK_CHANNEL_LIMIT);
-        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        // These handles are views into `P2pService`; they keep existing node
+        // and RPC seams source-compatible without creating second state.
+        let network_active = p2p.network_active_handle();
+        let peer_lifecycle = p2p.lifecycle();
+        let banned = p2p.banned_handle();
+        let p2p_outbound_tx = p2p.outbound_sender();
+        let p2p_outbound_rx = p2p.outbound_receiver();
+        let inbound_headers_tx = p2p.inbound_headers_sender();
+        let inbound_headers_rx = p2p.inbound_headers_receiver();
+        let inbound_blocks_tx = p2p.inbound_blocks_sender();
+        let inbound_blocks_rx = p2p.inbound_blocks_receiver();
         let chain_event_hints_rx = Arc::new(Mutex::new(chain_event_hints_rx_raw));
         // The template-coordinator wake exists from node birth so the apply
         // path and the gateway can fire it before `run` builds the
@@ -1552,9 +1569,9 @@ impl NodeState {
             recovery_meta_path: Some(config.data_dir.join(crate::crash_recovery::META_FILENAME)),
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
-        let sync = Arc::new(crate::BlockSync::new_with_lifecycle(
+        let sync = Arc::new(crate::BlockSync::new_with_p2p(
             apply_handles.clone(),
-            Arc::clone(&peer_lifecycle),
+            Arc::clone(&p2p),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
         ));
@@ -1615,6 +1632,7 @@ impl NodeState {
             blocks,
             transactions,
             network,
+            p2p,
             network_active,
             peer_lifecycle,
             banned,
@@ -1954,6 +1972,12 @@ impl NodeState {
         Arc::clone(&self.network)
     }
 
+    /// Returns the sole runtime owner of P2P workers and control state.
+    #[must_use]
+    pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
+        Arc::clone(&self.p2p)
+    }
+
     /// Returns the shared P2P admission switch exposed to RPC and P2P workers.
     #[must_use]
     pub fn network_active(&self) -> Arc<AtomicBool> {
@@ -2177,6 +2201,8 @@ impl NodeState {
 
 impl Drop for NodeState {
     fn drop(&mut self) {
+        self.p2p.shutdown();
+        self.p2p.join();
         let _admission = self.apply_handles.admission.close();
         // Safety net: if `bounded_index_shutdown` was not called (e.g. in
         // tests that drop `NodeState` directly), still request shutdown and

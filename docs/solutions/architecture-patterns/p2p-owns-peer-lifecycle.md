@@ -10,8 +10,9 @@ made stale sync decisions capable of racing a same-address replacement.
 
 ## Decision
 
-`PeerLifecycle` is the sole mutation boundary for live leases and ready-peer
-metadata. P2P connection threads use it to register before handshake, publish
+`P2pService` is the runtime owner of P2P control state, workers, and download
+policy. Its `PeerLifecycle` is the sole mutation boundary for live leases and
+ready-peer metadata. P2P connection threads use it to register before handshake, publish
 metadata only while the publishing lease remains current, replace a genuine
 predecessor, and remove themselves during teardown.
 
@@ -31,7 +32,8 @@ operation cannot publish, send to, or cancel a replacement.
 - Scheduler state is reset under the current-source guard before replacement
   metadata is published.
 - Handshake metadata is published only for the current lease.
-- The node, RPC, sync, and listener share one `Arc<PeerLifecycle>` authority.
+- The node and RPC use one shared `Arc<P2pService>`; its listener workers and
+  download policy use the service-owned lifecycle.
 - Ready-peer selection carries `PeerSource` through the final send.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale

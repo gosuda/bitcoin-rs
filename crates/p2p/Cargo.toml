@@ -31,9 +31,9 @@ zerocopy.workspace = true
 tinyvec.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
+metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-metrics.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

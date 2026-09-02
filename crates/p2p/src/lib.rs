@@ -2,7 +2,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Block download window, peer-assignment, stall, and scheduling policy.
-pub mod download_window;
+#[allow(missing_docs)]
+pub mod download;
 /// BIP155 addrv2 address helpers.
 pub mod addrv2;
 /// Peer banning and persistence.
@@ -25,6 +26,8 @@ pub mod listener;
 pub mod peer;
 /// Peer metadata published after a successful handshake.
 pub mod peer_info;
+/// Runtime owner for P2P control state and workers.
+pub mod service;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Bitcoin P2P wire codec.
@@ -42,11 +45,11 @@ pub use peer::{
     NodeAddress, Peer, PeerManager, PeerState, SystemDnsResolver, TrafficTotals,
     UPLOAD_TIMEFRAME_SECS, UploadTarget,
 };
+pub use download::{
+    DownloadWindow, PeerRequest, SyncBudget, SyncPeer, SyncPeerSelection, select_download_peers,
+    statically_fanout_eligible,
+};
 pub use peer_info::PeerInfo;
+pub use service::{P2pControlError, P2pService, P2pServiceConfig, P2pServiceError};
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
-
-pub use download_window::{
-    configure_request_mode, default_sync_budget, statically_fanout_eligible, DownloadWindow,
-    FanoutCandidate, SyncBudget, SyncPeer, SyncPeerSelection,
-};
