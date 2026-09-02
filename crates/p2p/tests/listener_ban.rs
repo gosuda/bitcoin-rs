@@ -9,10 +9,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bitcoin::p2p::Magic;
 use bitcoin_rs_p2p::listener::{
-    serve_with_controls, serve_with_shutdown, spawn_outbound_connection,
+    serve_with_controls, serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake,
     spawn_outbound_connection_with_controls,
+    spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake,
 };
-use bitcoin_rs_p2p::{BannedSubnet, IpSubnet, NetworkControls, PeerError};
+use bitcoin_rs_p2p::{BannedSubnet, IpSubnet, NetworkControls, PeerError, PeerLifecycle};
 use parking_lot::RwLock;
 
 #[test]
@@ -28,20 +29,23 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
 
     let registry = Arc::new(RwLock::new(Vec::new()));
     let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+    let lifecycle = Arc::new(PeerLifecycle::new(registry, outbound));
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(vec![ban(IpSubnet::from_ip(addr.ip()))]));
     let network_active = Arc::new(AtomicBool::new(true));
 
-    let handle = spawn_outbound_connection(
+    let handle = spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake(
         addr,
-        network_active,
         Magic::BITCOIN,
-        registry,
-        outbound,
+        lifecycle,
+        banned,
         headers_tx,
         blocks_tx,
-        banned,
+        network_active,
+        None,
+        None,
+        None,
     );
     let result = match handle.join() {
         Ok(result) => result,
@@ -79,9 +83,12 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
     let listener_shutdown = Arc::clone(&shutdown);
     let listener_network_active = Arc::clone(&network_active);
     let registry = Arc::new(RwLock::new(Vec::new()));
-    let listener_registry = Arc::clone(&registry);
     let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
-    let listener_outbound = Arc::clone(&outbound);
+    let lifecycle = Arc::new(PeerLifecycle::new(
+        Arc::clone(&registry),
+        Arc::clone(&outbound),
+    ));
+    let listener_lifecycle = Arc::clone(&lifecycle);
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(vec![ban(IpSubnet::new(
@@ -91,16 +98,18 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
     let listener_banned = Arc::clone(&banned);
 
     let handle = thread::spawn(move || {
-        serve_with_shutdown(
+        serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake(
             addr,
             listener_shutdown,
             listener_network_active,
             Magic::BITCOIN,
-            listener_registry,
-            listener_outbound,
+            listener_lifecycle,
+            listener_banned,
             headers_tx,
             blocks_tx,
-            listener_banned,
+            None,
+            None,
+            None,
         )
     });
 
@@ -135,22 +144,27 @@ fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> 
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(Vec::new()));
+    let lifecycle = Arc::new(PeerLifecycle::new(
+        Arc::clone(&registry),
+        Arc::clone(&outbound),
+    ));
 
     let listener_shutdown = Arc::clone(&shutdown);
     let listener_network_active = Arc::clone(&network_active);
-    let listener_registry = Arc::clone(&registry);
-    let listener_outbound = Arc::clone(&outbound);
+    let listener_lifecycle = Arc::clone(&lifecycle);
     let handle = thread::spawn(move || {
-        serve_with_shutdown(
+        serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake(
             addr,
             listener_shutdown,
             listener_network_active,
             Magic::BITCOIN,
-            listener_registry,
-            listener_outbound,
+            listener_lifecycle,
+            banned,
             headers_tx,
             blocks_tx,
-            banned,
+            None,
+            None,
+            None,
         )
     });
 
@@ -181,16 +195,22 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(Vec::new()));
-
-    let inactive = spawn_outbound_connection(
-        addr,
-        Arc::clone(&network_active),
-        Magic::BITCOIN,
+    let lifecycle = Arc::new(PeerLifecycle::new(
         Arc::clone(&registry),
         Arc::clone(&outbound),
+    ));
+
+    let inactive = spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake(
+        addr,
+        Magic::BITCOIN,
+        Arc::clone(&lifecycle),
+        Arc::clone(&banned),
         headers_tx.clone(),
         blocks_tx.clone(),
-        Arc::clone(&banned),
+        Arc::clone(&network_active),
+        None,
+        None,
+        None,
     );
     let inactive = inactive
         .join()
@@ -206,15 +226,17 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     );
 
     network_active.store(true, Ordering::Release);
-    let active = spawn_outbound_connection(
+    let active = spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake(
         addr,
-        network_active,
         Magic::BITCOIN,
-        registry,
-        outbound,
+        lifecycle,
+        banned,
         headers_tx,
         blocks_tx,
-        banned,
+        network_active,
+        None,
+        None,
+        None,
     );
     assert!(join_accept(accept_handle)?);
     let _ = active
@@ -371,7 +393,7 @@ fn loopback_peer_pair(shutdown: &Arc<AtomicBool>) -> Result<LoopbackPeer, Box<dy
         );
 
         while !dial.is_finished() {
-            if controls.peer_outbound().read().contains_key(&addr) {
+            if controls.peer_lifecycle().contains(addr) {
                 // Successful dial stays attached to shared state; detach the
                 // handle the same way as before so tests join only the listener.
                 drop(dial);
@@ -386,7 +408,7 @@ fn loopback_peer_pair(shutdown: &Arc<AtomicBool>) -> Result<LoopbackPeer, Box<dy
         };
         match result {
             Ok(()) => {
-                if controls.peer_outbound().read().contains_key(&addr) {
+                if controls.peer_lifecycle().contains(addr) {
                     return Ok((controls, addr, listener));
                 }
                 shutdown.store(true, Ordering::Relaxed);
@@ -431,10 +453,10 @@ fn controls_see_both_connection_directions_and_handshake_registry() -> Result<()
 
     let handshake_done = wait_until(Duration::from_secs(5), || {
         controls
-            .peer_registry()
-            .read()
+            .peer_lifecycle()
+            .ready_peers()
             .iter()
-            .any(|p| p.addr == addr)
+            .any(|peer| peer.info.addr == addr)
     });
     shutdown.store(true, Ordering::Relaxed);
     join_listener(listener)?;
@@ -459,10 +481,10 @@ fn ping_round_trip_measures_duration_on_both_sides() -> Result<(), Box<dyn Error
 
     let handshake_done = wait_until(Duration::from_secs(5), || {
         controls
-            .peer_registry()
-            .read()
+            .peer_lifecycle()
+            .ready_peers()
             .iter()
-            .any(|p| p.addr == addr)
+            .any(|peer| peer.info.addr == addr)
     });
     assert!(handshake_done, "handshake must complete before pinging");
     assert_eq!(controls.send_pings(unix_micros_now()), 2);
@@ -490,10 +512,10 @@ fn traffic_totals_accumulate_from_live_connections() -> Result<(), Box<dyn Error
 
     let traffic_flowed = wait_until(Duration::from_secs(5), || {
         controls
-            .peer_registry()
-            .read()
+            .peer_lifecycle()
+            .ready_peers()
             .iter()
-            .any(|p| p.addr == addr)
+            .any(|peer| peer.info.addr == addr)
             && controls.totals().total_bytes_recv() > 0
             && controls.totals().total_bytes_sent() > 0
     });
@@ -515,10 +537,10 @@ fn setnetworkactive_refuses_new_outbound_activity() -> Result<(), Box<dyn Error>
     let (controls, addr, listener) = loopback_peer_pair(&shutdown)?;
     let handshake_done = wait_until(Duration::from_secs(5), || {
         controls
-            .peer_registry()
-            .read()
+            .peer_lifecycle()
+            .ready_peers()
             .iter()
-            .any(|p| p.addr == addr)
+            .any(|peer| peer.info.addr == addr)
     });
     assert!(handshake_done);
     assert!(!controls.set_network_active(false));
@@ -561,21 +583,21 @@ fn controls_disconnect_node_promptly_removes_the_lease() -> Result<(), Box<dyn E
     let (controls, addr, listener) = loopback_peer_pair(&shutdown)?;
     let handshake_done = wait_until(Duration::from_secs(5), || {
         controls
-            .peer_registry()
-            .read()
+            .peer_lifecycle()
+            .ready_peers()
             .iter()
-            .any(|p| p.addr == addr)
+            .any(|peer| peer.info.addr == addr)
     });
     assert!(handshake_done);
     assert!(controls.disconnect_node(&addr));
 
     let outbound_gone = wait_until(Duration::from_secs(5), || {
-        !controls.peer_outbound().read().contains_key(&addr)
+        !controls.peer_lifecycle().contains(addr)
             || !controls
-                .peer_registry()
-                .read()
+                .peer_lifecycle()
+                .ready_peers()
                 .iter()
-                .any(|peer| peer.addr == addr)
+                .any(|peer| peer.info.addr == addr)
     });
     shutdown.store(true, Ordering::Relaxed);
     join_listener(listener)?;

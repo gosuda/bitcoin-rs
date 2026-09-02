@@ -462,8 +462,7 @@ struct AddedNodeEntry {
 /// channel exactly like RPC-triggered outbound connections.
 #[derive(Clone)]
 pub struct NetworkControls {
-    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+    peer_lifecycle: Arc<crate::PeerLifecycle>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     activity: Arc<NetworkActivity>,
     totals: Arc<TrafficTotals>,
@@ -485,8 +484,7 @@ impl NetworkControls {
         default_port: u16,
     ) -> Self {
         Self {
-            peer_registry,
-            peer_outbound,
+            peer_lifecycle: Arc::new(crate::PeerLifecycle::new(peer_registry, peer_outbound)),
             banned,
             activity: Arc::new(NetworkActivity::new(true)),
             totals: Arc::new(TrafficTotals::new(0)),
@@ -511,16 +509,10 @@ impl NetworkControls {
         self
     }
 
-    /// Shared handshake registry, also published to RPC projections.
+    /// Shared peer lifecycle authority used by listeners and observers.
     #[must_use]
-    pub fn peer_registry(&self) -> &Arc<RwLock<Vec<crate::PeerInfo>>> {
-        &self.peer_registry
-    }
-
-    /// Shared live-connection lease map.
-    #[must_use]
-    pub fn peer_outbound(&self) -> &Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>> {
-        &self.peer_outbound
+    pub fn peer_lifecycle(&self) -> Arc<crate::PeerLifecycle> {
+        Arc::clone(&self.peer_lifecycle)
     }
 
     /// Shared manual ban list, also enforced by the listener.
@@ -545,9 +537,8 @@ impl NetworkControls {
     /// handshake has not completed (Core `GetNodeCount(Both)`).
     #[must_use]
     pub fn connection_counts(&self) -> ConnectionCounts {
-        let outbound = self.peer_outbound.read();
         let mut counts = ConnectionCounts::default();
-        for lease in outbound.values() {
+        for (_, lease) in self.peer_lifecycle.live_leases() {
             if lease.is_inbound() {
                 counts.inbound += 1;
             } else {
@@ -561,19 +552,19 @@ impl NetworkControls {
     #[must_use]
     pub fn connected_peers(&self) -> Vec<ConnectedPeer> {
         let infos: hashbrown::HashMap<SocketAddr, crate::PeerInfo> = self
-            .peer_registry
-            .read()
-            .iter()
-            .map(|info| (info.addr, info.clone()))
+            .peer_lifecycle
+            .ready_peers()
+            .into_iter()
+            .map(|peer| (peer.info.addr, peer.info))
             .collect();
-        self.peer_outbound
-            .read()
-            .iter()
-            .map(|(addr, lease)| ConnectedPeer {
-                addr: *addr,
+        self.peer_lifecycle
+            .live_leases()
+            .into_iter()
+            .map(|(source, lease)| ConnectedPeer {
+                addr: source.addr,
                 node_id: lease.node_id(),
                 inbound: lease.is_inbound(),
-                info: infos.get(addr).cloned(),
+                info: infos.get(&source.addr).cloned(),
                 stats: lease.stats_handle(),
             })
             .collect()
@@ -584,10 +575,10 @@ impl NetworkControls {
     #[must_use]
     pub fn time_offset(&self) -> Option<i64> {
         let mut offsets: Vec<i64> = self
-            .peer_outbound
-            .read()
-            .values()
-            .filter_map(|lease| lease.stats().time_offset())
+            .peer_lifecycle
+            .live_leases()
+            .into_iter()
+            .filter_map(|(_, lease)| lease.stats().time_offset())
             .collect();
         offsets.sort_unstable();
         offsets.get(offsets.len() / 2).copied()
@@ -600,7 +591,7 @@ impl NetworkControls {
     /// the peer disconnects.
     pub fn send_pings(&self, now_us: u64) -> usize {
         let mut scheduled = 0;
-        for lease in self.peer_outbound.read().values() {
+        for (_, lease) in self.peer_lifecycle.live_leases() {
             let nonce = lease.stats().begin_ping(now_us);
             if lease.send(crate::Message::Ping(nonce)).is_ok() {
                 scheduled += 1;
@@ -753,8 +744,12 @@ impl NetworkControls {
     #[must_use]
     pub fn added_node_infos(&self) -> Vec<AddedNodeInfo> {
         let entries = self.added_nodes.read().clone();
-        let connected: hashbrown::HashSet<SocketAddr> =
-            self.peer_outbound.read().keys().copied().collect();
+        let connected: hashbrown::HashSet<SocketAddr> = self
+            .peer_lifecycle
+            .live_leases()
+            .into_iter()
+            .map(|(source, _)| source.addr)
+            .collect();
         entries
             .into_iter()
             .map(|entry| {
@@ -791,17 +786,17 @@ impl NetworkControls {
     /// plane into the durable address book without replacing prior entries.
     fn ingest_known_address_facts(&self, now: SystemTime) {
         let infos: hashbrown::HashMap<SocketAddr, u64> = self
-            .peer_registry
-            .read()
-            .iter()
-            .map(|info| (info.addr, info.services))
+            .peer_lifecycle
+            .ready_peers()
+            .into_iter()
+            .map(|peer| (peer.info.addr, peer.info.services))
             .collect();
         for (addr, services) in &infos {
             self.observe_address(*addr, *services, now);
         }
-        for addr in self.peer_outbound.read().keys().copied() {
-            let services = infos.get(&addr).copied().unwrap_or(0);
-            self.observe_address(addr, services, now);
+        for (source, _) in self.peer_lifecycle.live_leases() {
+            let services = infos.get(&source.addr).copied().unwrap_or(0);
+            self.observe_address(source.addr, services, now);
         }
         for entry in self.added_nodes.read().iter() {
             if let Some(addr) = entry.resolved {
@@ -850,35 +845,13 @@ impl NetworkControls {
         addresses
     }
 
-    /// Cancels and removes every live lease matching `predicate`, also
-    /// dropping its handshake-registry entry; returns the disconnected
-    /// addresses in registry order.
+    /// Cancels and removes every live lease matching `predicate` through the
+    /// shared identity-aware lifecycle authority.
     fn disconnect_matching(
         &self,
         predicate: impl Fn(&SocketAddr, &crate::PeerLease) -> bool,
     ) -> Vec<SocketAddr> {
-        let targets: Vec<SocketAddr> = {
-            let outbound = self.peer_outbound.read();
-            outbound
-                .iter()
-                .filter(|(addr, lease)| predicate(addr, lease))
-                .map(|(addr, _)| *addr)
-                .collect()
-        };
-        if targets.is_empty() {
-            return Vec::new();
-        }
-        let mut outbound = self.peer_outbound.write();
-        let mut registry = self.peer_registry.write();
-        let mut disconnected = Vec::new();
-        for addr in targets {
-            if let Some(lease) = outbound.remove(&addr) {
-                lease.cancel();
-                registry.retain(|peer| peer.addr != addr);
-                disconnected.push(addr);
-            }
-        }
-        disconnected
+        self.peer_lifecycle.disconnect_matching(predicate)
     }
 
     /// Disconnects the live connection at `addr`, removing its registry entry;
@@ -1041,7 +1014,7 @@ mod tests {
         } else {
             crate::PeerLease::new(tx)
         };
-        controls.peer_outbound().write().insert(addr, lease.clone());
+        controls.peer_lifecycle.register(addr, &lease);
         lease
     }
 
@@ -1063,19 +1036,23 @@ mod tests {
         let controls = controls_with_no_peers();
         let addr = SocketAddr::from(([127, 0, 0, 1], 3));
         let lease = lease_in_map(&controls, addr, false);
-        controls.peer_registry().write().push(crate::PeerInfo {
+        controls.peer_lifecycle.publish_ready(
             addr,
-            version: 70_016,
-            services: 0,
-            user_agent: String::from("/test/"),
-            start_height: 0,
-            conn_time: 0,
-            inbound: false,
-        });
+            &lease,
+            crate::PeerInfo {
+                addr,
+                version: 70_016,
+                services: 0,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                conn_time: 0,
+                inbound: false,
+            },
+        );
         assert!(controls.disconnect_node(&addr));
         assert!(lease.is_cancelled());
-        assert!(controls.peer_outbound().read().is_empty());
-        assert!(controls.peer_registry().read().is_empty());
+        assert!(controls.peer_lifecycle.live_addresses().is_empty());
+        assert!(controls.peer_lifecycle.ready_peers().is_empty());
         assert!(!controls.disconnect_node(&addr));
     }
 
@@ -1085,7 +1062,7 @@ mod tests {
         let addr = SocketAddr::from(([127, 0, 0, 1], 5));
         let (tx, rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new_inbound(tx);
-        controls.peer_outbound().write().insert(addr, lease.clone());
+        controls.peer_lifecycle.register(addr, &lease);
         assert_eq!(controls.send_pings(10_000), 1);
         assert!(matches!(rx.try_recv(), Ok(Message::Ping(_))));
         assert!(lease.stats().ping_wait(10_500).is_some());
@@ -1142,16 +1119,20 @@ mod tests {
     fn node_addresses_persist_observed_peers_and_added_nodes() {
         let controls = controls_with_no_peers();
         let connected = SocketAddr::from(([198, 51, 100, 1], 8333));
-        lease_in_map(&controls, connected, false);
-        controls.peer_registry().write().push(crate::PeerInfo {
-            addr: connected,
-            version: 70_016,
-            services: 9,
-            user_agent: String::from("/test/"),
-            start_height: 1,
-            conn_time: 10,
-            inbound: false,
-        });
+        let lease = lease_in_map(&controls, connected, false);
+        controls.peer_lifecycle.publish_ready(
+            connected,
+            &lease,
+            crate::PeerInfo {
+                addr: connected,
+                version: 70_016,
+                services: 9,
+                user_agent: String::from("/test/"),
+                start_height: 1,
+                conn_time: 10,
+                inbound: false,
+            },
+        );
         controls
             .add_node("198.51.100.2:8333")
             .unwrap_or_else(|err| panic!("add_node failed: {err}"));

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_p2p::PeerSource;
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
@@ -230,12 +231,17 @@ pub struct SyncBudget {
 
 #[derive(Clone, Debug)]
 pub struct PeerRequest {
+    source: PeerSource,
     peer_addr: SocketAddr,
     entries: Vec<PeerRequestEntry>,
     next_request_height: u32,
 }
 
 impl PeerRequest {
+    pub const fn source(&self) -> PeerSource {
+        self.source
+    }
+
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
@@ -1399,7 +1405,7 @@ impl DownloadWindow {
 
     pub fn next_peer_request(
         &mut self,
-        peer_addr: SocketAddr,
+        source: PeerSource,
         allow_expired_retry_from_peer: bool,
         chain_tip: &TipSnapshot,
         request_start_height: u32,
@@ -1407,6 +1413,7 @@ impl DownloadWindow {
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
+        let peer_addr = source.addr;
         self.retarget_request_branch(chain_tip, request_start_height, tree);
         if self.staged_bytes_exhausted() {
             return None;
@@ -1458,7 +1465,7 @@ impl DownloadWindow {
         if height <= request_tip_height && remaining_limit > 0 {
             if entries.is_empty() {
                 if let Some(request) = self.clean_contiguous_peer_request(
-                    peer_addr,
+                    source,
                     chain_tip,
                     tree,
                     height,
@@ -1483,7 +1490,7 @@ impl DownloadWindow {
                 &mut entries,
             );
         }
-        non_empty_request(peer_addr, entries, next_request_height)
+        non_empty_request(source, entries, next_request_height)
     }
 
     fn retarget_request_branch(
@@ -1620,7 +1627,7 @@ impl DownloadWindow {
 
     fn clean_contiguous_peer_request(
         &self,
-        peer_addr: SocketAddr,
+        source: PeerSource,
         chain_tip: &TipSnapshot,
         tree: &BlockTree,
         height: u32,
@@ -1637,7 +1644,7 @@ impl DownloadWindow {
         let entries =
             contiguous_request_entries(tree, chain_tip.tip_id, height, request_end_height)?;
         let next_request_height = next_request_height.max(request_end_height.saturating_add(1));
-        non_empty_request(peer_addr, entries, next_request_height)
+        non_empty_request(source, entries, next_request_height)
     }
 
     fn record_prefix_probe_delivery(
@@ -1996,12 +2003,13 @@ fn release_peer_block(
 }
 
 fn non_empty_request(
-    peer_addr: SocketAddr,
+    source: PeerSource,
     entries: Vec<PeerRequestEntry>,
     next_request_height: u32,
 ) -> Option<PeerRequest> {
     (!entries.is_empty()).then_some(PeerRequest {
-        peer_addr,
+        source,
+        peer_addr: source.addr,
         entries,
         next_request_height,
     })

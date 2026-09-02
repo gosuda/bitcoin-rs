@@ -42,10 +42,10 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
-    let sync = BlockSync::new(
+    let peer_lifecycle = Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(peers, peer_outbound));
+    let sync = BlockSync::new_with_lifecycle(
         handles,
-        Arc::clone(&peers),
-        Arc::clone(&peer_outbound),
+        peer_lifecycle,
         inbound_headers_rx,
         inbound_blocks_rx,
     );
@@ -100,10 +100,10 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
-    let sync = BlockSync::new(
+    let peer_lifecycle = Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(peers, peer_outbound));
+    let sync = BlockSync::new_with_lifecycle(
         handles,
-        Arc::clone(&peers),
-        Arc::clone(&peer_outbound),
+        peer_lifecycle,
         inbound_headers_rx,
         inbound_blocks_rx,
     );

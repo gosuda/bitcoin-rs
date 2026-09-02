@@ -22,11 +22,11 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 type SyncWakeHandle = Option<Sender<()>>;
-type PeerReadyHandle = Option<Arc<dyn Fn(SocketAddr) + Send + Sync>>;
+type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 
 /// State shared by the listener and every connection thread it spawns.
 ///
-/// The peer maps and ban list are the authoritative stores shared with the
+/// The peer lifecycle and ban list are the authoritative stores shared with the
 /// node and its network control plane; `activity` and `totals` carry the
 /// kill-switch and aggregate traffic accounting and are present only when the
 /// entry point was built from a [`crate::NetworkControls`] instance.
@@ -41,15 +41,14 @@ struct ConnectionShared {
 }
 
 impl ConnectionShared {
-    fn from_parts(
-        peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-        peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+    fn from_lifecycle(
+        peer_lifecycle: Arc<crate::PeerLifecycle>,
         banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
         chain_query: ChainQueryHandle,
         peer_ready: PeerReadyHandle,
     ) -> Self {
         Self {
-            peer_lifecycle: Arc::new(crate::PeerLifecycle::new(peer_registry, peer_outbound)),
+            peer_lifecycle,
             banned,
             activity: None,
             totals: None,
@@ -64,10 +63,7 @@ impl ConnectionShared {
         peer_ready: PeerReadyHandle,
     ) -> Self {
         Self {
-            peer_lifecycle: Arc::new(crate::PeerLifecycle::new(
-                Arc::clone(controls.peer_registry()),
-                Arc::clone(controls.peer_outbound()),
-            )),
+            peer_lifecycle: controls.peer_lifecycle(),
             banned: Arc::clone(controls.banned()),
             activity: Some(Arc::clone(controls.activity())),
             totals: Some(Arc::clone(controls.totals())),
@@ -85,19 +81,20 @@ impl ConnectionShared {
 /// Publishes handshake metadata for an already-registered connection.
 fn publish_peer_info(
     peer_lifecycle: &crate::PeerLifecycle,
-    peer_ready: Option<&(dyn Fn(SocketAddr) + Send + Sync)>,
+    peer_ready: Option<&(dyn Fn(crate::PeerSource) + Send + Sync)>,
     peer_addr: SocketAddr,
     lease: &crate::PeerLease,
     info: crate::PeerInfo,
 ) -> bool {
-    if !peer_lifecycle.is_current(lease.source(peer_addr)) {
-        return false;
-    }
-    // Reset address-scoped consumers before making this connection visible as
-    // ready. `publish_ready` rechecks identity in case the callback raced a
-    // same-address replacement.
+    let source = lease.source(peer_addr);
+    // Keep the identity check and the address-scoped scheduler reset in one
+    // lifecycle read-side critical section. A same-address replacement waits
+    // until the callback has completed, so a stale callback cannot clear the
+    // replacement's state.
     if let Some(peer_ready) = peer_ready {
-        peer_ready(peer_addr);
+        if !peer_lifecycle.with_current(source, || peer_ready(source)) {
+            return false;
+        }
     }
     peer_lifecycle.publish_ready(peer_addr, lease, info)
 }
@@ -105,7 +102,7 @@ fn publish_peer_info(
 #[cfg(test)]
 fn register_peer(
     peer_lifecycle: &crate::PeerLifecycle,
-    peer_ready: Option<&(dyn Fn(SocketAddr) + Send + Sync)>,
+    peer_ready: Option<&(dyn Fn(crate::PeerSource) + Send + Sync)>,
     peer_addr: SocketAddr,
     lease: &crate::PeerLease,
     info: crate::PeerInfo,
@@ -180,63 +177,34 @@ pub enum ListenerError {
 ///   - explicit FSM disconnect transition
 ///
 /// Per-connection threads are NOT joined by the outer shutdown — they
-/// outlive the listener by up to the timeout. On exit (clean or error),
-/// the peer is removed from `peer_registry` via address-match retain.
+/// outlive the listener by up to the timeout. On exit (clean or error), the
+/// connection removes its lease and ready metadata through the lifecycle
+/// authority, subject to its connection identity.
 ///
-/// Successful inbound handshakes append their public metadata to
-/// `peer_registry`. The peer is removed from `peer_registry` when the
-/// per-connection thread exits.
+/// Successful inbound handshakes publish their public metadata through the
+/// lifecycle authority. The metadata is removed when the per-connection
+/// thread exits.
+/// Binds `addr` and runs the accept loop with the supplied lifecycle authority.
+///
+/// This is the node-owned entry point: sync, RPC, and every connection thread
+/// receive the same lifecycle handle instead of independently wrapping the
+/// underlying maps.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn serve_with_shutdown(
+pub fn serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake(
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     magic: Magic,
-    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+    peer_lifecycle: Arc<crate::PeerLifecycle>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
-    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
-) -> Result<(), ListenerError> {
-    serve_with_shutdown_with_chain_and_sync_wake(
-        addr,
-        shutdown,
-        network_active,
-        magic,
-        peer_registry,
-        peer_outbound,
-        inbound_headers_tx,
-        inbound_blocks_tx,
-        banned,
-        None,
-        None,
-        None,
-    )
-}
-
-/// Binds `addr` and runs an accept loop with active-chain and sync-wake handles.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn serve_with_shutdown_with_chain_and_sync_wake(
-    addr: SocketAddr,
-    shutdown: Arc<AtomicBool>,
-    network_active: Arc<AtomicBool>,
-    magic: Magic,
-    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
-    inbound_headers_tx: Sender<crate::InboundHeaders>,
-    inbound_blocks_tx: Sender<crate::InboundBlock>,
-    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
     peer_ready: PeerReadyHandle,
 ) -> Result<(), ListenerError> {
-    let mut shared = ConnectionShared::from_parts(
-        peer_registry,
-        peer_outbound,
-        banned,
-        chain_query,
-        peer_ready,
-    );
+    let mut shared =
+        ConnectionShared::from_lifecycle(peer_lifecycle, banned, chain_query, peer_ready);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -350,59 +318,22 @@ pub fn serve_with_controls(
     serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
 }
 
-/// Spawns an outbound TCP connection to `addr`, performs the outbound P2P
-/// handshake, and enters the same message loop the inbound path uses.
-///
-/// Returns a `JoinHandle` for the spawned thread. Errors during connect or
-/// handshake bubble up via the `JoinHandle`'s `Result`.
-#[allow(clippy::needless_pass_by_value)]
-pub fn spawn_outbound_connection(
-    addr: SocketAddr,
-    network_active: Arc<AtomicBool>,
-    magic: Magic,
-    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
-    inbound_headers_tx: Sender<crate::InboundHeaders>,
-    inbound_blocks_tx: Sender<crate::InboundBlock>,
-    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
-) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    spawn_outbound_connection_with_chain_and_sync_wake(
-        addr,
-        magic,
-        peer_registry,
-        peer_outbound,
-        inbound_headers_tx,
-        inbound_blocks_tx,
-        banned,
-        network_active,
-        None,
-        None,
-        None,
-    )
-}
-
-/// Spawns an outbound connection with active-chain and sync-wake handles.
+/// Spawns an outbound connection using an already shared lifecycle authority.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn spawn_outbound_connection_with_chain_and_sync_wake(
+pub fn spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake(
     addr: SocketAddr,
     magic: Magic,
-    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+    peer_lifecycle: Arc<crate::PeerLifecycle>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
-    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     network_active: Arc<AtomicBool>,
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
     peer_ready: PeerReadyHandle,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    let mut shared = ConnectionShared::from_parts(
-        peer_registry,
-        peer_outbound,
-        banned,
-        chain_query,
-        peer_ready,
-    );
+    let mut shared =
+        ConnectionShared::from_lifecycle(peer_lifecycle, banned, chain_query, peer_ready);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -770,7 +701,7 @@ fn run_connected_session(
         removed_current
             || shared
                 .peer_lifecycle
-                .lease(peer_addr)
+                .lease_source(lease.source(peer_addr))
                 .is_none_or(|current| !current.same_connection(&lease))
     );
     lease.cancel();
@@ -1000,7 +931,8 @@ mod outbound_tests {
     use bitcoin::p2p::Magic;
     use parking_lot::RwLock;
 
-    use super::spawn_outbound_connection;
+    use super::spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake;
+    use crate::PeerLifecycle;
 
     #[test]
     fn spawn_outbound_connection_to_closed_port_fails_quickly()
@@ -1011,19 +943,22 @@ mod outbound_tests {
 
         let registry = Arc::new(RwLock::new(Vec::new()));
         let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+        let lifecycle = Arc::new(PeerLifecycle::new(registry, outbound));
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let banned = Arc::new(RwLock::new(Vec::new()));
 
-        let handle = spawn_outbound_connection(
+        let handle = spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake(
             addr,
-            Arc::new(AtomicBool::new(true)),
             Magic::BITCOIN,
-            registry,
-            outbound,
+            lifecycle,
+            banned,
             headers_tx,
             blocks_tx,
-            banned,
+            Arc::new(AtomicBool::new(true)),
+            None,
+            None,
+            None,
         );
         let inner = match handle.join() {
             Ok(inner) => inner,
@@ -1355,7 +1290,8 @@ mod resilient_accept_tests {
         let peer_registry = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
-        ConnectionShared::from_parts(peer_registry, peer_outbound, banned, None, None)
+        let lifecycle = Arc::new(crate::PeerLifecycle::new(peer_registry, peer_outbound));
+        ConnectionShared::from_lifecycle(lifecycle, banned, None, None)
     }
 
     fn sinks() -> InboundSyncSinks {
@@ -1463,8 +1399,8 @@ mod writer_setup_cleanup_tests {
         let peer_registry = Arc::new(RwLock::new(Vec::new()));
         let outbound: OutboundMap = Arc::new(RwLock::new(hashbrown::HashMap::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
-        let shared =
-            ConnectionShared::from_parts(peer_registry, outbound.clone(), banned, None, None);
+        let lifecycle = Arc::new(crate::PeerLifecycle::new(peer_registry, outbound.clone()));
+        let shared = ConnectionShared::from_lifecycle(lifecycle, banned, None, None);
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);

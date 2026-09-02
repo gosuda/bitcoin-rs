@@ -1160,11 +1160,8 @@ pub struct NodeState {
     network: Arc<RwLock<NetworkState>>,
     /// Shared P2P admission switch controlled by `setnetworkactive`.
     network_active: Arc<AtomicBool>,
-    peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
-    /// Per-peer outbound message senders, keyed by remote socket address.
-    /// External code pushes messages here; the per-connection thread drains
-    /// and writes them to the peer's TCP stream.
-    peer_outbound: Arc<RwLock<HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    /// Single lifecycle authority shared by sync, RPC, and P2P connections.
+    peer_lifecycle: Arc<bitcoin_rs_p2p::PeerLifecycle>,
     banned: Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     p2p_outbound_tx: crossbeam_channel::Sender<std::net::SocketAddr>,
     p2p_outbound_rx: Arc<Mutex<crossbeam_channel::Receiver<std::net::SocketAddr>>>,
@@ -1479,6 +1476,10 @@ impl NodeState {
         let peers = Arc::new(RwLock::new(Vec::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
         let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let peer_lifecycle = Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(
+            Arc::clone(&peers),
+            Arc::clone(&peer_outbound),
+        ));
         let (p2p_outbound_tx, p2p_outbound_rx_raw) =
             crossbeam_channel::bounded(P2P_OUTBOUND_QUEUE_LIMIT);
         let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
@@ -1551,10 +1552,9 @@ impl NodeState {
             recovery_meta_path: Some(config.data_dir.join(crate::crash_recovery::META_FILENAME)),
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
-        let sync = Arc::new(crate::BlockSync::new(
+        let sync = Arc::new(crate::BlockSync::new_with_lifecycle(
             apply_handles.clone(),
-            Arc::clone(&peers),
-            Arc::clone(&peer_outbound),
+            Arc::clone(&peer_lifecycle),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
         ));
@@ -1616,8 +1616,7 @@ impl NodeState {
             transactions,
             network,
             network_active,
-            peers,
-            peer_outbound,
+            peer_lifecycle,
             banned,
             p2p_outbound_tx,
             p2p_outbound_rx,
@@ -1961,10 +1960,10 @@ impl NodeState {
         Arc::clone(&self.network_active)
     }
 
-    /// Returns the shared registry of currently-handshook peers.
+    /// Returns the shared identity-aware P2P lifecycle authority.
     #[must_use]
-    pub fn peers(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>> {
-        Arc::clone(&self.peers)
+    pub fn peer_lifecycle(&self) -> Arc<bitcoin_rs_p2p::PeerLifecycle> {
+        Arc::clone(&self.peer_lifecycle)
     }
 
     /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
@@ -1973,18 +1972,6 @@ impl NodeState {
         Arc::clone(&self.banned)
     }
 
-    /// Returns the shared per-peer outbound message-sender map.
-    ///
-    /// External callers can look up a peer's `Sender<Message>` by socket
-    /// address and send a message into that peer's outbound queue. The
-    /// per-connection thread drains the receiver each iteration of
-    /// `run_message_loop` and writes the message via `peer.send`.
-    #[must_use]
-    pub fn peer_outbound(
-        &self,
-    ) -> Arc<RwLock<HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>> {
-        Arc::clone(&self.peer_outbound)
-    }
     /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
     #[must_use]
     pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<std::net::SocketAddr> {
@@ -2524,7 +2511,7 @@ mod tests {
     }
 
     #[test]
-    fn open_constructs_empty_peer_registry() -> anyhow::Result<()> {
+    fn open_constructs_empty_peer_lifecycle() -> anyhow::Result<()> {
         use tempfile::tempdir;
 
         let dir = tempdir()?;
@@ -2534,7 +2521,7 @@ mod tests {
         let state = NodeState::open(config, None)?;
 
         assert!(
-            state.peers().read().is_empty(),
+            state.peer_lifecycle.ready_peers().is_empty(),
             "freshly opened registry is empty"
         );
         Ok(())
@@ -2550,7 +2537,7 @@ mod tests {
         config.p2p_listen.clear();
         let state = NodeState::open(config, None)?;
 
-        assert!(state.peer_outbound().read().is_empty());
+        assert!(state.peer_lifecycle.live_addresses().is_empty());
         Ok(())
     }
 

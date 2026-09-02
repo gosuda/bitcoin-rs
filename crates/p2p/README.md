@@ -5,7 +5,7 @@ handshaking, the inbound message dispatcher, and peer and subnet banning.
 
 `PeerManager` tracks each connected `Peer` and its `PeerState`; a connection is
 identified by a `ConnectionId`, cleaned up through a `PeerLease`, and opened outbound
-through `spawn_outbound_connection`, while the `listener` module accepts inbound TCP
+through the lifecycle-owned listener entry points, while the `listener` module accepts inbound TCP
 connections with graceful shutdown. A connection negotiates version/verack in
 `handshake`, then runs the peer finite-state machine in `fsm`; `wire` is the protocol
 codec, decoding `Message` values and reporting `PeerError`. Inbound traffic reaches

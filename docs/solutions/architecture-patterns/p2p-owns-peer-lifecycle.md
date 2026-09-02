@@ -15,22 +15,24 @@ metadata. P2P connection threads use it to register before handshake, publish
 metadata only while the publishing lease remains current, replace a genuine
 predecessor, and remove themselves during teardown.
 
-Higher layers receive a handshake-completion notification with only the peer
-address immediately before P2P publishes the connection as ready. `BlockSync`
-uses it to clear address-scoped scheduler state before the replacement becomes
-selectable. It may snapshot peer facts, queue messages through a cloned current
-lease, and request a disconnect using `PeerSource`. It cannot insert into or
-remove from the shared maps. The source carries the connection identity, so a
-stale sync decision cannot disconnect a newer connection that reused the same
-socket address.
+Higher layers receive a handshake-completion notification carrying the
+`PeerSource` immediately before P2P publishes the connection as ready.
+`BlockSync` uses it to clear scheduler state while the source is held current,
+before a replacement becomes selectable. Ready-peer snapshots carry the same
+source, and sync queues messages through an identity-checked lease rather than
+resolving a `SocketAddr` again. Higher layers cannot insert into or remove from
+the shared maps. The source carries the connection identity, so a stale
+operation cannot publish, send to, or cancel a replacement.
 
 ## Guardrails
 
 - Address equality does not establish connection identity.
 - Registering a replacement immediately hides the predecessor's ready metadata.
-- Address-scoped scheduler state is reset before replacement metadata is published.
+- Scheduler state is reset under the current-source guard before replacement
+  metadata is published.
 - Handshake metadata is published only for the current lease.
-- Sync readiness callbacks carry no lease or metadata mutation capability.
+- The node, RPC, sync, and listener share one `Arc<PeerLifecycle>` authority.
+- Ready-peer selection carries `PeerSource` through the final send.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale
   disconnect attempts.
