@@ -939,6 +939,33 @@ fn restored_initial(
     })
 }
 
+fn cold_initial_chainstate(
+    config: &NodeConfig,
+    journal_config: crate::config::ChainstateJournalConfig,
+    reset_journal: bool,
+) -> Result<InitialChainstate> {
+    if journal_config.enabled && reset_journal {
+        drop(reset_journal_dir(&config.data_dir)?);
+    }
+    Ok(InitialChainstate {
+        utxo: UtxoSet::new(),
+        coin_stats: bitcoin_rs_utxo::stats::CoinStats::default(),
+        tree: bitcoin_rs_chain::BlockTree::new(),
+        applied_tip: None,
+        chain_tx_count: 0,
+        resume_source: ResumeSource::Cold,
+        journal_bootstrap: journal_config.enabled.then_some(JournalBootstrap {
+            open_existing: false,
+            base_generation: 0,
+            height: 0,
+            block_hash: config.network.genesis_block_hash().to_le_bytes(),
+            prev_hash: [0_u8; 32],
+            chain_tx_count: 1,
+            config: journal_config,
+        }),
+    })
+}
+
 fn prepare_initial_chainstate(
     checkpoint_load: crate::checkpoint::CheckpointLoad,
     checkpoint_data_dir: &cap_std::fs::Dir,
@@ -946,27 +973,19 @@ fn prepare_initial_chainstate(
     config: &NodeConfig,
 ) -> Result<InitialChainstate> {
     let journal_config = config.chainstate_journal;
+    let force_full_revalidation = config
+        .data_dir
+        .join(CHAINSTATE_JOURNAL_DIR)
+        .join(crate::chainstate_journal::FULL_REVALIDATION_MARKER)
+        .is_file();
+    if journal_config.enabled && force_full_revalidation {
+        tracing::warn!(
+            "chainstate journal fork crossed below checkpoint base; starting full validation"
+        );
+        return cold_initial_chainstate(config, journal_config, false);
+    }
     let crate::checkpoint::CheckpointLoad::Complete(restored) = checkpoint_load else {
-        if journal_config.enabled {
-            drop(reset_journal_dir(&config.data_dir)?);
-        }
-        return Ok(InitialChainstate {
-            utxo: UtxoSet::new(),
-            coin_stats: bitcoin_rs_utxo::stats::CoinStats::default(),
-            tree: bitcoin_rs_chain::BlockTree::new(),
-            applied_tip: None,
-            chain_tx_count: 0,
-            resume_source: ResumeSource::Cold,
-            journal_bootstrap: journal_config.enabled.then_some(JournalBootstrap {
-                open_existing: false,
-                base_generation: 0,
-                height: 0,
-                block_hash: config.network.genesis_block_hash().to_le_bytes(),
-                prev_hash: [0_u8; 32],
-                chain_tx_count: 1,
-                config: journal_config,
-            }),
-        });
+        return cold_initial_chainstate(config, journal_config, true);
     };
     let restored = *restored;
     if !journal_config.enabled {
@@ -1376,27 +1395,44 @@ impl NodeState {
             .load_disconnect_marker()
             .map_err(anyhow::Error::new)?
         {
-            // Names directories rather than a `-reindex` option, because this
-            // node has no reindex. An instruction the operator cannot follow is
-            // worse than none.
-            //
-            // Remove the authoritative views. The marker covers a disconnect
-            // that did not reach a clean UTXO-and-tip checkpoint. TxIndex rows
-            // are derived state outside this marker, but a retained TxIndex
-            // watermark can stall rollback because wiping the chainstate
-            // removes the body positions the index refers to. Include the txindex
-            // path so the operator action is complete.
-            bail!(
-                "refusing to start: a disconnect of block {hash} at height {height} did not \
-                 reach a clean checkpoint, so the UTXO set and chain tip cannot be trusted \
-                 together. The node cannot repair this in place. Remove or quarantine \
-                 {chainstate}, {checkpoints}, and {txindex}, then resync.",
-                hash = marker.hash,
-                height = marker.height,
-                chainstate = config.data_dir.join("chainstate").display(),
-                checkpoints = config.data_dir.join("chainstate-checkpoints").display(),
-                txindex = config.data_dir.join("txindex").display(),
-            );
+            let force_full_revalidation = config.chainstate_journal.enabled
+                && config
+                    .data_dir
+                    .join(CHAINSTATE_JOURNAL_DIR)
+                    .join(crate::chainstate_journal::FULL_REVALIDATION_MARKER)
+                    .is_file();
+            if marker.phase == crate::apply::DisconnectPhase::RolledBack && force_full_revalidation
+            {
+                undo_store.disarm_disconnect().map_err(anyhow::Error::new)?;
+                tracing::warn!(
+                    height = marker.height,
+                    hash = %marker.hash,
+                    "accepting completed deep reorg; full chain validation is required"
+                );
+            } else {
+                // Names directories rather than a `-reindex` option, because this
+                // node has no reindex. An instruction the operator cannot follow is
+                // worse than none.
+                //
+                // Remove the authoritative views. The marker covers a disconnect
+                // that did not reach a clean UTXO-and-tip checkpoint. TxIndex rows
+                // are derived state outside this marker, but a retained TxIndex
+                // watermark can stall rollback because wiping the chainstate
+                // removes the body positions the index refers to. Include the txindex
+                // path so the operator action is complete.
+                bail!(
+                    "refusing to start: a disconnect of block {hash} at height {height} did not \
+                     reach a clean checkpoint, so the UTXO set and chain tip cannot be trusted \
+                     together. The node cannot repair this in place. Remove or quarantine \
+                     {chainstate}, {checkpoints}, and {txindex}, then resync.",
+                    hash = marker.hash,
+                    height = marker.height,
+                    chainstate = config.data_dir.join("chainstate").display(),
+                    checkpoints = config.data_dir.join("chainstate-checkpoints").display(),
+                    txindex = config.data_dir.join("txindex").display(),
+                );
+            }
+
         }
         let block_files =
             Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);

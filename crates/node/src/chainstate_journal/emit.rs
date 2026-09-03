@@ -29,6 +29,15 @@ pub(crate) trait JournalEmit: Send + Sync {
     /// Enforces the §2.3 boundary for everything buffered: storage flush,
     /// segment fsync, atomic `head.json` publish — in that order.
     fn flush_through(&mut self, height: u32) -> Result<(), JournalWriterError>;
+
+    /// Durably rewrites the canonical journal frontier to a reorg fork.
+    fn rewind_to(
+        &mut self,
+        fork_height: u32,
+        fork_hash: [u8; 32],
+        fork_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError>;
 }
 
 #[allow(clippy::use_self)] // inherent vs trait method disambiguation requires the type path
@@ -39,6 +48,16 @@ impl<S: KvStore> JournalEmit for JournalWriter<S> {
 
     fn flush_through(&mut self, height: u32) -> Result<(), JournalWriterError> {
         JournalWriter::flush_to(self, height)
+    }
+
+    fn rewind_to(
+        &mut self,
+        fork_height: u32,
+        fork_hash: [u8; 32],
+        fork_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError> {
+        JournalWriter::rewind_to(self, fork_height, fork_hash, fork_prev_hash, chain_tx_count)
     }
 }
 

@@ -1276,10 +1276,13 @@ fn load_headers(
 fn load_payloads(
     generation_dir: &Dir,
     manifest: &CheckpointManifestV1,
-    headers: RestoredHeaders,
+    mut headers: RestoredHeaders,
 ) -> Result<RestoredChainstate, CheckpointError> {
     let chain_tx_count = manifest.applied_tip.chain_tx_count;
     let (utxo, coin_stats) = load_payloads_inner(generation_dir, manifest, &headers)?;
+    headers
+        .tree
+        .restore_chain_tx_count(headers.applied_tip_id, chain_tx_count)?;
     let applied_node = headers
         .tree
         .node(headers.applied_tip_id)

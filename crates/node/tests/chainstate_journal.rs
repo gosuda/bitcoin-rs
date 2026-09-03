@@ -56,13 +56,127 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("reorg-node");
+    config.p2p_listen.clear();
+    config.chainstate_journal.blocks = 1;
+
+    let genesis = Network::Regtest.genesis_block();
+    let initial = NodeState::open(config.clone(), None)?;
+    initial.apply_block(&genesis)?;
+    initial.publish_checkpoint()?;
+    drop(initial);
+
+    let state = NodeState::open(config.clone(), None)?;
+    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let tip1 = state.apply_block(&block1)?;
+    let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
+    state.apply_block(&block2)?;
+    bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block2)?;
+    let expected_utxo = state
+        .utxo()
+        .with_stable_view(|view| view.hash_serialized_3())?;
+    let expected_stats = state.coin_stats().snapshot();
+    drop(state);
+
+    let resumed = NodeState::open(config.clone(), None)?;
+    let resumed_tip = resumed
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("reorg replay did not publish a tip"))?;
+    assert_eq!(resumed_tip.as_ref(), &tip1);
+    assert_eq!(
+        resumed
+            .utxo()
+            .with_stable_view(|view| view.hash_serialized_3())?,
+        expected_utxo
+    );
+    assert_semantic_coin_stats_eq(&resumed.coin_stats().snapshot(), &expected_stats);
+
+    let mut replacement = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
+    replacement.header.time = replacement.header.time.saturating_add(1);
+    replacement.header.nonce = 0;
+    while !pow_met(replacement.header.bits, replacement.block_hash().0) {
+        replacement.header.nonce = replacement
+            .header
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("replacement nonce exhausted"))?;
+    }
+    assert_ne!(replacement.block_hash(), block2.block_hash());
+    let replacement_tip = resumed.apply_block(&replacement)?;
+    drop(resumed);
+
+    let replaced = NodeState::open(config, None)?;
+    let persisted_tip = replaced
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("replacement journal tip missing"))?;
+    assert_eq!(persisted_tip.as_ref(), &replacement_tip);
+    Ok(())
+}
+
+#[test]
+fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("deep-reorg-node");
+    config.p2p_listen.clear();
+    config.chainstate_journal.blocks = 1;
+
+    let genesis = Network::Regtest.genesis_block();
+    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let initial = NodeState::open(config.clone(), None)?;
+    initial.apply_block(&genesis)?;
+    initial.apply_block(&block1)?;
+    initial.publish_checkpoint()?;
+    drop(initial);
+
+    let state = NodeState::open(config.clone(), None)?;
+    bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block1)?;
+    drop(state);
+
+    let resumed = NodeState::open(config.clone(), None)?;
+    assert!(
+        resumed.applied_tip().load_full().is_none(),
+        "a checkpoint above the fork must not be trusted"
+    );
+    drop(resumed);
+
+    let resumed_again = NodeState::open(config, None)?;
+    assert!(
+        resumed_again.applied_tip().load_full().is_none(),
+        "full validation must remain sticky until a replacement checkpoint"
+    );
+    Ok(())
+}
+
+fn assert_semantic_coin_stats_eq(
+    left: &bitcoin_rs_utxo::stats::CoinStats,
+    right: &bitcoin_rs_utxo::stats::CoinStats,
+) {
+    assert_eq!(left.height, right.height);
+    assert_eq!(left.total_amount, right.total_amount);
+    assert_eq!(left.bogo_size, right.bogo_size);
+    assert_eq!(left.tx_count, right.tx_count);
+    assert_eq!(left.utxo_count, right.utxo_count);
+    assert_eq!(left.muhash.finalize_hash(), right.muhash.finalize_hash());
+}
+
 fn mined_regtest_child(prev_blockhash: BlockHash) -> Result<Block> {
+    mined_regtest_child_at(prev_blockhash, 1)
+}
+
+fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
         lock_time: 0,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![1, 1],
+            script_sig: vec![1, u8::try_from(height)?],
             sequence: u32::MAX,
             witness: Vec::new(),
         }],
@@ -76,7 +190,7 @@ fn mined_regtest_child(prev_blockhash: BlockHash) -> Result<Block> {
             version: 1,
             prev_blockhash,
             merkle_root: Hash256::default(),
-            time: Network::Regtest.genesis_block().header.time + 1,
+            time: Network::Regtest.genesis_block().header.time + height,
             bits: 0x207f_ffff,
             nonce: 0,
         },

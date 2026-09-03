@@ -946,6 +946,8 @@ impl ApplyHandles {
 /// cannot run this early.
 struct DisconnectPlan {
     parent_tip: TipSnapshot,
+    parent_prev_hash: Hash256,
+    parent_chain_tx_count: u64,
     undo: bitcoin_rs_utxo::UndoBatch,
     height: u32,
     tx_count_delta: u64,
@@ -986,7 +988,7 @@ fn plan_disconnect(
     bitcoin_rs_consensus::verify_merkle_root_with_txids(block, &txids)
         .map_err(|_| ApplyError::DisconnectBodyMismatch { hash: block_hash })?;
 
-    let parent_tip = {
+    let (parent_tip, parent_prev_hash, parent_chain_tx_count) = {
         let tree = handles.block_tree.read();
         let node = tree.node(applied.tip_id)?;
         let parent_id = node.parent.ok_or(ApplyError::DisconnectNotTip {
@@ -994,12 +996,20 @@ fn plan_disconnect(
             tip: applied.hash,
         })?;
         let parent = tree.node(parent_id)?;
-        TipSnapshot {
-            tip_id: parent_id,
-            height: parent.height,
-            chainwork: parent.chainwork,
-            hash: parent.hash,
-        }
+        let parent_prev_hash = match parent.parent {
+            Some(grandparent_id) => tree.node(grandparent_id)?.hash,
+            None => Hash256::default(),
+        };
+        (
+            TipSnapshot {
+                tip_id: parent_id,
+                height: parent.height,
+                chainwork: parent.chainwork,
+                hash: parent.hash,
+            },
+            parent_prev_hash,
+            parent.chain_tx_count,
+        )
     };
 
     let encoded = handles
@@ -1041,6 +1051,8 @@ fn plan_disconnect(
 
     Ok(DisconnectPlan {
         parent_tip,
+        parent_prev_hash,
+        parent_chain_tx_count,
         undo,
         height,
         tx_count_delta,
@@ -1142,6 +1154,8 @@ pub(crate) fn disconnect_block_admitted(
     let block_hash = block.block_hash().0;
     let DisconnectPlan {
         parent_tip,
+        parent_prev_hash,
+        parent_chain_tx_count,
         undo,
         height,
         tx_count_delta,
@@ -1240,6 +1254,26 @@ pub(crate) fn disconnect_block_admitted(
         parent_tip.hash,
     );
     rewind_chain_tx_count(handles, tx_count_delta);
+    let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
+        match journal.lock().rewind_to(
+            parent_tip.height,
+            parent_tip.hash.to_le_bytes(),
+            parent_prev_hash.to_le_bytes(),
+            parent_chain_tx_count,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);
+                tracing::warn!(
+                    height = parent_tip.height,
+                    hash = %parent_tip.hash,
+                    %error,
+                    "chainstate journal fork-head rewrite failed; retaining disconnect marker"
+                );
+                false
+            }
+        }
+    });
     handles.wake_tx_index();
     // The applied tip moved: every template long-poll waiter must observe it.
     handles.mining_generation.publish_generation();
@@ -1265,7 +1299,17 @@ pub(crate) fn disconnect_block_admitted(
             })
         })?;
 
-    // The marker deliberately stays set here.
+    if journal_rewound {
+        handles.undo_store.disarm_disconnect().map_err(|error| {
+            poison(crate::DisconnectError::MarkerStuck {
+                hash: block_hash,
+                height,
+                source: Box::new(ApplyError::UndoPersistence(error)),
+            })
+        })?;
+    }
+
+    // Without a durable journal fork transition, the marker deliberately stays set here.
     //
     // The authoritative rollback completed in memory, but it is not durable.
     // A crash can restore a checkpoint whose UTXO set and tip still contain
