@@ -21,7 +21,7 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, PeerToken, ReplacementCandidate,
     standardness::{PackageTxContext, evaluate_package_acceptance},
 };
-use bitcoin_rs_primitives::{Hash256, Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{Hash256, Tx, Txid};
 use bitcoin_rs_rpc::context::MiningControl;
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
@@ -217,7 +217,8 @@ impl TxIngressConsumer {
                         && matches!(c.outcome, bitcoin_rs_mempool::MutationOutcome::Accepted)
                 });
                 if accepted {
-                    self.relay.announce(txid, tx.wtxid(), Some(source.connection_id().get()));
+                    self.relay
+                        .announce(txid, tx.wtxid(), Some(source.connection_id().get()));
                     self.mining_control.publish_generation();
                     tracing::trace!(%txid, "p2p tx admitted and relayed");
                 }
@@ -490,7 +491,6 @@ mod tests {
             min_relay_fee_sat_per_kvb: 0,
             ..MempoolLimits::default()
         })));
-        let gateway = MempoolGateway::shared(Arc::clone(&pool));
 
         let recorded_origin = Arc::new(Mutex::new(None));
         struct OriginRecorder {
@@ -508,11 +508,12 @@ mod tests {
                 }
             }
         }
-        gateway
-            .install_observer(Arc::new(OriginRecorder {
+        let gateway = MempoolGateway::shared_with(
+            Arc::clone(&pool),
+            Arc::new(OriginRecorder {
                 captured: Arc::clone(&recorded_origin),
-            }))
-            .ok();
+            }),
+        );
 
         let source = test_source();
         let expected_conn_id = source.connection_id();

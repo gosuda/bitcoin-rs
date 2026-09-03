@@ -1,13 +1,13 @@
 //! Node-side mempool mutation observer.
 //!
-//! Bridges committed [`MutationResult`]s from the [`MempoolGateway`] onto
+//! Bridges committed [`MutationEnvelope`]s from the [`MempoolGateway`] onto
 //! Core's unified `sequence` ZMQ topic: accepted changes publish `A` events,
 //! removals publish `R` events — except block-inclusion removals, which Core
 //! suppresses because the block's own `C` event covers the departure.
 
 use std::sync::Arc;
 
-use bitcoin_rs_mempool::{MempoolObserver, MutationOutcome, MutationResult, RemovalReason};
+use bitcoin_rs_mempool::{MempoolObserver, MutationEnvelope, MutationOutcome, RemovalReason};
 use bitcoin_rs_primitives::Txid;
 
 use crate::zmq_publisher::{SequenceEvent, ZmqPublisher};
@@ -38,7 +38,8 @@ impl MempoolSequenceObserver {
 }
 
 impl MempoolObserver for MempoolSequenceObserver {
-    fn on_mutation(&self, result: &MutationResult) {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        let result = &envelope.result;
         for (offset, change) in result.changes.iter().enumerate() {
             let Some(sequence) = result.sequence_of(offset) else {
                 continue;
@@ -63,7 +64,7 @@ impl MempoolObserver for MempoolSequenceObserver {
 
 /// The node's one mutation observer: every committed mempool mutation fans
 /// out to the `sequence` wire events and the mining generation wake, in that
-/// order, under the gateway's publish mutex.
+/// order, after the gateway has released the publish mutex.
 ///
 /// Installed exactly once, on the node-owned [`MempoolGateway`] at
 /// [`crate::state::NodeState::open`], so both fan-outs stay ordered with the
@@ -93,17 +94,19 @@ impl NodeMutationObserver {
 }
 
 impl MempoolObserver for NodeMutationObserver {
-    fn on_mutation(&self, result: &MutationResult) {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
         if let Some(sequence) = &self.sequence {
-            sequence.on_mutation(result);
+            sequence.on_mutation(envelope);
         }
         // The last change's sequence is the pool's current sequence after this
         // mutation. Thread it directly so the coordinator never takes the
         // mempool read lock from the observer path.
+        let result = &envelope.result;
         let wake_sequence = result
             .sequence_of(result.changes.len().saturating_sub(1))
             .unwrap_or(result.sequence_base);
-        self.mining_generation.publish_generation_from(wake_sequence);
+        self.mining_generation
+            .publish_generation_from(wake_sequence);
     }
 }
 
@@ -301,7 +304,7 @@ mod tests {
     /// mutation that bypassed the gateway would satisfy neither assertion.
     #[test]
     fn node_mutation_observer_fans_out_to_sequence_and_mining_wake() {
-        use crate::mining::{MiningGenerationSignal, MempoolSequenceWake};
+        use crate::mining::{MempoolSequenceWake, MiningGenerationSignal};
         use bitcoin_rs_primitives::Block;
         use bitcoin_rs_rpc::context::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
