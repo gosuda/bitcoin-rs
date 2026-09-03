@@ -6169,7 +6169,7 @@ mod consensus_rule_tests {
     #[allow(clippy::arc_with_non_send_sync)]
     fn a_window_skips_scripts_for_assume_valid_blocks_and_proves_nothing_for_them()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (recorder, metrics_handle) = crate::metrics::test_recorder();
+        let recorder = crate::metrics::test_recorder();
 
         let genesis = Network::Regtest.genesis_block();
         let prevout = OutPoint::new(fixture_txid(0x71), 0);
