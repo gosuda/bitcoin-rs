@@ -34,10 +34,14 @@ pub(crate) enum ReplayOutcome {
 
 /// State reconstructed by a successful replay.
 pub(crate) struct ReplayedState {
-    /// Tree with the base→head header chain rebuilt (valid `NodeId`s + `chainwork`).
+    /// Checkpoint tree extended through the journal head.
     pub tree: BlockTree,
-    /// UTXO set with all committed-range mutations applied.
+    /// Checkpoint UTXO set with all committed-range mutations applied.
     pub utxo: UtxoSet,
+    /// `CoinStats` after the same ordered mutations and block metadata.
+    pub coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    /// Valid applied-tip snapshot derived from the rebuilt tree node.
+    pub applied_tip: bitcoin_rs_chain::TipSnapshot,
     /// Cumulative chain transaction count through the head.
     pub chain_tx_count: u64,
 }
@@ -223,14 +227,19 @@ fn scan_segment(
     Ok(records)
 }
 
-/// Replays the journal above the checkpoint base, if one is usable.
+/// Replays a usable journal above an owned checkpoint state.
 ///
-/// `base_tip` anchors the contiguity predicate; the returned state (when
-/// [`ReplayOutcome::Replayed`]) replaces the checkpoint state wholesale.
+/// The base identity is authenticated against `head.json` before any mutation.
+/// Callers reload the checkpoint on [`ReplayOutcome::Fallback`], so a semantic
+/// failure can never expose a partially replayed state.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn replay_from_journal(
     dir: &cap_std::fs::Dir,
-    base_tip_hash: [u8; 32],
-    base_tip_height: u32,
+    base_generation: u64,
+    tree: BlockTree,
+    utxo: UtxoSet,
+    coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    base_tip: bitcoin_rs_chain::TipSnapshot,
     base_chain_tx_count: u64,
 ) -> ReplayOutcome {
     let head_bytes = match read_head_bytes(dir) {
@@ -246,154 +255,257 @@ pub(crate) fn replay_from_journal(
             return ReplayOutcome::Fallback(JournalReplayError::HeadUnreadable(error.to_string()));
         }
     };
-    if head.block_hash != base_tip_hash
-        || head.height < base_tip_height
-        || head.prev_hash != base_tip_hash && head.height != base_tip_height
+    if head.base_generation != base_generation
+        || head.base_height != base_tip.height
+        || head.base_hash != base_tip.hash.to_le_bytes()
+        || head.base_chain_tx_count != base_chain_tx_count
+        || head.height < base_tip.height
     {
-        // Head identity is validated precisely in the scan against the base;
-        // this pre-filter only discards generations that cannot possibly
-        // continue the base chain.
+        return ReplayOutcome::Fallback(JournalReplayError::BaseMismatch);
     }
-    if head.block_hash == base_tip_hash && head.height == base_tip_height {
-        // Empty range: the journal holds nothing beyond the base tip. The
-        // caller can treat this as a successful no-op replay of the base.
-        return ReplayOutcome::Fallback(JournalReplayError::NoHead);
-    }
-    let _ = base_chain_tx_count;
-    let range = match scan_committed_range(dir, &head, base_tip_hash, base_tip_height) {
-        Ok(range) => range,
-        Err(error) => return ReplayOutcome::Fallback(error),
+    let records = if head.height == base_tip.height {
+        if head.block_hash != head.base_hash
+            || head.chain_tx_count != base_chain_tx_count
+            || head.record_count != 0
+        {
+            return ReplayOutcome::Fallback(JournalReplayError::BaseMismatch);
+        }
+        Vec::new()
+    } else {
+        match scan_committed_range(dir, &head, head.base_hash, head.base_height) {
+            Ok(range) => range.records,
+            Err(error) => return ReplayOutcome::Fallback(error),
+        }
     };
-    match replay_records(range.records, base_chain_tx_count) {
-        Ok(state) => ReplayOutcome::Replayed(Box::new(state)),
+    if u64::try_from(records.len()).ok() != Some(head.record_count) {
+        return ReplayOutcome::Fallback(JournalReplayError::CommittedRangeInvalid(
+            "record count does not match head marker".to_owned(),
+        ));
+    }
+    match replay_records(
+        records,
+        tree,
+        utxo,
+        coin_stats,
+        base_tip,
+        base_chain_tx_count,
+    ) {
+        Ok(state) if state.chain_tx_count == head.chain_tx_count => {
+            ReplayOutcome::Replayed(Box::new(state))
+        }
+        Ok(_) => ReplayOutcome::Fallback(JournalReplayError::CommittedRangeInvalid(
+            "chain transaction count does not match head marker".to_owned(),
+        )),
         Err(error) => ReplayOutcome::Fallback(error),
     }
 }
 
-/// Applies the ordered records into a fresh `§2.2` state enumeration.
+/// Applies ordered records above a restored checkpoint state.
 ///
-/// Headers first (they regenerate `NodeId`s + `chainwork` and are cheap to
-/// reject), then mutations block-by-block in commit order. `CoinStats` is
-/// driven by the `UtxoSet`'s change listener — the same mutations, the same
-/// preimages — with `finish_block` applied per record for the block-level
-/// height/tx-count deltas.
-#[allow(clippy::needless_pass_by_value)] // `base_chain_tx_count` is copied into the accumulator by design
+/// Headers first regenerate valid `NodeId`s and chainwork. Mutations then pass
+/// through the same `UtxoSet` commit surface as live apply, with a listener
+/// seeded from the checkpoint `CoinStats`.
+#[allow(clippy::needless_pass_by_value)] // the owned checkpoint state becomes the replay result
 fn replay_records(
     records: Vec<JournalRecord>,
+    mut tree: BlockTree,
+    mut utxo: UtxoSet,
+    initial_coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    base_tip: bitcoin_rs_chain::TipSnapshot,
     base_chain_tx_count: u64,
 ) -> Result<ReplayedState, JournalReplayError> {
-    let mut tree = BlockTree::new();
-    let mut utxo = UtxoSet::new();
-    // The change listener derives CoinStats from exactly the mutations replay
-    // applies; without it the stats would silently diverge from the set.
-    utxo.set_listener(Box::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-        bitcoin_rs_utxo::stats::CoinStats::default(),
-    )));
+    if base_chain_tx_count == 0 {
+        return Err(JournalReplayError::CommittedRangeInvalid(
+            "checkpoint chain_tx_count is unknown".to_owned(),
+        ));
+    }
+    let base_node = tree.node(base_tip.tip_id).map_err(|error| {
+        JournalReplayError::HeaderRebuildRejected(format!(
+            "checkpoint tip node is unavailable: {error}"
+        ))
+    })?;
+    if base_node.height != base_tip.height
+        || base_node.hash != base_tip.hash
+        || base_node.chainwork != base_tip.chainwork
+    {
+        return Err(JournalReplayError::HeaderRebuildRejected(
+            "checkpoint tip snapshot does not match its tree node".to_owned(),
+        ));
+    }
 
-    let mut prev_hash = records.first().map_or([0_u8; 32], |r| r.prev_hash);
+    let coin_stats = bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
+    utxo.set_listener(Box::new(coin_stats.clone()));
+    let mut prev_hash = base_tip.hash.to_le_bytes();
     let mut cumulative_tx_count = base_chain_tx_count;
+    let mut applied_tip = base_tip;
 
     for record in &records {
-        // Header rebuild: the journal header chain IS the block ancestry
-        // chain, so a reject here means the journal contradicts itself —
-        // fail closed (plan rev 5 Task 5 test: "header reject at rebuild").
-        let header = Header::consensus_decode(&record.raw_header[..]).map_err(|error| {
-            JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
-        })?;
-        if prev_hash != record.prev_hash {
-            return Err(JournalReplayError::CommittedRangeInvalid(format!(
-                "record {} prev_hash does not chain to {}",
-                record.height,
-                hex(&prev_hash)
-            )));
-        }
-        let parent = tree
-            .lookup(bitcoin_rs_primitives::Hash256::from_le_bytes(&prev_hash))
+        cumulative_tx_count = cumulative_tx_count
+            .checked_add(record.block_tx_count)
             .ok_or_else(|| {
-                JournalReplayError::HeaderRebuildRejected(format!(
-                    "height {}: parent {} missing from rebuilt tree",
-                    record.height,
-                    hex(&record.prev_hash)
-                ))
+                JournalReplayError::CommittedRangeInvalid(
+                    "chain transaction count overflow".to_owned(),
+                )
             })?;
-        let node_id = tree
-            .insert_node(Some(parent), header, NodeStatus::HeaderValid)
-            .map_err(|error| {
-                JournalReplayError::HeaderRebuildRejected(format!(
-                    "height {}: {error}",
-                    record.height
-                ))
-            })?;
-        tree.restore_chain_tx_count(
-            node_id,
-            cumulative_tx_count.saturating_add(record.block_tx_count),
-        )
-        .map_err(|error| {
-            JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
-        })?;
-
-        // Semantic mutations, in exact commit order, through the same
-        // commit surface the live apply path uses (`commit_borrowed_block`:
-        // adds then removes). The change listener keeps CoinStats aligned;
-        // MuHash/amount/bogo/utxo_count derive from the same full-coin
-        // preimages the record carries. Before each spend, the live coin is
-        // checked against the journaled coin (height/coinbase/value) — a
-        // mismatch means the journal and the reconstructed set diverged:
-        // fail closed (plan §2.1 sanity).
-        let mut replay_changes =
-            BorrowedBlockChanges::with_capacity(record.mutations.len(), record.mutations.len());
-        for mutation in &record.mutations {
-            match mutation {
-                Mutation::Create { coin } => {
-                    replay_changes.add(BorrowedUtxoAdd::new(
-                        coin.outpoint,
-                        &coin.txout,
-                        coin.coinbase,
-                        coin.height,
-                    ));
-                }
-                Mutation::Spend { coin } => {
-                    if let Some(live) = utxo.get_entry(&coin.outpoint)
-                        && (live.height != coin.height
-                            || live.coinbase != coin.coinbase
-                            || live.txout.value != coin.txout.value)
-                    {
-                        return Err(JournalReplayError::CommittedRangeInvalid(format!(
-                            "spend at height {} does not match the live coin",
-                            record.height
-                        )));
-                    }
-                    replay_changes.remove(coin.outpoint);
-                }
-                Mutation::Overwrite { new_coin, .. } => {
-                    // BIP30 exception: replaced coin is overwritten in place
-                    // (BorrowedBlockChanges.add + remove pair).
-                    replay_changes.add(BorrowedUtxoAdd::new(
-                        new_coin.outpoint,
-                        &new_coin.txout,
-                        new_coin.coinbase,
-                        new_coin.height,
-                    ));
-                    replay_changes.remove(new_coin.outpoint);
-                }
-            }
-        }
-        utxo.commit_borrowed_block(&replay_changes, &block_hash_of(record))
-            .map_err(|error| {
-                JournalReplayError::CommittedRangeInvalid(format!(
-                    "height {}: utxo commit failed: {error}",
-                    record.height
-                ))
-            })?;
-        cumulative_tx_count = cumulative_tx_count.saturating_add(record.block_tx_count);
+        applied_tip = insert_replayed_header(&mut tree, record, prev_hash, cumulative_tx_count)?;
+        apply_record_mutations(&utxo, record)?;
+        advance_coin_stats(&coin_stats, record)?;
         prev_hash = record.block_hash;
-        let _ = record.coin_stats_height_delta; // block-level stats handled below (finish_block hookup)
     }
     Ok(ReplayedState {
         tree,
         utxo,
+        coin_stats: coin_stats.snapshot(),
+        applied_tip,
         chain_tx_count: cumulative_tx_count,
     })
+}
+
+fn insert_replayed_header(
+    tree: &mut BlockTree,
+    record: &JournalRecord,
+    expected_prev: [u8; 32],
+    chain_tx_count: u64,
+) -> Result<bitcoin_rs_chain::TipSnapshot, JournalReplayError> {
+    let header = Header::consensus_decode(&record.raw_header[..]).map_err(|error| {
+        JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
+    })?;
+    if expected_prev != record.prev_hash
+        || header.prev_blockhash.0.to_le_bytes() != record.prev_hash
+        || header.compute_hash().0.to_le_bytes() != record.block_hash
+    {
+        return Err(JournalReplayError::CommittedRangeInvalid(format!(
+            "record {} header identity does not match its chain fields",
+            record.height
+        )));
+    }
+    let parent = tree
+        .lookup(Hash256::from_le_bytes(&expected_prev))
+        .ok_or_else(|| {
+            JournalReplayError::HeaderRebuildRejected(format!(
+                "height {}: parent {} missing from checkpoint tree",
+                record.height,
+                hex(&record.prev_hash)
+            ))
+        })?;
+    let node_id = tree
+        .insert_node(Some(parent), header, NodeStatus::HeaderValid)
+        .map_err(|error| {
+            JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
+        })?;
+    tree.restore_chain_tx_count(node_id, chain_tx_count)
+        .map_err(|error| {
+            JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
+        })?;
+    let node = tree.node(node_id).map_err(|error| {
+        JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
+    })?;
+    if node.height != record.height || node.hash.to_le_bytes() != record.block_hash {
+        return Err(JournalReplayError::HeaderRebuildRejected(format!(
+            "height {}: rebuilt node identity mismatch",
+            record.height
+        )));
+    }
+    Ok(bitcoin_rs_chain::TipSnapshot {
+        tip_id: node_id,
+        height: node.height,
+        chainwork: node.chainwork,
+        hash: node.hash,
+    })
+}
+
+fn apply_record_mutations(
+    utxo: &UtxoSet,
+    record: &JournalRecord,
+) -> Result<(), JournalReplayError> {
+    let mut changes =
+        BorrowedBlockChanges::with_capacity(record.mutations.len(), record.mutations.len());
+    for mutation in &record.mutations {
+        match mutation {
+            Mutation::Create { coin } => {
+                if utxo.get_entry(&coin.outpoint).is_some() {
+                    return Err(JournalReplayError::CommittedRangeInvalid(format!(
+                        "create at height {} overwrites a live coin",
+                        record.height
+                    )));
+                }
+                changes.add(BorrowedUtxoAdd::new(
+                    coin.outpoint,
+                    &coin.txout,
+                    coin.coinbase,
+                    coin.height,
+                ));
+            }
+            Mutation::Spend { coin } => {
+                require_live_coin(utxo, coin, record.height, "spend")?;
+                changes.remove(coin.outpoint);
+            }
+            Mutation::Overwrite { old_coin, new_coin } => {
+                require_live_coin(utxo, old_coin, record.height, "overwrite")?;
+                if old_coin.outpoint != new_coin.outpoint {
+                    return Err(JournalReplayError::CommittedRangeInvalid(format!(
+                        "overwrite at height {} changes its outpoint",
+                        record.height
+                    )));
+                }
+                changes.add(BorrowedUtxoAdd::new(
+                    new_coin.outpoint,
+                    &new_coin.txout,
+                    new_coin.coinbase,
+                    new_coin.height,
+                ));
+            }
+        }
+    }
+    utxo.commit_borrowed_block(&changes, &block_hash_of(record))
+        .map_err(|error| {
+            JournalReplayError::CommittedRangeInvalid(format!(
+                "height {}: utxo commit failed: {error}",
+                record.height
+            ))
+        })
+}
+
+fn advance_coin_stats(
+    coin_stats: &bitcoin_rs_utxo::stats::CoinStatsListener,
+    record: &JournalRecord,
+) -> Result<(), JournalReplayError> {
+    let expected_height = i64::from(coin_stats.snapshot().height)
+        .checked_add(record.coin_stats_height_delta)
+        .and_then(|height| u32::try_from(height).ok())
+        .ok_or_else(|| {
+            JournalReplayError::CommittedRangeInvalid(format!(
+                "height {}: invalid CoinStats height delta {}",
+                record.height, record.coin_stats_height_delta
+            ))
+        })?;
+    if expected_height != record.height {
+        return Err(JournalReplayError::CommittedRangeInvalid(format!(
+            "height {}: CoinStats delta reaches {expected_height}",
+            record.height
+        )));
+    }
+    coin_stats.finish_block(record.height, record.block_tx_count);
+    Ok(())
+}
+
+fn require_live_coin(
+    utxo: &UtxoSet,
+    coin: &super::record::Coin,
+    record_height: u32,
+    mutation: &str,
+) -> Result<(), JournalReplayError> {
+    let Some(live) = utxo.get_entry(&coin.outpoint) else {
+        return Err(JournalReplayError::CommittedRangeInvalid(format!(
+            "{mutation} at height {record_height} references a missing coin"
+        )));
+    };
+    if live.height != coin.height || live.coinbase != coin.coinbase || live.txout != coin.txout {
+        return Err(JournalReplayError::CommittedRangeInvalid(format!(
+            "{mutation} at height {record_height} does not match the live coin"
+        )));
+    }
+    Ok(())
 }
 
 /// Lowercase hex for diagnostics.
@@ -411,4 +523,111 @@ fn hex(bytes: &[u8]) -> String {
 /// header chain's hash semantics).
 fn block_hash_of(record: &JournalRecord) -> Hash256 {
     Hash256::from_le_bytes(&record.block_hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
+    use bitcoin_rs_primitives::{
+        BlockHash, Hash256, Header, OutPoint, TxOut, Txid, consensus_bytes,
+    };
+    use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+    use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd, UtxoSet};
+
+    use super::{JournalRecord, Mutation, replay_records};
+    use crate::chainstate_journal::Coin;
+
+    fn header(prev_blockhash: BlockHash, marker: u8, time: u32) -> Header {
+        let mut merkle = [0_u8; 32];
+        merkle[0] = marker;
+        Header {
+            version: 1,
+            prev_blockhash,
+            merkle_root: Hash256::from_le_bytes(&merkle),
+            time,
+            bits: 0x207f_ffff,
+            nonce: u32::from(marker),
+        }
+    }
+
+    fn raw_header(header: &Header) -> [u8; 80] {
+        let encoded = consensus_bytes(header);
+        encoded.try_into().expect("header is exactly 80 bytes")
+    }
+
+    fn coin(marker: u8, height: u32, value: u64) -> Coin {
+        Coin {
+            outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+            txout: TxOut {
+                value,
+                script_pubkey: vec![0x51],
+            },
+            height,
+            coinbase: true,
+        }
+    }
+
+    fn base_state()
+    -> Result<(BlockTree, UtxoSet, CoinStats, TipSnapshot, Coin), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let base_header = header(BlockHash::default(), 1, 1);
+        let base_id = tree.insert_node(None, base_header, NodeStatus::HeaderValid)?;
+        tree.restore_chain_tx_count(base_id, 1)?;
+        let base_node = tree.node(base_id)?;
+        let base_tip = TipSnapshot {
+            tip_id: base_id,
+            height: base_node.height,
+            chainwork: base_node.chainwork,
+            hash: base_node.hash,
+        };
+
+        let base_coin = coin(1, 0, 50);
+        let listener = CoinStatsListener::new(CoinStats::default());
+        let mut utxo = UtxoSet::new();
+        utxo.set_listener(Box::new(listener.clone()));
+        let mut changes = BorrowedBlockChanges::with_capacity(1, 0);
+        changes.add(BorrowedUtxoAdd::new(
+            base_coin.outpoint,
+            &base_coin.txout,
+            base_coin.coinbase,
+            base_coin.height,
+        ));
+        utxo.commit_borrowed_block(&changes, &base_tip.hash)?;
+        listener.finish_block(0, 1);
+        Ok((tree, utxo, listener.snapshot(), base_tip, base_coin))
+    }
+
+    #[test]
+    fn replay_extends_checkpoint_state_and_returns_valid_tip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tree, utxo, coin_stats, base_tip, base_coin) = base_state()?;
+        let next_header = header(BlockHash(base_tip.hash), 2, 2);
+        let next_hash = next_header.compute_hash();
+        let new_coin = coin(2, 1, 25);
+        let record = JournalRecord {
+            height: 1,
+            block_hash: next_hash.0.to_le_bytes(),
+            prev_hash: base_tip.hash.to_le_bytes(),
+            block_tx_count: 2,
+            coin_stats_height_delta: 1,
+            raw_header: raw_header(&next_header),
+            mutations: vec![Mutation::Create {
+                coin: new_coin.clone(),
+            }],
+        };
+
+        let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip, 1)?;
+
+        assert!(replayed.utxo.get_entry(&base_coin.outpoint).is_some());
+        assert!(replayed.utxo.get_entry(&new_coin.outpoint).is_some());
+        assert_eq!(replayed.chain_tx_count, 3);
+        assert_eq!(replayed.coin_stats.height, 1);
+        assert_eq!(replayed.coin_stats.tx_count, 3);
+        assert_eq!(replayed.applied_tip.height, 1);
+        assert_eq!(replayed.applied_tip.hash, next_hash.0);
+        let node = replayed.tree.node(replayed.applied_tip.tip_id)?;
+        assert_eq!(node.hash, replayed.applied_tip.hash);
+        assert_eq!(node.chainwork, replayed.applied_tip.chainwork);
+        Ok(())
+    }
 }

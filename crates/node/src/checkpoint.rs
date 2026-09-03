@@ -514,6 +514,8 @@ pub(crate) enum CheckpointLoad {
 }
 
 pub(crate) struct RestoredChainstate {
+    /// Authenticated immutable checkpoint generation from `CURRENT`/manifest.
+    pub(crate) generation: u64,
     pub(crate) tree: BlockTree,
     pub(crate) utxo: UtxoSet,
     pub(crate) coin_stats: CoinStats,
@@ -1289,6 +1291,7 @@ fn load_payloads(
         hash: applied_node.hash,
     };
     Ok(RestoredChainstate {
+        generation: manifest.generation,
         tree: headers.tree,
         utxo,
         coin_stats,

@@ -40,6 +40,7 @@ pub(crate) use emit::{JournalEmit, SharedJournalWriter, shared_journal_writer};
 pub(crate) use record::{
     BlockMeta, Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record,
 };
+pub(crate) use replay::{ReplayOutcome, replay_from_journal};
 #[allow(unused_imports)]
 // writer surface; Task 5 (boot fast path) consumes HeadMarker + failpoints
 pub(crate) use writer::{HeadMarker, JournalWriter, JournalWriterError, JournalWriterFailpoint};

@@ -2468,25 +2468,15 @@ fn apply_block_admitted<'b>(
     // the block — the journal is a recovery accelerator, not a consensus
     // dependency. No fsync on this path; `flush_to` performs the §2.3
     // durability boundary on the batch cadence.
-    if let Some(journal) = &handles.journal {
+    if height > 0
+        && let Some(journal) = &handles.journal
+    {
         let mut journal = journal.lock();
-        let undo_spends = undo.restores();
-        // build_block_changes pushes one undo restore per non-netted spend,
-        // in input order, and any BIP30 replaced-coin restores. Replay only
-        // needs the spends, so pair restores with removes positionally and
-        // stop when the two counts diverge (BIP30 case: restores outnumber
-        // removes — the tail restores belong to overwrites, not spends). The
-        // debug_assert pins the common non-BIP30 identity.
-        let removes = changes.spent_outpoints();
-        debug_assert!(
-            undo_spends.len() >= removes.len(),
-            "every journal-able spend needs a full undo coin"
-        );
-        let spent_coins = removes
+        let undo_coins = undo
+            .restores()
             .iter()
-            .zip(undo_spends.iter())
-            .map(|(outpoint, add)| crate::chainstate_journal::Coin {
-                outpoint: *outpoint,
+            .map(|add| crate::chainstate_journal::Coin {
+                outpoint: add.outpoint,
                 txout: add.txout.clone(),
                 height: add.height,
                 coinbase: add.coinbase,
@@ -2496,8 +2486,7 @@ fn apply_block_admitted<'b>(
                 height,
                 block_hash: block_hash.to_le_bytes(),
                 prev_hash: prev_hash.to_le_bytes(),
-                block_tx_count: tx_count_delta_for(block)
-                    + handles.chain_tx_count.load(Ordering::Relaxed),
+                block_tx_count: tx_count_delta_for(block),
                 // `finish_block` runs later in the publication tail, so the
                 // listener still carries the parent height here: the delta of
                 // this block is exactly (height - parent_height) — normally 1,
@@ -2513,17 +2502,16 @@ fn apply_block_admitted<'b>(
                 },
             },
             &changes,
-            spent_coins,
+            undo_coins,
         );
-        match journal.append(&record) {
-            Ok(()) => {
-                let flush_result = journal.flush_through(height);
-                if let Err(error) = flush_result {
-                    metrics::counter!("node.chainstate_journal.flush_failures").increment(1);
+        match record {
+            Ok(record) => {
+                if let Err(error) = journal.append(&record) {
+                    metrics::counter!("node.chainstate_journal.append_failures").increment(1);
                     tracing::warn!(
                         height,
                         %error,
-                        "chainstate journal flush failed; recovery may fall back to full re-validation"
+                        "chainstate journal append failed; recovery may fall back to full re-validation"
                     );
                 }
             }
@@ -2532,7 +2520,7 @@ fn apply_block_admitted<'b>(
                 tracing::warn!(
                     height,
                     %error,
-                    "chainstate journal append failed; recovery may fall back to full re-validation"
+                    "chainstate journal delta extraction failed; recovery may fall back to full re-validation"
                 );
             }
         }

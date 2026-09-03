@@ -123,6 +123,14 @@ pub(crate) enum JournalWriterError {
 /// rename or a bit flip fails closed at load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct HeadMarker {
+    /// Checkpoint generation this journal extends.
+    pub(crate) base_generation: u64,
+    /// Applied-tip height of the checkpoint base.
+    pub(crate) base_height: u32,
+    /// Applied-tip hash of the checkpoint base.
+    pub(crate) base_hash: [u8; 32],
+    /// Cumulative transaction count through the checkpoint base.
+    pub(crate) base_chain_tx_count: u64,
     /// Oldest RETAINED segment generation (the base cursor).
     pub(crate) start_gen: u64,
     /// Byte offset within the oldest retained segment's active record window.
@@ -226,6 +234,14 @@ pub(crate) enum WriterState {
 pub(crate) struct JournalWriter<S: KvStore> {
     dir: cap_std::fs::Dir,
     store: std::sync::Arc<S>,
+    /// Checkpoint generation this writer extends.
+    base_generation: u64,
+    /// Applied-tip height of the checkpoint base.
+    base_height: u32,
+    /// Applied-tip hash of the checkpoint base.
+    base_hash: [u8; 32],
+    /// Cumulative transaction count through the checkpoint base.
+    base_chain_tx_count: u64,
     /// Buffered record bytes not yet covered by a durability boundary.
     pending: Vec<u8>,
     /// Records buffered since the last boundary (for `flush_to` accounting).
@@ -238,6 +254,8 @@ pub(crate) struct JournalWriter<S: KvStore> {
     start: (u64, u64),
     /// Durable frontier published via `head.json`.
     durable: DurableCursor,
+    /// Cumulative transaction count covered by `durable`.
+    durable_chain_tx_count: u64,
     /// Height expected by the next `append`.
     next_height: u32,
     /// Cumulative `chain_tx_count` through the next append.
@@ -288,6 +306,7 @@ impl<S: KvStore> JournalWriter<S> {
     pub(crate) fn initialize(
         dir: cap_std::fs::Dir,
         store: std::sync::Arc<S>,
+        base_generation: u64,
         start: (u64, u64),
         height: u32,
         block_hash: [u8; 32],
@@ -295,6 +314,10 @@ impl<S: KvStore> JournalWriter<S> {
         chain_tx_count: u64,
     ) -> Result<Self, JournalWriterError> {
         let head = HeadMarker {
+            base_generation,
+            base_height: height,
+            base_hash: block_hash,
+            base_chain_tx_count: chain_tx_count,
             start_gen: start.0,
             start_offset: start.1,
             journal_gen: start.0,
@@ -318,6 +341,10 @@ impl<S: KvStore> JournalWriter<S> {
         let mut writer = Self {
             dir,
             store,
+            base_generation: head.base_generation,
+            base_height: head.base_height,
+            base_hash: head.base_hash,
+            base_chain_tx_count: head.base_chain_tx_count,
             pending: Vec::new(),
             pending_records: Vec::new(),
             segment_offset: head.offset,
@@ -328,6 +355,7 @@ impl<S: KvStore> JournalWriter<S> {
                 offset: head.offset,
                 height: head.height,
             },
+            durable_chain_tx_count: head.chain_tx_count,
             next_height: head.height.checked_add(1).ok_or_else(|| {
                 JournalWriterError::HeadUnreadable("head height overflow".to_owned())
             })?,
@@ -376,9 +404,33 @@ impl<S: KvStore> JournalWriter<S> {
         self.state
     }
 
+    /// Applies the resolved runtime batching and segment-rotation policy.
+    pub(crate) fn configure(
+        &mut self,
+        batch_blocks: u32,
+        batch_seconds: Duration,
+        rotate_mib: u64,
+    ) -> Result<(), JournalWriterError> {
+        if batch_blocks == 0 || batch_seconds.is_zero() || rotate_mib == 0 {
+            return Err(JournalWriterError::CursorMismatch(
+                "journal runtime limits must be non-zero".to_owned(),
+            ));
+        }
+        self.batch_blocks = batch_blocks;
+        self.batch_seconds = batch_seconds;
+        self.rotate_bytes = rotate_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("journal rotation size overflow".to_owned())
+        })?;
+        Ok(())
+    }
+
     /// Durable head marker, for the boot path and metrics.
     pub(crate) fn head(&self) -> HeadMarker {
         HeadMarker {
+            base_generation: self.base_generation,
+            base_height: self.base_height,
+            base_hash: self.base_hash,
+            base_chain_tx_count: self.base_chain_tx_count,
             start_gen: self.start.0,
             start_offset: self.start.1,
             journal_gen: self.durable.generation,
@@ -386,7 +438,7 @@ impl<S: KvStore> JournalWriter<S> {
             height: self.durable.height,
             block_hash: self.durable_block_hash,
             prev_hash: self.durable_prev_hash,
-            chain_tx_count: self.chain_tx_count,
+            chain_tx_count: self.durable_chain_tx_count,
             record_count: self.record_count,
         }
     }
@@ -484,6 +536,10 @@ impl<S: KvStore> JournalWriter<S> {
 
         // (3) atomic head publish.
         let marker = HeadMarker {
+            base_generation: self.base_generation,
+            base_height: self.base_height,
+            base_hash: self.base_hash,
+            base_chain_tx_count: self.base_chain_tx_count,
             start_gen: self.start.0,
             start_offset: self.start.1,
             journal_gen: self.segment_gen,
@@ -506,6 +562,7 @@ impl<S: KvStore> JournalWriter<S> {
         };
         self.durable_block_hash = last.block_hash;
         self.durable_prev_hash = last.prev_hash;
+        self.durable_chain_tx_count = self.chain_tx_count;
         self.record_count += u64::try_from(target)
             .map_err(|_| JournalWriterError::CursorMismatch("record count overflow".to_owned()))?;
         self.pending.clear();
@@ -564,6 +621,21 @@ impl<S: KvStore> JournalWriter<S> {
             return Ok(());
         }
         let last = &self.pending_records[target - 1];
+        let prefix_len = u64::try_from(self.pending_len_for(target))
+            .map_err(|_| JournalWriterError::CursorMismatch("record bytes overflow".to_owned()))?;
+        let target_offset = self.durable.offset.checked_add(prefix_len).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("segment offset overflow".to_owned())
+        })?;
+        let target_chain_tx_count = self.pending_records[..target].iter().try_fold(
+            self.durable_chain_tx_count,
+            |count, record| {
+                count.checked_add(record.block_tx_count).ok_or_else(|| {
+                    JournalWriterError::CursorMismatch(
+                        "chain transaction count overflow".to_owned(),
+                    )
+                })
+            },
+        )?;
 
         self.fail_storage_flush()?;
         self.store
@@ -578,14 +650,18 @@ impl<S: KvStore> JournalWriter<S> {
         file.sync_all()?;
 
         let marker = HeadMarker {
+            base_generation: self.base_generation,
+            base_height: self.base_height,
+            base_hash: self.base_hash,
+            base_chain_tx_count: self.base_chain_tx_count,
             start_gen: self.start.0,
             start_offset: self.start.1,
             journal_gen: self.segment_gen,
-            offset: self.segment_offset,
+            offset: target_offset,
             height: last.height,
             block_hash: last.block_hash,
             prev_hash: last.prev_hash,
-            chain_tx_count: self.chain_tx_count,
+            chain_tx_count: target_chain_tx_count,
             record_count: self.record_count
                 + u64::try_from(target).map_err(|_| {
                     JournalWriterError::CursorMismatch("record count overflow".to_owned())
@@ -595,14 +671,19 @@ impl<S: KvStore> JournalWriter<S> {
 
         self.durable = DurableCursor {
             generation: self.segment_gen,
-            offset: self.segment_offset,
+            offset: target_offset,
             height: last.height,
         };
         self.durable_block_hash = last.block_hash;
         self.durable_prev_hash = last.prev_hash;
+        self.durable_chain_tx_count = target_chain_tx_count;
         self.record_count += u64::try_from(target)
             .map_err(|_| JournalWriterError::CursorMismatch("record count overflow".to_owned()))?;
-        self.pending.drain(..self.pending_len_for(target));
+        self.pending.drain(
+            ..usize::try_from(prefix_len).map_err(|_| {
+                JournalWriterError::CursorMismatch("record bytes overflow".to_owned())
+            })?,
+        );
         self.pending_records.drain(..target);
         self.last_boundary = Instant::now();
         Ok(())
@@ -932,7 +1013,7 @@ mod tests {
 
     fn open_fresh(tag: &str, store: Arc<CountingStore>) -> JournalWriter<CountingStore> {
         let dir = temp_dir(tag);
-        JournalWriter::initialize(dir, store, (0, 0), 0, [1; 32], [0; 32], 0)
+        JournalWriter::initialize(dir, store, 0, (0, 0), 0, [1; 32], [0; 32], 0)
             .expect("initialize journal")
     }
 

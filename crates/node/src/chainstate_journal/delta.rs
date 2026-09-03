@@ -17,20 +17,29 @@
 //! - same-block spends are netted out upstream and produce no journal
 //!   mutation.
 //!
-//! BIP30 overwrite note: at the two exception heights the coinbase add
-//! overwrites a live coin. The undo batch carries the replaced coin so
-//! disconnect can restore it; the journal replay reaches the same state
-//! without an explicit `Overwrite` because replay resolves creates the same
-//! way `build_block_changes` does (the pre-existing coin is simply
-//! replaced in place), and the undo parity is preserved by the replay's own
-//! undo construction. The `Overwrite` variant stays reserved for a future
-//! replay need; emitting it here would require distinguishing replaced adds
-//! from fresh adds per outpoint, which the borrowed change set does not
-//! expose.
+//! BIP30 overwrite restores are distinguished from spend restores by
+//! outpoint: a restore matching an add carries the replaced old coin; a
+//! restore matching a remove carries the spent coin. This mapping has one
+//! owner here and rejects any leftover or missing restore.
 
 use bitcoin_rs_utxo::BorrowedBlockChanges;
+use hashbrown::HashMap;
+use thiserror::Error;
 
 use super::record::{Coin, JournalRecord, Mutation};
+
+#[derive(Debug, Error)]
+pub(crate) enum JournalDeltaError {
+    /// A spend has no full-coin undo preimage.
+    #[error("journal spend {0:?} has no undo coin")]
+    MissingSpend(bitcoin_rs_primitives::OutPoint),
+    /// More than one undo restore named the same outpoint.
+    #[error("journal undo restores duplicate outpoint {0:?}")]
+    DuplicateRestore(bitcoin_rs_primitives::OutPoint),
+    /// An undo restore matched neither an add nor a spend.
+    #[error("journal undo restore {0:?} matches no block mutation")]
+    UnmatchedRestore(bitcoin_rs_primitives::OutPoint),
+}
 
 /// Inputs for one fully applied block's semantic-delta record.
 ///
@@ -66,50 +75,105 @@ pub(crate) struct BlockDeltaInputs {
 pub(crate) fn journal_record_for_block(
     inputs: BlockDeltaInputs,
     changes: &BorrowedBlockChanges<'_>,
-    spent_coins: impl IntoIterator<Item = Coin>,
-) -> JournalRecord {
-    JournalRecord {
+    undo_coins: impl IntoIterator<Item = Coin>,
+) -> Result<JournalRecord, JournalDeltaError> {
+    Ok(JournalRecord {
         height: inputs.height,
         block_hash: inputs.block_hash,
         prev_hash: inputs.prev_hash,
         block_tx_count: inputs.block_tx_count,
         coin_stats_height_delta: inputs.coin_stats_height_delta,
         raw_header: inputs.raw_header,
-        mutations: mutations_for_block(changes, spent_coins),
-    }
+        mutations: mutations_for_block(changes, undo_coins)?,
+    })
 }
 
 /// Extracts the ordered mutation list from the apply path's change set.
 ///
 /// See the module docs for the mapping contract.
-#[must_use]
 pub(crate) fn mutations_for_block(
     changes: &BorrowedBlockChanges<'_>,
-    spent_coins: impl IntoIterator<Item = Coin>,
-) -> Vec<Mutation> {
-    let spent: Vec<Coin> = spent_coins.into_iter().collect();
-    debug_assert_eq!(
-        spent.len(),
-        changes.spent_outpoints().len(),
-        "one full coin per spend is required to build the journal delta"
-    );
+    undo_coins: impl IntoIterator<Item = Coin>,
+) -> Result<Vec<Mutation>, JournalDeltaError> {
+    let mut restores = HashMap::new();
+    for coin in undo_coins {
+        let outpoint = coin.outpoint;
+        if restores.insert(outpoint, coin).is_some() {
+            return Err(JournalDeltaError::DuplicateRestore(outpoint));
+        }
+    }
     let mut mutations = Vec::with_capacity(changes.add_count() + changes.remove_count());
     for add in changes.adds() {
-        mutations.push(Mutation::Create {
-            coin: Coin {
-                outpoint: add.outpoint,
-                txout: add.txout.clone(),
-                height: add.height,
-                coinbase: add.coinbase,
-            },
-        });
+        let new_coin = Coin {
+            outpoint: add.outpoint,
+            txout: add.txout.clone(),
+            height: add.height,
+            coinbase: add.coinbase,
+        };
+        match restores.remove(&add.outpoint) {
+            Some(old_coin) => mutations.push(Mutation::Overwrite { old_coin, new_coin }),
+            None => mutations.push(Mutation::Create { coin: new_coin }),
+        }
     }
-    for (outpoint, coin) in changes.spent_outpoints().iter().zip(spent) {
-        debug_assert_eq!(
-            outpoint, &coin.outpoint,
-            "spend/restore order must match between changes and undo"
-        );
+    for outpoint in changes.spent_outpoints() {
+        let coin = restores
+            .remove(outpoint)
+            .ok_or(JournalDeltaError::MissingSpend(*outpoint))?;
         mutations.push(Mutation::Spend { coin });
     }
-    mutations
+    if let Some((outpoint, _)) = restores.into_iter().next() {
+        return Err(JournalDeltaError::UnmatchedRestore(outpoint));
+    }
+    Ok(mutations)
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+    use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd};
+
+    use super::{Coin, Mutation, mutations_for_block};
+
+    fn coin(marker: u8, height: u32, value: u64) -> Coin {
+        Coin {
+            outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+            txout: TxOut {
+                value,
+                script_pubkey: vec![0x51],
+            },
+            height,
+            coinbase: true,
+        }
+    }
+
+    #[test]
+    fn classifies_bip30_restore_as_overwrite_before_spends() {
+        let old = coin(1, 10, 50);
+        let mut new = old.clone();
+        new.height = 100;
+        new.txout.value = 25;
+        let spent = coin(2, 20, 12);
+        let mut changes = BorrowedBlockChanges::with_capacity(1, 1);
+        changes.add(BorrowedUtxoAdd::new(
+            new.outpoint,
+            &new.txout,
+            new.coinbase,
+            new.height,
+        ));
+        changes.remove(spent.outpoint);
+
+        let mutations = mutations_for_block(&changes, vec![old.clone(), spent.clone()])
+            .expect("valid overwrite/spend mapping");
+
+        assert_eq!(
+            mutations,
+            vec![
+                Mutation::Overwrite {
+                    old_coin: old,
+                    new_coin: new,
+                },
+                Mutation::Spend { coin: spent },
+            ]
+        );
+    }
 }
