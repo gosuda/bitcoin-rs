@@ -1078,7 +1078,7 @@ mod tests {
             false,
             crate::connection::OutboundBudget::new(0, 0),
         );
-        controls.peer_outbound().write().insert(addr, lease.clone());
+        controls.peer_lifecycle.register(addr, &lease);
 
         // The zero budget refuses the ping; it is not counted and the
         // saturation policy cancels the lease so the peer disconnects.

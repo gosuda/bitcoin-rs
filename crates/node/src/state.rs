@@ -1990,6 +1990,15 @@ impl NodeState {
         Arc::clone(&self.peer_lifecycle)
     }
 
+    /// Returns the authoritative lease view used by the transaction relay
+    /// adapter. The lifecycle remains the sole mutation boundary.
+    #[must_use]
+    pub fn peer_outbound(
+        &self,
+    ) -> Arc<RwLock<hashbrown::HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>> {
+        self.peer_lifecycle.peer_outbound_handle()
+    }
+
     /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
     #[must_use]
     pub fn banned_subnets(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>> {
@@ -2000,6 +2009,12 @@ impl NodeState {
     #[must_use]
     pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<std::net::SocketAddr> {
         self.p2p_outbound_tx.clone()
+    }
+
+    /// Returns the service-owned persistent addnode entries.
+    #[must_use]
+    pub fn added_nodes(&self) -> Arc<RwLock<Vec<std::net::SocketAddr>>> {
+        self.p2p.added_nodes_handle()
     }
 
     /// Returns the shared receiver consumed by the outbound P2P drain worker.

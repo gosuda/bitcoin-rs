@@ -752,9 +752,10 @@ mod tests {
             budget.max_received_bytes,
             budget
                 .max_received_blocks
-                .saturating_mul(bitcoin_rs_p2p::download_window::PENDING_BLOCK_BYTE_ESTIMATE)
+                .saturating_mul(bitcoin_rs_p2p::download::PENDING_BLOCK_BYTE_ESTIMATE)
         );
-        let block = block_with_total_size(bitcoin_rs_p2p::download_window::PENDING_BLOCK_BYTE_ESTIMATE);
+        let block =
+            block_with_total_size(bitcoin_rs_p2p::download::PENDING_BLOCK_BYTE_ESTIMATE);
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();

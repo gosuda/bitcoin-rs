@@ -356,6 +356,18 @@ impl PeerLifecycle {
         Self { registry, leases }
     }
 
+    /// Returns the shared lease view for legacy relay consumers.
+    ///
+    /// New connection and control mutations must continue to use this type's
+    /// identity-aware methods; the handle exists so older read-and-send
+    /// adapters observe the same authoritative lease map.
+    #[must_use]
+    pub fn peer_outbound_handle(
+        &self,
+    ) -> Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>> {
+        Arc::clone(&self.leases)
+    }
+
     /// Registers a connection before its handshake, cancelling a genuinely
     /// different predecessor and hiding its ready metadata.
     pub fn register(&self, addr: SocketAddr, lease: &PeerLease) -> bool {

@@ -44,6 +44,7 @@ pub(crate) const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 const RPC_MAX_CONNECTIONS: usize = 128;
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const P2P_OUTBOUND_ACTIVE_LIMIT: usize = crate::state::P2P_OUTBOUND_QUEUE_LIMIT;
+const P2P_OUTBOUND_PEER_TARGET: usize = P2P_OUTBOUND_ACTIVE_LIMIT;
 const FAILED_ADDR_BACKOFF_SECS: u64 = 60;
 /// How often the DNS peer maintenance loop wakes to check the live peer count.
 const DNS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
@@ -988,7 +989,7 @@ pub(crate) fn start_node(
                 peer_lifecycle: state.peer_lifecycle(),
                 p2p_outbound_sender: Some(state.p2p_outbound_sender()),
                 banned: Arc::clone(&banned),
-                added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
+                added_nodes: state.added_nodes(),
             },
             mining: bitcoin_rs_rpc::context::MiningHandles {
                 mining_control: Some(Arc::clone(&mining_control)),

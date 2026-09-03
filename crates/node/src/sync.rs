@@ -45,10 +45,6 @@ const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
-fn default_sync_budget() -> SyncBudget {
-    SyncBudget::default()
-}
-
 /// Block download orchestrator.
 pub struct BlockSync {
     handles: crate::apply::ApplyHandles,
@@ -302,7 +298,7 @@ impl BlockSync {
         let chain_tip = self.handles.chain_tip.load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        let live_peers = self.peer_outbound.read().len();
+        let live_peers = self.peer_lifecycle.live_leases().len();
         let in_ibd = header_height > 0 && applied_height < header_height;
         let gap = header_height.saturating_sub(applied_height);
 
@@ -844,12 +840,11 @@ impl BlockSync {
                                 stager.retire_applied(invalid_hash);
                             }
                         }
-                        {
-                            let mut window = self.download_window.lock();
+                        self.with_download_window(|window| {
                             for invalid_hash in &error.invalidated {
                                 window.drop_for_retry(invalid_hash);
                             }
-                        }
+                        });
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
                     }
@@ -1505,14 +1500,16 @@ impl BlockSync {
     }
 
     fn record_sync_metrics(&self) {
-        let (pending_blocks, pending_bytes) =
-            self.with_download_window(|window| (window.pending_len(), window.pending_bytes()));
+        let (pending_blocks, pending_bytes, pending_blocks_high_water, pending_bytes_high_water) =
+            self.with_download_window(|window| {
+                let (blocks, bytes) = window.pending_high_water();
+                (window.pending_len(), window.pending_bytes(), blocks, bytes)
+            });
         let stager = self.block_stager.lock();
         metrics::gauge!("node.sync.pending_blocks").set(metric_count(pending_blocks));
         metrics::gauge!("node.sync.pending_bytes").set(metric_count(pending_bytes));
         metrics::gauge!("node.sync.received_blocks").set(metric_count(stager.received_len()));
         metrics::gauge!("node.sync.received_bytes").set(metric_count(stager.received_bytes()));
-        let (pending_blocks_high_water, pending_bytes_high_water) = window.pending_high_water();
         metrics::gauge!("node.sync.pending_blocks_high_water")
             .set(metric_count(pending_blocks_high_water));
         metrics::gauge!("node.sync.pending_bytes_high_water")

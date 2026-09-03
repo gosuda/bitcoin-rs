@@ -7,6 +7,39 @@ use bitcoin_rs_primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
+/// Default pending request timeout.
+pub const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
+/// Maximum number of block bodies in the pending request window.
+pub const PENDING_BUDGET: usize = 128;
+/// Default received block timeout.
+pub const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
+/// Maximum number of staged block bodies.
+pub const RECEIVED_BLOCK_BUDGET: usize = 128;
+/// Estimated serialized block size used for byte budgets.
+pub const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
+/// Maximum bytes in the pending request window.
+pub const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
+/// Maximum bytes in the received block window.
+pub const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
+/// Maximum serialized block body accepted by the sync pipeline.
+pub const MAX_SERIALIZED_BLOCK_SIZE: usize = 4_000_000;
+/// Maximum decoded inbound blocks drained into the staging pipeline at once.
+pub const INBOUND_BLOCK_STAGE_CHUNK: usize = RECEIVED_BLOCK_BYTE_BUDGET / PENDING_BLOCK_BYTE_ESTIMATE;
+/// Per-peer in-flight request budget.
+pub const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
+/// Maximum blocks assigned to one peer in fan-out mode.
+pub const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
+/// Minimum eligible peers required to activate fan-out.
+pub const MIN_PEERS_FOR_FANOUT: usize = PENDING_BUDGET / MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+/// Initial stalling timeout.
+pub const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum stalling timeout.
+pub const BLOCK_STALLING_TIMEOUT_MAX: Duration = Duration::from_secs(64);
+/// Cooldown applied after a staller disconnect.
+pub const STALLER_COOLDOWN: Duration = BLOCK_STALLING_TIMEOUT_MAX;
+/// Maximum number of inventory entries sent in one `getdata` batch.
+pub const GETDATA_BATCH_SIZE: usize = PENDING_BUDGET;
+
 #[derive(Clone, Copy, Debug)]
 #[allow(missing_docs)]
 pub struct SyncBudget {
@@ -337,7 +370,7 @@ const PREFIX_PROBE_WIN_MASK: u8 = (1_u8 << PREFIX_PROBE_WIN_BLOCKS) - 1;
 const PREFIX_PROBE_ESTIMATED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Stall-episode clearing reasons, the counter taxonomy for
-/// `p2p.sync.stall_episodes_cleared{reason}`. Every path that zeroes the
+/// `node.sync.stall_episodes_cleared{reason}`. Every path that zeroes the
 /// episode clock tags exactly one reason:
 /// - `apply_busy`: the no-blame guard held this tick ([`DownloadWindow::observe_stall`]).
 /// - `predicate`: a [`DownloadWindow::window_blocked_on`] term went false
@@ -348,7 +381,7 @@ const PREFIX_PROBE_ESTIMATED_BYTES: usize = 2 * 1024 * 1024;
 ///   ([`DownloadWindow::record_delivery_progress`]).
 /// - `fired`: conviction ??the episode reached the effective threshold.
 fn count_stall_episode_cleared(reason: &'static str) {
-    metrics::counter!("p2p.sync.stall_episodes_cleared", "reason" => reason).increment(1);
+    metrics::counter!("node.sync.stall_episodes_cleared", "reason" => reason).increment(1);
 }
 
 #[derive(Debug)]
@@ -359,6 +392,10 @@ pub struct DownloadWindow {
     peer_inflight: HashMap<SocketAddr, PeerInflight>,
     pending_bytes: usize,
     received_bytes: usize,
+    /// Highest pending population observed for sync metrics.
+    pending_blocks_high_water: usize,
+    /// Highest pending byte population observed for sync metrics.
+    pending_bytes_high_water: usize,
     ewma_block_bytes: usize,
     next_request_height: u32,
     request_tip: Option<(Hash256, u32)>,
@@ -444,6 +481,8 @@ impl DownloadWindow {
             ),
             pending_bytes: 0,
             received_bytes: 0,
+            pending_blocks_high_water: 0,
+            pending_bytes_high_water: 0,
             ewma_block_bytes: 256 * 1024,
             next_request_height: 1,
             request_tip: None,
@@ -549,6 +588,14 @@ impl DownloadWindow {
 
     pub const fn pending_bytes(&self) -> usize {
         self.pending_bytes
+    }
+
+    /// Returns the high-water marks for pending blocks and bytes.
+    pub const fn pending_high_water(&self) -> (usize, usize) {
+        (
+            self.pending_blocks_high_water,
+            self.pending_bytes_high_water,
+        )
     }
 
     pub fn has_request_capacity(&self) -> bool {
@@ -797,7 +844,7 @@ impl DownloadWindow {
                     // owner) and the episode re-keyed.
                     count_stall_episode_cleared("front_moved");
                 }
-                metrics::counter!("p2p.sync.stall_episodes_started").increment(1);
+                metrics::counter!("node.sync.stall_episodes_started").increment(1);
                 let episode = StallEpisode {
                     peer_addr,
                     front_hash,
@@ -1633,6 +1680,8 @@ impl DownloadWindow {
             self.pending_bytes = self.pending_bytes.saturating_add(estimated_bytes);
             inflight.blocks = inflight.blocks.saturating_add(1);
         }
+        self.pending_blocks_high_water = self.pending_blocks_high_water.max(self.pending.len());
+        self.pending_bytes_high_water = self.pending_bytes_high_water.max(self.pending_bytes);
         if !request.entries.is_empty() {
             self.record_pending_deadline(now);
         }

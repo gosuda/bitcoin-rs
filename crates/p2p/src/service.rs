@@ -452,6 +452,12 @@ impl P2pService {
         self.added_nodes.read().clone()
     }
 
+    /// Returns the service-owned persistent addnode view.
+    #[must_use]
+    pub fn added_nodes_handle(&self) -> Arc<RwLock<Vec<SocketAddr>>> {
+        Arc::clone(&self.added_nodes)
+    }
+
     /// Applies Core-like addnode state and requests a connection.
     pub fn add_node(&self, addr: SocketAddr, persist: bool) -> Result<(), P2pControlError> {
         if crate::subnet::is_banned(&self.banned.read(), addr.ip(), SystemTime::now()) {
@@ -617,17 +623,6 @@ impl P2pService {
         self.with_download_window(|window| *window = DownloadWindow::new(budget));
     }
 
-    /// Returns an inbound headers sender used by connection workers.
-    #[must_use]
-    pub fn inbound_headers_sender(&self) -> Sender<crate::InboundHeaders> {
-        self.inbound_headers_tx.clone()
-    }
-
-    /// Returns an inbound block sender used by connection workers.
-    #[must_use]
-    pub fn inbound_blocks_sender(&self) -> Sender<crate::InboundBlock> {
-        self.inbound_blocks_tx.clone()
-    }
 }
 
 fn reap_finished_outbound_connections(

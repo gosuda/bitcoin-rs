@@ -217,6 +217,37 @@ pub fn serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake(
     serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
 }
 
+/// Compatibility entry point for callers that still provide the two legacy
+/// peer stores separately. New runtime code should use
+/// [`serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake`] so the
+/// lifecycle authority is shared explicitly.
+#[allow(clippy::too_many_arguments)]
+pub fn serve_with_shutdown(
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    network_active: Arc<AtomicBool>,
+    magic: Magic,
+    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
+    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+    inbound_headers_tx: Sender<crate::InboundHeaders>,
+    inbound_blocks_tx: Sender<crate::InboundBlock>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+) -> Result<(), ListenerError> {
+    serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake(
+        addr,
+        shutdown,
+        network_active,
+        magic,
+        Arc::new(crate::PeerLifecycle::new(peer_registry, peer_outbound)),
+        banned,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        None,
+        None,
+        None,
+    )
+}
+
 /// Accept-loop core shared by every listener entry point.
 ///
 /// Bind and `set_nonblocking` failures are fatal and propagated as
@@ -1405,6 +1436,7 @@ mod writer_setup_cleanup_tests {
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);
+        let lease_probe = lease.clone();
         shared.peer_lifecycle.register(peer_addr, &lease);
 
         // Lease must be registered before the failure.
@@ -1454,8 +1486,8 @@ mod writer_shutdown_tests {
     use parking_lot::RwLock;
 
     use super::{
-        ConnectionShared, InboundSyncSinks, register_connection, run_connected_session,
-        run_message_loop, run_writer_loop, spawn_connection_writer,
+        ConnectionShared, InboundSyncSinks, run_connected_session, run_message_loop,
+        run_writer_loop, spawn_connection_writer,
     };
     use crate::connection::OutboundBudget;
     use crate::peer::{Peer, PeerState};
@@ -1743,12 +1775,13 @@ mod writer_shutdown_tests {
         let peer_registry = Arc::new(RwLock::new(Vec::new()));
         let outbound: OutboundMap = Arc::new(RwLock::new(hashbrown::HashMap::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
-        let shared = ConnectionShared::from_parts(peer_registry, outbound, banned, None, None);
+        let lifecycle = Arc::new(crate::PeerLifecycle::new(peer_registry, outbound));
+        let shared = ConnectionShared::from_lifecycle(lifecycle, banned, None, None);
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);
         let lease_probe = lease.clone();
-        register_connection(&shared.peer_outbound, peer_addr, lease.clone());
+        shared.peer_lifecycle.register(peer_addr, &lease);
 
         let info = crate::PeerInfo {
             addr: peer_addr,

@@ -1,7 +1,9 @@
 //! P2P listener shutdown integration coverage.
 use bitcoin::p2p::Magic;
 use bitcoin_rs_p2p::PeerLifecycle;
-use bitcoin_rs_p2p::listener::serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake;
+use bitcoin_rs_p2p::listener::{
+    serve_with_shutdown, serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake,
+};
 use std::error::Error;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
