@@ -589,6 +589,11 @@ impl ApplyAdmission {
         self.barrier.write()
     }
 
+    /// Temporarily pauses new chain transitions while the returned guard lives.
+    pub(crate) fn pause(&self) -> RwLockWriteGuard<'_, ()> {
+        self.barrier.write()
+    }
+
     /// Closes admission without taking the barrier.
     ///
     /// [`Self::close`] hands back the write guard because shutdown holds it

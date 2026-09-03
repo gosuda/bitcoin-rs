@@ -917,10 +917,16 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(())
     }
 
-    /// §2.5 compact: drop segments fully below the published checkpoint base
-    /// and reset the base cursor. Called by the publication primitive AFTER a
-    /// successful checkpoint install.
-    pub(crate) fn compact(&mut self, new_base: (u64, u64)) -> Result<(), JournalWriterError> {
+    /// §2.5 compact: rebase the empty post-publication journal on the newly
+    /// installed checkpoint and delete every superseded segment.
+    pub(crate) fn compact_to_checkpoint(
+        &mut self,
+        checkpoint_generation: u64,
+        tip_height: u32,
+        tip_hash: [u8; 32],
+        tip_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError> {
         if self.state != WriterState::Frozen {
             return Err(JournalWriterError::NotOpen {
                 state: match self.state {
@@ -930,31 +936,78 @@ impl<S: KvStore> JournalWriter<S> {
                 },
             });
         }
-        if new_base.0 > self.segment_gen
-            || (new_base.0 == self.segment_gen && new_base.1 > self.segment_offset)
+        if self.durable.height != tip_height
+            || self.durable_block_hash != tip_hash
+            || self.durable_chain_tx_count != chain_tx_count
         {
             return Err(JournalWriterError::CursorMismatch(format!(
-                "compaction base {new_base:?} is ahead of the durable frontier"
+                "checkpoint tip {tip_height} does not match frozen journal head {}",
+                self.durable.height
             )));
         }
-        // Delete fully-retained segments strictly below the new base gen.
+        let new_segment_gen = self.segment_gen.checked_add(1).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("segment generation overflow".to_owned())
+        })?;
+        let marker = HeadMarker {
+            base_generation: checkpoint_generation,
+            base_height: tip_height,
+            base_hash: tip_hash,
+            base_chain_tx_count: chain_tx_count,
+            start_gen: new_segment_gen,
+            start_offset: 0,
+            journal_gen: new_segment_gen,
+            offset: 0,
+            height: tip_height,
+            block_hash: tip_hash,
+            prev_hash: tip_prev_hash,
+            chain_tx_count,
+            record_count: 0,
+        };
+        self.write_head_atomic(&marker)?;
+
+        // The new head is now the logical commit point. Update in-memory state
+        // before best-effort physical cleanup so `resume` cannot republish the
+        // superseded base if cleanup reports an error.
+        self.base_generation = checkpoint_generation;
+        self.base_height = tip_height;
+        self.base_hash = tip_hash;
+        self.base_chain_tx_count = chain_tx_count;
+        self.start = (new_segment_gen, 0);
+        self.segment_gen = new_segment_gen;
+        self.segment_offset = 0;
+        self.durable = DurableCursor {
+            generation: new_segment_gen,
+            offset: 0,
+            height: tip_height,
+        };
+        self.durable_block_hash = tip_hash;
+        self.durable_prev_hash = tip_prev_hash;
+        self.durable_chain_tx_count = chain_tx_count;
+        self.chain_tx_count = chain_tx_count;
+        self.record_count = 0;
+        self.next_height = tip_height.checked_add(1).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("checkpoint height overflow".to_owned())
+        })?;
+        self.pending.clear();
+        self.pending_records.clear();
+        self.state = WriterState::Compacted;
+
         let entries: Vec<String> = self
             .dir
             .entries()?
-            .filter_map(|entry| {
-                entry
-                    .ok()
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-            })
-            .filter(|name| {
-                parse_segment_name(name).is_some_and(|generation| generation < new_base.0)
-            })
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| parse_segment_name(name).is_some())
             .collect();
         for name in entries {
-            self.dir.remove_file(&name)?;
+            self.dir.remove_file(name)?;
         }
-        self.start = new_base;
-        self.state = WriterState::Compacted;
+        match self.dir.remove_file(FULL_REVALIDATION_MARKER) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        crate::checkpoint_fs::sync_dir(&self.dir)?;
         Ok(())
     }
 
@@ -1406,7 +1459,9 @@ mod tests {
             .append(&sample_record(2))
             .expect_err("frozen writer rejects appends");
         assert!(matches!(error, JournalWriterError::NotOpen { .. }));
-        writer.compact((0, 0)).expect("compact");
+        writer
+            .compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3)
+            .expect("compact");
         writer.resume().expect("resume");
         assert_eq!(writer.state(), WriterState::Open);
         writer

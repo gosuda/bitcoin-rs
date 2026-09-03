@@ -85,6 +85,7 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<CoinStatsListener>,
     pub(crate) chain_tx_count: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) journal: Option<crate::chainstate_journal::SharedJournalWriter>,
 
     pub(crate) data_dir: PathBuf,
     pub(crate) chain_events: Arc<ChainEventPublisher>,
@@ -95,11 +96,73 @@ impl CheckpointPublisher {
     /// Publishes a durable checkpoint, mirroring
     /// [`crate::state::NodeState::write_clean_checkpoint`].
     ///
-    /// After a successful publication, rewrites the recovery sidecar to match
-    /// the published tip so the checkpoint and sidecar never disagree about
-    /// what is durable.
+    /// Both clean and periodic callers use this exact freeze → publish →
+    /// compact → resume sequence.
     pub(crate) fn publish(&self) -> core::result::Result<CheckpointWrite, CheckpointError> {
-        let _exclusive_apply = self.admission.close();
+        let _exclusive_apply = self.admission.pause();
+        let mut journal = self.journal.as_ref().map(|journal| journal.lock());
+        if let Some(writer) = journal.as_mut() {
+            writer
+                .freeze()
+                .map_err(|error| CheckpointError::Invalid(error.to_string()))?;
+        }
+        let applied_tip = self.applied_tip.load_full();
+        let chain_tx_count = self
+            .chain_tx_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut result = self.publish_frozen(applied_tip.as_deref(), chain_tx_count);
+
+        if let (Ok(CheckpointWrite::Published { generation }), Some(tip), Some(writer)) =
+            (&result, applied_tip.as_ref(), journal.as_mut())
+        {
+            let compact_result = self.tip_prev_hash(tip).and_then(|tip_prev_hash| {
+                writer
+                    .compact_to_checkpoint(
+                        *generation,
+                        tip.height,
+                        tip.hash.to_le_bytes(),
+                        tip_prev_hash.to_le_bytes(),
+                        chain_tx_count,
+                    )
+                    .map_err(|error| CheckpointError::Invalid(error.to_string()))
+            });
+            if let Err(error) = compact_result {
+                result = Err(error);
+            }
+        }
+        if let Some(writer) = journal.as_mut()
+            && let Err(error) = writer.resume()
+        {
+            let resume_error = CheckpointError::Invalid(error.to_string());
+            if result.is_ok() {
+                result = Err(resume_error);
+            } else {
+                tracing::error!(%error, "failed to resume chainstate journal after publication error");
+            }
+        }
+        result
+    }
+
+    fn tip_prev_hash(&self, tip: &TipSnapshot) -> core::result::Result<Hash256, CheckpointError> {
+        let tree = self.block_tree.read();
+        let node = tree.node(tip.tip_id).map_err(|error| {
+            CheckpointError::Invalid(format!("checkpoint tip is absent from block tree: {error}"))
+        })?;
+        let Some(parent_id) = node.parent else {
+            return Ok(Hash256::default());
+        };
+        tree.node(parent_id)
+            .map(|parent| parent.hash)
+            .map_err(|error| {
+                CheckpointError::Invalid(format!("checkpoint tip parent is absent: {error}"))
+            })
+    }
+
+    fn publish_frozen(
+        &self,
+        applied_tip: Option<&TipSnapshot>,
+        chain_tx_count: u64,
+    ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         if let Some(marker) = self.undo_store.load_disconnect_marker()?
             && marker.phase == crate::apply::DisconnectPhase::InFlight
         {
@@ -110,7 +173,6 @@ impl CheckpointPublisher {
         }
         // A checkpoint may name this tip only after body files then index rows sync.
         self.block_body_store.sync()?;
-        let applied_tip = self.applied_tip.load_full();
         let written = checkpoint::write_checkpoint_from_dir(
             &self.checkpoint_data_dir,
             checkpoint::HeaderCheckpointConfig {
@@ -120,14 +182,13 @@ impl CheckpointPublisher {
             &self.block_tree,
             &self.utxo,
             &self.coin_stats,
-            applied_tip.as_deref(),
-            self.chain_tx_count
-                .load(std::sync::atomic::Ordering::Relaxed),
+            applied_tip,
+            chain_tx_count,
         )?;
         // A2: Only after `CheckpointWrite::Published` and root fsync, write
         // the applied-tip witness for the same captured tip.
         if let CheckpointWrite::Published { .. } = written
-            && let Some(tip) = applied_tip.as_ref()
+            && let Some(tip) = applied_tip
         {
             let genesis_hex = self.genesis_hash.to_string_be();
             let witness = recovery_evidence::AppliedTipWitness::new(
@@ -149,10 +210,8 @@ impl CheckpointPublisher {
             .map_err(CheckpointError::from)?;
         // Everything up to this tip is now recoverable, so undo records below
         // it may be pruned.
-        self.durable_tip_height.store(
-            applied_tip.as_ref().map_or(0, |tip| tip.height),
-            Ordering::Release,
-        );
+        self.durable_tip_height
+            .store(applied_tip.map_or(0, |tip| tip.height), Ordering::Release);
         Ok(written)
     }
 }

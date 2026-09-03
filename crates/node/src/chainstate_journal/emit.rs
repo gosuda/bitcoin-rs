@@ -38,6 +38,22 @@ pub(crate) trait JournalEmit: Send + Sync {
         fork_prev_hash: [u8; 32],
         chain_tx_count: u64,
     ) -> Result<(), JournalWriterError>;
+
+    /// Stops appends and publishes every buffered record durably.
+    fn freeze(&mut self) -> Result<(), JournalWriterError>;
+
+    /// Re-bases the frozen writer on a successfully installed checkpoint.
+    fn compact_to_checkpoint(
+        &mut self,
+        checkpoint_generation: u64,
+        tip_height: u32,
+        tip_hash: [u8; 32],
+        tip_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError>;
+
+    /// Reopens appends after publication success or failure.
+    fn resume(&mut self) -> Result<(), JournalWriterError>;
 }
 
 #[allow(clippy::use_self)] // inherent vs trait method disambiguation requires the type path
@@ -58,6 +74,32 @@ impl<S: KvStore> JournalEmit for JournalWriter<S> {
         chain_tx_count: u64,
     ) -> Result<(), JournalWriterError> {
         JournalWriter::rewind_to(self, fork_height, fork_hash, fork_prev_hash, chain_tx_count)
+    }
+
+    fn freeze(&mut self) -> Result<(), JournalWriterError> {
+        JournalWriter::freeze(self)
+    }
+
+    fn compact_to_checkpoint(
+        &mut self,
+        checkpoint_generation: u64,
+        tip_height: u32,
+        tip_hash: [u8; 32],
+        tip_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError> {
+        JournalWriter::compact_to_checkpoint(
+            self,
+            checkpoint_generation,
+            tip_height,
+            tip_hash,
+            tip_prev_hash,
+            chain_tx_count,
+        )
+    }
+
+    fn resume(&mut self) -> Result<(), JournalWriterError> {
+        JournalWriter::resume(self)
     }
 }
 

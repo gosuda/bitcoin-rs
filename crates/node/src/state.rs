@@ -1293,7 +1293,6 @@ pub struct NodeState {
     durable_tip_height: Arc<AtomicU32>,
     config: NodeConfig,
     data_dir: PathBuf,
-    checkpoint_data_dir: cap_std::fs::Dir,
     #[cfg(test)]
     resume_source: ResumeSource,
     storage: NodeStorage,
@@ -1747,7 +1746,6 @@ impl NodeState {
             durable_tip_height,
             config,
             data_dir,
-            checkpoint_data_dir,
             #[cfg(test)]
             resume_source,
             storage,
@@ -1847,6 +1845,7 @@ impl NodeState {
             utxo: Arc::clone(&self.utxo),
             coin_stats: Arc::clone(&self.coin_stats),
             chain_tx_count: Arc::clone(&self.chain_tx_count),
+            journal: self.apply_handles.journal.clone(),
             data_dir: self.data_dir.clone(),
             chain_events: Arc::clone(&self.chain_events),
             durable_tip_height: Arc::clone(&self.durable_tip_height),
@@ -1880,64 +1879,7 @@ impl NodeState {
         &self,
     ) -> core::result::Result<crate::checkpoint::CheckpointWrite, crate::checkpoint::CheckpointError>
     {
-        let _exclusive_apply = self.apply_handles.admission.close();
-        if let Some(marker) = self.apply_handles.undo_store.load_disconnect_marker()?
-            && marker.phase == crate::apply::DisconnectPhase::InFlight
-        {
-            return Err(crate::checkpoint::CheckpointError::DisconnectInFlight {
-                hash: marker.hash,
-                height: marker.height,
-            });
-        }
-        // A checkpoint may name this tip only after body files then index rows sync.
-        self.block_body_store.sync()?;
-        let applied_tip = self.applied_tip.load_full();
-        let written = crate::checkpoint::write_checkpoint_from_dir(
-            &self.checkpoint_data_dir,
-            crate::checkpoint::HeaderCheckpointConfig {
-                network: self.config.network,
-                genesis: self.config.network.genesis_block_hash(),
-            },
-            &self.block_tree,
-            &self.utxo,
-            &self.coin_stats,
-            applied_tip.as_deref(),
-            self.chain_tx_count
-                .load(core::sync::atomic::Ordering::Relaxed),
-        )?;
-        // A2: Only after `CheckpointWrite::Published` and root fsync, write
-        // the applied-tip witness for the same captured tip. A witness failure
-        // is not swallowed: return a typed checkpoint error.
-        if let crate::checkpoint::CheckpointWrite::Published { .. } = written {
-            if let Some(tip) = applied_tip.as_ref() {
-                let genesis_hex = self.config.network.genesis_block_hash().to_string_be();
-                let witness = crate::recovery_evidence::AppliedTipWitness::new(
-                    genesis_hex,
-                    self.chain_events.epoch(),
-                    tip.height,
-                    tip.hash.to_string_be(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_secs()),
-                );
-                crate::recovery_evidence::write_witness(&self.data_dir, &witness)
-                    .map_err(|e| crate::checkpoint::CheckpointError::Invalid(e.to_string()))?;
-            }
-        }
-        // Remove the marker only after this checkpoint publishes the matching
-        // UTXO set and applied tip. TxIndex is outside the authoritative
-        // disconnect transaction and recovers from its own atomic capability watermarks.
-        self.apply_handles
-            .undo_store
-            .disarm_disconnect()
-            .map_err(crate::checkpoint::CheckpointError::from)?;
-        // Everything up to this tip is now recoverable, so undo records below it
-        // may be pruned. Published after the write, never before.
-        self.durable_tip_height.store(
-            applied_tip.as_ref().map_or(0, |tip| tip.height),
-            Ordering::Release,
-        );
-        Ok(written)
+        self.checkpoint_publisher()?.publish()
     }
 
     /// Returns the configured storage backend that was opened.

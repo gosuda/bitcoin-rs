@@ -1,6 +1,7 @@
 //! End-to-end crash-recovery coverage for the chainstate journal.
 
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
@@ -19,18 +20,16 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     let initial = NodeState::open(config.clone(), None)?;
     initial.apply_block(&genesis)?;
     initial.publish_checkpoint()?;
-    drop(initial);
 
-    // Reopening once rebases the fresh writer onto the published checkpoint.
-    let base = NodeState::open(config.clone(), None)?;
+    // Publication must rebase the live writer in the same process.
     let child = mined_regtest_child(genesis.block_hash())?;
-    let expected_tip = base.apply_block(&child)?;
-    let expected_utxo = base
+    let expected_tip = initial.apply_block(&child)?;
+    let expected_utxo = initial
         .utxo()
         .with_stable_view(|view| view.hash_serialized_3())?;
-    let expected_stats = base.coin_stats().snapshot();
-    let expected_tx_count = base.chain_tx_count_handle().load(Ordering::Relaxed);
-    drop(base);
+    let expected_stats = initial.coin_stats().snapshot();
+    let expected_tx_count = initial.chain_tx_count_handle().load(Ordering::Relaxed);
+    drop(initial);
 
     // No checkpoint was published for `child`: only the journal can recover it.
     let resumed = NodeState::open(config, None)?;
@@ -146,11 +145,63 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     );
     drop(resumed);
 
-    let resumed_again = NodeState::open(config, None)?;
+    let resumed_again = NodeState::open(config.clone(), None)?;
     assert!(
         resumed_again.applied_tip().load_full().is_none(),
         "full validation must remain sticky until a replacement checkpoint"
     );
+    resumed_again.apply_block(&genesis)?;
+    let replacement_tip = resumed_again.apply_block(&block1)?;
+    resumed_again.publish_checkpoint()?;
+    drop(resumed_again);
+
+    let recovered = NodeState::open(config, None)?;
+    let recovered_tip = recovered
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("replacement checkpoint was ignored"))?;
+    assert_eq!(recovered_tip.as_ref(), &replacement_tip);
+    Ok(())
+}
+
+#[test]
+fn periodic_publication_compacts_and_journals_new_suffix() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("periodic-node");
+    config.p2p_listen.clear();
+    config.chainstate_journal.blocks = 1;
+
+    let state = NodeState::open(config.clone(), None)?;
+    let worker = state.start_periodic_checkpoint(1, Duration::from_secs(60))?;
+    let genesis = Network::Regtest.genesis_block();
+    state.apply_block(&genesis)?;
+    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let tip1 = state.apply_block(&block1)?;
+
+    let current = config.data_dir.join("chainstate-checkpoints/CURRENT");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !current.is_file() {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::other("periodic checkpoint was not published").into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
+    let expected_tip = state.apply_block(&block2)?;
+    state.shutdown().store(true, Ordering::Release);
+    worker
+        .join()
+        .map_err(|_| std::io::Error::other("periodic checkpoint worker panicked"))?;
+    drop(state);
+
+    let resumed = NodeState::open(config, None)?;
+    let resumed_tip = resumed
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("periodic journal tip missing"))?;
+    assert_eq!(resumed_tip.as_ref(), &expected_tip);
     Ok(())
 }
 
