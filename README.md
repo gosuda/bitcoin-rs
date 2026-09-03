@@ -10,6 +10,77 @@ validator (see #166).
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
 
+## Why bitcoin-rs
+
+[Bitcoin Core](https://github.com/bitcoin/bitcoin) is the most successful
+implementation of Bitcoin. Its conservatism, stability, and compatibility
+discipline are major reasons for that success. Over time, however, those
+safeguards also shape which changes are practical: existing boundaries
+accumulate dependencies, and implementation choices harden into assumptions
+that Bitcoin consensus does not require.
+
+bitcoin-rs asks a simple question:
+
+> **If a Bitcoin full node were designed again today, what would we keep, and
+> what would we change?**
+
+### Why now?
+
+AI is changing how software is built. Work that once required large teams and
+long development cycles can now be attempted by much smaller teams with far
+faster iteration.
+
+Bitcoin is unusually well suited to this development model. Implementations can
+be checked against Bitcoin Core, `libbitcoinkernel`, historical chain data,
+consensus test vectors, fuzzing, and differential tests. Strong verification
+allows AI-assisted development to move quickly without treating generated code
+as truth.
+
+**Bitcoin is well suited to AI-native development; Bitcoin Core's development
+culture is not.** Its review process prioritizes minimizing change risk,
+rewarding incrementalism, entrenching existing boundaries, and making radical
+architectural experimentation prohibitively expensive.
+
+**That is why we built `bitcoin-rs`: to preserve Bitcoin's consensus while
+making bold architectural experimentation practical—build alternatives,
+verify them against reproducible evidence, and keep iterating until better
+designs emerge.**
+
+### What can be improved
+
+- **Performance is a first-class requirement.** `bitcoin-rs` is not aiming for
+  parity with Bitcoin Core simply by changing languages. Synchronization,
+  storage, memory ownership, concurrency, caching, I/O, and indexing can all be
+  reconsidered. Improvements must be demonstrated with matched whole-node
+  benchmarks against Core.
+- **The UTXO set is the node's authoritative coin state.** Much of the Bitcoin
+  application ecosystem grew by rebuilding or duplicating wallet-, Electrum-,
+  and explorer-specific views around the same chain data. `bitcoin-rs`
+  simplifies that boundary: the node owns the canonical UTXO set used for
+  validation and an integrated script index exposed through Esplora-compatible
+  APIs. This eliminates the need for a separate Electrum server with its own
+  duplicate chain state and ingestion pipeline.
+  Wallet-specific keys, policies, and metadata remain outside the node.
+  Consumers build on node state; they do not redefine where Bitcoin's coin
+  state lives.
+- **Modularity keeps the core isolated and components composable.** Clear
+  dependency and failure boundaries keep extensions from destabilizing
+  validation or chainstate while allowing components to be reused independently.
+  Extensions own their state and lifecycle and may build on core capabilities,
+  but they do not become dependencies of the core.
+- **Rust-native integration is a primary path.** Applications and extensions in
+  the Rust Bitcoin ecosystem can attach to the node as typed, in-process
+  components instead of routing through serialized RPC or separate processes.
+  This improves runtime efficiency and simplifies integration and deployment,
+  making the full node a native, composable part of the ecosystem.
+
+Bitcoin is not defined by the continued preservation of one codebase. **The code
+can change; consensus is what must remain.** `bitcoin-rs` aims to challenge
+Bitcoin Core and build a better Bitcoin implementation. That challenge
+strengthens the Bitcoin ecosystem: a separately designed codebase cross-checks
+consensus interpretation, increases implementation diversity, and reduces the
+risk of correlated implementation failures.
+
 ## Features
 
 - Consensus validation: `libbitcoinkernel` (Bitcoin Core's C++ engine) verifies
