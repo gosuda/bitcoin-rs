@@ -1485,7 +1485,6 @@ impl NodeState {
                     txindex = config.data_dir.join("txindex").display(),
                 );
             }
-
         }
         let block_files =
             Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
