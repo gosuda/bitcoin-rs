@@ -1430,6 +1430,7 @@ mod tests {
     #[test]
     fn failpoints_fire_documented_errors() {
         for boundary in [
+            JournalWriterFailpoint::SegmentAppend,
             JournalWriterFailpoint::StorageFlush,
             JournalWriterFailpoint::SegmentSync,
             JournalWriterFailpoint::HeadTempWrite,
