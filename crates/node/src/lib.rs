@@ -20,6 +20,7 @@ pub mod bitcoin_conf_compat;
 pub mod block_source;
 /// RPC status for concrete node-owned capabilities.
 mod capabilities;
+mod chainstate_journal;
 mod checkpoint;
 mod checkpoint_fs;
 /// Periodic chainstate checkpoint publication during sync.
