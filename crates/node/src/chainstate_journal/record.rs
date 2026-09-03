@@ -398,7 +398,7 @@ mod tests {
             prev_hash: [8; 32],
             block_tx_count: 70_000,
             coin_stats_height_delta: -1,
-            raw_header: header_bytes(42),
+            raw_header: header_bytes([9; 32]),
             mutations: vec![
                 Mutation::Create {
                     coin: coin(1, 42, true),

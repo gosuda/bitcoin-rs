@@ -21,8 +21,13 @@
 
 mod record;
 
+mod writer;
+
 #[allow(unused_imports)]
 // module surface; consumers arrive in Task 2 (writer), 4 (emit), 5 (replay)
 pub(crate) use record::{
     BlockMeta, Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record,
 };
+#[allow(unused_imports)]
+// writer surface; apply-path emission (Task 4) and boot replay (Task 5) consume these
+pub(crate) use writer::{HeadMarker, JournalWriter, JournalWriterError, JournalWriterFailpoint};
