@@ -309,7 +309,10 @@ fn serve_scrape(stream: &mut TcpStream, handle: &PrometheusHandle) {
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
 }
-
+#[cfg(test)]
+pub(crate) fn test_recorder() -> metrics::NoopRecorder {
+    metrics::NoopRecorder
+}
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};

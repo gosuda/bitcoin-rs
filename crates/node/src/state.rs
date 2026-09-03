@@ -1195,6 +1195,12 @@ impl NodeState {
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
         let checkpoint_data_dir = crate::checkpoint_fs::open_data_dir(&config.data_dir)
             .with_context(|| format!("open data_dir {}", config.data_dir.display()))?;
+        crate::checkpoint_fs::ensure_current_schema(&checkpoint_data_dir).with_context(|| {
+            format!(
+                "validate CURRENT_SCHEMA for datadir {}",
+                config.data_dir.display()
+            )
+        })?;
         // Allocate the process epoch before anything else can consume one:
         // durable, strictly greater than every earlier run of this data dir.
         let epoch = allocate_process_epoch(&checkpoint_data_dir)?;
@@ -2764,23 +2770,20 @@ mod tests {
     #[test]
     fn new_datadir_initializes_current_schema_before_storage() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let mut config = crate::Config::default_for_network(crate::Network::Regtest);
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::write(config.data_dir.join(".CURRENT_SCHEMA.tmp"), b"partial")?;
 
-        let _state = NodeState::open(config.clone())?;
+        let data_dir = config.data_dir.clone();
+        let _state = NodeState::open(config, None)?;
         assert_eq!(
-            std::fs::read(
-                config
-                    .data_dir
-                    .join(crate::checkpoint_fs::CURRENT_SCHEMA_FILE)
-            )?,
+            std::fs::read(data_dir.join(crate::checkpoint_fs::CURRENT_SCHEMA_FILE))?,
             crate::checkpoint_fs::current_schema_bytes()
         );
-        assert!(!config.data_dir.join(".CURRENT_SCHEMA.tmp").exists());
-        assert!(config.data_dir.join("chainstate").exists());
+        assert!(!data_dir.join(".CURRENT_SCHEMA.tmp").exists());
+        assert!(data_dir.join("chainstate").exists());
         Ok(())
     }
 
@@ -2793,14 +2796,41 @@ mod tests {
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::write(config.data_dir.join("legacy-state"), b"old")?;
 
-        let datadir = config.data_dir.display().to_string();
+        let data_dir = config.data_dir.clone();
+        let _state = NodeState::open(config, None)?;
+        assert_eq!(
+            std::fs::read(data_dir.join(crate::checkpoint_fs::CURRENT_SCHEMA_FILE))?,
+            b"0\n"
+        );
+        assert!(
+            data_dir.join("chainstate").exists(),
+            "baseline adoption must initialize storage"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mismatched_datadir_schema_is_refused_before_storage_opens() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("old-node");
+        config.p2p_listen.clear();
+        std::fs::create_dir_all(&config.data_dir)?;
+        std::fs::write(
+            config
+                .data_dir
+                .join(crate::checkpoint_fs::CURRENT_SCHEMA_FILE),
+            b"1\n",
+        )?;
+
+        let data_dir = config.data_dir.clone();
         let Err(error) = NodeState::open(config, None) else {
-            anyhow::bail!("legacy inline block body unexpectedly opened");
+            anyhow::bail!("mismatched datadir schema unexpectedly opened");
         };
         let message = format!("{error:#}");
         assert!(message.contains("CURRENT_SCHEMA is not the current datadir schema epoch"));
         assert!(message.contains("full resync"));
-        assert!(!config.data_dir.join("chainstate").exists());
+        assert!(!data_dir.join("chainstate").exists());
         Ok(())
     }
 
