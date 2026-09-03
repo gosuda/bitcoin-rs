@@ -1169,18 +1169,22 @@ pub(crate) fn read_head_bytes(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use bitcoin_rs_storage::{
         ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
     };
     use cap_std::ambient_authority;
+    use parking_lot::Mutex;
 
     use super::*;
     use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
 
     use crate::chainstate_journal::record::{Coin, Mutation};
+
+    type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
     /// Counts `flush()` calls and can fail them, proving the §2.3 order:
     /// the head marker must never advance without a counted flush.
@@ -1202,7 +1206,7 @@ mod tests {
         }
 
         fn set_fail_flush(&self, fail: bool) {
-            *self.fail_flush.lock().expect("uncontended") = fail;
+            *self.fail_flush.lock() = fail;
         }
     }
 
@@ -1239,10 +1243,8 @@ mod tests {
 
         fn flush(&self) -> Result<(), StorageError> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
-            if *self.fail_flush.lock().expect("uncontended") {
-                return Err(StorageError::InvalidOperation(
-                    "injected flush failure".into(),
-                ));
+            if *self.fail_flush.lock() {
+                return Err(StorageError::InvalidOperation("injected flush failure"));
             }
             Ok(())
         }
@@ -1260,12 +1262,15 @@ mod tests {
         fn delete_range(&mut self, _cf: ColumnFamily, _start: &[u8], _end: &[u8]) {}
     }
 
-    fn temp_dir(tag: &str) -> cap_std::fs::Dir {
+    fn temp_dir(tag: &str) -> TestResult<cap_std::fs::Dir> {
         let path =
             std::env::temp_dir().join(format!("journal-writer-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("temp dir creation");
-        cap_std::fs::Dir::open_ambient_dir(&path, ambient_authority()).expect("ambient open")
+        std::fs::create_dir_all(&path)?;
+        Ok(cap_std::fs::Dir::open_ambient_dir(
+            &path,
+            ambient_authority(),
+        )?)
     }
 
     fn sample_record(height: u32) -> JournalRecord {
@@ -1283,7 +1288,7 @@ mod tests {
                             Txid(Hash256::from_le_bytes(
                                 &[u8::try_from(height).unwrap_or(9); 32],
                             )),
-                            u32::from(height),
+                            height,
                         ),
                         txout: TxOut {
                             value: u64::from(height),
@@ -1299,7 +1304,7 @@ mod tests {
                             Txid(Hash256::from_le_bytes(
                                 &[u8::try_from(height.wrapping_sub(1)).unwrap_or(8); 32],
                             )),
-                            u32::from(height.wrapping_sub(1)),
+                            height.wrapping_sub(1),
                         ),
                         txout: TxOut {
                             value: u64::from(height),
@@ -1313,89 +1318,98 @@ mod tests {
         }
     }
 
-    fn open_fresh(tag: &str, store: Arc<CountingStore>) -> JournalWriter<CountingStore> {
-        let dir = temp_dir(tag);
-        JournalWriter::initialize(dir, store, 0, (0, 0), 0, [1; 32], [0; 32], 0)
-            .expect("initialize journal")
+    fn open_fresh(
+        tag: &str,
+        store: Arc<CountingStore>,
+    ) -> TestResult<JournalWriter<CountingStore>> {
+        let dir = temp_dir(tag)?;
+        Ok(JournalWriter::initialize(
+            dir,
+            store,
+            0,
+            (0, 0),
+            0,
+            [1; 32],
+            [0; 32],
+            0,
+        )?)
     }
 
     #[test]
-    fn head_never_advances_without_counted_storage_flush() {
+    fn head_never_advances_without_counted_storage_flush() -> TestResult {
         let store = Arc::new(CountingStore::new());
-        let mut writer = open_fresh("flush-order", Arc::clone(&store));
+        let mut writer = open_fresh("flush-order", Arc::clone(&store))?;
         let flushes_at_open = store.flush_count();
 
         // Fail the storage dependency: append still succeeds (buffered), but
         // the automatic boundary must not publish a head.
         store.set_fail_flush(true);
-        writer
-            .append(&sample_record(1))
-            .expect("buffered append is infallible");
+        writer.append(&sample_record(1))?;
         store.set_fail_flush(false);
 
         // Force the boundary now: flush counted, head publishable.
-        writer.flush_to(1).expect("boundary after flush recovery");
+        writer.flush_to(1)?;
         assert_eq!(store.flush_count(), flushes_at_open + 1);
         assert_eq!(writer.head().height, 1);
+        Ok(())
     }
 
     #[test]
-    fn torn_tail_beyond_head_is_ignored_on_reopen() {
+    fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
         let store = Arc::new(CountingStore::new());
         let dir;
         {
-            let mut writer = open_fresh("torn-tail", Arc::clone(&store));
-            writer.append(&sample_record(1)).expect("append 1");
-            writer.flush_to(1).expect("durable head at 1");
-            dir = writer.dir.try_clone().expect("dir clone");
+            let mut writer = open_fresh("torn-tail", Arc::clone(&store))?;
+            writer.append(&sample_record(1))?;
+            writer.flush_to(1)?;
+            dir = writer.dir.try_clone()?;
             // Simulate a torn append after the head: raw bytes past the cursor.
             let mut options = cap_std::fs::OpenOptions::new();
             options.append(true).create(true);
-            let mut file = dir
-                .open_with(&segment_name(writer.segment_gen), &options)
-                .expect("open segment");
-            file.write_all(&[0xde, 0xad, 0xbe, 0xef])
-                .expect("torn bytes");
-            file.sync_all().expect("torn sync");
+            let mut file = dir.open_with(segment_name(writer.segment_gen), &options)?;
+            file.write_all(&[0xde, 0xad, 0xbe, 0xef])?;
+            file.sync_all()?;
         }
         // Reopen: the torn tail must be truncated away without error.
-        let writer = JournalWriter::open(dir, store).expect("reopen after torn tail");
+        let writer = JournalWriter::open(dir, store)?;
         assert_eq!(writer.head().height, 1);
+        Ok(())
     }
 
     #[test]
-    fn partial_append_truncates_and_retries_idempotently() {
+    fn partial_append_truncates_and_retries_idempotently() -> TestResult {
         let store = Arc::new(CountingStore::new());
         let dir;
         let record = sample_record(1);
         {
-            let mut writer = open_fresh("idempotent", Arc::clone(&store));
+            let mut writer = open_fresh("idempotent", Arc::clone(&store))?;
             // Buffer record 1 but crash before any boundary (drop = crash).
-            writer.append(&record).expect("append");
-            dir = writer.dir.try_clone().expect("dir clone");
+            writer.append(&record)?;
+            dir = writer.dir.try_clone()?;
         }
         // After the crash, record 1 may have reached the page cache but was
         // never covered by a durable head. Reopening truncates to the head
         // cursor; the caller replays record 1 into the same place.
-        let mut writer = JournalWriter::open(dir, Arc::clone(&store)).expect("reopen");
-        writer.append(&record).expect("replay append");
-        writer.flush_to(1).expect("durable");
+        let mut writer = JournalWriter::open(dir, Arc::clone(&store))?;
+        writer.append(&record)?;
+        writer.flush_to(1)?;
         assert_eq!(writer.head().height, 1);
         assert_eq!(writer.head().record_count, 1);
+        Ok(())
     }
 
     #[test]
-    fn rotation_keeps_cursor_invariants() {
+    fn rotation_keeps_cursor_invariants() -> TestResult {
         let store = Arc::new(CountingStore::new());
-        let mut writer = open_fresh("rotation", Arc::clone(&store));
+        let mut writer = open_fresh("rotation", Arc::clone(&store))?;
         // Rotate exactly once, before the second append.
         let first = sample_record(1);
-        writer.rotate_bytes = u64::try_from(encode_record(&first).len()).expect("record length");
-        writer.append(&first).expect("append 1");
-        writer.append(&sample_record(2)).expect("append 2");
+        writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+        writer.append(&first)?;
+        writer.append(&sample_record(2))?;
         assert_eq!(writer.segment_gen, 1, "rotation bumped the generation");
         // head must stay valid across the rotation.
-        writer.flush_to(2).expect("durable across rotation");
+        writer.flush_to(2)?;
         assert_eq!(writer.head().height, 2);
         assert_eq!(writer.head().journal_gen, 1);
         // Zero-padded naming: lexicographic == numeric.
@@ -1403,10 +1417,11 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "zero-padded segments sort numerically");
+        Ok(())
     }
 
     #[test]
-    fn failpoints_fire_documented_errors() {
+    fn failpoints_fire_documented_errors() -> TestResult {
         for boundary in [
             JournalWriterFailpoint::SegmentAppend,
             JournalWriterFailpoint::StorageFlush,
@@ -1417,7 +1432,7 @@ mod tests {
             JournalWriterFailpoint::HeadDirSync,
         ] {
             let store = Arc::new(CountingStore::new());
-            let mut writer = open_fresh("failpoints", Arc::clone(&store));
+            let mut writer = open_fresh("failpoints", Arc::clone(&store))?;
             writer.inject_failpoint(boundary);
             // Segment append fails immediately; durability failures fire only
             // when the explicit batch boundary is advanced.
@@ -1425,33 +1440,31 @@ mod tests {
             let result = if boundary == JournalWriterFailpoint::SegmentAppend {
                 append_result
             } else {
-                append_result.expect("append remains buffered before boundary");
+                append_result?;
                 writer.flush_to(1)
             };
             assert!(result.is_err(), "{boundary:?} did not fire");
             // ...and head.json must still reflect height 0 (no advancement).
             assert_eq!(writer.head().height, 0, "{boundary:?} advanced the head");
         }
+        Ok(())
     }
 
     #[test]
-    fn freeze_rejects_appends_and_compaction_flow_completes() {
+    fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
         let store = Arc::new(CountingStore::new());
-        let mut writer = open_fresh("freeze", Arc::clone(&store));
-        writer.append(&sample_record(1)).expect("append 1");
-        writer.freeze().expect("freeze");
+        let mut writer = open_fresh("freeze", Arc::clone(&store))?;
+        writer.append(&sample_record(1))?;
+        writer.freeze()?;
         assert_eq!(writer.state(), WriterState::Frozen);
-        let error = writer
-            .append(&sample_record(2))
-            .expect_err("frozen writer rejects appends");
+        let Err(error) = writer.append(&sample_record(2)) else {
+            return Err("frozen writer accepted an append".into());
+        };
         assert!(matches!(error, JournalWriterError::NotOpen { .. }));
-        writer
-            .compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3)
-            .expect("compact");
-        writer.resume().expect("resume");
+        writer.compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3)?;
+        writer.resume()?;
         assert_eq!(writer.state(), WriterState::Open);
-        writer
-            .append(&sample_record(2))
-            .expect("append 2 after resume");
+        writer.append(&sample_record(2))?;
+        Ok(())
     }
 }

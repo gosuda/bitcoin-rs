@@ -91,4 +91,4 @@ cargo test -p bitcoin-rs-node --test chainstate_journal_bench \
   replay_10k_records_with_bounded_time_and_memory -- --ignored --exact --nocapture
 ```
 
-A single synthetic regtest run against the rebased Task 10 candidate replayed 10,000 one-transaction records in **2.804 seconds**, with a measured peak-RSS delta of **11,344 KiB** (`VmHWM`, isolated replay process). The gate limits replay to 60 seconds and 256 MiB RSS delta. This is a bounded regression datapoint, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.
+A single synthetic regtest run against the rebased Task 10 candidate replayed 10,000 one-transaction records in **2.929 seconds**, with a measured peak-RSS delta of **11,280 KiB** (`VmHWM`, isolated replay process). The gate limits replay to 60 seconds and 256 MiB RSS delta. This is a bounded regression datapoint, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.

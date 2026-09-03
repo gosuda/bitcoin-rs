@@ -147,7 +147,8 @@ mod tests {
     }
 
     #[test]
-    fn classifies_bip30_restore_as_overwrite_before_spends() {
+    fn classifies_bip30_restore_as_overwrite_before_spends() -> Result<(), super::JournalDeltaError>
+    {
         let old = coin(1, 10, 50);
         let mut new = old.clone();
         new.height = 100;
@@ -162,8 +163,7 @@ mod tests {
         ));
         changes.remove(spent.outpoint);
 
-        let mutations = mutations_for_block(&changes, vec![old.clone(), spent.clone()])
-            .expect("valid overwrite/spend mapping");
+        let mutations = mutations_for_block(&changes, vec![old.clone(), spent.clone()])?;
 
         assert_eq!(
             mutations,
@@ -175,5 +175,6 @@ mod tests {
                 Mutation::Spend { coin: spent },
             ]
         );
+        Ok(())
     }
 }

@@ -618,6 +618,9 @@ mod tests {
     use super::{JournalRecord, Mutation, replay_records};
     use crate::chainstate_journal::Coin;
 
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    type BaseState = (BlockTree, UtxoSet, CoinStats, TipSnapshot, Coin);
+
     fn header(prev_blockhash: BlockHash, marker: u8, time: u32) -> Header {
         let mut merkle = [0_u8; 32];
         merkle[0] = marker;
@@ -633,7 +636,10 @@ mod tests {
 
     fn raw_header(header: &Header) -> [u8; 80] {
         let encoded = consensus_bytes(header);
-        encoded.try_into().expect("header is exactly 80 bytes")
+        assert_eq!(encoded.len(), 80, "consensus header length changed");
+        let mut raw = [0_u8; 80];
+        raw.copy_from_slice(&encoded);
+        raw
     }
 
     fn coin(marker: u8, height: u32, value: u64) -> Coin {
@@ -648,8 +654,7 @@ mod tests {
         }
     }
 
-    fn base_state()
-    -> Result<(BlockTree, UtxoSet, CoinStats, TipSnapshot, Coin), Box<dyn std::error::Error>> {
+    fn base_state() -> TestResult<BaseState> {
         let mut tree = BlockTree::new();
         let base_header = header(BlockHash::default(), 1, 1);
         let base_id = tree.insert_node(None, base_header, NodeStatus::HeaderValid)?;
@@ -679,8 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_extends_checkpoint_state_and_returns_valid_tip()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn replay_extends_checkpoint_state_and_returns_valid_tip() -> TestResult {
         let (tree, utxo, coin_stats, base_tip, base_coin) = base_state()?;
         let next_header = header(BlockHash(base_tip.hash), 2, 2);
         let next_hash = next_header.compute_hash();

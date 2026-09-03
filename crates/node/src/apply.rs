@@ -1260,12 +1260,16 @@ pub(crate) fn disconnect_block_admitted(
     );
     rewind_chain_tx_count(handles, tx_count_delta);
     let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
-        match journal.lock().rewind_to(
-            parent_tip.height,
-            parent_tip.hash.to_le_bytes(),
-            parent_prev_hash.to_le_bytes(),
-            parent_chain_tx_count,
-        ) {
+        let rewind_result = {
+            let mut journal = journal.lock();
+            journal.rewind_to(
+                parent_tip.height,
+                parent_tip.hash.to_le_bytes(),
+                parent_prev_hash.to_le_bytes(),
+                parent_chain_tx_count,
+            )
+        };
+        match rewind_result {
             Ok(()) => true,
             Err(error) => {
                 metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);

@@ -1019,6 +1019,22 @@ fn prepare_initial_chainstate(
         return restored_initial(restored, journal_config, false, ResumeSource::Checkpoint);
     }
 
+    replay_checkpoint_journal(
+        restored,
+        checkpoint_data_dir,
+        checkpoint_config,
+        config,
+        journal_config,
+    )
+}
+
+fn replay_checkpoint_journal(
+    restored: crate::checkpoint::RestoredChainstate,
+    checkpoint_data_dir: &cap_std::fs::Dir,
+    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    config: &NodeConfig,
+    journal_config: crate::config::ChainstateJournalConfig,
+) -> Result<InitialChainstate> {
     let base_generation = restored.generation;
     let base_height = restored.applied_tip.height;
     let journal_dir = open_journal_dir(&config.data_dir)?;

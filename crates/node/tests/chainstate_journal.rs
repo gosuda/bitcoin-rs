@@ -8,6 +8,12 @@ use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 use sha2::{Digest, Sha256};
 
+fn stable_utxo_hash(
+    view: &bitcoin_rs_utxo::UtxoSetView<'_>,
+) -> Result<Hash256, bitcoin_rs_utxo::UtxoError> {
+    view.hash_serialized_3()
+}
+
 #[test]
 fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -24,9 +30,7 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     // Publication must rebase the live writer in the same process.
     let child = mined_regtest_child(genesis.block_hash())?;
     let expected_tip = initial.apply_block(&child)?;
-    let expected_utxo = initial
-        .utxo()
-        .with_stable_view(|view| view.hash_serialized_3())?;
+    let expected_utxo = initial.utxo().with_stable_view(stable_utxo_hash)?;
     let expected_stats = initial.coin_stats().snapshot();
     let expected_tx_count = initial.chain_tx_count_handle().load(Ordering::Relaxed);
     drop(initial);
@@ -39,9 +43,7 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
         .ok_or_else(|| std::io::Error::other("journal replay did not publish a tip"))?;
     assert_eq!(resumed_tip.as_ref(), &expected_tip);
     assert_eq!(
-        resumed
-            .utxo()
-            .with_stable_view(|view| view.hash_serialized_3())?,
+        resumed.utxo().with_stable_view(stable_utxo_hash)?,
         expected_utxo
     );
     assert_eq!(
@@ -75,9 +77,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
     state.apply_block(&block2)?;
     bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block2)?;
-    let expected_utxo = state
-        .utxo()
-        .with_stable_view(|view| view.hash_serialized_3())?;
+    let expected_utxo = state.utxo().with_stable_view(stable_utxo_hash)?;
     let expected_stats = state.coin_stats().snapshot();
     drop(state);
 
@@ -88,9 +88,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
         .ok_or_else(|| std::io::Error::other("reorg replay did not publish a tip"))?;
     assert_eq!(resumed_tip.as_ref(), &tip1);
     assert_eq!(
-        resumed
-            .utxo()
-            .with_stable_view(|view| view.hash_serialized_3())?,
+        resumed.utxo().with_stable_view(stable_utxo_hash)?,
         expected_utxo
     );
     assert_semantic_coin_stats_eq(&resumed.coin_stats().snapshot(), &expected_stats);
@@ -173,7 +171,7 @@ fn periodic_publication_compacts_and_journals_new_suffix() -> Result<()> {
     config.chainstate_journal.blocks = 1;
 
     let state = NodeState::open(config.clone(), None)?;
-    let worker = state.start_periodic_checkpoint(1, Duration::from_secs(60))?;
+    let worker = state.start_periodic_checkpoint(1, Duration::from_mins(1))?;
     let genesis = Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
