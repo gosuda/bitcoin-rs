@@ -17,6 +17,10 @@ through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPubli
 / `NoOpZmqPublisher` implementations and the `TxIndexRuntime` worker; `signal` and
 `shutdown` bridge process signals into graceful shutdown.
 
+Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
+See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability
+ordering, fallback and reorg behavior, configuration, metrics, and verification.
+
 The node crate registers only `benches/sync_pipeline.rs` as a Criterion benchmark.
 Large corpus/replay/evidence harnesses are intentionally not shipped by this
 runtime crate.

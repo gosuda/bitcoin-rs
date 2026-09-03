@@ -979,21 +979,50 @@ fn prepare_initial_chainstate(
         .join(crate::chainstate_journal::FULL_REVALIDATION_MARKER)
         .is_file();
     if journal_config.enabled && force_full_revalidation {
+        metrics::counter!(
+            "node.chainstate_journal.fallback_total",
+            "reason" => "full_revalidation_marker"
+        )
+        .increment(1);
         tracing::warn!(
-            "chainstate journal fork crossed below checkpoint base; starting full validation"
+            restore_source = "cold",
+            reason = "fork_below_checkpoint_base",
+            "chainstate restore requires full validation"
         );
         return cold_initial_chainstate(config, journal_config, false);
     }
     let crate::checkpoint::CheckpointLoad::Complete(restored) = checkpoint_load else {
+        if journal_config.enabled {
+            metrics::counter!(
+                "node.chainstate_journal.fallback_total",
+                "reason" => "no_checkpoint"
+            )
+            .increment(1);
+        }
+        tracing::info!(
+            restore_source = "cold",
+            reason = "no_complete_checkpoint",
+            "chainstate restore selected"
+        );
         return cold_initial_chainstate(config, journal_config, true);
     };
     let restored = *restored;
     if !journal_config.enabled {
+        tracing::info!(
+            restore_source = "checkpoint",
+            height = restored.applied_tip.height,
+            hash = %restored.applied_tip.hash,
+            chain_tx_count = restored.chain_tx_count,
+            reason = "journal_disabled",
+            "chainstate restore selected"
+        );
         return restored_initial(restored, journal_config, false, ResumeSource::Checkpoint);
     }
 
     let base_generation = restored.generation;
+    let base_height = restored.applied_tip.height;
     let journal_dir = open_journal_dir(&config.data_dir)?;
+    let replay_started = std::time::Instant::now();
     let replay = crate::chainstate_journal::replay_from_journal(
         &journal_dir,
         base_generation,
@@ -1003,13 +1032,21 @@ fn prepare_initial_chainstate(
         restored.applied_tip,
         restored.chain_tx_count,
     );
+    let replay_seconds = replay_started.elapsed().as_secs_f64();
+    metrics::histogram!("node.chainstate_journal.replay_seconds").record(replay_seconds);
     drop(journal_dir);
     match replay {
         crate::chainstate_journal::ReplayOutcome::Replayed(replayed) => {
             tracing::info!(
+                restore_source = "journal",
+                checkpoint_generation = base_generation,
+                checkpoint_height = base_height,
                 height = replayed.applied_tip.height,
                 hash = %replayed.applied_tip.hash,
-                "restored chainstate from durable journal head"
+                replayed_records = replayed.applied_tip.height.saturating_sub(base_height),
+                chain_tx_count = replayed.chain_tx_count,
+                replay_seconds,
+                "chainstate restore selected"
             );
             let bootstrap = JournalBootstrap {
                 open_existing: true,
@@ -1031,7 +1068,24 @@ fn prepare_initial_chainstate(
             })
         }
         crate::chainstate_journal::ReplayOutcome::Fallback(error) => {
-            tracing::info!(%error, "chainstate journal unavailable; using checkpoint recovery");
+            let reason = error.reason();
+            metrics::counter!(
+                "node.chainstate_journal.fallback_total",
+                "reason" => reason
+            )
+            .increment(1);
+            if error.is_checksum_failure() {
+                metrics::counter!("node.chainstate_journal.checksum_failures_total").increment(1);
+            }
+            tracing::warn!(
+                restore_source = "checkpoint",
+                checkpoint_generation = base_generation,
+                checkpoint_height = base_height,
+                reason,
+                %error,
+                replay_seconds,
+                "chainstate journal rejected; checkpoint recovery selected"
+            );
             drop(reset_journal_dir(&config.data_dir)?);
             let reloaded = crate::checkpoint::load_checkpoint_from_dir(
                 checkpoint_data_dir,

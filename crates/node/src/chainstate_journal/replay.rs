@@ -68,6 +68,28 @@ pub(crate) enum JournalReplayError {
     HeaderRebuildRejected(String),
 }
 
+impl JournalReplayError {
+    pub(crate) const fn reason(&self) -> &'static str {
+        match self {
+            Self::NoHead => "no_head",
+            Self::HeadUnreadable(_) => "head_unreadable",
+            Self::BaseMismatch => "base_mismatch",
+            Self::CommittedRangeInvalid(_) => "committed_range_invalid",
+            Self::HeaderRebuildRejected(_) => "header_rebuild_rejected",
+        }
+    }
+
+    pub(crate) fn is_checksum_failure(&self) -> bool {
+        match self {
+            Self::HeadUnreadable(_) => true,
+            Self::CommittedRangeInvalid(message) => {
+                message.contains("crc") || message.contains("checksum")
+            }
+            Self::NoHead | Self::BaseMismatch | Self::HeaderRebuildRejected(_) => false,
+        }
+    }
+}
+
 /// Reads and validates the committed range `(start..=head)` from the journal
 /// directory: every record decodes, crc32c passes, and the contiguity
 /// predicate (`record[i].height == record[i-1].height + 1` AND

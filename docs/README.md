@@ -9,6 +9,8 @@ This page maps it to what you might want.
   node.
 - [rest-interface.md](rest-interface.md) documents the optional Core-compatible
   REST gateway and enforcer integration.
+- [chainstate-recovery.md](chainstate-recovery.md) documents checkpoint/journal
+  crash recovery, fallback behavior, metrics, and operator actions.
 - [../CONCEPTS.md](../CONCEPTS.md) is the project glossary. Read a term here
   before assuming it means what it means elsewhere in Bitcoin.
 - [../README.md](../README.md) covers the defaults and the measured benchmark.

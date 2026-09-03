@@ -484,7 +484,6 @@ impl<S: KvStore> JournalWriter<S> {
         let mut file = self.dir.open_with(&name, &options)?;
         let bytes = encode_record(record);
         file.write_all(&bytes)?;
-        file.sync_data()?;
         self.segment_offset = self
             .segment_offset
             .checked_add(u64::try_from(bytes.len()).map_err(|_| {
@@ -515,6 +514,7 @@ impl<S: KvStore> JournalWriter<S> {
         {
             self.advance_durability()?;
         }
+        self.record_lag_metrics();
         Ok(())
     }
 
@@ -526,62 +526,7 @@ impl<S: KvStore> JournalWriter<S> {
     /// `target` is the record index (exclusive) in `pending_records` that the
     /// boundary covers.
     fn advance_durability(&mut self) -> Result<(), JournalWriterError> {
-        if self.pending_records.is_empty() {
-            return Ok(());
-        }
-        let target = self.pending_records.len();
-        let last = &self.pending_records[target - 1];
-
-        // (1) storage dependency — deferred undo rows must be durable before
-        // the head claims the covered heights.
-        self.fail_storage_flush()?;
-        self.store
-            .flush()
-            .map_err(|error| JournalWriterError::StorageFlush(error.to_string()))?;
-
-        // (2) log fsync — the segment bytes covering the range become durable.
-        self.fail_segment_sync()?;
-        let name = segment_name(self.segment_gen);
-        let file = self
-            .dir
-            .open_with(&name, cap_std::fs::OpenOptions::new().write(true))?;
-        file.sync_all()?;
-
-        // (3) atomic head publish.
-        let marker = HeadMarker {
-            base_generation: self.base_generation,
-            base_height: self.base_height,
-            base_hash: self.base_hash,
-            base_chain_tx_count: self.base_chain_tx_count,
-            start_gen: self.start.0,
-            start_offset: self.start.1,
-            journal_gen: self.segment_gen,
-            offset: self.segment_offset,
-            height: last.height,
-            block_hash: last.block_hash,
-            prev_hash: last.prev_hash,
-            chain_tx_count: self.chain_tx_count,
-            record_count: self.record_count
-                + u64::try_from(target).map_err(|_| {
-                    JournalWriterError::CursorMismatch("record count overflow".to_owned())
-                })?,
-        };
-        self.write_head_atomic(&marker)?;
-
-        self.durable = DurableCursor {
-            generation: self.segment_gen,
-            offset: self.segment_offset,
-            height: last.height,
-        };
-        self.durable_block_hash = last.block_hash;
-        self.durable_prev_hash = last.prev_hash;
-        self.durable_chain_tx_count = self.chain_tx_count;
-        self.record_count += u64::try_from(target)
-            .map_err(|_| JournalWriterError::CursorMismatch("record count overflow".to_owned()))?;
-        self.pending.clear();
-        self.pending_records.clear();
-        self.last_boundary = Instant::now();
-        Ok(())
+        self.advance_durability_upto(self.pending_records.len())
     }
 
     /// Publishes `head.json` without advancing the cursor (used at
@@ -606,6 +551,7 @@ impl<S: KvStore> JournalWriter<S> {
         self.dir.rename("head.json.tmp", &self.dir, "head.json")?;
         self.fail_head_dir_sync()?;
         crate::checkpoint_fs::sync_dir(&self.dir)?;
+        self.record_size_metric();
         Ok(())
     }
 
@@ -651,9 +597,14 @@ impl<S: KvStore> JournalWriter<S> {
         )?;
 
         self.fail_storage_flush()?;
-        self.store
+        let flush_started = Instant::now();
+        let flush_result = self
+            .store
             .flush()
-            .map_err(|error| JournalWriterError::StorageFlush(error.to_string()))?;
+            .map_err(|error| JournalWriterError::StorageFlush(error.to_string()));
+        metrics::histogram!("node.chainstate_journal.storage_flush_seconds")
+            .record(flush_started.elapsed().as_secs_f64());
+        flush_result?;
 
         self.fail_segment_sync()?;
         let name = segment_name(self.segment_gen);
@@ -699,7 +650,33 @@ impl<S: KvStore> JournalWriter<S> {
         );
         self.pending_records.drain(..target);
         self.last_boundary = Instant::now();
+        self.record_lag_metrics();
         Ok(())
+    }
+
+    fn record_lag_metrics(&self) {
+        let latest_height = self.next_height.saturating_sub(1);
+        let lag = latest_height.saturating_sub(self.durable.height);
+        metrics::gauge!("node.chainstate_journal.lag_blocks").set(f64::from(lag));
+        metrics::gauge!("node.chainstate_journal.head_height").set(f64::from(self.durable.height));
+    }
+
+    fn record_size_metric(&self) {
+        let bytes = self
+            .dir
+            .entries()
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                parse_segment_name(entry.file_name().to_string_lossy().as_ref()).is_some()
+            })
+            .filter_map(|entry| entry.metadata().ok())
+            .map(|metadata| metadata.len())
+            .sum::<u64>();
+        let kib = u32::try_from(bytes / 1024).unwrap_or(u32::MAX);
+        metrics::gauge!("node.chainstate_journal.size_mib").set(f64::from(kib) / 1024.0);
     }
 
     /// Byte length of the first `target` buffered records.
