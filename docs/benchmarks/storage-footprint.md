@@ -23,7 +23,7 @@ cargo run -p bitcoin-rs-storage --example storage_footprint --release --features
 | Undo rows | 5,000 |
 | Block-body value size | 16,384 B (16 KiB) |
 | Undo value size | 256 B |
-| Index CF key/value sizes | TxConfirmed 12+8, TxMempool 5+4, BlockHeaders 80+0, Funding 12+8, Spending 12+0, Coinstats 12+8, BlockTree 37+0, UtxoMeta 16+8 |
+| Index CF key/value sizes | TxConfirmed 12+8, TxMempool 5+4, BlockHeaders 80+0, Funding 12+8, Spending 12+8, Coinstats 12+8, BlockTree 37+0, UtxoMeta 16+8 |
 | Block-body key size | 37 B |
 | **Logical data size** | **127,970,000 B (122.04 MiB)** |
 

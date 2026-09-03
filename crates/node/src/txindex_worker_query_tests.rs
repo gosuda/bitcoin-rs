@@ -1,8 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_index::{ScriptHashRow, SpendingPrefixRow, TxidRow};
+use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
+use bitcoin_rs_index::{HashPrefixRow, ScriptHashRow, SpendingPrefixRow, TxidRow};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     encode::double_sha256,
@@ -174,17 +175,39 @@ struct FixtureConfig {
 
 struct QueryFixture {
     engine: TxIndexQueryEngine,
+    body: Option<Arc<SingleBlockBody>>,
 }
 
 struct SingleBlockBody {
     height: u32,
     hash: BlockHash,
     body: Vec<u8>,
+    full_reads: AtomicUsize,
+    range_reads: AtomicUsize,
 }
 
 impl BlockBodySource for SingleBlockBody {
     fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+        if height == self.height && hash == self.hash {
+            self.full_reads.fetch_add(1, Ordering::Relaxed);
+        }
         (height == self.height && hash == self.hash).then(|| self.body.clone())
+    }
+
+    fn block_body_range(
+        &self,
+        height: u32,
+        hash: BlockHash,
+        offset: u32,
+        len: u32,
+    ) -> Option<Vec<u8>> {
+        if height != self.height || hash != self.hash {
+            return None;
+        }
+        self.range_reads.fetch_add(1, Ordering::Relaxed);
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(usize::try_from(len).ok()?)?;
+        self.body.get(start..end).map(<[u8]>::to_vec)
     }
 }
 
@@ -244,12 +267,17 @@ impl QueryFixture {
         } else {
             Vec::new()
         };
-        let body_source = config.retain_body.then(|| {
-            let source: Arc<dyn BlockBodySource> = Arc::new(SingleBlockBody {
+        let body = config.retain_body.then(|| {
+            Arc::new(SingleBlockBody {
                 height: tip.height,
                 hash: config.block.block_hash(),
                 body: consensus_bytes(&config.block),
-            });
+                full_reads: AtomicUsize::new(0),
+                range_reads: AtomicUsize::new(0),
+            })
+        });
+        let body_source: Option<Arc<dyn BlockBodySource>> = body.as_ref().map(|source| {
+            let source: Arc<dyn BlockBodySource> = source.clone();
             source
         });
         let block_source = NodeBlockSource::new(Arc::new(RwLock::new(
@@ -265,7 +293,14 @@ impl QueryFixture {
             applied_tip,
             body_source,
         );
-        Ok(Self { engine })
+        Ok(Self { engine, body })
+    }
+
+    fn full_reads(&self) -> Result<usize, std::io::Error> {
+        self.body
+            .as_ref()
+            .map(|body| body.full_reads.load(Ordering::Relaxed))
+            .ok_or_else(|| std::io::Error::other("body source"))
     }
 }
 
@@ -327,6 +362,50 @@ fn compute_merkle_root(block: &Block) -> Option<Hash256> {
         level = next;
     }
     Some(Hash256::from_le_bytes(&level[0]))
+}
+
+fn position_of_transaction(block: &Block, index: usize) -> Result<TxPosition, std::io::Error> {
+    let body = consensus_bytes(block);
+    let transaction = consensus_bytes(&block.txs[index]);
+    let offset = body
+        .windows(transaction.len())
+        .position(|window| window == transaction)
+        .ok_or_else(|| std::io::Error::other("transaction must be present"))?;
+    let offset =
+        u32::try_from(offset).map_err(|_| std::io::Error::other("transaction offset fits"))?;
+    let length = u32::try_from(transaction.len())
+        .map_err(|_| std::io::Error::other("transaction length fits"))?;
+    Ok(TxPosition::new(offset, length))
+}
+
+fn block_with_spending_transaction() -> Result<(Block, OutPoint, ScriptHash, Txid), std::io::Error>
+{
+    let mut block = Network::Regtest.genesis_block();
+    let funding_txid = block.txs[0].txid();
+    let script = block.txs[0].outputs[0].script_pubkey.clone();
+    let value = block.txs[0].outputs[0].value;
+    let outpoint = OutPoint {
+        txid: funding_txid,
+        vout: 0,
+    };
+    block.txs.push(Tx {
+        version: 2,
+        lock_time: 0,
+        inputs: vec![TxIn {
+            previous_output: outpoint,
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
+        }],
+        outputs: vec![TxOut {
+            value,
+            script_pubkey: Vec::new(),
+        }],
+    });
+    block.header.merkle_root = compute_merkle_root(&block)
+        .ok_or_else(|| std::io::Error::other("block has transactions"))?;
+    let spend_txid = block.txs[1].txid();
+    Ok((block, outpoint, ScriptHash::new(&script), spend_txid))
 }
 
 /// Pins that the height query proves absence rather than guessing the tip.
@@ -557,7 +636,7 @@ fn confirmed_history_snapshot_includes_funding_transaction()
 }
 
 #[test]
-fn confirmed_history_snapshot_includes_the_spending_transaction()
+fn confirmed_history_snapshot_includes_the_spending_transaction_from_legacy_empty_spending_value()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut block = Network::Regtest.genesis_block();
     let coinbase = &mut block.txs[0];
@@ -629,6 +708,118 @@ fn confirmed_history_snapshot_includes_the_spending_transaction()
     };
     assert!(snapshot.history.contains(&funding_record));
     assert!(snapshot.history.contains(&spending_record));
+    assert!(fixture.full_reads()? > 0);
+    Ok(())
+}
+
+#[test]
+fn confirmed_history_snapshot_reads_positioned_spending_transaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (block, outpoint, scripthash, spend_txid) = block_with_spending_transaction()?;
+    let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
+    let spend_prefix = SpendingPrefixRow::scan_prefix(&outpoint).to_vec();
+    let spending_row = SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec();
+    let fixture = QueryFixture::new(FixtureConfig {
+        block: block.clone(),
+        retain_body: true,
+        scans: vec![
+            scan_response(
+                ColumnFamily::Funding,
+                ScriptHashRow::scan_prefix(scripthash),
+                vec![(
+                    funding_row,
+                    TxPositionValue::encode(&[position_of_transaction(&block, 0)?]),
+                )],
+                true,
+            ),
+            scan_response(
+                ColumnFamily::Spending,
+                spend_prefix,
+                vec![(
+                    spending_row,
+                    TxPositionValue::encode(&[position_of_transaction(&block, 1)?]),
+                )],
+                true,
+            ),
+        ],
+        aba_trigger: None,
+        watermark: None,
+    })?;
+
+    let snapshot = fixture.engine.history_snapshot(scripthash)?;
+    assert!(snapshot.history.contains(&ScriptHistoryRecord {
+        txid: spend_txid,
+        height: 0,
+    }));
+    assert_eq!(fixture.full_reads()?, 0);
+    Ok(())
+}
+
+#[test]
+fn unspent_outputs_exclude_positioned_spent_output() -> Result<(), Box<dyn std::error::Error>> {
+    let (block, outpoint, scripthash, _) = block_with_spending_transaction()?;
+    let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
+    let spending_row = SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec();
+    let fixture = QueryFixture::new(FixtureConfig {
+        block: block.clone(),
+        retain_body: true,
+        scans: vec![
+            scan_response(
+                ColumnFamily::Funding,
+                ScriptHashRow::scan_prefix(scripthash),
+                vec![(
+                    funding_row,
+                    TxPositionValue::encode(&[position_of_transaction(&block, 0)?]),
+                )],
+                true,
+            ),
+            scan_response(
+                ColumnFamily::Spending,
+                SpendingPrefixRow::scan_prefix(&outpoint),
+                vec![(
+                    spending_row,
+                    TxPositionValue::encode(&[position_of_transaction(&block, 1)?]),
+                )],
+                true,
+            ),
+        ],
+        aba_trigger: None,
+        watermark: None,
+    })?;
+
+    assert!(fixture.engine.unspent_outputs(scripthash)?.is_empty());
+    assert_eq!(fixture.full_reads()?, 0);
+    Ok(())
+}
+
+#[test]
+fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn std::error::Error>> {
+    let (block, outpoint, _, spend_txid) = block_with_spending_transaction()?;
+    let spending_row = SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec();
+    let fixture = QueryFixture::new(FixtureConfig {
+        block: block.clone(),
+        retain_body: true,
+        scans: vec![scan_response(
+            ColumnFamily::Spending,
+            SpendingPrefixRow::scan_prefix(&outpoint),
+            vec![(
+                spending_row,
+                TxPositionValue::encode(&[position_of_transaction(&block, 0)?]),
+            )],
+            true,
+        )],
+        aba_trigger: None,
+        watermark: None,
+    })?;
+
+    assert_eq!(
+        fixture
+            .engine
+            .spender(outpoint)?
+            .map(|spender| spender.txid),
+        Some(spend_txid)
+    );
+    assert_eq!(fixture.full_reads()?, 1);
     Ok(())
 }
 

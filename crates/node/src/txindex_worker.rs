@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
-    ConsumerCursorUpdate, HashPrefixRow, IndexCapabilities, IndexCapability, IndexError,
-    IndexReader, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
+    ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
     types::{TxPosition, TxPositionValue},
 };
@@ -2685,16 +2685,12 @@ impl TxIndexQueryEngine {
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
-    ) -> Result<Vec<HashPrefixRow>, TxQueryError> {
+    ) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
         let limit = budget.next_scan_limit()?;
         let scan = snapshot
             .spending_rows(outpoint, limit)
             .map_err(|error| TxQueryError::Storage(error.to_string().into()))?;
-        Ok(budget
-            .accept_scan(scan)?
-            .into_iter()
-            .map(|row| row.row)
-            .collect())
+        budget.accept_scan(scan)
     }
 
     fn collect_funding_outputs(
@@ -2771,33 +2767,54 @@ impl TxIndexQueryEngine {
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
     ) -> Result<Option<SpendingRecord>, TxQueryError> {
-        let spend_rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
+        let rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
         let mut last_height = None;
-        for row in spend_rows {
-            let height = row.height();
+        for row in rows {
+            let height = row.row.height();
             if last_height == Some(height) {
                 continue;
             }
             last_height = Some(height);
+            if let Some(positions) = Self::validated_positions(&row.value) {
+                if let Some(&position) = positions.first() {
+                    if let Some(transaction) =
+                        self.resolve_positioned_transaction(tip, budget, height, position)?
+                    {
+                        if let Some(record) = Self::spending_input(&transaction, height, outpoint)?
+                        {
+                            return Ok(Some(record));
+                        }
+                    }
+                }
+            }
             let hash = self.resolve_hash_at_height(height, tip)?;
             let block = self.resolve_block(budget, height, hash)?;
             for transaction in &block.txs {
-                let Some(vin) = transaction
-                    .inputs
-                    .iter()
-                    .position(|input| input.previous_output == *outpoint)
-                else {
-                    continue;
-                };
-                return Ok(Some(SpendingRecord {
-                    txid: transaction.txid(),
-                    height,
-                    vin: u32::try_from(vin)
-                        .map_err(|_| TxQueryError::Storage("vin overflow".into()))?,
-                }));
+                if let Some(record) = Self::spending_input(transaction, height, outpoint)? {
+                    return Ok(Some(record));
+                }
             }
         }
         Ok(None)
+    }
+
+    fn spending_input(
+        transaction: &Tx,
+        height: u32,
+        outpoint: &OutPoint,
+    ) -> Result<Option<SpendingRecord>, TxQueryError> {
+        let Some(vin) = transaction
+            .inputs
+            .iter()
+            .position(|input| input.previous_output == *outpoint)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(SpendingRecord {
+            txid: transaction.txid(),
+            height,
+            vin: u32::try_from(vin).map_err(|_| TxQueryError::Storage("vin overflow".into()))?,
+        }))
     }
 
     fn history_snapshot_for(

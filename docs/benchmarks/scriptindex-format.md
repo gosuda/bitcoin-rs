@@ -82,7 +82,7 @@ contract. A finding is **informational** if it confirms an existing decision.
 - The per-row byte counts are **informational**: they confirm the existing
   key/value layout but do not change it.
 - The Q1–Q5 verdicts are **material**: they freeze decisions about
-  `TxPosition` width, empty Spending values, LE vs sortable keys, per-CF
+  `TxPosition` width, positioned Spending values, LE vs sortable keys, per-CF
   cost, and the Live locator.
 
 ## One-corpus / one-disposable-fixture guard
@@ -107,7 +107,7 @@ as a benchmark corpus or a data file.
 |---|---|---|---|---|
 | TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
 | Funding | `Funding` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Spending | `Spending` | 8 (prefix) + 4 (LE height) = 12 | 0 (empty value) | 12 |
+| Spending | `Spending` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
 | BlockHeaders | `BlockHeaders` | 80 (raw header = block hash) | 0 (empty value) | 80 |
 
 **Key observations:**
@@ -115,8 +115,9 @@ as a benchmark corpus or a data file.
 - `TxPosition` is 8 bytes: 4-byte LE offset + 4-byte LE length (`TX_POSITION_SIZE = 8`).
 - The common case is n = 1 (one transaction at one height funds one script),
   so the typical Funding and TxConfirmed row is **20 bytes** (12 key + 8 value).
-- Spending rows carry no value: the key alone is the index. An empty value
-  never means "no spending" — it means "this outpoint was spent at this height."
+- Spending rows carry positions for the transactions that spend the outpoint.
+  An empty value never means "no spending" — it is a legacy row value that
+  requires a full-block scan.
 - BlockHeaders rows are keyed by the raw 80-byte block header (which is also
   the block hash). The value is empty.
 
@@ -130,15 +131,14 @@ are **fixture-scale**, not mainnet projections.
 |---|---|---|---|---|---|---|
 | TxConfirmed | 12 | 8 | 200,000 | 4,000,000 | ~14.3 MiB | ~75 B |
 | Funding | 12 | 8 | 200,000 | 4,000,000 | ~14.3 MiB | ~75 B |
-| Spending | 12 | 0 | 200,000 | 2,400,000 | ~17.9 MiB | ~89 B |
+| Spending | 12 | 8 | 200,000 | 4,000,000 | ~17.9 MiB | ~89 B |
 | BlockHeaders | 80 | 0 | 200,000 | 16,000,000 | ~15.2 MiB | ~0 B (compressed) |
 
-**Why Spending costs more per row than Funding despite having no value:**
+**Why Spending costs more per row than Funding despite its small value:**
 fjall's per-row overhead (bloom filter, block index, key encoding) is roughly
-constant. A 12-byte key with a 0-byte value pays the same overhead as a
-12-byte key with an 8-byte value, but the logical payload is smaller, so the
-amplification ratio is higher. The LZ4 compression cannot recover the
-overhead on rows with no value to compress.
+constant. A 12-byte key with an 8-byte value pays the same fixed overhead as
+other small index rows, but the logical payload is still small, so the
+amplification ratio is higher.
 
 **Why BlockHeaders on-disk is smaller than logical:** the 80-byte headers in
 the synthetic corpus are highly repetitive (deterministic pattern), so LZ4
@@ -164,26 +164,12 @@ correct and the width is sufficient.
 
 ### Q2: Empty Spending value vs position — should Spending carry positions?
 
-**Verdict: keep empty value. Do not add positions to Spending rows.**
+**Verdict: Spending rows carry positions (format version 4).**
 
-Spending rows answer one question: "was this outpoint spent, and at what
-height?" The key (`prefix(8) || LE height(4)`) answers both. A caller that
-needs the spending transaction fetches the block at the height and scans it
-for the input that spends the outpoint — the same exact-resolve path Funding
-and TxConfirmed use.
-
-Adding positions to Spending would:
-
-- Double the value size (12 + 8n vs 12 + 0) for a marginal read-path win.
-- Require a value-format migration or a dual-read path, which the versioning
-  section below forbids for a capability that is not independently tracked.
-- Complicate the rollback path: spending rows are deleted by key, and adding
-  a value means the writer must encode positions for spending transactions,
-  which the current `IndexBlockVisitor` does not track.
-
-The empty value is the correct design. An empty value on a Spending row
-means "spent at this height," not "not spent." This is the same convention
-as BlockHeaders: the key is the index; the value is absent.
+`spender_for` runs once per funding output for address history and UTXO
+queries, so an unpositioned spend costs a 4 MB full-block reservation each and
+exhausts the query budget after ~16 spends (issue #262). Positions make the
+spend path the same one-transaction read as funding.
 
 ### Q3: Keep LE height vs switch to sortable (big-endian) height?
 
@@ -221,7 +207,7 @@ must sort — but the high-level resolvers already do it for them.
 |---|---|---|---|
 | TxConfirmed | 20 (12 key + 8 value) | ~75 | 3.75× |
 | Funding | 20 (12 key + 8 value) | ~75 | 3.75× |
-| Spending | 12 (12 key + 0 value) | ~89 | 7.42× |
+| Spending | 20 (12 key + 8 value) | ~89 | 7.42× |
 | BlockHeaders | 80 (80 key + 0 value) | ~0 (compressed, fixture) | <0.01× (fixture) |
 
 **Caveats:**
@@ -231,10 +217,8 @@ must sort — but the high-level resolvers already do it for them.
 - The BlockHeaders amplification is an artifact of the synthetic corpus
   (repetitive 80-byte headers compress to near-zero). On mainnet, expect
   amplification ≈ 1.0 (headers are incompressible).
-- The Spending amplification (7.42×) is the highest because the row has no
-  value to compress, so the full per-row overhead is paid against a 12-byte
-  payload. This is inherent to the design (Q2) and not actionable without
-  adding a value, which Q2 rejects.
+- The Spending amplification remains high because the row's fixed storage
+  overhead is large relative to its compact position payload.
 
 ### Q5: Live UTXO locator — what is the baseline key shape?
 
@@ -281,10 +265,11 @@ The index tracks two independently versioned capabilities via
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
 
 **Per-capability format version.** The row-value format version
-(`INDEX_FORMAT_VERSION`, currently 1) is a single marker in `UtxoMeta`. It
-governs whether Funding and TxConfirmed values carry `TxPosition` arrays.
-A future format bump (e.g. adding positions to Spending, or changing
-`TxPosition` width) would increment this version. Readers already handle
+(`INDEX_FORMAT_VERSION`, currently 2) is a single marker in `UtxoMeta`. It
+governs whether Funding, Spending, and TxConfirmed values carry `TxPosition`
+arrays.
+A future format bump (e.g. changing `TxPosition` width) would increment this
+version. Readers already handle
 `IndexFormat::Legacy` by falling back to full block scans, so an old-format
 index remains correct, just slower.
 
