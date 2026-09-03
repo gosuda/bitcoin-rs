@@ -1,8 +1,8 @@
 //! Shared node state aggregating subsystem handles.
 //!
 //! V1 keeps this deliberately minimal: it owns the resolved [`NodeConfig`], the
-//! data-directory path, the open chainstate storage backend, and the replay log
-//! used by [`crate::crash_recovery`]. Subsystem wiring (chain / utxo / mempool
+//! data-directory path, and the open chainstate storage backend. Subsystem
+//! wiring (chain / utxo / mempool
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
 use arc_swap::ArcSwapOption;
@@ -1109,7 +1109,6 @@ pub struct NodeState {
     chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
     apply_handles: crate::apply::ApplyHandles,
     sync: Arc<crate::BlockSync>,
-    replayed: Mutex<Vec<u32>>,
     /// Process-wide rollback-evidence warning snapshot (`ArcSwap`).
     warning_store: Arc<crate::recovery_evidence::WarningStore>,
 }
@@ -1459,7 +1458,6 @@ impl NodeState {
                 config.network,
                 config.assume_valid_height,
             )),
-            recovery_meta_path: Some(config.data_dir.join(crate::crash_recovery::META_FILENAME)),
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
         let sync = Arc::new(crate::BlockSync::new(
@@ -1538,7 +1536,6 @@ impl NodeState {
             chain_event_hints_rx,
             apply_handles,
             sync,
-            replayed: Mutex::new(Vec::new()),
             warning_store,
         })
     }
@@ -1960,30 +1957,6 @@ impl NodeState {
     #[must_use]
     pub fn sync(&self) -> Arc<crate::BlockSync> {
         Arc::clone(&self.sync)
-    }
-
-    /// Heights walked by the most recent crash-recovery replay.
-    #[must_use]
-    pub fn replayed_heights(&self) -> Vec<u32> {
-        self.replayed.lock().clone()
-    }
-
-    /// Records a height in the in-memory replay log.
-    pub(crate) fn push_replayed(&self, height: u32) {
-        self.replayed.lock().push(height);
-    }
-
-    /// Test helper: writes the recovery metadata as if a block at `height`
-    /// had just been fully committed. Real block commits flow through the
-    /// `crates/utxo` listener; this helper exists so crash-recovery tests
-    /// can simulate a chain without bringing up the full subsystem stack.
-    pub fn record_synthetic_block_for_recovery(&self, height: u32) -> Result<()> {
-        let meta = crate::crash_recovery::Meta {
-            height,
-            last_committed_height: height,
-            tip_hash_hex: None,
-        };
-        crate::crash_recovery::write_meta(self, &meta)
     }
 
     /// Returns the process-wide shutdown signal shared by all runtime workers.

@@ -9,14 +9,17 @@
 //! ## Cadence
 //!
 //! [`CHECKPOINT_INTERVAL_BLOCKS`] = 10 000. At 30–75 blocks/s during IBD this
-//! fires every ~2–5 min. The worst-case replay window when the node is killed
-//! between publications is 10 000 blocks: the recovery sidecar (written after
-//! every block apply) records the true tip, and [`crash_recovery::recover_if_needed`]
-//! replays the gap from stored block bodies.
+//! fires every ~2–5 min. [`CHECKPOINT_INTERVAL_SECS`] = 1800 (30 min) is the
+//! fallback for a slow-syncing node that has not reached the block count but
+//! still wants progress anchored.
 //!
-//! [`CHECKPOINT_INTERVAL_SECS`] = 1800 (30 min) is the fallback for a
-//! slow-syncing node that has not reached the block count but still wants
-//! progress anchored.
+//! ## Recovery story
+//!
+//! The published checkpoint is the sole recovery anchor: a node killed
+//! mid-sync restarts from the last published checkpoint (periodic or
+//! clean-shutdown) and re-validates blocks mined after it.  The former V1
+//! recovery sidecar / body-replay path was retired (issue #230, task 0); a
+//! stale sidecar file on disk is simply ignored.
 //!
 //! ## Cost when it fires
 //!
@@ -26,25 +29,6 @@
 //! atomic swap). Snapshot size scales with tip (22.8 MB at height 130k;
 //! plausibly several GB near modern tips). At a 10k-block cadence the pause is
 //! seconds-to-tens-of-seconds — well under 1 % of wall time during IBD.
-//!
-//! ## Precedence: checkpoint vs sidecar
-//!
-//! The recovery sidecar (`recovery_meta.json`) is written after every
-//! successful block apply and records `(height, last_committed_height,
-//! tip_hash)`. The checkpoint is a durable snapshot at a specific tip.
-//!
-//! **The checkpoint is authoritative for durable state; the sidecar is
-//! authoritative for progress.** On boot, the checkpoint restores the UTXO
-//! set and block tree to its height, then the sidecar's gap is replayed from
-//! stored block bodies. The checkpoint can never name a tip the sidecar has
-//! not already recorded, because the apply path writes the sidecar before the
-//! checkpoint publisher can observe the tip (admission is closed during
-//! publication, so no apply can race).
-//!
-//! To enforce this invariant, after each periodic publication the worker
-//! rewrites the sidecar to match the published tip. If the sidecar was already
-//! at the same height (the normal case) this is a no-op rewrite; if it was
-//! behind (a bug or a lost write) the rewrite corrects it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,7 +47,6 @@ use bitcoin_rs_utxo::stats::CoinStatsListener;
 
 use crate::apply::{ApplyAdmission, PruneBodyStore, UndoStore};
 use crate::checkpoint::{self, CheckpointError, CheckpointWrite};
-use crate::crash_recovery;
 use crate::recovery_evidence;
 use crate::state::ChainEventPublisher;
 
@@ -158,27 +141,6 @@ impl CheckpointPublisher {
             );
             recovery_evidence::write_witness(&self.data_dir, &witness)
                 .map_err(|e| CheckpointError::Invalid(e.to_string()))?;
-
-            // Enforce checkpoint/sidecar agreement: rewrite the sidecar to
-            // match the published tip. The sidecar is authoritative for
-            // progress; the checkpoint is authoritative for durable state.
-            // After publication they must agree at the checkpoint height.
-            let meta = crash_recovery::Meta {
-                height: tip.height,
-                last_committed_height: tip.height,
-                tip_hash_hex: Some(tip.hash.to_string_be()),
-            };
-            if let Err(error) = crash_recovery::write_meta_to_path(
-                &self.data_dir.join(crash_recovery::META_FILENAME),
-                &meta,
-            ) {
-                tracing::warn!(
-                    %error,
-                    height = tip.height,
-                    "failed to rewrite recovery sidecar after periodic checkpoint; \
-                     the checkpoint is durable but the sidecar may lag",
-                );
-            }
         }
         // Remove the disconnect marker only after this checkpoint publishes the
         // matching UTXO set and applied tip.

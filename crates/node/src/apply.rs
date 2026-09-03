@@ -847,10 +847,6 @@ pub struct ApplyHandles {
     /// Block height at or below which kernel / portable script execution is skipped during block apply.
     /// Non-script transaction checks still run. Zero disables the shortcut (full script checks on every block).
     pub assume_valid_height: u32,
-    /// Path to the crash-recovery sidecar; when set, the apply path writes
-    /// `(height, last_committed_height, tip_hash)` after every successful
-    /// block apply so boot can replay the gap from stored bodies.
-    pub(crate) recovery_meta_path: Option<std::path::PathBuf>,
     /// Hash-pinned assume-valid trust gate; the height shortcut above applies only while this is trusted.
     pub assume_valid_gate: Arc<AssumeValidGate>,
 }
@@ -919,7 +915,6 @@ impl ApplyHandles {
             chain_transition: Arc::new(parking_lot::Mutex::new(())),
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
-            recovery_meta_path: None,
         }
     }
 
@@ -2568,22 +2563,6 @@ fn apply_block_admitted<'b>(
             .publish_sequence(crate::zmq_publisher::SequenceEvent::Connected(tip.hash));
     }
 
-    // Persist crash-recovery progress: the block body is on disk, so the
-    // state at this height is reconstructable from the last checkpoint plus
-    if let Some(meta_path) = &handles.recovery_meta_path {
-        let meta = crate::crash_recovery::Meta {
-            height,
-            last_committed_height: height,
-            tip_hash_hex: Some(tip.hash.to_string_be()),
-        };
-        if let Err(error) = crate::crash_recovery::write_meta_to_path(meta_path, &meta) {
-            tracing::warn!(
-                %error,
-                height,
-                "failed to persist crash-recovery meta; recovery window will be larger on next boot"
-            );
-        }
-    }
     Ok(tip)
 }
 

@@ -27,8 +27,6 @@ mod checkpoint_fs;
 mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
-/// Startup crash recovery.
-pub mod crash_recovery;
 /// Typed in-process node lifecycle: the embedding surface over the same
 /// service graph the daemon wires.
 pub mod embed;

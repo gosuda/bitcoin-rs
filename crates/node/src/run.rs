@@ -12,7 +12,7 @@ use crossbeam_channel::{TrySendError, bounded};
 use crate::config::{NodeConfig, RuntimeInputs};
 use crate::event_loop::EventLoop;
 use crate::state::NodeState;
-use crate::{crash_recovery, logging, shutdown};
+use crate::{logging, shutdown};
 
 // Test-only observation seam: records that `run` reached the
 // bootstrap-worker join. Lets a regression that propagates a checkpoint
@@ -919,7 +919,9 @@ pub(crate) fn start_node(
         // The guard was just built with `state: Some(state)` above.
         panic!("state recorded above");
     };
-    crash_recovery::recover_if_needed(state)?;
+    // No sidecar consultation at boot: the V1 crash-recovery sidecar /
+    // body-replay path was retired (issue #230, task 0). A stale sidecar
+    // file on disk is ignored; recovery is checkpoint-based.
 
     tracing::info!(
         network = ?state.config().network,

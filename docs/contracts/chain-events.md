@@ -113,11 +113,6 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `stable_generation_is_even_after_disconnect`.
 - `crates/node/src/state.rs`:
   `checkpoint_refuses_inflight_disconnect_and_preserves_state`.
-- `crates/node/tests/crash_recovery.rs` (G11):
-  `recovery_replays_from_last_committed_height_to_tip`,
-  `recovery_meta_write_leaves_readable_sidecar_without_tmp`,
-  `torn_meta_after_crash_is_refused`,
-  `stale_tmp_after_crash_does_not_corrupt_recovery`.
 - `crates/node/src/recovery_evidence.rs` tests (G11):
   `witness_round_trips_and_falls_back_to_prev`,
   `foreign_genesis_current_cannot_displace_valid_prev`,

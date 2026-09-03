@@ -2,11 +2,11 @@
 
 The integration crate for running a synchronous `bitcoin-rs` node: layered
 configuration, storage-backend selection, signal bridging, metrics/tracing setup,
-startup crash recovery, and the central crossbeam-driven event loop that connects the
+and the central crossbeam-driven event loop that connects the
 subsystem crates.
 
-`run` is the top-level entry point: it loads the layered `Config` (with RPC `Auth`),
-recovers via `crash_recovery`, and drives `event_loop`, the central synchronous loop.
+`run` is the top-level entry point: it loads the layered `Config` (with RPC `Auth`), and
+drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `apply` block-apply pipeline;
 `BlockSync` orchestrates block download; `reorg` switches the applied chain from one
 branch to another. Adapters expose node state to the rest of the system —
