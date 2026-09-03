@@ -91,7 +91,7 @@ fn estimate_current_block(ctx: &Context) -> (u64, u64) {
     let selected = policy.select_transactions(
         &pool,
         MAX_BLOCK_WEIGHT.saturating_sub(bitcoin_rs_mining::DEFAULT_BLOCK_RESERVED_WEIGHT),
-        MAX_BLOCK_SIGOPS_COST,
+        MAX_BLOCK_SIGOPS_COST.saturating_sub(bitcoin_rs_mining::DEFAULT_COINBASE_RESERVED_SIGOPS),
     );
     let mut weight: u64 = 0;
     let mut count: u64 = 0;
