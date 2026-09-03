@@ -1374,9 +1374,9 @@ mod tests {
             writer.append(&record).expect("append");
             dir = writer.dir.try_clone().expect("dir clone");
         }
-        // After the crash, record 1 was fsynced per append but never covered
-        // by a head. Reopening truncates to the head cursor; the caller
-        // replays record 1 and gets the same bytes in the same place.
+        // After the crash, record 1 may have reached the page cache but was
+        // never covered by a durable head. Reopening truncates to the head
+        // cursor; the caller replays record 1 into the same place.
         let mut writer = JournalWriter::open(dir, Arc::clone(&store)).expect("reopen");
         writer.append(&record).expect("replay append");
         writer.flush_to(1).expect("durable");
@@ -1388,9 +1388,10 @@ mod tests {
     fn rotation_keeps_cursor_invariants() {
         let store = Arc::new(CountingStore::new());
         let mut writer = open_fresh("rotation", Arc::clone(&store));
-        // Force a tiny rotation threshold so the first append rotates.
-        writer.rotate_bytes = 0;
-        writer.append(&sample_record(1)).expect("append 1");
+        // Rotate exactly once, before the second append.
+        let first = sample_record(1);
+        writer.rotate_bytes = u64::try_from(encode_record(&first).len()).expect("record length");
+        writer.append(&first).expect("append 1");
         writer.append(&sample_record(2)).expect("append 2");
         assert_eq!(writer.segment_gen, 1, "rotation bumped the generation");
         // head must stay valid across the rotation.
@@ -1418,8 +1419,15 @@ mod tests {
             let store = Arc::new(CountingStore::new());
             let mut writer = open_fresh("failpoints", Arc::clone(&store));
             writer.inject_failpoint(boundary);
-            // The boundary path must fail at the armed boundary...
-            let result = writer.append(&sample_record(1));
+            // Segment append fails immediately; durability failures fire only
+            // when the explicit batch boundary is advanced.
+            let append_result = writer.append(&sample_record(1));
+            let result = if boundary == JournalWriterFailpoint::SegmentAppend {
+                append_result
+            } else {
+                append_result.expect("append remains buffered before boundary");
+                writer.flush_to(1)
+            };
             assert!(result.is_err(), "{boundary:?} did not fire");
             // ...and head.json must still reflect height 0 (no advancement).
             assert_eq!(writer.head().height, 0, "{boundary:?} advanced the head");

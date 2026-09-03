@@ -1037,13 +1037,19 @@ fn prepare_initial_chainstate(
     drop(journal_dir);
     match replay {
         crate::chainstate_journal::ReplayOutcome::Replayed(replayed) => {
+            let replayed_records = replayed.applied_tip.height.saturating_sub(base_height);
+            let (restore_source, resume_source) = if replayed_records == 0 {
+                ("checkpoint", ResumeSource::Checkpoint)
+            } else {
+                ("journal", ResumeSource::Journal)
+            };
             tracing::info!(
-                restore_source = "journal",
+                restore_source,
                 checkpoint_generation = base_generation,
                 checkpoint_height = base_height,
                 height = replayed.applied_tip.height,
                 hash = %replayed.applied_tip.hash,
-                replayed_records = replayed.applied_tip.height.saturating_sub(base_height),
+                replayed_records,
                 chain_tx_count = replayed.chain_tx_count,
                 replay_seconds,
                 "chainstate restore selected"
@@ -1063,7 +1069,7 @@ fn prepare_initial_chainstate(
                 tree: replayed.tree,
                 applied_tip: Some(replayed.applied_tip),
                 chain_tx_count: replayed.chain_tx_count,
-                resume_source: ResumeSource::Journal,
+                resume_source,
                 journal_bootstrap: Some(bootstrap),
             })
         }
@@ -3777,12 +3783,12 @@ mod tests {
             bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
         })?;
         scanned.tx_count = rolling.tx_count;
-        // Rolling per-coin accumulation is off by design (89f1dac5): the live
-        // listener tracks height and tx count only, and totals come from the
-        // on-demand scan. This mirrors clean_checkpoint's assertion below.
-        assert_ne!(
+        // The listener is attached only after checkpoint/journal restoration,
+        // then tracks subsequent live UTXO mutations without double-counting
+        // the restored snapshot.
+        assert_eq!(
             rolling.total_amount, scanned.total_amount,
-            "default resume must not receive rolling UTXO notifications"
+            "restored state must receive subsequent rolling UTXO notifications"
         );
         Ok(())
     }
