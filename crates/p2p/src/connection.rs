@@ -362,9 +362,7 @@ impl PeerLifecycle {
     /// identity-aware methods; the handle exists so older read-and-send
     /// adapters observe the same authoritative lease map.
     #[must_use]
-    pub fn peer_outbound_handle(
-        &self,
-    ) -> Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>> {
+    pub fn peer_outbound_handle(&self) -> Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>> {
         Arc::clone(&self.leases)
     }
 

@@ -622,7 +622,6 @@ impl P2pService {
     pub fn install_download_budget(&self, budget: SyncBudget) {
         self.with_download_window(|window| *window = DownloadWindow::new(budget));
     }
-
 }
 
 fn reap_finished_outbound_connections(

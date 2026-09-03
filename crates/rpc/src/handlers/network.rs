@@ -165,56 +165,56 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         .map(|(id, ready_peer)| {
             let peer = &ready_peer.info;
             v31::PeerInfo {
-            id: u32::try_from(id).unwrap_or(u32::MAX),
-            address: peer.addr.to_string(),
-            address_bind: Some(peer.addr.to_string()),
-            address_local: None,
-            network: network_name(peer.addr.ip()).to_owned(),
-            mapped_as: None,
-            services: format!("{:016x}", peer.services),
-            services_names: peer
-                .services_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            relay_transactions: true,
-            last_send: 0,
-            last_received: 0,
-            last_transaction: 0,
-            last_block: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-            connection_time: i64_saturated(peer.conn_time),
-            time_offset: 0,
-            ping_time: Some(0.0),
-            minimum_ping: Some(0.0),
-            ping_wait: None,
-            version: peer.version,
-            subversion: peer.user_agent.clone(),
-            inbound: peer.inbound,
-            bip152_hb_to: false,
-            bip152_hb_from: false,
-            starting_height: Some(i64::from(peer.start_height)),
-            presynced_headers: Some(-1),
-            synced_headers: Some(-1),
-            synced_blocks: Some(-1),
-            inflight: Some(Vec::new()),
-            addresses_relay_enabled: None,
-            addresses_processed: None,
-            addresses_rate_limited: None,
-            permissions: Vec::new(),
-            minimum_fee_filter: 0.0,
-            bytes_sent_per_message: std::collections::BTreeMap::new(),
-            bytes_received_per_message: std::collections::BTreeMap::new(),
-            inv_to_send: 0,
-            last_inv_sequence: 0,
-            connection_type: Some(if peer.inbound {
-                ConnectionType::Inbound
-            } else {
-                ConnectionType::OutboundFullRelay
-            }),
-            transport_protocol_type: TransportProtocolType::V1,
-            session_id: String::new(),
+                id: u32::try_from(id).unwrap_or(u32::MAX),
+                address: peer.addr.to_string(),
+                address_bind: Some(peer.addr.to_string()),
+                address_local: None,
+                network: network_name(peer.addr.ip()).to_owned(),
+                mapped_as: None,
+                services: format!("{:016x}", peer.services),
+                services_names: peer
+                    .services_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                relay_transactions: true,
+                last_send: 0,
+                last_received: 0,
+                last_transaction: 0,
+                last_block: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+                connection_time: i64_saturated(peer.conn_time),
+                time_offset: 0,
+                ping_time: Some(0.0),
+                minimum_ping: Some(0.0),
+                ping_wait: None,
+                version: peer.version,
+                subversion: peer.user_agent.clone(),
+                inbound: peer.inbound,
+                bip152_hb_to: false,
+                bip152_hb_from: false,
+                starting_height: Some(i64::from(peer.start_height)),
+                presynced_headers: Some(-1),
+                synced_headers: Some(-1),
+                synced_blocks: Some(-1),
+                inflight: Some(Vec::new()),
+                addresses_relay_enabled: None,
+                addresses_processed: None,
+                addresses_rate_limited: None,
+                permissions: Vec::new(),
+                minimum_fee_filter: 0.0,
+                bytes_sent_per_message: std::collections::BTreeMap::new(),
+                bytes_received_per_message: std::collections::BTreeMap::new(),
+                inv_to_send: 0,
+                last_inv_sequence: 0,
+                connection_type: Some(if peer.inbound {
+                    ConnectionType::Inbound
+                } else {
+                    ConnectionType::OutboundFullRelay
+                }),
+                transport_protocol_type: TransportProtocolType::V1,
+                session_id: String::new(),
             }
         })
         .collect::<Vec<_>>();

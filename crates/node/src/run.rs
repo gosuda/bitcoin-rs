@@ -1032,11 +1032,7 @@ pub(crate) fn start_node(
     // wake delivery.
     state
         .p2p()
-        .start(
-            Some(&p2p_chain_query),
-            Some(&sync_wake_tx),
-            &peer_ready,
-        )
+        .start(Some(&p2p_chain_query), Some(&sync_wake_tx), &peer_ready)
         .map_err(anyhow::Error::from)?;
     // Periodic chainstate checkpoint worker: publishes a checkpoint every
     // CHECKPOINT_INTERVAL_BLOCKS or CHECKPOINT_INTERVAL_SECS so a node

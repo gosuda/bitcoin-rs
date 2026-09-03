@@ -218,7 +218,9 @@ pub fn serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake(
 }
 
 /// Compatibility entry point for callers that still provide the two legacy
-/// peer stores separately. New runtime code should use
+/// peer stores separately.
+///
+/// New runtime code should use
 /// [`serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake`] so the
 /// lifecycle authority is shared explicitly.
 #[allow(clippy::too_many_arguments)]

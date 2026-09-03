@@ -24,7 +24,8 @@ pub const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
 /// Maximum serialized block body accepted by the sync pipeline.
 pub const MAX_SERIALIZED_BLOCK_SIZE: usize = 4_000_000;
 /// Maximum decoded inbound blocks drained into the staging pipeline at once.
-pub const INBOUND_BLOCK_STAGE_CHUNK: usize = RECEIVED_BLOCK_BYTE_BUDGET / PENDING_BLOCK_BYTE_ESTIMATE;
+pub const INBOUND_BLOCK_STAGE_CHUNK: usize =
+    RECEIVED_BLOCK_BYTE_BUDGET / PENDING_BLOCK_BYTE_ESTIMATE;
 /// Per-peer in-flight request budget.
 pub const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 /// Maximum blocks assigned to one peer in fan-out mode.
