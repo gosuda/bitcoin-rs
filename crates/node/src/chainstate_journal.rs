@@ -25,6 +25,8 @@ mod emit;
 
 mod record;
 
+mod replay;
+
 mod writer;
 
 #[allow(unused_imports)]

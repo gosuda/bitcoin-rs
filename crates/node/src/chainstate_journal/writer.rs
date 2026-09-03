@@ -53,8 +53,18 @@ const DEFAULT_MAX_JOURNAL_MIB: u64 = 2048;
 /// Zero-padded 10-digit generation: lexicographic order equals numeric order.
 const SEGMENT_GEN_WIDTH: usize = 10;
 
+/// Public-to-crate wrapper for the boot replay's segment window reader.
+pub(crate) fn segment_name_pub(generation: u64) -> String {
+    segment_name(generation)
+}
+
 fn segment_name(generation: u64) -> String {
     format!("segment-{generation:0SEGMENT_GEN_WIDTH$}.log")
+}
+
+/// Public-to-crate wrapper for the boot replay's segment window reader.
+pub(crate) fn parse_segment_name_pub(name: &str) -> Option<u64> {
+    parse_segment_name(name)
 }
 
 fn parse_segment_name(name: &str) -> Option<u64> {
@@ -159,7 +169,7 @@ impl HeadMarker {
         Ok(bytes)
     }
 
-    fn deserialize(bytes: &[u8]) -> Result<Self, JournalWriterError> {
+    pub(crate) fn deserialize(bytes: &[u8]) -> Result<Self, JournalWriterError> {
         if bytes.len() < 9 {
             return Err(JournalWriterError::HeadUnreadable(
                 "marker shorter than its frame header".to_owned(),
