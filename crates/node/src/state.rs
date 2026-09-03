@@ -1458,6 +1458,7 @@ impl NodeState {
                 config.network,
                 config.assume_valid_height,
             )),
+            journal: None,
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
         let sync = Arc::new(crate::BlockSync::new(

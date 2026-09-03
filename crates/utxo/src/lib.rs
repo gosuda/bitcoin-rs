@@ -31,9 +31,9 @@ pub use connect::{BlockChangeError, BlockValueTotals, SpentOutputLookup, is_coin
 pub use key::{UtxoBuildHasher, UtxoKey};
 pub use record::{OneUtxoOut, UtxoRecord};
 pub use set::{
-    BlockChanges, ScannedUtxo, UndoBatch, UtxoAdd, UtxoChangeEvents, UtxoChangeListener,
-    UtxoCommittedEvent, UtxoError, UtxoInserted, UtxoMemoryReport, UtxoRemoved, UtxoScan, UtxoSet,
-    UtxoSetView,
+    BlockChanges, BorrowedBlockChanges, BorrowedUtxoAdd, ScannedUtxo, UndoBatch, UtxoAdd,
+    UtxoChangeEvents, UtxoChangeListener, UtxoCommittedEvent, UtxoError, UtxoInserted,
+    UtxoMemoryReport, UtxoRemoved, UtxoScan, UtxoSet, UtxoSetView,
 };
 pub use shard::{LiveOutput, LiveOutputMeta};
 pub use snapshot::{

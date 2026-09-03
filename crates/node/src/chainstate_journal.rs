@@ -19,15 +19,25 @@
 #![allow(dead_code)]
 // The re-export is the module's public surface; writers/replayers arrive in Task 2+.
 
+mod delta;
+
+mod emit;
+
 mod record;
 
 mod writer;
 
+#[allow(unused_imports)]
+// writer surface; apply-path emission (Task 4) and boot replay (Task 5) consume these
+pub(crate) use delta::{BlockDeltaInputs, journal_record_for_block};
+#[allow(unused_imports)]
+// emit surface; Task 5 (boot wiring) installs the SharedJournalWriter
+pub(crate) use emit::{JournalEmit, SharedJournalWriter, shared_journal_writer};
 #[allow(unused_imports)]
 // module surface; consumers arrive in Task 2 (writer), 4 (emit), 5 (replay)
 pub(crate) use record::{
     BlockMeta, Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record,
 };
 #[allow(unused_imports)]
-// writer surface; apply-path emission (Task 4) and boot replay (Task 5) consume these
+// writer surface; Task 5 (boot fast path) consumes HeadMarker + failpoints
 pub(crate) use writer::{HeadMarker, JournalWriter, JournalWriterError, JournalWriterFailpoint};

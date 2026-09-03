@@ -849,6 +849,12 @@ pub struct ApplyHandles {
     pub assume_valid_height: u32,
     /// Hash-pinned assume-valid trust gate; the height shortcut above applies only while this is trusted.
     pub assume_valid_gate: Arc<AssumeValidGate>,
+    /// Chainstate-journal writer, when the journal is enabled (issue #230).
+    ///
+    /// `None` = journal off: the apply path emits nothing and behaves exactly
+    /// as a checkpoint-only node. The writer is single-owner (the apply path);
+    /// the `Mutex` only makes the shared handle exclusive.
+    pub(crate) journal: Option<crate::chainstate_journal::SharedJournalWriter>,
 }
 
 impl ApplyHandles {
@@ -915,6 +921,7 @@ impl ApplyHandles {
             chain_transition: Arc::new(parking_lot::Mutex::new(())),
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
+            journal: None,
         }
     }
 
@@ -2450,6 +2457,86 @@ fn apply_block_admitted<'b>(
     metrics::histogram!("node.apply_block.utxo_commit_seconds")
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
+
+    // §2.3 linearization point for the chainstate journal (issue #230): the
+    // in-memory UTXO commit above is the commit of record; everything the
+    // journal needs to reconstruct this block's semantic delta is still
+    // available here. Emit BEFORE `applied_tip.store` so the durable head can
+    // never lag what the applied-tip publication announces. The emission is
+    // best-effort: a transient journal I/O failure is logged + counted (the
+    // §2.3 degraded-mode policy owns persistent failure) and must never fail
+    // the block — the journal is a recovery accelerator, not a consensus
+    // dependency. No fsync on this path; `flush_to` performs the §2.3
+    // durability boundary on the batch cadence.
+    if let Some(journal) = &handles.journal {
+        let mut journal = journal.lock();
+        let undo_spends = undo.restores();
+        // build_block_changes pushes one undo restore per non-netted spend,
+        // in input order, and any BIP30 replaced-coin restores. Replay only
+        // needs the spends, so pair restores with removes positionally and
+        // stop when the two counts diverge (BIP30 case: restores outnumber
+        // removes — the tail restores belong to overwrites, not spends). The
+        // debug_assert pins the common non-BIP30 identity.
+        let removes = changes.spent_outpoints();
+        debug_assert!(
+            undo_spends.len() >= removes.len(),
+            "every journal-able spend needs a full undo coin"
+        );
+        let spent_coins = removes
+            .iter()
+            .zip(undo_spends.iter())
+            .map(|(outpoint, add)| crate::chainstate_journal::Coin {
+                outpoint: *outpoint,
+                txout: add.txout.clone(),
+                height: add.height,
+                coinbase: add.coinbase,
+            });
+        let record = crate::chainstate_journal::journal_record_for_block(
+            crate::chainstate_journal::BlockDeltaInputs {
+                height,
+                block_hash: block_hash.to_le_bytes(),
+                prev_hash: prev_hash.to_le_bytes(),
+                block_tx_count: tx_count_delta_for(block)
+                    + handles.chain_tx_count.load(Ordering::Relaxed),
+                // `finish_block` runs later in the publication tail, so the
+                // listener still carries the parent height here: the delta of
+                // this block is exactly (height - parent_height) — normally 1,
+                // 0 for genesis (which never reaches this code path).
+                coin_stats_height_delta: i64::from(height)
+                    - i64::from(handles.coin_stats.snapshot().height),
+                raw_header: {
+                    let mut header_bytes = [0u8; 80];
+                    let encoded = bitcoin_rs_primitives::consensus_bytes(&block.header);
+                    debug_assert_eq!(encoded.len(), 80, "header consensus encoding is 80 bytes");
+                    header_bytes.copy_from_slice(&encoded);
+                    header_bytes
+                },
+            },
+            &changes,
+            spent_coins,
+        );
+        match journal.append(&record) {
+            Ok(()) => {
+                let flush_result = journal.flush_through(height);
+                if let Err(error) = flush_result {
+                    metrics::counter!("node.chainstate_journal.flush_failures").increment(1);
+                    tracing::warn!(
+                        height,
+                        %error,
+                        "chainstate journal flush failed; recovery may fall back to full re-validation"
+                    );
+                }
+            }
+            Err(error) => {
+                metrics::counter!("node.chainstate_journal.append_failures").increment(1);
+                tracing::warn!(
+                    height,
+                    %error,
+                    "chainstate journal append failed; recovery may fall back to full re-validation"
+                );
+            }
+        }
+    }
 
     // Everything past the UTXO commit publishes values prepared above and
     // cannot fail: the tip snapshot was resolved from the tree before the
