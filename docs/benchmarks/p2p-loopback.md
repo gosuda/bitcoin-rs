@@ -215,9 +215,9 @@ python3 tools/benchmark-campaign/p2p_loopback.py --config <config.json> --output
 python3 -m unittest test_p2p_loopback   # from tools/benchmark-campaign/
 ```
 
-The tool depends on nothing in `runner.py`/`test_runner.py`; tests use real
-loopback sockets and deterministic fixture nodes (tiny Python scripts that
-connect, echo, read the exact corpus length, and write state files).
+The tool is standalone: tests use real loopback sockets and deterministic
+fixture nodes (tiny Python scripts that connect, echo, read the exact corpus
+length, and write state files).
 
 ## Limits
 

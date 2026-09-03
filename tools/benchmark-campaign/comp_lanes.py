@@ -213,11 +213,11 @@ def _find_bitcoind() -> str | None:
 
 
 def run_offline_lane(workspace: Path) -> dict[str, object]:
-    """Check whether the offline full-validation comparator (#34) can run.
+    """Report whether an offline full-validation run (#34) is reachable.
 
-    The comparator in ``runner.py`` requires a ``bitcoind`` binary and a
-    frozen corpus.  When ``bitcoind`` is absent the lane records the
-    blocking fact.
+    The strict comparator that consumed this signal was retired in commit
+    5487803, so this lane reports host readiness only: a ``bitcoind`` binary
+    on PATH, without which no offline comparison can start.
     """
     bitcoind = _find_bitcoind()
     if bitcoind is None:
