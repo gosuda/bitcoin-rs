@@ -10,7 +10,7 @@ const FRAME_TRAILER_LEN: usize = core::mem::size_of::<u32>();
 const MAX_PAYLOAD_LEN: usize = 256 * 1024 * 1024;
 const MAX_MUTATIONS: u32 = 4_000_000;
 
-/// A complete coin, including the fields required by CoinStats' MuHash preimage.
+/// A complete coin, including the fields required by `CoinStats`' `MuHash` preimage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Coin {
     /// Transaction output identifier.
@@ -45,7 +45,7 @@ pub(crate) struct BlockMeta {
     pub(crate) prev_hash: [u8; 32],
     /// Number of transactions in the block.
     pub(crate) block_tx_count: u64,
-    /// CoinStats height delta applied by the block.
+    /// `CoinStats` height delta applied by the block.
     pub(crate) coin_stats_height_delta: i64,
 }
 
@@ -60,11 +60,11 @@ pub(crate) struct JournalRecord {
     pub(crate) prev_hash: [u8; 32],
     /// Number of transactions in the block.
     pub(crate) block_tx_count: u64,
-    /// CoinStats height delta applied by the block.
+    /// `CoinStats` height delta applied by the block.
     pub(crate) coin_stats_height_delta: i64,
     /// The block's full 80-byte consensus header. Boot replay rebuilds the
-    /// checkpoint→head header chain in the BlockTree from these, which is what
-    /// makes the post-replay `TipSnapshot` (NodeId + chainwork) reconstructible.
+    /// checkpoint→head header chain in the `BlockTree` from these, which is what
+    /// makes the post-replay `TipSnapshot` (`NodeId` + `chainwork`) reconstructible.
     pub(crate) raw_header: [u8; 80],
     /// Mutations in exact commit order.
     pub(crate) mutations: Vec<Mutation>,

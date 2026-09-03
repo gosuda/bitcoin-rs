@@ -8,13 +8,21 @@
 //! per-coin tuple used by `utxo::undo_codec` (outpoint, `TxOut`, height, and
 //! coinbase), but this codec owns the ordered journal mutation shape.  Each
 //! record also carries the block's full 80-byte consensus header: boot replay
-//! rebuilds the checkpoint→head header chain in the BlockTree from these, so
-//! the post-replay `TipSnapshot` (NodeId + chainwork) is reconstructible.
+//! rebuilds the checkpoint→head header chain in the `BlockTree` from these, so
+//! the post-replay `TipSnapshot` (`NodeId` + `chainwork`) is reconstructible.
 //! Records are semantic UTXO deltas (net effects in commit order), not
 //! physical shard-commit order.
 
+// Wire-format surface lands in Task 1 and is consumed by the writer (Task 2),
+// apply-path emission (Task 4), and boot replay (Task 5). Until those callers
+// exist the codec is deliberately unreferenced from the production path.
+#![allow(dead_code)]
+// The re-export is the module's public surface; writers/replayers arrive in Task 2+.
+
 mod record;
 
+#[allow(unused_imports)]
+// module surface; consumers arrive in Task 2 (writer), 4 (emit), 5 (replay)
 pub(crate) use record::{
     BlockMeta, Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record,
 };
