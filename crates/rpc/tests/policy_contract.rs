@@ -16,7 +16,7 @@ use std::error::Error;
 use bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb;
 use bitcoin_rs_mempool::{
     AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits, MempoolObserver,
-    MutationOutcome, MutationResult, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
+    MutationEnvelope, MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
 };
 use bitcoin_rs_node::reorg::{ReorgError, invalidate_block};
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
@@ -629,7 +629,8 @@ struct RecordingGatewayObserver {
 }
 
 impl MempoolObserver for RecordingGatewayObserver {
-    fn on_mutation(&self, result: &MutationResult) {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        let result = &envelope.result;
         let mut changes = self.changes.lock();
         for (offset, change) in result.changes.iter().enumerate() {
             let sequence = result.sequence_of(offset).unwrap_or(u64::MAX);

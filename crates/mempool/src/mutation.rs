@@ -137,10 +137,9 @@ pub struct PeerToken {
 
 /// How the transaction behind a committed mutation entered the node.
 ///
-/// [`AdmissionOrigin::Peer`] and [`AdmissionOrigin::Block`] are the
-/// pre-declared batch contract for the ingress relay (R6/R7) and the
-/// apply-path sweep migration (ING-R34); no production caller emits them
-/// yet.
+/// [`AdmissionOrigin::Peer`] is emitted by P2P ingress
+/// (`crates/node/src/tx_ingress.rs`). [`AdmissionOrigin::Block`] is emitted
+/// by the apply-path sweep (`crates/node/src/apply.rs`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionOrigin {
     /// Submitted through RPC (`sendrawtransaction`).
@@ -156,10 +155,10 @@ pub enum AdmissionOrigin {
 /// What the gateway hands its observers: the committed result plus how the
 /// mutating transaction entered the node.
 ///
-/// The envelope is move-through and zero-alloc: [`MempoolGateway`] moves a
-/// committed [`MutationResult`] into it, publishes `&MutationEnvelope`, and
-/// hands `envelope.result` back to the caller — no clone, no lifetime on
-/// the observer trait.
+/// [`MempoolGateway`] clones one [`MutationResult`] into the envelope for
+/// each committed non-empty batch that has an observer attached, enqueues
+/// that envelope, then returns the original result to the caller. Observers
+/// receive `&MutationEnvelope` after the publish mutex is released.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MutationEnvelope {
     /// How the transaction entered the node.

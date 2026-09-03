@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationOutcome, MutationResult};
+use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
@@ -659,7 +659,8 @@ struct RecordingMempoolObserver {
 }
 
 impl MempoolObserver for RecordingMempoolObserver {
-    fn on_mutation(&self, result: &MutationResult) {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        let result = &envelope.result;
         let mut changes = self.changes.lock();
         for (offset, change) in result.changes.iter().enumerate() {
             let sequence = result.sequence_of(offset).unwrap_or(u64::MAX);

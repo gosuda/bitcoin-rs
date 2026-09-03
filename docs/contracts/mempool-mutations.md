@@ -15,38 +15,46 @@ in `crates/node/src/mempool_observer.rs`; payload encoding in
 - Every production mempool mutation routes through `MempoolGateway`. No
   production code outside the gateway takes the mempool write lock; lookups
   go through `MempoolGateway::read`.
-- Every mutating method flows through one path, `commit`, in this exact
-  order:
+- Every mutating method flows through one path, `commit` (and
+  `admit_transaction`, which enqueues the same way), in this exact order:
   1. take the pool write lock,
   2. mutate and assign per-change `mempool_sequence` values,
-  3. acquire the publish mutex while still holding the write lock,
-  4. drop the write lock,
-  5. call the observer under the publish mutex,
-  6. release the publish mutex.
-- Taking the publish mutex before the write lock is released (step 3 before
-  step 4) serializes publish acquisitions in commit order. An observer never
-  sees a later-committed batch before, or interleaved with, an earlier one.
-- The write lock is never held across an observer call. A slow or blocked
-  observer delays later publications; it can never roll anything back or
-  reorder the stream. Sequences were assigned in step 2, so a lagging
-  observer still sees a gap-free, ordered stream.
-- The observer receives a `&MutationEnvelope` — the committed `MutationResult`
-  paired with the `AdmissionOrigin` that identifies how the transaction
-  entered the node (`Rpc`, `Peer`, `Reorg`, or `Block`). The envelope is
-  move-through and zero-alloc: the gateway moves the result into the
-  envelope, publishes `&MutationEnvelope`, and hands `envelope.result` back
-  to the caller.
-- Observers are best-effort mirrors. Observer errors and panics never affect
-  the committed mutation. An observer must never route mutations back
-  through the gateway or otherwise take the mempool lock — read or write:
-  the callback runs under the gateway's publish mutex (step 5), so any pool
-  acquisition from the observer path can deadlock against a concurrent
-  writer or re-enter the gateway. The accepted-mutation mining wake threads
-  the last change's sequence into `MempoolSequenceWake::publish_generation_from`,
-  which builds the generation key from `applied_tip` plus that sequence and
-  never touches the mempool read lock (`crates/node/src/mining.rs`); the
-  node observer routes every mutation through it
-  (`crates/node/src/mempool_observer.rs`, `NodeMutationObserver::on_mutation`).
+  3. while still holding the write lock, enqueue a non-empty
+     `MutationEnvelope` on the publish FIFO and elect a drainer if none
+     exists,
+  4. release the write lock and the publish-state lock,
+  5. the elected drainer pops batches one at a time — releasing the
+     publish-state lock before every observer call — and returns the
+     publish state to idle only once the queue is empty.
+- Commits serialize under the write lock and step 3 enqueues under that
+  same ownership, so the queue order is the commit order and the sequence
+  order. An observer never sees a later-committed batch before, or
+  interleaved with, an earlier one.
+- Publication is eventual, not synchronous. A nested or concurrent
+  mutation enqueues and returns while a drainer exists; its callback may
+  run after that call has returned. A slow observer delays later
+  publications, not the caller. It can never roll anything back or reorder
+  the stream. Sequences were assigned in step 2, so a lagging observer
+  still sees a gap-free, ordered stream.
+- The observer receives a `&MutationEnvelope` — the committed
+  `MutationResult` paired with the `AdmissionOrigin` that identifies how
+  the transaction entered the node (`Rpc`, `Peer`, `Reorg`, or `Block`).
+  The gateway clones one `MutationResult` into the envelope for each
+  committed non-empty batch that has an observer attached, so it can both
+  enqueue publication and return the original result to the caller.
+  Empty results and an absent observer enqueue nothing, allocate nothing,
+  and spawn no thread.
+- Observers are best-effort mirrors. Observer errors and panics never
+  affect the committed mutation. No gateway lock is held across an
+  observer call, so an observer may re-enter the gateway: a nested call
+  commits, enqueues, and returns immediately, and its publication
+  completes after the in-flight callback. The accepted-mutation mining
+  wake threads the last change's sequence into
+  `MempoolSequenceWake::publish_generation_from`, which builds the
+  generation key from `applied_tip` plus that sequence and never touches
+  the mempool read lock (`crates/node/src/mining.rs`); the node observer
+  routes every mutation through it (`crates/node/src/mempool_observer.rs`,
+  `NodeMutationObserver::on_mutation`).
 
 ### `MPL-02`: Atomic mutation records and sequence assignment
 

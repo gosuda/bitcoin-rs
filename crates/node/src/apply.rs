@@ -10169,7 +10169,7 @@ mod chain_tx_count_tests {
 mod chain_generation_tests {
     use std::sync::Arc;
 
-    use bitcoin_rs_mempool::{MempoolObserver, MutationResult};
+    use bitcoin_rs_mempool::{MempoolObserver, MutationEnvelope};
     use bitcoin_rs_primitives::{BlockHash, Network, OutPoint, Tx, TxIn, TxOut, Txid};
     use bitcoin_rs_utxo::UtxoSet;
     use parking_lot::Mutex;
@@ -10198,7 +10198,7 @@ mod chain_generation_tests {
     }
 
     impl MempoolObserver for GatewayGenerationRecorder {
-        fn on_mutation(&self, _result: &MutationResult) {
+        fn on_mutation(&self, _envelope: &MutationEnvelope) {
             let generation = self
                 .gateway
                 .get()

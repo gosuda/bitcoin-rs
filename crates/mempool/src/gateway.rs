@@ -2,7 +2,7 @@
 //!
 //! Every production mempool mutation routes through [`MempoolGateway`]: it
 //! owns the pool's write lock, commits the mutation, and then enqueues the
-//! ordered [`MutationResult`] for the optional [`MempoolObserver`] — always
+//! ordered [`MutationEnvelope`] for the optional [`MempoolObserver`] — always
 //! in commit order, by construction. Publication is eventual: a nested or
 //! concurrent mutation call may return before its callback runs, and the
 //! elected drainer completes every queued callback exactly once, in
@@ -114,7 +114,7 @@ pub enum AdmitError {
 /// and `shared` shrinks to run-time composition plus tests.
 use crate::EntryId;
 use crate::entry::MempoolEntry;
-use crate::mutation::{AdmissionOrigin, MutationResult};
+use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::pool::{Mempool, MempoolError, PrioritiseError};
 use crate::rbf::{RbfError, ReplacementCandidate};
 
@@ -134,8 +134,8 @@ static REGISTRY: LazyLock<Mutex<Vec<Weak<MempoolGateway>>>> =
 /// — possibly after the nested call itself has already returned to its
 /// caller.
 pub trait MempoolObserver: Send + Sync {
-    /// Called once per committed, non-empty [`MutationResult`].
-    fn on_mutation(&self, result: &MutationResult);
+    /// Called once per committed, non-empty [`MutationEnvelope`].
+    fn on_mutation(&self, envelope: &MutationEnvelope);
 }
 
 /// Fans one committed mutation out to several named observers.
@@ -144,8 +144,8 @@ pub trait MempoolObserver: Send + Sync {
 /// leg is counted (`mempool_observer_leg_failed_total{leg}`) and logged
 /// with its name, and the later legs still run. The gateway's outer
 /// `catch_unwind` around the composite stays as the backstop. Legs inherit
-/// the [`MempoolObserver`] contract: best-effort, non-blocking, never
-/// touching the mempool lock.
+/// the [`MempoolObserver`] contract: best-effort mirrors that run with no
+/// gateway lock held, so a leg may re-enter the gateway.
 #[derive(Default)]
 pub struct CompositeObserver {
     /// Guarded because a subsystem may attach its leg after the gateway is
@@ -197,13 +197,13 @@ fn panic_message_and_dispose(panic_payload: Box<dyn core::any::Any + Send>) -> (
 }
 
 impl MempoolObserver for CompositeObserver {
-    fn on_mutation(&self, result: &MutationResult) {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
         // Clone the roster, then release: a leg is free to re-enter the
         // gateway, and a re-entrant attach must not deadlock behind us.
         let legs = self.legs.lock().clone();
         for (name, leg) in &legs {
             let outcome = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-                leg.on_mutation(result);
+                leg.on_mutation(envelope);
             }));
             if let Err(panic_payload) = outcome {
                 metrics::counter!("mempool_observer_leg_failed_total", "leg" => *name).increment(1);
@@ -221,14 +221,14 @@ impl MempoolObserver for CompositeObserver {
 
 /// The mutation publication queue state, protected by the `publish` mutex.
 ///
-/// Non-empty results are enqueued under the pool write lock; one drainer is
+/// Non-empty envelopes are enqueued under the pool write lock; one drainer is
 /// elected if none exists. The drainer pops batches one at a time —
 /// releasing the publish-state lock before every observer call — and
 /// returns the state to idle only once the queue is empty.
 struct PublishState {
-    /// Committed, non-empty batches awaiting their observer callback, in
+    /// Committed, non-empty envelopes awaiting their observer callback, in
     /// commit order.
-    queue: VecDeque<MutationResult>,
+    queue: VecDeque<MutationEnvelope>,
     /// Whether exactly one caller is draining the queue.
     draining: bool,
 }
@@ -242,7 +242,7 @@ struct PublishState {
 ///
 /// 1. take the pool write lock,
 /// 2. mutate and assign per-change mempool sequences,
-/// 3. while still holding the write lock, enqueue the non-empty result on
+/// 3. while still holding the write lock, enqueue the non-empty envelope on
 ///    the publish state's FIFO queue and elect a drainer if none exists,
 /// 4. release the write lock and the publish-state lock,
 /// 5. the elected drainer pops batches one at a time — releasing the
@@ -614,7 +614,10 @@ impl MempoolGateway {
         let mut elected = false;
         if !result.changes.is_empty() && self.observer.is_some() {
             let mut publish = self.publish.lock();
-            publish.queue.push_back(result.clone());
+            publish.queue.push_back(MutationEnvelope {
+                origin: request.origin,
+                result: result.clone(),
+            });
             elected = !publish.draining;
             publish.draining = true;
         }
@@ -689,15 +692,16 @@ impl MempoolGateway {
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> Result<MutationResult, E>,
     ) -> Result<MutationResult, E> {
-        let _ = origin; // origin retained for API compatibility; the queue
-        // publishes results without it.
         let mut elected = false;
         let result = {
             let mut pool = self.pool.write();
             let result = mutate(&mut pool)?;
             if !result.changes.is_empty() && self.observer.is_some() {
                 let mut publish = self.publish.lock();
-                publish.queue.push_back(result.clone());
+                publish.queue.push_back(MutationEnvelope {
+                    origin,
+                    result: result.clone(),
+                });
                 elected = !publish.draining;
                 publish.draining = true;
             }
@@ -733,10 +737,10 @@ impl MempoolGateway {
     /// panic hook still prints the panic before it is caught here.
     fn drain(&self) {
         loop {
-            let result = {
+            let envelope = {
                 let mut publish = self.publish.lock();
-                if let Some(result) = publish.queue.pop_front() {
-                    result
+                if let Some(envelope) = publish.queue.pop_front() {
+                    envelope
                 } else {
                     publish.draining = false;
                     return;
@@ -746,7 +750,7 @@ impl MempoolGateway {
                 continue;
             };
             let outcome = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-                observer.on_mutation(&result);
+                observer.on_mutation(&envelope);
             }));
             if let Err(panic_payload) = outcome {
                 let (message, payload_disposal_panicked) = panic_message_and_dispose(panic_payload);
@@ -887,7 +891,9 @@ mod tests {
         AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError, CompositeObserver,
         MempoolGateway, MempoolObserver,
     };
-    use crate::mutation::{AdmissionOrigin, MutationOutcome, MutationResult, RemovalReason};
+    use crate::mutation::{
+        AdmissionOrigin, MutationEnvelope, MutationOutcome, MutationResult, RemovalReason,
+    };
     use crate::standardness::PackageTxContext;
     use crate::{Mempool, MempoolEntry, MempoolLimits};
     use alloc::sync::Arc;
@@ -926,12 +932,14 @@ mod tests {
     #[derive(Default)]
     struct RecordingObserver {
         seen: Mutex<Vec<(Hash256, MutationOutcome)>>,
+        origins: Mutex<Vec<AdmissionOrigin>>,
     }
 
     impl MempoolObserver for RecordingObserver {
-        fn on_mutation(&self, result: &MutationResult) {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            self.origins.lock().push(envelope.origin);
             let mut seen = self.seen.lock();
-            for change in &result.changes {
+            for change in &envelope.result.changes {
                 seen.push((change.txid, change.outcome));
             }
         }
@@ -940,7 +948,7 @@ mod tests {
     struct PanickingObserver;
 
     impl MempoolObserver for PanickingObserver {
-        fn on_mutation(&self, _result: &MutationResult) {
+        fn on_mutation(&self, _envelope: &MutationEnvelope) {
             panic!("observer exploded");
         }
     }
@@ -1039,6 +1047,16 @@ mod tests {
                 (hash(&child.txid()), removed(RemovalReason::Explicit)),
             ],
             "one event per change, in commit order"
+        );
+        drop(seen);
+        assert_eq!(
+            *observer.origins.lock(),
+            vec![
+                AdmissionOrigin::Rpc,
+                AdmissionOrigin::Rpc,
+                AdmissionOrigin::Rpc
+            ],
+            "commit must publish the origin that entered the mutation"
         );
     }
 
@@ -1289,7 +1307,8 @@ mod tests {
     }
 
     impl MempoolObserver for GatedObserver {
-        fn on_mutation(&self, result: &MutationResult) {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            let result = &envelope.result;
             let mut stream = self.stream.lock();
             let first_call = stream.is_empty();
             for index in 0..result.len() {
@@ -1398,7 +1417,8 @@ mod tests {
     }
 
     impl MempoolObserver for ReentrantObserver {
-        fn on_mutation(&self, result: &MutationResult) {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            let result = &envelope.result;
             {
                 let mut stream = self.stream.lock();
                 for index in 0..result.len() {
@@ -1477,7 +1497,8 @@ mod tests {
     }
 
     impl MempoolObserver for ContiguityObserver {
-        fn on_mutation(&self, result: &MutationResult) {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            let result = &envelope.result;
             {
                 let mut stream = self.stream.lock();
                 for index in 0..result.len() {
@@ -1580,7 +1601,8 @@ mod tests {
     }
 
     impl MempoolObserver for SequenceStreamObserver {
-        fn on_mutation(&self, result: &MutationResult) {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            let result = &envelope.result;
             let mut stream = self.stream.lock();
             for index in 0..result.len() {
                 stream.push(result.sequence_of(index).unwrap_or(u64::MAX));
