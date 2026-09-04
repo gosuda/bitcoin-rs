@@ -358,61 +358,7 @@ pub fn record_at_height_hash(
     }
     None
 }
-/// Block payload facts available without materializing a full block body.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BlockBodyMetadata {
-    /// Serialized block byte length.
-    pub body_size: usize,
-    /// Number of transactions encoded in the block.
-    pub tx_count: usize,
-}
-
-/// Storage-backed block body reader used when block records keep only metadata.
-pub trait BlockBodySource: Send + Sync {
-    /// Returns serialized block bytes for `height` and `hash`, if available.
-    fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>>;
-
-    /// Returns indexed body facts. Implementations that cannot answer without
-    /// I/O may leave this absent; header-only callers then remain header-only.
-    fn block_body_metadata(&self, _height: u32, _hash: BlockHash) -> Option<BlockBodyMetadata> {
-        None
-    }
-
-    /// Bytes this source's block storage currently occupies on disk.
-    ///
-    /// This is `getblockchaininfo`'s `size_on_disk`, and it has to come from
-    /// whatever owns the bytes. The block-record log can only offer the sum of
-    /// the block sizes it has seen, which is a different number: records outlive
-    /// the bodies they describe, so that sum keeps counting bytes pruning has
-    /// already deleted — under a field name that is read to check whether
-    /// pruning is working.
-    ///
-    /// `None` means "this source does not know", and the caller falls back to
-    /// that sum. A source with no durable storage behind it — a test fixture, a
-    /// cache-only context — has nothing better to say.
-    fn disk_usage(&self) -> Option<u64> {
-        None
-    }
-
-    /// Returns `len` body bytes starting `offset` bytes into the serialized
-    /// block, letting a caller read one transaction without materializing the
-    /// whole body.
-    ///
-    /// Defaults to `None` so a backend that cannot slice keeps working: callers
-    /// must treat `None` as "read the whole body instead", never as "those bytes
-    /// do not exist". An out-of-range request also yields `None` rather than a
-    /// short read — a truncated transaction decodes into something other than
-    /// the one that was asked for.
-    fn block_body_range(
-        &self,
-        _height: u32,
-        _hash: BlockHash,
-        _offset: u32,
-        _len: u32,
-    ) -> Option<Vec<u8>> {
-        None
-    }
-}
+pub use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource};
 
 /// Read-only source of rollback-evidence warnings for `getblockchaininfo`.
 ///
@@ -882,12 +828,6 @@ pub struct CapabilitySnapshot {
     pub capabilities: Vec<CapabilityStatus>,
 }
 
-/// Read-only provider implemented by the node for the RPC capability report.
-pub trait CapabilityProvider: Send + Sync {
-    /// Captures the current capability status.
-    fn snapshot(&self) -> CapabilitySnapshot;
-}
-
 /// Failure from a complete transaction-index query.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TxQueryError {
@@ -1027,8 +967,8 @@ pub struct ContextHandles {
     pub network: NetworkHandles,
     /// Mining capability: the template coordinator, when one is attached.
     pub mining: MiningHandles,
-    /// Live capability report for concrete node-owned services.
-    pub capabilities: Option<Arc<dyn CapabilityProvider>>,
+    /// Live txindex status for the `getcapabilities` projection.
+    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexStatusSource>>,
 }
 
 /// Chain capability handles.
@@ -1144,8 +1084,8 @@ pub struct Context {
     pub esplora_tx_index: Option<Arc<dyn TxIndexQuery>>,
     /// Optional node-owned generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
-    /// Live capability report for concrete node-owned services.
-    pub capabilities: Option<Arc<dyn CapabilityProvider>>,
+    /// Live txindex status for the `getcapabilities` projection.
+    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexStatusSource>>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
     /// Network selector used by handlers needing consensus parameters (e.g.
@@ -1229,7 +1169,7 @@ impl Context {
             tx_index: None,
             esplora_tx_index: None,
             script_index: None,
-            capabilities: None,
+            txindex_status: None,
             prune_service: None,
             chain_control: None,
             peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
@@ -1281,7 +1221,7 @@ impl Context {
             tx_index: None,
             esplora_tx_index: None,
             script_index: None,
-            capabilities: None,
+            txindex_status: None,
             prune_service: None,
             chain_control: None,
             peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
@@ -1331,7 +1271,7 @@ impl Context {
                     added_nodes,
                 },
             mining: MiningHandles { mining_control },
-            capabilities,
+            txindex_status,
         } = handles;
         Self {
             chain_tip,
@@ -1347,7 +1287,7 @@ impl Context {
             tx_index,
             esplora_tx_index: None,
             script_index,
-            capabilities,
+            txindex_status,
             network,
             chain_network,
             peer_table,
@@ -2046,7 +1986,7 @@ mod tests {
             mining: MiningHandles {
                 mining_control: None,
             },
-            capabilities: None,
+            txindex_status: None,
         });
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),

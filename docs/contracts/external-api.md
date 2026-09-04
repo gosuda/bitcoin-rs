@@ -44,6 +44,10 @@ nothing normative; it places the owners under the
 - Statistical and script index queries are bounded by `QueryBudget` to prevent
   memory exhaustion.
 
+The wallet-facing subset of this surface — tip, fees, address/script
+queries, and broadcast over Esplora, plus the key-free node RPCs — is
+owned by [wallet-facing.md](wallet-facing.md).
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).

@@ -1,4 +1,7 @@
 //! Contract tests for the dedicated redb transaction-index store.
+//!
+//! `ScriptLive` rows in these tests protect the `IDX-01` empty-valued
+//! `script-hash-prefix || full-outpoint` representation.
 
 #![cfg(feature = "redb")]
 

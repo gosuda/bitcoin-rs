@@ -15,7 +15,10 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::Mempool;
-use bitcoin_rs_mining::{Candidate, CandidateContext, TemplateId, assemble_candidate};
+use bitcoin_rs_mempool::{MempoolObserver, MutationEnvelope};
+use bitcoin_rs_mining::{
+    Candidate, CandidateContext, MiningChainContext, TemplateId, assemble_candidate,
+};
 use bitcoin_rs_primitives::{Block, Hash256, Network};
 use bitcoin_rs_rpc::context::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
@@ -29,7 +32,6 @@ use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::ApplyError;
 use crate::apply::{self, ApplyHandles};
-use crate::bip9_context::MiningChainContext;
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
@@ -208,6 +210,16 @@ impl MiningGenerationSignal {
         } else {
             self.publish_generation();
         }
+    }
+}
+
+impl MempoolObserver for MiningGenerationSignal {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        let result = &envelope.result;
+        let wake_sequence = result
+            .sequence_of(result.changes.len().saturating_sub(1))
+            .unwrap_or(result.sequence_base);
+        self.publish_generation_from(wake_sequence);
     }
 }
 

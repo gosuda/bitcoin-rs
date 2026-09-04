@@ -46,7 +46,7 @@ struct WorkerInputs {
     block_tree: Arc<RwLock<BlockTree>>,
     shutdown: Arc<AtomicBool>,
     wake_rx: Receiver<()>,
-    block_source: NodeBlockSource,
+    block_source: IndexBlockSource,
     chain_events: Arc<crate::state::ChainEventPublisher>,
 }
 
@@ -60,7 +60,7 @@ fn build_worker_inputs(dir: &std::path::Path, epoch: u64) -> WorkerInputs {
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let shutdown = Arc::new(AtomicBool::new(false));
     let blocks = Arc::new(RwLock::new(BlockLog::new()));
-    let block_source = NodeBlockSource::new(blocks);
+    let block_source = IndexBlockSource::new(blocks);
     let chain_events = detached_chain_publisher();
 
     WorkerInputs {

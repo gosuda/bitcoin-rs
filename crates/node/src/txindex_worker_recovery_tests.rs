@@ -169,6 +169,18 @@ struct Harness {
 
 impl Harness {
     fn new(fixture: &ForkFixture, rollback_rebuild_cutover: u32) -> Self {
+        Self::with_enabled(
+            fixture,
+            rollback_rebuild_cutover,
+            IndexCapabilities::HISTORICAL,
+        )
+    }
+
+    fn with_enabled(
+        fixture: &ForkFixture,
+        rollback_rebuild_cutover: u32,
+        enabled: IndexCapabilities,
+    ) -> Self {
         let index_dir = tempfile::tempdir().expect("index dir");
         let evidence_dir = tempfile::tempdir().expect("evidence dir");
         let store = Arc::new(FjallStore::open(index_dir.path()).expect("fjall open"));
@@ -180,6 +192,10 @@ impl Harness {
         let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
         let (reporter, warnings) = test_recovery_reporter(evidence_dir.path());
         let body_store: Arc<dyn PruneBodyStore> = fixture.bodies.clone();
+        let utxo = enabled
+            .script_live
+            .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+        let chain_transition = enabled.script_live.then(|| Arc::new(Mutex::new(())));
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
@@ -187,15 +203,15 @@ impl Harness {
             block_tree: Arc::clone(&fixture.tree),
             body_store: Some(body_store),
             batch_limits: DEFAULT_BATCH_LIMITS,
-            enabled: IndexCapabilities::HISTORICAL,
+            enabled,
             chain_events: detached_chain_publisher(),
             reporter,
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
             rollback_rebuild_cutover,
-            utxo: None,
-            chain_transition: None,
+            utxo,
+            chain_transition,
         };
         Self {
             _index_dir: index_dir,
@@ -217,6 +233,43 @@ impl Harness {
     fn settle(&self, pending: &mut Option<PendingForward>) {
         for _ in 0..64 {
             match self.worker.reconcile_once(pending).expect("reconcile pass") {
+                ReconcileAction::CaughtUp => return,
+                ReconcileAction::Progressed | ReconcileAction::Buffered => {}
+                ReconcileAction::Stalled => panic!("worker stalled"),
+            }
+        }
+        panic!("worker did not converge");
+    }
+
+    /// Forwards the currently enabled capabilities without leftover demotion.
+    ///
+    /// `settle` runs `reconcile_pass`, which resets families that `enabled`
+    /// no longer maintains (`IDX-01` leftover). Tests that split watermarks
+    /// across families keep the disabled sibling's cursor and must not take
+    /// that path.
+    fn catch_up_enabled(&self, pending: &mut Option<PendingForward>) {
+        for _ in 0..64 {
+            let Some(target) = self.applied_tip.load_full() else {
+                panic!("catch-up requires an applied tip");
+            };
+            let (fence, watermarks) = self.writer.fenced_watermarks().expect("watermarks");
+            let Some((capabilities, watermark)) =
+                self.worker.forward_selection(watermarks, target.as_ref())
+            else {
+                return;
+            };
+            match self
+                .worker
+                .catch_up_to(
+                    target.as_ref(),
+                    fence,
+                    watermarks,
+                    watermark,
+                    capabilities,
+                    pending,
+                )
+                .expect("catch-up pass")
+            {
                 ReconcileAction::CaughtUp => return,
                 ReconcileAction::Progressed | ReconcileAction::Buffered => {}
                 ReconcileAction::Stalled => panic!("worker stalled"),
@@ -315,6 +368,50 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
         }
         other => panic!("expected IndexWatermarkAhead marker, got {other:?}"),
     }
+}
+
+/// `RCV-04` / `IDX-07`: a live-only watermark above the restored tip writes
+/// index-ahead evidence. A same-pass rebuild then reseeds from the UTXO set
+/// rather than replaying Live from genesis.
+#[test]
+fn live_only_index_ahead_is_reported_and_reseeded() {
+    let f = ForkFixture::new(3);
+    let h = Harness::with_enabled(&f, 0, IndexCapabilities::SCRIPT_LIVE);
+    let mut pending = None;
+
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    h.settle(&mut pending);
+    assert_eq!(h.watermarks().script_live.map(|w| w.height), Some(3));
+
+    let a1 = f.tip(f.a[0]);
+    h.set_tip(&a1);
+    let first = h.worker.reconcile_once(&mut pending).expect("ahead pass");
+    assert!(!matches!(first, ReconcileAction::CaughtUp));
+    match h.index_ahead_marker() {
+        Some(RollbackEventKind::IndexWatermarkAhead {
+            capability,
+            restored_height,
+            restored_hash,
+            old_height,
+            old_hash,
+            gap,
+        }) => {
+            assert_eq!(capability, "script_live");
+            assert_eq!((restored_height, old_height, gap), (1, 3, 2));
+            assert_eq!(restored_hash, a1.hash.to_string_be());
+            assert_eq!(old_hash, a3.hash.to_string_be());
+        }
+        other => panic!("expected IndexWatermarkAhead marker, got {other:?}"),
+    }
+    assert_eq!(
+        h.watermarks().script_live.map(|w| w.height),
+        Some(1),
+        "ScriptLive reseeds from the restored UTXO tip after rebuild"
+    );
+
+    h.settle(&mut pending);
+    assert_eq!(h.watermarks().script_live.map(|w| w.height), Some(1));
 }
 
 /// `RCV-05`: a rollback deeper than the cutover resets the selected
@@ -420,7 +517,8 @@ fn selective_rebuild_leg_survives_sibling_rollback() {
     h.worker.enabled = IndexCapabilities::TX_LOOKUP;
     let a3 = f.tip(f.a[2]);
     h.set_tip(&a3);
-    h.settle(&mut pending);
+    h.catch_up_enabled(&mut pending);
+    pending = None;
     let watermarks = h.watermarks();
     assert_eq!(watermarks.tx_lookup.map(|w| w.height), Some(3));
     assert_eq!(watermarks.script_history.map(|w| w.height), Some(1));
