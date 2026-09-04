@@ -37,13 +37,13 @@ electrs/mempool.space base URL. Relative routes below are appended to it.
   index covers the applied tip.
 - Broadcast: `POST /tx` (hex body), which dispatches `sendrawtransaction`
   through the same admission owner as JSON-RPC.
-- `/api` is a closed namespace: a request in it never falls through to
-  JSON-RPC. Unprefixed electrs paths on this listener 404 so JSON-RPC
-  keeps `/`. `/api/v1` is Mempool's API on the explorer port, not an
-  Esplora alias here.
-- `/internal/*` and `/block-template` are mempool-backend helpers under
-  the same `/api` base (`ESPLORA_REST_API_URL=http://node:8332/api`).
-  Explorer nginx 404s those paths on the public port.
+- `/api` is a closed electrs namespace: a request in it never falls
+  through to JSON-RPC. Unprefixed electrs paths on this listener 404 so
+  JSON-RPC keeps `/`. `/api/v1` is Mempool's API on the explorer port,
+  not an Esplora alias here.
+- `/api` does not serve mempool-backend helpers. `/internal/*` and
+  `/block-template` live under `/esplora`, the electrs superset
+  `mempool/backend` uses as `ESPLORA_REST_API_URL`.
 
 ### `WF-03`: Proof is a public-HTTP consumer
 
@@ -69,7 +69,7 @@ electrs/mempool.space base URL. Relative routes below are appended to it.
 ## Proven by
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
-- `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix` and `api_is_the_closed_esplora_and_backend_namespace`
+- `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset`
 - `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
 
 ## Vocabulary

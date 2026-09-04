@@ -660,8 +660,8 @@ fn assert_esplora_namespace(
     let backend = client.esplora_get("/api/internal/mempool/txs")?;
     assert_eq!(
         backend.status,
-        200,
-        "GET /api/internal/* is the mempool-backend path on the node listener: {}",
+        404,
+        "GET /api/internal/* is not wallet-facing: {}",
         backend.text()
     );
     Ok(())
