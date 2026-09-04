@@ -724,11 +724,10 @@ impl MiningCoordinator {
     /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
     fn accept_submitted_header(&self, header: Header) -> Result<(), MiningControlError> {
         let mut tree = self.block_tree.write();
-        if tree.lookup(header.prev_blockhash.into()).is_none() {
-            return Err(MiningControlError::Rejected(CompactString::from(format!(
-                "Must submit previous header ({}) first",
-                header.prev_blockhash
-            ))));
+        if tree.lookup(header.block_hash().into()).is_none()
+            && tree.lookup(header.prev_blockhash.into()).is_none()
+        {
+            return Err(missing_parent_rejection(header.prev_blockhash));
         }
         accept_headers(
             &mut tree,
@@ -966,6 +965,12 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     }
 }
 
+fn missing_parent_rejection(prev_hash: Hash256) -> MiningControlError {
+    MiningControlError::Rejected(CompactString::from(format!(
+        "Must submit previous header ({prev_hash}) first"
+    )))
+}
+
 fn header_reject_reason(error: ChainError) -> MiningControlError {
     let reason = match error {
         ChainError::InvalidPow { .. } => CompactString::from("high-hash"),
@@ -975,7 +980,7 @@ fn header_reject_reason(error: ChainError) -> MiningControlError {
         ChainError::TimestampTooEarly { .. } => CompactString::from("time-too-old"),
         ChainError::TimestampTooFarAhead { .. } => CompactString::from("time-too-new"),
         ChainError::MissingParent { prev_hash } => {
-            CompactString::from(format!("Must submit previous header ({prev_hash}) first"))
+            return missing_parent_rejection(prev_hash);
         }
         other => CompactString::from(other.to_string()),
     };
@@ -1010,6 +1015,7 @@ mod apply_error_tests {
 }
 
 #[cfg(test)]
+// CONTRACT: docs/contracts/external-api.md#API-09
 mod header_reject_tests {
     use super::header_reject_reason;
     use bitcoin_rs_chain::{ChainError, ChainWork};
