@@ -2,6 +2,9 @@
 
 #![cfg(feature = "redb")]
 
+//! CONTRACT: IDX-01 — ScriptLive rows are empty-valued hash-prefix/outpoint
+//! keys with exact point deletion.
+
 use bitcoin_rs_storage::{
     ColumnFamily, KvStore, PrefixScanLimit, StorageError, WriteBatch, WriteCondition,
 };
