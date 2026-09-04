@@ -169,6 +169,9 @@ remove another script's output.
 - **Deep reorg memory bounding**: Disconnect planning preloads branch block bodies into memory; streaming bounded-memory disconnect is tracked under #206 (open).
 ## Proven by
 
+- `crates/index/tests/index_roundtrip.rs`
+  `commit_golden_blocks_writes_expected_electrs_rows`: electrs family
+  occupancy after one atomic `IndexWriter::commit_block` (`IDX-06`).
 - `crates/node/src/txindex_worker_recovery_tests.rs`:
   - `shallow_reorg_rewinds_to_common_ancestor_then_replays`
   - `absent_tip_rewinds_index_to_empty`
