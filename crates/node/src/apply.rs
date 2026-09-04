@@ -2222,11 +2222,12 @@ fn prove_window<'a>(
         ) {
             return Vec::new();
         }
-        // BIP141: a missing commitment is fatal only when the block carries
-        // witness data anyway; a commitment-less block without witness data is
-        // valid under active segwit. The commitment check consumes the view's
-        // cached witness IDs, so a block hashes its transactions as witness
-        // IDs exactly once across the whole window.
+        // BIP141 CheckWitnessMalleation window precheck. Under active SegWit a
+        // block with witness data must carry a matching BIP141 commitment and a
+        // 32-byte coinbase reserved nonce. The check consumes the view's cached
+        // witness IDs so a block hashes its transactions as witness IDs exactly
+        // once across the whole window. A commitment-less block without witness
+        // data is valid and is not checked here.
         if context
             .flags
             .contains(bitcoin_rs_script::VerifyFlags::WITNESS)

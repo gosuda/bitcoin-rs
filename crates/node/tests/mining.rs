@@ -113,6 +113,21 @@ fn to_lower_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed`.
+const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+
+fn is_witness_commitment(script_pubkey: &[u8]) -> bool {
+    script_pubkey.len() >= 38 && script_pubkey.starts_with(&WITNESS_COMMITMENT_PREFIX)
+}
+
+fn solved_template_block(mining: &MiningCoordinator) -> anyhow::Result<Block> {
+    let template = expect_template(mining.get_block_template(template_request(None))?);
+    template
+        .candidate
+        .solve(1_000_000)
+        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))
+}
+
 fn mined_child(prev: BlockHash) -> anyhow::Result<Block> {
     mined_child_labeled(prev, 1)
 }
@@ -613,6 +628,105 @@ fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
 }
 
 #[test]
+fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let mut block = solved_template_block(&mining)?;
+    {
+        let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+            panic!("solved candidate missing coinbase input");
+        };
+        assert!(
+            !input.witness.is_empty(),
+            "assembled candidate must carry the reserved nonce"
+        );
+        input.witness.clear();
+    }
+    assert!(
+        block.txs.first().is_some_and(|tx| tx
+            .outputs
+            .iter()
+            .any(|output| is_witness_commitment(&output.script_pubkey))),
+        "assembled candidate must carry a BIP141 commitment"
+    );
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-witness-nonce-size");
+        }
+        other => panic!("expected bad-witness-nonce-size, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let mut block = solved_template_block(&mining)?;
+    {
+        let Some(coinbase) = block.txs.first_mut() else {
+            panic!("solved candidate missing coinbase");
+        };
+        assert!(
+            coinbase
+                .inputs
+                .first()
+                .is_some_and(|input| !input.witness.is_empty()),
+            "assembled candidate must carry the reserved nonce"
+        );
+        coinbase
+            .outputs
+            .retain(|output| !is_witness_commitment(&output.script_pubkey));
+        assert!(
+            !coinbase.outputs.is_empty(),
+            "coinbase must keep a payout output after stripping the commitment"
+        );
+    }
+    block.header.merkle_root = block_merkle_root(&block);
+    mine_block_to_regtest_target(&mut block)?;
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "unexpected-witness");
+        }
+        other => panic!("expected unexpected-witness, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let mut block = solved_template_block(&mining)?;
+    {
+        let Some(output) = block.txs.first_mut().and_then(|tx| {
+            tx.outputs
+                .iter_mut()
+                .rev()
+                .find(|output| is_witness_commitment(&output.script_pubkey))
+        }) else {
+            panic!("solved candidate missing BIP141 commitment");
+        };
+        output.script_pubkey[6] ^= 0xff;
+    }
+    block.header.merkle_root = block_merkle_root(&block);
+    mine_block_to_regtest_target(&mut block)?;
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-witness-merkle-match");
+        }
+        other => panic!("expected bad-witness-merkle-match, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
@@ -651,12 +765,10 @@ fn submit_block_fills_omitted_coinbase_witness() -> anyhow::Result<()> {
         "assembled candidate must carry the reserved nonce"
     );
     input.witness.clear();
-    let has_commitment = block.txs[0].outputs.iter().any(|output| {
-        output.script_pubkey.len() >= 38
-            && output
-                .script_pubkey
-                .starts_with(&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed])
-    });
+    let has_commitment = block.txs[0]
+        .outputs
+        .iter()
+        .any(|output| is_witness_commitment(&output.script_pubkey));
     assert!(
         has_commitment,
         "assembled candidate must carry a BIP141 commitment"
