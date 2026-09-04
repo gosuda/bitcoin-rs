@@ -155,9 +155,7 @@ fn serve_connection(
 
         if request.method == "GET" {
             let (path, query) = split_path_query(&request.path);
-            // `/rest/` is Core REST. `/api` and `/esplora` are Esplora
-            // directories (public electrs vs mempool-backend superset).
-            // Everything else 404s so JSON-RPC keeps `/`.
+            // Routing contract: `docs/contracts/wallet-facing.md` WF-02.
             let response = if path.starts_with("/rest/") {
                 crate::rest::route(handler.context(), path, query, rest_enabled)
             } else {
