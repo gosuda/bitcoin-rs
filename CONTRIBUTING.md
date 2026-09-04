@@ -23,24 +23,35 @@ cargo install --locked cargo-deny
 ## Quick verification (PR gate)
 
 Pull requests run a fast pure-Rust gate configured in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml). Run these locally before
-submitting:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml): `fmt`, `deny`, `clippy`,
+and normal workspace tests. No C++ toolchain, no benches, no backend matrix.
+Run these locally before submitting:
 
 ```sh
 # 1. Format check
 cargo fmt --all -- --check
 
-# 2. Clippy on all targets with default features
-cargo clippy --workspace --all-targets -- -D warnings
+# 2. Clippy on all targets, kernel-free
+# consensus and node default to `kernel` (C++ libbitcoinkernel); exclude them
+# from the workspace pass and lint their pure-Rust surfaces separately.
+cargo clippy --workspace --all-targets \
+  --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
+  -- -D warnings
+cargo clippy -p bitcoin-rs-consensus \
+  --no-default-features --all-targets -- -D warnings
+cargo clippy -p bitcoin-rs-node \
+  --no-default-features --features fjall,zmq --all-targets -- -D warnings
 
 # 3. Workspace unit and integration tests (pure-Rust defaults)
-cargo test --workspace --no-fail-fast
+cargo test --workspace --no-fail-fast \
+  --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
+cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+cargo test -p bitcoin-rs-node \
+  --no-default-features --features fjall,zmq --no-fail-fast
 
-# 4. Isolated non-default feature tests
-cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
-
-# 5. Dependency, license, and duplicate-version audits
-cargo deny check
+# 4. Dependency, license, and duplicate-version audits
+cargo deny check --workspace --no-default-features \
+  --features rocksdb,fjall,redb,mdbx,kernel
 ```
 
 ## Deep CI lanes (main workflow)
@@ -56,6 +67,11 @@ Compiles all storage engines (`fjall`, `redb`, `rocksdb`, `mdbx`) and the
 ```sh
 cargo test -p bitcoin-rs --no-fail-fast \
   --no-default-features --features "rocksdb,fjall,redb,mdbx,kernel"
+
+# Portable full-backend surface without kernel
+cargo test -p bitcoin-rs --no-fail-fast \
+  --no-default-features --features "rocksdb,fjall,redb,mdbx"
+cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
 
 cargo clippy -p bitcoin-rs --all-targets \
   --no-default-features --features "rocksdb,fjall,redb,mdbx,kernel" -- -D warnings
@@ -76,10 +92,18 @@ cargo test -p bitcoin-rs --test g03_kernel_parity --features kernel -- --ignored
 ### Benchmark compilation check
 
 ```sh
-cargo bench -p bitcoin-rs --no-run \
-  --no-default-features --features "rocksdb,fjall,redb,mdbx,kernel"
-cargo bench -p bitcoin-rs-utxo --no-run
-cargo bench -p bitcoin-rs-utxo --no-run --features bench-mimalloc
+cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
+cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
+cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
+cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
+```
+
+### Comparator campaign tests
+
+```sh
+cd tools/benchmark-campaign
+for f in test_*.py; do python3 "$f"; done
+python3 tools/campaign-corpus/test_corpus.py
 ```
 
 ### Fuzzing

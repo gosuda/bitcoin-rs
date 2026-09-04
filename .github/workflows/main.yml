@@ -1,13 +1,18 @@
 name: ci-main
 
 # Deep lanes: everything that needs the C++ toolchain (libbitcoinkernel),
-# nightly, lockfile mutation, or long runtimes. Never triggered by pull
-# requests -- the fast gate in ci.yml is the only required-status job set for
-# PRs.
+# nightly, lockfile mutation, long runtimes, or extra feature/backend
+# surfaces. Never triggered by pull requests -- the fast gate in ci.yml is
+# the only required-status job set for PRs.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+# The deep validation lanes only need to read repository contents. Keep the
+# token scope explicit instead of inheriting repository defaults.
+permissions:
+  contents: read
 
 # Same design as ci.yml's concurrency block: one group per run, so `main`
 # pushes never queue against each other and so are never cancelled (a pending
@@ -47,6 +52,13 @@ jobs:
       - run: |
           cargo test -p bitcoin-rs --no-fail-fast \
             --no-default-features --features "${FULL_NODE_FEATURES}"
+      # Portable full-backend surface without kernel (the PR gate tests the
+      # default fjall+zmq path only). Isolated so node's default `zmq`
+      # feature cannot unify bitcoin-rs-rpc on.
+      - run: |
+          cargo test -p bitcoin-rs --no-fail-fast \
+            --no-default-features --features "rocksdb,fjall,redb,mdbx"
+          cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
       # Consensus fixture corpus: committed tests that are --ignored by
       # design (large deterministic vectors), so the workspace run never
       # picks them up.
@@ -168,3 +180,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo test -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+
+  # Comparator campaign behavioral tests and the C150/Cmodern corpus freeze.
+  # Pure Python, self-contained -- no bitcoind, no external services. Moved
+  # off the PR gate (issue #171): not part of fmt/deny/clippy/workspace tests.
+  comparator-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - run: |
+          cd tools/benchmark-campaign
+          for f in test_*.py; do python3 "$f" || exit 1; done
+      - run: python3 tools/campaign-corpus/test_corpus.py
