@@ -21,10 +21,10 @@ The native path becomes the library default only after:
 4. The native median is faster than the pinned kernel median.
 5. Changed validation boundaries pass the in-tree test and clippy gates.
 
-Full-mainnet replay remains blocked on #34 and #42 (no frozen C150/Cmodern
-corpus and no in-tree `bitcoind` comparator run). A missing replay does not
-weaken the signed-spend or vector gates. A failed signed-spend measurement
-does not flip the default.
+Full-mainnet replay remains blocked on #34 (no in-tree `bitcoind` comparator
+run). #42 froze the C150/Cmodern corpus contracts; that freeze does not run
+the comparator. A missing replay does not weaken the signed-spend or vector
+gates. A failed signed-spend measurement does not flip the default.
 
 ## Current ownership of the default
 
@@ -93,5 +93,5 @@ count is not reported by this harness.
 |---|---|
 | Core vector parity (available corpus) | Pass (zero pinned native mismatches) |
 | Signed-spend native faster, stable medians | Fail (stable; native 9.2% slower on apply p50) |
-| Full-mainnet replay | Blocked on #34 / #42 |
+| Full-mainnet replay | Blocked on #34 (#42 corpus freeze is done) |
 | Library / image default | Keep `kernel` |
