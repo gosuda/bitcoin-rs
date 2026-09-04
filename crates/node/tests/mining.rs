@@ -1267,6 +1267,7 @@ fn disconnect_applied(state: &NodeState, block: &Block) -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
+// CONTRACT: API-21 (BIP22 duplicate behavior)
 #[test]
 fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -1304,6 +1305,7 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Resu
     Ok(())
 }
 
+// CONTRACT: API-21 (BIP22 duplicate behavior)
 #[test]
 fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
     let state = open_regtest()?;
