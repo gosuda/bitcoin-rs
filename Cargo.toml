@@ -22,7 +22,7 @@ edition      = "2024"
 rust-version = "1.95.0"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/gosuda/bitcoin-rs"
-version      = "0.4.0"
+version      = "0.5.0"
 authors      = ["metaphorics"]
 
 # ============================================================================
@@ -35,19 +35,19 @@ authors      = ["metaphorics"]
 
 # Internal crates — `version` must match `[workspace.package].version` (gate g15).
 # Cargo cannot inherit `version` into `[workspace.dependencies]`; bump both together.
-bitcoin-rs-primitives = { path = "crates/primitives", version = "0.4.0" }
-bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.4.0", default-features = false }
-bitcoin-rs-script     = { path = "crates/script",     version = "0.4.0", default-features = false }
-bitcoin-rs-storage    = { path = "crates/storage",    version = "0.4.0", default-features = false }
-bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.4.0" }
-bitcoin-rs-chain      = { path = "crates/chain",      version = "0.4.0" }
-bitcoin-rs-index      = { path = "crates/index",      version = "0.4.0" }
+bitcoin-rs-primitives = { path = "crates/primitives", version = "0.5.0" }
+bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.5.0", default-features = false }
+bitcoin-rs-script     = { path = "crates/script",     version = "0.5.0", default-features = false }
+bitcoin-rs-storage    = { path = "crates/storage",    version = "0.5.0", default-features = false }
+bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.5.0" }
+bitcoin-rs-chain      = { path = "crates/chain",      version = "0.5.0" }
+bitcoin-rs-index      = { path = "crates/index",      version = "0.5.0" }
 
-bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.4.0" }
-bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.4.0" }
-bitcoin-rs-mining     = { path = "crates/mining",     version = "0.4.0" }
-bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.4.0" }
-bitcoin-rs-node       = { path = "crates/node",       version = "0.4.0", default-features = false }
+bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.5.0" }
+bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.5.0" }
+bitcoin-rs-mining     = { path = "crates/mining",     version = "0.5.0" }
+bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.5.0" }
+bitcoin-rs-node       = { path = "crates/node",       version = "0.5.0", default-features = false }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
