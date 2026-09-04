@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
-    BlockTree, ChainError, NodeId, TipSnapshot, accept_headers, current_unix_seconds,
+    BlockTree, ChainError, NodeId, NodeStatus, TipSnapshot, accept_headers, current_unix_seconds,
 };
 use bitcoin_rs_mempool::{
     Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
@@ -715,10 +715,29 @@ impl MiningCoordinator {
     }
 
     fn propose(&self, block: &Block) -> BlockValidationResult {
+        // Core GBT proposal looks the hash up before TestBlockValidity.
+        if let Some(known) = self.known_block_result(block.block_hash().into()) {
+            return known;
+        }
         match apply::validate_block(&self.apply_handles, block) {
             Ok(()) => BlockValidationResult::Accepted,
             Err(error) => map_apply_error(error),
         }
+    }
+
+    /// Core `LookupBlockIndex` / BIP22 proposal vocabulary.
+    ///
+    /// `BLOCK_VALID_SCRIPTS` is `Active` or `Stale`. `BLOCK_FAILED_VALID` is
+    /// `Invalid`. Anything else in the tree is still inconclusive.
+    fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
+        let tree = self.block_tree.read();
+        let node_id = tree.lookup(block_hash)?;
+        let node = tree.node(node_id).ok()?;
+        Some(match node.status {
+            NodeStatus::Invalid => BlockValidationResult::DuplicateInvalid,
+            NodeStatus::HeaderValid => BlockValidationResult::DuplicateInconclusive,
+            NodeStatus::Active | NodeStatus::Stale => BlockValidationResult::Duplicate,
+        })
     }
 
     /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
@@ -758,23 +777,15 @@ impl MiningCoordinator {
 
     fn submit(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = block.block_hash().into();
-        {
-            let tree = self.block_tree.read();
-            if let Some(node_id) = tree.lookup(block_hash) {
-                let node = tree.node(node_id).map_err(|error| {
-                    MiningControlError::Failed(CompactString::from(error.to_string()))
-                })?;
-                if node.status == bitcoin_rs_chain::NodeStatus::Invalid {
-                    return Ok(BlockValidationResult::DuplicateInvalid);
-                }
-                let on_applied = self.applied_tip.load_full().is_some_and(|tip| {
-                    tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id)
-                });
-                if on_applied {
-                    return Ok(BlockValidationResult::Duplicate);
-                }
-                return Ok(BlockValidationResult::DuplicateInconclusive);
-            }
+        // Core v31 `submitblock` dropped the index pre-check. `ProcessNewBlock`
+        // returns `duplicate` only when the block was already accepted
+        // (`!new_block && accepted`). A header-only tree entry must still
+        // receive the body so `submitheader` then `submitblock` works.
+        if matches!(
+            self.known_block_result(block_hash),
+            Some(BlockValidationResult::Duplicate)
+        ) {
+            return Ok(BlockValidationResult::Duplicate);
         }
 
         match self.followers.apply_connect(&self.apply_handles, block) {

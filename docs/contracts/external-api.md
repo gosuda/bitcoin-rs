@@ -7,7 +7,8 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 `API-08` is mainnet template operational gates. `API-09` is `submitheader`.
 `API-10` is GBT client-rule negotiation. `API-11` is `submitblock` decode.
 `API-12` is GBT proposal request parsing. `API-13` is `submitblock` uncommitted
-witness fill.
+witness fill. `API-14` is Core v31 `submitblock` / GBT proposal duplicate
+vocabulary.
 
 ## Clauses
 
@@ -177,6 +178,17 @@ witness fill.
 - An existing coinbase witness is left unchanged. Proposal mode does not
   apply this fill.
 
+### `API-14`: `submitblock` and proposal duplicate vocabulary
+
+- **Owner**: `MiningCoordinator::known_block_result` in
+  `crates/node/src/mining.rs`.
+- GBT proposal looks the block hash up first, matching Core
+  `LookupBlockIndex`: scripts-valid (`Active` / `Stale`) is `duplicate`,
+  `Invalid` is `duplicate-invalid`, header-only is `duplicate-inconclusive`.
+- `submitblock` matches Core v31 `ProcessNewBlock`: only an already
+  accepted block is `duplicate`. A header admitted by `submitheader` still
+  receives the body.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -249,3 +261,9 @@ owned by [wallet-facing.md](wallet-facing.md).
     `leaves_an_existing_coinbase_witness_alone`,
     `skips_without_commitment_or_when_segwit_is_inactive`
   - `crates/node/tests/mining.rs` test `submit_block_fills_omitted_coinbase_witness`
+- `API-14`:
+  - `crates/node/tests/mining.rs` tests `submit_block_applies_a_header_already_in_the_tree`,
+    `proposal_of_an_applied_block_is_duplicate`,
+    `proposal_of_an_invalid_header_is_duplicate_invalid`,
+    `proposal_of_a_header_only_block_is_duplicate_inconclusive`,
+    `duplicate_submit_returns_duplicate`

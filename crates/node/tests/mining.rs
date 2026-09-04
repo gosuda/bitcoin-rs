@@ -1024,8 +1024,37 @@ fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn propose_block(
+    mining: &MiningCoordinator,
+    block: Block,
+) -> anyhow::Result<BlockValidationResult> {
+    match mining.get_block_template(BlockTemplateRequest {
+        mode: BlockTemplateMode::Proposal(block),
+        capabilities: Vec::new(),
+        rules: Vec::new(),
+        long_poll_id: None,
+    })? {
+        BlockTemplateResult::Proposal(result) => Ok(result),
+        other => panic!("expected a proposal result, got {other:?}"),
+    }
+}
+
 #[test]
-fn known_invalid_submit_is_duplicate_invalid() -> anyhow::Result<()> {
+fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    assert_eq!(
+        propose_block(&mining, genesis)?,
+        BlockValidationResult::Duplicate
+    );
+    Ok(())
+}
+
+#[test]
+fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Hash256;
 
@@ -1046,30 +1075,14 @@ fn known_invalid_submit_is_duplicate_invalid() -> anyhow::Result<()> {
             .insert_node(Some(genesis_id), invalid.header, NodeStatus::Invalid)?;
     }
     assert_eq!(
-        mining.submit_block(invalid)?,
+        propose_block(&mining, invalid)?,
         BlockValidationResult::DuplicateInvalid
     );
     Ok(())
 }
 
 #[test]
-fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
-    mining.publish_generation();
-    let genesis = Network::Regtest.genesis_block();
-    let child = mined_child(genesis.block_hash())?;
-    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
-    assert_eq!(
-        mining.submit_block(genesis)?,
-        BlockValidationResult::Duplicate
-    );
-    Ok(())
-}
-
-#[test]
-fn known_non_active_submit_is_duplicate_inconclusive() -> anyhow::Result<()> {
+fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Hash256;
 
@@ -1090,8 +1103,43 @@ fn known_non_active_submit_is_duplicate_inconclusive() -> anyhow::Result<()> {
             .insert_node(Some(genesis_id), side.header, NodeStatus::HeaderValid)?;
     }
     assert_eq!(
-        mining.submit_block(side)?,
+        propose_block(&mining, side)?,
         BlockValidationResult::DuplicateInconclusive
+    );
+    Ok(())
+}
+
+#[test]
+fn submit_block_applies_a_header_already_in_the_tree() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    let child_hash = Hash256::from(child.block_hash());
+    mining.submit_header(child.header)?;
+    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after submit"));
+    assert_eq!(tip.hash, child_hash);
+    Ok(())
+}
+
+#[test]
+fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    assert_eq!(
+        mining.submit_block(genesis)?,
+        BlockValidationResult::Duplicate
     );
     Ok(())
 }
