@@ -16,11 +16,7 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 ## Interface architecture and implementation guidance
 
 ### 1. Protocol demuxing and authentication
-- **Transport Demuxing**: Private free function `classify` (`crates/rpc/src/server.rs`) is the listener directory table. `serve_connection` dispatches that table before authentication:
-  - `GET /rest/*` → Core REST (`rest::route`).
-  - `GET` or `POST` under `/api` or `/esplora` → Esplora. `classify` strips the directory prefix and passes `Surface` plus the rest; `esplora::route` / `route_post` only dispatch inside that directory. Unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
-  - Other `POST` → JSON-RPC. `Auth::validate_header` (`crates/rpc/src/auth.rs`) guards this path only.
-  - Any other method or GET outside `/rest/`, `/api`, and `/esplora` → 404 at the demux. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` do not enter Esplora or JSON-RPC. The request parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
+- **Transport Demuxing**: Private free function `classify` (`crates/rpc/src/server.rs`) is the listener directory table, and `serve_connection` dispatches it before authentication. The wallet-facing Esplora routing contract is maintained in [`WF-02`](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues).
 - **JSON-RPC Framing & Protocol Versioning**: `JsonRpcVersion` (`crates/rpc/src/server.rs`) governs wire framing:
   - Requests with `"jsonrpc": "2.0"` use JSON-RPC 2.0 (`JsonRpcVersion::V2`): success responses emit `{"jsonrpc":"2.0","result":...,"id":...}` (HTTP 200), error responses emit `{"jsonrpc":"2.0","error":...,"id":...}` (HTTP 200), and requests omitting `id` are treated as notifications returning HTTP 204 No Content.
   - Other requests use JSON-RPC 1.1 / legacy (`JsonRpcVersion::Legacy`): success responses emit `{"result":...,"error":null,"id":...}` (HTTP 200), error responses emit `{"result":null,"error":...,"id":...}` with HTTP 500 status, and missing `id` values default to `null`.
