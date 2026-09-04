@@ -118,7 +118,7 @@ pub struct BlockTemplate {
 pub enum BlockValidationResult {
     /// The block is valid and, for submission, was synchronously applied.
     Accepted,
-    /// The block was already accepted (`Active` or `Stale`).
+    /// The block was already accepted (its body is on the applied chain).
     Duplicate,
     /// The block duplicates one already known to be invalid.
     ///

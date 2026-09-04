@@ -183,8 +183,9 @@ vocabulary.
 - **Owner**: `MiningCoordinator::known_block_result` in
   `crates/node/src/mining.rs`.
 - GBT proposal looks the block hash up first, matching Core
-  `LookupBlockIndex`: scripts-valid (`Active` / `Stale`) is `duplicate`,
-  `Invalid` is `duplicate-invalid`, header-only is `duplicate-inconclusive`.
+  `LookupBlockIndex`: a node on the applied chain is `duplicate`,
+  `Invalid` is `duplicate-invalid`, and any other tree entry (including a
+  header-only tip) is `duplicate-inconclusive`.
 - `submitblock` matches Core v31 `ProcessNewBlock`: only an already
   accepted block is `duplicate`. A header admitted by `submitheader` still
   receives the body.

@@ -727,17 +727,25 @@ impl MiningCoordinator {
 
     /// Core `LookupBlockIndex` / BIP22 proposal vocabulary.
     ///
-    /// `BLOCK_VALID_SCRIPTS` is `Active` or `Stale`. `BLOCK_FAILED_VALID` is
-    /// `Invalid`. Anything else in the tree is still inconclusive.
+    /// A node on the applied chain has had its body connected (Core
+    /// `BLOCK_VALID_SCRIPTS`). `Invalid` is `BLOCK_FAILED_VALID`. Any other
+    /// tree entry, including a header-only `Active` tip, is still
+    /// inconclusive — `NodeStatus::Active` is the header chain, not scripts.
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(block_hash)?;
         let node = tree.node(node_id).ok()?;
-        Some(match node.status {
-            NodeStatus::Invalid => BlockValidationResult::DuplicateInvalid,
-            NodeStatus::HeaderValid => BlockValidationResult::DuplicateInconclusive,
-            NodeStatus::Active | NodeStatus::Stale => BlockValidationResult::Duplicate,
-        })
+        if node.status == NodeStatus::Invalid {
+            return Some(BlockValidationResult::DuplicateInvalid);
+        }
+        let on_applied = self
+            .applied_tip
+            .load_full()
+            .is_some_and(|tip| tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id));
+        if on_applied {
+            return Some(BlockValidationResult::Duplicate);
+        }
+        Some(BlockValidationResult::DuplicateInconclusive)
     }
 
     /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
