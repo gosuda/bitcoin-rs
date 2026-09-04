@@ -165,7 +165,7 @@ decoder, or conversion pass.
 | BlockHeaders | `sha256d(header)(32)` | empty |
 | ScriptLive | `prefix(8) \|\| txid(32) \|\| vout_u24(3)` | empty |
 
-`INDEX_FORMAT_VERSION` is 3 (packed positions). High-level history resolvers
+`spending_prefix` still uses electrs' big-endian wrapping mix. High-level history resolvers
 still sort by numeric height so API order does not depend on the raw key
 encoding.
 
@@ -265,10 +265,13 @@ capabilities. A later change that touches only Live can reset only
 reset TxLookup and ScriptHistory together because they share
 `HashPrefixRow` / `TxPosition`.
 
-`INDEX_FORMAT_VERSION` (currently 3) is the packed-position marker written
-alongside a ScriptHistory reset. A foreign store version that is not 3, 4,
-or 5 still refuses start.
+`[0x00, b'V']` is the only layout marker. The leftover ASCII
+`index:format_version` key from formats 1–4 is deleted on reset and is
+not read. A foreign store version that is not 3, 4, or 5 still refuses
+start.
 
 **No dual-read path, no migration.** Previous ScriptIndex bytes are
-deleted and rebuilt from authoritative chain/UTXO sources. Live is cheap
-to re-seed (one pass over the UTXO set); History is a reindex.
+deleted and rebuilt from authoritative chain/UTXO sources. Empty or
+malformed *row values* still scan the block: that is corruption safety,
+not an old-format decoder. Live is cheap to re-seed (one pass over the
+UTXO set); History is a reindex.

@@ -9,11 +9,11 @@ pub mod mempool;
 pub mod types;
 
 pub use index::{
-    BlockSource, ConsumerCursorUpdate, INDEX_FORMAT_VERSION, IndexCapabilities, IndexCapability,
-    IndexError, IndexFormat, IndexReader, IndexRowCounts, IndexWatermark, IndexWatermarks,
-    IndexWriteFence, IndexWriter, Indexer, IndexerLike, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts,
-    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHistoryEntry, ScriptLiveScan,
-    SpentCoinScripts, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
+    IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
+    IndexerLike, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits,
+    PreparedBlock, ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan,
+    TxIndexScanRow, TxIndexSnapshot,
 };
 pub use mempool::{MempoolRowCounts, MempoolRowWriter};
 pub use types::{
