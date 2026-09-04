@@ -89,6 +89,28 @@ impl ConnectionShared {
         }
     }
 
+    /// Publish handshake info only for the currently registered lease, then
+    /// notify BlockSync. `publish_info` is the identity-checked Ready
+    /// transition; a stale predecessor must not clear the replacement's
+    /// address-scoped download or header state.
+    ///
+    /// The table lock is not held across notify: BlockSync takes
+    /// `download_window` / `pending_getheaders`, the opposite order of `tick`.
+    fn publish_info_and_notify_ready(
+        &self,
+        peer_addr: SocketAddr,
+        lease: &crate::PeerLease,
+        info: crate::PeerInfo,
+    ) -> bool {
+        let source = lease.source(peer_addr);
+        if self.peer_table.publish_info(peer_addr, lease, info) {
+            self.notify_peer_ready(source);
+            true
+        } else {
+            false
+        }
+    }
+
     fn is_session_cancelled(&self) -> bool {
         self.session_cancel
             .as_ref()
@@ -879,11 +901,7 @@ fn run_connected_session(
             return Err(error);
         }
     };
-    let source = lease.source(peer_addr);
-    if shared.peer_table.is_current(source) {
-        shared.notify_peer_ready(source);
-    }
-    shared.peer_table.publish_info(peer_addr, &lease, info);
+    shared.publish_info_and_notify_ready(peer_addr, &lease, info);
 
     let inbound = lease.is_inbound();
     tracing::info!(
@@ -1963,5 +1981,82 @@ mod writer_shutdown_tests {
         let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None);
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod ready_notify_tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use parking_lot::RwLock;
+
+    use super::ConnectionShared;
+
+    fn peer_info(addr: SocketAddr, start_height: i32) -> crate::PeerInfo {
+        crate::PeerInfo {
+            addr,
+            version: 70_016,
+            services: 1,
+            user_agent: String::from("/test/"),
+            start_height,
+            conn_time: 0,
+            inbound: false,
+            addr_bind: addr,
+            time_offset: 0,
+            counters: Arc::new(crate::PeerCounters::default()),
+        }
+    }
+
+    fn shared_with_notify_counter(
+        notified: &Arc<AtomicUsize>,
+    ) -> ConnectionShared {
+        let peer_table = Arc::new(crate::PeerTable::new());
+        let banned = Arc::new(RwLock::new(Vec::new()));
+        let notified = Arc::clone(notified);
+        ConnectionShared::from_parts(peer_table, banned, None).with_peer_ready(Arc::new(move |_| {
+            notified.fetch_add(1, Ordering::Relaxed);
+        }))
+    }
+
+    #[test]
+    fn stale_predecessor_does_not_notify_peer_ready() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_450));
+        let notified = Arc::new(AtomicUsize::new(0));
+        let shared = shared_with_notify_counter(&notified);
+
+        let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
+        let stale = crate::PeerLease::new(stale_tx);
+        let (current_tx, _current_rx) = crossbeam_channel::unbounded();
+        let current = crate::PeerLease::new(current_tx);
+        shared.peer_table.register(addr, stale.clone());
+        shared.peer_table.register(addr, current.clone());
+
+        assert!(
+            !shared.publish_info_and_notify_ready(addr, &stale, peer_info(addr, 1)),
+            "replaced predecessor must not publish or notify"
+        );
+        assert_eq!(notified.load(Ordering::Relaxed), 0);
+        assert!(shared.peer_table.infos().is_empty());
+
+        assert!(shared.publish_info_and_notify_ready(addr, &current, peer_info(addr, 2)));
+        assert_eq!(notified.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.peer_table.infos()[0].start_height, 2);
+    }
+
+    #[test]
+    fn current_lease_publishes_then_notifies_ready() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_451));
+        let notified = Arc::new(AtomicUsize::new(0));
+        let shared = shared_with_notify_counter(&notified);
+
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        shared.peer_table.register(addr, lease.clone());
+
+        assert!(shared.publish_info_and_notify_ready(addr, &lease, peer_info(addr, 3)));
+        assert_eq!(notified.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.peer_table.infos(), vec![peer_info(addr, 3)]);
     }
 }

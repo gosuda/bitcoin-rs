@@ -17,10 +17,12 @@ handshake, publish metadata only while the publishing lease remains current,
 replace a genuine predecessor, and remove themselves during teardown.
 
 Higher layers receive a handshake-completion notification carrying the
-`PeerSource` immediately before P2P publishes the connection as ready.
-`BlockSync` uses it to clear scheduler state while the source is held current,
-before a replacement becomes selectable. Ready-peer snapshots carry the same
-source, and sync queues messages through an identity-checked lease rather than
+`PeerSource` only after P2P publishes that same connection as ready.
+`publish_info` is the identity-checked Ready transition; a stale predecessor
+whose publish is rejected must not reset address-scoped scheduler state.
+`BlockSync` clears leftover download and header state for the address when the
+current connection becomes ready. Ready-peer snapshots carry the same source,
+and sync queues messages through an identity-checked lease rather than
 resolving a `SocketAddr` again. Higher layers cannot insert into or remove from
 the shared maps. The source carries the connection identity, so a stale
 operation cannot publish, send to, or cancel a replacement.
@@ -29,8 +31,8 @@ operation cannot publish, send to, or cancel a replacement.
 
 - Address equality does not establish connection identity.
 - Registering a replacement immediately hides the predecessor's ready metadata.
-- Scheduler state is reset under the current-source guard before replacement
-  metadata is published.
+- Scheduler state is reset only after the current lease publishes ready
+  metadata. A stale predecessor must not notify.
 - Handshake metadata is published only for the current lease.
 - The node and RPC use one shared `Arc<P2pService>`; its listener workers and
   download policy use the service-owned lifecycle.

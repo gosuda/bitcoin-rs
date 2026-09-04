@@ -151,10 +151,12 @@ impl BlockSync {
         *self.block_stager.lock() = BlockStager::new(budget);
     }
 
-    /// Clears address-scoped sync state before a replacement is published ready.
+    /// Clears address-scoped sync state when this connection becomes ready.
     ///
-    /// Matching is by socket address, not connection identity: a same-address
-    /// replacement never shares the predecessor's `PeerSource`.
+    /// Matching is by socket address, not connection identity: leftover header
+    /// and download state from a predecessor at the same address must not
+    /// survive into the new session. A same-address replacement never shares
+    /// the predecessor's `PeerSource`.
     pub fn on_peer_ready(&self, source: bitcoin_rs_p2p::PeerSource) {
         self.download_window.lock().forget_peer(source.addr);
         let mut pending = self.pending_getheaders.lock();
