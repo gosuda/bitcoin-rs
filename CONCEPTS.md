@@ -74,6 +74,14 @@ The bounded set of blocks in flight — requested but not yet received. Capped j
 ### Staller
 A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation), does not blame a peer when local apply/stager backpressure is the bottleneck, and disconnects it so another peer can supply the block. See `docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md`.
 
+### Peer lifecycle ownership
+`P2pService` owns P2P control state and workers. Live sessions live in one
+`PeerTable`; `PeerLifecycle` wraps that table for service send and disconnect
+helpers. Ready snapshots carry `PeerSource`, and identity-checked table
+methods are what authorize a mutation. Address equality alone never does.
+`BlockSync` owns the production download window and may call those table
+methods directly. See `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
+
 ### assumevalid
 Skipping script-signature verification for blocks at or below a trusted height while performing every other consensus check. Mainnet defaults to the hash-pinned anchor below; other networks default to height 0. `--assume-valid-height 0` requests full verification; a custom nonzero height skips without hash gating.
 

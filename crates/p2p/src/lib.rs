@@ -29,6 +29,8 @@ pub mod peer;
 pub mod peer_info;
 /// Single owner of live peer sessions: leases and their handshake metadata.
 pub mod peer_table;
+/// Runtime owner for P2P control state and workers.
+pub mod service;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Bitcoin P2P wire codec.
@@ -36,7 +38,7 @@ pub mod wire;
 /// BIP339 wtxid-relay state.
 pub mod wtxid;
 
-pub use connection::{ConnectionId, PeerLease, PeerSource, PeerStats};
+pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerStats, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
@@ -49,6 +51,10 @@ pub use peer::{
 };
 pub use peer_info::PeerInfo;
 pub use peer_table::{PeerSession, PeerTable};
+pub use service::{
+    P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
+    apply_network_active,
+};
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
 
