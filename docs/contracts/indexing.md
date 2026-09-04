@@ -14,27 +14,27 @@ Owners:
 
 ### `IDX-01`: Capability configuration and internal enablement
 
-- CLI `--txindex` (env `BITCOIN_RS_TXINDEX`, configuration `txindex=1`) enables
+- TOML `txindex = true` (env `BITCOIN_RS_TXINDEX`, Core `txindex=1`) enables
   the `TxLookup` capability in the transaction index store. This builds
   Core-compatible transaction identifier lookup rows (`TxidRow`) and outpoint
   value positions.
-- CLI `--scriptindex` / `--script-index` (env `BITCOIN_RS_SCRIPTINDEX`,
-  configuration `scriptindex=1`) enables the `ScriptHistory` capability. This
+- TOML `script_index = "full"` (env `BITCOIN_RS_SCRIPTINDEX`, boolean
+  spellings `true` / `1` / `yes`) enables the `ScriptHistory` capability. This
   builds generic scripthash funding rows (`ScriptHashRow`), spending rows
   (`SpendingPrefixRow`), and outpoint spender records.
-- Enabling either `--txindex` or `--scriptindex` spawns exactly one node-owned
+- Enabling either `txindex` or `script_index` spawns exactly one node-owned
   `TxIndexRuntime` worker thread. Enabling both permits both capability row
   families to share a single block-body parse and atomic forward commit batch
   when their watermarks are aligned.
 
 ### `IDX-02`: Capability advertisement and Core compatibility
 
-- Only explicit `--txindex` advertises the Core `txindex` capability in RPC
-  `getindexinfo` and enables historical `getrawtransaction` verbose and raw
-  lookups across all confirmed blocks.
-- `--scriptindex` provides generic script history, unspent output, and spender
+- Only explicit `txindex` configuration advertises the Core `txindex` capability
+  in RPC `getindexinfo` and enables historical `getrawtransaction` verbose and
+  raw lookups across all confirmed blocks.
+- `script_index` provides generic script history, unspent output, and spender
   queries for Esplora and RPC routes without advertising Core `txindex` unless
-  `--txindex` is also set.
+  `txindex` is also set.
 - `getindexinfo` reports `synced: true` if and only if the advertised
   capability watermark matches the height and block hash of the active chain tip.
 

@@ -481,7 +481,7 @@ where
     queued
 }
 
-/// Maintains outbound connections to the fixed peers from `--connect`.
+/// Maintains outbound connections to the fixed peers from `connect`.
 ///
 /// When `connect` is configured, DNS bootstrap is disabled and the node dials
 /// only these addresses, re-queueing any that are not currently connected so a
@@ -1806,7 +1806,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Scenario (e): --connect mode unaffected — spawn_fixed_peer_bootstrap unchanged
+    // Scenario (e): connect mode unaffected — spawn_fixed_peer_bootstrap unchanged
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1818,7 +1818,7 @@ mod tests {
         let config = NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Signet);
         assert!(
             config.connect.is_empty(),
-            "default signet config must have no --connect peers"
+            "default signet config must have no connect peers"
         );
         // When connect is empty, spawn_dns_peer_maintenance is taken; its handle is Some.
         let shutdown = Arc::new(AtomicBool::new(true)); // pre-set: thread exits immediately

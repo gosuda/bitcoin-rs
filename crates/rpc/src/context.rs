@@ -1139,8 +1139,8 @@ pub struct Context {
     pub tx_index: Option<Arc<dyn TxIndexQuery>>,
     /// Complete transaction lookup used internally by Esplora projections.
     ///
-    /// This may be available with `--scriptindex` even when `tx_index` is
-    /// absent, because it does not advertise the Core `--txindex` contract.
+    /// This may be available with `script_index` even when `tx_index` is
+    /// absent, because it does not advertise the Core `txindex` contract.
     pub esplora_tx_index: Option<Arc<dyn TxIndexQuery>>,
     /// Optional node-owned generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,

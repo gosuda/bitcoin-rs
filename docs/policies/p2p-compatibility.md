@@ -28,7 +28,10 @@ Re-pinning to a newer Core version requires all of:
 - Bitcoin P2P **v1 envelope only** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload.
 - Payload bound: `MAX_MESSAGE_PAYLOAD = 32 MiB`. Core caps messages at 4 MiB; bitcoin-rs is deliberately looser so any protocol-maximal block fits. A peer that Core would disconnect for an oversized message may be accepted here; this is a bound difference, not a relay difference.
 - Network magic and default ports come from `bitcoin_rs_primitives::Network` and are asserted equal to Core's constants per network (mainnet 8333, testnet3 18333, testnet4 48333, signet 38333, regtest 18444).
-- Fork networks sharing a chain may override the message-start bytes with `--p2p-magic` (a bitcoin-rs extension; requires `--network mainnet` semantics and explicit `--connect` peers). Not a Core option; recorded as extension, not parity.
+- Fork networks sharing a chain may override the message-start bytes with
+  `p2p_magic` / `BITCOIN_RS_P2P_MAGIC` (a bitcoin-rs extension; requires
+  `network = mainnet` semantics, `dns_seeds_enabled = false`, and explicit
+  `connect` peers). Not a Core option; recorded as extension, not parity.
 
 ## 4. Handshake Contract
 
@@ -116,7 +119,7 @@ Explicit deltas from Core 31.1, each intentional and safe:
 1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive announcements**: absent. We do not broadcast `inv`/`headers`/`cmpctblock` for new blocks or relay transaction announcements. The node is a header/block consumer and an on-demand server; live relay of Core-originated blocks into bitcoin-rs is exercised by the interop lane (§8).
-4. **Address management**: no `getaddr` answers, no addr gossip, no DNS-seed-free peer discovery beyond configured `--connect`/`--addnode` surfaces.
+4. **Address management**: no `getaddr` answers, no addr gossip, no DNS-seed-free peer discovery beyond configured `connect` peers.
 5. **Service bits**: we advertise exactly `NETWORK | WITNESS`. No `NODE_BLOOM`, `NODE_COMPACT_FILTERS`, or `NODE_NETWORK_LIMITED` — honest, since none of those services exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Idle timeout** 60 s vs Core's 20 minutes.

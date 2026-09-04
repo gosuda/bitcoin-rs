@@ -1,15 +1,20 @@
-//! Node configuration split across three lifetimes.
+//! Node configuration split across four lifetimes.
 //!
-//! 1. [`UserConfig`] — what a user may supply. Every field is an optional
+//! 1. Process-launch CLI — the clap Parser for `bitcoin-rs`. The public flag
+//!    surface is the launcher: `--config`, `--bitcoin-conf`, `--network`, and
+//!    `--data-dir` (plus clap `--help` / `--version`). Runtime knobs are not
+//!    flags; adding a [`UserConfig`] field cannot publish a CLI option.
+//! 2. [`UserConfig`] — what a user may supply. Every field is an optional
 //!    override; absence means that source did not specify a value. Source
-//!    adapters (CLI, environment, TOML, Bitcoin Core `bitcoin.conf`) produce
-//!    this type. It carries no runtime defaults.
-//! 2. [`NodeConfig`] — the fully resolved, validated configuration consumed by
+//!    adapters (environment, TOML, Bitcoin Core `bitcoin.conf`) and the
+//!    launcher overlay produce this type. It carries no runtime defaults and
+//!    no clap attributes.
+//! 3. [`NodeConfig`] — the fully resolved, validated configuration consumed by
 //!    the runtime. Defaults are applied exactly once, at the [`NodeConfig`]
 //!    resolution boundary, and the type is not constructible without going
 //!    through it. It carries no parser annotations and no `Option` that merely
 //!    represents source absence.
-//! 3. [`RuntimeInputs`] — process and test dependencies (`shutdown` receiver,
+//! 4. [`RuntimeInputs`] — process and test dependencies (`shutdown` receiver,
 //!    `mempool` observer) that are not configuration and must never be
 //!    serialized or merged.
 //!
@@ -17,9 +22,11 @@
 //! could deserialize a partial file straight into it (silently picking up
 //! per-field defaults), read an unresolved `Option<[u8; 4]>` P2P magic where a
 //! resolved value was expected, and inject a shutdown channel through a
-//! "configuration" field. Separating the types makes those confusions
-//! impossible: a caller holding a [`NodeConfig`] has a resolved, validated fact,
-//! and a caller holding a [`UserConfig`] has an unresolved wish.
+//! "configuration" field. A later design then derived clap from [`UserConfig`],
+//! so every runtime knob automatically became a public flag. Separating the
+//! types makes those confusions impossible: a caller holding a [`NodeConfig`]
+//! has a resolved, validated fact, a caller holding a [`UserConfig`] has an
+//! unresolved wish, and the process CLI cannot grow with the config model.
 
 use core::fmt;
 use std::ffi::OsString;
@@ -164,8 +171,8 @@ pub struct NotificationConfig {
 /// historical funding/spending rows while still maintaining the live-output
 /// view.
 ///
-/// The boolean spellings remain behaviorally compatible: `--scriptindex`,
-/// `--scriptindex=true`, and `BITCOIN_RS_SCRIPTINDEX=true` all mean
+/// The boolean spellings remain behaviorally compatible: `script_index =
+/// true`, `script_index = "full"`, and `BITCOIN_RS_SCRIPTINDEX=true` all mean
 /// [`Self::Full`], and `false` means [`Self::Disabled`].
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -503,14 +510,20 @@ impl NodeConfig {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let cli = match UserConfig::try_parse_from(args) {
+        let cli = match CliArgs::try_parse_from(args) {
             Ok(cli) => cli,
             Err(err) => {
                 err.exit();
             }
         };
         let env = std::env::vars();
-        Self::from_layers(cli.config.as_ref(), cli.bitcoin_conf.as_ref(), env, &cli)
+        let overlay = cli.overlay();
+        Self::from_layers(
+            cli.config.as_deref(),
+            cli.bitcoin_conf.as_deref(),
+            env,
+            &overlay,
+        )
     }
 
     /// Testable layered loader with an explicit environment source.
@@ -527,14 +540,22 @@ impl NodeConfig {
         A: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let mut cli = UserConfig::try_parse_from(args)?;
-        if cli.config.is_none() {
-            cli.config = toml_path.map(Path::to_path_buf);
-        }
-        if cli.bitcoin_conf.is_none() {
-            cli.bitcoin_conf = bitcoin_conf_path.map(Path::to_path_buf);
-        }
-        Self::from_layers(cli.config.as_ref(), cli.bitcoin_conf.as_ref(), env, &cli)
+        let cli = CliArgs::try_parse_from(args)?;
+        let toml_buf = cli
+            .config
+            .clone()
+            .or_else(|| toml_path.map(Path::to_path_buf));
+        let bitcoin_conf_buf = cli
+            .bitcoin_conf
+            .clone()
+            .or_else(|| bitcoin_conf_path.map(Path::to_path_buf));
+        let overlay = cli.overlay();
+        Self::from_layers(
+            toml_buf.as_deref(),
+            bitcoin_conf_buf.as_deref(),
+            env,
+            &overlay,
+        )
     }
 
     /// Validates backend names and simple cross-field constraints.
@@ -542,15 +563,15 @@ impl NodeConfig {
         if self.p2p_magic != self.network.magic() {
             ensure!(
                 self.network == Network::Mainnet,
-                "P2P magic overrides currently require --network mainnet"
+                "P2P magic overrides currently require network = mainnet"
             );
             ensure!(
                 !self.connect.is_empty(),
-                "P2P magic overrides require at least one --connect peer"
+                "P2P magic overrides require at least one connect peer"
             );
             ensure!(
                 !self.dns_seeds_enabled,
-                "P2P magic overrides require --dns-seeds-enabled=false"
+                "P2P magic overrides require dns_seeds_enabled = false"
             );
         }
         match self.storage_backend.as_str() {
@@ -593,8 +614,8 @@ impl NodeConfig {
     }
 
     fn from_layers<E, K, V>(
-        toml_path: Option<&PathBuf>,
-        bitcoin_conf_path: Option<&PathBuf>,
+        toml_path: Option<&Path>,
+        bitcoin_conf_path: Option<&Path>,
         env: E,
         cli: &UserConfig,
     ) -> Result<Self>
@@ -611,7 +632,7 @@ impl NodeConfig {
         let network = effective_network(toml_layer.as_ref(), &env_layer, cli);
         let mut config = Self::default_for_network(network);
 
-        if let Some(path) = &bitcoin_conf_path {
+        if let Some(path) = bitcoin_conf_path {
             crate::bitcoin_conf_compat::apply_file(&mut config, path)?;
         }
         if let Some(layer) = &toml_layer {
@@ -750,78 +771,80 @@ impl RuntimeInputs {
     }
 }
 
+/// Process-launch arguments. This is the only clap Parser in the node crate.
+///
+/// Runtime node settings belong in TOML, environment, or `bitcoin.conf`.
+/// Adding a field here is a public CLI contract change; adding a field to
+/// [`UserConfig`] is not.
+#[derive(Clone, Debug, Default, Parser)]
+#[command(
+    name = "bitcoin-rs",
+    about = "Run a bitcoin-rs node",
+    version = env!("CARGO_PKG_VERSION"),
+    disable_help_subcommand = true
+)]
+struct CliArgs {
+    /// Path to a bitcoin-rs TOML configuration file.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Path to a Bitcoin Core `bitcoin.conf`.
+    #[arg(long = "bitcoin-conf")]
+    bitcoin_conf: Option<PathBuf>,
+    /// Select the Bitcoin or fork network, including its P2P bootstrap profile.
+    #[arg(long, value_parser = parse_network_selection)]
+    network: Option<NetworkSelection>,
+    /// Node data directory.
+    #[arg(long = "data-dir")]
+    data_dir: Option<PathBuf>,
+}
+
+impl CliArgs {
+    fn overlay(&self) -> UserConfig {
+        UserConfig {
+            network: self.network,
+            data_dir: self.data_dir.clone(),
+            ..UserConfig::default()
+        }
+    }
+}
+
 /// What a user may supply: every field is an optional override and absence
 /// means that source did not specify a value.
 ///
-/// Source adapters (CLI, environment, TOML, Bitcoin Core `bitcoin.conf`)
-/// produce this type. It carries no runtime defaults — those live solely in
-/// [`NodeConfig::default_for_network`].
-#[derive(Clone, Debug, Default, Deserialize, Parser)]
-#[command(name = "bitcoin-rs-node", about = "Run a bitcoin-rs node")]
+/// Source adapters (environment, TOML, Bitcoin Core `bitcoin.conf`) and the
+/// process-launch overlay produce this type. It carries no runtime defaults —
+/// those live solely in [`NodeConfig::default_for_network`] — and no clap
+/// attributes, so a new field cannot become a public CLI flag.
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UserConfig {
-    #[arg(long)]
-    pub(crate) config: Option<PathBuf>,
-    #[arg(long = "bitcoin-conf")]
-    pub(crate) bitcoin_conf: Option<PathBuf>,
     /// Select the Bitcoin or fork network, including its P2P bootstrap profile.
-    #[arg(long, value_parser = parse_network_selection)]
     pub(crate) network: Option<NetworkSelection>,
     /// Override the four P2P message-start bytes for a fork network.
-    #[arg(long = "p2p-magic", value_parser = parse_p2p_magic)]
     #[serde(deserialize_with = "deserialize_optional_p2p_magic")]
     pub(crate) p2p_magic: Option<[u8; 4]>,
-    #[arg(long = "data-dir")]
     pub(crate) data_dir: Option<PathBuf>,
-    #[arg(long = "storage-backend")]
     pub(crate) storage_backend: Option<String>,
-    #[arg(long = "rpc-bind")]
     pub(crate) rpc_bind: Option<SocketAddr>,
     /// Enable the Bitcoin Core-compatible REST gateway.
-    #[arg(long)]
     pub(crate) rest: Option<bool>,
-    #[arg(skip)]
     pub(crate) rpc_auth: Option<Auth>,
-    #[arg(long = "rpc-user")]
     pub(crate) rpc_user: Option<String>,
-    #[arg(long = "rpc-password")]
     pub(crate) rpc_password: Option<String>,
-    #[arg(long = "rpc-cookie")]
     pub(crate) rpc_cookie: Option<PathBuf>,
-    #[arg(
-        long = "scriptindex",
-        visible_alias = "script-index",
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
     pub(crate) script_index: Option<String>,
-    #[arg(long = "p2p-listen", value_delimiter = ',')]
     pub(crate) p2p_listen: Option<Vec<SocketAddr>>,
-    #[arg(long = "dns-seeds-enabled")]
     pub(crate) dns_seeds_enabled: Option<bool>,
-    #[arg(
-        long = "connect",
-        value_delimiter = ',',
-        value_parser = parse_connect_endpoint
-    )]
     pub(crate) connect: Option<Vec<String>>,
-    #[arg(long = "prune-target-mb")]
     pub(crate) prune_target_mb: Option<u64>,
-    #[arg(long)]
     pub(crate) txindex: Option<bool>,
-    #[arg(long = "dbcache-mb")]
     pub(crate) dbcache_mb: Option<u64>,
-    #[arg(skip)]
     pub(crate) chainstate_journal: Option<ChainstateJournalUserSection>,
-    #[arg(long = "log-level")]
     pub(crate) log_level: Option<String>,
-    #[arg(long = "metrics-bind")]
     pub(crate) metrics_bind: Option<SocketAddr>,
     /// Notification configuration is intentionally file-only; adapter internals
     /// are not promoted back to flat process flags.
-    #[arg(skip)]
     pub(crate) notifications: Option<NotificationConfig>,
-    #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
 }
 
@@ -985,6 +1008,62 @@ where
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    /// The public CLI is a launcher. Adding a [`UserConfig`] field must not
+    /// publish a new flag; only [`CliArgs`] is parsed by clap.
+    ///
+    /// Mutation: put `Parser` back on [`UserConfig`] or add a long flag to
+    /// [`CliArgs`]. This test fails because the frozen long-option set changed.
+    #[test]
+    fn public_cli_surface_is_the_launcher_flags() {
+        use std::collections::BTreeSet;
+
+        let longs: BTreeSet<&str> = CliArgs::command()
+            .get_arguments()
+            .filter_map(clap::Arg::get_long)
+            .collect();
+        assert_eq!(
+            longs,
+            BTreeSet::from([
+                "bitcoin-conf",
+                "config",
+                "data-dir",
+                "help",
+                "network",
+                "version"
+            ])
+        );
+    }
+
+    #[test]
+    fn runtime_knobs_are_rejected_as_cli_flags() {
+        for flag in [
+            "--storage-backend",
+            "--rpc-bind",
+            "--txindex",
+            "--scriptindex",
+            "--dbcache-mb",
+            "--log-level",
+            "--assume-valid-height",
+            "--p2p-magic",
+            "--connect",
+            "--metrics-bind",
+        ] {
+            let error = NodeConfig::from_layered_sources(
+                None,
+                None,
+                core::iter::empty::<(&str, &str)>(),
+                ["bitcoin-rs", flag],
+            )
+            .expect_err("runtime knobs are not launcher flags");
+            let message = error.to_string();
+            assert!(
+                message.contains("unexpected argument") || message.contains("unrecognized"),
+                "{flag} must fail clap parse: {message}"
+            );
+        }
+    }
 
     /// Journal defaults resolve without any user input (plan rev 5 Task 3).
     #[test]

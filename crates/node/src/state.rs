@@ -1325,7 +1325,7 @@ fn tx_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabili
         // ScriptIndex-backed Esplora responses need exact historical
         // transactions to render prevouts and calculate fees. This is an
         // internal dependency; `tx_index_query` below still exposes it to Core
-        // RPCs only for an explicit --txindex configuration.
+        // RPCs only for an explicit txindex configuration.
         tx_lookup: config.txindex || config.script_index.is_enabled(),
         script_history: config.script_index.keeps_history(),
     }
@@ -2000,8 +2000,8 @@ impl NodeState {
 
     /// Returns transaction lookup for internal Esplora projections.
     ///
-    /// `--scriptindex` builds this dependency as well, but that does not
-    /// enable or advertise the Core `--txindex` contract.
+    /// `script_index` builds this dependency as well, but that does not
+    /// enable or advertise the Core `txindex` contract.
     #[must_use]
     pub fn esplora_tx_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery>> {
         self.tx_index_adapter.as_ref().map(|adapter| {

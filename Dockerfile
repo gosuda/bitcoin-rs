@@ -41,5 +41,11 @@ USER bitcoin-rs
 VOLUME ["/data"]
 EXPOSE 8332 8333
 
+# Container bind addresses are configuration, not CLI flags. Local binary
+# defaults remain loopback; the image listens on all interfaces so sibling
+# containers and published ports can reach RPC and P2P.
+ENV BITCOIN_RS_RPC_BIND=0.0.0.0:8332 \
+    BITCOIN_RS_P2P_LISTEN=0.0.0.0:8333
+
 ENTRYPOINT ["bitcoin-rs"]
-CMD ["--data-dir", "/data", "--rpc-bind", "0.0.0.0:8332", "--p2p-listen", "0.0.0.0:8333"]
+CMD ["--data-dir", "/data"]

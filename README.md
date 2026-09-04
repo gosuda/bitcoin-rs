@@ -97,7 +97,7 @@ risk of correlated implementation failures.
   features.
 - Sharded UTXO cache: a 256-shard in-memory UTXO set (`hashbrown::HashTable` of
   compact records behind `parking_lot::RwLock`) with checkpoint-based crash
-  recovery and effective `--dbcache-mb` budget allocation.
+  recovery and effective `dbcache_mb` budget allocation.
 - Asynchronous index consumer: `txindex` reconciles over a monotonic chain
   snapshot and event hint channel without blocking block validation.
 - Integrated ScriptIndex and Esplora APIs: address and scripthash UTXO indexing
@@ -194,15 +194,15 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 | Storage backend | `fjall` |
 | Validation engine | `libbitcoinkernel` (with `--features kernel`); portable Rust (default binary, Taproot key-path only) |
 | Kernel feature | Off in default binary build; on in `crates/consensus` and `crates/node` library defaults |
-| Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
+| Database cache | 450 MiB (`dbcache_mb` / `BITCOIN_RS_DBCACHE_MB`, split 80/20 when txindex is enabled) |
 | Multi-peer download | On (8 outbound peers, 128-block window) |
 | Transaction index | Off |
 | Script index | Off |
 | Pruning | Off |
 
 Mainnet defaults to skipping historical script verification up to the pinned
-assume-valid anchor. Pass `--assume-valid-height 0` to verify all scripts from
-genesis.
+assume-valid anchor. Set `assume_valid_height = 0` or
+`BITCOIN_RS_ASSUME_VALID_HEIGHT=0` to verify all scripts from genesis.
 
 ## Build and test
 

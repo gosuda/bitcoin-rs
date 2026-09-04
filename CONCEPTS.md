@@ -58,7 +58,7 @@ The bounded set of blocks in flight — requested but not yet received. Capped j
 A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation), does not blame a peer when local apply/stager backpressure is the bottleneck, and disconnects it so another peer can supply the block. See `docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md`.
 
 ### assumevalid
-Skipping script-signature verification for blocks at or below a trusted height while performing every other consensus check. Mainnet defaults to the hash-pinned anchor below; other networks default to height 0. `--assume-valid-height 0` requests full verification; a custom nonzero height skips without hash gating.
+Skipping script-signature verification for blocks at or below a trusted height while performing every other consensus check. Mainnet defaults to the hash-pinned anchor below; other networks default to height 0. `assume_valid_height = 0` / `BITCOIN_RS_ASSUME_VALID_HEIGHT=0` requests full verification; a custom nonzero height skips without hash gating.
 
 ### Hash-pinned assume-valid anchor
 The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`). Script verification is skipped at or below it only after the active header chain is shown to contain this exact hash; sub-anchor header tips and diverged chains verify fully.
@@ -191,7 +191,7 @@ State that connection writes and disconnection must account for. `coin_stats` ne
 ## Derived indexes
 
 ### TxIndex capability watermarks
-Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`); `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement); `BlockHeaders` is shared rollback-integrity metadata whose row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch; a lagging cursor moves independently. Height alone cannot prove identity across a reorg. Older or unversioned index formats are deleted and rebuilt on startup; a crash-resumable reset marker makes restart finish deletion before the writer is exposed.
+Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`txindex`); `ScriptHistory` owns `Funding` and `Spending` (`script_index`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement); `BlockHeaders` is shared rollback-integrity metadata whose row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch; a lagging cursor moves independently. Height alone cannot prove identity across a reorg. Older or unversioned index formats are deleted and rebuilt on startup; a crash-resumable reset marker makes restart finish deletion before the writer is exposed.
 
 ### Coalesced TxIndex wake
 The nonblocking hint published after a committed `applied_tip.store`: an atomic revision incremented with `Release` plus `try_send` on a capacity-one channel. Tokens may coalesce or drop; the worker checks the authoritative revision before sleeping and also wakes on a bounded timeout.

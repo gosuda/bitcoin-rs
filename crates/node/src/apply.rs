@@ -6335,7 +6335,7 @@ mod consensus_rule_tests {
     /// makes, and must not hand back script evidence for a block it skipped.
     ///
     /// It used to do neither: every unit was prepared and executed before the
-    /// per-block decision was reached, so `--assume-valid-height N` did nothing
+    /// per-block decision was reached, so `assume_valid_height` did nothing
     /// on the windowed path at all.
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]

@@ -10,7 +10,7 @@ rest=1
 
 The REST requests are unauthenticated, as in Bitcoin Core. JSON-RPC requests on
 the same listener continue to require their configured authentication. Select
-the listener with the existing `--rpc-bind` option (or its layered config
+the listener with `rpc_bind` / `BITCOIN_RS_RPC_BIND` (or its layered config
 equivalent).
 
 The gateway registers these Core REST prefixes:

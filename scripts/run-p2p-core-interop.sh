@@ -225,15 +225,15 @@ echo "==> core height after initial mine: ${CORE_HEIGHT}"
 
 echo "==> starting bitcoin-rs (connect 127.0.0.1:${CORE_P2P_PORT})"
 # shellcheck disable=SC2086 # the command may carry its own arguments
+BITCOIN_RS_RPC_BIND="127.0.0.1:${RS_RPC_PORT}" \
+BITCOIN_RS_RPC_USER="${RS_RPC_USER}" \
+BITCOIN_RS_RPC_PASSWORD="${RS_RPC_PASSWORD}" \
+BITCOIN_RS_P2P_LISTEN="127.0.0.1:${RS_P2P_PORT}" \
+BITCOIN_RS_CONNECT="127.0.0.1:${CORE_P2P_PORT}" \
+BITCOIN_RS_LOG_LEVEL=info \
 ${BITCOIN_RS_COMMAND} \
   --network regtest \
   --data-dir "${RS_DATADIR}" \
-  --rpc-bind "127.0.0.1:${RS_RPC_PORT}" \
-  --rpc-user "${RS_RPC_USER}" \
-  --rpc-password "${RS_RPC_PASSWORD}" \
-  --p2p-listen "127.0.0.1:${RS_P2P_PORT}" \
-  --connect "127.0.0.1:${CORE_P2P_PORT}" \
-  --log-level info \
   >"${RS_LOG}" 2>&1 &
 BITCOIN_RS_PID=$!
 
