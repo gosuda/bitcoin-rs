@@ -6,11 +6,12 @@ endpoints (`MEMPOOL_BACKEND=esplora`) and its Core-compatible JSON-RPC methods
 on the same node listener. It starts no Electrum or electrs service.
 
 The stock Mempool frontend proxies `/api/v1` to the Mempool backend and every
-other `/api/` path to electrs. This example mounts `nginx-mempool.conf` to send
-the public Esplora prefixes (`/tx`, `/block`, `/block-height`, `/blocks`,
-`/address`, `/scripthash`, `/mempool`, `/fee-estimates`) to bitcoin-rs on
-`:8332`. Unknown `/api/` paths stay on the Mempool backend so the explorer
-port does not become a JSON-RPC, `/internal/*`, or `/block-template` front.
+other `/api/` path to electrs. This example mounts `nginx-mempool.conf` to keep
+`/api/v1` on the Mempool backend and send every other `/api/` path to
+bitcoin-rs on `:8332/api/`. The node owns that prefix as a closed public
+Esplora namespace, so the explorer port does not become a JSON-RPC,
+`/internal/*`, or `/block-template` front, and new Esplora routes do not need
+an nginx allowlist.
 
 The Mempool project has a frontend, backend, and MariaDB dependency, so this
 stack contains those three services plus `bitcoin-rs`. The frontend is the only
