@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
-    ConsumerCursorUpdate, HashPrefixRow, IndexCapabilities, IndexCapability, IndexError,
-    IndexReader, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
+    ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
     types::{TxPosition, TxPositionValue},
 };
@@ -2901,16 +2901,25 @@ impl TxIndexQueryEngine {
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
-    ) -> Result<Vec<HashPrefixRow>, TxQueryError> {
+    ) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
         let limit = budget.next_scan_limit()?;
         let scan = snapshot
             .spending_rows(outpoint, limit)
             .map_err(|error| TxQueryError::Storage(error.to_string().into()))?;
-        Ok(budget
-            .accept_scan(scan)?
-            .into_iter()
-            .map(|row| row.row)
-            .collect())
+        budget.accept_scan(scan)
+    }
+
+    fn vin_spending(transaction: &Tx, outpoint: &OutPoint) -> Result<Option<u32>, TxQueryError> {
+        let Some(vin) = transaction
+            .inputs
+            .iter()
+            .position(|input| input.previous_output == *outpoint)
+        else {
+            return Ok(None);
+        };
+        u32::try_from(vin)
+            .map(Some)
+            .map_err(|_| TxQueryError::Storage("vin overflow".into()))
     }
 
     fn collect_funding_outputs(
@@ -2990,27 +2999,51 @@ impl TxIndexQueryEngine {
         let spend_rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
         let mut last_height = None;
         for row in spend_rows {
-            let height = row.height();
+            let height = row.row.height();
             if last_height == Some(height) {
                 continue;
             }
             last_height = Some(height);
+
+            if let Some(positions) = Self::validated_positions(&row.value) {
+                let mut complete = true;
+                let mut found = None;
+                for &position in positions {
+                    let Some(transaction) =
+                        self.resolve_positioned_transaction(tip, budget, height, position)?
+                    else {
+                        complete = false;
+                        break;
+                    };
+                    if let Some(vin) = Self::vin_spending(&transaction, outpoint)? {
+                        found = Some(SpendingRecord {
+                            txid: transaction.txid(),
+                            height,
+                            vin,
+                        });
+                        break;
+                    }
+                }
+                if complete {
+                    if found.is_some() {
+                        return Ok(found);
+                    }
+                    // Every named transaction decoded and none spent this
+                    // outpoint: an 8-byte prefix collision at this height.
+                    continue;
+                }
+            }
+
             let hash = self.resolve_hash_at_height(height, tip)?;
             let block = self.resolve_block(budget, height, hash)?;
             for transaction in &block.txs {
-                let Some(vin) = transaction
-                    .inputs
-                    .iter()
-                    .position(|input| input.previous_output == *outpoint)
-                else {
-                    continue;
-                };
-                return Ok(Some(SpendingRecord {
-                    txid: transaction.txid(),
-                    height,
-                    vin: u32::try_from(vin)
-                        .map_err(|_| TxQueryError::Storage("vin overflow".into()))?,
-                }));
+                if let Some(vin) = Self::vin_spending(transaction, outpoint)? {
+                    return Ok(Some(SpendingRecord {
+                        txid: transaction.txid(),
+                        height,
+                        vin,
+                    }));
+                }
             }
         }
         Ok(None)

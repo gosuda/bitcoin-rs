@@ -5,7 +5,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Number of bytes retained from hashes in electrs index rows.
 pub const HASH_PREFIX_LEN: usize = 8;
-/// Number of bytes used for little-endian block heights in index rows.
+/// Number of bytes used for big-endian block heights in ordered index keys.
+///
+/// Big-endian encoding makes lexicographic key order match numeric height
+/// order within one 8-byte prefix, so a prefix scan is chronological.
 pub const HEIGHT_SIZE: usize = 4;
 /// Serialized byte length of a hash-prefix row.
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
@@ -15,7 +18,12 @@ pub const HEADER_ROW_SIZE: usize = 80;
 /// Prefix used as the seek key for electrs-style hash-prefix rows.
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
-/// A stable electrs hash-prefix row: eight prefix bytes followed by a little-endian height.
+/// A hash-prefix row: eight prefix bytes followed by a big-endian height.
+///
+/// Height is big-endian so store iteration within one prefix is chronological.
+/// This is a derived-index encoding; it is not required to match electrs's
+/// little-endian height suffix. Previous little-endian rows are deleted and
+/// rebuilt.
 #[derive(
     Copy,
     Clone,
@@ -36,22 +44,30 @@ pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 pub struct HashPrefixRow {
     /// The first eight bytes of the indexed hash-derived key.
     pub prefix: HashPrefix,
-    /// The transaction-confirming block height, encoded little-endian.
+    /// The transaction-confirming block height, encoded big-endian.
     pub height: [u8; HEIGHT_SIZE],
 }
 
 impl HashPrefixRow {
+    /// Encodes a native height as the on-disk key suffix.
+    ///
+    /// This is the single owner of height endianness for ordered index keys.
+    #[must_use]
+    pub const fn encode_height(height: u32) -> [u8; HEIGHT_SIZE] {
+        height.to_be_bytes()
+    }
+
     /// Creates a row from its prefix and native-endian height.
     pub const fn new(prefix: HashPrefix, height: u32) -> Self {
         Self {
             prefix,
-            height: height.to_le_bytes(),
+            height: Self::encode_height(height),
         }
     }
 
     /// Returns the native-endian block height.
     pub const fn height(self) -> u32 {
-        u32::from_le_bytes(self.height)
+        u32::from_be_bytes(self.height)
     }
 
     /// Returns the serialized database row.
@@ -145,16 +161,9 @@ impl SpendingPrefixRow {
         HashPrefixRow::new(Self::scan_prefix(outpoint), height)
     }
 
-    /// Builds a database row from zero-copy previous-outpoint parts.
-    pub(crate) fn row_parts(
-        txid_bytes: &[u8],
-        vout: u32,
-        height: [u8; HEIGHT_SIZE],
-    ) -> HashPrefixRow {
-        HashPrefixRow {
-            prefix: spending_prefix(txid_bytes, vout),
-            height,
-        }
+    /// Compact scan prefix from zero-copy previous-outpoint parts.
+    pub(crate) fn prefix_parts(txid_bytes: &[u8], vout: u32) -> HashPrefix {
+        spending_prefix(txid_bytes, vout)
     }
 }
 
@@ -350,11 +359,11 @@ impl TxPosition {
 
 /// Codec for the row value carrying a row's transaction byte positions.
 ///
-/// Layout: a packed `TxPosition[n]`, `n >= 1`. A row exists only because at
-/// least one transaction produced it, so an **empty** value never means "this
-/// block has no matching transactions" — it means the row predates this format.
-/// Readers must treat empty and malformed values identically: no usable
-/// positions, scan the block.
+/// Layout: a packed `TxPosition[n]`, `n >= 1`, used by Funding, `TxConfirmed`,
+/// and Spending. A row exists only because at least one transaction produced
+/// it, so an **empty** value never means "this block has no matching
+/// transactions" — it means the row predates this format. Readers must treat
+/// empty and malformed values identically: no usable positions, scan the block.
 ///
 /// # Staleness
 ///
@@ -417,15 +426,26 @@ mod tests {
     };
 
     #[test]
-    fn hash_prefix_row_uses_electrs_layout() {
-        let row = HashPrefixRow::new([0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc], 123_456);
+    fn hash_prefix_row_uses_sortable_big_endian_height() {
+        let prefix = [0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc];
+        let row = HashPrefixRow::new(prefix, 123_456);
         assert_eq!(
             row.to_db_row(),
             [
-                0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc, 0x40, 0xe2, 0x01, 0x00
+                0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc, 0x00, 0x01, 0xe2, 0x40
             ]
         );
         assert_eq!(row.height(), 123_456);
+
+        // Height 255 is `00 00 00 FF`; height 256 is `00 00 01 00`. Big-endian
+        // byte order matches numeric order; little-endian would reverse them.
+        assert!(
+            HashPrefixRow::new(prefix, 1).to_db_row() < HashPrefixRow::new(prefix, 256).to_db_row()
+        );
+        assert!(
+            HashPrefixRow::new(prefix, 255).to_db_row()
+                < HashPrefixRow::new(prefix, 256).to_db_row()
+        );
     }
 
     #[test]

@@ -2,10 +2,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_index::{ScriptHashRow, SpendingPrefixRow, TxidRow};
+use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
+use bitcoin_rs_index::{HashPrefixRow, ScriptHashRow, SpendingPrefixRow, TxidRow};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    encode::double_sha256,
+    encode::double_sha256, varint,
 };
 use bitcoin_rs_rpc::context::{BlockRecord, ScriptHistoryRecord};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
@@ -180,11 +181,28 @@ struct SingleBlockBody {
     height: u32,
     hash: BlockHash,
     body: Vec<u8>,
+    expose_full_body: bool,
 }
 
 impl BlockBodySource for SingleBlockBody {
     fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-        (height == self.height && hash == self.hash).then(|| self.body.clone())
+        (self.expose_full_body && height == self.height && hash == self.hash)
+            .then(|| self.body.clone())
+    }
+
+    fn block_body_range(
+        &self,
+        height: u32,
+        hash: BlockHash,
+        offset: u32,
+        len: u32,
+    ) -> Option<Vec<u8>> {
+        if height != self.height || hash != self.hash {
+            return None;
+        }
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(usize::try_from(len).ok()?)?;
+        self.body.get(start..end).map(<[u8]>::to_vec)
     }
 }
 
@@ -193,9 +211,21 @@ impl QueryFixture {
         Self::new_with_script_history_watermark(config, ScriptHistoryWatermark::MatchTx)
     }
 
+    fn new_range_only(config: FixtureConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::build(config, ScriptHistoryWatermark::MatchTx, true)
+    }
+
     fn new_with_script_history_watermark(
         config: FixtureConfig,
         script_history_watermark: ScriptHistoryWatermark,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::build(config, script_history_watermark, false)
+    }
+
+    fn build(
+        config: FixtureConfig,
+        script_history_watermark: ScriptHistoryWatermark,
+        range_only: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let tip_id = tree.insert_header(config.block.header, NodeStatus::HeaderValid)?;
@@ -239,16 +269,17 @@ impl QueryFixture {
                 aba,
             },
         });
-        let records = if config.retain_body {
+        let records = if config.retain_body && !range_only {
             vec![BlockRecord::from_block(tip.height, &config.block)]
         } else {
             Vec::new()
         };
-        let body_source = config.retain_body.then(|| {
+        let body_source = (config.retain_body || range_only).then(|| {
             let source: Arc<dyn BlockBodySource> = Arc::new(SingleBlockBody {
                 height: tip.height,
                 hash: config.block.block_hash(),
                 body: consensus_bytes(&config.block),
+                expose_full_body: !range_only,
             });
             source
         });
@@ -327,6 +358,87 @@ fn compute_merkle_root(block: &Block) -> Option<Hash256> {
         level = next;
     }
     Some(Hash256::from_le_bytes(&level[0]))
+}
+
+fn tx_positions(block: &Block) -> Result<Vec<TxPosition>, Box<dyn std::error::Error>> {
+    let tx_count = u64::try_from(block.txs.len())?;
+    let mut offset = 80_usize
+        .checked_add(varint::encode(tx_count).len())
+        .ok_or_else(|| std::io::Error::other("block header plus count overflows usize"))?;
+    let mut positions = Vec::with_capacity(block.txs.len());
+    for tx in &block.txs {
+        let len = tx.total_size();
+        positions.push(TxPosition::new(u32::try_from(offset)?, u32::try_from(len)?));
+        offset = offset
+            .checked_add(len)
+            .ok_or_else(|| std::io::Error::other("transaction offset overflow"))?;
+    }
+    Ok(positions)
+}
+
+struct SpendBlock {
+    block: Block,
+    funded_txid: Txid,
+    spend_txid: Txid,
+    spending_row: Vec<u8>,
+    spend_prefix: Vec<u8>,
+}
+
+fn genesis_spent_by_second_tx() -> Result<SpendBlock, Box<dyn std::error::Error>> {
+    let mut block = Network::Regtest.genesis_block();
+    let coinbase = &mut block.txs[0];
+    let funded_txid = coinbase.txid();
+    let value = coinbase.outputs[0].value;
+    let spend_tx = Tx {
+        version: 2,
+        lock_time: 0,
+        inputs: vec![TxIn {
+            previous_output: OutPoint {
+                txid: funded_txid,
+                vout: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
+        }],
+        outputs: vec![TxOut {
+            value,
+            script_pubkey: Vec::new(),
+        }],
+    };
+    block.txs.push(spend_tx);
+    block.header.merkle_root = compute_merkle_root(&block)
+        .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
+    let spend_txid = block.txs[1].txid();
+    let outpoint = OutPoint {
+        txid: funded_txid,
+        vout: 0,
+    };
+    Ok(SpendBlock {
+        spending_row: SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec(),
+        spend_prefix: SpendingPrefixRow::scan_prefix(&outpoint).to_vec(),
+        block,
+        funded_txid,
+        spend_txid,
+    })
+}
+
+fn range_only_spender_fixture(
+    spend: &SpendBlock,
+    spending_value: Vec<u8>,
+) -> Result<QueryFixture, Box<dyn std::error::Error>> {
+    QueryFixture::new_range_only(FixtureConfig {
+        block: spend.block.clone(),
+        retain_body: false,
+        scans: vec![scan_response(
+            ColumnFamily::Spending,
+            spend.spend_prefix.clone(),
+            vec![(spend.spending_row.clone(), spending_value)],
+            true,
+        )],
+        aba_trigger: None,
+        watermark: None,
+    })
 }
 
 /// Pins that the height query proves absence rather than guessing the tip.
@@ -679,5 +791,76 @@ fn confirmed_history_snapshot_retries_after_aba_on_spending_scan()
         fixture.engine.history_snapshot(scripthash),
         Err(TxQueryError::Retry)
     ));
+    Ok(())
+}
+
+#[test]
+fn spender_lookup_cannot_scan_when_only_range_reads_exist() -> Result<(), Box<dyn std::error::Error>>
+{
+    let spend = genesis_spent_by_second_tx()?;
+    let fixture = range_only_spender_fixture(&spend, Vec::new())?;
+    let outpoint = OutPoint {
+        txid: spend.funded_txid,
+        vout: 0,
+    };
+    assert!(matches!(
+        fixture.engine.spender(outpoint),
+        Err(TxQueryError::Unavailable(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn spender_lookup_uses_stored_spender_position() -> Result<(), Box<dyn std::error::Error>> {
+    let spend = genesis_spent_by_second_tx()?;
+    let positions = tx_positions(&spend.block)?;
+    let fixture = range_only_spender_fixture(&spend, TxPositionValue::encode(&[positions[1]]))?;
+    let record = fixture
+        .engine
+        .spender(OutPoint {
+            txid: spend.funded_txid,
+            vout: 0,
+        })?
+        .ok_or_else(|| std::io::Error::other("positioned spender missing"))?;
+    assert_eq!(record.txid, spend.spend_txid);
+    assert_eq!(record.height, 0);
+    assert_eq!(record.vin, 0);
+    Ok(())
+}
+
+#[test]
+fn spender_lookup_exact_checks_prefix_collision_positions() -> Result<(), Box<dyn std::error::Error>>
+{
+    let spend = genesis_spent_by_second_tx()?;
+    let positions = tx_positions(&spend.block)?;
+    let fixture = range_only_spender_fixture(
+        &spend,
+        TxPositionValue::encode(&[positions[0], positions[1]]),
+    )?;
+    let record = fixture
+        .engine
+        .spender(OutPoint {
+            txid: spend.funded_txid,
+            vout: 0,
+        })?
+        .ok_or_else(|| std::io::Error::other("spender missing among collision positions"))?;
+    assert_eq!(record.txid, spend.spend_txid);
+    assert_eq!(record.vin, 0);
+    Ok(())
+}
+
+#[test]
+fn spender_lookup_treats_decoded_non_match_as_prefix_collision()
+-> Result<(), Box<dyn std::error::Error>> {
+    let spend = genesis_spent_by_second_tx()?;
+    let positions = tx_positions(&spend.block)?;
+    let fixture = range_only_spender_fixture(&spend, TxPositionValue::encode(&[positions[0]]))?;
+    assert_eq!(
+        fixture.engine.spender(OutPoint {
+            txid: spend.funded_txid,
+            vout: 0,
+        })?,
+        None
+    );
     Ok(())
 }

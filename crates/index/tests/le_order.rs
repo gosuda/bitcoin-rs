@@ -1,11 +1,15 @@
-//! Little-endian key-order vs numeric-height-order contract tests.
+//! Big-endian key-order vs numeric-height-order contract tests.
 //!
-//! The 4-byte height suffix in `HashPrefixRow` is little-endian, so
-//! lexicographic key-byte order does **not** match numeric height order
-//! within one 8-byte prefix. Height 256 (`00 01 00 00`) sorts before
-//! height 1 (`01 00 00 00`) in byte order.
+//! The 4-byte height suffix in `HashPrefixRow` is big-endian, so
+//! lexicographic key-byte order **matches** numeric height order within one
+//! 8-byte prefix. Height 1 (`00 00 00 01`) sorts before height 256
+//! (`00 00 01 00`).
 //!
 //! These tests pin two contracts:
+//!
+//! 1. Store iteration of funding and spending rows is chronological.
+//! 2. High-level resolvers still sort by numeric height so API order does
+//!    not depend on the on-disk encoding.
 //!
 mod common;
 
@@ -61,11 +65,11 @@ fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
 }
 
-/// Two funding rows with the same 8-byte prefix at heights 1 and 256 do NOT
-/// iterate in numeric order under LE keys, but `resolve_script_history` DOES
-/// sort by numeric height.
+/// Two funding rows with the same 8-byte prefix at heights 1 and 256 iterate
+/// in numeric order under big-endian keys, and `resolve_script_history` also
+/// sorts by numeric height so API order does not depend on the encoding.
 #[test]
-fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
+fn store_order_and_history_are_numeric_height() {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let mut indexer = Indexer::new(Arc::new(MemoryStore::default()));
@@ -89,32 +93,17 @@ fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
         panic!("ingest height 256");
     };
 
-    // --- Part A: iter_funding_rows returns LE byte order, not numeric ---
+    // --- Part A: iter_funding_rows returns numeric height order ---
 
     let Ok(rows) = indexer.iter_funding_rows(scripthash) else {
         panic!("iter_funding_rows");
     };
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
-    // Height 256 is [0x00, 0x01, 0x00, 0x00]; height 1 is [0x01, 0x00, 0x00, 0x00].
-    // LE byte order puts 256 before 1.
     assert_eq!(
-        rows[0].height(),
-        256,
-        "LE byte order puts height 256 before height 1, not numeric order"
-    );
-    assert_eq!(rows[1].height(), 1);
-
-    // The corollary: numeric sort produces the opposite order.
-    let mut numeric = rows.clone();
-    numeric.sort_by_key(|row| row.height());
-    assert_eq!(
-        numeric.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![1, 256]
-    );
-    assert_ne!(
-        rows, numeric,
-        "store iteration order must differ from numeric height order"
+        rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
+        vec![1, 256],
+        "big-endian height keys iterate in numeric order"
     );
 
     // --- Part B: resolve_script_history sorts by numeric height ---
@@ -135,7 +124,7 @@ fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
     assert_eq!(
         entries.iter().map(|e| e.height).collect::<Vec<_>>(),
         vec![1, 256],
-        "resolve_script_history must sort by numeric height, not LE byte order"
+        "resolve_script_history must sort by numeric height regardless of key encoding"
     );
 
     // The first entry's txid must come from the height-1 block.
@@ -225,11 +214,10 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() {
     );
 }
 
-/// Spending rows share the same LE height-order caveat as funding rows.
-/// This test confirms the on-disk key for spending rows also uses LE height,
-/// so `iter_spending_rows` returns LE byte order, not numeric.
+/// Spending rows use the same big-endian height suffix as funding rows, so
+/// `iter_spending_rows` returns numeric height order.
 #[test]
-fn spending_rows_also_use_le_height_order() {
+fn spending_rows_use_numeric_height_order() {
     let script = vec![0x51, 0x04];
     let outpoint = spent_outpoint(7, 0);
 
@@ -258,7 +246,9 @@ fn spending_rows_also_use_le_height_order() {
     };
     assert_eq!(rows.len(), 2, "two spending rows at two heights");
 
-    // LE byte order: 256 before 1.
-    assert_eq!(rows[0].height(), 256);
-    assert_eq!(rows[1].height(), 1);
+    assert_eq!(
+        rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
+        vec![1, 256],
+        "big-endian height keys iterate in numeric order"
+    );
 }

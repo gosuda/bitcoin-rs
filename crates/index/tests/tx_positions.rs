@@ -171,6 +171,53 @@ fn txid_positions_address_their_own_transaction() {
 }
 
 #[test]
+fn spending_positions_address_the_transactions_that_spent_the_outpoint() {
+    let block = mixed_block();
+    let bytes = consensus_bytes(&block);
+
+    let store = Arc::new(MemoryStore::default());
+    Indexer::new(Arc::clone(&store))
+        .ingest_block(&bytes, HEIGHT)
+        .expect("ingest");
+
+    for tx in &block.txs {
+        for input in &tx.inputs {
+            let outpoint = input.previous_output;
+            if outpoint.vout == u32::MAX && outpoint.txid.as_bytes().iter().all(|&b| b == 0) {
+                continue;
+            }
+            let rows = rows_with_values(&store, ColumnFamily::Spending);
+            let prefix = bitcoin_rs_index::SpendingPrefixRow::scan_prefix(&outpoint);
+            let (_key, value) = rows
+                .iter()
+                .find(|(key, _)| key.starts_with(&prefix))
+                .expect("spending row for the prevout");
+            let positions = TxPositionValue::decode(value).expect("spending value decodes");
+            assert!(
+                !positions.is_empty(),
+                "spending rows carry at least one spender position"
+            );
+            let matches = positions.iter().any(|position| {
+                let start = usize::try_from(position.offset()).expect("offset fits usize");
+                let end =
+                    usize::try_from(position.end().expect("end fits u32")).expect("end fits usize");
+                let Ok(decoded) = deserialize::<Tx>(&bytes[start..end]) else {
+                    return false;
+                };
+                decoded
+                    .inputs
+                    .iter()
+                    .any(|vin| vin.previous_output == outpoint)
+            });
+            assert!(
+                matches,
+                "a stored spender position must address a transaction that spent the outpoint"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_partial_position_decodes_to_none() {
     let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);
     for truncated in 1..value.len() {

@@ -76,9 +76,9 @@ The query mix is read-only. No write-path measurement is in scope.
 A finding is **material** if it changes a design decision or a caller
 contract. A finding is **informational** if it confirms an existing decision.
 
-- The LE-vs-numeric ordering finding is **material**: it changed
-  `resolve_script_history` and `resolve_unspent_outputs_with_height` to sort
-  by numeric height in the reader.
+- The LE-vs-numeric ordering finding was **material** and is now closed by
+  encoding height big-endian so store order is numeric. Resolvers still sort
+  so API order does not depend on the on-disk encoding.
 - The per-row byte counts are **informational**: they confirm the existing
   key/value layout but do not change it.
 - The Q1–Q5 verdicts are **material**: they freeze decisions about
@@ -105,18 +105,19 @@ as a benchmark corpus or a data file.
 
 | Row type | Column family | Key bytes | Value bytes | Total per row |
 |---|---|---|---|---|
-| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Funding | `Funding` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Spending | `Spending` | 8 (prefix) + 4 (LE height) = 12 | 0 (empty value) | 12 |
+| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (BE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
+| Funding | `Funding` | 8 (prefix) + 4 (BE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
+| Spending | `Spending` | 8 (prefix) + 4 (BE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
 | BlockHeaders | `BlockHeaders` | 80 (raw header = block hash) | 0 (empty value) | 80 |
 
 **Key observations:**
 
 - `TxPosition` is 8 bytes: 4-byte LE offset + 4-byte LE length (`TX_POSITION_SIZE = 8`).
-- The common case is n = 1 (one transaction at one height funds one script),
-  so the typical Funding and TxConfirmed row is **20 bytes** (12 key + 8 value).
-- Spending rows carry no value: the key alone is the index. An empty value
-  never means "no spending" — it means "this outpoint was spent at this height."
+- The common case is n = 1, so the typical Funding, TxConfirmed, and Spending
+  row is **20 bytes** (12 key + 8 value).
+- Spending rows carry spender `TxPosition[n]`, the same value layout as Funding.
+  An empty value never means "no spending" — it means the row predates this
+  format and the reader must scan.
 - BlockHeaders rows are keyed by the raw 80-byte block header (which is also
   the block hash). The value is empty.
 
@@ -151,66 +152,60 @@ contain hashes, timestamps, nonces); expect on-disk ≈ logical on mainnet.
 
 **Verdict: keep 8 bytes (4+4).**
 
-`TxPosition` stores a 4-byte LE offset and a 4-byte LE length. The maximum
-serialized block size on mainnet is 4 MB (the post-segwit weight limit
-divided by 4), and both `offset` and `len` fit in `u32`. A block would need
-to exceed 4 GB before a `u32` offset overflows, which is impossible under
-consensus rules.
+**Q1 asked whether 8 bytes is too wide, not whether it is sufficient.**
+Packing to 3+3 (u24 offset + u24 length) saves 2 bytes per occurrence, about
+3% of measured physical bytes/row against ~75 B fjall overhead. Decode would
+lose the current zerocopy `TxPosition[n]` overlay. Rejected: keep 8 bytes
+because physical overhead dominates and `u32` is the addressing width the rest
+of the node already uses.
 
-Widening to 8+8 would double the value size of every Funding and TxConfirmed
-row (from 8n to 16n bytes) for zero benefit. The `Ord` implementation
-already compares numerically, not lexicographically, so the LE encoding is
-correct and the width is sufficient.
+`TxPosition` stores a 4-byte LE offset and a 4-byte LE length. The maximum
+serialized block size on mainnet is 4 MB, and both fields fit in `u32`. The
+`Ord` implementation compares numerically, not lexicographically.
 
 ### Q2: Empty Spending value vs position — should Spending carry positions?
 
-**Verdict: keep empty value. Do not add positions to Spending rows.**
+**Verdict: store compact spender `TxPosition[n]` on Spending rows.**
 
-Spending rows answer one question: "was this outpoint spent, and at what
-height?" The key (`prefix(8) || LE height(4)`) answers both. A caller that
-needs the spending transaction fetches the block at the height and scans it
-for the input that spends the outpoint — the same exact-resolve path Funding
-and TxConfirmed use.
+Spending rows still answer "was this outpoint spent, and at what height?"
+The key (`prefix(8) || BE height(4)`) answers both. The value now names the
+spender transaction's byte range, the same layout Funding and TxConfirmed
+already use.
 
-Adding positions to Spending would:
+Empty Spending values forced `spender_for` (Esplora outspend, and every
+funded output in `history_snapshot_for`) to load and scan the candidate
+block. That is the same I/O class Funding escaped by carrying positions.
+Prefix collisions are exact-checked against the prevout after fetching the
+named transactions; a fully-decoded non-match is a collision, not a scan.
+A decode failure still falls back to a full block scan (all-or-scan).
 
-- Double the value size (12 + 8n vs 12 + 0) for a marginal read-path win.
-- Require a value-format migration or a dual-read path, which the versioning
-  section below forbids for a capability that is not independently tracked.
-- Complicate the rollback path: spending rows are deleted by key, and adding
-  a value means the writer must encode positions for spending transactions,
-  which the current `IndexBlockVisitor` does not track.
+Rejected alternatives:
 
-The empty value is the correct design. An empty value on a Spending row
-means "spent at this height," not "not spent." This is the same convention
-as BlockHeaders: the key is the index; the value is absent.
+- Keep empty values. Saves 8n logical bytes and pays a whole-block read on
+  every spender lookup, including each historical output of a script.
+- Dual-read old empty rows. Forbidden: derived bytes are deleted and rebuilt.
+  `FORMAT_VERSION_VALUE` 3→4 refuses previous indexes.
+
+Rollback still deletes by key; positions live in the value and disappear
+with the row. `IndexBlockVisitor` buffers spending prefixes until
+`visit_transaction` knows the spender's byte range, matching funding.
 
 ### Q3: Keep LE height vs switch to sortable (big-endian) height?
 
-**Verdict: keep LE. Sort in the reader.**
+**Verdict: encode height big-endian so store order is numeric order.**
 
-Switching the height suffix from little-endian to big-endian would make
-lexicographic key order match numeric height order. That is not a
-compatibility constraint: derived ScriptIndex bytes are disposable.
-The pick is keep-LE because the reader already restores numeric order
-cheaply, and BE would buy nothing the API does not already guarantee:
+Little-endian heights made lexicographic KV order the opposite of the order
+every API promises. Sorting in the reader patched the symptom; pagination
+and bounded chronological scans could not use a prefix range. Electrs
+convention is not a compatibility constraint: derived ScriptIndex bytes are
+disposable.
 
-1. **The sort cost is negligible.** The reader sorts a `Vec` of
-   `ScriptHistoryEntry` (two `u32` fields each) or `(Txid, u32, u64, u32)`
-   tuples by height. For a typical scripthash with 10–100 funding rows, this
-   is a few hundred nanoseconds — invisible against the block-fetch I/O that
-   follows.
-2. **LE is the electrs convention.** The index is shaped to match electrs's
-   key layout for compatibility reasoning. Switching to BE would diverge
-   from the reference design for no measurable query benefit.
+High-level resolvers still sort by numeric height so API order does not
+depend on the on-disk encoding. Tests pin both store iteration and resolver
+output for heights 1 and 256.
 
-The sort-in-reader approach (`entries.sort_by_key(|entry| entry.height)`) is
-applied in `resolve_script_history`, `resolve_script_history_scan`,
-`resolve_unspent_outputs_with_height`, and
-`resolve_unspent_outputs_with_height_scan`. The raw `iter_funding_rows`,
-`iter_spending_rows`, and `iter_txid_rows` functions document the LE caveat
-and return rows in store order, so callers that want chronological order
-must sort — but the high-level resolvers already do it for them.
+Rejected: keep-LE and sort in the reader. The durable key's only ordered
+dimension would remain unordered.
 
 ### Q4: Per-CF cost table (fixture-scale)
 
@@ -221,7 +216,7 @@ must sort — but the high-level resolvers already do it for them.
 |---|---|---|---|
 | TxConfirmed | 20 (12 key + 8 value) | ~75 | 3.75× |
 | Funding | 20 (12 key + 8 value) | ~75 | 3.75× |
-| Spending | 12 (12 key + 0 value) | ~89 | 7.42× |
+| Spending | 20 (12 key + 8 value) | ~75 | ~3.75× |
 | BlockHeaders | 80 (80 key + 0 value) | ~0 (compressed, fixture) | <0.01× (fixture) |
 
 **Caveats:**
@@ -231,10 +226,10 @@ must sort — but the high-level resolvers already do it for them.
 - The BlockHeaders amplification is an artifact of the synthetic corpus
   (repetitive 80-byte headers compress to near-zero). On mainnet, expect
   amplification ≈ 1.0 (headers are incompressible).
-- The Spending amplification (7.42×) is the highest because the row has no
-  value to compress, so the full per-row overhead is paid against a 12-byte
-  payload. This is inherent to the design (Q2) and not actionable without
-  adding a value, which Q2 rejects.
+- The Spending amplification is no longer the empty-value outlier: rows now
+  carry the same 8-byte `TxPosition` payload as Funding. Physical figures
+  above for Spending were the empty-value fixture; expect Funding-like
+  overhead after rebuild.
 
 ### Q5: Live UTXO locator — what is the baseline key shape?
 
@@ -281,19 +276,23 @@ The index tracks two independently versioned capabilities via
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
 
 **Per-capability format version.** The row-value format version
-(`INDEX_FORMAT_VERSION`, currently 1) is a single marker in `UtxoMeta`. It
-governs whether Funding and TxConfirmed values carry `TxPosition` arrays.
-A future format bump (e.g. adding positions to Spending, or changing
-`TxPosition` width) would increment this version. Readers already handle
-`IndexFormat::Legacy` by falling back to full block scans, so an old-format
-index remains correct, just slower.
+(`INDEX_FORMAT_VERSION`, currently 2) is a single marker in `UtxoMeta`. It
+governs `TxPosition` arrays on Funding, TxConfirmed, and Spending, and
+big-endian heights in `HashPrefixRow`. A store-wide `FORMAT_VERSION_VALUE`
+of 4 refuses version-3 indexes (little-endian heights, empty Spending
+values) so the worker deletes and rebuilds those capabilities. There is no
+legacy key decoder.
 
 **Per-capability reset.** The `IndexCapabilities` mask allows resetting one
 capability without touching the other. `acquire_capability_reset` and
 `resume_capability_reset` delete only the column families belonging to the
 requested capability and clear only that capability's watermark. The reset
 state is tracked in `RESET_CAPABILITIES_KEY` with a monotonic version that
-prevents ABA across repeated resets.
+prevents ABA across repeated resets. A History/TxLookup format bump does not
+require wiping `ScriptLive`: Live keys have no height suffix. The store-wide
+marker bump still resets all derived capabilities together today because
+the previous on-disk index cannot be interpreted; Live is unpopulated until
+#225.
 
 **Adding ScriptLive later must not force a History reindex.** ScriptLive
 rows would occupy a new column family (not one of the existing four). The

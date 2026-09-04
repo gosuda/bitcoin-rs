@@ -162,10 +162,12 @@ fn txindex_position_values_follow_authoritative_rows() -> TestResult<()> {
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
     let confirmed = key_12(1);
     let funding = key_12(2);
+    let spending = key_12(3);
 
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &confirmed, b"tx-position");
     batch.put(ColumnFamily::Funding, &funding, b"funding-position");
+    batch.put(ColumnFamily::Spending, &spending, b"spend-position");
     store.write(batch)?;
 
     assert_eq!(
@@ -175,6 +177,10 @@ fn txindex_position_values_follow_authoritative_rows() -> TestResult<()> {
     assert_eq!(
         store.get(ColumnFamily::Funding, &funding)?,
         Some(b"funding-position".to_vec())
+    );
+    assert_eq!(
+        store.get(ColumnFamily::Spending, &spending)?,
+        Some(b"spend-position".to_vec())
     );
     let rows = store
         .iter_prefix(ColumnFamily::TxConfirmed, &confirmed[..4])?
@@ -447,13 +453,17 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
 
-    // Non-empty value on a fixed-width table aborts the batch.
+    // Non-empty value on a unit-value fixed-width table aborts the batch.
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &valid, b"");
-    batch.put(ColumnFamily::Spending, &key_12(2), b"non-empty");
+    batch.put(ColumnFamily::BlockHeaders, &header_80(2), b"non-empty");
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
-    assert!(store.get(ColumnFamily::Spending, &key_12(2))?.is_none());
+    assert!(
+        store
+            .get(ColumnFamily::BlockHeaders, &header_80(2))?
+            .is_none()
+    );
 
     // Delete with an invalid key length aborts the batch.
     let mut batch = store.new_batch();

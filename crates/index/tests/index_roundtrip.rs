@@ -678,11 +678,11 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 5 })
     ));
     Ok(())
 }
@@ -735,7 +735,7 @@ fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0],
+        &[4, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1484,7 +1484,7 @@ const TX_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 const SCRIPT_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
-const FORMAT_VALUE: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
 /// concurrent writer commits. Injection points run these claims wholesale;
@@ -1805,7 +1805,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
             .as_deref(),
-        Some(1u32.to_le_bytes().as_slice()),
+        Some(2u32.to_le_bytes().as_slice()),
         "the row-format marker survives reset and rebuild"
     );
     assert!(
@@ -1813,7 +1813,14 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
             .rows(ColumnFamily::Funding)
             .into_iter()
             .any(|(_, value)| !value.is_empty()),
-        "rebuilt rows carry transaction byte positions"
+        "rebuilt funding rows carry transaction byte positions"
+    );
+    assert!(
+        store
+            .rows(ColumnFamily::Spending)
+            .into_iter()
+            .all(|(_, value)| !value.is_empty()),
+        "rebuilt spending rows carry spender transaction byte positions"
     );
     Ok(())
 }
@@ -1871,15 +1878,15 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
 #[test]
 fn format_version_requires_exact_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
-    // Extra trailing byte must be rejected even though the prefix is version 3.
+    // Extra trailing byte must be rejected even though the prefix is version 4.
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0, 0],
+        &[4, 0, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 3 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
     ));
     Ok(())
 }
@@ -1894,7 +1901,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0],
+        &[4, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1934,7 +1941,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0],
+        &[4, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
