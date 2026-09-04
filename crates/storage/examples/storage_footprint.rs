@@ -50,20 +50,21 @@ const UNDO_VALUE_BYTES: usize = 256;
 fn logical_data_size() -> u64 {
     let mut total: u64 = 0;
 
-    // Index CFs: 12-byte key + 8-byte value per row (TxConfirmed, Funding,
-    // Spending), 80-byte key + 0-byte value (BlockHeaders), 12-byte key
+    // Index CFs: 12-byte key + 6-byte packed position (TxConfirmed, Funding,
+    // Spending), 32-byte hash key + 0-byte value (BlockHeaders), 12-byte key
     // + 8-byte value (Coinstats),
     // 37-byte key + 0-byte value (BlockTree), 16-byte key + 8-byte value
-    // (UtxoMeta), 5-byte key + 4-byte value (TxMempool).
+    // (UtxoMeta), 5-byte key + 4-byte value (TxMempool), 43-byte live locator.
     let index_cfs: &[(ColumnFamily, usize, usize)] = &[
-        (ColumnFamily::TxConfirmed, 12, 8),
+        (ColumnFamily::TxConfirmed, 12, 6),
         (ColumnFamily::TxMempool, 5, 4),
-        (ColumnFamily::BlockHeaders, 80, 0),
-        (ColumnFamily::Funding, 12, 8),
-        (ColumnFamily::Spending, 12, 8),
+        (ColumnFamily::BlockHeaders, 32, 0),
+        (ColumnFamily::Funding, 12, 6),
+        (ColumnFamily::Spending, 12, 6),
         (ColumnFamily::Coinstats, 12, 8),
         (ColumnFamily::BlockTree, 37, 0),
         (ColumnFamily::UtxoMeta, 16, 8),
+        (ColumnFamily::ScriptLive, 43, 0),
     ];
 
     for &(_, key_len, val_len) in index_cfs {
@@ -87,14 +88,15 @@ fn logical_data_size() -> u64 {
 fn write_corpus<S: KvStore>(store: &S) {
     // Index CFs with small key/value pairs.
     let index_cfs: &[(ColumnFamily, usize, usize)] = &[
-        (ColumnFamily::TxConfirmed, 12, 8),
+        (ColumnFamily::TxConfirmed, 12, 6),
         (ColumnFamily::TxMempool, 5, 4),
-        (ColumnFamily::BlockHeaders, 80, 0),
-        (ColumnFamily::Funding, 12, 8),
-        (ColumnFamily::Spending, 12, 8),
+        (ColumnFamily::BlockHeaders, 32, 0),
+        (ColumnFamily::Funding, 12, 6),
+        (ColumnFamily::Spending, 12, 6),
         (ColumnFamily::Coinstats, 12, 8),
         (ColumnFamily::BlockTree, 37, 0),
         (ColumnFamily::UtxoMeta, 16, 8),
+        (ColumnFamily::ScriptLive, 43, 0),
     ];
 
     for &(cf, key_len, val_len) in index_cfs {

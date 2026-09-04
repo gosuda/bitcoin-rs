@@ -2,8 +2,13 @@
 
 The compression-fix comparison was measured on 2026-09-02 at branch
 `overhaul/one-session` commit `b0e0935` against the empty-`Spending`
-(`12+0`) corpus. Current-format (`Spending 12+8`) totals were remesured on
-2026-09-04 from `crates/storage/examples/storage_footprint.rs`.
+(`12+0`) corpus. Format-4 (`Spending 12+8`, 80-byte header keys) totals were
+remeasured on 2026-09-04 from `crates/storage/examples/storage_footprint.rs`.
+
+Format 5 changed the harness corpus to packed 6-byte positions, 32-byte
+header-hash keys, and 43-byte `ScriptLive` locators. Re-run the example
+before treating the tables below as current; they remain the format-4
+snapshot that measured the LZ4-all-levels fix.
 
 ## What was measured
 
@@ -26,7 +31,7 @@ cargo run -p bitcoin-rs-storage --example storage_footprint --release --features
 | Undo rows | 5,000 |
 | Block-body value size | 16,384 B (16 KiB) |
 | Undo value size | 256 B |
-| Index CF key/value sizes | TxConfirmed 12+8, TxMempool 5+4, BlockHeaders 80+0, Funding 12+8, Spending 12+8, Coinstats 12+8, BlockTree 37+0, UtxoMeta 16+8 |
+| Index CF key/value sizes | Format 4 snapshot: TxConfirmed 12+8, TxMempool 5+4, BlockHeaders 80+0, Funding 12+8, Spending 12+8, Coinstats 12+8, BlockTree 37+0, UtxoMeta 16+8. Format 5 harness: TxConfirmed/Funding/Spending 12+6, BlockHeaders 32+0, ScriptLive 43+0. |
 | Block-body key size | 37 B |
 | **Logical data size** | **129,570,000 B (123.57 MiB)** |
 

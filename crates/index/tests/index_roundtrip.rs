@@ -684,32 +684,29 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 5 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 6 })
     ));
     Ok(())
 }
 
 #[test]
-fn format_3_open_resets_only_script_history() -> Result<(), Box<dyn std::error::Error>> {
+fn format_4_open_resets_all_derived_capabilities() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     store.put(ColumnFamily::Spending, b"legacy-spend", &[])?;
-    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &3_u32.to_le_bytes())?;
+    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &4_u32.to_le_bytes())?;
     store.put(
         ColumnFamily::UtxoMeta,
         b"index:format_version",
-        &1_u32.to_le_bytes(),
+        &2_u32.to_le_bytes(),
     )?;
 
-    let Some(tx_lookup) = store.get(ColumnFamily::UtxoMeta, &[0x00, b'T'])? else {
-        return Err("tx lookup watermark".into());
-    };
-    let confirmed_before = store.count(ColumnFamily::TxConfirmed);
-    let headers_before = store.count(ColumnFamily::BlockHeaders);
+    assert!(store.count(ColumnFamily::TxConfirmed) > 0);
+    assert!(store.count(ColumnFamily::BlockHeaders) > 0);
     assert!(store.count(ColumnFamily::Funding) > 0);
     assert!(store.count(ColumnFamily::Spending) > 0);
 
@@ -717,24 +714,24 @@ fn format_3_open_resets_only_script_history() -> Result<(), Box<dyn std::error::
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
-        Some(4_u32.to_le_bytes().as_slice())
+        Some(5_u32.to_le_bytes().as_slice())
     );
     assert_eq!(
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
             .as_deref(),
-        Some(2_u32.to_le_bytes().as_slice())
+        Some(3_u32.to_le_bytes().as_slice())
     );
     assert_eq!(
         writer.watermarks()?,
         IndexWatermarks {
-            tx_lookup: Some(IndexWatermark::from_bytes(&tx_lookup)?),
+            tx_lookup: None,
             script_history: None,
             script_live: None,
         }
     );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), confirmed_before);
-    assert_eq!(store.count(ColumnFamily::BlockHeaders), headers_before);
+    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
+    assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
     assert_eq!(store.count(ColumnFamily::Funding), 0);
     assert_eq!(store.count(ColumnFamily::Spending), 0);
     Ok(())
@@ -788,7 +785,7 @@ fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -815,7 +812,7 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
     assert_eq!(block.hash, hash);
     assert_eq!(block.parent_hash, [0u8; 32]);
     assert_eq!(block.row_count, 3); // txid + funding + header
-    assert_eq!(block.encoded_bytes, 120);
+    assert_eq!(block.encoded_bytes, 68);
 
     let wrong_hash = [0x42u8; 32];
     assert!(matches!(
@@ -1610,7 +1607,7 @@ const SCRIPT_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
-const FORMAT_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
 /// concurrent writer commits. Injection points run these claims wholesale;
@@ -1931,7 +1928,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
             .as_deref(),
-        Some(2u32.to_le_bytes().as_slice()),
+        Some(3u32.to_le_bytes().as_slice()),
         "the row-format marker survives reset and rebuild"
     );
     assert!(
@@ -1981,7 +1978,7 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     assert!(batch.try_push(block0).is_ok());
     assert!(batch.try_push(block1).is_err());
     assert_eq!(batch.len(), 1);
-    assert_eq!(batch.encoded_bytes(), 120);
+    assert_eq!(batch.encoded_bytes(), 68);
     assert!(batch.is_full());
     assert_eq!(
         batch.watermark(),
@@ -2020,7 +2017,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -2060,7 +2057,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,

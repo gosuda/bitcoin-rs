@@ -105,21 +105,23 @@ as a benchmark corpus or a data file.
 
 | Row type | Column family | Key bytes | Value bytes | Total per row |
 |---|---|---|---|---|
-| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Funding | `Funding` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Spending | `Spending` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| BlockHeaders | `BlockHeaders` | 80 (raw header = block hash) | 0 (empty value) | 80 |
+| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (BE height) = 12 | `n × 6` (packed TxPosition array, n ≥ 1) | 12 + 6n |
+| Funding | `Funding` | 8 (prefix) + 4 (BE height) = 12 | `n × 6` | 12 + 6n |
+| Spending | `Spending` | 8 (prefix) + 4 (BE height) = 12 | `n × 6` | 12 + 6n |
+| BlockHeaders | `BlockHeaders` | 32 (sha256d of the header) | 0 (empty value) | 32 |
+| ScriptLive | `ScriptLive` | 8 (prefix) + 32 (txid) + 3 (vout) = 43 | 0 | 43 |
 
 **Key observations:**
 
-- `TxPosition` is 8 bytes: 4-byte LE offset + 4-byte LE length (`TX_POSITION_SIZE = 8`).
-- The common case is n = 1 (one transaction at one height funds one script),
-  so the typical Funding and TxConfirmed row is **20 bytes** (12 key + 8 value).
+- `TxPosition` is 6 bytes: 3-byte LE offset + 3-byte LE length (`TX_POSITION_SIZE = 6`).
+- The common case is n = 1, so the typical Funding/TxConfirmed/Spending row is
+  **18 bytes** (12 key + 6 value).
 - Spending rows carry positions for the transactions that spend the outpoint.
-  An empty value never means "no spending" — it is a legacy row value that
+  An empty value never means "no spending" — it is a malformed row that
   requires a full-block scan.
-- BlockHeaders rows are keyed by the raw 80-byte block header (which is also
-  the block hash). The value is empty.
+- BlockHeaders rows are keyed by the 32-byte double-SHA256 of the header.
+- ScriptLive locators keep the full txid in the key so point deletes are
+  identity-safe under an 8-byte script-prefix collision.
 
 ### Physical bytes on fjall (fixture-scale, cited from storage-footprint.md)
 
@@ -150,175 +152,123 @@ the synthetic corpus are highly repetitive (deterministic pattern), so LZ4
 compresses them well. Real block headers are near-incompressible (they
 contain hashes, timestamps, nonces); expect on-disk ≈ logical on mainnet.
 
-## Q1–Q5 verdicts
+## Chosen format (store version 5)
 
-### Q1: TxPosition width — is 8 bytes (4+4) sufficient?
+Derived ScriptIndex bytes are disposable. Format 5 is a store-wide epoch:
+opening version 3 or 4 resets every derived capability and rebuilds from
+authoritative chain/UTXO state. There is no dual-read, dual-write, legacy
+decoder, or conversion pass.
 
-**Verdict: keep 8 bytes (4+4).**
+| Row | Key | Value |
+|---|---|---|
+| TxConfirmed / Funding / Spending | `prefix(8) \|\| height_be(4)` | packed `TxPosition[n]`, 6 bytes each |
+| BlockHeaders | `sha256d(header)(32)` | empty |
+| ScriptLive | `prefix(8) \|\| txid(32) \|\| vout_u24(3)` | empty |
 
-`TxPosition` stores a 4-byte LE offset and a 4-byte LE length. The maximum
-serialized block size on mainnet is 4 MB (the post-segwit weight limit
-divided by 4), and both `offset` and `len` fit in `u32`. A block would need
-to exceed 4 GB before a `u32` offset overflows, which is impossible under
-consensus rules.
+`INDEX_FORMAT_VERSION` is 3 (packed positions). High-level history resolvers
+still sort by numeric height so API order does not depend on the raw key
+encoding.
 
-Widening to 8+8 would double the value size of every Funding and TxConfirmed
-row (from 8n to 16n bytes) for zero benefit. The `Ord` implementation
-already compares numerically, not lexicographically, so the LE encoding is
-correct and the width is sufficient.
+### Q1: TxPosition width
 
-### Q2: Empty Spending value vs position — should Spending carry positions?
+**Verdict: pack to 6 bytes (`u24` offset + `u24` length).**
 
-**Verdict: Spending rows carry positions (format version 4).**
+Consensus-serialized blocks cannot exceed 4 MiB, so 32-bit fields wasted two
+bytes on every occurrence. Packed 6-byte entries stay zerocopy (`&[TxPosition]`
+from the value slice). Delta-coded `u24` offsets cannot beat that for the
+common `n = 1` row; a varint delta would win on `n > 1` but loses in-place
+decode. Merge/batch admission uses `TX_POSITION_SIZE`, so the smaller value
+automatically admits more positions under the same `max_bytes` cap.
 
-`spender_for` runs once per funding output for address history and UTXO
-queries, so an unpositioned spend costs a 4 MB full-block reservation each and
-exhausts the query budget after ~16 spends (issue #262). Positions make the
-spend path the same one-transaction read as funding.
+Rejected: keep 8-byte `u32` pair (format 4); varint/delta as the production
+codec (decode allocates and is not a win at `n = 1`).
 
-### Q3: Keep LE height vs switch to sortable (big-endian) height?
+### Q2: Empty Spending value vs position
 
-**Verdict: keep LE. Sort in the reader.**
+**Verdict: Spending rows carry packed positions (unchanged from format 4).**
 
-Switching the height suffix from little-endian to big-endian would make
-lexicographic key order match numeric height order. That is not a
-compatibility constraint: derived ScriptIndex bytes are disposable.
-The pick is keep-LE because the reader already restores numeric order
-cheaply, and BE would buy nothing the API does not already guarantee:
+`spender_for` runs once per funding output. Unpositioned spends cost a full
+block reservation each. Positions also identify the exact spender under an
+8-byte outpoint-prefix collision, so the reader does not scan the block to
+disambiguate.
 
-1. **The sort cost is negligible.** The reader sorts a `Vec` of
-   `ScriptHistoryEntry` (two `u32` fields each) or `(Txid, u32, u64, u32)`
-   tuples by height. For a typical scripthash with 10–100 funding rows, this
-   is a few hundred nanoseconds — invisible against the block-fetch I/O that
-   follows.
-2. **LE is the electrs convention.** The index is shaped to match electrs's
-   key layout for compatibility reasoning. Switching to BE would diverge
-   from the reference design for no measurable query benefit.
+Rejected: empty Spending values.
 
-The sort-in-reader approach (`entries.sort_by_key(|entry| entry.height)`) is
-applied in `resolve_script_history`, `resolve_script_history_scan`,
-`resolve_unspent_outputs_with_height`, and
-`resolve_unspent_outputs_with_height_scan`. The raw `iter_funding_rows`,
-`iter_spending_rows`, and `iter_txid_rows` functions document the LE caveat
-and return rows in store order, so callers that want chronological order
-must sort — but the high-level resolvers already do it for them.
+### Q3: Height endian
+
+**Verdict: big-endian height. Sort in the reader anyway.**
+
+LE keys made lexicographic order disagree with numeric height (height 256
+sorted before height 1). That also scattered sequential IBD writes for a
+hot script across the keyspace and defeated LSM prefix compression of the
+8-byte hash prefix. BE makes store order chronological, clusters writes for
+one prefix, and lets a bounded height scan walk the prefix in order.
+
+API pagination still sorts by numeric height. Store order matching numeric
+order is a physical win, not the API contract.
+
+Rejected: keep LE "because electrs does" — electrs layout is not a
+compatibility constraint for rebuildable derived state.
 
 ### Q4: Per-CF cost table (fixture-scale)
 
-**Verdict: the per-CF cost table is labeled fixture-scale and cited from
-`storage-footprint.md`.**
+Logical bytes/row after format 5:
 
-| Column family | Logical bytes/row | Physical bytes/row (fjall, fixture-scale) | Amplification |
-|---|---|---|---|
-| TxConfirmed | 20 (12 key + 8 value) | ~75 | 3.75× |
-| Funding | 20 (12 key + 8 value) | ~75 | 3.75× |
-| Spending | 12 (12 key + 0 value) | ~89 | 7.42× |
-| BlockHeaders | 80 (80 key + 0 value) | ~0 (compressed, fixture) | <0.01× (fixture) |
+| Column family | Logical bytes/row |
+|---|---|
+| TxConfirmed | 18 (12 key + 6 value) |
+| Funding | 18 (12 key + 6 value) |
+| Spending | 18 (12 key + 6 value) |
+| BlockHeaders | 32 (32-byte hash key + empty value) |
+| ScriptLive | 43 (43-byte locator + empty value) |
 
-**Caveats:**
+Physical fjall figures in `storage-footprint.md` are still the format-4
+200k-row corpus. Re-run `crates/storage/examples/storage_footprint.rs` on
+format 5 before treating those numbers as current.
 
-- Physical bytes/row is computed as `on_disk / rows` from the 200k-row
-  fixture. It includes bloom-filter, block-index, and key-encoding overhead.
-- The BlockHeaders amplification is an artifact of the synthetic corpus
-  (repetitive 80-byte headers compress to near-zero). On mainnet, expect
-  amplification ≈ 1.0 (headers are incompressible).
-- The Spending amplification figure predates positioned Spending values
-  (format version 4) and has not been re-measured.
+### Q5: Live UTXO locator
 
-### Q5: Live UTXO locator — what is the baseline key shape?
+**Verdict: `prefix(8) \|\| txid(32) \|\| vout_u24(3)` = 43 bytes, empty value.**
 
-**Verdict: baseline is `prefix(8) || txid(32) || vout(4)` with an empty
-value. A smaller locator requires an injectivity proof.**
+The full txid stays in the key so the locator is injective on
+`(script_prefix, outpoint)`. Two scripts that collide on the 8-byte prefix
+cannot share an outpoint, and distinct outpoints cannot share a key, so a
+point delete cannot remove another script's row. Prefix-range scans stay
+read-only. `vout` packs to 3 bytes because consensus output counts cannot
+reach `2^24` under the serialized-block size cap.
 
-ScriptLive is a compact reverse view of the authoritative UTXO set (current
-outpoint locators per script), not a mempool index and not a Coin copy.
-Rows are **not implemented** in this audit. This verdict freezes the
-baseline key shape so a future implementation does not need to revisit
-the decision.
+Rejected:
 
-**Baseline key: `prefix(8) || txid(32) || vout(4)` = 44 bytes, empty value.**
+- `prefix \|\| txid \|\| vout_u32` (44-byte baseline): one unused identity byte.
+- Shorter txid / hashed outpoint locators: not injective; a point delete
+  can drop another live row, and no read-side exact-check recovers a row
+  that is already gone.
+- Grouping vouts under `(prefix, txid)`: requires read-modify-write on
+  every spend and is unsafe if coalesced as last-op-per-key instead of
+  last-op-per-vout.
 
-Rationale:
+## Versioning: per-capability reset, store-wide format epoch
 
-- The confirmed index uses 8-byte prefixes for scan efficiency, but a
-  mempool row must be deletable when the transaction confirms or is evicted.
-  A prefix-only key is lossy: multiple outpoints can share a prefix, so
-  deletion by prefix would remove unrelated rows.
-- The full outpoint (`txid(32) || vout(4)`) is injective: each outpoint
-  maps to exactly one key. The 8-byte prefix is prepended to preserve the
-  same scan-prefix contract as confirmed rows (`ScriptHashRow::scan_prefix`
-  returns the first 8 bytes of the scripthash), so a single prefix scan
-  over the Live CF returns both confirmed and unconfirmed rows for a
-  scripthash without a second seek.
-- The value is empty because the Live key already names the outpoint
-  (`txid || vout`). The caller fetches the transaction from the mempool or
-  the confirmed index by that txid; a stored position or coin copy would
-  duplicate state the Live row is not authorized to own.
-
-**A smaller locator (e.g. dropping the prefix, or hashing the outpoint to
-fewer bytes) requires an injectivity proof:** a demonstration that no two
-live outpoints can produce the same key, and that prefix-scan efficiency is
-preserved. No such proof is offered here; the 44-byte baseline is the
-default until one is.
-
-## Versioning: per-capability format and reset
-
-The index tracks two independently versioned capabilities via
+The index tracks three independently reset capabilities via
 `IndexCapability`:
 
 | Capability | Column families | Watermark key |
 |---|---|---|
 | `TxLookup` | `TxConfirmed`, `BlockHeaders` | `TX_LOOKUP_WATERMARK_KEY` |
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
+| `ScriptLive` | `ScriptLive` | `SCRIPT_LIVE_WATERMARK_KEY` |
 
-**Per-capability format version.** The row-value format version
-(`INDEX_FORMAT_VERSION`, currently 2) is a single marker in `UtxoMeta`. It
-governs whether Funding, Spending, and TxConfirmed values carry `TxPosition`
-arrays.
-A future format bump (e.g. changing `TxPosition` width) would increment this
-version. Readers already handle
-`IndexFormat::Legacy` by falling back to full block scans, so an old-format
-index remains correct, just slower.
+Format 5 changes shared prefix-row encoding, packed positions, header keys,
+and the Live locator, so opening version 3 or 4 resets **all** derived
+capabilities. A later change that touches only Live can reset only
+`ScriptLive`; a change that touches only packed positions still has to
+reset TxLookup and ScriptHistory together because they share
+`HashPrefixRow` / `TxPosition`.
 
-**Per-capability reset.** The `IndexCapabilities` mask allows resetting one
-capability without touching the other. `acquire_capability_reset` and
-`resume_capability_reset` delete only the column families belonging to the
-requested capability and clear only that capability's watermark. The reset
-state is tracked in `RESET_CAPABILITIES_KEY` with a monotonic version that
-prevents ABA across repeated resets.
+`INDEX_FORMAT_VERSION` (currently 3) is the packed-position marker written
+alongside a ScriptHistory reset. A foreign store version that is not 3, 4,
+or 5 still refuses start.
 
-Opening a format-3 store (Spending keys without positions) is this kind of
-reset: `IndexWriter::open` rebuilds `ScriptHistory` only and leaves
-`TxLookup` ready. A foreign format version still refuses start.
-
-**Adding ScriptLive later must not force a History reindex.** ScriptLive
-rows would occupy a new column family (not one of the existing four). The
-`IndexCapability` enum would gain a `ScriptLive` variant with its own
-watermark key. Because the reset mechanism is per-capability:
-
-- Adding `ScriptLive` does not touch `Funding`, `Spending`, `TxConfirmed`,
-  or `BlockHeaders` rows.
-- A `ScriptHistory` reset (clearing `Funding` + `Spending`) does not touch
-  `ScriptLive` rows.
-- A `ScriptLive` reset clears only the Live CF.
-- The `INDEX_FORMAT_VERSION` marker does not change: it governs the
-  row-value format of existing CFs, not the existence of a new CF.
-
-The only shared state between capabilities is the `ORDINARY_STATE_REVISION`
-counter in `UtxoMeta`, which advances on every ordinary commit regardless of
-which capability wrote. This is by design: the revision fences derived
-writes against concurrent resets, and a new capability's writes must be
-fenced the same way. Adding a capability does not change the revision
-counter's semantics; it just means more writes advance it.
-
-**No dual-read path.** The reader does not maintain a "read from old format,
-then read from new format" fallback for a capability that has not been
-reset. The `IndexFormat::Legacy` fallback is for the row-value format
-(positions vs no positions), not for the presence or absence of a column
-family. A new CF is either populated (after the first ingest) or empty
-(before it); the reader handles both without a format check.
-
-**No migration.** Adding a capability is additive: open the new keyspace,
-start ingesting, advance the new watermark. No existing row is rewritten.
-The only operator action is enabling the capability in the ingest
-configuration; the reset mechanism handles the rest.
+**No dual-read path, no migration.** Previous ScriptIndex bytes are
+deleted and rebuilt from authoritative chain/UTXO sources. Live is cheap
+to re-seed (one pass over the UTXO set); History is a reindex.

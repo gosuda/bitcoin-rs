@@ -22,10 +22,10 @@ pub enum ColumnFamily {
     BlockBodies = 8,
     /// Per-block UTXO undo records, needed to disconnect a block during a reorg.
     UndoData = 9,
-    /// Live script-index rows: `script-prefix || outpoint` for currently
-    /// unspent outputs (#225). Appended after every existing discriminant so
-    /// the addition is additive -- renumbering these is a breaking change
-    /// (`docs/policies/db-migration.md` 3.1).
+    /// Live script-index rows: `script-prefix(8) || txid(32) || vout_u24(3)`
+    /// for currently unspent outputs (#225). Appended after every existing
+    /// discriminant so the addition is additive -- renumbering these is a
+    /// breaking change (`docs/policies/db-migration.md` 3.1).
     ScriptLive = 10,
 }
 

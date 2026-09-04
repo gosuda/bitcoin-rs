@@ -51,7 +51,7 @@ Owners:
   `missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`.
 
 `ScriptLive` is not a duplicate coin table. Its empty-valued key is
-`script-hash-prefix || full-outpoint`; the prefix is only a scan accelerator.
+`script-hash-prefix || txid || vout_u24`; the prefix is only a scan accelerator.
 Readers resolve each locator against the authoritative UTXO set and exact-check
 the full script. Deletes are exact point deletes, so a prefix collision cannot
 remove another script's output.

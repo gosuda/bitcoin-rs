@@ -10,7 +10,8 @@ use tracing::debug;
 use zerocopy::IntoBytes;
 
 use crate::types::{
-    HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow,
+    HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow, encode_height,
+    header_identity_key,
 };
 
 /// Errors returned while indexing confirmed blocks.
@@ -31,13 +32,13 @@ pub enum IndexError {
         /// Actual header length observed by the visitor.
         len: usize,
     },
-    /// A transaction's byte range in the block does not fit the `u32` that
-    /// [`crate::types::TxPosition`] stores.
+    /// A transaction's byte range in the block does not fit the packed 24-bit
+    /// [`crate::types::TxPosition`] fields.
     ///
     /// Unreachable for any consensus-valid block — a block is capped far below
-    /// 4 GiB — but the arithmetic is checked rather than wrapped, and the
+    /// 16 MiB — but the arithmetic is checked rather than wrapped, and the
     /// failure is an addressing limit, not a malformed header.
-    #[error("transaction byte range does not fit u32 at block offset {offset}")]
+    #[error("transaction byte range does not fit u24 at block offset {offset}")]
     UnaddressablePosition {
         /// Block byte offset reached when the range stopped fitting.
         offset: u64,
@@ -157,11 +158,12 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
-const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
-/// Format 3 stores Spending keys without positions. This build still
-/// understands those rows (resolvers fall back to a full block) and upgrades
-/// by resetting only `ScriptHistory`, leaving `TxLookup` ready (`IDX-04`).
-const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+const FORMAT_VERSION_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
+/// Previous `ScriptIndex` epochs. Derived rows are disposable: opening one of
+/// these versions resets every derived capability and rebuilds from
+/// authoritative chain/UTXO state. There is no dual-read, dual-write, or
+/// in-place conversion.
+const PREVIOUS_FORMAT_VERSIONS: &[[u8; 4]] = &[[0x03, 0x00, 0x00, 0x00], [0x04, 0x00, 0x00, 0x00]];
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
@@ -708,9 +710,6 @@ fn acquire_capability_reset<S: KvStore>(
         }
         if capabilities.script_history {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY);
-            // Same durable batch as FORMAT_VERSION_VALUE so a format-3
-            // upgrade cannot publish version 4 while leaving the row-value
-            // marker at 1.
             batch.put(
                 ColumnFamily::UtxoMeta,
                 INDEX_FORMAT_VERSION_KEY,
@@ -1295,11 +1294,10 @@ impl<S: KvStore> Indexer<S> {
     /// scan prefix, decoded from `ColumnFamily::Funding`. Rows are returned in
     /// the iteration order of the underlying store (lexicographic by key bytes).
     ///
-    /// **Height ordering caveat:** the 4-byte height suffix is little-endian,
-    /// so lexicographic byte order does **not** match numeric height order
-    /// within one prefix. For example, height 256 (`00 01 00 00`) sorts before
-    /// height 1 (`01 00 00 00`). Callers that need chronological order must
-    /// sort the returned rows by numeric height after exact-resolving them.
+    /// The 4-byte height suffix is big-endian, so lexicographic byte order
+    /// matches numeric height order within one prefix. High-level resolvers
+    /// still sort by numeric height so API order does not depend on the raw
+    /// key encoding.
     ///
     /// The 8-byte prefix is lossy: callers MUST resolve heights back to full
     /// transactions via block storage to confirm scripthash identity.
@@ -1354,13 +1352,10 @@ impl<S: KvStore> Indexer<S> {
     /// `ScriptHistoryEntry::confirmed` for every transaction in that block that has
     /// at least one output matching `scripthash` exactly.
     ///
-    /// Entries are returned sorted by numeric height (ascending). The underlying
-    /// store iterates rows in lexicographic key-byte order, and because the
-    /// 4-byte height suffix is little-endian, that order does **not** match
-    /// numeric height order within one prefix (height 256 sorts before height
-    /// 1). This method sorts the final entry list by numeric height so callers
-    /// receive chronological order regardless of the on-disk key encoding.
-    /// Heights not resolvable by `source` are skipped.
+    /// Entries are returned sorted by numeric height (ascending). Store
+    /// iteration is already chronological because heights are big-endian;
+    /// this method still sorts so API order does not depend on the raw key
+    /// encoding. Heights not resolvable by `source` are skipped.
     ///
     /// The lossy 8-byte prefix is exact-resolved here: only transactions whose
     /// output scripthash matches the full 32-byte `scripthash` are emitted.
@@ -1497,7 +1492,7 @@ impl<S: KvStore> Indexer<S> {
     /// funding height (ascending). Use this when callers need the confirmation
     /// height (e.g. `ScriptIndex` `listunspent` emits the height for each
     /// unspent output). The sort mirrors [`Self::resolve_script_history`]:
-    /// store iteration order is LE byte order, not numeric height order.
+    /// API order is numeric height, independent of the raw key encoding.
     pub fn resolve_unspent_outputs_with_height<B: BlockSource>(
         &self,
         scripthash: crate::ScriptHash,
@@ -1568,11 +1563,10 @@ impl<S: KvStore> Indexer<S> {
     /// spending scan prefix, decoded from `ColumnFamily::Spending`. The 8-byte
     /// prefix is lossy as above.
     ///
-    /// **Height ordering caveat:** same as [`Self::iter_funding_rows`]: the
-    /// 4-byte height suffix is little-endian, so lexicographic byte order does
-    /// **not** match numeric height order within one prefix. Callers needing
-    /// chronological order must sort by numeric height after exact-resolving
-    /// rows.
+    /// **Height ordering:** same as [`Self::iter_funding_rows`]: the 4-byte
+    /// height suffix is big-endian, so lexicographic byte order matches numeric
+    /// height order within one prefix. Callers needing chronological order can
+    /// use store order; high-level resolvers still sort by numeric height.
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,
@@ -1588,11 +1582,10 @@ impl<S: KvStore> Indexer<S> {
     /// prefix, decoded from `ColumnFamily::TxConfirmed`. The 8-byte prefix is
     /// lossy; multiple txids can share a prefix.
     ///
-    /// **Height ordering caveat:** same as [`Self::iter_funding_rows`]: the
-    /// 4-byte height suffix is little-endian, so lexicographic byte order does
-    /// **not** match numeric height order within one prefix. Callers needing
-    /// chronological order must sort by numeric height after exact-resolving
-    /// rows.
+    /// **Height ordering:** same as [`Self::iter_funding_rows`]: the 4-byte
+    /// height suffix is big-endian, so lexicographic byte order matches numeric
+    /// height order within one prefix. Callers needing chronological order can
+    /// use store order; high-level resolvers still sort by numeric height.
     pub fn iter_txid_rows(&self, txid: &Txid) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
         let prefix = TxidRow::scan_prefix(txid);
         let iter = self.store.iter_prefix(ColumnFamily::TxConfirmed, &prefix)?;
@@ -1787,10 +1780,10 @@ impl<S: KvStore> Indexer<S> {
 
     /// True when the header column family holds at least one row.
     ///
-    /// Deliberately not `header_count`: a legacy index takes this branch on
-    /// every single start, and counting reads every row in the column family
-    /// and allocates an 80-byte array per row — roughly a million of each at
-    /// mainnet height — to answer a question that is only ever yes or no.
+    /// Deliberately not `header_count`: a leftover index takes this branch on
+    /// every start, and counting would read every row in the column family —
+    /// roughly a million 32-byte hash keys at mainnet height — to answer a
+    /// question that is only ever yes or no.
     fn has_any_header(&self) -> Result<bool, IndexError> {
         let mut rows = self.store.iter_prefix(ColumnFamily::BlockHeaders, &[])?;
         Ok(rows.next().transpose()?.is_some())
@@ -1798,7 +1791,7 @@ impl<S: KvStore> Indexer<S> {
 
     const FLUSH_THRESHOLD_ROWS: usize = 500_000;
 
-    /// Walks one serialized block once with `bitcoin_slices` and writes electrs-shaped rows.
+    /// Walks one serialized block once with `bitcoin_slices` and writes compact index rows.
     pub fn ingest_block(
         &mut self,
         block: &[u8],
@@ -1937,20 +1930,17 @@ impl<S: KvStore> Indexer<S> {
         // the replacement was indexed, would delete the replacement's rows and
         // leave ScriptIndex missing active-chain history.
         //
-        // The header row is the identity: its key is the 80-byte serialized
-        // header, and the block hash is the double-SHA256 of exactly those
-        // bytes, so no two blocks share one. Its absence means this block is
-        // already rolled back and the keys now belong to whatever replaced it.
-        // Rekeying the other three families would carry block identity
-        // directly, but it would break the electrs-compatible layout and force
-        // a reindex, which is a far larger change than the bug warrants.
+        // The header row is the identity: its key is the 32-byte double-SHA256
+        // of the 80-byte serialized header, and no two blocks share one. Its
+        // absence means this block is already rolled back and the keys now
+        // belong to whatever replaced it.
         // A read failure is propagated, not treated as absence: silently
         // reporting a clean rollback because storage was unreachable would
         // leave the caller believing the block is gone.
         let identity_present = match rows.header_rows.first() {
             Some(header) => self
                 .store
-                .get(ColumnFamily::BlockHeaders, header)?
+                .get(ColumnFamily::BlockHeaders, &header_identity_key(header))?
                 .is_some(),
             None => false,
         };
@@ -1978,7 +1968,7 @@ impl<S: KvStore> Indexer<S> {
             batch.delete(ColumnFamily::Spending, row.as_bytes());
         });
         for row in &rows.header_rows {
-            batch.delete(ColumnFamily::BlockHeaders, row);
+            batch.delete(ColumnFamily::BlockHeaders, &header_identity_key(row));
         }
         commit_ordinary(self.store.as_ref(), self.generation, fence, batch)?;
         debug!(
@@ -2040,7 +2030,7 @@ impl<S: KvStore> Indexer<S> {
             );
         });
         for row in &self.pending_rows.header_rows {
-            batch.put(ColumnFamily::BlockHeaders, row, &[]);
+            batch.put(ColumnFamily::BlockHeaders, &header_identity_key(row), &[]);
         }
         apply_live_ops(&mut batch, &self.pending_rows.live_ops, false);
         if let Err(error) = commit_ordinary(self.store.as_ref(), self.generation, &fence, batch) {
@@ -2099,7 +2089,7 @@ fn pending_rows_for_block_with_header(
         let mut visitor = IndexBlockVisitor {
             rows: &mut rows,
             header: &mut header,
-            height_bytes: height.to_le_bytes(),
+            height_bytes: encode_height(height),
             txids,
             txid_count: 0,
             invalid_header_len: None,
@@ -2235,6 +2225,11 @@ fn pending_rows_for_decoded_block(
             u32::try_from(tx.total_size()).map_err(|_| IndexError::UnaddressablePosition {
                 offset: u64::from(offset),
             })?;
+        if offset > crate::types::U24_MAX || byte_len > crate::types::U24_MAX {
+            return Err(IndexError::UnaddressablePosition {
+                offset: u64::from(offset),
+            });
+        }
         let position = crate::types::TxPosition::new(offset, byte_len);
         offset = offset
             .checked_add(byte_len)
@@ -2386,7 +2381,7 @@ impl PendingRows {
         let header_bytes = self
             .header_rows
             .len()
-            .checked_mul(crate::types::HEADER_ROW_SIZE)
+            .checked_mul(crate::types::HEADER_KEY_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
         let live_bytes = self
             .live_ops
@@ -2456,7 +2451,7 @@ fn put_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows) {
         );
     });
     for row in &rows.header_rows {
-        batch.put(ColumnFamily::BlockHeaders, row, &[]);
+        batch.put(ColumnFamily::BlockHeaders, &header_identity_key(row), &[]);
     }
     apply_live_ops(batch, &rows.live_ops, false);
 }
@@ -2526,7 +2521,7 @@ fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_i
     apply_live_ops(batch, &rows.live_ops, true);
     if delete_shared_identity {
         for row in &rows.header_rows {
-            batch.delete(ColumnFamily::BlockHeaders, row);
+            batch.delete(ColumnFamily::BlockHeaders, &header_identity_key(row));
         }
     }
 }
@@ -2583,10 +2578,12 @@ impl IndexBlockVisitor<'_> {
             .as_ptr()
             .addr()
             .checked_sub(self.block.as_ptr().addr())?;
-        Some(crate::types::TxPosition::new(
-            u32::try_from(offset).ok()?,
-            u32::try_from(bytes.len()).ok()?,
-        ))
+        let offset = u32::try_from(offset).ok()?;
+        let byte_len = u32::try_from(bytes.len()).ok()?;
+        if offset > crate::types::U24_MAX || byte_len > crate::types::U24_MAX {
+            return None;
+        }
+        Some(crate::types::TxPosition::new(offset, byte_len))
     }
 }
 
@@ -2604,8 +2601,9 @@ impl Visitor for IndexBlockVisitor<'_> {
     fn visit_transaction(&mut self, tx: &bsl::Transaction<'_>) -> ControlFlow<()> {
         let Some(position) = self.position_of(tx) else {
             // A transaction that does not lie inside the block slice, or whose
-            // offset does not fit `u32`, cannot be addressed by a position.
-            // Refuse the block rather than write a row that points nowhere.
+            // offset does not fit the packed 24-bit position, cannot be
+            // addressed by a position. Refuse the block rather than write a
+            // row that points nowhere.
             return ControlFlow::Break(());
         };
         for prefix in self.pending_funding.drain(..) {
@@ -3098,8 +3096,8 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Opens a writer over `store`, rejecting unversioned index tables.
     ///
-    /// Format 3 (Spending keys without positions) is upgraded in place by
-    /// resetting `ScriptHistory` only. Any other version mismatch is
+    /// Previous `ScriptIndex` epochs (3 and 4) reset every derived capability
+    /// and rebuild from authoritative sources. Any other version mismatch is
     /// [`IndexError::UnsupportedTxIndexFormatVersion`].
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
@@ -3108,14 +3106,15 @@ impl<S: KvStore> IndexWriter<S> {
             .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
         {
             Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
-            Some(value) if value.as_slice() == FORMAT_VERSION_V3 => {
-                // Only Spending's representation changed. Reset ScriptHistory
-                // so new spending rows carry positions, and leave TxLookup
-                // serving (`IDX-04`). Foreign versions still refuse start.
+            Some(value)
+                if PREVIOUS_FORMAT_VERSIONS
+                    .iter()
+                    .any(|v| value.as_slice() == v) =>
+            {
                 resume_capability_reset(
                     indexer.store.as_ref(),
                     generation,
-                    IndexCapabilities::SCRIPT_HISTORY.to_mask(),
+                    IndexCapabilities::ALL.to_mask(),
                 )?;
             }
             Some(value) => {
@@ -3597,7 +3596,7 @@ impl<S: KvStore> IndexWriter<S> {
         let header_present = self
             .indexer
             .store
-            .get(ColumnFamily::BlockHeaders, header)?
+            .get(ColumnFamily::BlockHeaders, &header_identity_key(header))?
             .is_some();
         ensure_fence_live(self.indexer.store.as_ref(), self.generation, &fence)?;
         if !header_present {
@@ -3852,10 +3851,13 @@ pub trait IndexerLike: Send + Sync {
 /// Metadata key marking which row-value format an index was written with.
 const INDEX_FORMAT_VERSION_KEY: &[u8] = b"index:format_version";
 
-/// Current row-value format. Version 1 added transaction byte positions to
-/// funding and txid row values; version 2 added positions to spending row
-/// values; version 0 (unmarked) has empty values.
-pub const INDEX_FORMAT_VERSION: u32 = 2;
+/// Current row-value format.
+///
+/// Version 1 added transaction byte positions to funding and txid row values;
+/// version 2 added positions to spending row values; version 3 packed each
+/// position into 6 bytes (`u24` offset + `u24` length). Version 0 (unmarked)
+/// has empty values.
+pub const INDEX_FORMAT_VERSION: u32 = 3;
 
 /// Which row-value format an opened index carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4033,17 +4035,14 @@ mod tests {
         Ok(())
     }
 
-    /// Proves that lexicographic key byte order does **not** match numeric
-    /// height order within one prefix, because the height suffix is
-    /// little-endian. Height 256 is `[0x00, 0x01, 0x00, 0x00]`, height 1 is
-    /// `[0x01, 0x00, 0x00, 0x00]`, so byte order puts 256 before 1.
+    /// Proves that lexicographic key byte order matches numeric height order
+    /// within one prefix, because the height suffix is big-endian. Height 1
+    /// is `[0x00, 0x00, 0x00, 0x01]`, height 256 is `[0x00, 0x00, 0x01, 0x00]`.
     ///
-    /// This pins the corrected doc contract on `iter_funding_rows`: callers
-    /// needing chronological order must sort by numeric height after
-    /// exact-resolving rows, never rely on store iteration order.
+    /// High-level resolvers still sort by numeric height so API order does not
+    /// depend on the raw key encoding.
     #[test]
-    fn iter_funding_rows_height_order_is_le_byte_order_not_numeric()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn iter_funding_rows_height_order_matches_numeric() -> Result<(), Box<dyn std::error::Error>> {
         let script = vec![0x51, 0x01];
         let scripthash = ScriptHash::from_script_bytes(&script);
         let (_dir, mut indexer) = indexer()?;
@@ -4056,26 +4055,13 @@ mod tests {
 
         let rows = indexer.iter_funding_rows(scripthash)?;
         assert_eq!(rows.len(), 2, "two heights funded the same script");
-
-        // Store iteration order is LE byte order, so 256 precedes 1.
-        assert_eq!(
-            rows[0].height(),
-            256,
-            "LE byte order puts height 256 before height 1, not numeric order"
-        );
-        assert_eq!(rows[1].height(), 1);
-
-        // The corollary: numeric sort produces the opposite order, so no
-        // caller may treat raw iteration order as chronological.
+        assert_eq!(rows[0].height(), 1);
+        assert_eq!(rows[1].height(), 256);
         let mut numeric = rows.clone();
         numeric.sort_by_key(|row| row.height());
         assert_eq!(
-            numeric.iter().map(|row| row.height()).collect::<Vec<_>>(),
-            vec![1, 256]
-        );
-        assert_ne!(
             rows, numeric,
-            "store iteration order must differ from numeric height order"
+            "store iteration order must match numeric height order"
         );
         Ok(())
     }
