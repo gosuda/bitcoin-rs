@@ -165,9 +165,10 @@ Then, in a second terminal, run the wallet while the node is still running:
 btcw balance -n regtest -u http://127.0.0.1:18443/api
 ```
 
-`/api` is the Esplora surface (the mempool.space electrs prefix). JSON-RPC
-keeps the listener root. `/api/v1` is Mempool's API on the explorer port,
-not an Esplora alias on this node.
+`/api` is the public Esplora surface (the mempool.space electrs prefix).
+JSON-RPC keeps the listener root. `/api/v1` is Mempool's API on the
+explorer port, not an Esplora alias on this node. Mempool backend bulk
+helpers live under `/esplora`, not `/api`.
 
 The wallet stays in that repository. This node only serves the public
 surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).
