@@ -7,6 +7,10 @@ fn main() {
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
     let lock_path = manifest_dir.join("../../Cargo.lock");
     println!("cargo:rerun-if-changed={}", lock_path.display());
+    // Git HEAD may be either a detached commit or a symbolic reference.
+    let git_dir = manifest_dir.join("../../.git");
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
 
     if let Ok(output) = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
