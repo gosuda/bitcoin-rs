@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::vec::Vec;
 
+use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_primitives::{Block, BlockHash, Header, Network, Tx, Txid};
 use compact_str::CompactString;
 
@@ -216,6 +217,8 @@ pub enum MiningControlError {
 pub enum GenerateTx {
     /// Include this currently-pooled transaction, looked up by txid.
     Mempool(Txid),
+    /// Include this transaction resolved from the mempool at parse time.
+    ResolvedMempool(SnapshotEntry),
     /// Include this decoded raw transaction even if it is not in the mempool.
     Raw(Tx),
 }
