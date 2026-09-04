@@ -693,13 +693,11 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `IDX-05` / `IDX-04`: format 3 open resets historical keys and keeps Live.
 #[test]
 fn format_3_open_resets_historical_keys_and_keeps_live() -> Result<(), Box<dyn std::error::Error>> {
     predecessor_height_format_resets_historical(3)
 }
 
-/// `IDX-05` / `IDX-04`: format 4 open resets historical keys and keeps Live.
 #[test]
 fn format_4_open_resets_historical_keys_and_keeps_live() -> Result<(), Box<dyn std::error::Error>> {
     predecessor_height_format_resets_historical(4)
@@ -708,6 +706,7 @@ fn format_4_open_resets_historical_keys_and_keeps_live() -> Result<(), Box<dyn s
 fn predecessor_height_format_resets_historical(
     version: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // IDX-05: predecessor formats reset incompatible historical keys.
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     store.put(ColumnFamily::Spending, b"legacy-spend", &[])?;
@@ -1944,6 +1943,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
     writer.reset_capabilities(IndexCapabilities::HISTORICAL)?;
     drop(writer);
 
+    // IDX-05: the reset/rebuild path preserves the current store format.
     // The emptied index claims the current store format before rebuilding.
     let indexer = Indexer::new(Arc::clone(&store));
     indexer.ensure_format_version()?;
