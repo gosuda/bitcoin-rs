@@ -15,7 +15,8 @@ use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
-    self, compact_target_hex, i64_saturated, sat_to_btc, typed_to_sonic_omitting_nulls,
+    self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_i64,
+    typed_to_sonic_omitting_nulls,
 };
 use crate::context::Context;
 use crate::error::RpcError;
@@ -287,13 +288,7 @@ pub(crate) fn getprioritisedtransactions(
         let _ = row.insert("in_mempool", json!(entry.in_mempool));
         if let Some(modified_fee) = entry.modified_fee {
             // CONTRACT: docs/contracts/external-api.md#API-25
-            let sats = i64::try_from(modified_fee).unwrap_or_else(|_| {
-                if modified_fee.is_negative() {
-                    i64::MIN
-                } else {
-                    i64::MAX
-                }
-            });
+            let sats = signed_sat_to_i64(modified_fee);
             let _ = row.insert("modified_fee", json!(sats));
         }
         let _ = object.insert(&txid, Value::from(row));
