@@ -2,10 +2,10 @@
 //! only HTTP (Esplora + JSON-RPC) using rust-bitcoin.
 //!
 //! This is the executable proof of `docs/contracts/wallet-facing.md`. It
-//! does not import `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or index
-//! types. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
-//! (`btcw -u`); this test issues the same Esplora operations that wallet
-//! issues against any Esplora URL.
+//! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
+//! The package has no `[lib]`; this test does not import `bitcoin-rs-node`,
+//! `NodeState`, `UtxoSet`, or index types. The named out-of-repo consumer
+//! is `gosuda/bitcoin-wallet` (`btcw -u`).
 
 #![allow(missing_docs)]
 
@@ -36,8 +36,6 @@ use serde_json::{Value, json};
 
 const RPC_USER: &str = "bitcoin-rs";
 const RPC_PASSWORD: &str = "bitcoin-rs";
-/// `base64("bitcoin-rs:bitcoin-rs")`.
-const BASIC_AUTH: &str = "Yml0Y29pbi1yczpiaXRjb2luLXJz";
 const FEE_SATS: u64 = 10_000;
 const REGTEST_SUBSIDY_SATS: u64 = 5_000_000_000;
 const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
@@ -392,7 +390,8 @@ impl Client {
             "method": method,
             "params": params,
         }))?;
-        let response = self.exchange("POST", "/", Some(BASIC_AUTH), &body)?;
+        let token = basic_token();
+        let response = self.exchange("POST", "/", Some(token.as_str()), &body)?;
         let value = response.json()?;
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             return Err(format!("{method} RPC error: {error}").into());
@@ -561,6 +560,37 @@ fn required_u64(value: &Value, key: &str) -> TestResult<u64> {
         .as_u64()
         .or_else(|| entry.as_i64().and_then(|n| u64::try_from(n).ok()))
         .ok_or_else(|| format!("template field {key} is not an integer: {entry}").into())
+}
+
+fn basic_token() -> String {
+    encode_base64(format!("{RPC_USER}:{RPC_PASSWORD}").as_bytes())
+}
+
+fn encode_base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
+    for chunk in input.chunks(3) {
+        let byte0 = chunk[0];
+        let byte1 = chunk.get(1).copied().unwrap_or(0);
+        let byte2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(char::from(ALPHABET[usize::from(byte0 >> 2)]));
+        out.push(char::from(
+            ALPHABET[usize::from(((byte0 & 0x03) << 4) | (byte1 >> 4))],
+        ));
+        if chunk.len() > 1 {
+            out.push(char::from(
+                ALPHABET[usize::from(((byte1 & 0x0f) << 2) | (byte2 >> 6))],
+            ));
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(char::from(ALPHABET[usize::from(byte2 & 0x3f)]));
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 fn read_http_response(stream: TcpStream) -> TestResult<HttpResponse> {

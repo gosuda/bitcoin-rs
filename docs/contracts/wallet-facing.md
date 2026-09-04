@@ -37,12 +37,13 @@ out of tree.
 
 - In-tree fixtures that import `NodeState`, `UtxoSet`, index types, or
   other node crates do not prove this contract.
-- Proof: `bin/bitcoin-rs/tests/wallet_facing.rs` spawns the `bitcoin-rs`
-  binary and talks to it as an external process. The test depends on
-  rust-bitcoin, not on `bitcoin-rs-node` / primitives, and speaks only
-  HTTP. It funds a regtest chain through `getblocktemplate` /
-  `submitblock` (this node has no `generate*` RPC), then scans,
-  fee-estimates, and broadcasts the way
+- Proof: `bin/bitcoin-rs/tests/wallet_facing.rs` lives in the binary
+  package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`. That package has
+  no `[lib]`, so the test crate does not link `bitcoin-rs-node` or
+  storage; its source depends on rust-bitcoin and speaks only HTTP. It
+  funds a regtest chain through `getblocktemplate` / `submitblock`
+  (this node has no `generate*` RPC), then scans, fee-estimates, and
+  broadcasts the way
   [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw -u`)
   does against any Esplora URL.
 - Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>`
