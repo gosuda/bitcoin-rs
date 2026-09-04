@@ -93,9 +93,13 @@ const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
 const POSITION_PREFETCH_BLOCKS: usize = 65_536;
 /// Maximum number of blocks whose bodies are held in memory and whose
 /// `prepare_block_with_spent_scripts` row-build work is fanned out across the rayon pool
-/// in one parallel prepare step. Bounds memory while keeping the CPU-bound
-/// decode/row-build off the single writer thread.
-const PREPARE_CHUNK_BLOCKS: usize = 128;
+/// in one parallel prepare step. Matches the IBD download window so a filled
+/// 256-block staging cap can prepare in one pass when bodies are small.
+const PREPARE_CHUNK_BLOCKS: usize = 256;
+/// Serialized-body budget for one parallel prepare step. Stops a 1 MiB-class
+/// window from holding 256 bodies in RAM while still packing early-chain
+/// blocks up to the count cap.
+const PREPARE_CHUNK_BYTES: usize = 32 << 20;
 const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
@@ -2274,14 +2278,16 @@ impl Worker {
                 .prefetch_positions(&requests)
                 .map_err(TxIndexWorkerError::Storage)?;
 
-            // Sub-chunk: load bodies serially (preserving the reader's
-            // prefetch state), prepare blocks in parallel across the rayon
-            // pool, then push prepared blocks into the batch in height order.
-            // The single-writer commit and watermark publish remain the only
-            // ordering points (#209 invariants).
-            for sub_chunk in identities.chunks(PREPARE_CHUNK_BLOCKS) {
+            // Sub-chunk: load bodies serially until the count or byte cap
+            // (preserving the reader's prefetch state), prepare blocks in
+            // parallel across the rayon pool, then push prepared blocks into
+            // the batch in height order. The single-writer commit and
+            // watermark publish remain the only ordering points (#209
+            // invariants).
+            let mut remaining = identities;
+            while !remaining.is_empty() {
                 match self.prepare_and_admit_chunk(
-                    sub_chunk,
+                    &mut remaining,
                     &mut body_reader,
                     capabilities,
                     &mut state,
@@ -2297,15 +2303,16 @@ impl Worker {
         self.finish_catch_up(state, chunk_end, target, pending)
     }
 
-    /// Loads bodies serially, prepares blocks in parallel across the rayon pool,
-    /// then admits them into the batch in height order on the single writer
-    /// thread. Returns `Stalled` if a body is missing or shutdown was requested,
-    /// `Progressed` if the batch filled and was committed, or `Continue` to keep
-    /// processing.
+    /// Loads bodies serially until the count or byte cap, prepares that prefix
+    /// in parallel across the rayon pool, then admits them into the batch in
+    /// height order on the single writer thread. Advances `identities` past
+    /// the loaded prefix. Returns `Stalled` if a body is missing or shutdown
+    /// was requested, `Progressed` if the batch filled and was committed, or
+    /// `Continue` to keep processing.
     #[allow(clippy::too_many_lines)]
     fn prepare_and_admit_chunk(
         &self,
-        sub_chunk: &[BlockIdentity],
+        identities: &mut &[BlockIdentity],
         body_reader: &mut Box<dyn PruneBodyReader + '_>,
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
@@ -2315,15 +2322,20 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        // Load bodies serially through the single reader.
-        let mut bodies = Vec::with_capacity(sub_chunk.len());
-        for identity in sub_chunk {
+        // Load bodies serially through the single reader until either cap.
+        // An oversized first body is still loaded so catch-up always moves.
+        let mut bodies = Vec::new();
+        let mut loaded_bytes = 0_usize;
+        for identity in *identities {
             if self.runtime.should_stop() {
                 return Ok(ChunkAction::Stalled);
             }
             let hash = Hash256::from_le_bytes(&identity.hash);
             match body_reader.load_block_body(identity.height, hash) {
-                Ok(Some(body)) => bodies.push(body),
+                Ok(Some(body)) => {
+                    loaded_bytes = loaded_bytes.saturating_add(body.len());
+                    bodies.push(body);
+                }
                 Ok(None) => {
                     if !state.batch.is_empty() {
                         let replacement = PendingForward {
@@ -2340,7 +2352,12 @@ impl Worker {
                 }
                 Err(e) => return Err(TxIndexWorkerError::Storage(e)),
             }
+            if bodies.len() >= PREPARE_CHUNK_BLOCKS || loaded_bytes >= PREPARE_CHUNK_BYTES {
+                break;
+            }
         }
+        let loaded = bodies.len();
+        let sub_chunk = &identities[..loaded];
 
         let anchors = if capabilities.script_live {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
@@ -2436,6 +2453,7 @@ impl Worker {
                 };
             }
         }
+        *identities = &identities[loaded..];
         Ok(ChunkAction::Continue)
     }
     fn finish_catch_up(
