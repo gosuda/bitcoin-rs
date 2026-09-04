@@ -85,7 +85,7 @@ Configuration defaults:
 | `--txindex` | off |
 | `--scriptindex` | off (accepts `full`, `utxo`, or boolean; defaults to `full` when passed without a value) |
 | `--features kernel` (build-time) | off in default binary; compiles `libbitcoinkernel` as a verification oracle |
-| `--verify-kernel` | off; compares native script verdicts against Core. Requires `--features kernel` |
+| `--verify-kernel` | off; compares native parse/txids and script verdicts against Core. Requires `--features kernel` |
 
 The node logs its startup banner, effective cache allocation, and the address
 the JSON-RPC listener bound to.

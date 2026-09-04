@@ -277,7 +277,7 @@ pub struct ObservabilityOverrides {
 pub struct ValidationOverrides {
     /// Height through which script verification may be skipped.
     pub assume_valid_height: Option<u32>,
-    /// Compare native script verdicts against `libbitcoinkernel`.
+    /// Compare native parse/txids and script verdicts against `libbitcoinkernel`.
     pub verify_kernel: Option<bool>,
 }
 
@@ -603,7 +603,7 @@ pub struct ObservabilityConfig {
 pub struct ValidationConfig {
     /// Height through which script verification may be skipped.
     pub assume_valid_height: u32,
-    /// Compare native script verdicts against `libbitcoinkernel`.
+    /// Compare native parse/txids and script verdicts against `libbitcoinkernel`.
     pub verify_kernel: bool,
 }
 

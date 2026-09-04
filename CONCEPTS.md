@@ -127,7 +127,7 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 ## Consensus validation
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). The `kernel` feature compiles it as an independent oracle: tests (and a later runtime verification tap) compare Core's parse and script verdicts against the native path. Production apply never feeds kernel-owned data into Rust state. Builds with `kernel` need `cmake` and `libboost-dev`. See `docs/contracts/validation-default.md`.
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). The `kernel` feature compiles it as an independent oracle: tests and `--verify-kernel` compare Core's parse, txids, and script verdicts against the native path. Production apply never feeds kernel-owned data into Rust state. Builds with `kernel` need `cmake` and `libboost-dev`. See `docs/contracts/validation-default.md`.
 
 ### Native Rust interpreter
 The production script path (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. Apply-path verification precomputes BIP143/BIP341 sighash midstates once per transaction (`SighashCache::precompute`) and clones that cache into each input.
