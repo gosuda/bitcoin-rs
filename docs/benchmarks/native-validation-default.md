@@ -54,11 +54,12 @@ The native interpreter executes legacy, P2SH, SegWit v0, and Taproot
 key-path and script-path spends. The earlier stub that accepted only
 `OP_TRUE` is gone.
 
-### Performance, signed-spend proxy (2026-09-02)
+### Performance, signed-spend proxy (pre-change baseline, 2026-09-02)
 
 Artifact: [`data/overhaul-signed-spend-20260902.md`](data/overhaul-signed-spend-20260902.md).
-Host: Intel Xeon Gold 6138. Corpus: 117-block regtest skeleton, 16 spend
-blocks, P2PKH / P2WPKH / P2WSH 2-of-3.
+This is the two-run pre-change baseline only; it is not the required post-change
+three-run decision measurement. Host: Intel Xeon Gold 6138. Corpus: 117-block
+regtest skeleton, 16 spend blocks, P2PKH / P2WPKH / P2WSH 2-of-3.
 
 | Arm | Run 1 Criterion median | Run 2 Criterion median |
 |---|---:|---:|
@@ -83,7 +84,7 @@ paths use that same context.
 | Gate | Status |
 |---|---|
 | Core vector parity (available corpus) | Pass (zero pinned native mismatches) |
-| Signed-spend native faster, stable medians | Fail on 2026-09-02; re-measure after the secp context lever |
+| Signed-spend native faster, stable medians | Insufficient evidence: the 2026-09-02 artifact is a two-run pre-change baseline; three post-change runs per arm are pending |
 | Full-mainnet replay | Blocked on #34 / #42 |
 | Library / image default | Keep `kernel` until signed-spend passes |
 
