@@ -64,6 +64,13 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     }
     client.mine(Coinbase::P2wpkh)?;
 
+    assert_bdk_chain_view(&client)?;
+    assert_bdk_script_sync(&client)?;
+    assert_bdk_broadcast(&client)?;
+    Ok(())
+}
+
+fn assert_bdk_chain_view(client: &Client) -> TestResult {
     let height = client.esplora_text("/blocks/tip/height")?;
     assert_eq!(
         height.trim(),
@@ -106,7 +113,10 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         fees.get("6").and_then(Value::as_f64).is_some(),
         "fee estimates must include the 6-block target wallets use: {fees}"
     );
+    Ok(())
+}
 
+fn assert_bdk_script_sync(client: &Client) -> TestResult {
     client.wait_for_scriptindex(P2WPKH_ADDRESS)?;
 
     let address_utxos = client.esplora_json(&format!("/address/{P2WPKH_ADDRESS}/utxo"))?;
@@ -143,8 +153,11 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
             .is_some_and(|entries| !entries.is_empty()),
         "scripthash history must list the funding transaction: {script_history}"
     );
+    Ok(())
+}
 
-    let spend_hex = spend_first_anyone_can_spend(&client)?;
+fn assert_bdk_broadcast(client: &Client) -> TestResult {
+    let spend_hex = spend_first_anyone_can_spend(client)?;
     let broadcast = client.esplora_post("/api/v1/tx", spend_hex.as_bytes())?;
     assert_eq!(
         broadcast.status,
@@ -207,7 +220,9 @@ struct StartupChild(Option<Child>);
 
 impl StartupChild {
     fn into_inner(mut self) -> Child {
-        self.0.take().unwrap_or_else(|| panic!("startup child already taken"))
+        self.0
+            .take()
+            .unwrap_or_else(|| panic!("startup child already taken"))
     }
 }
 
