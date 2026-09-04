@@ -1411,7 +1411,7 @@ mod writer_shutdown_tests {
     #[test]
     fn send_block_unblocks_when_session_is_cancelled() -> Result<(), Box<dyn std::error::Error>> {
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
-        let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
+        let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
         let session_cancel = Arc::new(AtomicBool::new(false));
         let sinks = InboundSyncSinks::new(headers_tx, blocks_tx, None)
             .with_session_cancel(Arc::clone(&session_cancel));
@@ -1447,6 +1447,7 @@ mod writer_shutdown_tests {
             started.elapsed() < Duration::from_secs(2),
             "cancelled send_block must not wait on the full queue"
         );
+        drop(blocks_rx);
         Ok(())
     }
 
