@@ -115,11 +115,8 @@ impl<S> CountingStream<S> {
 }
 
 impl CountingStream<std::net::TcpStream> {
-    /// Takes a connected TCP stream and applies the P2P socket contract.
-    ///
-    /// Disables Nagle so pipelined control messages (`inv`, `getdata`, `ping`)
-    /// are not held for a delayed ACK. Handshake and the message loop still
-    /// set their own read/write timeouts: those intervals differ by phase.
+    /// Takes a connected TCP stream and applies the connected-socket posture
+    /// defined by contract `P2P-03`.
     ///
     /// # Errors
     ///
