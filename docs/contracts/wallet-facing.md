@@ -76,6 +76,29 @@ electrs/mempool.space base URL. Relative routes below are appended to it.
 - `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset`
 - `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
 
+## WF-02 acceptance criteria and evidence
+
+The running-node proof is accepted when all of the following conditions hold:
+
+- `GET` and `POST` routes under `/api` and `/esplora` reach their respective
+  public handlers.
+- Unsupported methods (including `HEAD /api/tx` and `PUT /`) return 404 at the
+  listener demux and never become JSON-RPC requests.
+- `GET` routes outside `/rest/`, `/api`, and `/esplora` are not exposed by the
+  wallet-facing HTTP surface.
+
+Evidence is produced by
+`external_wallet_can_scan_estimate_and_broadcast` in
+`bin/bitcoin-rs/tests/wallet_facing.rs`; its live HTTP assertions cover the
+three conditions above. Run it with:
+
+```text
+cargo test -p bitcoin-rs --test wallet_facing external_wallet_can_scan_estimate_and_broadcast -- --nocapture
+```
+
+The direct routing evidence is additionally provided by
+`classify_splits_rest_esplora_and_json_rpc` in `crates/rpc/src/server.rs`.
+
 ## Vocabulary
 
 [Wallet-free RPC boundary](../../CONCEPTS.md),
