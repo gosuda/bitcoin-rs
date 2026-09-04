@@ -24,11 +24,17 @@ import os
 import signal
 import stat
 import subprocess
+import shutil
+#
+# The archive and manifest are copied into a private custody directory before
+# any arm starts.  Children only receive those copies; the configured paths are
+# never used as a check-then-use input after custody is established.
+#
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import NoReturn, TypedDict, TypeIs
 
@@ -875,6 +881,17 @@ def _kill_tree(process: subprocess.Popen[bytes]) -> None:
     raise ContractError("child process group did not terminate")
 
 
+def _evict_page_cache() -> None:
+    """Fail closed unless Linux can perform the declared cache eviction."""
+    try:
+        os.sync()
+        with open("/proc/sys/vm/drop_caches", "w", encoding="ascii") as stream:
+            stream.write("3\n")
+            stream.flush()
+    except OSError as error:
+        raise ContractError(f"cannot evict page cache: {error}") from error
+
+
 def _child_env(arm_dir: Path) -> dict[str, str]:
     tmp = arm_dir / "tmp"
     tmp.mkdir(exist_ok=True)
@@ -921,6 +938,8 @@ def _run_arm(
 ) -> ArmObservation:
     arm_dir = root / f"{order_index:02d}-{program.role}"
     arm_dir.mkdir(parents=True)
+    if config.posture.cache_policy == "process-cold/page-cache-evicted":
+        _evict_page_cache()
     data_dir = arm_dir / "data"
     data_dir.mkdir()
     binary_path = _verified_copy(program, arm_dir)
@@ -1066,6 +1085,26 @@ def run_campaign(config: Config, output_root: Path) -> JsonObject:
     if sys.platform != "linux":
         raise ContractError("offline full-validation comparator requires Linux")
     output_root.mkdir(parents=True, exist_ok=True)
+    custody_dir = output_root / "custody"
+    custody_dir.mkdir()
+    frozen_archive = custody_dir / "archive.dat"
+    frozen_manifest = custody_dir / "manifest.json"
+    try:
+        shutil.copyfile(config.archive.path, frozen_archive)
+        shutil.copyfile(config.manifest.path, frozen_manifest)
+    except OSError as error:
+        raise ContractError(f"cannot create immutable corpus custody copy: {error}") from error
+    with frozen_archive.open("rb") as stream:
+        archive_digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    with frozen_manifest.open("rb") as stream:
+        manifest_digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if archive_digest != config.archive.sha256:
+        raise ContractError("archive changed while creating custody copy")
+    if manifest_digest != config.manifest.sha256:
+        raise ContractError("manifest changed while creating custody copy")
+    frozen_archive_ref = replace(config.archive, path=frozen_archive)
+    frozen_manifest_ref = replace(config.manifest, path=frozen_manifest)
+    config = replace(config, archive=frozen_archive_ref, manifest=frozen_manifest_ref)
     arms: list[ArmObservation] = []
     order_index = 0
     for pair_index in range(PAIR_COUNT):
@@ -1124,6 +1163,16 @@ def run_campaign(config: Config, output_root: Path) -> JsonObject:
 
 
 def _publish_result(result: JsonObject, output: Path) -> None:
+    """Publish atomically; commitment is the successful directory fsync.
+
+    The unnamed inode is fsynced before linking, then the containing directory
+    is fsynced.  Thus a successful return means the result name and bytes are
+    durable.  Failures before the directory fsync are non-committed and may be
+    retried (the destination must still be absent); an EEXIST or ambiguous
+    post-fsync failure is non-retriable and callers must inspect the destination.
+    This function owns no retries or compensation, and crash recovery consists
+    of retaining the already-linked result or rerunning when the name is absent.
+    """
     if sys.platform != "linux":
         raise ContractError("publication requires Linux O_TMPFILE support")
     at_empty_path = getattr(os, "AT_EMPTY_PATH", 0x1000)
