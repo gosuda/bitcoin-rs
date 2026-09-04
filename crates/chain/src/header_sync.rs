@@ -1,7 +1,8 @@
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::{Hash256, Network};
 
-use pow::{compact_is_met_by, compact_to_target, target_to_compact};
+pub use pow::compact_is_met_by;
+use pow::{compact_to_target, target_to_compact};
 
 use crate::{
     ChainError,
@@ -380,7 +381,7 @@ pub(crate) mod pow {
     /// Returns `true` when a valid nonzero compact target is met by `hash`.
     /// The consensus hash bytes are interpreted as a little-endian integer.
     #[must_use]
-    pub(crate) fn compact_is_met_by(bits: u32, hash: Hash256) -> bool {
+    pub fn compact_is_met_by(bits: u32, hash: Hash256) -> bool {
         let target = compact_to_target(bits);
         target != ChainWork::ZERO && ChainWork::from_le_bytes(hash.to_le_bytes()) <= target
     }

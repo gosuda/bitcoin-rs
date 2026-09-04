@@ -52,6 +52,12 @@ pub enum MiningError {
         /// Limit that the coinbase alone exhausted.
         field: &'static str,
     },
+    /// Exhausted `max_tries` without meeting the compact target.
+    #[error("failed to meet compact target in {tries} nonce attempts")]
+    Unsolved {
+        /// Nonce attempts consumed.
+        tries: u64,
+    },
 }
 
 /// Builds the coinbase paying `payout`, optionally committing to `SegWit`.

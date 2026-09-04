@@ -107,6 +107,23 @@ impl MiningControl for SmokeMiningControl {
     }
 
     fn publish_generation(&self) {}
+
+    fn generate(
+        &self,
+        _request: bitcoin_rs_rpc::context::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError> {
+        Err(MiningControlError::Unavailable("not wired".into()))
+    }
+
+    fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
+        Ok(42.5)
+    }
+
+    fn prioritised_transactions(
+        &self,
+    ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError> {
+        Ok(Vec::new())
+    }
 }
 
 #[test]
@@ -142,8 +159,6 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         ("getnetworkinfo", json!([])),
         ("getpeerinfo", json!([])),
         ("getconnectioncount", json!([])),
-        // getnetworkhashps is not implemented yet — Core-compat manifest gap,
-        // covered by the method-coverage work, not by this wiring sweep.
         ("uptime", json!([])),
         ("finalizepsbt", json!([valid_psbt.as_str()])),
         ("combinepsbt", json!([[valid_psbt.as_str()]])),
@@ -155,6 +170,8 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         ("getmininginfo", json!([])),
         ("getblocktemplate", json!([{}])),
         ("submitblock", json!([raw_tx.as_str()])),
+        ("getnetworkhashps", json!([])),
+        ("getprioritisedtransactions", json!([])),
     ];
 
     for (method, params) in cases {

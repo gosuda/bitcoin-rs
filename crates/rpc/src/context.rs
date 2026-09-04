@@ -719,6 +719,55 @@ pub enum MiningControlError {
     Failed(CompactString),
 }
 
+/// How [`MiningControl::generate`] selects non-coinbase transactions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GenerateSelection {
+    /// Full mempool package selection (`generatetoaddress`).
+    Mempool,
+    /// Only these currently-pooled txids, in this order. Empty is coinbase-only.
+    Txids(Vec<Txid>),
+}
+
+/// Request to assemble, solve, and optionally submit one or more blocks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenerateRequest {
+    /// Coinbase `scriptPubKey`.
+    pub payout: Vec<u8>,
+    /// Number of sequential blocks to produce.
+    pub count: u32,
+    /// Nonce search budget per block. Core default is `1_000_000`.
+    pub max_tries: u64,
+    /// Transaction source for each assembled candidate.
+    pub selection: GenerateSelection,
+    /// When false, solve but do not apply. Requires `count == 1`.
+    pub submit: bool,
+}
+
+/// One solved block produced by [`MiningControl::generate`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneratedBlock {
+    /// Header hash of the solved block.
+    pub hash: BlockHash,
+    /// Consensus serialization as lowercase hex, for `generateblock` `submit=false`.
+    pub hex: String,
+}
+
+impl GenerateRequest {
+    /// Bitcoin Core's default `maxtries` for `generatetoaddress` / `generateblock`.
+    pub const DEFAULT_MAX_TRIES: u64 = 1_000_000;
+}
+
+/// One non-zero mining fee overlay from [`MiningControl::prioritised_transactions`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrioritisedTransaction {
+    /// Overlay key.
+    pub txid: Txid,
+    /// Accumulated signed satoshi delta.
+    pub fee_delta: i64,
+    /// Whether `txid` is currently admitted.
+    pub in_mempool: bool,
+}
+
 /// Node-owned control plane for candidate lifecycle and solved-block submission.
 pub trait MiningControl: Send + Sync {
     /// Assembles or long-polls a template, or dry-validates a proposal.
@@ -735,6 +784,19 @@ pub trait MiningControl: Send + Sync {
 
     /// Publishes a completed authoritative mutation to template waiters.
     fn publish_generation(&self);
+
+    /// Assembles, solves, and optionally submits `request.count` blocks paying `request.payout`.
+    fn generate(&self, request: GenerateRequest)
+    -> Result<Vec<GeneratedBlock>, MiningControlError>;
+
+    /// Network hashes-per-second over `nblocks` ending at `height`.
+    ///
+    /// `nblocks <= 0` uses the span since the last difficulty retarget.
+    /// `height < 0` uses the applied tip.
+    fn network_hash_ps(&self, nblocks: i64, height: i64) -> Result<f64, MiningControlError>;
+
+    /// Non-zero mining fee overlays, including txids not currently in the pool.
+    fn prioritised_transactions(&self) -> Result<Vec<PrioritisedTransaction>, MiningControlError>;
 }
 
 /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.

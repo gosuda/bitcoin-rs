@@ -1256,6 +1256,29 @@ mod compat_manifest_tests {
             fn publish_generation(&self) {
                 *self.published.lock() += 1;
             }
+
+            fn generate(
+                &self,
+                _request: bitcoin_rs_rpc::context::GenerateRequest,
+            ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError>
+            {
+                Err(unavailable())
+            }
+
+            fn network_hash_ps(
+                &self,
+                _nblocks: i64,
+                _height: i64,
+            ) -> Result<f64, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn prioritised_transactions(
+                &self,
+            ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError>
+            {
+                Err(unavailable())
+            }
         }
 
         impl MempoolSequenceWake for RecordingControl {
@@ -1525,6 +1548,29 @@ mod sequence_observer_tests {
 
             fn publish_generation(&self) {
                 *self.published.lock() += 1;
+            }
+
+            fn generate(
+                &self,
+                _request: bitcoin_rs_rpc::context::GenerateRequest,
+            ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError>
+            {
+                Err(unavailable())
+            }
+
+            fn network_hash_ps(
+                &self,
+                _nblocks: i64,
+                _height: i64,
+            ) -> Result<f64, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn prioritised_transactions(
+                &self,
+            ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError>
+            {
+                Err(unavailable())
             }
         }
 

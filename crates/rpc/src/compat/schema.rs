@@ -403,6 +403,25 @@ mod tests {
         }
 
         fn publish_generation(&self) {}
+
+        fn generate(
+            &self,
+            _request: crate::context::GenerateRequest,
+        ) -> Result<Vec<crate::context::GeneratedBlock>, MiningControlError> {
+            Err(MiningControlError::Unavailable(
+                compact_str::CompactString::from("not wired"),
+            ))
+        }
+
+        fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
+            Ok(0.0)
+        }
+
+        fn prioritised_transactions(
+            &self,
+        ) -> Result<Vec<crate::context::PrioritisedTransaction>, MiningControlError> {
+            Ok(Vec::new())
+        }
     }
 
     /// Methods this compares, and the parameters it compares them with.

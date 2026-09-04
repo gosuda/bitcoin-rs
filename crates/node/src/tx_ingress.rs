@@ -522,6 +522,39 @@ mod tests {
         fn publish_generation(&self) {
             self.publishes.fetch_add(1, Ordering::Relaxed);
         }
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_rpc::context::GenerateRequest,
+        ) -> Result<
+            Vec<bitcoin_rs_rpc::context::GeneratedBlock>,
+            bitcoin_rs_rpc::context::MiningControlError,
+        > {
+            Err(bitcoin_rs_rpc::context::MiningControlError::Failed(
+                "not implemented".to_owned().into(),
+            ))
+        }
+
+        fn network_hash_ps(
+            &self,
+            _nblocks: i64,
+            _height: i64,
+        ) -> Result<f64, bitcoin_rs_rpc::context::MiningControlError> {
+            Err(bitcoin_rs_rpc::context::MiningControlError::Failed(
+                "not implemented".to_owned().into(),
+            ))
+        }
+
+        fn prioritised_transactions(
+            &self,
+        ) -> Result<
+            Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>,
+            bitcoin_rs_rpc::context::MiningControlError,
+        > {
+            Err(bitcoin_rs_rpc::context::MiningControlError::Failed(
+                "not implemented".to_owned().into(),
+            ))
+        }
     }
 
     /// Builds a valid coinbase tx for testing (no inputs, one output).

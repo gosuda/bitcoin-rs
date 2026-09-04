@@ -14,4 +14,5 @@ pub use coinbase::{MiningError, WITNESS_RESERVED_VALUE, witness_commitment_scrip
 pub use context::{MiningChainContext, check_candidate_header};
 pub use template::{
     Candidate, CandidateContext, CandidateTransaction, TemplateId, assemble_candidate,
+    assemble_ordered_candidate, solve_block,
 };

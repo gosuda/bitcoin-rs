@@ -14,16 +14,18 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::{Mempool, MempoolObserver, MutationEnvelope};
 use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningChainContext, TemplateId, assemble_candidate,
+    assemble_ordered_candidate,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network};
+use bitcoin_rs_primitives::{Block, Hash256, Network, consensus_bytes};
 use bitcoin_rs_rpc::context::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, LastCandidateInfo, MiningCapability, MiningControl,
-    MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation,
-    difficulty_for_bits,
+    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GeneratedBlock,
+    LastCandidateInfo, MiningCapability, MiningControl, MiningControlError, MiningInfo, MiningRule,
+    PrioritisedTransaction, SignetMiningInfo, TemplateMutation, difficulty_for_bits,
 };
 use compact_str::CompactString;
 use hashbrown::HashMap;
@@ -535,6 +537,88 @@ impl MiningCoordinator {
         Ok(Arc::new(candidate))
     }
 
+    fn assemble_fresh(
+        &self,
+        payout: &[u8],
+        selection: &GenerateSelection,
+    ) -> Result<Candidate, MiningControlError> {
+        let tip = self.applied_tip.load_full().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
+        })?;
+        let snapshot = {
+            let mempool = self.mempool.read();
+            snapshot_for_selection(&mempool, selection)?
+        };
+        let current_time = Self::current_time_secs().max(1);
+        let chain = {
+            let tree = self.block_tree.read();
+            MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time).map_err(
+                |error| MiningControlError::Failed(CompactString::from(error.to_string())),
+            )?
+        };
+        let context = CandidateContext {
+            previous_block_hash: chain.previous_block_hash,
+            height: chain.height,
+            version: chain.version,
+            bits: chain.bits,
+            min_time: chain.min_time,
+            current_time: current_time.max(chain.min_time),
+            locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
+            network: self.network,
+            csv_active: chain.csv_active,
+            segwit_active: chain.segwit_active,
+            max_weight: MAX_BLOCK_WEIGHT,
+            max_size: MAX_BLOCK_SIZE,
+            max_sigops: u64::from(bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST),
+        };
+        match selection {
+            GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
+            GenerateSelection::Txids(_) => assemble_ordered_candidate(&context, &snapshot, payout),
+        }
+        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
+    }
+
+    fn generate_blocks(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        if request.count == 0 {
+            return Ok(Vec::new());
+        }
+        if !request.submit && request.count != 1 {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "submit=false requires nblocks=1",
+            )));
+        }
+        let mut generated = Vec::with_capacity(usize::try_from(request.count).unwrap_or(0));
+        for _ in 0..request.count {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
+            let block = candidate.solve(request.max_tries).map_err(|error| {
+                MiningControlError::Failed(CompactString::from(error.to_string()))
+            })?;
+            if request.submit {
+                match self.submit(&block)? {
+                    BlockValidationResult::Accepted => {}
+                    other => {
+                        return Err(MiningControlError::Failed(CompactString::from(format!(
+                            "generated block was not accepted: {other:?}"
+                        ))));
+                    }
+                }
+            }
+            generated.push(GeneratedBlock {
+                hash: block.block_hash(),
+                hex: hex_encode(&consensus_bytes(&block)),
+            });
+        }
+        Ok(generated)
+    }
+
     fn template_from_candidate(
         candidate: Arc<Candidate>,
         request: &BlockTemplateRequest,
@@ -652,7 +736,8 @@ impl MiningCoordinator {
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
         let last_candidate = self.state.lock().last_candidate;
-        let network_hashes_per_second = estimate_network_hashps(&self.block_tree, tip.as_deref());
+        let network_hashes_per_second =
+            estimate_network_hashps(&self.block_tree, self.network, tip.as_deref(), 120, -1);
         Ok(MiningInfo {
             blocks,
             last_candidate,
@@ -726,6 +811,38 @@ impl MiningControl for MiningCoordinator {
     fn publish_generation(&self) {
         Self::publish_generation(self);
     }
+
+    fn generate(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        self.generate_blocks(&request)
+    }
+
+    fn network_hash_ps(&self, nblocks: i64, height: i64) -> Result<f64, MiningControlError> {
+        let tip = self.applied_tip.load_full();
+        Ok(estimate_network_hashps(
+            &self.block_tree,
+            self.network,
+            tip.as_deref(),
+            nblocks,
+            height,
+        ))
+    }
+
+    fn prioritised_transactions(&self) -> Result<Vec<PrioritisedTransaction>, MiningControlError> {
+        Ok(self
+            .mempool
+            .read()
+            .prioritised_transactions()
+            .into_iter()
+            .map(|(txid, fee_delta, in_mempool)| PrioritisedTransaction {
+                txid,
+                fee_delta,
+                in_mempool,
+            })
+            .collect())
+    }
 }
 
 impl MempoolSequenceWake for MiningCoordinator {
@@ -797,28 +914,94 @@ mod apply_error_tests {
     }
 }
 
-fn estimate_network_hashps(block_tree: &RwLock<BlockTree>, tip: Option<&TipSnapshot>) -> f64 {
-    const WINDOW: u32 = 120;
-    let Some(tip) = tip else {
+fn snapshot_for_selection(
+    mempool: &Mempool,
+    selection: &GenerateSelection,
+) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    match selection {
+        GenerateSelection::Mempool => Ok(mempool.mining_snapshot()),
+        GenerateSelection::Txids(txids) => {
+            let full = mempool.mining_snapshot();
+            let mut by_txid = HashMap::with_capacity(full.entries.len());
+            for (index, entry) in full.entries.iter().enumerate() {
+                let position = u32::try_from(index).unwrap_or(u32::MAX);
+                by_txid.insert(entry.txid, position);
+            }
+            let mut selected = Vec::with_capacity(txids.len());
+            let mut old_to_new = HashMap::with_capacity(txids.len());
+            for txid in txids {
+                let Some(&old) = by_txid.get(txid) else {
+                    return Err(MiningControlError::InvalidRequest(CompactString::from(
+                        "transaction not in mempool",
+                    )));
+                };
+                let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+                old_to_new.insert(old, new_index);
+                let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
+                selected.push(full.entries[old_usize].clone());
+            }
+            for entry in &mut selected {
+                entry.ancestors.retain_mut(|ancestor| {
+                    if let Some(&new_index) = old_to_new.get(ancestor) {
+                        *ancestor = new_index;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            Ok(MempoolMiningSnapshot {
+                sequence: full.sequence,
+                entries: selected,
+            })
+        }
+    }
+}
+
+fn estimate_network_hashps(
+    block_tree: &RwLock<BlockTree>,
+    network: Network,
+    tip: Option<&TipSnapshot>,
+    nblocks: i64,
+    height: i64,
+) -> f64 {
+    let Some(applied) = tip else {
         return 0.0;
     };
     let tree = block_tree.read();
-    let Ok(tip_node) = tree.node(tip.tip_id) else {
+    let end_id = if height < 0 {
+        applied.tip_id
+    } else {
+        let Ok(height) = u32::try_from(height) else {
+            return 0.0;
+        };
+        match tree.node_at_height_from(applied.tip_id, height) {
+            Some(id) => id,
+            None => return 0.0,
+        }
+    };
+    let Ok(end_node) = tree.node(end_id) else {
         return 0.0;
     };
-    let target_height = tip_node.height.saturating_sub(WINDOW);
-    let Some(earliest_id) = tree.node_at_height_from(tip.tip_id, target_height) else {
+    let lookup = if nblocks <= 0 {
+        let interval = network.retarget_interval().max(1);
+        (end_node.height % interval).saturating_add(1)
+    } else {
+        u32::try_from(nblocks).unwrap_or(u32::MAX)
+    };
+    let target_height = end_node.height.saturating_sub(lookup);
+    let Some(earliest_id) = tree.node_at_height_from(end_id, target_height) else {
         return 0.0;
     };
     let Ok(earliest_node) = tree.node(earliest_id) else {
         return 0.0;
     };
-    if earliest_node.height == tip_node.height {
+    if earliest_node.height == end_node.height {
         return 0.0;
     }
-    let work_delta = tip_node.chainwork.saturating_sub(earliest_node.chainwork);
+    let work_delta = end_node.chainwork.saturating_sub(earliest_node.chainwork);
     let time_delta_secs =
-        i64::from(tip_node.header.time).saturating_sub(i64::from(earliest_node.header.time));
+        i64::from(end_node.header.time).saturating_sub(i64::from(earliest_node.header.time));
     hashes_per_second(work_delta.to_be_bytes(), time_delta_secs)
 }
 
@@ -852,6 +1035,16 @@ fn signet_info(network: Network) -> Option<SignetMiningInfo> {
     let challenge = hex_decode(DEFAULT_SIGNET_CHALLENGE)
         .unwrap_or_else(|| panic!("Bitcoin Core's default Signet challenge is invalid hex"));
     Some(SignetMiningInfo { challenge })
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 /// Decodes a lowercase hex string to bytes. Returns `None` on invalid input.
@@ -1102,7 +1295,8 @@ mod generation_signal_tests {
     use super::{MempoolSequenceWake, MiningGenerationSignal};
     use bitcoin_rs_primitives::Block;
     use bitcoin_rs_rpc::context::{
-        BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
+        BlockTemplateRequest, BlockTemplateResult, GeneratedBlock, MiningControl,
+        MiningControlError,
     };
     use compact_str::CompactString;
     use parking_lot::Mutex;
@@ -1141,6 +1335,24 @@ mod generation_signal_tests {
 
         fn publish_generation(&self) {
             *self.published.lock() += 1;
+        }
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_rpc::context::GenerateRequest,
+        ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+            Err(unavailable())
+        }
+
+        fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
+            Err(unavailable())
+        }
+
+        fn prioritised_transactions(
+            &self,
+        ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError>
+        {
+            Err(unavailable())
         }
     }
 

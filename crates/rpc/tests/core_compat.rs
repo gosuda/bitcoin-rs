@@ -344,6 +344,23 @@ impl MiningControl for CompatMiningControl {
     }
 
     fn publish_generation(&self) {}
+
+    fn generate(
+        &self,
+        _request: bitcoin_rs_rpc::context::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError> {
+        Err(MiningControlError::Unavailable("not wired".into()))
+    }
+
+    fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
+        Ok(0.0)
+    }
+
+    fn prioritised_transactions(
+        &self,
+    ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError> {
+        Ok(Vec::new())
+    }
 }
 
 #[test]

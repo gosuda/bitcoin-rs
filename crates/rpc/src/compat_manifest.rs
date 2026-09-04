@@ -229,7 +229,7 @@ mod tests {
             .map(|entry| field(entry, "method"))
             .collect();
 
-        for method in ["getwalletinfo", "listunspent", "generatetoaddress"] {
+        for method in ["getwalletinfo", "listunspent", "generate"] {
             assert!(
                 !listed.contains(&method.to_owned()),
                 "this test needs a method the manifest does not list; `{method}` is listed"

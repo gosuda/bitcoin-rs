@@ -10,11 +10,11 @@ use crate::compat::convert::{compact_target_hex, i64_saturated, sat_to_btc, type
 use crate::context::Context;
 use crate::context::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, MiningCapability, MiningControlError, MiningInfo,
-    MiningRule, TemplateMutation,
+    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection,
+    MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
 };
 use crate::error::RpcError;
-use crate::handlers::{ensure_no_params, params_array, required_str};
+use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str, required_u64};
 use corepc_types::v31;
 
 const NONCE_RANGE: &str = "00000000ffffffff";
@@ -114,6 +114,176 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         control.publish_generation();
     }
     Ok(json!(true))
+}
+
+pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    let nblocks = required_u32(params, 0, "nblocks is required")?;
+    let address = required_str(params, 1, "address is required")?;
+    let max_tries = optional_u64(params, 2, GenerateRequest::DEFAULT_MAX_TRIES)?;
+    let payout = decode_payout(address, ctx.chain_network)?;
+    let generated = control
+        .generate(GenerateRequest {
+            payout,
+            count: nblocks,
+            max_tries,
+            selection: GenerateSelection::Mempool,
+            submit: true,
+        })
+        .map_err(map_mining_control_error)?;
+    let hashes: Vec<String> = generated
+        .iter()
+        .map(|block| block.hash.to_string())
+        .collect();
+    Ok(json!(hashes))
+}
+
+pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    let output = required_str(params, 0, "output is required")?;
+    let payout = decode_payout(output, ctx.chain_network)?;
+    let txids = parse_generateblock_txids(params)?;
+    let submit = optional_bool(params, 2, true)?;
+    let generated = control
+        .generate(GenerateRequest {
+            payout,
+            count: 1,
+            max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+            selection: GenerateSelection::Txids(txids),
+            submit,
+        })
+        .map_err(map_mining_control_error)?;
+    let Some(block) = generated.first() else {
+        return Err(RpcError::Internal(
+            "generateblock produced no block hash".to_owned(),
+        ));
+    };
+    if submit {
+        Ok(json!({ "hash": block.hash.to_string() }))
+    } else {
+        Ok(json!({
+            "hash": block.hash.to_string(),
+            "hex": block.hex,
+        }))
+    }
+}
+
+pub(crate) fn getnetworkhashps(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    let nblocks = optional_i64(params, 0, 120)?;
+    let height = optional_i64(params, 1, -1)?;
+    let rate = control
+        .network_hash_ps(nblocks, height)
+        .map_err(map_mining_control_error)?;
+    Ok(json!(rate))
+}
+
+pub(crate) fn getprioritisedtransactions(
+    ctx: &Arc<Context>,
+    params: &Value,
+) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    let entries = control
+        .prioritised_transactions()
+        .map_err(map_mining_control_error)?;
+    let mut object = sonic_rs::Object::new();
+    for entry in entries {
+        let key = entry.txid.to_string();
+        let _ = object.insert(
+            &key,
+            json!({
+                "fee_delta": entry.fee_delta,
+                "in_mempool": entry.in_mempool,
+            }),
+        );
+    }
+    Ok(Value::from(object))
+}
+
+fn required_u32(params: &Value, index: usize, name: &'static str) -> Result<u32, RpcError> {
+    let value = required_u64(params, index, name)?;
+    u32::try_from(value).map_err(|_| RpcError::InvalidParams(name))
+}
+
+fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
+    let Some(array) = params.as_array() else {
+        return Ok(default);
+    };
+    match array.get(index) {
+        None => Ok(default),
+        Some(value) if value.is_null() => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .ok_or(RpcError::InvalidType("parameter must be an integer")),
+    }
+}
+
+fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
+    let Some(array) = params.as_array() else {
+        return Ok(default);
+    };
+    match array.get(index) {
+        None => Ok(default),
+        Some(value) if value.is_null() => Ok(default),
+        Some(value) => value
+            .as_i64()
+            .ok_or(RpcError::InvalidType("parameter must be an integer")),
+    }
+}
+
+fn decode_payout(text: &str, network: bitcoin_rs_primitives::Network) -> Result<Vec<u8>, RpcError> {
+    if let Ok(unchecked) = bitcoin::Address::from_str(text)
+        && let Ok(address) =
+            unchecked.require_network(crate::compat::convert::bitcoin_network(network))
+    {
+        return Ok(address.script_pubkey().as_bytes().to_vec());
+    }
+    from_hex(text)
+        .map_err(|()| RpcError::InvalidAddressOrKey("Invalid address or script".to_owned()))
+}
+
+fn parse_generateblock_txids(params: &Value) -> Result<Vec<Txid>, RpcError> {
+    let array = params_array(params)?;
+    let Some(value) = array.get(1) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(entries) = value.as_array() else {
+        return Err(RpcError::InvalidType("transactions must be an array"));
+    };
+    let mut txids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(text) = entry.as_str() else {
+            return Err(RpcError::InvalidType(
+                "transactions must be an array of hex strings",
+            ));
+        };
+        if let Ok(txid) = Txid::from_str(text) {
+            txids.push(txid);
+            continue;
+        }
+        let bytes = from_hex(text)
+            .map_err(|()| RpcError::InvalidParams("transaction hex is not valid hexadecimal"))?;
+        let tx: bitcoin_rs_primitives::Tx = deserialize(&bytes)
+            .map_err(|_| RpcError::InvalidParams("transaction hex could not be decoded"))?;
+        txids.push(tx.txid());
+    }
+    Ok(txids)
 }
 
 fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, RpcError> {
@@ -387,9 +557,12 @@ fn render_validation_result(result: BlockValidationResult) -> Value {
 
 fn map_mining_control_error(error: MiningControlError) -> RpcError {
     match error {
-        MiningControlError::InvalidRequest(message)
-        | MiningControlError::Unavailable(message)
-        | MiningControlError::Failed(message) => RpcError::Internal(message.to_string()),
+        MiningControlError::InvalidRequest(message) => {
+            RpcError::InvalidParameter(message.to_string())
+        }
+        MiningControlError::Unavailable(message) | MiningControlError::Failed(message) => {
+            RpcError::Internal(message.to_string())
+        }
     }
 }
 
@@ -488,6 +661,30 @@ mod tests {
         }
 
         fn publish_generation(&self) {}
+
+        fn generate(
+            &self,
+            request: crate::context::GenerateRequest,
+        ) -> Result<Vec<crate::context::GeneratedBlock>, MiningControlError> {
+            let hash = bitcoin_rs_primitives::BlockHash::from(Hash256::from_le_bytes(&[0xab; 32]));
+            Ok(vec![
+                crate::context::GeneratedBlock {
+                    hash,
+                    hex: String::from("00"),
+                };
+                usize::try_from(request.count).unwrap_or(0)
+            ])
+        }
+
+        fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
+            Ok(0.0)
+        }
+
+        fn prioritised_transactions(
+            &self,
+        ) -> Result<Vec<crate::context::PrioritisedTransaction>, MiningControlError> {
+            Ok(Vec::new())
+        }
     }
 
     fn sample_candidate() -> Candidate {
@@ -1017,5 +1214,63 @@ mod tests {
             result.get("chain").and_then(JsonValueTrait::as_str),
             Some("testnet4")
         );
+    }
+
+    #[test]
+    fn generatetoaddress_projects_solved_hashes() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let result = generatetoaddress(&ctx, &json!([2, "51"]))
+            .unwrap_or_else(|err| panic!("generatetoaddress failed: {err}"));
+        let hashes = result
+            .as_array()
+            .unwrap_or_else(|| panic!("generatetoaddress returns a hash array"));
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.iter().all(|hash| hash.as_str().is_some()));
+    }
+
+    #[test]
+    fn generateblock_projects_hash_object() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let result = generateblock(&ctx, &json!(["51", []]))
+            .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
+        assert!(
+            result
+                .get("hash")
+                .and_then(JsonValueTrait::as_str)
+                .is_some()
+        );
+        assert!(result.get("hex").is_none());
+    }
+
+    #[test]
+    fn generateblock_without_submit_includes_hex() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let result = generateblock(&ctx, &json!(["51", [], false]))
+            .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
+        assert!(
+            result
+                .get("hash")
+                .and_then(JsonValueTrait::as_str)
+                .is_some()
+        );
+        assert_eq!(
+            result.get("hex").and_then(JsonValueTrait::as_str),
+            Some("00")
+        );
+    }
+
+    #[test]
+    fn getnetworkhashps_and_prioritised_transactions_project_control() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let rate = getnetworkhashps(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getnetworkhashps failed: {err}"));
+        assert!(rate.as_f64().is_some());
+        let overlay = getprioritisedtransactions(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getprioritisedtransactions failed: {err}"));
+        assert!(overlay.is_object());
     }
 }

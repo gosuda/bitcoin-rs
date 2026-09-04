@@ -976,6 +976,17 @@ impl Mempool {
         Ok(())
     }
 
+    /// Non-zero mining fee overlays, including txids that are not currently in
+    /// the pool. `in_mempool` is true when the txid is an admitted entry.
+    #[must_use]
+    pub fn prioritised_transactions(&self) -> Vec<(Txid, i64, bool)> {
+        self.fee_deltas
+            .iter()
+            .filter(|(_, delta)| **delta != 0)
+            .map(|(txid, delta)| (*txid, *delta, self.by_txid.contains_key(txid)))
+            .collect()
+    }
+
     /// Reason-carrying core for composite mutations that remove an entry and
     /// all descendants that spend its outputs.
     pub(crate) fn remove_entry_and_descendants_into(

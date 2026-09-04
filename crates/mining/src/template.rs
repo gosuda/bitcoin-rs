@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
-use bitcoin_rs_primitives::{Hash256, Network, Tx, Txid, Wtxid, encode::double_sha256};
+use bitcoin_rs_primitives::{
+    Block, BlockHash, Hash256, Header, Network, Tx, Txid, Wtxid, encode::double_sha256,
+};
 
 use crate::MiningError;
 use crate::coinbase::{WITNESS_RESERVED_VALUE, build_coinbase};
@@ -154,6 +157,52 @@ pub struct Candidate {
     pub witness_commitment: Option<Hash256>,
 }
 
+impl Candidate {
+    /// Builds the unsolved block this candidate describes.
+    ///
+    /// Coinbase is first, then the selected transactions in topological order.
+    /// The header carries the candidate version, parent, merkle root, time,
+    /// and compact target with a zero nonce.
+    #[must_use]
+    pub fn into_unsolved_block(&self) -> Block {
+        let mut txs = Vec::with_capacity(self.transactions.len().saturating_add(1));
+        txs.push(self.coinbase.clone());
+        txs.extend(self.transactions.iter().map(|tx| (*tx.tx).clone()));
+        let merkle_root = merkle_root_from_txids(txs.iter().map(Tx::txid));
+        Block {
+            header: Header {
+                version: self.version,
+                prev_blockhash: BlockHash::from(self.previous_block_hash),
+                merkle_root,
+                time: self.current_time.max(self.min_time),
+                bits: self.bits,
+                nonce: 0,
+            },
+            txs,
+        }
+    }
+
+    /// Assembles the unsolved block and searches nonces until the compact
+    /// target is met or `max_tries` is exhausted.
+    pub fn solve(&self, max_tries: u64) -> Result<Block, MiningError> {
+        let mut block = self.into_unsolved_block();
+        solve_block(&mut block, max_tries)?;
+        Ok(block)
+    }
+}
+
+/// Searches `block.header.nonce` until the compact target is met.
+pub fn solve_block(block: &mut Block, max_tries: u64) -> Result<(), MiningError> {
+    for _ in 0..max_tries {
+        let hash = Hash256::from(block.header.compute_hash());
+        if compact_is_met_by(block.header.bits, hash) {
+            return Ok(());
+        }
+        block.header.nonce = block.header.nonce.wrapping_add(1);
+    }
+    Err(MiningError::Unsolved { tries: max_tries })
+}
+
 /// Assembles one transport-neutral candidate from a chain context and snapshot.
 ///
 /// Selection is package-atomic, topologically ordered, final under
@@ -164,6 +213,57 @@ pub fn assemble_candidate(
     snapshot: &MempoolMiningSnapshot,
     payout: &[u8],
 ) -> Result<Candidate, MiningError> {
+    let reservation = coinbase_reservation(context, payout)?;
+    let (ordered, fees, weight, size, sigops) = select_packages(
+        context,
+        snapshot,
+        reservation.weight,
+        reservation.size,
+        reservation.sigops,
+    )?;
+    let body = SelectedBody {
+        ordered,
+        fees,
+        weight,
+        size,
+        sigops,
+    };
+    finish_candidate(context, snapshot, payout, &body, reservation)
+}
+
+/// Assembles a candidate whose non-coinbase body is `snapshot.entries` in order.
+///
+/// Used by `generateblock`: the listed transactions are the block, not a
+/// package-selected subset. Resource overflows fail rather than skip.
+pub fn assemble_ordered_candidate(
+    context: &CandidateContext,
+    snapshot: &MempoolMiningSnapshot,
+    payout: &[u8],
+) -> Result<Candidate, MiningError> {
+    let reservation = coinbase_reservation(context, payout)?;
+    let body = exact_order(context, snapshot, reservation)?;
+    finish_candidate(context, snapshot, payout, &body, reservation)
+}
+
+#[derive(Clone, Copy)]
+struct CoinbaseReservation {
+    weight: u64,
+    size: u64,
+    sigops: u64,
+}
+
+struct SelectedBody {
+    ordered: Vec<usize>,
+    fees: u64,
+    weight: u64,
+    size: u64,
+    sigops: u64,
+}
+
+fn coinbase_reservation(
+    context: &CandidateContext,
+    payout: &[u8],
+) -> Result<CoinbaseReservation, MiningError> {
     let dummy_commitment = Hash256::from_le_bytes(&[0_u8; 32]);
     let reservation = build_coinbase(
         context.height,
@@ -172,25 +272,81 @@ pub fn assemble_candidate(
         payout.to_vec(),
         context.segwit_active.then_some(&dummy_commitment),
     )?;
-    let reserved_weight = reservation.weight();
-    let reserved_size = u64::try_from(reservation.total_size()).map_err(|_| {
+    let size = u64::try_from(reservation.total_size()).map_err(|_| {
         MiningError::CandidateScalarOverflow {
             field: "coinbase size",
         }
     })?;
-    let reserved_sigops = u64::from(bitcoin_rs_script::count_tx_legacy(&reservation));
+    Ok(CoinbaseReservation {
+        weight: reservation.weight(),
+        size,
+        sigops: u64::from(bitcoin_rs_script::count_tx_legacy(&reservation)),
+    })
+}
 
-    let (ordered, fees, selected_weight, selected_size, selected_sigops) = select_packages(
-        context,
-        snapshot,
-        reserved_weight,
-        reserved_size,
-        reserved_sigops,
-    )?;
+fn exact_order(
+    context: &CandidateContext,
+    snapshot: &MempoolMiningSnapshot,
+    reservation: CoinbaseReservation,
+) -> Result<SelectedBody, MiningError> {
+    if reservation.weight > context.max_weight {
+        return Err(MiningError::CapacityExhausted { field: "weight" });
+    }
+    if reservation.size > context.max_size {
+        return Err(MiningError::CapacityExhausted { field: "size" });
+    }
+    if reservation.sigops > context.max_sigops {
+        return Err(MiningError::CapacityExhausted { field: "sigops" });
+    }
 
+    let mut fees = 0_u64;
+    let mut weight = 0_u64;
+    let mut size = 0_u64;
+    let mut sigops = 0_u64;
+    for entry in &snapshot.entries {
+        fees = fees
+            .checked_add(entry.fee)
+            .ok_or(MiningError::FeeOverflow)?;
+        weight = weight
+            .checked_add(entry.weight)
+            .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
+        size = size
+            .checked_add(u64::from(entry.size))
+            .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
+        sigops = sigops.checked_add(u64::from(entry.sigop_cost)).ok_or(
+            MiningError::CandidateScalarOverflow {
+                field: "sigop cost",
+            },
+        )?;
+    }
+    if reservation.weight.saturating_add(weight) > context.max_weight {
+        return Err(MiningError::CapacityExhausted { field: "weight" });
+    }
+    if reservation.size.saturating_add(size) > context.max_size {
+        return Err(MiningError::CapacityExhausted { field: "size" });
+    }
+    if reservation.sigops.saturating_add(sigops) > context.max_sigops {
+        return Err(MiningError::CapacityExhausted { field: "sigops" });
+    }
+    Ok(SelectedBody {
+        ordered: (0..snapshot.entries.len()).collect(),
+        fees,
+        weight,
+        size,
+        sigops,
+    })
+}
+
+fn finish_candidate(
+    context: &CandidateContext,
+    snapshot: &MempoolMiningSnapshot,
+    payout: &[u8],
+    body: &SelectedBody,
+    reservation: CoinbaseReservation,
+) -> Result<Candidate, MiningError> {
     let (witness_merkle_root, witness_reserved_value, witness_commitment) = if context.segwit_active
     {
-        let root = witness_merkle_root(snapshot, &ordered)?;
+        let root = witness_merkle_root(snapshot, &body.ordered)?;
         let commitment = witness_commitment_hash(&root, &WITNESS_RESERVED_VALUE);
         (Some(root), Some(WITNESS_RESERVED_VALUE), Some(commitment))
     } else {
@@ -200,7 +356,7 @@ pub fn assemble_candidate(
     let coinbase = build_coinbase(
         context.height,
         context.network.subsidy_halving_interval(),
-        fees,
+        body.fees,
         payout.to_vec(),
         witness_commitment.as_ref(),
     )?;
@@ -213,15 +369,17 @@ pub fn assemble_candidate(
     // fixed-width hash, so the reservation and final coinbase have the same
     // weight, serialized size, and sigop cost.
 
-    let transactions = candidate_transactions(snapshot, &ordered)?;
+    let transactions = candidate_transactions(snapshot, &body.ordered)?;
 
-    let weight = reserved_weight
-        .checked_add(selected_weight)
+    let weight = reservation
+        .weight
+        .checked_add(body.weight)
         .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
-    let size = reserved_size
-        .checked_add(selected_size)
+    let size = reservation
+        .size
+        .checked_add(body.size)
         .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
-    let sigop_cost = reserved_sigops.checked_add(selected_sigops).ok_or(
+    let sigop_cost = reservation.sigops.checked_add(body.sigops).ok_or(
         MiningError::CandidateScalarOverflow {
             field: "sigop cost",
         },
@@ -243,7 +401,7 @@ pub fn assemble_candidate(
         mempool_sequence: snapshot.sequence,
         coinbase,
         coinbase_value,
-        fees,
+        fees: body.fees,
         weight,
         size,
         sigop_cost,
@@ -310,10 +468,21 @@ fn witness_merkle_root(
     for &index in ordered {
         leaves.push(*snapshot.entries[index].wtxid.as_bytes());
     }
+    merkle_root_from_leaves(leaves)
+}
 
+fn merkle_root_from_txids(txids: impl IntoIterator<Item = Txid>) -> Hash256 {
+    let leaves = txids
+        .into_iter()
+        .map(|txid| *txid.as_bytes())
+        .collect::<Vec<_>>();
+    merkle_root_from_leaves(leaves).unwrap_or_else(|_| Hash256::from_le_bytes(&[0_u8; 32]))
+}
+
+fn merkle_root_from_leaves(mut leaves: Vec<[u8; 32]>) -> Result<Hash256, MiningError> {
     if leaves.is_empty() {
         return Err(MiningError::CandidateScalarOverflow {
-            field: "witness merkle root",
+            field: "merkle root",
         });
     }
 

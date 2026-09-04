@@ -163,6 +163,29 @@ impl MiningControl for RecordingMining {
     fn publish_generation(&self) {
         self.publishes.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn generate(
+        &self,
+        _request: bitcoin_rs_rpc::context::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError> {
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
+    }
+
+    fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
+    }
+
+    fn prioritised_transactions(
+        &self,
+    ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError> {
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
+    }
 }
 
 /// Returns `Some(reason)` when loopback TCP cannot be used and the test must

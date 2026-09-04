@@ -10,7 +10,7 @@ use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 use bitcoin_rs_rpc::context::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
-    MiningControl, MiningControlError,
+    GenerateRequest, GenerateSelection, MiningControl, MiningControlError,
 };
 use compact_str::CompactString;
 use crossbeam_channel::bounded;
@@ -990,5 +990,89 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
         current.candidate.previous_block_hash
     );
     assert_eq!(template.submit_old, Some(true));
+    Ok(())
+}
+
+#[test]
+fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let hashes = mining.generate(GenerateRequest {
+        payout: vec![0x51],
+        count: 2,
+        max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+        selection: GenerateSelection::Txids(Vec::new()),
+        submit: true,
+    })?;
+    assert_eq!(hashes.len(), 2);
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after generate"));
+    assert_eq!(tip.height, 2);
+    assert_eq!(
+        tip.hash,
+        Hash256::from(hashes.last().expect("two hashes").hash)
+    );
+    Ok(())
+}
+
+#[test]
+fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let missing = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));
+    let error = mining
+        .generate(GenerateRequest {
+            payout: vec![0x51],
+            count: 1,
+            max_tries: 16,
+            selection: GenerateSelection::Txids(vec![missing]),
+            submit: true,
+        })
+        .expect_err("missing mempool txid must fail");
+    assert!(matches!(error, MiningControlError::InvalidRequest(_)));
+    Ok(())
+}
+
+#[test]
+fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let info = mining.mining_info()?;
+    let rate = mining.network_hash_ps(120, -1)?;
+    assert_eq!(rate, info.network_hashes_per_second);
+    Ok(())
+}
+
+#[test]
+fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let before = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing before generate"));
+    let generated = mining.generate(GenerateRequest {
+        payout: vec![0x51],
+        count: 1,
+        max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+        selection: GenerateSelection::Txids(Vec::new()),
+        submit: false,
+    })?;
+    assert_eq!(generated.len(), 1);
+    assert!(!generated[0].hex.is_empty());
+    let after = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after generate"));
+    assert_eq!(after.height, before.height);
+    assert_eq!(after.hash, before.hash);
     Ok(())
 }

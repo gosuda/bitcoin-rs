@@ -139,6 +139,10 @@ declare_rows! {
     "getmininginfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator.", "0.4.0", Some(mining::getmininginfo);
     "submitblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::submitblock);
     "prioritisetransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::prioritisetransaction);
+    "generatetoaddress", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator.", "0.4.0", Some(mining::generatetoaddress);
+    "generateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles and solves one block paying output from the listed mempool txids or raw txs in that order; third param is Core's submit flag.", "0.4.0", Some(mining::generateblock);
+    "getnetworkhashps", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Reuses the coordinator's chainwork/time window; nblocks<=0 uses the span since the last retarget.", "0.4.0", Some(mining::getnetworkhashps);
+    "getprioritisedtransactions", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Projects the mempool's persistent fee-delta overlay, including txids not currently admitted.", "0.4.0", Some(mining::getprioritisedtransactions);
 
     // -- JSON-RPC: bitcoin-rs extension ------------------------------
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/rpc/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
@@ -165,8 +169,6 @@ declare_rows! {
     "stop", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Lifecycle control not exposed over RPC.", "n/a", None;
 
     // -- JSON-RPC: Core surface not exposed (mining/network/util/signer)
-    "getnetworkhashps", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Network hash-rate estimate not implemented.", "n/a", None;
-    "getprioritisedtransactions", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Prioritisation map not queryable yet.", "n/a", None;
     "submitheader", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Header-only submission not implemented.", "n/a", None;
     "getaddrmaninfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Addrman table stats not exposed.", "n/a", None;
     "abortprivatebroadcast", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;
