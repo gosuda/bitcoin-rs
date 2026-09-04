@@ -313,6 +313,8 @@ mod tests {
     /// Default `Write::write_vectored` writes only the first non-empty slice.
     /// Production `write_message` emits header + payload through that method,
     /// so the wrapper must forward both slices and count every byte taken.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn a_vectored_write_counts_every_slice_the_socket_took() {
         struct VectoredWriter;
@@ -342,6 +344,8 @@ mod tests {
 
     /// A short vectored write still counts only the bytes the inner writer
     /// accepted, matching the scalar `write` contract.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn a_short_vectored_write_counts_what_the_socket_took() {
         struct ShortVectoredWriter;
