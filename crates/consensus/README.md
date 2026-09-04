@@ -1,9 +1,10 @@
 # bitcoin-rs-consensus
 
-Owns consensus validation: transaction and block rule checks for every active soft fork,
-with the `kernel` feature (the production default) routing script verification through
-bitcoinkernel — Bitcoin Core's native consensus engine — and a portable Rust path
-retained for differential tests and builds without a native backend.
+Owns consensus validation: transaction and block rule checks for every active soft fork.
+The `kernel` feature (the library production default, `VAL-01`) routes script
+verification through bitcoinkernel. With `kernel` off, the native interpreter in
+`bitcoin-rs-script` verifies every consensus spend class. See
+[`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md).
 
 Rule checks live in small per-subject modules (`bip9`, `bip30`, `bip34`, `bip65`,
 `bip66`, `bip68`, `bip112`, `bip113`, `bip141`, `bip143`, `bip341`, `bip342`), surfaced

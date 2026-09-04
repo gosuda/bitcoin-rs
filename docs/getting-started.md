@@ -7,9 +7,12 @@ verify progress before moving on.
 
 - A Rust toolchain for edition 2024 (MSRV 1.95.0 or newer).
 - The default binary build is pure Rust and requires no C++ compiler or system
-  libraries. It uses the portable Rust script interpreter, which verifies
-  Taproot key-path spends only and cannot validate ordinary mainnet spends
-  (see #166). For production consensus validation, enable the `kernel` feature.
+  libraries. It uses the native Rust script interpreter, which verifies
+  legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends.
+  `libbitcoinkernel` remains the library production default and the Compose
+  image engine until issue #213 promotes native
+  (`docs/contracts/validation-default.md`). For that engine, enable the
+  `kernel` feature.
 
 If you plan to compile with the `kernel` feature for production consensus
 validation via `libbitcoinkernel`, install `cmake` and `libboost-dev`:
@@ -29,13 +32,11 @@ cargo build --release -p bitcoin-rs
 
 This produces `./target/release/bitcoin-rs`. The default configuration includes
 the `fjall` storage backend, `redb`, and `zmq` sequence publishing. The default
-binary build uses the portable Rust script interpreter, which verifies Taproot
-key-path spends only; other script classes (Legacy, SegWit v0, Taproot
-script-path) are stubbed pending a full opcode interpreter (see #166). A
-mainnet sync with this build stops at the first real spend.
+binary build uses the native Rust script interpreter for every consensus spend
+class. Library crates and the Compose image still default to
+`libbitcoinkernel` (`docs/contracts/validation-default.md`).
 
-To compile with `libbitcoinkernel` as the consensus engine for full script
-validation across all script classes:
+To compile with `libbitcoinkernel` as the consensus engine:
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel

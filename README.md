@@ -1,10 +1,10 @@
 # bitcoin-rs
 
 A Bitcoin full node in Rust 2024. The default binary build is pure Rust (no
-C++ toolchain required) and uses `libbitcoinkernel` as the production consensus
-engine when the `kernel` feature is enabled; the portable Rust script path
-verifies Taproot key-path spends only and is not yet a complete consensus
-validator (see #166).
+C++ toolchain required) and runs the native script interpreter. `libbitcoinkernel`
+is the production consensus engine when the `kernel` feature is enabled, and
+the library default in `bitcoin-rs-consensus` / `bitcoin-rs-node` until issue
+#213 promotes native (`docs/contracts/validation-default.md`).
 
 [![CI](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
@@ -81,17 +81,15 @@ risk of correlated implementation failures.
 
 - Consensus validation: `libbitcoinkernel` (Bitcoin Core's C++ engine) verifies
   all script classes — Legacy, SegWit v0, and Taproot key-path and script-path
-  spends — when the `kernel` feature is enabled. The portable Rust interpreter
-  covers Taproot key-path only; other script classes are stubbed pending a full
-  opcode interpreter (see #166). Script checks run in parallel across rayon
-  workers with sighash midstate reuse per transaction.
+  spends — when the `kernel` feature is enabled. The native Rust interpreter
+  covers the same classes through `bitcoin-rs-script` when `kernel` is off.
+  Script checks run in parallel across rayon workers with sighash midstate
+  reuse per transaction.
 - Kernel feature: `--features kernel` enables `libbitcoinkernel` as the
   consensus engine. The `crates/consensus` and `crates/node` library crates
   default to `kernel`; the `bin/bitcoin-rs` binary defaults to `["fjall",
-  "redb", "zmq"]` (no kernel) for a pure-Rust quickstart. A default binary
-  build therefore excludes `bitcoinkernel` from its dependency graph and
-  cannot validate ordinary mainnet spends — pass `--features kernel` for
-  production consensus validation.
+  "redb", "zmq"]` (no kernel) for a pure-Rust quickstart. Issue #213 keeps
+  that split until native wins the signed-spend and full-replay gates.
 - Pure-Rust storage defaults: LSM-tree storage backed by `fjall` by default,
   with `redb` compiled in, and `rocksdb`/`mdbx` available through optional Cargo
   features.
@@ -177,8 +175,8 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 
 - Validation: script execution runs in parallel across rayon workers, with
   sighash midstate reuse per transaction. Under the `kernel` feature,
-  `libbitcoinkernel` verifies all script classes; without it, the portable
-  Rust interpreter handles Taproot key-path only.
+  `libbitcoinkernel` verifies all script classes; without it, the native
+  Rust interpreter in `bitcoin-rs-script` does.
 - Kernel boundary: `crates/consensus/src/kernel.rs` contains all
   `libbitcoinkernel` types behind `#[cfg(feature = "kernel")]`. Kernel types
   never leak into node state or apply logic.
@@ -192,7 +190,7 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 | Setting | Default |
 |---|---|
 | Storage backend | `fjall` |
-| Validation engine | `libbitcoinkernel` (with `--features kernel`); portable Rust (default binary, Taproot key-path only) |
+| Validation engine | Native Rust (default binary); `libbitcoinkernel` with `--features kernel` and as the consensus/node library default |
 | Kernel feature | Off in default binary build; on in `crates/consensus` and `crates/node` library defaults |
 | Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
 | Multi-peer download | On (8 outbound peers, 128-block window) |

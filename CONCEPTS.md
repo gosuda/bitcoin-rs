@@ -106,9 +106,9 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 ## Consensus validation
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), the production consensus default. It is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. Default builds need `cmake` and `libboost-dev`.
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), the production consensus default in `bitcoin-rs-consensus` and `bitcoin-rs-node`. It is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. Builds with `kernel` need `cmake` and `libboost-dev`. The Compose image compiles `fjall,kernel`. Issue #213 keeps this library default until native wins the signed-spend and full-replay gates (`docs/contracts/validation-default.md`).
 ### Rust interpreter (portable posture)
-The pure-Rust script path under `--no-default-features`. It fully verifies the Taproot key path; its non-Taproot path is a stub accepting only a bare `OP_TRUE` spend, and it has no Taproot script-path support. Retained for differential testing and lightweight non-production environments; a mainnet sync stops at the first real spend.
+The pure-Rust script path used when `kernel` is off, including the default `bin/bitcoin-rs` build. It verifies legacy and P2SH, SegWit v0, and Taproot key-path and script-path spends through `bitcoin-rs-script`. Core vector native columns pin zero mismatches. It is the C++-free quickstart engine, not the library production default.
 
 ### One-shot kernel block parse
 Parsing each block exactly once with `bitcoinkernel::Block::new` (`KernelBlock`, `crates/consensus/src/kernel.rs`) and reusing that parse downstream for txids and the transaction objects script preparation borrows via `TransactionRef`. Price a replacement by everything it subsumes, not by the line item that motivated it.

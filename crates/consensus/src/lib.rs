@@ -4,13 +4,11 @@
 //! `bitcoin-rs-node`: it routes every script class through bitcoinkernel
 //! (Bitcoin Core's native consensus engine). The `bin/bitcoin-rs` binary
 //! defaults to `["fjall", "redb", "zmq"]` (no `kernel`), so `cargo build
-//! -p bitcoin-rs` uses the portable path. With the feature off, the crate
-//! builds a portable Rust validation path that delegates taproot key-path
-//! script execution to `bitcoin-rs-script` and keeps consensus-facing rule
-//! checks in small, testable modules. The portable path's non-Taproot arm
-//! is a stub that accepts only bare `OP_TRUE` spends; it cannot validate
-//! ordinary mainnet spends (see #166). It is retained for differential
-//! tests and builds without a native backend.
+//! -p bitcoin-rs` uses the native Rust interpreter in `bitcoin-rs-script`,
+//! which verifies legacy, P2SH, `SegWit` v0, and Taproot key-path and
+//! script-path spends. Issue #213 keeps `kernel` as the library default
+//! until native wins the signed-spend and full-replay gates; see
+//! `docs/contracts/validation-default.md`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 

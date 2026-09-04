@@ -47,13 +47,12 @@ included — is self-authenticating against the recorded provenance.
 - **`segwit_v0_spend`** is from block 481,824, the segwit activation block.
 - **`taproot_keypath_spend`** is the widely documented **first taproot spend
   on mainnet** (block 709,635, single input, one 64-byte Schnorr signature,
-  no annex). It is the one fixture inside the in-repo Rust interpreter's
-  native scope (single-input key-path), so it carries
-  `interpreter_parity: true`.
+  no annex). It is the fixture that currently carries
+  `interpreter_parity: true` for the kernel-vs-interpreter differential.
 - **`taproot_scriptpath_spend`** is a single-input script-path spend from the
-  same block. It doubles as the fixture-grounded half of the
-  `differential_is_non_vacuous` pin: the kernel accepts it while the key-path-
-  only Rust interpreter rejects it.
+  same block. It is the fixture-grounded half of the
+  `differential_is_non_vacuous` pin: each engine must accept the pristine
+  spend and reject a tampered control block.
 
 Esplora data was fetched from `mempool.space` (the recorded source URLs);
 `blockstream.info` serves the identical transactions under the same API paths

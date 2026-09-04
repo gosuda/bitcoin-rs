@@ -7,8 +7,10 @@ workflow, coding standards, and verification commands used across the project.
 
 - Rust toolchain: Rust 2024 edition (MSRV 1.95.0 or newer).
 - Default build: Pure Rust. No C++ compiler or system libraries required.
-- Optional kernel oracle: `cmake` and `libboost-dev` (only when building with
-  `--features kernel` for differential verification against `libbitcoinkernel`).
+  Script validation uses the native interpreter in `bitcoin-rs-script`.
+- Optional kernel engine: `cmake` and `libboost-dev` (only when building with
+  `--features kernel` for `libbitcoinkernel`). Library crates default to
+  `kernel`; the binary does not. See `docs/contracts/validation-default.md`.
 
 Install tools:
 

@@ -19,7 +19,7 @@ pub mod interpreter;
 pub mod script;
 /// Signature operation counters.
 pub mod sigops;
-/// Bounded stack infrastructure for the future hand-rolled interpreter.
+/// Bounded stack infrastructure for the opcode evaluator.
 pub mod stack;
 /// Taproot verification helpers.
 pub mod taproot;

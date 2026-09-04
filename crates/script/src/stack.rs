@@ -2,7 +2,7 @@ use smallvec::SmallVec;
 use thiserror::Error;
 use tinyvec::ArrayVec;
 
-/// One stack item in the future hand-rolled interpreter.
+/// One stack item in the opcode evaluator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScriptItem {
     /// A minimally encoded script integer.

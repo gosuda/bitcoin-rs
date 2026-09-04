@@ -5,13 +5,13 @@ signature-hash caching that surround script execution.
 
 `Interpreter::execute` and `Interpreter::execute_with_prevouts` run one script
 spend under a `VerifyFlags` set (parseable from Core test-vector flag strings
-via `VerifyFlags::from_core_names`): the local BIP341 path verifies Taproot
-key-path spends in full — multi-input spends require the complete ordered
-prevout set — while the portable non-taproot path accepts only bare `OP_TRUE`
-spends; every other script class requires the kernel production path. Around
-the interpreter sit `sigops` (signature-operation counting), `sighash_cache`
-(the signature-hash cache wrapper), and `opcodes` (opcode re-exports and a
-local opcode newtype). Failures surface as `ScriptError`.
+via `VerifyFlags::from_core_names`). The native evaluator covers legacy and
+P2SH, SegWit v0 (BIP143), and Taproot key-path and script-path (BIP341/BIP342).
+Multi-input Taproot spends require the complete ordered prevout set. Around
+the interpreter sit `sigops` (signature-operation counting) and the local
+script helpers. Failures surface as `ScriptError`. The `kernel` feature on
+`bitcoin-rs-consensus` remains the library production default; see
+[`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md).
 
 ## Features
 
