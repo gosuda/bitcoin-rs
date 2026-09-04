@@ -389,6 +389,7 @@ fn chainstate_journal_rejects_invalid_values() {
     assert!(resolve(&[&retention_below_rotation]).is_err());
 }
 
+/// Contract ARCH-05: the resolved mining payout address is decoded for the selected network.
 #[test]
 fn mining_payout_address_decodes_after_all_layers() -> Result<()> {
     use bitcoin_rs_node::MiningOverrides;
