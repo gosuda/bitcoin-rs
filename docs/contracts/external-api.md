@@ -5,6 +5,7 @@
 path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
 BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 `API-08` is mainnet template operational gates. `API-09` is `submitheader`.
+`API-10` is GBT client-rule negotiation.
 
 ## Clauses
 
@@ -126,6 +127,21 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 - Success is JSON `null`. Header-only admission does not apply the block or
   publish a mining generation.
 
+### `API-10`: GBT client-rule negotiation
+
+- **Owner**: `ensure_client_rules_for_template` and
+  `ensure_client_supports_mandatory_rules` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Template mode requires the client to list `segwit`. On signet it also
+  requires `signet`. Failures are Core `-8` with Core's exact messages:
+  `getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})`
+  and
+  `getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})`.
+  Signet is checked first, matching Core v31.0 `src/rpc/mining.cpp`.
+- These checks run before template assembly. Proposal mode skips them.
+- After assembly, any remaining mandatory template rule the client omitted
+  is Core `-8`: `Support for 'NAME' rule requires explicit client support`.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -181,3 +197,8 @@ owned by [wallet-facing.md](wallet-facing.md).
     `submit_header_rejects_time_too_new`
   - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
     `nbits_mismatch_is_bad_diffbits`
+- `API-10`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_missing_segwit_rule`,
+    `getblocktemplate_requires_signet_rule_on_signet`,
+    `getblocktemplate_rejects_template_mandatory_rule_without_client_support`,
+    `getblocktemplate_proposal_skips_client_rule_negotiation`

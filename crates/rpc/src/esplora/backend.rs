@@ -6,7 +6,7 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
-use bitcoin_rs_primitives::{OutPoint, Txid};
+use bitcoin_rs_primitives::{Network, OutPoint, Txid};
 
 use super::http::{bad, dispatch_error, json_response, query_limit};
 use super::model::Outspend;
@@ -177,7 +177,12 @@ fn internal_outspend(
 }
 
 fn block_template(handler: &Handler) -> Response {
+    let request = if handler.context().chain_network == Network::Signet {
+        sonic_json!([{"rules": ["segwit", "signet"]}])
+    } else {
+        sonic_json!([{"rules": ["segwit"]}])
+    };
     handler
-        .dispatch("getblocktemplate", &sonic_json!([]))
+        .dispatch("getblocktemplate", &request)
         .map_or_else(dispatch_error, json_response)
 }

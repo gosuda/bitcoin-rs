@@ -373,7 +373,7 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     ));
 
     let template: corepc_types::v31::GetBlockTemplate =
-        typed(&handler.dispatch("getblocktemplate", &json!([{}]))?)?;
+        typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
     assert_eq!(template.version, 0x2000_0000);
     assert_eq!(template.height, 0);
     assert_eq!(template.bits, "1d00ffff");

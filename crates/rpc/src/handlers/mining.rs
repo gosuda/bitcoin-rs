@@ -7,7 +7,7 @@ use bitcoin_rs_mining::{
     MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
     witness_commitment_script,
 };
-use bitcoin_rs_primitives::{Block, Header, Tx, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{Block, Header, Network, Tx, Txid, consensus_bytes, deserialize};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
 
@@ -22,6 +22,12 @@ use crate::handlers::{ensure_no_params, optional_bool, params_array, required_st
 use corepc_types::v31;
 
 const NONCE_RANGE: &str = "00000000ffffffff";
+
+/// Core v31.0 `src/rpc/mining.cpp` template-mode client-rule errors.
+const GBT_REQUIRE_SEGWIT: &str =
+    r#"getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})"#;
+const GBT_REQUIRE_SIGNET: &str =
+    r#"getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})"#;
 
 fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
     fn nibble(byte: u8) -> Result<u8, ()> {
@@ -61,6 +67,7 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let request = parse_block_template_request(params)?;
     if matches!(request.mode, BlockTemplateMode::Template) {
         ensure_template_ready(ctx)?;
+        ensure_client_rules_for_template(ctx.chain_network, &request.rules)?;
     }
     let client_rules = request.rules.clone();
     match control.get_block_template(request) {
@@ -467,6 +474,25 @@ fn parse_string_list(
     }
 }
 
+fn client_supports_rule(rules: &[MiningRule], name: &str) -> bool {
+    rules.iter().any(|rule| rule.as_str() == name)
+}
+
+/// Core refuses template assembly until the client lists `segwit`, and
+/// `signet` on signet. Proposal mode returns before these checks.
+fn ensure_client_rules_for_template(
+    network: Network,
+    client_rules: &[MiningRule],
+) -> Result<(), RpcError> {
+    if network == Network::Signet && !client_supports_rule(client_rules, "signet") {
+        return Err(RpcError::InvalidParameter(GBT_REQUIRE_SIGNET.to_owned()));
+    }
+    if !client_supports_rule(client_rules, "segwit") {
+        return Err(RpcError::InvalidParameter(GBT_REQUIRE_SEGWIT.to_owned()));
+    }
+    Ok(())
+}
+
 fn ensure_client_supports_mandatory_rules(
     template: &BlockTemplate,
     client_rules: &[MiningRule],
@@ -475,13 +501,11 @@ fn ensure_client_supports_mandatory_rules(
         if !rule_is_mandatory(rule.as_str()) {
             continue;
         }
-        if !client_rules
-            .iter()
-            .any(|supported| supported.as_str() == rule.as_str())
-        {
-            return Err(RpcError::InvalidParams(
-                "support for mandatory rules is required",
-            ));
+        if !client_supports_rule(client_rules, rule.as_str()) {
+            return Err(RpcError::InvalidParameter(format!(
+                "Support for '{}' rule requires explicit client support",
+                rule.as_str()
+            )));
         }
     }
     Ok(())
@@ -490,7 +514,7 @@ fn ensure_client_supports_mandatory_rules(
 /// Core refuses template assembly on mainnet while disconnected or still in IBD.
 /// Proposal mode skips these gates. Test chains (`Network != Mainnet`) skip them.
 fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
-    if ctx.chain_network != bitcoin_rs_primitives::Network::Mainnet {
+    if ctx.chain_network != Network::Mainnet {
         return Ok(());
     }
     if ctx.peer_table.is_empty() {
@@ -874,8 +898,15 @@ mod tests {
     }
 
     fn ctx_with_control(control: Arc<dyn MiningControl>) -> Arc<Context> {
+        ctx_with_control_on_network(control, Network::Regtest)
+    }
+
+    fn ctx_with_control_on_network(
+        control: Arc<dyn MiningControl>,
+        network: Network,
+    ) -> Arc<Context> {
         let mut ctx = Context::new();
-        ctx.chain_network = Network::Regtest;
+        ctx.chain_network = network;
         Arc::new(ctx.with_mining_control(control))
     }
 
@@ -1074,10 +1105,16 @@ mod tests {
             challenge: vec![0x51],
         });
         let control = FakeMiningControl::with_template(template);
-        let ctx = ctx_with_control(control);
-        let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+        let ctx = ctx_with_control_on_network(control.clone(), Network::Signet);
+        let missing_signet = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
             .expect_err("missing signet support must fail");
-        assert!(matches!(error, RpcError::InvalidParams(_)));
+        assert!(matches!(missing_signet, RpcError::InvalidParameter(_)));
+        assert_eq!(missing_signet.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(missing_signet.to_string(), GBT_REQUIRE_SIGNET);
+        let missing_both = getblocktemplate(&ctx, &json!([{}]))
+            .expect_err("missing both rules on signet must quote signet first");
+        assert_eq!(missing_both.to_string(), GBT_REQUIRE_SIGNET);
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
         let accepted = getblocktemplate(&ctx, &json!([{"rules":["segwit", "signet"]}]))
             .unwrap_or_else(|err| panic!("signet template failed: {err}"));
         let rules = accepted
@@ -1091,6 +1128,23 @@ mod tests {
                 .and_then(JsonValueTrait::as_str),
             Some("51")
         );
+    }
+
+    #[test]
+    fn getblocktemplate_rejects_template_mandatory_rule_without_client_support() {
+        let mut template = sample_template();
+        template.rules.push(MiningRule::new("signet"));
+        let control = FakeMiningControl::with_template(template);
+        let ctx = ctx_with_control(control.clone());
+        let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .expect_err("template-listed signet still requires client support");
+        assert!(matches!(error, RpcError::InvalidParameter(_)));
+        assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(
+            error.to_string(),
+            "Support for 'signet' rule requires explicit client support"
+        );
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1121,12 +1175,42 @@ mod tests {
     }
 
     #[test]
-    fn getblocktemplate_rejects_missing_mandatory_rule_support() {
+    fn getblocktemplate_rejects_missing_segwit_rule() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(control);
-        let error = getblocktemplate(&ctx, &json!([{"rules":["csv"]}]))
-            .expect_err("missing segwit support must fail");
-        assert!(matches!(error, RpcError::InvalidParams(_)));
+        let ctx = ctx_with_control(control.clone());
+        for params in [
+            json!([]),
+            json!([{}]),
+            json!([{"rules":[]}]),
+            json!([{"rules":["csv"]}]),
+        ] {
+            let error =
+                getblocktemplate(&ctx, &params).expect_err("missing segwit support must fail");
+            assert!(matches!(error, RpcError::InvalidParameter(_)));
+            assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+            assert_eq!(error.to_string(), GBT_REQUIRE_SEGWIT);
+        }
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn getblocktemplate_proposal_skips_client_rule_negotiation() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.proposal.lock() = BlockValidationResult::Accepted;
+        let ctx = ctx_with_control_on_network(control.clone(), Network::Signet);
+        let genesis = sample_block();
+        let hex = to_lower_hex(&consensus_bytes(&genesis));
+        let result = getblocktemplate(
+            &ctx,
+            &json!([{
+                "mode": "proposal",
+                "capabilities": ["proposal"],
+                "data": hex,
+            }]),
+        )
+        .unwrap_or_else(|err| panic!("proposal without rules failed: {err}"));
+        assert!(result.is_null());
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
