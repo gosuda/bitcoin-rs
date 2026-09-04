@@ -14,8 +14,8 @@ use std::error::Error;
 
 use bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb;
 use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext, StandardnessError, StandardnessPolicy,
-    evaluate_package_acceptance, is_standard_tx,
+    AcceptanceRejectReason, AdmissionConsensus, PackageTxContext, StandardnessError,
+    StandardnessPolicy, evaluate_package_acceptance, is_standard_tx,
 };
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolError, MempoolLimits, MutationOutcome, PolicyError, RbfError,
@@ -96,6 +96,26 @@ fn context(fee: u64, vsize: u32) -> PackageTxContext {
     }
 }
 
+fn spendable_prevouts(tx: &Tx) -> Vec<(OutPoint, TxOut)> {
+    let need = tx
+        .outputs
+        .iter()
+        .fold(0_u64, |sum, output| sum.saturating_add(output.value))
+        .saturating_add(50_000);
+    tx.inputs
+        .iter()
+        .map(|input| {
+            (
+                input.previous_output,
+                TxOut {
+                    value: need,
+                    script_pubkey: op_true_script(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn preview_reason(
     pool: &Mempool,
     tx: &Tx,
@@ -106,6 +126,8 @@ fn preview_reason(
         &policy(),
         std::slice::from_ref(tx),
         &[ctx],
+        std::slice::from_ref(&spendable_prevouts(tx)),
+        AdmissionConsensus::default(),
         None,
         INCREMENTAL_RELAY_FEE_SAT_PER_KVB,
     )
@@ -121,6 +143,8 @@ fn preview_allowed(pool: &Mempool, tx: &Tx, ctx: PackageTxContext) -> bool {
         &policy(),
         std::slice::from_ref(tx),
         &[ctx],
+        std::slice::from_ref(&spendable_prevouts(tx)),
+        AdmissionConsensus::default(),
         None,
         INCREMENTAL_RELAY_FEE_SAT_PER_KVB,
     )
@@ -535,6 +559,8 @@ fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), Box<dyn Error>
         &policy(),
         std::slice::from_ref(&orphan),
         &[missing],
+        std::slice::from_ref(&spendable_prevouts(&orphan)),
+        AdmissionConsensus::default(),
         None,
         INCREMENTAL_RELAY_FEE_SAT_PER_KVB,
     );

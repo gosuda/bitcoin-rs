@@ -9,7 +9,8 @@ use alloc::sync::Arc;
 use std::error::Error;
 
 use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext, StandardnessPolicy, evaluate_package_acceptance,
+    AcceptanceRejectReason, AdmissionConsensus, PackageTxContext, StandardnessPolicy,
+    evaluate_package_acceptance,
 };
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolStats, PolicyError, RbfError,
@@ -268,8 +269,22 @@ fn package_acceptance_surfaces_bip125_replacement_boundaries() -> Result<(), Box
         sigop_cost: 4,
         missing_inputs: false,
     };
-    let facts =
-        evaluate_package_acceptance(&pool, &policy, &[replacement_tx], &[context], None, 1_000);
+    let facts = evaluate_package_acceptance(
+        &pool,
+        &policy,
+        std::slice::from_ref(&replacement_tx),
+        &[context],
+        &[vec![(
+            replacement_tx.inputs[0].previous_output,
+            TxOut {
+                value: 1_000_000,
+                script_pubkey: vec![0x51],
+            },
+        )]],
+        AdmissionConsensus::default(),
+        None,
+        1_000,
+    );
     assert_eq!(
         facts.results[0].reject_reason,
         Some(AcceptanceRejectReason::Replacement(RbfError::Rule1NoOptIn))

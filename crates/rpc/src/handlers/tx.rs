@@ -11,7 +11,7 @@ use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext as MempoolPackageTxContext,
+    AcceptanceRejectReason, AdmissionConsensus, PackageTxContext as MempoolPackageTxContext,
     evaluate_package_acceptance_all,
 };
 use bitcoin_rs_mempool::{
@@ -641,12 +641,19 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 
     let pool = ctx.mempool.read();
     let policy = pool.policy_snapshot();
-    let contexts = package_contexts(ctx, &pool, &txs);
+    let (contexts, prevouts) = package_contexts(ctx, &pool, &txs);
     let facts = evaluate_package_acceptance_all(
         &pool,
         &policy.standardness,
         &txs,
         &contexts,
+        &prevouts,
+        AdmissionConsensus {
+            finality_height: ctx.applied_height().saturating_add(1),
+            locktime_cutoff: ctx
+                .median_time_past_for_hash(ctx.applied_hash())
+                .unwrap_or(0),
+        },
         max_feerate,
         policy.incremental_relay_fee_sat_per_kvb,
     );
@@ -969,9 +976,10 @@ fn package_contexts(
     ctx: &Context,
     pool: &bitcoin_rs_mempool::Mempool,
     txs: &[Tx],
-) -> Vec<MempoolPackageTxContext> {
-    let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
+) -> (Vec<MempoolPackageTxContext>, Vec<Vec<(OutPoint, TxOut)>>) {
+    let mut package_outputs: HashMap<(Txid, u32), TxOut> = HashMap::new();
     let mut contexts = Vec::with_capacity(txs.len());
+    let mut all_prevouts = Vec::with_capacity(txs.len());
 
     for tx in txs {
         let mut missing_inputs = false;
@@ -984,15 +992,9 @@ fn package_contexts(
                 continue;
             }
             let key = (input.previous_output.txid, input.previous_output.vout);
-            if let Some(value) = package_outputs.get(&key) {
-                input_value = input_value.saturating_add(*value);
-                prevouts.push((
-                    input.previous_output,
-                    TxOut {
-                        value: *value,
-                        script_pubkey: Vec::new(),
-                    },
-                ));
+            if let Some(output) = package_outputs.get(&key) {
+                input_value = input_value.saturating_add(output.value);
+                prevouts.push((input.previous_output, output.clone()));
                 continue;
             }
             if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
@@ -1025,15 +1027,16 @@ fn package_contexts(
             sigop_cost,
             missing_inputs,
         });
+        all_prevouts.push(prevouts);
 
         let txid = tx.txid();
         for (vout, output) in tx.outputs.iter().enumerate() {
             let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-            package_outputs.insert((txid, vout), output.value);
+            package_outputs.insert((txid, vout), output.clone());
         }
     }
 
-    contexts
+    (contexts, all_prevouts)
 }
 
 /// Computes the total sigop cost for a transaction given resolved prevouts.
@@ -2746,6 +2749,95 @@ mod acceptance_tests {
         assert!(
             ctx.mempool.read().is_empty(),
             "testing acceptance must not accept"
+        );
+    }
+
+    fn p2wpkh_script() -> Vec<u8> {
+        let mut script = vec![0x00, 0x14];
+        script.extend_from_slice(&[0x11_u8; 20]);
+        script
+    }
+
+    fn seed_p2wpkh_utxo(ctx: &Context, tag: u8, value: u64) {
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            internal_outpoint(tag),
+            TxOut {
+                value,
+                script_pubkey: p2wpkh_script(),
+            },
+            false,
+            7,
+        ));
+        ctx.utxo
+            .commit_block(&changes, &Hash256::default())
+            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    }
+
+    /// An empty-witness spend of a P2WPKH output must be rejected by both
+    /// RPC outlets. The preview used to skip script verification, so
+    /// `testmempoolaccept` reported `allowed: true` for a transaction
+    /// `sendrawtransaction` would refuse.
+    #[test]
+    fn sendrawtransaction_and_testmempoolaccept_reject_unsigned_p2wpkh() {
+        let ctx = Arc::new(Context::new());
+        seed_p2wpkh_utxo(&ctx, 1, 100_000);
+        let tx = spending_tx(1, 90_000);
+        let hex = hex_of(&tx);
+
+        let send = sendrawtransaction(&ctx, &json!([hex.as_str()]));
+        let Err(send_err) = send else {
+            panic!("sendrawtransaction must reject an unsigned P2WPKH spend");
+        };
+        assert!(
+            matches!(send_err, RpcError::TxRejected(_)),
+            "expected a transaction rejection, got {send_err:?}"
+        );
+        assert!(
+            send_err.to_string().contains("script-verify-flag-failed"),
+            "sendrawtransaction must quote the script-verify class: {send_err}"
+        );
+        assert!(ctx.mempool.read().is_empty());
+
+        let Ok(preview) = testmempoolaccept(&ctx, &json!([[hex.as_str()]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+        let Some(row) = preview.as_array().and_then(|rows| rows.first()) else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(row.get("allowed").as_bool(), Some(false));
+        assert_eq!(
+            row.get("reject-reason").as_str(),
+            Some("script-verify-flag-failed"),
+            "testmempoolaccept must quote the same class sendrawtransaction does"
+        );
+    }
+
+    #[test]
+    fn testmempoolaccept_rejects_tx_final_only_under_header_tip_mtp() {
+        const BASE: u32 = 500_000_000;
+        let ctx = Arc::new(Context::new());
+        let (applied_mtp, best_mtp) = build_divergent_tips(&ctx);
+        assert!(applied_mtp < best_mtp);
+        let lock_time = BASE + 3_300;
+        assert!(applied_mtp < lock_time && lock_time < best_mtp);
+
+        seed_utxo(&ctx, 1, 100_000);
+        let mut tx = spending_tx(1, 90_000);
+        tx.lock_time = lock_time;
+        tx.inputs[0].sequence = 0xFFFF_FFFE;
+
+        let Ok(value) = testmempoolaccept(&ctx, &json!([[hex_of(&tx)]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+        let Some(row) = value.as_array().and_then(|rows| rows.first()) else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(row.get("allowed").as_bool(), Some(false));
+        assert_eq!(
+            row.get("reject-reason").as_str(),
+            Some("non-final"),
+            "preview must reject a locktime that is final only under the header MTP"
         );
     }
 

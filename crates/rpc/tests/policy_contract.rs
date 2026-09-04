@@ -1612,6 +1612,64 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_each_class() -> Result<(), 
 }
 
 #[test]
+fn unsigned_p2wpkh_spend_rejects_on_both_rpc_outlets() -> Result<(), Box<dyn Error>> {
+    let ctx = Arc::new(Context::new());
+    let mut changes = BlockChanges::default();
+    let prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x74; 32])), 0);
+    changes.add(UtxoAdd::new(
+        prevout,
+        TxOut {
+            value: 10_000,
+            script_pubkey: p2wpkh_script(),
+        },
+        false,
+        1,
+    ));
+    ctx.utxo
+        .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
+        .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
+    let tx = tx(prevout, 9_000, 0xffff_ffff);
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let message = reject_message(
+        &handler
+            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&tx)]))
+            .err()
+            .ok_or("expected script-verify rejection")?,
+    );
+    assert!(
+        message.contains("script-verify-flag-failed"),
+        "sendrawtransaction must quote script-verify: {message}"
+    );
+    assert!(
+        !ctx.mempool.read().contains_txid(&rpc_txid(&tx)),
+        "rejected tx must not enter the pool"
+    );
+
+    let rows = handler
+        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&tx)]]))?
+        .as_array()
+        .ok_or("expected an array of results")?
+        .clone();
+    assert_eq!(
+        rows.first()
+            .ok_or("expected one row")?
+            .get("allowed")
+            .and_then(JsonValueTrait::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        rows.first()
+            .ok_or("expected one row")?
+            .get("reject-reason")
+            .and_then(JsonValueTrait::as_str),
+        Some("script-verify-flag-failed"),
+        "testmempoolaccept must quote the same class"
+    );
+    Ok(())
+}
+
+#[test]
 fn decode_failures_reject_with_invalid_params() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));

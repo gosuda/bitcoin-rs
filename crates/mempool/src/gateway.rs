@@ -18,27 +18,11 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{UtxoView, verify_transaction};
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_primitives::{Tx, Txid};
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-/// Adapter that lets the consensus verifier look up prevouts from a
-/// resolved `(OutPoint, TxOut)` slice, layered under the mempool by
-/// `MempoolUtxoView`.
-struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
-
-impl UtxoView for PrevoutMap<'_> {
-    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
-        self.0
-            .iter()
-            .find(|(op, _)| op == outpoint)
-            .map(|(_, txout)| txout.clone())
-    }
-}
 
 /// Why a chain-change reservation or finish failed.
 ///
@@ -129,10 +113,12 @@ pub enum AdmitError {
     /// The transaction was rejected by policy. The reason is mempool-owned.
     #[error(transparent)]
     Policy(#[from] crate::standardness::AcceptanceRejectReason),
-    /// The transaction failed consensus verification (finality, duplicate
-    /// inputs, overspend, sigop limits) or failed its input scripts under
-    /// Core's policy flags (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp
-    /// `PolicyScriptChecks`).
+    /// The next-block height overflowed `u32`, so finality is unanswerable.
+    ///
+    /// Consensus and script failures are reported as [`AdmitError::Policy`]
+    /// with [`crate::standardness::AcceptanceRejectReason::ScriptVerify`],
+    /// [`crate::standardness::AcceptanceRejectReason::NonFinal`], or
+    /// [`crate::standardness::AcceptanceRejectReason::Consensus`].
     #[error("consensus verification failed")]
     Consensus,
 }
@@ -623,10 +609,12 @@ impl MempoolGateway {
         if pool.contains_txid(&txid) {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
-        // 4. Policy evaluation under the same write guard. `evaluate_one`
-        //    checks standardness, missing inputs, coinbase, min-relay,
-        //    max-fee, and replacement — but NOT package limits (those are
-        //    enforced by `replace_transaction` below).
+        // 4. Policy and consensus evaluation under the same write guard.
+        //    `evaluate_one` checks standardness, missing inputs, coinbase,
+        //    min-relay, max-fee, replacement, package limits, then consensus
+        //    (finality, duplicate inputs, value balance, and scripts under
+        //    `VerifyFlags::STANDARD`). Package-limit revalidation still
+        //    happens in `replace_transaction` below.
         let policy = pool.policy_snapshot();
         let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
             &pool,
@@ -637,47 +625,17 @@ impl MempoolGateway {
             &policy.standardness,
             &request.tx,
             request.context,
+            &request.prevouts,
+            crate::standardness::AdmissionConsensus {
+                finality_height: request.height.checked_add(1).ok_or(AdmitError::Consensus)?,
+                locktime_cutoff: request.locktime_cutoff,
+            },
             request.max_feerate_sat_per_kvb,
             mempool_min_fee,
             policy.incremental_relay_fee_sat_per_kvb,
         );
         if let Some(reason) = fact.reject_reason {
             return Err(AdmitError::Policy(reason));
-        }
-
-        // 4b. Consensus verification (finality, duplicate inputs, overspend,
-        //     sigop limits) plus Core's policy script checks over the
-        //     resolved prevouts layered with the mempool. A non-coinbase
-        //     transaction with no resolved prevouts must be rejected
-        //     outright — policy may not have caught it if the caller set
-        //     missing_inputs=false. Scripts run here under
-        //     `VerifyFlags::STANDARD`, matching Core's `PolicyScriptChecks`
-        //     (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp): an
-        //     unrelayable transaction must not occupy pool capacity until
-        //     block connection evicts it.
-        if request.prevouts.is_empty() {
-            // Coinbase transactions are never admitted via the gateway.
-            // Empty prevouts on a non-coinbase tx means the caller did not
-            // resolve inputs — reject rather than admit unverified.
-            return Err(AdmitError::Consensus);
-        }
-        let chain_view = PrevoutMap(&request.prevouts);
-        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
-        // Finality is evaluated at the height of the next block the
-        // transaction could be mined in (`height + 1`), exactly Core's
-        // `CheckFinalTxAtTip`.
-        // A u32 overflow on the next block height is not a valid chain
-        // state, but failing closed here matches the conservative choice:
-        // nothing is admitted when the finality question is unanswerable.
-        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
-        if let Err(_err) = verify_transaction(
-            &request.tx,
-            &view,
-            finality_height,
-            request.locktime_cutoff,
-            VerifyFlags::STANDARD,
-        ) {
-            return Err(AdmitError::Consensus);
         }
 
         // 5. Mutate under the same write guard via `replace_transaction`,
@@ -1009,7 +967,7 @@ mod tests {
     use crate::mutation::{
         AdmissionOrigin, InsertionOutcome, MutationEnvelope, MutationOutcome, RemovalReason,
     };
-    use crate::standardness::PackageTxContext;
+    use crate::standardness::{AcceptanceRejectReason, PackageTxContext};
     use crate::{Mempool, MempoolEntry, MempoolLimits};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -2161,7 +2119,10 @@ mod tests {
 
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::NonFinal))
+            ),
             "lock_time == tip_height + 1 must still be non-final: {result:?}"
         );
     }
@@ -2185,7 +2146,10 @@ mod tests {
 
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::NonFinal))
+            ),
             "lock_time above applied-tip MTP must be non-final: {result:?}"
         );
     }
@@ -2208,7 +2172,10 @@ mod tests {
 
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::ScriptVerify))
+            ),
             "a script-invalid spend must fail verification: {result:?}"
         );
         assert!(gateway.read().is_empty());
@@ -2759,7 +2726,10 @@ mod tests {
         };
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::Consensus))
+            ),
             "a non-coinbase tx with no prevouts must be rejected: {result:?}"
         );
         assert!(gateway.read().is_empty());
@@ -2808,7 +2778,10 @@ mod tests {
         };
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::Consensus))
+            ),
             "duplicate inputs must fail consensus verification: {result:?}"
         );
         assert!(gateway.read().is_empty());

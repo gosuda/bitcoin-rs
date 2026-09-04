@@ -125,6 +125,73 @@ fn sendrawtransaction_admits_standard_tx_to_mempool() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+fn fund_p2wpkh_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
+    let txid = Hash256::from_le_bytes(&[txid_byte; 32]);
+    let outpoint = OutPoint::new(Txid(txid), 0);
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        outpoint,
+        TxOut {
+            value,
+            script_pubkey: hex_decode(P2WPKH_SCRIPT_HEX).expect("p2wpkh script"),
+        },
+        false,
+        1,
+    ));
+    ctx.utxo
+        .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
+        .expect("commit_block");
+    outpoint
+}
+
+#[test]
+fn sendrawtransaction_rejects_unsigned_p2wpkh_spend() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
+    let prevout = fund_p2wpkh_utxo(&ctx, 0x42, 10_000);
+    let tx = make_tx(prevout, 9_000, script);
+    let raw = hex_encode(&consensus_bytes(&tx));
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let err = handler
+        .dispatch("sendrawtransaction", &json!([raw.as_str()]))
+        .expect_err("unsigned P2WPKH spend must be rejected");
+    assert_eq!(err.code(), RpcError::CORE_VERIFY_REJECTED);
+    assert!(
+        err.to_string().contains("script-verify-flag-failed"),
+        "unexpected rejection: {err}"
+    );
+    assert!(
+        !ctx.mempool.read().contains_txid(&tx.txid()),
+        "rejected tx must not enter the mempool"
+    );
+    Ok(())
+}
+
+#[test]
+fn testmempoolaccept_rejects_unsigned_p2wpkh_spend() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
+    let prevout = fund_p2wpkh_utxo(&ctx, 0x46, 10_000);
+    let tx = make_tx(prevout, 9_000, script);
+    let raw = hex_encode(&consensus_bytes(&tx));
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    let result = handler.dispatch("testmempoolaccept", &json!([[raw.as_str()]]))?;
+    let rows = result.as_array().ok_or("expected array")?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("allowed").as_bool(), Some(false));
+    let reason = rows[0]
+        .get("reject-reason")
+        .and_then(JsonValueTrait::as_str)
+        .ok_or("expected reject-reason")?;
+    assert_eq!(
+        reason, "script-verify-flag-failed",
+        "preview must quote the same class as sendrawtransaction"
+    );
+    Ok(())
+}
+
 #[test]
 fn sendrawtransaction_rejects_missing_inputs() {
     let ctx = Arc::new(Context::new());

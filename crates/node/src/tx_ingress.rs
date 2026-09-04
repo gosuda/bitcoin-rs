@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use bitcoin_rs_mempool::{
     AdmissionOrigin, MempoolGateway, PeerToken, ReplacementCandidate,
-    standardness::{PackageTxContext, evaluate_package_acceptance},
+    standardness::{AdmissionConsensus, PackageTxContext, evaluate_package_acceptance},
 };
 use bitcoin_rs_primitives::{Hash256, Tx, Txid};
 use bitcoin_rs_rpc::context::MiningControl;
@@ -140,37 +140,7 @@ impl TxIngressConsumer {
             return;
         }
 
-        // Evaluate acceptance policy (standardness, fee, missing inputs).
-        let (fact, policy) = {
-            let pool = self.mempool_gateway.read();
-            let policy = pool.policy_snapshot();
-            let contexts = self.package_contexts(&pool, std::slice::from_ref(&tx));
-            let facts = evaluate_package_acceptance(
-                &pool,
-                &policy.standardness,
-                std::slice::from_ref(&tx),
-                &contexts,
-                None,
-                policy.incremental_relay_fee_sat_per_kvb,
-            );
-            let fact = facts.results.into_iter().next().unwrap_or_else(|| {
-                let mut fact = bitcoin_rs_mempool::standardness::TxAcceptanceFact {
-                    txid,
-                    wtxid: tx.wtxid(),
-                    allowed: Some(false),
-                    vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
-                    weight: tx.weight(),
-                    sigop_cost: 0,
-                    base_fee: None,
-                    reject_reason: None,
-                };
-                fact.reject_reason =
-                    Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::PackageTooLarge);
-                fact
-            });
-            (fact, policy)
-        };
-
+        let (fact, policy) = self.preview_one(&tx);
         // Rejected: record in recent-rejects so the Inv filter suppresses
         // future getdata for this tx. Missing-inputs rejections are not
         // orphans here — the standardness evaluator reports them as
@@ -235,6 +205,49 @@ impl TxIngressConsumer {
         }
     }
 
+    /// Evaluates one transaction through the mempool acceptance seam
+    /// (policy and consensus) without inserting it.
+    fn preview_one(
+        &self,
+        tx: &Tx,
+    ) -> (
+        bitcoin_rs_mempool::standardness::TxAcceptanceFact,
+        bitcoin_rs_mempool::MempoolPolicySnapshot,
+    ) {
+        let pool = self.mempool_gateway.read();
+        let policy = pool.policy_snapshot();
+        let (contexts, prevouts) = self.package_contexts(&pool, std::slice::from_ref(tx));
+        let facts = evaluate_package_acceptance(
+            &pool,
+            &policy.standardness,
+            std::slice::from_ref(tx),
+            &contexts,
+            &prevouts,
+            AdmissionConsensus {
+                finality_height: self.applied_height().saturating_add(1),
+                locktime_cutoff: 0,
+            },
+            None,
+            policy.incremental_relay_fee_sat_per_kvb,
+        );
+        let fact = facts.results.into_iter().next().unwrap_or_else(|| {
+            let mut fact = bitcoin_rs_mempool::standardness::TxAcceptanceFact {
+                txid: tx.txid(),
+                wtxid: tx.wtxid(),
+                allowed: Some(false),
+                vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
+                weight: tx.weight(),
+                sigop_cost: 0,
+                base_fee: None,
+                reject_reason: None,
+            };
+            fact.reject_reason =
+                Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::PackageTooLarge);
+            fact
+        });
+        (fact, policy)
+    }
+
     /// Resolves prevout contexts for a package of transactions, using the
     /// mempool and UTXO set — the same logic as the RPC
     /// `sendrawtransaction` handler.
@@ -242,16 +255,26 @@ impl TxIngressConsumer {
         &self,
         pool: &bitcoin_rs_mempool::Mempool,
         txs: &[Tx],
-    ) -> Vec<PackageTxContext> {
-        use bitcoin_rs_primitives::OutPoint;
+    ) -> (
+        Vec<PackageTxContext>,
+        Vec<
+            Vec<(
+                bitcoin_rs_primitives::OutPoint,
+                bitcoin_rs_primitives::TxOut,
+            )>,
+        >,
+    ) {
+        use bitcoin_rs_primitives::{OutPoint, TxOut};
         use hashbrown::HashMap;
 
-        let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
+        let mut package_outputs: HashMap<(Txid, u32), TxOut> = HashMap::new();
         let mut contexts = Vec::with_capacity(txs.len());
+        let mut all_prevouts = Vec::with_capacity(txs.len());
 
         for tx in txs {
             let mut missing_inputs = false;
             let mut input_value = 0_u64;
+            let mut prevouts = Vec::new();
 
             for input in &tx.inputs {
                 if input.previous_output == OutPoint::default() {
@@ -259,8 +282,9 @@ impl TxIngressConsumer {
                     continue;
                 }
                 let key = (input.previous_output.txid, input.previous_output.vout);
-                if let Some(value) = package_outputs.get(&key) {
-                    input_value = input_value.saturating_add(*value);
+                if let Some(output) = package_outputs.get(&key) {
+                    input_value = input_value.saturating_add(output.value);
+                    prevouts.push((input.previous_output, output.clone()));
                     continue;
                 }
                 if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
@@ -268,10 +292,12 @@ impl TxIngressConsumer {
                     && let Some(output) = parent.outputs.get(vout)
                 {
                     input_value = input_value.saturating_add(output.value);
+                    prevouts.push((input.previous_output, output.clone()));
                     continue;
                 }
                 if let Some(live) = self.utxo.get_entry(&input.previous_output) {
                     input_value = input_value.saturating_add(live.txout.value);
+                    prevouts.push((input.previous_output, live.txout.clone()));
                     continue;
                 }
                 missing_inputs = true;
@@ -291,15 +317,16 @@ impl TxIngressConsumer {
                 sigop_cost,
                 missing_inputs,
             });
+            all_prevouts.push(prevouts);
 
             let txid = tx.txid();
             for (vout, output) in tx.outputs.iter().enumerate() {
                 let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-                package_outputs.insert((txid, vout), output.value);
+                package_outputs.insert((txid, vout), output.clone());
             }
         }
 
-        contexts
+        (contexts, all_prevouts)
     }
 
     /// Returns the current applied tip height.
@@ -402,7 +429,8 @@ mod tests {
         }
     }
 
-    /// Builds a tx that spends a known UTXO, passing standardness checks.
+    /// Builds a tx that spends a known UTXO, passing standardness and
+    /// consensus script checks (anyone-can-spend `OP_TRUE` prevout).
     fn spending_tx() -> Tx {
         let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
         Tx {
@@ -412,20 +440,24 @@ mod tests {
                     txid: parent_txid,
                     vout: 0,
                 },
-                script_sig: vec![0x52, 0x02, 0xAA, 0xBB],
+                script_sig: Vec::new(),
                 sequence: 0xFFFF_FFFF,
                 witness: Vec::new(),
             }],
             outputs: vec![TxOut {
                 value: 49_000,
-                script_pubkey: vec![0x6A],
+                script_pubkey: {
+                    let mut script = vec![0x00, 0x14];
+                    script.extend_from_slice(&[0x11_u8; 20]);
+                    script
+                },
             }],
             lock_time: 0,
         }
     }
 
     /// Creates a consumer with a pre-funded UTXO so `spending_tx` passes
-    /// standardness (`missing-inputs`) checks.
+    /// standardness and consensus verification.
     fn make_consumer_with_utxo(
         gateway: &Arc<MempoolGateway>,
         mining: Arc<RecordingMining>,
@@ -441,7 +473,7 @@ mod tests {
             },
             TxOut {
                 value: 50_000,
-                script_pubkey: Vec::new(),
+                script_pubkey: vec![0x51],
             },
             false,
             100,

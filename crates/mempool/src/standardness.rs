@@ -9,10 +9,11 @@ use alloc::vec::Vec;
 
 use hashbrown::HashSet;
 
-use bitcoin_rs_primitives::{Tx, TxOut, Txid, Wtxid};
+use bitcoin_rs_consensus::{ConsensusError, UtxoView, verify_transaction};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 use bitcoin_rs_script::{
-    Instruction, is_multisig, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh,
-    is_p2wsh, is_push_only, minimal_non_dust, opcode, script::instructions,
+    Instruction, VerifyFlags, is_multisig, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh,
+    is_p2tr, is_p2wpkh, is_p2wsh, is_push_only, minimal_non_dust, opcode, script::instructions,
 };
 use thiserror::Error;
 
@@ -205,21 +206,60 @@ pub enum AcceptanceRejectReason {
     /// Consensus script verification failed.
     #[error("script-verify-flag-failed")]
     ScriptVerify,
+    /// Transaction is not locktime-final at the next-block height / MTP.
+    #[error("non-final")]
+    NonFinal,
+    /// Consensus verification failed (duplicate inputs, overspend, missing prevouts).
+    #[error("consensus-verification-failed")]
+    Consensus,
 }
 
-/// Mempool-owned seam behind `testmempoolaccept`.
+/// Height and locktime cutoff for consensus checks at admission.
+///
+/// `finality_height` is the height of the **next** block (`tip + 1`), matching
+/// Core's `CheckFinalTxAtTip`. `locktime_cutoff` is the applied tip's
+/// median-time-past after BIP113; `0` is the pre-genesis / unknown-MTP cutoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdmissionConsensus {
+    /// Height the transaction is evaluated as final at (`applied_tip + 1`).
+    pub finality_height: u32,
+    /// Timestamp `nLockTime` is compared against (applied-tip MTP).
+    pub locktime_cutoff: u32,
+}
+
+impl Default for AdmissionConsensus {
+    fn default() -> Self {
+        Self {
+            finality_height: 1,
+            locktime_cutoff: 0,
+        }
+    }
+}
+
+/// Resolved prevouts for one transaction, layered under the live pool by
+/// [`evaluate_one`].
+///
+/// Callers that already rejected the row as `missing-inputs` may pass an
+/// empty slice; consensus verification does not run after a policy reject.
+pub type TxPrevouts = Vec<(OutPoint, TxOut)>;
+
+/// Mempool-owned seam behind `testmempoolaccept` and `sendrawtransaction`.
 ///
 /// It composes standardness, presence, missing-input, min-relay / max-fee,
-/// and BIP125 replacement checks against the live pool without inserting
-/// anything. Consensus script verification remains outside this module.
-/// `contexts` must have the same length as `txs`. `incremental_relay_fee_sat_per_kvb`
+/// BIP125 replacement, package limits, and consensus verification (finality,
+/// duplicate inputs, value balance, and scripts under `VerifyFlags::STANDARD`)
+/// against the live pool without inserting anything. `contexts` and `prevouts`
+/// must have the same length as `txs`. `incremental_relay_fee_sat_per_kvb`
 /// feeds the size-pressure mempool-min floor and BIP125 rule 4.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_package_acceptance(
     pool: &Mempool,
     policy: &StandardnessPolicy,
     txs: &[Tx],
     contexts: &[PackageTxContext],
+    prevouts: &[TxPrevouts],
+    consensus: AdmissionConsensus,
     max_feerate_sat_per_kvb: Option<u64>,
     incremental_relay_fee_sat_per_kvb: u64,
 ) -> PackageAcceptanceFacts {
@@ -227,6 +267,11 @@ pub fn evaluate_package_acceptance(
         txs.len(),
         contexts.len(),
         "package txs and contexts must align"
+    );
+    assert_eq!(
+        txs.len(),
+        prevouts.len(),
+        "package txs and prevouts must align"
     );
 
     if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
@@ -242,7 +287,7 @@ pub fn evaluate_package_acceptance(
     let mut results = Vec::with_capacity(txs.len());
     let mut package_failed = false;
 
-    for (tx, context) in txs.iter().zip(contexts.iter()) {
+    for ((tx, context), tx_prevouts) in txs.iter().zip(contexts.iter()).zip(prevouts.iter()) {
         if package_failed {
             results.push(TxAcceptanceFact {
                 txid: tx.txid(),
@@ -262,6 +307,8 @@ pub fn evaluate_package_acceptance(
             policy,
             tx,
             *context,
+            tx_prevouts,
+            consensus,
             max_feerate_sat_per_kvb,
             mempool_min_fee,
             incremental_relay_fee_sat_per_kvb,
@@ -284,11 +331,14 @@ pub fn evaluate_package_acceptance(
 /// This is the `testmempoolaccept` form: it reports every row's acceptance
 /// status, including rows after an earlier rejected row.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_package_acceptance_all(
     pool: &Mempool,
     policy: &StandardnessPolicy,
     txs: &[Tx],
     contexts: &[PackageTxContext],
+    prevouts: &[TxPrevouts],
+    consensus: AdmissionConsensus,
     max_feerate_sat_per_kvb: Option<u64>,
     incremental_relay_fee_sat_per_kvb: u64,
 ) -> PackageAcceptanceFacts {
@@ -296,6 +346,11 @@ pub fn evaluate_package_acceptance_all(
         txs.len(),
         contexts.len(),
         "package txs and contexts must align"
+    );
+    assert_eq!(
+        txs.len(),
+        prevouts.len(),
+        "package txs and prevouts must align"
     );
 
     if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
@@ -311,12 +366,15 @@ pub fn evaluate_package_acceptance_all(
     let results = txs
         .iter()
         .zip(contexts.iter())
-        .map(|(tx, context)| {
+        .zip(prevouts.iter())
+        .map(|((tx, context), tx_prevouts)| {
             evaluate_one(
                 pool,
                 policy,
                 tx,
                 *context,
+                tx_prevouts,
+                consensus,
                 max_feerate_sat_per_kvb,
                 mempool_min_fee,
                 incremental_relay_fee_sat_per_kvb,
@@ -330,11 +388,14 @@ pub fn evaluate_package_acceptance_all(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_one(
     pool: &Mempool,
     policy: &StandardnessPolicy,
     tx: &Tx,
     context: PackageTxContext,
+    prevouts: &[(OutPoint, TxOut)],
+    consensus: AdmissionConsensus,
     max_feerate_sat_per_kvb: Option<u64>,
     mempool_min_fee_sat_per_kvb: u64,
     incremental_relay_fee_sat_per_kvb: u64,
@@ -372,7 +433,7 @@ pub(crate) fn evaluate_one(
                 let excluded: HashSet<EntryId> = plan.evicted.iter().copied().collect();
                 match pool.check_package_limits(tx, vsize, &excluded) {
                     Err(err) => Some(AcceptanceRejectReason::PackageLimit(err)),
-                    Ok(()) => None,
+                    Ok(()) => verify_for_admission(pool, tx, prevouts, consensus).err(),
                 }
             }
         }
@@ -387,6 +448,47 @@ pub(crate) fn evaluate_one(
         sigop_cost: context.sigop_cost,
         base_fee: Some(context.fee),
         reject_reason: reject,
+    }
+}
+
+/// Chain UTXO adapter over a caller-resolved prevout slice.
+struct SliceView<'a>(&'a [(OutPoint, TxOut)]);
+
+impl UtxoView for SliceView<'_> {
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        self.0
+            .iter()
+            .find(|(op, _)| op == outpoint)
+            .map(|(_, txout)| txout.clone())
+    }
+}
+
+/// Runs consensus verification (finality, duplicate inputs, value balance,
+/// scripts under relay flags) against the live pool layered over `prevouts`.
+fn verify_for_admission(
+    pool: &Mempool,
+    tx: &Tx,
+    prevouts: &[(OutPoint, TxOut)],
+    consensus: AdmissionConsensus,
+) -> Result<(), AcceptanceRejectReason> {
+    let chain_view = SliceView(prevouts);
+    let view = crate::accept::MempoolUtxoView::new(pool, &chain_view);
+    verify_transaction(
+        tx,
+        &view,
+        consensus.finality_height,
+        consensus.locktime_cutoff,
+        VerifyFlags::STANDARD,
+    )
+    .map_err(|error| reject_reason_from_consensus(&error))
+}
+
+fn reject_reason_from_consensus(error: &ConsensusError) -> AcceptanceRejectReason {
+    match error {
+        ConsensusError::Script { .. } => AcceptanceRejectReason::ScriptVerify,
+        ConsensusError::Bip { bip: "BIP113", .. } => AcceptanceRejectReason::NonFinal,
+        ConsensusError::Bip { bip: "BIP68", .. } => AcceptanceRejectReason::NonBip68Final,
+        _ => AcceptanceRejectReason::Consensus,
     }
 }
 
@@ -578,7 +680,7 @@ fn is_standard_nulldata(script: &[u8]) -> bool {
 mod tests {
     use super::*;
     use alloc::sync::Arc;
-    use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
     use bitcoin_rs_script::{is_multisig, minimal_non_dust, opcode, push_data};
 
     const DUST_RELAY_FEE_SAT_PER_KVB: u64 = 3_000;
@@ -924,10 +1026,58 @@ mod tests {
         }
     }
 
+    fn spendable_prevouts(tx: &Tx) -> TxPrevouts {
+        let need = tx
+            .outputs
+            .iter()
+            .fold(0_u64, |sum, output| sum.saturating_add(output.value))
+            .saturating_add(50_000);
+        tx.inputs
+            .iter()
+            .map(|input| {
+                (
+                    input.previous_output,
+                    TxOut {
+                        value: need,
+                        script_pubkey: vec![0x51],
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn preview(
+        pool: &crate::Mempool,
+        txs: &[Tx],
+        contexts: &[PackageTxContext],
+        max_feerate: Option<u64>,
+    ) -> PackageAcceptanceFacts {
+        let prevouts: Vec<TxPrevouts> = txs.iter().map(spendable_prevouts).collect();
+        evaluate_package_acceptance(
+            pool,
+            &policy(),
+            txs,
+            contexts,
+            &prevouts,
+            AdmissionConsensus::default(),
+            max_feerate,
+            1_000,
+        )
+    }
+
     #[test]
     fn package_acceptance_rejects_empty_and_oversized_packages() {
         let pool = crate::Mempool::new(crate::MempoolLimits::default());
-        let empty = evaluate_package_acceptance(&pool, &policy(), &[], &[], None, 1_000);
+        let empty = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            &[],
+            &[],
+            &[],
+            AdmissionConsensus::default(),
+            None,
+            1_000,
+        );
         assert_eq!(
             empty.package_error,
             Some(AcceptanceRejectReason::PackageTooLarge)
@@ -942,7 +1092,17 @@ mod tests {
             })
             .collect();
         let contexts: Vec<PackageTxContext> = txs.iter().map(|_| ctx(1_000, 100, false)).collect();
-        let oversized = evaluate_package_acceptance(&pool, &policy(), &txs, &contexts, None, 1_000);
+        let prevouts: Vec<TxPrevouts> = txs.iter().map(spendable_prevouts).collect();
+        let oversized = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            &txs,
+            &contexts,
+            &prevouts,
+            AdmissionConsensus::default(),
+            None,
+            1_000,
+        );
         assert_eq!(
             oversized.package_error,
             Some(AcceptanceRejectReason::PackageTooLarge)
@@ -957,13 +1117,11 @@ mod tests {
             ..crate::MempoolLimits::default()
         });
         let tx = standard_tx(1);
-        let facts = evaluate_package_acceptance(
+        let facts = preview(
             &pool,
-            &policy(),
             std::slice::from_ref(&tx),
             &[ctx(1_000, 100, false)],
             None,
-            1_000,
         );
         assert!(facts.package_error.is_none());
         let row = &facts.results[0];
@@ -980,13 +1138,11 @@ mod tests {
         let first = standard_tx(1);
         let mut second = standard_tx(1);
         second.outputs[0].script_pubkey = vec![0x51, 0x99];
-        let facts = evaluate_package_acceptance(
+        let facts = preview(
             &pool,
-            &policy(),
             &[first, second.clone()],
             &[ctx(1_000, 100, true), ctx(1_000, 100, false)],
             None,
-            1_000,
         );
         assert_eq!(
             facts.results[0].reject_reason,
@@ -1005,13 +1161,11 @@ mod tests {
             ..crate::MempoolLimits::default()
         });
         let tx = standard_tx(1);
-        let over = evaluate_package_acceptance(
+        let over = preview(
             &pool,
-            &policy(),
             std::slice::from_ref(&tx),
             &[ctx(10_000, 100, false)],
             Some(50_000),
-            1_000,
         );
         // fee_rate = 100_000 sat/kvB > 50_000
         assert_eq!(
@@ -1027,14 +1181,7 @@ mod tests {
             1,
         ))
         .expect("insert");
-        let dup = evaluate_package_acceptance(
-            &pool,
-            &policy(),
-            &[tx],
-            &[ctx(1_000, 100, false)],
-            None,
-            1_000,
-        );
+        let dup = preview(&pool, &[tx], &[ctx(1_000, 100, false)], None);
         assert_eq!(
             dup.results[0].reject_reason,
             Some(AcceptanceRejectReason::AlreadyInMempool)
@@ -1058,13 +1205,11 @@ mod tests {
             }],
             lock_time: 0,
         };
-        let facts = evaluate_package_acceptance(
+        let facts = preview(
             &pool,
-            &policy(),
             std::slice::from_ref(&coinbase),
             &[ctx(0, 100, false)],
             None,
-            1_000,
         );
         assert_eq!(
             facts.results[0].reject_reason,
@@ -1078,11 +1223,14 @@ mod tests {
         let pool = crate::Mempool::new(crate::MempoolLimits::default());
         let first = standard_tx(1);
         let second = standard_tx(2);
+        let second_prevouts = spendable_prevouts(&second);
         let facts = evaluate_package_acceptance_all(
             &pool,
             &policy(),
             &[first, second.clone()],
             &[ctx(1_000, 100, true), ctx(1_000, 100, false)],
+            &[Vec::new(), second_prevouts],
+            AdmissionConsensus::default(),
             None,
             1_000,
         );
@@ -1096,5 +1244,72 @@ mod tests {
             "evaluate-all must still evaluate the second row after the first rejects"
         );
         assert_eq!(facts.results[1].txid, second.txid());
+    }
+
+    #[test]
+    fn package_acceptance_rejects_an_unsigned_p2wpkh_spend() {
+        let pool = crate::Mempool::new(crate::MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..crate::MempoolLimits::default()
+        });
+        let prev = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x9a; 32])), 0);
+        let mut tx = standard_tx(2);
+        tx.inputs[0].previous_output = prev;
+        let mut p2wpkh = vec![opcode::OP_0, 0x14];
+        p2wpkh.extend_from_slice(&[0x11_u8; 20]);
+        let prevouts = vec![vec![(
+            prev,
+            TxOut {
+                value: 200_000,
+                script_pubkey: p2wpkh,
+            },
+        )]];
+        let facts = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            std::slice::from_ref(&tx),
+            &[ctx(1_000, 100, false)],
+            &prevouts,
+            AdmissionConsensus::default(),
+            None,
+            1_000,
+        );
+        assert_eq!(
+            facts.results[0].reject_reason,
+            Some(AcceptanceRejectReason::ScriptVerify),
+            "an empty-witness P2WPKH spend must fail script verification"
+        );
+        assert_eq!(facts.results[0].allowed, Some(false));
+    }
+
+    #[test]
+    fn package_acceptance_rejects_a_non_final_locktime() {
+        let pool = crate::Mempool::new(crate::MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..crate::MempoolLimits::default()
+        });
+        let mut tx = standard_tx(2);
+        tx.lock_time = 500_000_010;
+        tx.inputs[0].sequence = 0xFFFF_FFFE;
+        let prevouts = vec![spendable_prevouts(&tx)];
+        let facts = evaluate_package_acceptance(
+            &pool,
+            &policy(),
+            std::slice::from_ref(&tx),
+            &[ctx(1_000, 100, false)],
+            &prevouts,
+            AdmissionConsensus {
+                finality_height: 1,
+                locktime_cutoff: 500_000_000,
+            },
+            None,
+            1_000,
+        );
+        assert_eq!(
+            facts.results[0].reject_reason,
+            Some(AcceptanceRejectReason::NonFinal),
+            "a timestamp lock above the applied MTP must be non-final"
+        );
+        assert_eq!(facts.results[0].allowed, Some(false));
     }
 }
