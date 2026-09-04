@@ -13,7 +13,8 @@ vocabulary. `API-15` is BIP22 reject-reason mapping. `API-16` is GBT
 reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 `prioritisetransaction` dummy/`fee_delta` arity. `API-20` is
 `prioritisetransaction` dust-output refusal. `API-21` is GBT proposal /
-`submitblock` duplicate for reorged scripts-valid bodies.
+`submitblock` duplicate for reorged scripts-valid bodies. `API-22` is
+`getmininginfo` omitting unset optional fields.
 
 ## Clauses
 
@@ -277,6 +278,13 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
   resubmit is `duplicate`, not `inconclusive-not-best-prevblk`. Core
   `BLOCK_HAVE_DATA` after prune is not modeled separately.
 
+### `API-22`: `getmininginfo` omits unset optional fields
+
+- **Owner**: `render_mining_info` in `crates/rpc/src/handlers/mining.rs`.
+- Core pushes `currentblockweight`, `currentblocktx`, and `signet_challenge`
+  only when set. Unset optionals are omitted, not JSON `null`. Projection
+  uses `typed_to_sonic_omitting_nulls`, the same helper as GBT.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -394,3 +402,8 @@ owned by [wallet-facing.md](wallet-facing.md).
     `proposal_of_a_disconnected_scripts_valid_block_is_duplicate`,
     `submit_of_a_disconnected_scripts_valid_block_is_duplicate`,
     `applied_ancestor_with_unset_chain_tx_count_is_duplicate`
+- `API-22`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `getmininginfo_omits_unset_optional_fields`,
+    `getmininginfo_can_include_signet_challenge`,
+    `getmininginfo_projects_control_state`
