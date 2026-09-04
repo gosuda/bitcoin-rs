@@ -687,6 +687,8 @@ mod tests {
         Ok(())
     }
 
+    // CONTRACT: VAL-01 (docs/contracts/validation-default.md#val-01); BIP144
+    // governs the witness-stripped txid semantics exercised by the SegWit case.
     #[test]
     fn wire_txid_matches_reencoded_txid_for_legacy_and_segwit() -> Result<()> {
         use crate::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
