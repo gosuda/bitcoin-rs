@@ -1859,6 +1859,16 @@ impl NodeState {
         ) {
             tracing::error!(error, "failed to attach orphan-wake observer");
         }
+        let followers = crate::chain_effects::ChainFollowers::new(
+            crate::chain_effects::ChainEffects::new(
+                Arc::clone(&blocks),
+                Arc::clone(&zmq_publisher),
+                tx_index_runtime.clone(),
+            ),
+            Arc::clone(&mining_generation),
+            Some(Arc::clone(&tx_admission)),
+        );
+        let (capture_rawtx, capture_block_bytes) = followers.capture_flags();
         let mut apply_handles = crate::apply::Chainstate {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
@@ -1883,19 +1893,10 @@ impl NodeState {
             )),
             journal,
             checkpoint_publisher: None,
-            capture_rawtx: zmq_publisher.wants_rawtx(),
-            capture_block_bytes: tx_index_runtime.is_some() || zmq_publisher.wants_rawblock(),
+            capture_rawtx,
+            capture_block_bytes,
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
-        let followers = crate::chain_effects::ChainFollowers::new(
-            crate::chain_effects::ChainEffects::new(
-                Arc::clone(&blocks),
-                Arc::clone(&zmq_publisher),
-                tx_index_runtime.clone(),
-            ),
-            Arc::clone(&mining_generation),
-            Some(Arc::clone(&tx_admission)),
-        );
         // A restored checkpoint is durable at its own height by definition, so
         // start there rather than at zero, which would refuse all undo pruning.
         let durable_tip_height = Arc::new(AtomicU32::new(
