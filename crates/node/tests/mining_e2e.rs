@@ -681,7 +681,7 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
     // The gateway is constructed with the observer so publication runs
     // through the same path production uses.
     let observer = Arc::new(RecordingMempoolObserver::default());
-    let gateway = state.apply_handles().mempool_gateway;
+    let gateway = state.mempool_gateway();
     assert!(
         Arc::ptr_eq(&gateway, &MempoolGateway::shared(state.mempool())),
         "the node's gateway must be the one interned for its pool"

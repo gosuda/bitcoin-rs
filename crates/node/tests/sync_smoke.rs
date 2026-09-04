@@ -266,13 +266,9 @@ fn apply_handles_with_coin_stats_and_utxo(
         block_tree,
         Arc::clone(&utxo),
         Arc::clone(&coin_stats),
-        None,
         mempool,
         mempool_gateway,
         mining_generation,
-        Arc::new(RwLock::new(bitcoin_rs_rpc::context::BlockLog::new())),
-        Arc::new(RwLock::new(HashMap::<Txid, Tx>::new())),
-        Arc::new(bitcoin_rs_node::NoOpZmqPublisher),
         Arc::new(chain_events),
     );
     (handles, coin_stats, utxo)

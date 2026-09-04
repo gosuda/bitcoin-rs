@@ -8,10 +8,11 @@ subsystem crates.
 `run` is the top-level entry point: it loads the layered `Config` (with RPC `Auth`), and
 drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `Chainstate` facade for
-authoritative apply; `BlockSync` orchestrates block download; `reorg`
-switches the applied chain from one branch to another. The chainstate
-facade serializes connect, disconnect, and window apply behind
-`ChainTransition`. Owning crates expose the domain surfaces `node` wires:
+authoritative apply; `ChainEffects` owns post-commit RPC/ZMQ/index consumers;
+`BlockSync` orchestrates block download; `reorg` switches the applied chain
+from one branch to another. The chainstate facade serializes connect,
+disconnect, and window apply behind `ChainTransition`. Owning crates expose
+the domain surfaces `node` wires:
 chain BIP9/softfork lookups, P2P `ActiveChainQuery`, mining candidate context,
 and the txindex worker's private block-source bridge. Notifications leave
 through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPublisher`
