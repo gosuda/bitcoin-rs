@@ -170,10 +170,6 @@ impl<S: Read> Read for CountingStream<S> {
         self.counters.record_recv(read);
         Ok(read)
     }
-
-    fn is_read_vectored(&self) -> bool {
-        self.inner.is_read_vectored()
-    }
 }
 
 impl<S: Write> Write for CountingStream<S> {
@@ -187,10 +183,6 @@ impl<S: Write> Write for CountingStream<S> {
         let written = self.inner.write_vectored(buffers)?;
         self.counters.record_sent(written);
         Ok(written)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.inner.is_write_vectored()
     }
 
     fn flush(&mut self) -> IoResult<()> {
@@ -328,9 +320,6 @@ mod tests {
             fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
                 self.vectored += 1;
                 Ok(buffers.iter().map(|buffer| buffer.len()).sum())
-            }
-            fn is_write_vectored(&self) -> bool {
-                true
             }
             fn flush(&mut self) -> IoResult<()> {
                 Ok(())
