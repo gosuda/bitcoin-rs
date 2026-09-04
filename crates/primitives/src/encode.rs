@@ -389,6 +389,136 @@ impl ConsensusDecode for Block {
     }
 }
 
+const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
+
+/// Transaction ids of a serialized block, hashed from the wire bytes.
+///
+/// A legacy transaction is hashed as one contiguous slice. A BIP144 transaction
+/// hashes version, vin, vout, and locktime and skips the marker, flag, and
+/// witness. That is the same digest [`Tx::txid`] computes by re-encoding.
+pub fn txids_from_serialized_block(raw: &[u8]) -> Result<Vec<Txid>, DecodeError> {
+    let mut reader = raw;
+    let _header = take(&mut reader, SERIALIZED_BLOCK_HEADER_LEN)?;
+    let tx_count = read_compact(&mut reader)?;
+    let mut txids = Vec::new();
+    for _ in 0..tx_count {
+        txids.push(hash_txid_from_reader(&mut reader)?);
+    }
+    if !reader.is_empty() {
+        return Err(DecodeError::TrailingBytes {
+            remaining: reader.len(),
+        });
+    }
+    Ok(txids)
+}
+
+/// Double-SHA256 of one transaction's non-witness serialization, consumed from `reader`.
+fn hash_txid_from_reader(reader: &mut &[u8]) -> Result<Txid, DecodeError> {
+    let tx_start = *reader;
+    let _version = take(reader, 4)?;
+    let mut input_count = read_compact(reader)?;
+    if input_count != 0 {
+        skip_vin(reader, input_count)?;
+        let output_count = read_compact(reader)?;
+        skip_vout(reader, output_count)?;
+        let _lock_time = take(reader, 4)?;
+        let consumed = tx_start.len() - reader.len();
+        return Ok(Txid(double_sha256(&tx_start[..consumed])));
+    }
+
+    let flag = read_u8(reader)?;
+    if flag != 0x01 {
+        return Err(DecodeError::InvalidSegwitFlag { got: flag });
+    }
+    let mut engine = Sha256::new();
+    Digest::update(&mut engine, &tx_start[..4]);
+    input_count = read_compact_into(&mut engine, reader)?;
+    skip_vin_into(&mut engine, reader, input_count)?;
+    let output_count = read_compact_into(&mut engine, reader)?;
+    skip_vout_into(&mut engine, reader, output_count)?;
+    if !skip_witness(reader, input_count)? {
+        return Err(DecodeError::SuperfluousWitness);
+    }
+    take_into(&mut engine, reader, 4)?;
+    Ok(Txid(finalize_double_sha256(engine)))
+}
+
+fn read_compact_into(hasher: &mut Sha256, reader: &mut &[u8]) -> Result<u64, DecodeError> {
+    let (value, consumed) = varint::decode(reader)?;
+    Digest::update(hasher, &reader[..consumed]);
+    *reader = &reader[consumed..];
+    Ok(value)
+}
+
+fn take_into(hasher: &mut Sha256, reader: &mut &[u8], n: usize) -> Result<(), DecodeError> {
+    let bytes = take(reader, n)?;
+    Digest::update(hasher, bytes);
+    Ok(())
+}
+
+fn skip_prefixed_bytes(reader: &mut &[u8]) -> Result<(), DecodeError> {
+    let len = read_compact(reader)?;
+    let needed = usize::try_from(len).unwrap_or(usize::MAX);
+    let _ = take(reader, needed)?;
+    Ok(())
+}
+
+fn skip_vin(reader: &mut &[u8], count: u64) -> Result<(), DecodeError> {
+    for _ in 0..count {
+        let _ = take(reader, 36)?;
+        skip_prefixed_bytes(reader)?;
+        let _ = take(reader, 4)?;
+    }
+    Ok(())
+}
+
+fn skip_vout(reader: &mut &[u8], count: u64) -> Result<(), DecodeError> {
+    for _ in 0..count {
+        let _ = take(reader, 8)?;
+        skip_prefixed_bytes(reader)?;
+    }
+    Ok(())
+}
+
+fn skip_vin_into(hasher: &mut Sha256, reader: &mut &[u8], count: u64) -> Result<(), DecodeError> {
+    for _ in 0..count {
+        take_into(hasher, reader, 36)?;
+        skip_script_into(hasher, reader)?;
+        take_into(hasher, reader, 4)?;
+    }
+    Ok(())
+}
+
+fn skip_vout_into(hasher: &mut Sha256, reader: &mut &[u8], count: u64) -> Result<(), DecodeError> {
+    for _ in 0..count {
+        take_into(hasher, reader, 8)?;
+        skip_script_into(hasher, reader)?;
+    }
+    Ok(())
+}
+
+fn skip_script_into(hasher: &mut Sha256, reader: &mut &[u8]) -> Result<(), DecodeError> {
+    let len = read_compact_into(hasher, reader)?;
+    let needed = usize::try_from(len).unwrap_or(usize::MAX);
+    take_into(hasher, reader, needed)
+}
+
+fn skip_witness(reader: &mut &[u8], input_count: u64) -> Result<bool, DecodeError> {
+    let mut any = false;
+    for _ in 0..input_count {
+        let item_count = read_compact(reader)?;
+        if item_count > 0 {
+            any = true;
+        }
+        for _ in 0..item_count {
+            let len = read_compact(reader)?;
+            let needed = usize::try_from(len).unwrap_or(usize::MAX);
+            let _ = take(reader, needed)?;
+        }
+    }
+    Ok(any)
+}
+
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
@@ -554,6 +684,68 @@ mod tests {
             Err(DecodeError::SuperfluousWitness)
         );
         assert!(bitcoin_deserialize::<Transaction>(&zero_input).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn wire_txid_matches_reencoded_txid_for_legacy_and_segwit() -> Result<()> {
+        use crate::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+
+        let legacy = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), 0),
+                script_sig: vec![0x51],
+                sequence: 0xffff_fffe,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 7,
+        };
+        let legacy_bytes = crate::encode::consensus_bytes(&legacy);
+        let mut legacy_reader = legacy_bytes.as_slice();
+        let legacy_wire = super::hash_txid_from_reader(&mut legacy_reader)?;
+        assert_eq!(legacy_wire, legacy.txid());
+        assert!(legacy_reader.is_empty());
+
+        let segwit = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid(Hash256::default()), 3),
+                script_sig: Vec::new(),
+                sequence: 0xffff_fffe,
+                witness: vec![vec![0xaa; 40]],
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x00, 0x14, 0xab],
+            }],
+            lock_time: 42,
+        };
+        let segwit_bytes = crate::encode::consensus_bytes(&segwit);
+        let mut segwit_reader = segwit_bytes.as_slice();
+        let segwit_wire = super::hash_txid_from_reader(&mut segwit_reader)?;
+        assert_eq!(segwit_wire, segwit.txid());
+        assert!(segwit_reader.is_empty());
+
+        let block = Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash::default(),
+                merkle_root: Hash256::default(),
+                time: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            txs: vec![legacy, segwit],
+        };
+        let raw = crate::encode::consensus_bytes(&block);
+        let from_wire = super::txids_from_serialized_block(&raw)?;
+        let from_structs: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+        assert_eq!(from_wire, from_structs);
         Ok(())
     }
 }
