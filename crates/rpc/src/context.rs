@@ -787,9 +787,11 @@ pub trait MiningControl: Send + Sync {
 
     /// Assembles, solves, and optionally submits `request.count` blocks paying `request.payout`.
     ///
-    /// Each submitted block is committed independently before the next is assembled;
-    /// an error may therefore leave earlier blocks durable and visible. Callers own
-    /// retry decisions (and any compensation); dry runs validate without persistence.
+    /// Each submitted block is committed independently before the next block is
+    /// assembled; an error may therefore leave earlier blocks durable and visible.
+    /// Unsubmitted blocks are only dry-validated and are not persisted. Callers
+    /// own retry and any compensation for partial progress; failures are reported
+    /// as [`MiningControlError`] values.
     fn generate(&self, request: GenerateRequest)
     -> Result<Vec<GeneratedBlock>, MiningControlError>;
 
