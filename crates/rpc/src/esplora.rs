@@ -55,8 +55,16 @@ pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
     let ctx = handler.context();
     let projection = Projection::new(&ctx);
     let chain_view = projection.capture_chain_view();
+    let response = dispatch_get(handler, &ctx, path, query);
+    match projection.ensure_chain_view(chain_view.as_ref()) {
+        Ok(()) => response,
+        Err(response) => response,
+    }
+}
+
+fn dispatch_get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Response {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
-    let response = match parts.as_slice() {
+    match parts.as_slice() {
         ["blocks", "tip", "height"] => text(ctx.applied_height().to_string()),
         ["blocks", "tip", "hash"] => text(ctx.applied_hash().to_string_be()),
         ["internal", "mempool", "txs"] => internal_mempool_txs(&ctx, None, query),
@@ -145,10 +153,6 @@ pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
         }
         ["address-prefix", _] => unavailable("address prefix search requires an address index"),
         _ => not_found(),
-    };
-    match projection.ensure_chain_view(chain_view.as_ref()) {
-        Ok(()) => response,
-        Err(response) => response,
     }
 }
 
