@@ -949,7 +949,7 @@ pub struct Chainstate {
     pub(crate) chain_transition: Arc<parking_lot::Mutex<()>>,
     pub(crate) assume_valid_height: u32,
     pub(crate) assume_valid_gate: Arc<AssumeValidGate>,
-    /// When set, native script verdicts are compared against `libbitcoinkernel`.
+    /// When set, native parse/txids and script verdicts are compared against `libbitcoinkernel`.
     pub(crate) verify_kernel: bool,
     /// Chainstate-journal writer, when the journal is enabled (issue #230).
     ///
@@ -2169,10 +2169,15 @@ fn prove_window<'a>(
     // block, so the window does all of it at once. Only the overlay walk below
     // is order-dependent, and it is the cheaper half.
     let parse_started = quanta::Instant::now();
+    let verify_kernel = handles.verify_kernel;
     let parsed: Vec<core::result::Result<_, ApplyError>> = blocks
         .par_iter()
         .zip(serialized.par_iter())
-        .map(|(block, raw)| parse_block_for_apply(block, Some(raw.as_ref())))
+        .map(|(block, raw)| {
+            let txids = parse_block_for_apply(block, Some(raw.as_ref()))?;
+            maybe_compare_kernel_block_parse(verify_kernel, Some(raw.as_ref()), &txids)?;
+            Ok(txids)
+        })
         .collect();
     metrics::histogram!("node.window.parse_seconds").record(parse_started.elapsed().as_secs_f64());
 
@@ -2398,14 +2403,6 @@ struct PreparedApply<'b> {
     resolved: Arc<ResolvedUtxoView>,
 }
 
-/// Parses a block and resolves the outputs it spends.
-///
-/// `source` is where prevouts come from. Today that is always the committed
-/// UTXO set; a window passes an overlay so a block can see outputs an earlier
-/// block in the same window created.
-///
-/// Runs no consensus rule and mutates nothing, which is what lets a window
-/// prepare several blocks before committing any of them.
 /// A sink that compares what is written to it against `expected`.
 ///
 /// Used to check preserved bytes against a block without serialising the block
@@ -2454,6 +2451,21 @@ pub(crate) fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
     sink.equal && sink.offset == raw.len()
 }
 
+fn maybe_compare_kernel_block_parse(
+    verify_kernel: bool,
+    provided_serialized: Option<&[u8]>,
+    txids: &[Txid],
+) -> core::result::Result<(), ApplyError> {
+    if !verify_kernel {
+        return Ok(());
+    }
+    let Some(raw) = provided_serialized else {
+        return Ok(());
+    };
+    bitcoin_rs_consensus::kernel::compare_block_parse(raw, txids)?;
+    Ok(())
+}
+
 fn parse_block_for_apply(
     block: &Block,
     provided_serialized: Option<&[u8]>,
@@ -2500,8 +2512,10 @@ fn prepare_apply<'b, S: crate::window_overlay::OutputSource + ?Sized>(
     block: &'b Block,
     provided_serialized: Option<&[u8]>,
     source: &S,
+    verify_kernel: bool,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
     let txids = parse_block_for_apply(block, provided_serialized)?;
+    maybe_compare_kernel_block_parse(verify_kernel, provided_serialized, &txids)?;
     let tx_plan = plan_block_transactions(block, &txids);
     let view = bitcoin_rs_consensus::BlockView::new(&block.txs, txids);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
@@ -2650,7 +2664,12 @@ fn apply_block_admitted<'b>(
         }
         Some(ProvenApply::AssumeValidSkipped(prepared)) => (prepared, false),
         Some(ProvenApply::Proven(_)) | None => (
-            prepare_apply(block, provided_serialized.as_deref(), handles.utxo.as_ref())?,
+            prepare_apply(
+                block,
+                provided_serialized.as_deref(),
+                handles.utxo.as_ref(),
+                handles.verify_kernel,
+            )?,
             false,
         ),
     };
@@ -4255,6 +4274,33 @@ mod consensus_rule_tests {
         } else {
             match result {
                 Ok(()) => panic!("verify_kernel without the kernel feature must fail"),
+                Err(ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
+                    reason,
+                ))) => {
+                    assert!(
+                        reason.contains("verify_kernel"),
+                        "unexpected kernel error: {reason}"
+                    );
+                }
+                Err(other) => panic!("expected Kernel compile-time error, got {other:?}"),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn verify_kernel_parse_tap_keeps_native_txids() -> Result<(), Box<dyn std::error::Error>> {
+        let utxo = utxo_with_output(OutPoint::new(fixture_txid(0x62), 0), 1)?;
+        let block = block_with_transactions(vec![coinbase_transaction(0x62)]);
+        let raw = consensus_bytes(&block);
+        let native = block_txids(&block);
+        let prepared = prepare_apply(&block, Some(raw.as_slice()), utxo.as_ref(), true);
+        if bitcoin_rs_consensus::kernel::kernel_compiled() {
+            let prepared = prepared?;
+            assert_eq!(prepared.view.txids(), native.as_slice());
+        } else {
+            match prepared {
+                Ok(_) => panic!("verify_kernel parse tap without the kernel feature must fail"),
                 Err(ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
                     reason,
                 ))) => {

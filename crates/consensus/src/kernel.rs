@@ -226,6 +226,30 @@ mod enabled {
             )),
         }
     }
+
+    /// Compares native txids against Core's parse of the same wire bytes.
+    ///
+    /// Kernel-owned `KernelBlock` / txids never leave this call. Agreement is
+    /// `Ok`; parse failure or a txid/count mismatch is [`ConsensusError::Kernel`].
+    pub fn compare_block_parse(raw: &[u8], native_txids: &[Txid]) -> Result<(), ConsensusError> {
+        let kernel_block = KernelBlock::parse(raw)?;
+        if kernel_block.transaction_count() != native_txids.len() {
+            return Err(ConsensusError::Kernel(format!(
+                "native tx count {}, kernel tx count {}",
+                native_txids.len(),
+                kernel_block.transaction_count(),
+            )));
+        }
+        let kernel_txids = kernel_block.txids()?;
+        for (index, (native, kernel)) in native_txids.iter().zip(kernel_txids.iter()).enumerate() {
+            if native != kernel {
+                return Err(ConsensusError::Kernel(format!(
+                    "txid mismatch at index {index}"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Returns whether this build compiled `libbitcoinkernel`.
@@ -238,7 +262,9 @@ pub const fn kernel_compiled() -> bool {
 }
 
 #[cfg(feature = "kernel")]
-pub use enabled::{KernelBlock, KernelContext, compare_script_verdicts, verify_tx_scripts};
+pub use enabled::{
+    KernelBlock, KernelContext, compare_block_parse, compare_script_verdicts, verify_tx_scripts,
+};
 
 #[cfg(not(feature = "kernel"))]
 /// Stub kernel context available when the `kernel` feature is off.
@@ -262,4 +288,94 @@ pub fn compare_script_verdicts(
     Err(crate::ConsensusError::Kernel(
         "verify_kernel requires a build with --features kernel".to_owned(),
     ))
+}
+
+#[cfg(not(feature = "kernel"))]
+/// Runtime `--verify-kernel` requires a build that compiled `libbitcoinkernel`.
+pub fn compare_block_parse(
+    raw: &[u8],
+    native_txids: &[bitcoin_rs_primitives::Txid],
+) -> Result<(), crate::ConsensusError> {
+    let _ = (raw, native_txids);
+    Err(crate::ConsensusError::Kernel(
+        "verify_kernel requires a build with --features kernel".to_owned(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin_rs_primitives::{
+        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    };
+
+    use super::{compare_block_parse, kernel_compiled};
+
+    fn coinbase_block() -> Block {
+        let tx = Tx {
+            version: 1,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                script_sig: vec![1, 1],
+                sequence: u32::MAX,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 50,
+                script_pubkey: Vec::new(),
+            }],
+            lock_time: 0,
+        };
+        Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash::default(),
+                merkle_root: Hash256::default(),
+                time: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            txs: vec![tx],
+        }
+    }
+
+    #[test]
+    fn compare_block_parse_agrees_or_requires_kernel_feature() {
+        let block = coinbase_block();
+        let raw = consensus_bytes(&block);
+        let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+        let result = compare_block_parse(&raw, &txids);
+        if kernel_compiled() {
+            result.expect("Core parse must match native txids");
+        } else {
+            match result {
+                Err(crate::ConsensusError::Kernel(reason)) => {
+                    assert!(
+                        reason.contains("verify_kernel"),
+                        "unexpected kernel error: {reason}"
+                    );
+                }
+                other => panic!("expected Kernel compile-time error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn compare_block_parse_rejects_txid_mismatch_when_compiled() {
+        if !kernel_compiled() {
+            return;
+        }
+        let block = coinbase_block();
+        let raw = consensus_bytes(&block);
+        let mut txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+        txids[0] = Txid::default();
+        match compare_block_parse(&raw, &txids) {
+            Err(crate::ConsensusError::Kernel(reason)) => {
+                assert!(
+                    reason.contains("txid mismatch"),
+                    "unexpected kernel error: {reason}"
+                );
+            }
+            other => panic!("expected txid mismatch, got {other:?}"),
+        }
+    }
 }

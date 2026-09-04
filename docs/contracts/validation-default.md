@@ -49,8 +49,10 @@ Owners:
 - The Compose image (`Dockerfile`) builds `--features fjall`.
 - `--features kernel` compiles the independent Core oracle. `--verify-kernel`
   (env `BITCOIN_RS_VERIFY_KERNEL`, toml `verify_kernel`) sends the same
-  Rust-owned inputs to Core and compares accept/reject only. Turning it on
-  must not become an alternative apply implementation.
+  Rust-owned inputs to Core and compares accept/reject only: block parse
+  and txids from the preserved wire bytes, then script verdicts from the
+  already-resolved Rust prevouts. Turning it on must not become an
+  alternative apply implementation.
 
 ## Proven by
 

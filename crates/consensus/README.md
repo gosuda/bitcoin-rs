@@ -11,9 +11,10 @@ Rule checks live in small per-subject modules (`bip9`, `bip30`, `bip34`, `bip65`
 `bip66`, `bip68`, `bip112`, `bip113`, `bip141`, `bip143`, `bip341`, `bip342`), surfaced
 through the `verify_transaction` family (with median-time-past and borrowed variants),
 `is_final_tx`, and the `verify_block_rules` family including Merkle-root verification.
-`kernel::verify_tx_scripts` and `kernel::KernelBlock` are available under
-`--features kernel` so tests can compare Core's parse and script verdicts
-against the native path. BIP9 activation is `compute_state`
+`kernel::verify_tx_scripts`, `kernel::KernelBlock`, `kernel::compare_script_verdicts`,
+and `kernel::compare_block_parse` are available under `--features kernel` so tests
+and `--verify-kernel` can compare Core's parse, txids, and script verdicts against
+the native path. BIP9 activation is `compute_state`
 over a `DeploymentContext` with `DeploymentParams`. Consensus bounds are exported as
 `MAX_SCRIPT_SIZE`, `MAX_MONEY`, and `MAX_BLOCK_SIGOPS_COST`; failures are `ConsensusError`
 variants.
