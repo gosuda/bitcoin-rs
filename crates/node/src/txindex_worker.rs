@@ -33,7 +33,7 @@ use bitcoin_rs_index::{
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::capabilities::{
-    CapabilityState, CapabilityStatus, TXINDEX_CAPABILITY, TxIndexCapabilitySource,
+    CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status,
 };
 use bitcoin_rs_rpc::context::{
     BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
@@ -3841,12 +3841,7 @@ impl TxIndexCapabilitySource for TxIndexCapability {
             }
             _ => CapabilityState::Disabled,
         };
-        CapabilityStatus {
-            id: TXINDEX_CAPABILITY.to_owned(),
-            compiled: true,
-            enabled,
-            state,
-        }
+        txindex_status(enabled, state)
     }
 }
 

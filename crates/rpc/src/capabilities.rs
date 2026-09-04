@@ -1,9 +1,8 @@
 //! Core-compatible projection of concrete service status.
 //!
-//! Txindex owns lifecycle and progress. This module owns the
-//! `getcapabilities` wire types and the one-method pull seam RPC needs
-//! because it cannot depend on `node`. There is no parallel status enum
-//! and no generic capability-provider framework.
+//! Txindex owns lifecycle and progress. This module owns the `getcapabilities`
+//! wire types and the one-method pull seam RPC needs because it cannot depend
+//! on `node`. See the indexing contract's `IDX-02` for the capability rules.
 
 use serde::{Deserialize, Serialize};
 
@@ -76,15 +75,21 @@ pub trait TxIndexCapabilitySource: Send + Sync {
     fn capability(&self) -> CapabilityStatus;
 }
 
-/// Disabled txindex row used when no worker is attached.
+/// Construct the stable txindex row from its enablement and lifecycle state.
 #[must_use]
-pub fn disabled_txindex() -> CapabilityStatus {
+pub fn txindex_status(enabled: bool, state: CapabilityState) -> CapabilityStatus {
     CapabilityStatus {
         id: TXINDEX_CAPABILITY.to_owned(),
         compiled: true,
-        enabled: false,
-        state: CapabilityState::Disabled,
+        enabled,
+        state,
     }
+}
+
+/// Disabled txindex row used when no worker is attached.
+#[must_use]
+pub fn disabled_txindex() -> CapabilityStatus {
+    txindex_status(false, CapabilityState::Disabled)
 }
 
 /// Point-in-time `getcapabilities` snapshot for the concrete txindex row.
@@ -115,6 +120,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/indexing.md#IDX-02
     fn missing_source_is_the_disabled_txindex_row() {
         let snapshot = txindex_snapshot(None);
         assert_eq!(snapshot.capabilities, vec![disabled_txindex()]);
