@@ -1892,6 +1892,7 @@ impl NodeState {
                 config.network,
                 config.validation.assume_valid_height,
             )),
+            verify_kernel: config.validation.verify_kernel,
             journal,
             checkpoint_publisher: None,
             capture_rawtx,

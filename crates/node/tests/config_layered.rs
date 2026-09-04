@@ -278,12 +278,14 @@ fn assume_valid_height_override_has_precedence() -> Result<()> {
     let low = UserConfig {
         validation: ValidationOverrides {
             assume_valid_height: Some(10_000),
+            ..ValidationOverrides::default()
         },
         ..Default::default()
     };
     let high = UserConfig {
         validation: ValidationOverrides {
             assume_valid_height: Some(30_000),
+            ..ValidationOverrides::default()
         },
         ..Default::default()
     };
@@ -301,6 +303,52 @@ fn assume_valid_height_defaults_to_mainnet_anchor() -> Result<()> {
             .assume_valid_anchor()
             .map_or(0, |(height, _)| height)
     );
+    Ok(())
+}
+
+#[test]
+fn verify_kernel_defaults_off() -> Result<()> {
+    let config = resolve(&[])?;
+    assert!(!config.validation.verify_kernel);
+    Ok(())
+}
+
+#[test]
+fn verify_kernel_override_has_precedence() {
+    let mut low = UserConfig {
+        validation: ValidationOverrides {
+            verify_kernel: Some(false),
+            ..ValidationOverrides::default()
+        },
+        ..Default::default()
+    };
+    let high = UserConfig {
+        validation: ValidationOverrides {
+            verify_kernel: Some(true),
+            ..ValidationOverrides::default()
+        },
+        ..Default::default()
+    };
+    low.overlay(&high);
+    assert_eq!(low.validation.verify_kernel, Some(true));
+}
+
+#[test]
+fn verify_kernel_without_feature_fails_validate() -> Result<()> {
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.validation.verify_kernel = true;
+    let result = config.validate();
+    if bitcoin_rs_consensus::kernel::kernel_compiled() {
+        result?;
+    } else {
+        match result {
+            Ok(()) => panic!("verify_kernel needs --features kernel"),
+            Err(error) => assert!(
+                error.to_string().contains("verify_kernel"),
+                "unexpected validate error: {error}"
+            ),
+        }
+    }
     Ok(())
 }
 

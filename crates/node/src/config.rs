@@ -277,6 +277,8 @@ pub struct ObservabilityOverrides {
 pub struct ValidationOverrides {
     /// Height through which script verification may be skipped.
     pub assume_valid_height: Option<u32>,
+    /// Compare native script verdicts against `libbitcoinkernel`.
+    pub verify_kernel: Option<bool>,
 }
 
 /// User-supplied mining overrides.
@@ -500,6 +502,9 @@ impl ValidationOverrides {
         if other.assume_valid_height.is_some() {
             self.assume_valid_height = other.assume_valid_height;
         }
+        if other.verify_kernel.is_some() {
+            self.verify_kernel = other.verify_kernel;
+        }
     }
 }
 
@@ -598,6 +603,8 @@ pub struct ObservabilityConfig {
 pub struct ValidationConfig {
     /// Height through which script verification may be skipped.
     pub assume_valid_height: u32,
+    /// Compare native script verdicts against `libbitcoinkernel`.
+    pub verify_kernel: bool,
 }
 
 /// Resolved mining configuration.
@@ -670,6 +677,7 @@ impl NodeConfig {
             chainstate_journal: ChainstateJournalConfig::default(),
             validation: ValidationConfig {
                 assume_valid_height: 0,
+                verify_kernel: false,
             },
             mining: MiningConfig::default(),
         };
@@ -734,6 +742,10 @@ impl NodeConfig {
         anyhow::ensure!(
             journal.max_lag_seconds > 0,
             "chainstate_journal.max_lag_seconds must be positive"
+        );
+        anyhow::ensure!(
+            !self.validation.verify_kernel || bitcoin_rs_consensus::kernel::kernel_compiled(),
+            "verify_kernel requires a build with --features kernel"
         );
         Ok(())
     }
@@ -801,6 +813,9 @@ impl NodeConfig {
         }
         if let Some(value) = layer.validation.assume_valid_height {
             self.validation.assume_valid_height = value;
+        }
+        if let Some(value) = layer.validation.verify_kernel {
+            self.validation.verify_kernel = value;
         }
     }
 

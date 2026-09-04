@@ -47,8 +47,9 @@ Owners:
 - `bin/bitcoin-rs` default features are `fjall`, `redb`, and `zmq`. They
   never include `kernel`.
 - The Compose image (`Dockerfile`) builds `--features fjall`.
-- `--features kernel` compiles the independent Core oracle for
-  differential tests and a later runtime verification tap. Turning it on
+- `--features kernel` compiles the independent Core oracle. `--verify-kernel`
+  (env `BITCOIN_RS_VERIFY_KERNEL`, toml `verify_kernel`) sends the same
+  Rust-owned inputs to Core and compares accept/reject only. Turning it on
   must not become an alternative apply implementation.
 
 ## Proven by

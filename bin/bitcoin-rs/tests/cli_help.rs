@@ -15,4 +15,8 @@ fn help_prints_binary_name() {
         String::from_utf8_lossy(&output.stdout).contains("--measure-storage"),
         "help must name the storage-footprint measurement command"
     );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("--verify-kernel"),
+        "help must name the kernel verification tap"
+    );
 }

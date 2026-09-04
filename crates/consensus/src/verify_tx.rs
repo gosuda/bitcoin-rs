@@ -401,6 +401,35 @@ pub struct BlockScriptChecks<'b> {
     checks: Vec<InputCheck>,
 }
 
+impl BlockScriptChecks<'_> {
+    /// Compares this unit's native script verdict against `libbitcoinkernel`.
+    ///
+    /// Uses the already-resolved Rust prevouts. Kernel-owned handles never
+    /// leave this call.
+    pub fn compare_kernel_scripts(
+        &self,
+        flags: VerifyFlags,
+        native_accepted: bool,
+    ) -> Result<(), ConsensusError> {
+        let txs_and_spent: Vec<(&Tx, Vec<(OutPoint, TxOut)>)> = self
+            .prepared
+            .iter()
+            .filter(|prep| !prep.spent_outputs.is_empty())
+            .map(|prep| {
+                let spent = prep
+                    .tx
+                    .inputs
+                    .iter()
+                    .zip(prep.spent_outputs.iter())
+                    .map(|(input, prevout)| (input.previous_output, prevout.clone()))
+                    .collect();
+                (prep.tx, spent)
+            })
+            .collect();
+        crate::kernel::compare_script_verdicts(&txs_and_spent, flags, native_accepted)
+    }
+}
+
 /// Which unit failed, and how.
 ///
 /// The index is the position in the slice handed to [`verify_prepared_units`],
