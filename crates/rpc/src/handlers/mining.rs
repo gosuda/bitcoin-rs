@@ -395,6 +395,30 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
         return Err(RpcError::InvalidType("template request must be an object"));
     }
 
+    let mode_text = match request.get("mode") {
+        None => "template",
+        Some(value) if value.is_null() => "template",
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| RpcError::InvalidParameter("Invalid mode".to_owned()))?,
+    };
+
+    if mode_text == "proposal" {
+        // API-12: proposal request parsing.
+        let data = request.get("data").and_then(JsonValueTrait::as_str).ok_or(
+            RpcError::InvalidType("Missing data String key for proposal"),
+        )?;
+        return Ok(BlockTemplateRequest {
+            mode: BlockTemplateMode::Proposal(decode_submitted_block(data)?),
+            capabilities: Vec::new(),
+            rules: Vec::new(),
+            long_poll_id: None,
+        });
+    }
+    if mode_text != "template" {
+        return Err(RpcError::InvalidParameter("Invalid mode".to_owned()));
+    }
+
     let capabilities = parse_string_list(request.get("capabilities"), "capabilities")?;
     let rules = parse_string_list(request.get("rules"), "rules")?;
     let long_poll_id = match request.get("longpollid") {
@@ -408,31 +432,8 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
         }
     };
 
-    let mode_text = match request.get("mode") {
-        None => "template",
-        Some(value) if value.is_null() => "template",
-        Some(value) => value
-            .as_str()
-            .ok_or_else(|| RpcError::InvalidParameter("Invalid mode".to_owned()))?,
-    };
-
-    let mode = match mode_text {
-        "template" => BlockTemplateMode::Template,
-        "proposal" => {
-            // Core does not require the client to list the proposal capability.
-            let data = request.get("data").and_then(JsonValueTrait::as_str).ok_or(
-                RpcError::InvalidType("Missing data String key for proposal"),
-            )?;
-            let block = decode_submitted_block(data)?;
-            BlockTemplateMode::Proposal(block)
-        }
-        _ => {
-            return Err(RpcError::InvalidParameter("Invalid mode".to_owned()));
-        }
-    };
-
     Ok(BlockTemplateRequest {
-        mode,
+        mode: BlockTemplateMode::Template,
         capabilities: capabilities
             .into_iter()
             .map(MiningCapability::new)
