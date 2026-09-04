@@ -162,12 +162,13 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         && !dummy.is_null()
     {
         // Core `MaybeArg<double>`: JSON 0 and 0.0 are both zero.
-        let value = dummy
-            .as_f64()
-            .or_else(|| dummy.as_i64().map(|n| n as f64))
-            .or_else(|| dummy.as_u64().map(|n| n as f64))
+        let nonzero = dummy
+            .as_i64()
+            .map(|n| n != 0)
+            .or_else(|| dummy.as_u64().map(|n| n != 0))
+            .or_else(|| dummy.as_f64().map(|n| n != 0.0))
             .ok_or(RpcError::InvalidType("dummy must be a number"))?;
-        if value != 0.0 {
+        if nonzero {
             return Err(RpcError::InvalidParameter(
                 PRIORITISE_DUMMY_ERROR.to_owned(),
             ));
