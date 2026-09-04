@@ -11,14 +11,12 @@ use thiserror::Error;
 
 use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
+use crate::socket::{HANDSHAKE_TIMEOUT, configure_peer_stream};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Maximum backoff for transient accept errors (ECONNABORTED, EMFILE, …).
 /// Bounded so the listener recovers quickly once the pressure clears.
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
-const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
-/// Stream read timeout used while polling handshake and message reads.
-const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
@@ -283,9 +281,11 @@ pub enum ListenerError {
 /// Binds `addr` and runs an accept loop until `shutdown` is set.
 ///
 /// On each accepted connection, spawns a thread that runs the inbound
-/// handshake followed by a message-dispatch loop. The handshake uses
-/// `HANDSHAKE_READ_TIMEOUT` (60s); after handshake, the message loop polls
-/// inbound reads every second while enforcing a 60s inbound idle timeout.
+/// handshake followed by a message-dispatch loop. Socket flags come from
+/// [`crate::socket::configure_peer_stream`]. The handshake uses
+/// [`crate::socket::HANDSHAKE_TIMEOUT`]; after handshake, the message loop
+/// polls inbound reads every [`crate::socket::STREAM_POLL_INTERVAL`] while
+/// enforcing a 60s inbound idle timeout.
 /// The thread terminates on:
 ///   - successful handshake then idle (60s of no inbound messages)
 ///   - wire / FSM error
@@ -681,12 +681,7 @@ fn run_outbound_connection(
 
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
-        .map_err(crate::wire::PeerError::Io)?;
+    configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
     if shared.is_session_cancelled() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
@@ -711,7 +706,7 @@ fn run_outbound_connection(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, magic);
-    let handshake_deadline = Instant::now() + HANDSHAKE_READ_TIMEOUT;
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if let Err(error) = run_outbound_handshake(
         &mut peer,
         nonce,
@@ -817,7 +812,7 @@ fn spawn_handshake_thread(
         );
     }
     // The handle is intentionally dropped: per-connection threads outlive
-    // this listener thread by up to HANDSHAKE_READ_TIMEOUT.
+    // this listener thread by up to HANDSHAKE_TIMEOUT.
 }
 
 fn run_handshake(
@@ -827,15 +822,7 @@ fn run_handshake(
     shared: &ConnectionShared,
     inbound_sync_sinks: &InboundSyncSinks,
 ) -> Result<(), crate::wire::PeerError> {
-    stream
-        .set_nonblocking(false)
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
-        .map_err(crate::wire::PeerError::Io)?;
+    configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
 
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
@@ -860,7 +847,7 @@ fn run_handshake(
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::new(stream, magic);
-    let handshake_deadline = Instant::now() + HANDSHAKE_READ_TIMEOUT;
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if let Err(error) = run_inbound_handshake(
         &mut peer,
         nonce,
@@ -977,9 +964,6 @@ fn run_connected_session(
     );
 
     let loop_result = (|| {
-        peer.stream
-            .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-            .map_err(crate::wire::PeerError::Io)?;
         run_message_loop(
             peer,
             peer_addr,
