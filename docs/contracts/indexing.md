@@ -108,6 +108,30 @@ remove another script's output.
     forward.
   - If the watermark is on an abandoned branch, the worker rolls back to the
     common ancestor and connects forward to the active tip.
+
+### `IDX-08`: Atomic commit durability and recovery
+
+- `IndexWriter` is the sole owner of index mutations. `commit_block` prepares
+  all rows and commits them together with the capability watermark in one
+  store batch; its successful return is the commit point and implies the rows
+  and watermark are durable according to the store's atomic-write guarantee.
+- A failed commit must be treated as ambiguous by callers: callers must not
+  retry blindly or mutate index column families themselves. The index worker
+  re-reads the persisted watermark and either retries from the last confirmed
+  contiguous height or resets and rebuilds the affected capability. Storage
+  errors are non-retriable by the indexing worker after supervision marks it
+  failed; recovery/rebuild owns the reset decision.
+- A crash before the atomic batch is visible leaves the previous watermark and
+  rows intact; a crash after visibility leaves both the rows and watermark.
+  Partial rows without the corresponding watermark are not queryable and are
+  reconciled on restart.
+
+### `IDX-09`: Canonical electrs row cardinality
+
+- A committed block emits the canonical electrs rows: one header row, one
+  transaction row per indexed transaction, and funding/spending rows for each
+  applicable output/input. The golden-row test is the retained contract test
+  for these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint and, when enabled,
   replays the journal's committed suffix (`docs/chainstate-recovery.md`) before
   `NodeState::start_index_workers()` spawns worker threads

@@ -2957,6 +2957,16 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Commits one serialized block through the prepared-write owner.
     ///
+    /// The successful return is the commit point: all prepared rows and the
+    /// watermark become durable together under the store's atomic-write
+    /// guarantee. A crash before that point leaves the previous watermark and
+    /// rows; a crash after it leaves both the rows and watermark. A failed
+    /// call is therefore ambiguous to the caller: do not retry blindly or
+    /// write column families directly. The supervised index worker owns
+    /// retry-from-the-last-confirmed-watermark, or reset and rebuild when
+    /// the persisted state cannot be established; storage failures are
+    /// non-retriable after the worker is marked failed.
+    ///
     /// Production catch-up uses [`Self::prepare_block_with_spent_scripts`] plus
     /// [`PreparedBatch`] to bound multi-block writes. This is the same owner
     /// for a single block: tests and benches must not grow a second ingest path.

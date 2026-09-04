@@ -495,6 +495,7 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
+/// CONTRACT: IDX-09 — canonical electrs row cardinality after an atomic commit.
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std::error::Error>> {
     let cases = [
