@@ -783,42 +783,41 @@ impl MiningCoordinator {
     fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
         let tip = self.applied_tip.load_full();
         let blocks = tip.as_ref().map_or(0, |tip| tip.height);
-        let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
-            Some(tip) => {
-                let tree = self.block_tree.read();
-                let tip_bits =
-                    tree.node(tip.tip_id)
-                        .map(|node| node.header.bits)
-                        .map_err(|error| {
-                            MiningControlError::Failed(CompactString::from(error.to_string()))
-                        })?;
-                let current_time = Self::current_time_secs().max(1);
-                let next =
-                    MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time)
-                        .map_err(|error| {
-                            MiningControlError::Failed(CompactString::from(error.to_string()))
-                        })?;
-                (
-                    tip_bits,
-                    difficulty_for_bits(tip_bits),
-                    next.bits,
-                    difficulty_for_bits(next.bits),
-                )
-            }
-            None => (0, 0.0, 0, 0.0),
-        };
-        let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
-        let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
-        let last_candidate = self.state.lock().last_candidate;
-        let network_hashes_per_second = {
-            let tree = self.block_tree.read();
-            estimate_network_hashps(
-                &tree,
-                tip.as_ref().map(|snapshot| snapshot.tip_id),
-                120,
-                self.network,
+        let (bits, difficulty, next_bits, next_difficulty, network_hashes_per_second) =
+            match tip.as_ref() {
+                Some(tip) => {
+                    let tree = self.block_tree.read();
+                    let tip_bits =
+                        tree.node(tip.tip_id)
+                            .map(|node| node.header.bits)
+                            .map_err(|error| {
+                                MiningControlError::Failed(CompactString::from(error.to_string()))
+                            })?;
+                    let current_time = Self::current_time_secs().max(1);
+                    let next =
+                        MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time)
+                            .map_err(|error| {
+                                MiningControlError::Failed(CompactString::from(error.to_string()))
+                            })?;
+                    let rate = estimate_network_hashps(&tree, Some(tip.tip_id), 120, self.network);
+                    (
+                        tip_bits,
+                        difficulty_for_bits(tip_bits),
+                        next.bits,
+                        difficulty_for_bits(next.bits),
+                        rate,
+                    )
+                }
+                None => (0, 0.0, 0, 0.0, 0.0),
+            };
+        let (pooled_transactions, minimum_fee_rate) = {
+            let mempool = self.mempool.read();
+            (
+                u64::try_from(mempool.len()).unwrap_or(u64::MAX),
+                mempool.min_relay_fee_sat_per_kvb(),
             )
         };
+        let last_candidate = self.state.lock().last_candidate;
         Ok(MiningInfo {
             blocks,
             last_candidate,
@@ -1086,8 +1085,12 @@ fn hash_ps_at(
 
 /// Estimates hashes/s over `lookup` blocks ending at an already-resolved start.
 ///
-/// Height validation lives in [`resolve_hash_ps_start`]. A missing start or
-/// unwalkable window is a zero rate so `getmininginfo` can stay best-effort.
+/// Height validation lives in [`resolve_hash_ps_start`]. The window is Core's
+/// parent walk (`GetNetworkHashPS`): `lookup` parent pointers from the start
+/// node, min/max header time, `chainwork` delta over that span. A missing
+/// start or unwalkable window is a zero rate so `getmininginfo` can stay
+/// best-effort.
+// CONTRACT: docs/contracts/external-api.md#API-06
 fn estimate_network_hashps(
     tree: &BlockTree,
     start_id: Option<NodeId>,
@@ -1103,7 +1106,7 @@ fn estimate_network_hashps(
     if start_node.height == 0 {
         return 0.0;
     }
-    let walk = if lookup == -1 {
+    let mut walk = if lookup == -1 {
         let interval = i64::from(network.retarget_interval());
         if interval <= 0 {
             1
@@ -1113,33 +1116,37 @@ fn estimate_network_hashps(
     } else {
         lookup
     };
+    if walk > i64::from(start_node.height) {
+        walk = i64::from(start_node.height);
+    }
     let walk = u32::try_from(walk).unwrap_or(u32::MAX);
-    let walk = walk.min(start_node.height);
     if walk == 0 {
         return 0.0;
     }
-    let target_height = start_node.height.saturating_sub(walk);
-    let Some(earliest_id) = tree.node_at_height_from(start_id, target_height) else {
+
+    let mut min_time = start_node.header.time;
+    let mut max_time = min_time;
+    let mut earliest_id = start_id;
+    for _ in 0..walk {
+        let Ok(node) = tree.node(earliest_id) else {
+            return 0.0;
+        };
+        let Some(parent) = node.parent else {
+            return 0.0;
+        };
+        earliest_id = parent;
+        let Ok(parent_node) = tree.node(earliest_id) else {
+            return 0.0;
+        };
+        min_time = min_time.min(parent_node.header.time);
+        max_time = max_time.max(parent_node.header.time);
+    }
+    if min_time == max_time {
         return 0.0;
-    };
+    }
     let Ok(earliest_node) = tree.node(earliest_id) else {
         return 0.0;
     };
-    if earliest_node.height == start_node.height {
-        return 0.0;
-    }
-    let mut min_time = start_node.header.time;
-    let mut max_time = min_time;
-    for window_height in target_height..=start_node.height {
-        let Some(id) = tree.node_at_height_from(start_id, window_height) else {
-            continue;
-        };
-        let Ok(node) = tree.node(id) else {
-            continue;
-        };
-        min_time = min_time.min(node.header.time);
-        max_time = max_time.max(node.header.time);
-    }
     let work_delta = start_node.chainwork.saturating_sub(earliest_node.chainwork);
     let time_delta_secs = i64::from(max_time).saturating_sub(i64::from(min_time));
     let work_bytes: [u8; 32] = work_delta.to_be_bytes();
