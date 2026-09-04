@@ -47,7 +47,11 @@ const MEMPOOL_PAGE: usize = 50;
 /// Routes a read-only Esplora request from the node HTTP listener.
 #[must_use]
 pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
-    let path = canonical_path(path);
+    let path = match strip_public_prefix(path) {
+        Some(rest) if is_backend_only_path(rest) => return not_found(),
+        Some(rest) => rest,
+        None => path,
+    };
     let ctx = handler.context();
     let projection = Projection::new(&ctx);
     let chain_view = projection.capture_chain_view();
@@ -149,9 +153,20 @@ pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
 }
 
 /// Routes Esplora raw-transaction broadcast.
+///
+/// Returns `None` only for unprefixed paths this router does not own, so the
+/// HTTP demux can fall through to JSON-RPC. A path under `/api` or `/api/v1`
+/// is a closed public Esplora namespace and always returns `Some`.
 #[must_use]
 pub fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
-    match canonical_path(path) {
+    let (path, public) = match strip_public_prefix(path) {
+        Some(rest) => (rest, true),
+        None => (path, false),
+    };
+    if public && is_backend_only_path(path) {
+        return Some(not_found());
+    }
+    match path {
         "/tx" => {
             let Ok(hex) = core::str::from_utf8(body) else {
                 return Some(bad("transaction body must be UTF-8 hex"));
@@ -187,23 +202,34 @@ pub fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response
         // backend. Returning 404 is preferable to pretending that sequential
         // sendrawtransaction calls are atomic package evaluation.
         "/txs/package" => Some(not_found()),
+        _ if public => Some(not_found()),
         _ => None,
     }
 }
 
-/// See `docs/contracts/wallet-facing.md` WF-02 for the wallet-facing path aliases.
-fn canonical_path(path: &str) -> &str {
+/// See `docs/contracts/wallet-facing.md` WF-02.
+///
+/// `/api` and `/api/v1` are directory prefixes of the public Esplora surface.
+/// Longer prefix first so `/api/v1` is not swallowed by `/api`.
+fn strip_public_prefix(path: &str) -> Option<&str> {
     for prefix in ["/api/v1", "/api"] {
         if let Some(rest) = path.strip_prefix(prefix) {
             if rest.is_empty() {
-                return "/";
+                return Some("/");
             }
             if rest.starts_with('/') {
-                return rest;
+                return Some(rest);
             }
         }
     }
-    path
+    None
+}
+
+/// Mempool-backend and mining helper routes. They stay on the unprefixed
+/// listener (`ESPLORA_REST_API_URL=http://node:8332`); the public `/api`
+/// namespace must not expose them through an explorer or a wallet base URL.
+fn is_backend_only_path(path: &str) -> bool {
+    path == "/block-template" || path.starts_with("/internal/")
 }
 
 fn tx(ctx: &Context, id: &str) -> Response {
@@ -1680,6 +1706,48 @@ mod tests {
         assert!(
             route_post(&handler, "/apitx", b"00").is_none(),
             "POST /apitx is not an Esplora alias"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_api_prefix_is_a_closed_esplora_namespace() -> Result<(), Box<dyn std::error::Error>> {
+        let (handler, _, _, _) = contract_fixture()?;
+        assert_eq!(
+            route(&handler, "/internal/mempool/txs", "").status,
+            200,
+            "unprefixed /internal stays on the mempool-backend listener"
+        );
+        assert_eq!(
+            route(&handler, "/block-template", "").status,
+            503,
+            "unprefixed /block-template stays on the node listener"
+        );
+        for path in [
+            "/api/internal/mempool/txs",
+            "/api/v1/internal/mempool/txs",
+            "/api/block-template",
+            "/api/v1/block-template",
+        ] {
+            assert_eq!(
+                route(&handler, path, "").status,
+                404,
+                "{path} must not alias backend-only routes"
+            );
+        }
+        assert_eq!(
+            route_post(&handler, "/api/internal/txs", b"[]").map(|response| response.status),
+            Some(404),
+            "POST /api/internal/txs must not alias the mempool-backend route"
+        );
+        assert_eq!(
+            route_post(&handler, "/api/v1/not-esplora", b"{}").map(|response| response.status),
+            Some(404),
+            "unknown POST under /api/v1 must not fall through to JSON-RPC"
+        );
+        assert!(
+            route_post(&handler, "/not-esplora", b"{}").is_none(),
+            "unprefixed unknown POST still falls through to JSON-RPC"
         );
         Ok(())
     }

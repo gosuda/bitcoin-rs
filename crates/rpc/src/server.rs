@@ -167,7 +167,8 @@ fn serve_connection(
             continue;
         }
 
-        if let Some(response) = crate::esplora::route_post(handler, &request.path, &request.body) {
+        let (path, _query) = split_path_query(&request.path);
+        if let Some(response) = crate::esplora::route_post(handler, path, &request.body) {
             write_response(reader.get_mut(), &response, keep_alive)?;
             if !keep_alive {
                 return Ok(());
