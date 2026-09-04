@@ -41,5 +41,6 @@ normative; it places them under the
     inventory against the policy table, rust-bitcoin v1 envelopes, handshake
     fields, per-network framing, relay round-trips, the reject-or-ignore
     matrix, and peer-visible reorg/restart behavior.
-- `crates/p2p/tests/core_interop_live.rs`: live interop lane running via
-  `scripts/run-p2p-core-interop.sh` when an external `bitcoind` is provided.
+- `crates/p2p/tests/core_interop_live.rs`: live differential lane running via
+  `scripts/run-p2p-core-interop.sh` against the pinned Core 31.1 `bitcoind`
+  (`docs/contracts/core-differential.md`).
