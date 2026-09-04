@@ -27,15 +27,17 @@
 //! script-path fixture (pristine vs tampered control block) and must accept
 //! the first and reject the second.
 //!
-//! ## Interpreter scoping
+//! ## Interpreter scoping (VAL-02)
 //!
-//! The native `Interpreter` executes every consensus spend class (legacy,
-//! P2SH, `SegWit` v0, Taproot key-path and script-path). Fixtures still carry
-//! an explicit `interpreter_parity` flag so the differential can be widened
-//! one class at a time; today the committed corpus asserts two-engine verdict
-//! parity on the taproot key-path fixture. Other classes are verified against
-//! the kernel, with native coverage proven separately by
-//! `crates/script/tests/core_vectors.rs` (`NATIVE_*_FAILURES = 0`).
+//! This test is part of the proof for `VAL-02` in
+//! `docs/contracts/validation-default.md`. The native `Interpreter` executes
+//! every consensus spend class (legacy, P2SH, `SegWit` v0, Taproot key-path
+//! and script-path). Fixtures still carry an explicit `interpreter_parity`
+//! flag so the differential can be widened one class at a time; today the
+//! committed corpus asserts two-engine verdict parity on the taproot key-path
+//! fixture. Other classes are verified against the kernel, with native coverage
+//! proven separately by `crates/script/tests/core_vectors.rs`
+//! (`NATIVE_*_FAILURES = 0`).
 //!
 //! ## Fixtures
 //!
