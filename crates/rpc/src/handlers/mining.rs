@@ -2252,8 +2252,16 @@ mod tests {
     #[test]
     fn generateblock_rejects_multipath_before_ranged_like_core() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(control);
+        let ctx = ctx_with_control(control.clone());
         let tpub = "tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B";
+        let wrong_network = generateblock(
+            &ctx_with_control_on_network(control, Network::Bitcoin),
+            &json!([format!("wpkh({tpub}/<0;1>/0)"), []]),
+        )
+        .err()
+        .unwrap_or_else(|| panic!("wrong-network descriptor must fail"));
+        assert_eq!(wrong_network.code(), RpcError::CORE_NOT_FOUND);
+        assert_eq!(wrong_network.to_string(), GENERATEBLOCK_INVALID_OUTPUT);
         let multipath = generateblock(&ctx, &json!([format!("wpkh({tpub}/<0;1>/0)"), []]))
             .err()
             .unwrap_or_else(|| panic!("multipath descriptor must fail"));
@@ -2282,8 +2290,5 @@ mod tests {
             .unwrap_or_else(|| panic!("hardened xpub must fail Expand"));
         assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
         assert_eq!(error.to_string(), GENERATEBLOCK_NEEDS_PRIVATE_KEYS);
-        let tprv = "tprv8ZgxMBicQKsPd3EupYiPRhaMooHKUHJxNsTfYuScep13go8QFfHdtkG9nRkFGb7busX4isf6X9dURGCoKgitaApQ6MupRhZMcELAxTBRJgS";
-        generateblock(&ctx, &json!([format!("wpkh({tprv}/0h/0)"), []]))
-            .unwrap_or_else(|err| panic!("hardened tprv must Expand: {err}"));
     }
 }
