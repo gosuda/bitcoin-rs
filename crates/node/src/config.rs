@@ -175,9 +175,7 @@ pub enum ScriptIndexMode {
     /// No `ScriptIndex` capability is maintained.
     #[default]
     Disabled,
-    /// Maintain only the compact live-output view.
-    ///
-    /// Maintains the durable compact live-output view without historical rows.
+    /// Maintain only the compact live-output view (CONTRACT: IDX-01).
     Utxo,
     /// Maintain both the live-output view and historical script activity.
     Full,
