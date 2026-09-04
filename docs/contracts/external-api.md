@@ -15,7 +15,8 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 `prioritisetransaction` dust-output refusal. `API-21` is GBT proposal /
 `submitblock` duplicate for reorged scripts-valid bodies. `API-22` is
 `getmininginfo` omitting unset optional fields. `API-23` is
-`estimatesmartfee` Core `conf_target` and `estimate_mode` gates.
+`estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-24`
+is `generateblock` Core txid/raw-tx parse errors.
 
 ## Clauses
 
@@ -81,7 +82,8 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
   The transactions array is required (an explicit `[]` is coinbase-only).
   Listed order is kept, those fees are not added to the coinbase, 64-character
   hex is a mempool txid, and decoded raw transactions are included without
-  mempool admission. Extra positional arguments are rejected.
+  mempool admission. Extra positional arguments are rejected. Transaction
+  parse errors are `API-24`.
 
 ### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
 
@@ -298,6 +300,18 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
   this node's estimator has one horizon.
 - Trailing parameters are refused.
 
+### `API-24`: `generateblock` txid and raw-tx parse errors
+
+- **Owner**: `parse_generateblock_transactions` in
+  `crates/rpc/src/handlers/mining.rs`.
+- 64-character hex is Core `Txid::FromHex`. A txid missing from the
+  mempool is `-5` `Transaction {str} not in mempool.` using the caller's
+  string.
+- Anything else is Core `DecodeHexTx`. Invalid hex or a payload that is
+  not a complete transaction is `-22`
+  `Transaction decode failed for {str}. Make sure the tx has at least one
+  input.`
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -320,8 +334,10 @@ owned by [wallet-facing.md](wallet-facing.md).
   `generateblock_projects_hash_object`, `generateblock_accepts_addr_descriptor`,
   `generateblock_without_submit_includes_hex`,
   `generateblock_requires_transactions_array`, `generateblock_keeps_raw_transactions`,
-  `generateblock_rejects_trailing_parameters`,
-  `generateblock_rejects_invalid_supplied_checksums`
+    `generateblock_rejects_trailing_parameters`,
+    `generateblock_rejects_invalid_supplied_checksums`,
+    `generateblock_rejects_unknown_mempool_txid_like_core`,
+    `generateblock_rejects_undecodable_raw_tx_like_core`
 - `crates/node/tests/mining.rs` tests `generate_mines_coinbase_only_blocks_to_the_tip`,
   `generateblock_rejects_unknown_mempool_txid`,
   `generateblock_raw_tx_does_not_require_mempool_admission`,
@@ -425,3 +441,8 @@ owned by [wallet-facing.md](wallet-facing.md).
     `estimatesmartfee_rejects_conf_target_outside_core_range`,
     `estimatesmartfee_rejects_unknown_estimate_mode`,
     `estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing`
+- `API-24`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `generateblock_rejects_unknown_mempool_txid_like_core`,
+    `generateblock_rejects_undecodable_raw_tx_like_core`,
+    `generateblock_keeps_raw_transactions`
