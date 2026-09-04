@@ -4,7 +4,9 @@
 //! via ZMQ for client subscribers. `bitcoin-rs` keeps the apply path behind a
 //! small trait so notification failures cannot affect block connection.
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Result, ensure};
+#[cfg(feature = "zmq")]
+use anyhow::{Context as _, bail};
 use bitcoin_rs_primitives::{Hash256, Txid};
 #[cfg(feature = "zmq")]
 use core::fmt;
@@ -335,9 +337,8 @@ impl fmt::Debug for SocketZmqPublisher {
 impl SocketZmqPublisher {
     /// Binds one PUB socket per endpoint group.
     ///
-    /// Duplicate endpoint groups are rejected because one endpoint identifies
-    /// one owned socket and one HWM. Duplicate topics inside a group are
-    /// recorded once.
+    /// Duplicate endpoint groups and duplicate topics inside a group are
+    /// rejected by configuration validation.
     pub fn bind(endpoint_configs: &[ZmqEndpointConfig]) -> Result<Self> {
         validate_endpoint_configs(endpoint_configs)?;
         let context = zmq::Context::new();
@@ -349,8 +350,6 @@ impl SocketZmqPublisher {
         let mut rawtx_endpoints = Vec::new();
         let mut sequence_endpoints = Vec::new();
         let mut notifiers = Vec::new();
-        let mut seen_notifiers = HashSet::<(ZmqTopic, String)>::new();
-
         for endpoint_config in endpoint_configs {
             if !bound_endpoints.insert(endpoint_config.endpoint.clone()) {
                 bail!("duplicate ZMQ endpoint {}", endpoint_config.endpoint);
@@ -379,9 +378,6 @@ impl SocketZmqPublisher {
                 socket: Mutex::new(socket),
             });
             for &topic in &endpoint_config.topics {
-                if !seen_notifiers.insert((topic, endpoint_config.endpoint.clone())) {
-                    continue;
-                }
                 notifiers.push(ZmqNotifier {
                     topic,
                     endpoint: endpoint_config.endpoint.clone(),
@@ -835,42 +831,13 @@ mod tests {
 
     #[cfg(feature = "zmq")]
     #[test]
-    fn socket_publisher_deduplicates_exact_topic_endpoint_pairs() -> anyhow::Result<()> {
-        use std::sync::Arc;
+    fn socket_publisher_rejects_duplicate_topics() {
+        let result = SocketZmqPublisher::bind(&[endpoint(
+            "inproc://bitcoin-rs-zmq-duplicate-topic".to_owned(),
+            vec![ZmqTopic::HashBlock, ZmqTopic::HashBlock],
+            5,
+        )]);
 
-        let shared = "inproc://bitcoin-rs-zmq-dedupe-shared".to_owned();
-        let other = "inproc://bitcoin-rs-zmq-dedupe-other".to_owned();
-        let publisher = SocketZmqPublisher::bind(&[
-            endpoint(
-                shared.clone(),
-                vec![ZmqTopic::HashBlock, ZmqTopic::HashBlock, ZmqTopic::RawTx],
-                5,
-            ),
-            endpoint(other.clone(), vec![ZmqTopic::HashBlock], 5),
-        ])?;
-
-        let publisher: Arc<dyn ZmqPublisher> = Arc::new(publisher);
-        assert_eq!(
-            publisher.active_notifiers(),
-            vec![
-                ZmqNotifier {
-                    topic: ZmqTopic::HashBlock,
-                    endpoint: shared.clone(),
-                    hwm: 5,
-                },
-                ZmqNotifier {
-                    topic: ZmqTopic::RawTx,
-                    endpoint: shared,
-                    hwm: 5,
-                },
-                ZmqNotifier {
-                    topic: ZmqTopic::HashBlock,
-                    endpoint: other,
-                    hwm: 5,
-                },
-            ],
-            "exact (topic, endpoint) duplicates collapse; distinct topics/endpoints remain"
-        );
-        Ok(())
+        assert!(result.is_err());
     }
 }
