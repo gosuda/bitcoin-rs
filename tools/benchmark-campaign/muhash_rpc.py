@@ -12,6 +12,7 @@ import argparse
 import base64
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -60,6 +61,12 @@ _TCP_ESTABLISHED = 0x01
 _TCP_LISTEN = 0x0A
 _LOOPBACK_V4 = "0100007F"
 _LOOPBACK_V6 = "00000000000000000000000001000000"
+# Linux memfd seals. Some Python 3.13 builds omit these fcntl names.
+_F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1024 + 9)
+_F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+_F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+_F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
+_F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
 OPERATOR_TRUST_BOUNDARY = (
     "operator-controlled observation; not remote binary authentication"
 )
@@ -1907,7 +1914,8 @@ def _copy_pinned_file(
     that already exists. Hash mismatch and any I/O failure after create
     unlink the destination and raise ``ContractError``; those failures
     are not retried here. ``run_campaign`` owns the workspace and does
-    not retry a failed copy. Spawn re-hashes the copy before exec.
+    not retry a failed copy. Spawn re-hashes the copy into a sealed memfd
+    before exec.
     """
     created = False
     try:
@@ -1970,14 +1978,66 @@ def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
     )
 
 
-def _rehash_copy(path: Path, expected: str, cap: int, field: str) -> None:
-    raw = _read_regular_file(path, cap, field)
-    if hashlib.sha256(raw).hexdigest() != expected:
-        raise ContractError(f"{field} changed after its verified copy")
+def _open_verified_snapshot(path: Path, expected: str, cap: int, field: str) -> int:
+    """Return a sealed, non-CLOEXEC memfd of the verified bytes.
 
-
-def _rehash_binary(path: Path, expected: str) -> None:
-    _rehash_copy(path, expected, MAX_BINARY_BYTES, "arm binary copy")
+    The child inherits this descriptor and opens ``/proc/self/fd/<n>``. A
+    later rename or in-place write of the workspace pathname cannot change
+    those bytes. The caller closes the fd after ``Popen``.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source = os.open(path, flags)
+    except OSError as error:
+        raise ContractError(f"cannot open {field}") from error
+    snapshot = -1
+    try:
+        before = os.fstat(source)
+        if not stat.S_ISREG(before.st_mode):
+            raise ContractError(f"{field} must be a regular file")
+        raw = _read_fd(source, before.st_size, cap, field)
+        after = os.fstat(source)
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if identity_before != identity_after:
+            raise ContractError(f"{field} changed while being read")
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise ContractError(f"{field} changed after its verified copy")
+        try:
+            snapshot = os.memfd_create(
+                f"verified-{field.replace(' ', '-')}", os.MFD_ALLOW_SEALING
+            )
+            written = 0
+            while written < len(raw):
+                written += os.write(snapshot, raw[written:])
+            os.lseek(snapshot, 0, os.SEEK_SET)
+            os.fchmod(snapshot, 0o500)
+            fcntl.fcntl(
+                snapshot,
+                _F_ADD_SEALS,
+                _F_SEAL_WRITE | _F_SEAL_SHRINK | _F_SEAL_GROW | _F_SEAL_SEAL,
+            )
+        except (AttributeError, OSError) as error:
+            raise ContractError(f"cannot create sealed {field}") from error
+        owned = snapshot
+        snapshot = -1
+        return owned
+    finally:
+        if snapshot >= 0:
+            os.close(snapshot)
+        os.close(source)
 
 
 def _expand_command(
@@ -2036,28 +2096,39 @@ class _ArmProcess:
         if self._process is not None:
             raise ContractError(f"{self.spec.kind} process is already running")
         self.spec.datadir.mkdir(parents=True, exist_ok=True)
-        _rehash_binary(self.binary, self.spec.binary_sha256)
-        _rehash_copy(
-            self.config, self.spec.config.sha256, MAX_RECEIPT_BYTES, "arm config copy"
-        )
-        argv = _expand_command(
-            self.spec.command,
-            binary=self.binary,
-            config=self.config,
-            data_dir=self.spec.datadir,
-            port=self.port,
-            cookie=self.cookie,
+        binary_fd = _open_verified_snapshot(
+            self.binary, self.spec.binary_sha256, MAX_BINARY_BYTES, "arm binary copy"
         )
         try:
-            self._process = subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
+            config_fd = _open_verified_snapshot(
+                self.config,
+                self.spec.config.sha256,
+                MAX_RECEIPT_BYTES,
+                "arm config copy",
             )
+            try:
+                argv = _expand_command(
+                    self.spec.command,
+                    binary=Path(f"/proc/self/fd/{binary_fd}"),
+                    config=Path(f"/proc/self/fd/{config_fd}"),
+                    data_dir=self.spec.datadir,
+                    port=self.port,
+                    cookie=self.cookie,
+                )
+                self._process = subprocess.Popen(
+                    argv,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                    pass_fds=(binary_fd, config_fd),
+                )
+            finally:
+                os.close(config_fd)
         except OSError as error:
             raise ContractError(f"cannot spawn {self.spec.kind} process") from error
+        finally:
+            os.close(binary_fd)
         self._pid = self._process.pid
         _wait_owned_endpoint(
             self._process, self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS
