@@ -1005,9 +1005,13 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
     })
 }
 
+fn is_operational_apply_error(error: &ApplyError) -> bool {
+    matches!(error, ApplyError::Shutdown | ApplyError::JournalBackpressure(_))
+}
+
 fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     match error {
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
+        error if is_operational_apply_error(&error) => {
             BlockValidationResult::Inconclusive
         }
         other => BlockValidationResult::Rejected(bip22_reject_reason(&other)),
@@ -1099,7 +1103,7 @@ fn bip22_chain_reason(error: &ChainError) -> CompactString {
 /// as `TestBlockValidity`. CONTRACT: docs/contracts/external-api.md#API-27
 fn test_block_validity_error(error: ApplyError) -> MiningControlError {
     match error {
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
+        error if is_operational_apply_error(&error) => {
             MiningControlError::Unavailable(CompactString::from(error.to_string()))
         }
         other => MiningControlError::Rejected(CompactString::from(format!(
