@@ -2,9 +2,10 @@
 //!
 //! [`BlockStager`] holds decoded inbound bodies until their predecessor is
 //! applied. Slot-count eviction and byte-budget backpressure live here;
-//! [`crate::DownloadWindow`] owns in-flight assignment. The node sync
-//! coordinator stages arrivals and drains a contiguous apply prefix; it does
-//! not own this policy.
+//! [`crate::DownloadWindow`] owns in-flight assignment. The ownership boundary
+//! is defined by the [architecture contract](../../docs/contracts/architecture.md);
+//! the node sync coordinator stages arrivals and drains a contiguous apply
+//! prefix, but does not own this policy.
 
 use std::{
     collections::VecDeque,
@@ -955,6 +956,8 @@ mod tests {
         assert!(stager.contains(&second));
     }
 
+    /// Contract: `docs/contracts/architecture.md` requires same-height fork
+    /// eviction before the expected hash is staged.
     #[test]
     fn insert_evicts_same_height_fork_before_expected_hash() {
         let expected_hash = Hash256::from_le_bytes(&[0x11; 32]);

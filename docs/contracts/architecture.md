@@ -188,7 +188,8 @@ Owners:
   / `ChainTransition` facade (`ARCH-07`). Derived consumers live in
   `ChainFollowers` / `ChainEffects` and are dispatched after commit
   while the `ChainTransition` is still held; `Chainstate` does not hold
-  them. `crates/p2p` owns `DownloadWindow` and `BlockStager`. `crates/node`
+  them. `crates/p2p` owns `DownloadWindow` and `BlockStager`; when staging blocks, `BlockStager` evicts a same-height fork
+    before the expected hash. `crates/node`
   still carries leftover domain mechanics: UTXO undo persistence and
   disconnect markers (`apply.rs`), the node-side sync coordinator (`sync.rs`),
   and direct backend construction and cache share dispatch (`state.rs`).
