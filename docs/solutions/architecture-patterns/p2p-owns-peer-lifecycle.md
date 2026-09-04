@@ -21,10 +21,11 @@ Higher layers receive a handshake-completion notification carrying the
 `PeerSource` only after P2P publishes that same connection as ready.
 `publish_info` is the identity-checked Ready transition; a stale predecessor
 whose publish is rejected must not reset address-scoped scheduler state.
-`BlockSync` is the node-side download coordinator. It drives the P2P-owned
-production download window and header-request state. It clears leftover
-address-scoped scheduler state when the current connection becomes ready, and
-it may disconnect a current `PeerSource` after a peer-fault headers batch. Ready-peer snapshots carry the same source, and sync queues
+`BlockSync` is the node-side download executor. It drives the P2P-owned
+`SyncPlanner` (production download window, stager, and conviction policy).
+It clears leftover address-scoped scheduler state when the current connection
+becomes ready, and it may disconnect a current `PeerSource` after a peer-fault
+headers batch. Ready-peer snapshots carry the same source, and sync queues
 messages through an identity-checked lease rather than resolving a
 `SocketAddr` again. The source carries the connection identity, so a stale
 operation cannot publish, send to, or cancel a replacement.

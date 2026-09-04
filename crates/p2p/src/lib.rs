@@ -39,6 +39,8 @@ pub mod peer_table;
 pub mod service;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
+/// Download planner: window, staging, and conviction policy.
+pub mod sync_planner;
 /// Bitcoin P2P wire codec.
 pub mod wire;
 /// BIP339 wtxid-relay state.
@@ -71,3 +73,4 @@ pub use download_window::{
     DownloadWindow, FanoutCandidate, SyncBudget, SyncPeer, SyncPeerSelection,
     configure_request_mode, default_sync_budget, statically_fanout_eligible,
 };
+pub use sync_planner::{ColdFrontHedge, SyncAction, SyncDisconnectReason, SyncPlanner};
