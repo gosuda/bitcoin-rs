@@ -69,12 +69,12 @@ Policy rejections reach callers with different envelopes per outlet; the class i
 | :--- | :--- | :--- | :--- | :--- |
 | Below min relay | `MinRelayFeeNotMet` | JSON-RPC internal error, message contains `min-relay-fee-not-met` | `reject-reason: "min-relay-fee-not-met"` | Core: `min relay fee not met` (ATMP) / `min-relay-fee-not-met` (package); code −1/−26 by lane |
 | Non-standard | `NonStandard(...)` | internal error, message is the standardness error text | `reject-reason` is the standardness error text (e.g. `non-standard output script`, `dust output`, `non-standard transaction version`) | Core: `version`, `dust`, `scriptpubkey`, `tx-size`; code −26/−27 by lane |
-| RBF rules | `Replacement(RbfError)` | internal error containing `BIP125 rule N` | `reject-reason` carries the same text | Core: `bad-txns-bip125-replacement-*` family |
-| Missing inputs | `MissingInputs` | internal error containing `missing-inputs` | `reject-reason: "missing-inputs"` | Core: `missing-inputs` (−25) |
+| RBF rules | `Replacement(RbfError)` | `TxRejected` (−26), containing `BIP125 rule N` | `reject-reason` carries the same text | Core: `bad-txns-bip125-replacement-*` family |
+| Missing inputs | `MissingInputs` | `TxRejected` (−26), containing `missing-inputs` | `reject-reason: "missing-inputs"` | Core: `missing-inputs` (−25) |
 | Package limits | `PackageLimit(PolicyError)` | internal error containing the pool policy text (e.g. `too many unconfirmed ancestors`, `ancestor package is too large`, `too many unconfirmed descendants`, `too many transactions in cluster`, `cluster is too large`) | `reject-reason` carries the same text | Core: `too-long-mempool-chain` / cluster-limit text, code −26 |
 | Consensus / Script verification | not produced by the preview evaluator | `RpcError::TxRejected("consensus-verification-failed")` | not reported — preview does not run script checks (ledger §5.2) | Core: `mandatory-script-verify-flag-failed`, `non-mandatory-script-verify-flag`, code −26 |
 
-Code values are the node's JSON-RPC internal-error code (−32603) or transaction-rejected code (−26). Core uses its transaction error codes (−1/−25/−26/−27) for the same classes; the per-class message strings, not the numeric code, are the compatibility contract here. Aligning numeric codes is deferred to the RPC compatibility manifest (track 4a) so there is one owner for the error-code table.
+Code values are the node's transaction-rejected code (−26), except `MaxFeeExceeded`, which is `InvalidParams` (−32602). Core uses its transaction error codes (−1/−25/−26/−27) for the same classes; the per-class message strings, not the numeric code, are the compatibility contract here. Aligning numeric codes is deferred to the RPC compatibility manifest (track 4a) so there is one owner for the error-code table.
 
 ## 5. Deviation Ledger
 
