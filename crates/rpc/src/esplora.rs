@@ -661,7 +661,7 @@ fn mempool(ctx: &Context) -> Response {
     let pool = ctx.mempool.read();
     let stats = pool.stats();
     let mut bins = std::collections::BTreeMap::new();
-    for (_, entry) in &pool.entries {
+    for entry in pool.iter_entries() {
         *bins.entry(entry.fee_rate).or_insert(0_u64) += u64::from(entry.vsize);
     }
     json_response(MempoolSummary {
@@ -677,7 +677,7 @@ fn mempool(ctx: &Context) -> Response {
 }
 fn mempool_recent(ctx: &Context) -> Response {
     let pool = ctx.mempool.read();
-    let mut entries = pool.entries.iter().map(|(_, e)| e).collect::<Vec<_>>();
+    let mut entries = pool.iter_entries().collect::<Vec<_>>();
     entries.sort_by(|left, right| {
         right
             .time

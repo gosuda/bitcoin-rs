@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::ops::RangeInclusive;
+use core::ops::{Bound, RangeInclusive};
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
@@ -94,17 +94,18 @@ pub enum PrioritiseError {
 #[derive(Debug)]
 pub struct Mempool {
     /// Entry arena. Public ids are slab indices represented as `u32`.
-    pub entries: Slab<MempoolEntry>,
+    pub(crate) entries: Slab<MempoolEntry>,
     /// Tx id to entry id lookup. Owned by this module; reach it
     /// through `contains_txid`, `entry_id_by_txid`, and `entry_by_txid`.
     by_txid: HashMap<Txid, EntryId>,
-    /// Funding index keyed by script hash then entry id.
-    pub funding: std::collections::BTreeSet<(ScriptHash, EntryId)>,
+    /// Funding index keyed by script hash then entry id. Owned by this
+    /// module; reach it through `entries_funding_script`.
+    funding: std::collections::BTreeSet<(ScriptHash, EntryId)>,
     /// Spending index keyed by spent outpoint then entry id. Owned by this
     /// module; reach it through `is_outpoint_spent` and `outpoint_spender`.
     spending: std::collections::BTreeSet<(SpendingKey, EntryId)>,
     /// Fee-priority index for mining and eviction consumers.
-    pub pareto: ParetoFront,
+    pub(crate) pareto: ParetoFront,
     /// Active mempool policy limits.
     pub limits: MempoolLimits,
     /// Running sum of `vsize` over `entries`.
@@ -114,11 +115,10 @@ pub struct Mempool {
     /// whether the pool is over its size limit, so folding it there cost `O(n)`
     /// per acceptance and made insertion quadratic in pool size on its own.
     ///
-    /// `entries` is a public field, so code outside this module *could*
-    /// desynchronize this by mutating the slab directly. Nothing does — every
-    /// mutation goes through `insert_entry`, `remove_entries`, `prioritise` or
-    /// `clear` — and `debug_assert`s in `total_vsize` and `aggregate_fees` fail
-    /// loudly in test and debug builds if that ever stops being true.
+    /// `entries` is crate-visible so eviction can walk the arena, but every
+    /// mutation still goes through `insert_entry`, `remove_entries`,
+    /// `prioritise` or `clear` — and `debug_assert`s in `total_vsize` and
+    /// `aggregate_fees` fail the moment a future in-crate caller forgets.
     total_vsize: u64,
     /// Exact running sum of `fee` over `entries`. A `u32` entry id bounds the
     /// successful-entry sum below `u128::MAX`.
@@ -766,6 +766,56 @@ impl Mempool {
         usize::try_from(id)
             .ok()
             .and_then(|index| self.entries.get(index))
+    }
+
+    /// Walks every live entry in slab order.
+    ///
+    /// This is the pool's own scan. Callers that used to iterate `entries`
+    /// directly come through here so the arena stays inside the module.
+    pub fn iter_entries(&self) -> impl Iterator<Item = &MempoolEntry> + '_ {
+        self.entries.iter().map(|(_id, entry)| entry)
+    }
+
+    /// Returns every in-pool entry that funds `script_hash`.
+    ///
+    /// Walks the funding index rather than the entry arena, so a script with
+    /// no mempool outputs costs a range probe, not a scan of the pool.
+    pub fn entries_funding_script(
+        &self,
+        script_hash: ScriptHash,
+    ) -> impl Iterator<Item = &MempoolEntry> + '_ {
+        let entries = &self.entries;
+        self.funding
+            .range((
+                Bound::Included((script_hash, 0)),
+                Bound::Included((script_hash, u32::MAX)),
+            ))
+            .filter_map(move |(_, id)| {
+                usize::try_from(*id)
+                    .ok()
+                    .and_then(|index| entries.get(index))
+            })
+    }
+
+    /// Returns whether any in-pool transaction has `wtxid`.
+    ///
+    /// Linear in pool size: the pool indexes txids, not witness ids.
+    #[must_use]
+    pub fn contains_wtxid(&self, wtxid: &Wtxid) -> bool {
+        self.entries
+            .iter()
+            .any(|(_id, entry)| entry.wtxid == *wtxid)
+    }
+
+    /// Returns the in-pool entry for `wtxid`, or `None` if none matches.
+    ///
+    /// Linear in pool size: the pool indexes txids, not witness ids.
+    #[must_use]
+    pub fn entry_by_wtxid(&self, wtxid: &Wtxid) -> Option<&MempoolEntry> {
+        self.entries
+            .iter()
+            .map(|(_id, entry)| entry)
+            .find(|entry| entry.wtxid == *wtxid)
     }
 
     /// Returns mempool entry ids in order of descending `fee_rate` (sat/kvB).
@@ -2469,6 +2519,58 @@ mod tests {
             vout: 0,
         };
         assert!(matches!(pool.outpoint_spender(outpoint), Ok(None)));
+    }
+
+    #[test]
+    fn entries_funding_script_selects_only_matching_funders() {
+        let mut pool = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        let matching = vec![0x51];
+        let other = vec![0x52];
+        let funder = |script: Vec<u8>, tag: u8| Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: txid_of([tag; 32]),
+                    vout: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xFF_FF_FF_FF,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: script,
+            }],
+        };
+        let matching_tx = funder(matching.clone(), 0xaa);
+        let matching_txid = matching_tx.txid();
+        let matching_wtxid = matching_tx.wtxid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(matching_tx), 100, 10_000, 1, 7))
+            .expect("matching insert");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(funder(other, 0xbb)),
+            100,
+            10_000,
+            1,
+            7,
+        ))
+        .expect("other insert");
+
+        let funded: Vec<_> = pool
+            .entries_funding_script(ScriptHash::from_script(&matching))
+            .map(|entry| entry.txid)
+            .collect();
+        assert_eq!(funded, vec![matching_txid]);
+        assert!(pool.contains_wtxid(&matching_wtxid));
+        assert_eq!(
+            pool.entry_by_wtxid(&matching_wtxid).map(|entry| entry.txid),
+            Some(matching_txid)
+        );
+        assert_eq!(pool.iter_entries().count(), 2);
     }
 
     #[test]

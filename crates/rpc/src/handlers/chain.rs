@@ -1456,9 +1456,9 @@ fn block_verbose_typed(
     let (_bytes, block) = decode_block(ctx, record)?;
     let coinbase_tx = convert::coinbase_transaction_typed(block.txs.first())
         .ok_or_else(|| RpcError::Internal("block has no coinbase transaction".to_owned()))?;
-    let size = i64_saturated_len(consensus_bytes(&block).len());
-    let stripped_size = i64_saturated_len(crate::render::stripped_size(&block));
-    let weight = crate::render::block_weight(&block);
+    let size = i64_saturated_len(block.total_size());
+    let stripped_size = i64_saturated_len(block.stripped_size());
+    let weight = block.weight();
     let bits = format!("{:08x}", header.bits);
     let version_hex = format!("{:08x}", u32::from_le_bytes(header.version.to_le_bytes()));
     if verbosity < 2 {
@@ -5726,98 +5726,5 @@ mod scantxoutset_tests {
         let result = scantxoutset(&ctx, &json!(["abort"]))
             .unwrap_or_else(|err| panic!("scantxoutset abort failed: {err}"));
         assert_eq!(result.as_bool(), Some(false));
-    }
-}
-
-#[cfg(test)]
-mod stripped_size_tests {
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    };
-
-    /// A block whose single transaction carries a witness stack.
-    fn witness_block() -> Block {
-        let tx = Tx {
-            version: 2,
-            lock_time: 0,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0_u8; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: vec![vec![0x21_u8; 64], vec![0x03_u8; 33]],
-            }],
-            outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
-            }],
-        };
-        Block {
-            header: Header {
-                version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 1_700_000_000,
-                bits: 0x207f_ffff,
-                nonce: 0,
-            },
-            txs: vec![tx],
-        }
-    }
-
-    /// A block whose transaction carries no witness.
-    fn witness_free_block() -> Block {
-        let tx = Tx {
-            version: 2,
-            lock_time: 0,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0_u8; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
-            }],
-            outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
-            }],
-        };
-        Block {
-            header: Header {
-                version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 1_700_000_000,
-                bits: 0x207f_ffff,
-                nonce: 0,
-            },
-            txs: vec![tx],
-        }
-    }
-
-    #[test]
-    fn stripped_size_is_below_total_for_a_witness_block() {
-        let block = witness_block();
-        let total = consensus_bytes(&block).len();
-        let stripped = crate::render::stripped_size(&block);
-
-        assert!(
-            stripped < total,
-            "the witness discount must be visible: {stripped} vs {total}"
-        );
-    }
-
-    #[test]
-    fn stripped_size_equals_the_sum_of_base_sizes_plus_header_and_count() {
-        let block = witness_block();
-        let manual: usize = 80
-            + 1 // compact size for 1 tx
-            + block.txs.iter().map(Tx::base_size).sum::<usize>();
-        assert_eq!(crate::render::stripped_size(&block), manual);
-    }
-
-    #[test]
-    fn stripped_size_equals_total_for_a_witness_free_block() {
-        let block = witness_free_block();
-        let total = consensus_bytes(&block).len();
-        assert_eq!(crate::render::stripped_size(&block), total);
     }
 }
