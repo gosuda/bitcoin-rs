@@ -79,7 +79,7 @@ const NAMED_DEPLOYMENTS: [(&str, u32); 2] =
 /// Deployments a GBT caller must see in `vbavailable`.
 ///
 /// Only `Started` and `LockedIn` states are signalling. Active and failed
-/// deployments are not negotiated as version bits. Core v31 `vbrequired` is
+/// deployments are not negotiated as version bits. See `API-16` in `docs/contracts/external-api.md`; `vbrequired`
 /// always 0 and is not derived from this list.
 #[must_use]
 pub fn signalling_deployments(

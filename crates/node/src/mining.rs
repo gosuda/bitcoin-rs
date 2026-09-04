@@ -706,7 +706,7 @@ impl MiningCoordinator {
                 bit: deployment.bit,
             })
             .collect();
-        // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
+        // See `API-16` in docs/contracts/external-api.md.
         (available, 0)
     }
 
