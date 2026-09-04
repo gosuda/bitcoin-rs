@@ -2,8 +2,8 @@
 //!
 //! Ownership, admission, and the `Chainstate` / `ChainTransition` boundary
 //! are specified by `ARCH-07` in `docs/contracts/architecture.md`. Apply
-//! publishes the tip and returns a [`ChainEvent`]. [`crate::chain_effects`]
-//! consumes that event after the commit.
+//! publishes the applied tip and returns a concrete connect or disconnect
+//! outcome. [`crate::chain_effects`] consumes the outcome after the commit.
 
 mod scratch;
 
@@ -857,15 +857,6 @@ pub struct DisconnectOutcome {
     pub hash: Hash256,
     /// Creating txids of coins the undo restored, for orphan re-evaluation.
     pub restored_parents: Vec<Txid>,
-}
-
-/// One committed chain transition, for derived consumers.
-#[derive(Clone, Debug)]
-pub enum ChainEvent {
-    /// A block became the applied tip.
-    Connected(ConnectOutcome),
-    /// A block stopped being the applied tip.
-    Disconnected(DisconnectOutcome),
 }
 
 /// Coherent read of header tip, applied tip, and chain-tx count.
@@ -10550,6 +10541,8 @@ mod with_zmq_publisher_tests {
         fn publish_rawtx(&self, _: &[u8]) {}
     }
 
+    /// ARCH-07 evidence: configured post-commit ZMQ publishers are used by the
+    /// derived-consumer boundary.
     #[test]
     fn with_zmq_publisher_swaps_handle() {
         let tagged = Arc::new(TaggedPublisher::default());

@@ -68,7 +68,7 @@ mod window_overlay;
 pub mod zmq_publisher;
 
 pub use apply::{
-    ChainEvent, ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
+    ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
 };
 pub use bitcoin_rs_primitives::Network;
 pub use chain_effects::{ChainEffects, ChainFollowers};
