@@ -248,6 +248,7 @@ mod tests {
         }
     }
 
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn inbound_handshake_reaches_ready_after_remote_version_and_verack() -> Result<(), PeerError> {
         let magic = Magic::BITCOIN;
