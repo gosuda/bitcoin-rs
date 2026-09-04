@@ -513,6 +513,29 @@ class CampaignTests(unittest.TestCase):
             main(["--config", str(config_path), "--output", str(output)])
         self.assertFalse(output.exists())
 
+    def test_child_manifest_mutation_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-manifest-mut-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, expected = _build_workspace(root)
+        mutator = _write_executable(
+            root / "mutate.py",
+            _node_source(expected).replace(
+                "raise SystemExit(0)\n",
+                "manifest = __import__('pathlib').Path(args.manifest)\n"
+                "__import__('os').chmod(manifest, 0o600)\n"
+                "manifest.write_bytes(manifest.read_bytes()[::-1])\n"
+                "raise SystemExit(0)\n",
+            ),
+        )
+        config = json.loads(config_path.read_text())
+        config["candidate"]["binary"] = str(mutator)
+        config["candidate"]["binary_sha256"] = _sha256_file(mutator)
+        config_path.write_bytes(canonical_bytes(config) + b"\n")
+        output = root / OUTPUT_NAME
+        with self.assertRaises(ContractError):
+            main(["--config", str(config_path), "--output", str(output)])
+        self.assertFalse(output.exists())
+
     def test_summarize_uses_nearest_rank(self) -> None:
         summary = summarize([10, 20, 30, 40, 50, 60, 70])
         self.assertEqual(summary["samples"], 7)

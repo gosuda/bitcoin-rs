@@ -447,7 +447,14 @@ def _identity_from_stat(info: os.stat_result, digest: str) -> FileIdentity:
 
 
 def header_hash(payload: bytes) -> str:
-    """Display-hex of double-SHA256(header), matching Bitcoin block hashes."""
+    """Display-hex of double-SHA256 of the 80-byte header.
+
+    This is Bitcoin Core ``CBlockHeader::GetHash`` (``HashWriter`` over the
+    header, then byte-reversed hex). Independent vector: the published
+    mainnet genesis header hashes to
+    ``000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f``
+    (Bitcoin Core ``CMainParams``, bitcoin-rs ``MAINNET_GENESIS``).
+    """
     if len(payload) < HEADER_BYTES:
         raise ContractError("block payload is shorter than a header")
     digest = hashlib.sha256(hashlib.sha256(payload[:HEADER_BYTES]).digest()).digest()
@@ -517,6 +524,7 @@ def _parse_manifest(value: object, archive: FileRef, magic: bytes) -> Manifest:
 
 
 def _verify_archive(archive: FileRef, manifest: Manifest, magic: bytes) -> FileIdentity:
+    """Walk a Core ``blk*.dat`` stream: 4-byte message start, 4-byte LE size, block."""
     descriptor = _open_regular(archive.path, "archive")
     digest = hashlib.sha256()
     try:
@@ -554,22 +562,39 @@ def _verify_archive(archive: FileRef, manifest: Manifest, magic: bytes) -> FileI
         os.close(descriptor)
 
 
-def _require_unchanged(path: Path, expected: FileIdentity, field: str) -> None:
+def _hash_regular(path: Path, field: str) -> tuple[os.stat_result, str]:
     descriptor = _open_regular(path, field)
+    digest = hashlib.sha256()
     try:
         info = os.fstat(descriptor)
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
     except OSError as error:
+        raise ContractError(f"cannot hash {field}: {error}") from error
+    finally:
         os.close(descriptor)
-        raise ContractError(f"cannot restat {field}: {error}") from error
-    os.close(descriptor)
-    current = _identity_from_stat(info, expected.sha256)
+    return info, digest.hexdigest()
+
+
+def _require_pin(path: Path, expected: FileIdentity, field: str) -> None:
+    info, digest = _hash_regular(path, field)
+    current = _identity_from_stat(info, digest)
     if (
         current.dev != expected.dev
         or current.ino != expected.ino
         or current.size != expected.size
         or current.mtime_ns != expected.mtime_ns
+        or digest != expected.sha256
     ):
         raise ContractError(f"{field} changed after custody verification")
+
+
+def _assert_pins(pinned: PinnedCorpus) -> None:
+    _require_pin(pinned.archive.path, pinned.archive_identity, "archive")
+    _require_pin(pinned.manifest.path, pinned.manifest_identity, "manifest")
 
 
 def _certified_state(value: object, field: str) -> CertifiedState:
@@ -1129,8 +1154,7 @@ def _run_arm(
     data_dir = arm_dir / "data"
     data_dir.mkdir()
     binary_path = _verified_copy(program, arm_dir)
-    _require_unchanged(pinned.archive.path, pinned.archive_identity, "archive")
-    _require_unchanged(pinned.manifest.path, pinned.manifest_identity, "manifest")
+    _assert_pins(pinned)
     _verify_copy_digest(binary_path, program.binary_sha256)
     state_path = arm_dir / "state.json"
     argv = _expand_command(
@@ -1143,6 +1167,7 @@ def _run_arm(
     )
     deadline = time.monotonic_ns() + config.arm_timeout_ns
     code, wall_ns, cpu_ns, peak_rss = _run_phase(argv, arm_dir, deadline)
+    _assert_pins(pinned)
     final = _state(state_path, f"{program.role} final state")
     expected_json = state_json(config.expected_state)
     durability_ok = code == 0
@@ -1155,6 +1180,7 @@ def _run_arm(
         if program.reopen_command is None:
             raise ContractError(f"{program.role} has no reopen command")
         reopen_path = arm_dir / "reopen-state.json"
+        _assert_pins(pinned)
         _verify_copy_digest(binary_path, program.binary_sha256)
         reopen_argv = _expand_command(
             program.reopen_command,
@@ -1166,6 +1192,7 @@ def _run_arm(
         )
         reopen_deadline = time.monotonic_ns() + config.arm_timeout_ns
         reopen_exit, _, _, _ = _run_phase(reopen_argv, arm_dir, reopen_deadline)
+        _assert_pins(pinned)
         reopened = _state(reopen_path, f"{program.role} reopen state")
         reopen_state = state_json(reopened)
         reopen_hash = canonical_sha256(reopen_state)

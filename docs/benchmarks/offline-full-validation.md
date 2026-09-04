@@ -14,25 +14,27 @@ proves the harness with fixture nodes.
 
 One `offline-full-validation-config-v1` document binds every arm:
 
-- **Archive**: Bitcoin Core block-file framing only — 4-byte network magic,
+- **Archive**: Bitcoin Core `blk*.dat` framing only — 4-byte message start,
   4-byte little-endian payload length, consensus-serialized block. No
   padding, stale-chain records, or backend-specific bytes. The comparator
   opens the file `O_NOFOLLOW`, hashes it, and walks every record against the
   manifest. Trailing bytes, a magic mismatch, a length mismatch, or a header
   hash that does not match the manifest refuse the run before any child
-  starts. Block hash is double-SHA256 of the 80-byte header, displayed
-  little-endian, matching Bitcoin. The hash helper is checked against the
-  published 80-byte mainnet genesis header
-  (`000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f`),
-  not only against synthetic fixture bytes hashed with the same algorithm.
+  starts. Block hash is Bitcoin Core `CBlockHeader::GetHash`: double-SHA256
+  of the 80-byte header, displayed little-endian. The helper is checked
+  against the published mainnet genesis header
+  (`000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f`
+  from Core `CMainParams`), not only against synthetic fixture bytes hashed
+  with the same algorithm.
 - **Manifest**: `core-framed-archive-manifest-v1` names network, magic,
   inclusive height range, archive digest and size, and one packed entry per
   height (`hash`, `offset`, `payload_length`). Heights are contiguous. The
   packed records must consume the archive exactly.
 - **Pinned corpus**: after config load, the campaign copies archive and
   manifest into a private campaign directory, re-hashes both, and
-  chmod's them `0o400`. Every arm reads those pins. A same-size rewrite
-  of the operator path after load cannot change what the children see.
+  chmod's them `0o400`. Every arm reads those pins. Before and after every
+  child, the controller re-hashes both pins and checks device, inode, size,
+  and mtime. A same-user child that chmod's and rewrites a pin fails closed.
 - **Posture**: `assume_valid` must be false. `txindex`, `blockfilterindex`,
   and `coinstatsindex` must be off. Cache policy is the closed set
   `process-cold/page-cache-unspecified`. The sibling MuHash comparator
