@@ -590,7 +590,13 @@ impl MiningCoordinator {
                 "submit=false requires nblocks=1",
             )));
         }
-        let mut generated = Vec::with_capacity(usize::try_from(request.count).unwrap_or(0));
+        const MAX_GENERATED_BLOCKS: u32 = 1_000;
+        if request.count > MAX_GENERATED_BLOCKS {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "nblocks exceeds the operational generation limit",
+            )));
+        }
+        let mut generated = Vec::with_capacity(request.count as usize);
         for _ in 0..request.count {
             if self.shutdown.load(Ordering::Acquire) {
                 return Err(MiningControlError::Unavailable(CompactString::from(
@@ -602,6 +608,8 @@ impl MiningCoordinator {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
             if request.submit {
+                  // Submission performs validation and persistence.
+
                 match self.submit(&block)? {
                     BlockValidationResult::Accepted => {}
                     other => {
@@ -611,7 +619,12 @@ impl MiningCoordinator {
                     }
                 }
             }
-            generated.push(GeneratedBlock {
+            if !request.submit && self.propose(&block) != BlockValidationResult::Accepted {
+                  return Err(MiningControlError::Failed(CompactString::from(
+                      "generated block failed validation",
+                  )));
+              }
+              generated.push(GeneratedBlock {
                 hash: block.block_hash(),
                 hex: hex_encode(&consensus_bytes(&block)),
             });
