@@ -28,9 +28,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Required PR gate: fmt, deny, clippy, normal workspace tests. Pure Rust only
-# -- no libboost/cmake, no kernel build, no benches, no backend/feature matrix.
-# Deep lanes live in main.yml and run on `main` pushes only.
+# Required PR gate: fmt and deny stay parallel (seconds, no cargo compile).
+# clippy and workspace tests share one runner and one rust-cache so they do
+# not rebuild the same graph on two machines. Deep lanes live in main.yml.
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
@@ -51,7 +51,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  clippy:
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+        with:
+          rust-version: "1.95.0"
+          arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
+
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -59,11 +68,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Pure-Rust clippy gate with -D warnings. consensus and node have
-      # `kernel` in their per-crate defaults, which would pull in the C++
-      # libbitcoinkernel build (cmake + libboost-dev); exclude them from the
-      # workspace-wide pass and lint them separately with --no-default-features
-      # so the PR gate needs no C++ toolchain install.
+      # One kernel-free compile graph. consensus and node default to `kernel`
+      # (C++ libbitcoinkernel); exclude them from the workspace pass and
+      # lint/test their pure-Rust surfaces separately. Clippy runs first so a
+      # lint failure does not wait for the test suite.
       - run: |
           cargo clippy --workspace --all-targets \
             --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
@@ -72,32 +80,9 @@ jobs:
             --no-default-features --all-targets -- -D warnings
           cargo clippy -p bitcoin-rs-node \
             --no-default-features --features fjall,zmq --all-targets -- -D warnings
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Normal workspace tests, kernel-free. consensus and node are excluded
-      # from the workspace pass (their defaults include kernel) and tested
-      # separately with --no-default-features. Extra backend, kernel, and
-      # isolated-feature surfaces run on main only.
       - run: |
           cargo test --workspace --no-fail-fast \
             --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
           cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
           cargo test -p bitcoin-rs-node \
             --no-default-features --features fjall,zmq --no-fail-fast
-
-  deny:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
-        with:
-          rust-version: "1.95.0"
-          # Check the full dependency graph (all backends + kernel).
-          # cargo-deny resolves metadata without compiling, so this costs no
-          # C++ toolchain.
-          arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
