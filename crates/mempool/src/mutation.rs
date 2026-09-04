@@ -20,14 +20,12 @@ pub enum RemovalReason {
     Conflict,
     /// A BIP125 replacement evicted the entry.
     Replaced,
-    /// The entry descended from an evicted or confirmed entry.
+    /// The entry descended from an evicted or replaced entry.
     Descendant,
     /// Size or fee-rate policy evicted the entry.
     PolicyEviction,
     /// The entry outlived its expiry.
     Expiry,
-    /// An explicit removal addressed the entry by id or txid.
-    Explicit,
     /// A wholesale clear emptied the pool.
     Clear,
     /// A reorg disconnected the entry's containing state.

@@ -380,6 +380,7 @@ impl Mempool {
         let ancestors = self.ancestor_ids_for_tx(&entry.tx);
         self.check_ancestor_limits(&ancestors, &entry)?;
         self.check_descendant_limits_excluding(&ancestors, excluded)?;
+        self.check_cluster_limits(&entry.tx, entry.vsize, excluded)?;
 
         if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
             return Err(MempoolError::TooManyEntries);
@@ -925,17 +926,8 @@ impl Mempool {
         Ok(())
     }
 
-    /// Removes an entry and all descendants that spend its outputs. The
-    /// parent commits before its descendants; each removed entry emits one
-    /// `Removed(Explicit)` change.
-    pub fn remove_entry_and_descendants(&mut self, id: EntryId) -> MutationResult {
-        let mut changes = Vec::new();
-        self.remove_entry_and_descendants_into(id, RemovalReason::Explicit, &mut changes);
-        self.finish_mutation(changes)
-    }
-
-    /// Reason-carrying core of [`Mempool::remove_entry_and_descendants`] for
-    /// composite mutations that must tag the removal with their own reason.
+    /// Reason-carrying core for composite mutations that remove an entry and
+    /// all descendants that spend its outputs.
     pub(crate) fn remove_entry_and_descendants_into(
         &mut self,
         id: EntryId,
@@ -950,18 +942,8 @@ impl Mempool {
         self.remove_entries_with_reasons(&removals, changes);
     }
 
-    /// Removes the entry for `txid` along with all descendants that spend
-    /// its outputs, each as one `Removed(Explicit)` change in parent-before-
-    /// descendants order.
-    ///
-    /// Returns an empty result when the txid is not present in the pool.
-    pub fn remove_by_txid(&mut self, txid: &Txid) -> MutationResult {
-        let mut changes = Vec::new();
-        self.remove_by_txid_into(txid, RemovalReason::Explicit, &mut changes);
-        self.finish_mutation(changes)
-    }
-
-    /// Reason-carrying core of [`Mempool::remove_by_txid`].
+    /// Removes the entry identified by `txid` and its descendants with the
+    /// supplied reason.
     fn remove_by_txid_into(
         &mut self,
         txid: &Txid,
@@ -981,14 +963,16 @@ impl Mempool {
     /// committing parent before descendants.
     ///
     /// For each block transaction, this mirrors Bitcoin Core's
-    /// `removeForBlock`: the entry and its descendants leave the pool, other
-    /// entries spending the same inputs — double spends the block just
-    /// settled — leave with their descendants, and the overlay stored for the
-    /// txid is erased whether or not the transaction was ever admitted (a
-    /// pre-admission delta for a directly mined transaction must not survive
-    /// into a later re-admission). Entries removed only because a parent or
-    /// conflict was mined were not confirmed themselves: they keep their
-    /// overlay and are recorded as departures, not confirmations.
+    /// `removeForBlock`: the mined entry leaves the pool, while its unmined
+    /// descendants stay there with refreshed ancestor metadata because they
+    /// now spend confirmed coins. Other entries spending the same inputs
+    /// — double spends the block just settled — leave with their descendants,
+    /// and the overlay stored for the txid is erased whether or not the
+    /// transaction was ever admitted (a pre-admission delta for a directly
+    /// mined transaction must not survive into a later re-admission). Entries
+    /// removed only because a conflict was mined were not confirmed
+    /// themselves: they keep their overlay and are recorded as departures,
+    /// not confirmations.
     ///
     /// `block_txids` contains the validated txid for each transaction in
     /// `block_txs`, in the same order. `height` is the connected block's
@@ -1012,7 +996,12 @@ impl Mempool {
 
         let mut changes = Vec::new();
         for (tx, txid) in block_txs.iter().zip(block_txids) {
-            self.remove_by_txid_into(txid, RemovalReason::BlockInclusion, &mut changes);
+            if let Some(id) = self.by_txid.get(txid).copied() {
+                self.remove_entries_with_reasons(
+                    &[(id, RemovalReason::BlockInclusion)],
+                    &mut changes,
+                );
+            }
             for conflict in self.conflicts_for(tx) {
                 self.remove_entry_and_descendants_into(
                     conflict,
@@ -1437,6 +1426,126 @@ impl Mempool {
         Ok(())
     }
 
+    /// Returns every entry reachable from `seeds` through spend edges in
+    /// either direction: the union of the connected components they sit in.
+    ///
+    /// This is Bitcoin Core's cluster, and it is deliberately not
+    /// [`Self::metadata_closure`]. That one is ancestors, self, and
+    /// descendants -- a chain through one transaction. A cluster is a
+    /// connected component, so two children of one parent belong to it even
+    /// though neither is an ancestor or a descendant of the other, and a walk
+    /// that only follows the chain silently under-counts every fan-out.
+    ///
+    /// The frontier alternates directions rather than expanding one and then
+    /// the other, because reaching a sibling needs an up-edge followed by a
+    /// down-edge, and reaching a cousin needs that twice.
+    fn cluster_ids_seeded_by(
+        &self,
+        seeds: &[EntryId],
+        excluded: &HashSet<EntryId>,
+    ) -> Vec<EntryId> {
+        let mut seen: Vec<EntryId> = Vec::new();
+        let mut frontier: Vec<EntryId> = Vec::new();
+        for seed in seeds {
+            if !excluded.contains(seed) && !seen.contains(seed) {
+                seen.push(*seed);
+                frontier.push(*seed);
+            }
+        }
+        while let Some(id) = frontier.pop() {
+            let parents = self.entry(id).map_or_else(Vec::new, |entry| {
+                entry
+                    .tx
+                    .inputs
+                    .iter()
+                    .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+                    .collect::<Vec<_>>()
+            });
+            for neighbour in parents.into_iter().chain(self.child_ids(id)) {
+                if !excluded.contains(&neighbour) && !seen.contains(&neighbour) {
+                    seen.push(neighbour);
+                    frontier.push(neighbour);
+                }
+            }
+        }
+        seen.sort_unstable();
+        seen
+    }
+
+    /// Refuses a transaction that would join a cluster over either limit.
+    ///
+    /// The candidate is not in the pool yet, so its cluster is seeded from
+    /// both directions: the in-pool parents it spends, and any in-pool
+    /// transaction that already spends *its* outputs. The second half is not
+    /// hypothetical -- `insert_entry` documents that a transaction can arrive
+    /// after something spending it, through orphan promotion or out-of-order
+    /// relay -- and a seed set of parents alone would miss the descendants
+    /// this transaction is about to connect.
+    ///
+    /// `excluded` is the set of entry ids a replacement will evict. The walk
+    /// in [`Self::cluster_ids_seeded_by`] is the sole owner of that rule:
+    /// excluded seeds and neighbours are treated as absent, so a replacement
+    /// that shrinks an over-large cluster is not rejected by the cluster it
+    /// is about to clear.
+    fn check_cluster_limits(
+        &self,
+        tx: &Tx,
+        vsize: u32,
+        excluded: &HashSet<EntryId>,
+    ) -> Result<(), PolicyError> {
+        let txid = tx.txid();
+        let mut seeds = tx
+            .inputs
+            .iter()
+            .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+            .collect::<Vec<_>>();
+        seeds.extend(self.existing_spenders_of(txid, tx.outputs.len()));
+        let cluster = self.cluster_ids_seeded_by(&seeds, excluded);
+        if cluster.is_empty() {
+            // A cluster of one. Still checked, so a single oversized
+            // transaction cannot pass a limit its cluster would fail.
+            return cluster_within_limits(1, u64::from(vsize), &self.limits);
+        }
+        let count = u32::try_from(cluster.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let cluster_vsize = cluster.iter().fold(u64::from(vsize), |total, id| {
+            total.saturating_add(self.entry(*id).map_or(0, |member| u64::from(member.vsize)))
+        });
+        cluster_within_limits(count, cluster_vsize, &self.limits)
+    }
+
+    /// In-pool entries already spending an output of `txid`.
+    ///
+    /// Keyed by txid rather than [`EntryId`] because the caller's transaction
+    /// has no entry id yet.
+    fn existing_spenders_of(&self, txid: Txid, output_count: usize) -> Vec<EntryId> {
+        let mut spenders = Vec::new();
+        for vout in 0..output_count {
+            let Ok(vout) = u32::try_from(vout) else {
+                continue;
+            };
+            for (_, spender) in self
+                .spending
+                .range(outpoint_range(OutPoint::new(txid, vout)))
+            {
+                if !spenders.contains(spender) {
+                    spenders.push(*spender);
+                }
+            }
+        }
+        spenders
+    }
+
+    /// The cluster limits this pool enforces at admission.
+    ///
+    /// Read by `getmempoolinfo`, which reports enforced policy rather than a
+    /// constant: change a limit and the reported number changes with it.
+    #[must_use]
+    pub const fn cluster_limits(&self) -> (u32, u64) {
+        (self.limits.cluster_count, self.limits.cluster_size_vbytes)
+    }
+
     fn ancestor_ids_for_tx(&self, tx: &Tx) -> Vec<EntryId> {
         let mut ancestors = Vec::new();
         let mut stack = tx
@@ -1555,22 +1664,22 @@ impl Mempool {
             .saturating_add(1)
     }
 
-    /// Checks ancestor and descendant package limits for `tx` without
+    /// Checks ancestor, descendant, and cluster limits for `tx` without
     /// inserting it, mirroring the gates `validate_insert` applies.
     ///
     /// `excluded` is the set of entry ids that a replacement will evict;
-    /// those entries are skipped in the descendant-count check so a
-    /// replacement that trims an over-large descendant package is not
-    /// falsely rejected by the package it is about to clear. Pass an empty
-    /// set for a plain (non-replacement) admission preview.
+    /// those entries are skipped in the descendant-count and cluster checks
+    /// so a replacement that trims an over-large cluster is not falsely
+    /// rejected by the cluster it is about to clear. Pass an empty set for a
+    /// plain (non-replacement) admission preview.
     ///
     /// `vsize` is the candidate's own virtual size; it is folded into the
-    /// ancestor-size total exactly as `validate_insert` does.
+    /// ancestor-size and cluster-size totals exactly as `validate_insert` does.
     ///
     /// WHY: the acceptance preview (`testmempoolaccept`) and the admission
     /// gate (`sendrawtransaction` → `replace_transaction`) must quote the
-    /// same verdict; without this check the preview reports `allowed` for a
-    /// transaction the admission gate then rejects on package limits.
+    /// same verdict; without these checks the preview reports `allowed` for a
+    /// transaction the admission gate then rejects on package or cluster limits.
     pub fn check_package_limits(
         &self,
         tx: &Tx,
@@ -1580,6 +1689,7 @@ impl Mempool {
         let ancestors = self.ancestor_ids_for_tx(tx);
         self.check_ancestor_count_and_size(&ancestors, vsize)?;
         self.check_descendant_limits_excluding(&ancestors, excluded)?;
+        self.check_cluster_limits(tx, vsize, excluded)?;
         Ok(())
     }
 
@@ -1620,6 +1730,24 @@ impl From<OutPoint> for SpendingKey {
         key[32..].copy_from_slice(&outpoint.vout.to_le_bytes());
         Self(key)
     }
+}
+
+/// Applies both cluster limits to a candidate cluster's count and vsize.
+///
+/// Separate from the walk so the limits are checked in one place whether or
+/// not the candidate has any in-pool neighbours.
+const fn cluster_within_limits(
+    count: u32,
+    vsize: u64,
+    limits: &MempoolLimits,
+) -> Result<(), PolicyError> {
+    if count > limits.cluster_count {
+        return Err(PolicyError::ClusterCountLimit);
+    }
+    if vsize > limits.cluster_size_vbytes {
+        return Err(PolicyError::ClusterSizeLimit);
+    }
+    Ok(())
 }
 
 /// Heap a single transaction owns, beyond the `Tx` struct itself.
@@ -1809,10 +1937,14 @@ mod tests {
             7,
         ))?;
         pool.insert_entry(MempoolEntry::new(Arc::new(prioritised), 100, 100, 2, 7))?;
-        pool.insert_entry(MempoolEntry::new(Arc::new(removed), 100, 50, 3, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(removed.clone()), 100, 50, 3, 7))?;
 
         assert_eq!(pool.aggregate_fees(), u64::MAX);
-        assert!(!pool.remove_by_txid(&removed_txid).is_empty());
+        assert!(
+            !pool
+                .remove_for_block(&[&removed], &[removed_txid], 8)
+                .is_empty()
+        );
         assert_eq!(pool.aggregate_fees(), u64::MAX);
         pool.prioritise(prioritised_txid, -100)
             .expect("overlay delta applies");
@@ -2042,7 +2174,13 @@ mod tests {
 
         let low_a_tx = tx(2, Vec::new());
         let low_a_txid = low_a_tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(low_a_tx), 1_000, 1_500, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(low_a_tx.clone()),
+            1_000,
+            1_500,
+            1,
+            7,
+        ))?;
         assert_floor(&pool, Some(1_500), "insert lower rate");
 
         let low_b_tx = tx(3, Vec::new());
@@ -2050,9 +2188,9 @@ mod tests {
         pool.insert_entry(MempoolEntry::new(Arc::new(low_b_tx), 1_000, 1_500, 1, 7))?;
         assert_floor(&pool, Some(1_500), "duplicate min rate");
 
-        let removed = pool.remove_by_txid(&low_a_txid);
+        let removed = pool.remove_for_block(&[&low_a_tx], &[low_a_txid], 8);
         assert_eq!(removed.len(), 1);
-        assert_floor(&pool, Some(1_500), "explicit remove of one duplicate min");
+        assert_floor(&pool, Some(1_500), "block inclusion of one duplicate min");
 
         let evicted = pool.evict_below_fee_rate(2_000);
         assert_eq!(change_txids(&evicted), vec![hash_of(&low_b_txid)]);
@@ -2472,36 +2610,38 @@ mod tests {
     }
 
     #[test]
-    fn remove_by_txid_returns_empty_for_unknown_txid() {
+    fn block_inclusion_keeps_unmined_descendants() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
+        let parent = tx(13, Vec::new());
+        let parent_txid = parent.txid();
+        let child = tx(14, vec![OutPoint::new(parent_txid, 0)]);
+        let child_txid = child.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(parent.clone()),
+            100,
+            1_000,
+            1,
+            7,
+        ))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 7))?;
+        let child_id = pool
+            .entry_id_by_txid(&child_txid)
+            .expect("child id resolves");
 
-        let removed = pool.remove_by_txid(&txid_of([0_u8; 32]));
+        let removed = pool.remove_for_block(&[&parent], &[parent_txid], 8);
 
-        assert!(removed.is_empty());
-        assert_eq!(pool.len(), 0);
-    }
-
-    #[test]
-    fn remove_by_txid_removes_entry_and_descendants_when_present() -> Result<(), MempoolError> {
-        let mut pool = Mempool::new(MempoolLimits::default());
-        let tx = Tx {
-            version: 2,
-            lock_time: 0,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-        };
-        let txid = tx.txid();
-        let entry = MempoolEntry::new(Arc::new(tx), 123, 4_567, 0, 0);
-        pool.insert_entry(entry)?;
-
-        let removed = pool.remove_by_txid(&txid);
-
-        assert_eq!(removed.len(), 1);
         assert_eq!(
-            removed.changes.first().map(|change| change.txid),
-            Some(hash_of(&txid))
+            removed.changes,
+            vec![MutationChange {
+                txid: hash_of(&parent_txid),
+                outcome: MutationOutcome::Removed(RemovalReason::BlockInclusion),
+            }]
         );
-        assert_eq!(pool.len(), 0);
+        assert!(pool.contains_txid(&child_txid));
+        assert!(pool.ancestor_ids_for_entry(child_id).is_empty());
+        let incremental = totals(&pool);
+        pool.recompute_all_metadata();
+        assert_eq!(incremental, totals(&pool));
         Ok(())
     }
 
@@ -2722,7 +2862,7 @@ mod tests {
         pool.insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7))?;
         pool.prioritise(txid, 700).expect("delta applies");
 
-        assert!(!pool.remove_by_txid(&txid).is_empty());
+        assert!(!pool.evict_below_fee_rate(10_001).is_empty());
 
         pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
         let Some(entry) = pool.entry_by_txid(&txid) else {
@@ -2747,7 +2887,7 @@ mod tests {
         ))?;
         let child = tx(11, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(child.clone()), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7))?;
         // A delta stored for a transaction that never reached the pool.
         let stranger = tx(12, Vec::new());
         let stranger_txid = stranger.txid();
@@ -2762,21 +2902,24 @@ mod tests {
         let removed =
             pool.remove_for_block(&[&parent, &stranger], &[parent_txid, stranger_txid], 8);
 
-        assert_eq!(removed.len(), 2, "the parent leaves with its descendant");
+        assert_eq!(removed.len(), 1, "only the mined parent leaves");
+        assert_eq!(
+            removed.changes,
+            vec![MutationChange {
+                txid: hash_of(&parent_txid),
+                outcome: MutationOutcome::Removed(RemovalReason::BlockInclusion),
+            }]
+        );
         assert!(!pool.fee_deltas.contains_key(&parent_txid));
         assert!(!pool.fee_deltas.contains_key(&stranger_txid));
         assert_eq!(
             pool.fee_deltas.get(&child_txid).copied(),
             Some(200),
-            "a descendant removed for a mined parent was not confirmed itself"
+            "the unmined child keeps its overlay"
         );
+        assert!(pool.contains_txid(&child_txid));
 
         // Readmission answers from the surviving state alone.
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7))?;
-        assert_eq!(
-            pool.entry_by_txid(&child_txid).map(|entry| entry.fee_delta),
-            Some(200)
-        );
         pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7))?;
         assert_eq!(
             pool.entry_by_txid(&parent_txid)
@@ -3328,7 +3471,12 @@ mod tests {
     {
         for victim in 0..6_u32 {
             let (mut pool, _outs) = graph_pool()?;
-            let removed = pool.remove_entry_and_descendants(victim);
+            let Some(entry) = pool.entry(victim) else {
+                panic!("entry {victim} must be present in the fixture");
+            };
+            let tx = entry.tx.clone();
+            let txid = entry.txid;
+            let removed = pool.remove_for_block(&[&tx], &[txid], 8);
             assert!(
                 !removed.is_empty(),
                 "entry {victim} must be present in the fixture"
@@ -3460,13 +3608,21 @@ mod tests {
             .expect("prioritise down must apply");
         check(&pool, "a negative fee delta");
 
-        // `mid`: removing it takes the rest of the chain with it and leaves
-        // both a surviving parent and an unrelated entry behind.
+        // `mid`: only the mined entry leaves; its descendants stay, while
+        // both a surviving parent and an unrelated entry remain behind.
         let Some(victim_txid) = outs.get(1).map(|out| out.txid) else {
             panic!("fixture must hold a second entry");
         };
-        let removed = pool.remove_by_txid(&victim_txid);
+        let Some(victim) = pool.entry_by_txid(&victim_txid) else {
+            panic!("fixture must hold the victim entry");
+        };
+        let victim_tx = victim.tx.clone();
+        let removed = pool.remove_for_block(&[&victim_tx], &[victim_txid], 8);
         assert!(!removed.is_empty(), "the victim must actually be removed");
+        assert!(
+            outs.get(2).is_some_and(|out| pool.contains_txid(&out.txid)),
+            "the chain below the victim remains in the pool"
+        );
         check(&pool, "a removal");
 
         pool.clear();
@@ -3630,6 +3786,384 @@ mod spend_index_tests {
         (pool, root_txid)
     }
 
+    /// A cluster is a connected component, not an ancestor package.
+    ///
+    /// `child_a` and `child_b` both spend the root and neither is an ancestor
+    /// or a descendant of the other, so a walk that follows only the chain
+    /// through one transaction reports a smaller cluster than exists. That is
+    /// the whole difference between `cluster_ids_seeded_by` and
+    /// `metadata_closure`, and it is asserted against `metadata_closure`
+    /// directly so that reusing the wrong one fails here.
+    #[test]
+    fn a_cluster_holds_siblings_that_no_ancestor_walk_reaches() {
+        let (pool, root_txid) = graph_pool();
+        let child_a_txid = child_a_txid_of(&pool, root_txid);
+        let Some(child_a_id) = pool.entry_id_by_txid(&child_a_txid) else {
+            panic!("fixture child_a is missing");
+        };
+
+        let cluster = pool.cluster_ids_seeded_by(&[child_a_id], &HashSet::new());
+        let chain = pool.metadata_closure(&[child_a_id]);
+
+        assert_eq!(
+            cluster.len(),
+            pool.len(),
+            "the cluster must span the whole connected component"
+        );
+        assert!(
+            chain.len() < cluster.len(),
+            "this fixture must distinguish the two walks or it proves nothing: chain={} cluster={}",
+            chain.len(),
+            cluster.len()
+        );
+    }
+
+    /// Resolves `child_a` by structure rather than by a hard-coded txid: it is
+    /// the root's child that itself has a child.
+    fn child_a_txid_of(pool: &Mempool, root_txid: Txid) -> Txid {
+        let Some(root_id) = pool.entry_id_by_txid(&root_txid) else {
+            panic!("fixture root is missing");
+        };
+        for child in pool.child_ids(root_id) {
+            if !pool.child_ids(child).is_empty()
+                && let Some(entry) = pool.entry(child)
+            {
+                return entry.txid;
+            }
+        }
+        panic!("fixture has no grandchild-bearing child");
+    }
+
+    /// Admission refuses a transaction that would take the cluster over the
+    /// count limit, and admits the same one when the limit allows it.
+    #[test]
+    fn admission_refuses_a_transaction_over_the_cluster_count_limit() {
+        let confirmed = OutPoint::new(txid_of([9_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 4, 1);
+        let root_txid = root.txid();
+
+        let build = |limit: u32| {
+            let limits = MempoolLimits {
+                cluster_count: limit,
+                ..MempoolLimits::default()
+            };
+            let mut pool = Mempool::new(limits);
+            let root_entry = MempoolEntry::new(Arc::new(root.clone()), 100, 10_000, 1, 7);
+            let Ok(_id) = pool.insert_entry(root_entry) else {
+                panic!("root must be admitted");
+            };
+            // Two siblings spending distinct root outputs: neither is an
+            // ancestor of the other, so only a cluster walk counts them
+            // together.
+            let mut outcomes = Vec::new();
+            for vout in 0..2_u32 {
+                let child = tx_with(
+                    &[OutPoint::new(root_txid, vout)],
+                    1,
+                    u64::from(vout).saturating_add(2),
+                );
+                let entry = MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7);
+                outcomes.push(pool.insert_entry(entry));
+            }
+            outcomes
+        };
+
+        // Root plus two siblings is three: a limit of two must refuse the
+        // second sibling, and a limit of three must take it.
+        let refused = build(2);
+        assert!(refused[0].is_ok(), "the first sibling fits: {refused:?}");
+        assert!(
+            matches!(
+                refused[1],
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "the second sibling must be refused on cluster count: {refused:?}"
+        );
+
+        let accepted = build(3);
+        assert!(
+            accepted.iter().all(Result::is_ok),
+            "a limit of three admits the whole cluster: {accepted:?}"
+        );
+    }
+
+    /// Admission counts the candidate's cousins, not just its own chain.
+    ///
+    /// ```text
+    ///   A ──vout 0──> B ──vout 0──> D (candidate)
+    ///     ──vout 1──> C
+    /// ```
+    ///
+    /// Seeding from D's only parent B and walking ancestors-and-descendants
+    /// reaches `{A, B}` and stops: C is a sibling of B, so no chain through B
+    /// contains it. The real cluster is `{A, B, C}`, so D is the fourth
+    /// member and a limit of three must refuse it.
+    ///
+    /// This is the case that makes the walk load-bearing at the admission
+    /// site. A fixture where every transaction hangs directly off one root
+    /// cannot separate the two walks -- there the chain through the root
+    /// happens to be the whole component -- and swapping
+    /// `cluster_ids_seeded_by` for `metadata_closure` passes it.
+    #[test]
+    fn admission_counts_a_cousin_that_no_chain_through_the_parent_reaches() {
+        let confirmed = OutPoint::new(txid_of([17_u8; 32]), 0);
+        let a = tx_with(&[confirmed], 2, 1);
+        let a_txid = a.txid();
+        let b = tx_with(&[OutPoint::new(a_txid, 0)], 1, 2);
+        let b_txid = b.txid();
+        let c = tx_with(&[OutPoint::new(a_txid, 1)], 1, 3);
+        let d = tx_with(&[OutPoint::new(b_txid, 0)], 1, 4);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [a, b, c] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(d), 100, 10_000, 1, 7));
+        assert!(
+            matches!(
+                outcome,
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "C is in D's cluster although no chain through B reaches it: {outcome:?}"
+        );
+    }
+
+    /// The size limit is enforced independently of the count limit.
+    #[test]
+    fn admission_refuses_a_transaction_over_the_cluster_size_limit() {
+        let confirmed = OutPoint::new(txid_of([11_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 2, 1);
+        let root_txid = root.txid();
+
+        let limits = MempoolLimits {
+            // High enough that the count limit cannot be what refuses.
+            cluster_count: 100,
+            cluster_size_vbytes: 250,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(root), 200, 10_000, 1, 7))
+        else {
+            panic!("root must be admitted");
+        };
+        let child = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7));
+        assert!(
+            matches!(
+                outcome,
+                Err(MempoolError::Policy(PolicyError::ClusterSizeLimit))
+            ),
+            "200 + 100 vbytes exceeds a 250-vbyte cluster: {outcome:?}"
+        );
+    }
+
+    /// A transaction already spending the candidate's outputs joins its
+    /// cluster, so the candidate cannot be admitted by looking only upstream.
+    ///
+    /// Reachable in production: `insert_entry` documents that a transaction
+    /// can arrive after something that spends it, through orphan promotion or
+    /// out-of-order relay.
+    #[test]
+    fn a_cluster_includes_transactions_that_already_spend_the_candidate() {
+        let confirmed = OutPoint::new(txid_of([13_u8; 32]), 0);
+        let parent = tx_with(&[confirmed], 1, 1);
+        let parent_txid = parent.txid();
+        let child = tx_with(&[OutPoint::new(parent_txid, 0)], 1, 2);
+
+        let limits = MempoolLimits {
+            cluster_count: 1,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+
+        // The child lands first; nothing in the pool is its parent yet.
+        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7))
+        else {
+            panic!("the child must be admitted into an empty pool");
+        };
+        // Now its parent arrives. Seeding the walk from parents alone would
+        // find nothing and admit it into a cluster of two.
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7));
+        assert!(
+            matches!(
+                outcome,
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "the pre-existing spender must count toward the cluster: {outcome:?}"
+        );
+    }
+
+    /// The defaults are Bitcoin Core's, and the reader follows configuration
+    /// so `getmempoolinfo` cannot report a constant.
+    #[test]
+    fn cluster_limits_default_to_cores_values_and_follow_configuration() {
+        let pool = Mempool::new(MempoolLimits::default());
+        // Core `policy.h`: DEFAULT_CLUSTER_LIMIT{64} and
+        // DEFAULT_CLUSTER_SIZE_LIMIT_KVB{101}, the latter in kvB.
+        assert_eq!(pool.cluster_limits(), (64, 101_000));
+
+        let limits = MempoolLimits {
+            cluster_count: 7,
+            cluster_size_vbytes: 4_242,
+            ..MempoolLimits::default()
+        };
+        let configured = Mempool::new(limits);
+        assert_eq!(
+            configured.cluster_limits(),
+            (7, 4_242),
+            "the reader must follow configuration, or the RPC reports a constant"
+        );
+    }
+
+    /// A replacement that evicts a member of a cluster at the count limit
+    /// must be judged against the post-eviction cluster. Counting the
+    /// soon-removed original would reject a replacement that does not grow
+    /// the cluster.
+    #[test]
+    fn a_replacement_that_evicts_from_a_full_cluster_is_admitted() {
+        // root → A (RBF), root → B. Cluster {root, A, B} is at the limit
+        // of three. Replacing A with another spend of the same input leaves
+        // the cluster at three.
+        let confirmed = OutPoint::new(txid_of([21_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 2, 1);
+        let root_txid = root.txid();
+        let mut a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        a.inputs[0].sequence = 0xFFFF_FFFD;
+        let a_txid = a.txid();
+        let b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [root, a, b] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let replacement = tx_with(&[OutPoint::new(root_txid, 0)], 1, 4);
+        let result = pool.replace_transaction(
+            crate::ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1),
+            4,
+            7,
+            4,
+        );
+        assert!(
+            result.is_ok(),
+            "a replacement that evicts from a full cluster must be admitted, \
+             not rejected by the entries it removes: {result:?}"
+        );
+        assert!(
+            pool.entry_id_by_txid(&a_txid).is_none(),
+            "the replaced original must leave the pool"
+        );
+    }
+
+    /// Preview and admission must quote the same cluster-count verdict.
+    /// Ancestor and descendant limits are lifted so only the cluster check
+    /// can refuse.
+    #[test]
+    fn check_package_limits_rejects_a_cluster_only_violation() {
+        let confirmed = OutPoint::new(txid_of([23_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 3, 1);
+        let root_txid = root.txid();
+        let child_a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        let child_b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            max_ancestors: 100,
+            max_ancestor_size: 1_000_000,
+            max_descendants: 100,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [root, child_a, child_b] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let child_c = tx_with(&[OutPoint::new(root_txid, 2)], 1, 4);
+        let excluded: HashSet<EntryId> = HashSet::new();
+        let preview = pool.check_package_limits(&child_c, 100, &excluded);
+        assert!(
+            matches!(preview, Err(PolicyError::ClusterCountLimit)),
+            "the preview must reject a cluster-only violation: {preview:?}"
+        );
+
+        let admission = pool.insert_entry(MempoolEntry::new(Arc::new(child_c), 100, 10_000, 4, 7));
+        assert!(
+            matches!(
+                admission,
+                Err(MempoolError::Policy(PolicyError::ClusterCountLimit))
+            ),
+            "admission must reject on cluster count: {admission:?}"
+        );
+        assert_eq!(
+            preview.map_err(MempoolError::from).err(),
+            admission.err(),
+            "preview and admission must reject on the same error"
+        );
+    }
+
+    /// A replacement preview must exclude the evicted original the same way
+    /// admission does, or `testmempoolaccept` and `sendrawtransaction`
+    /// disagree on a replacement into a full cluster.
+    #[test]
+    fn check_package_limits_excludes_a_replacement_s_evictions() {
+        let confirmed = OutPoint::new(txid_of([27_u8; 32]), 0);
+        let root = tx_with(&[confirmed], 2, 1);
+        let root_txid = root.txid();
+        let mut a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
+        a.inputs[0].sequence = 0xFFFF_FFFD;
+        let a_txid = a.txid();
+        let b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
+
+        let limits = MempoolLimits {
+            cluster_count: 3,
+            ..MempoolLimits::default()
+        };
+        let mut pool = Mempool::new(limits);
+        for tx in [root, a, b] {
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            else {
+                panic!("the three-member cluster must be admitted under a limit of three");
+            };
+        }
+
+        let Some(a_id) = pool.entry_id_by_txid(&a_txid) else {
+            panic!("A must be in the pool");
+        };
+        let replacement = tx_with(&[OutPoint::new(root_txid, 0)], 1, 4);
+        let mut excluded = HashSet::new();
+        excluded.insert(a_id);
+
+        let preview = pool.check_package_limits(&replacement, 100, &excluded);
+        assert!(
+            preview.is_ok(),
+            "preview must project the post-eviction cluster: {preview:?}"
+        );
+        assert_eq!(
+            pool.check_package_limits(&replacement, 100, &HashSet::new()),
+            Err(PolicyError::ClusterCountLimit),
+            "without the exclusion the same replacement is over the limit"
+        );
+    }
+
     #[test]
     fn the_cached_txid_matches_a_recomputation() {
         let (pool, _root_txid) = graph_pool();
@@ -3727,16 +4261,20 @@ mod spend_index_tests {
     }
 
     #[test]
-    fn spender_txids_is_empty_once_the_spenders_are_gone() {
+    fn block_inclusion_removes_root_but_leaves_descendants() {
         let (mut pool, root_txid) = graph_pool();
-        let Some(root_id) = pool.entry_id_by_txid(&root_txid) else {
+        let Some(root) = pool.entry_by_txid(&root_txid) else {
             panic!("root missing from the fixture pool");
         };
-        let removed = pool.remove_entry_and_descendants(root_id);
+        let root_tx = root.tx.clone();
+        let before = pool.len();
+        let removed = pool.remove_for_block(&[&root_tx], &[root_txid], 8);
         assert!(!removed.is_empty());
-        // The root left with its descendants, so nothing is left to spend it.
+        // The root left, while its descendants remain as transactions that
+        // now spend confirmed outputs.
         assert!(pool.entry_id_by_txid(&root_txid).is_none());
-        assert!(pool.is_empty(), "the fixture is a single connected package");
+        assert_eq!(pool.len(), before - 1);
+        assert!(!pool.is_empty());
     }
 }
 

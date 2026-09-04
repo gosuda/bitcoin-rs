@@ -1,8 +1,8 @@
 //! Shared node state aggregating subsystem handles.
 //!
 //! V1 keeps this deliberately minimal: it owns the resolved [`NodeConfig`], the
-//! data-directory path, the open chainstate storage backend, and the replay log
-//! used by [`crate::crash_recovery`]. Subsystem wiring (chain / utxo / mempool
+//! data-directory path, and the open chainstate storage backend. Subsystem
+//! wiring (chain / utxo / mempool
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
 use arc_swap::ArcSwapOption;
@@ -13,6 +13,12 @@ use bitcoin_rs_rpc::context::{
     BlockBodyMetadata, BlockBodySource, BlockLog, NetworkState, PruneResult, PruneService,
     PruneServiceError, PruneStatus, ZmqNotification,
 };
+#[cfg(any(
+    not(feature = "rocksdb"),
+    not(feature = "fjall"),
+    not(feature = "redb"),
+    not(feature = "mdbx")
+))]
 use core::fmt;
 use core::mem::size_of;
 use crossbeam_channel::{Receiver, Sender};
@@ -29,7 +35,7 @@ use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
     PrunePolicy, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
-use bitcoin_rs_storage::{ColumnFamily, FlatFileBlockStore, KvStore, WriteBatch};
+use bitcoin_rs_storage::{ColumnFamily, FlatFileBlockStore, KvStore, StorageBackend, WriteBatch};
 use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 
@@ -349,6 +355,12 @@ pub enum ApplyError {
     /// not disconnect it, so the block must not be applied.
     #[error("undo persistence: {0}")]
     UndoPersistence(#[source] bitcoin_rs_storage::StorageError),
+    /// Journal durability or retention cannot recover within configured bounds.
+    ///
+    /// Refused before this block mutates chainstate; retry is safe after the
+    /// journal flushes or a checkpoint compacts retained segments.
+    #[error("chainstate journal backpressure stopped block apply: {0}")]
+    JournalBackpressure(String),
     /// A spent output had no resolved prevout, so the undo record would be
     /// unable to restore it.
     #[error("undo record cannot restore spent output {txid}:{vout}")]
@@ -485,9 +497,9 @@ impl NodeStorage {
         std::fs::create_dir_all(&chainstate_dir)
             .with_context(|| format!("create chainstate_dir {}", chainstate_dir.display()))?;
 
-        match config.storage_backend.as_str() {
+        match config.storage.backend {
             #[cfg(feature = "rocksdb")]
-            "rocksdb" => Ok(Self::RocksDb(Arc::new(
+            StorageBackend::RocksDb => Ok(Self::RocksDb(Arc::new(
                 bitcoin_rs_storage::RocksDbStore::open_with_cache(
                     &chainstate_dir,
                     chainstate_cache_bytes,
@@ -495,7 +507,7 @@ impl NodeStorage {
                 .map_err(anyhow::Error::new)?,
             ))),
             #[cfg(feature = "fjall")]
-            "fjall" => Ok(Self::Fjall(Arc::new(
+            StorageBackend::Fjall => Ok(Self::Fjall(Arc::new(
                 bitcoin_rs_storage::FjallStore::open_with_cache(
                     &chainstate_dir,
                     chainstate_cache_bytes,
@@ -503,7 +515,7 @@ impl NodeStorage {
                 .map_err(anyhow::Error::new)?,
             ))),
             #[cfg(feature = "redb")]
-            "redb" => Ok(Self::Redb(Arc::new(
+            StorageBackend::Redb => Ok(Self::Redb(Arc::new(
                 bitcoin_rs_storage::RedbStore::open_with_cache(
                     &chainstate_dir,
                     chainstate_cache_bytes,
@@ -511,13 +523,19 @@ impl NodeStorage {
                 .map_err(anyhow::Error::new)?,
             ))),
             #[cfg(feature = "mdbx")]
-            "mdbx" => Ok(Self::Mdbx(Arc::new(
+            StorageBackend::Mdbx => Ok(Self::Mdbx(Arc::new(
                 bitcoin_rs_storage::MdbxStore::open_with_cache(
                     &chainstate_dir,
                     chainstate_cache_bytes,
                 )
                 .map_err(anyhow::Error::new)?,
             ))),
+            #[cfg(any(
+                not(feature = "rocksdb"),
+                not(feature = "fjall"),
+                not(feature = "redb"),
+                not(feature = "mdbx")
+            ))]
             other => bail!(
                 "unsupported storage backend: {other} (compiled features = {CompiledStorageFeatures})"
             ),
@@ -676,6 +694,30 @@ impl NodeStorage {
         }
     }
 
+    fn journal_writer(
+        &self,
+        dir: cap_std::fs::Dir,
+        bootstrap: JournalBootstrap,
+    ) -> Result<crate::chainstate_journal::SharedJournalWriter> {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(feature = "fjall")]
+            Self::Fjall(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(feature = "redb")]
+            Self::Redb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(feature = "mdbx")]
+            Self::Mdbx(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
+        }
+    }
+
     #[cfg(test)]
     fn stored_prune_body(
         &self,
@@ -729,6 +771,47 @@ impl NodeStorage {
             _ => match *self {},
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct JournalBootstrap {
+    open_existing: bool,
+    base_generation: u64,
+    height: u32,
+    block_hash: [u8; 32],
+    prev_hash: [u8; 32],
+    chain_tx_count: u64,
+    config: crate::config::ChainstateJournalConfig,
+}
+
+fn build_journal_writer<S: KvStore + 'static>(
+    dir: cap_std::fs::Dir,
+    store: Arc<S>,
+    bootstrap: JournalBootstrap,
+) -> Result<crate::chainstate_journal::SharedJournalWriter> {
+    let mut writer = if bootstrap.open_existing {
+        crate::chainstate_journal::JournalWriter::open(dir, store)?
+    } else {
+        crate::chainstate_journal::JournalWriter::initialize(
+            dir,
+            store,
+            bootstrap.base_generation,
+            (0, 0),
+            bootstrap.height,
+            bootstrap.block_hash,
+            bootstrap.prev_hash,
+            bootstrap.chain_tx_count,
+        )?
+    };
+    writer.configure(
+        bootstrap.config.blocks,
+        Duration::from_secs(bootstrap.config.seconds),
+        bootstrap.config.rotate_mib,
+        bootstrap.config.max_journal_mib,
+        bootstrap.config.max_lag_blocks,
+        Duration::from_secs(bootstrap.config.max_lag_seconds),
+    )?;
+    Ok(crate::chainstate_journal::shared_journal_writer(writer))
 }
 
 struct StoredBlockBodySource {
@@ -810,6 +893,262 @@ const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
 pub(crate) enum ResumeSource {
     Cold,
     Checkpoint,
+    Journal,
+}
+
+pub(crate) const CHAINSTATE_JOURNAL_DIR: &str = crate::chainstate_journal::JOURNAL_DIR_NAME;
+
+fn requires_full_revalidation(data_dir: &Path) -> bool {
+    data_dir
+        .join(CHAINSTATE_JOURNAL_DIR)
+        .join(crate::chainstate_journal::FULL_REVALIDATION_MARKER)
+        .is_file()
+}
+
+struct InitialChainstate {
+    utxo: UtxoSet,
+    coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    tree: bitcoin_rs_chain::BlockTree,
+    applied_tip: Option<TipSnapshot>,
+    chain_tx_count: u64,
+    resume_source: ResumeSource,
+    journal_bootstrap: Option<JournalBootstrap>,
+}
+
+fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
+    let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+    std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
+    crate::checkpoint_fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
+}
+
+fn open_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
+    let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
+    std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
+    crate::checkpoint_fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
+}
+
+fn checkpoint_bootstrap(
+    restored: &crate::checkpoint::RestoredChainstate,
+    config: crate::config::ChainstateJournalConfig,
+    open_existing: bool,
+) -> Result<JournalBootstrap> {
+    let node = restored.tree.node(restored.applied_tip.tip_id)?;
+    let prev_hash = match node.parent {
+        Some(parent) => restored.tree.node(parent)?.hash.to_le_bytes(),
+        None => [0_u8; 32],
+    };
+    Ok(JournalBootstrap {
+        open_existing,
+        base_generation: restored.generation,
+        height: restored.applied_tip.height,
+        block_hash: restored.applied_tip.hash.to_le_bytes(),
+        prev_hash,
+        chain_tx_count: restored.chain_tx_count,
+        config,
+    })
+}
+
+fn restored_initial(
+    restored: crate::checkpoint::RestoredChainstate,
+    config: crate::config::ChainstateJournalConfig,
+    open_existing: bool,
+    resume_source: ResumeSource,
+) -> Result<InitialChainstate> {
+    let journal_bootstrap = config
+        .enabled
+        .then(|| checkpoint_bootstrap(&restored, config, open_existing))
+        .transpose()?;
+    Ok(InitialChainstate {
+        utxo: restored.utxo,
+        coin_stats: restored.coin_stats,
+        tree: restored.tree,
+        applied_tip: Some(restored.applied_tip),
+        chain_tx_count: restored.chain_tx_count,
+        resume_source,
+        journal_bootstrap,
+    })
+}
+
+fn cold_initial_chainstate(
+    config: &NodeConfig,
+    journal_config: crate::config::ChainstateJournalConfig,
+    reset_journal: bool,
+) -> Result<InitialChainstate> {
+    if journal_config.enabled && reset_journal {
+        drop(reset_journal_dir(&config.data_dir)?);
+    }
+    Ok(InitialChainstate {
+        utxo: UtxoSet::new(),
+        coin_stats: bitcoin_rs_utxo::stats::CoinStats::default(),
+        tree: bitcoin_rs_chain::BlockTree::new(),
+        applied_tip: None,
+        chain_tx_count: 0,
+        resume_source: ResumeSource::Cold,
+        journal_bootstrap: journal_config.enabled.then_some(JournalBootstrap {
+            open_existing: false,
+            base_generation: 0,
+            height: 0,
+            block_hash: config.network.genesis_block_hash().to_le_bytes(),
+            prev_hash: [0_u8; 32],
+            chain_tx_count: 1,
+            config: journal_config,
+        }),
+    })
+}
+
+fn prepare_initial_chainstate(
+    checkpoint_load: crate::checkpoint::CheckpointLoad,
+    checkpoint_data_dir: &cap_std::fs::Dir,
+    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    config: &NodeConfig,
+) -> Result<InitialChainstate> {
+    let journal_config = config.chainstate_journal;
+    if requires_full_revalidation(&config.data_dir) {
+        metrics::counter!(
+            "node.chainstate_journal.fallback_total",
+            "reason" => "full_revalidation_marker"
+        )
+        .increment(1);
+        tracing::warn!(
+            restore_source = "cold",
+            reason = "fork_below_checkpoint_base",
+            "chainstate restore requires full validation"
+        );
+        return cold_initial_chainstate(config, journal_config, false);
+    }
+    let crate::checkpoint::CheckpointLoad::Complete(restored) = checkpoint_load else {
+        if journal_config.enabled {
+            metrics::counter!(
+                "node.chainstate_journal.fallback_total",
+                "reason" => "no_checkpoint"
+            )
+            .increment(1);
+        }
+        tracing::info!(
+            restore_source = "cold",
+            reason = "no_complete_checkpoint",
+            "chainstate restore selected"
+        );
+        return cold_initial_chainstate(config, journal_config, true);
+    };
+    let restored = *restored;
+    if !journal_config.enabled {
+        tracing::info!(
+            restore_source = "checkpoint",
+            height = restored.applied_tip.height,
+            hash = %restored.applied_tip.hash,
+            chain_tx_count = restored.chain_tx_count,
+            reason = "journal_disabled",
+            "chainstate restore selected"
+        );
+        return restored_initial(restored, journal_config, false, ResumeSource::Checkpoint);
+    }
+
+    replay_checkpoint_journal(
+        restored,
+        checkpoint_data_dir,
+        checkpoint_config,
+        config,
+        journal_config,
+    )
+}
+
+fn replay_checkpoint_journal(
+    restored: crate::checkpoint::RestoredChainstate,
+    checkpoint_data_dir: &cap_std::fs::Dir,
+    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    config: &NodeConfig,
+    journal_config: crate::config::ChainstateJournalConfig,
+) -> Result<InitialChainstate> {
+    let base_generation = restored.generation;
+    let base_height = restored.applied_tip.height;
+    let journal_dir = open_journal_dir(&config.data_dir)?;
+    let replay_started = std::time::Instant::now();
+    let replay = crate::chainstate_journal::replay_from_journal(
+        &journal_dir,
+        base_generation,
+        restored.tree,
+        restored.utxo,
+        restored.coin_stats,
+        restored.applied_tip,
+        restored.chain_tx_count,
+    );
+    let replay_seconds = replay_started.elapsed().as_secs_f64();
+    metrics::histogram!("node.chainstate_journal.replay_seconds").record(replay_seconds);
+    drop(journal_dir);
+    match replay {
+        crate::chainstate_journal::ReplayOutcome::Replayed(replayed) => {
+            let replayed_records = replayed.applied_tip.height.saturating_sub(base_height);
+            let (restore_source, resume_source) = if replayed_records == 0 {
+                ("checkpoint", ResumeSource::Checkpoint)
+            } else {
+                ("journal", ResumeSource::Journal)
+            };
+            tracing::info!(
+                restore_source,
+                checkpoint_generation = base_generation,
+                checkpoint_height = base_height,
+                height = replayed.applied_tip.height,
+                hash = %replayed.applied_tip.hash,
+                replayed_records,
+                chain_tx_count = replayed.chain_tx_count,
+                replay_seconds,
+                "chainstate restore selected"
+            );
+            let bootstrap = JournalBootstrap {
+                open_existing: true,
+                base_generation,
+                height: replayed.applied_tip.height,
+                block_hash: replayed.applied_tip.hash.to_le_bytes(),
+                prev_hash: [0_u8; 32],
+                chain_tx_count: replayed.chain_tx_count,
+                config: journal_config,
+            };
+            Ok(InitialChainstate {
+                utxo: replayed.utxo,
+                coin_stats: replayed.coin_stats,
+                tree: replayed.tree,
+                applied_tip: Some(replayed.applied_tip),
+                chain_tx_count: replayed.chain_tx_count,
+                resume_source,
+                journal_bootstrap: Some(bootstrap),
+            })
+        }
+        crate::chainstate_journal::ReplayOutcome::Fallback(error) => {
+            let reason = error.reason();
+            metrics::counter!(
+                "node.chainstate_journal.fallback_total",
+                "reason" => reason
+            )
+            .increment(1);
+            if error.is_checksum_failure() {
+                metrics::counter!("node.chainstate_journal.checksum_failures_total").increment(1);
+            }
+            tracing::warn!(
+                restore_source = "checkpoint",
+                checkpoint_generation = base_generation,
+                checkpoint_height = base_height,
+                reason,
+                %error,
+                replay_seconds,
+                "chainstate journal rejected; checkpoint recovery selected"
+            );
+            drop(reset_journal_dir(&config.data_dir)?);
+            let reloaded = crate::checkpoint::load_checkpoint_from_dir(
+                checkpoint_data_dir,
+                checkpoint_config,
+            )?;
+            let crate::checkpoint::CheckpointLoad::Complete(reloaded) = reloaded else {
+                bail!("checkpoint disappeared while recovering from journal fallback");
+            };
+            restored_initial(*reloaded, journal_config, false, ResumeSource::Checkpoint)
+        }
+    }
 }
 
 fn load_pruneheight<S: KvStore>(store: &S) -> Result<Option<u32>> {
@@ -972,6 +1311,12 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
     }
 }
 
+#[cfg(any(
+    not(feature = "rocksdb"),
+    not(feature = "fjall"),
+    not(feature = "redb"),
+    not(feature = "mdbx")
+))]
 const COMPILED_STORAGE_FEATURES: &[&str] = &[
     #[cfg(feature = "rocksdb")]
     "rocksdb",
@@ -983,8 +1328,20 @@ const COMPILED_STORAGE_FEATURES: &[&str] = &[
     "mdbx",
 ];
 
+#[cfg(any(
+    not(feature = "rocksdb"),
+    not(feature = "fjall"),
+    not(feature = "redb"),
+    not(feature = "mdbx")
+))]
 struct CompiledStorageFeatures;
 
+#[cfg(any(
+    not(feature = "rocksdb"),
+    not(feature = "fjall"),
+    not(feature = "redb"),
+    not(feature = "mdbx")
+))]
 impl fmt::Display for CompiledStorageFeatures {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Some((first, rest)) = COMPILED_STORAGE_FEATURES.split_first() else {
@@ -1002,12 +1359,14 @@ impl fmt::Display for CompiledStorageFeatures {
 
 fn tx_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
     bitcoin_rs_index::IndexCapabilities {
-        // ScriptIndex-backed Esplora responses need exact historical
-        // transactions to render prevouts and calculate fees. This is an
-        // internal dependency; `tx_index_query` below still exposes it to Core
-        // RPCs only for an explicit --txindex configuration.
-        tx_lookup: config.txindex || config.script_index.is_enabled(),
-        script_history: config.script_index.keeps_history(),
+        // Full ScriptIndex-backed Esplora responses need exact historical
+        // transactions to render prevouts and calculate fees. `utxo` owns
+        // only the compact live-output view and must not pay for TxLookup.
+        // `tx_index_query` still exposes TxLookup to Core RPCs only for an
+        // explicit --txindex configuration.
+        tx_lookup: config.indexes.txindex || config.indexes.script_index.keeps_history(),
+        script_history: config.indexes.script_index.keeps_history(),
+        script_live: config.indexes.script_index.is_enabled(),
     }
 }
 
@@ -1020,18 +1379,24 @@ fn build_tx_index_open_spec(
     if enabled.is_empty() {
         return Ok(None);
     }
-    if config.prune_target_mb > 0 {
+    if config.storage.prune_target_mb > 0 {
         bail!("transaction and script indexing are not compatible with -prune");
     }
-    let batch_limits = match config.storage_backend.as_str() {
+    let batch_limits = match config.storage.backend {
         #[cfg(feature = "rocksdb")]
-        "rocksdb" => crate::txindex_worker::ROCKSDB_BATCH_LIMITS,
+        StorageBackend::RocksDb => crate::txindex_worker::ROCKSDB_BATCH_LIMITS,
         #[cfg(feature = "fjall")]
-        "fjall" => crate::txindex_worker::DEFAULT_BATCH_LIMITS,
+        StorageBackend::Fjall => crate::txindex_worker::DEFAULT_BATCH_LIMITS,
         #[cfg(feature = "redb")]
-        "redb" => crate::txindex_worker::REDB_BATCH_LIMITS,
+        StorageBackend::Redb => crate::txindex_worker::REDB_BATCH_LIMITS,
         #[cfg(feature = "mdbx")]
-        "mdbx" => crate::txindex_worker::DEFAULT_BATCH_LIMITS,
+        StorageBackend::Mdbx => crate::txindex_worker::DEFAULT_BATCH_LIMITS,
+        #[cfg(any(
+            not(feature = "rocksdb"),
+            not(feature = "fjall"),
+            not(feature = "redb"),
+            not(feature = "mdbx")
+        ))]
         other => bail!("unsupported storage backend for txindex: {other}"),
     };
     let canonical_data_root = config
@@ -1041,13 +1406,15 @@ fn build_tx_index_open_spec(
     Ok(Some(crate::txindex_worker::TxIndexOpenSpec {
         data_dir: config.data_dir.clone(),
         namespace: "txindex",
-        storage_backend: config.storage_backend.clone(),
+        storage_backend: config.storage.backend,
         cache_bytes: txindex_cache_bytes,
         batch_limits,
         epoch,
         enabled,
         rollback_rebuild_cutover: crate::txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
+        utxo: None,
+        chain_transition: None,
     }))
 }
 
@@ -1069,7 +1436,6 @@ pub struct NodeState {
     durable_tip_height: Arc<AtomicU32>,
     config: NodeConfig,
     data_dir: PathBuf,
-    checkpoint_data_dir: cap_std::fs::Dir,
     #[cfg(test)]
     resume_source: ResumeSource,
     storage: NodeStorage,
@@ -1115,7 +1481,6 @@ pub struct NodeState {
     chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
     apply_handles: crate::apply::ApplyHandles,
     sync: Arc<crate::BlockSync>,
-    replayed: Mutex<Vec<u32>>,
     /// Process-wide rollback-evidence warning snapshot (`ArcSwap`).
     warning_store: Arc<crate::recovery_evidence::WarningStore>,
 }
@@ -1156,7 +1521,7 @@ impl NodeState {
         // Divide the process cache budget across the persistent namespaces
         // that exist in this deployment. A disabled txindex share redistributes
         // to chainstate.
-        let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.dbcache_mb);
+        let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb);
         let cache_shares = bitcoin_rs_storage::split_cache_budget(
             cache_budget,
             !tx_index_capabilities(&config).is_empty(),
@@ -1172,27 +1537,38 @@ impl NodeState {
             .load_disconnect_marker()
             .map_err(anyhow::Error::new)?
         {
-            // Names directories rather than a `-reindex` option, because this
-            // node has no reindex. An instruction the operator cannot follow is
-            // worse than none.
-            //
-            // Remove the authoritative views. The marker covers a disconnect
-            // that did not reach a clean UTXO-and-tip checkpoint. TxIndex rows
-            // are derived state outside this marker, but a retained TxIndex
-            // watermark can stall rollback because wiping the chainstate
-            // removes the body positions the index refers to. Include the txindex
-            // path so the operator action is complete.
-            bail!(
-                "refusing to start: a disconnect of block {hash} at height {height} did not \
-                 reach a clean checkpoint, so the UTXO set and chain tip cannot be trusted \
-                 together. The node cannot repair this in place. Remove or quarantine \
-                 {chainstate}, {checkpoints}, and {txindex}, then resync.",
-                hash = marker.hash,
-                height = marker.height,
-                chainstate = config.data_dir.join("chainstate").display(),
-                checkpoints = config.data_dir.join("chainstate-checkpoints").display(),
-                txindex = config.data_dir.join("txindex").display(),
-            );
+            let force_full_revalidation = requires_full_revalidation(&config.data_dir);
+            if marker.phase == crate::apply::DisconnectPhase::RolledBack && force_full_revalidation
+            {
+                undo_store.disarm_disconnect().map_err(anyhow::Error::new)?;
+                tracing::warn!(
+                    height = marker.height,
+                    hash = %marker.hash,
+                    "accepting completed deep reorg; full chain validation is required"
+                );
+            } else {
+                // Names directories rather than a `-reindex` option, because this
+                // node has no reindex. An instruction the operator cannot follow is
+                // worse than none.
+                //
+                // Remove the authoritative views. The marker covers a disconnect
+                // that did not reach a clean UTXO-and-tip checkpoint. TxIndex rows
+                // are derived state outside this marker, but a retained TxIndex
+                // watermark can stall rollback because wiping the chainstate
+                // removes the body positions the index refers to. Include the txindex
+                // path so the operator action is complete.
+                bail!(
+                    "refusing to start: a disconnect of block {hash} at height {height} did not \
+                     reach a clean checkpoint, so the UTXO set and chain tip cannot be trusted \
+                     together. The node cannot repair this in place. Remove or quarantine \
+                     {chainstate}, {checkpoints}, and {txindex}, then resync.",
+                    hash = marker.hash,
+                    height = marker.height,
+                    chainstate = config.data_dir.join("chainstate").display(),
+                    checkpoints = config.data_dir.join("chainstate-checkpoints").display(),
+                    txindex = config.data_dir.join("txindex").display(),
+                );
+            }
         }
         let block_files =
             Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
@@ -1222,38 +1598,29 @@ impl NodeState {
             let _ = &zmq_endpoints;
             Arc::new(crate::NoOpZmqPublisher)
         };
-        let (
-            utxo_set,
-            initial_coin_stats,
-            block_tree_value,
-            restored_applied_tip,
-            restored_chain_tx_count,
+        let InitialChainstate {
+            utxo: mut utxo_set,
+            coin_stats: initial_coin_stats,
+            tree: block_tree_value,
+            applied_tip: restored_applied_tip,
+            chain_tx_count: restored_chain_tx_count,
             resume_source,
-        ) = match checkpoint_load {
-            crate::checkpoint::CheckpointLoad::Cold => (
-                bitcoin_rs_utxo::UtxoSet::new(),
-                bitcoin_rs_utxo::stats::CoinStats::default(),
-                bitcoin_rs_chain::BlockTree::new(),
-                None,
-                0,
-                ResumeSource::Cold,
-            ),
-            crate::checkpoint::CheckpointLoad::Complete(restored) => {
-                tracing::info!(
-                    height = restored.applied_tip.height,
-                    hash = %restored.applied_tip.hash,
-                    "restored chainstate checkpoint"
-                );
-                (
-                    restored.utxo,
-                    restored.coin_stats,
-                    restored.tree,
-                    Some(restored.applied_tip),
-                    restored.chain_tx_count,
-                    ResumeSource::Checkpoint,
-                )
-            }
-        };
+            journal_bootstrap,
+        } = prepare_initial_chainstate(
+            checkpoint_load,
+            &checkpoint_data_dir,
+            checkpoint_config,
+            &config,
+        )?;
+        if resume_source == ResumeSource::Checkpoint {
+            tracing::info!(
+                height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height),
+                hash = %restored_applied_tip
+                    .as_ref()
+                    .map_or_else(|| config.network.genesis_block_hash(), |tip| tip.hash),
+                "restored chainstate checkpoint"
+            );
+        }
         // A2: Create the process-wide rollback-evidence warning store before
         // any detection or worker spawn. One ArcSwap holds the complete
         // immutable snapshot; getblockchaininfo loads one per request.
@@ -1291,6 +1658,7 @@ impl NodeState {
                 let source = match resume_source {
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
+                    ResumeSource::Journal => "journal",
                 };
                 recovery_reporter
                     .report_checkpoint_fallback(
@@ -1312,10 +1680,9 @@ impl NodeState {
                         gap,
                         threshold = STALE_RESTORE_ERROR_THRESHOLD,
                         "stale checkpoint restore: chainstate is {gap} blocks behind \
-                         the last durable applied-tip witness — the node is proceeding \
-                         with a valid but far-behind tip; crash recovery will replay \
-                         the gap from stored bodies when present, otherwise the sync \
-                         layer must re-fetch it"
+                         the last durable applied-tip witness — no committed journal \
+                         suffix covers the gap, so the node is proceeding with a valid \
+                         but far-behind tip and the sync layer must re-fetch it"
                     );
                 }
             }
@@ -1333,6 +1700,13 @@ impl NodeState {
         };
         let coin_stats_listener =
             bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
+        utxo_set.set_listener(Box::new(coin_stats_listener.clone()));
+        let journal = match journal_bootstrap {
+            Some(bootstrap) => {
+                Some(storage.journal_writer(open_journal_dir(&config.data_dir)?, bootstrap)?)
+            }
+            None => None,
+        };
         let utxo = Arc::new(utxo_set);
         let coin_stats = Arc::new(coin_stats_listener);
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
@@ -1351,10 +1725,13 @@ impl NodeState {
             ChainEventPublisher::new(epoch, initial_snapshot);
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
+        let chain_transition = Arc::new(parking_lot::Mutex::new(()));
         let tx_index_open_spec = build_tx_index_open_spec(&config, txindex_cache_bytes, epoch)?;
         let (tx_index_runtime, tx_index_spawn, tx_index_lifecycle, tx_index_adapter) =
             match tx_index_open_spec {
-                Some(spec) => {
+                Some(mut spec) => {
+                    spec.utxo = Some(Arc::clone(&utxo));
+                    spec.chain_transition = Some(Arc::clone(&chain_transition));
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                     let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
                     let body_source: Arc<dyn bitcoin_rs_rpc::context::BlockBodySource> =
@@ -1390,7 +1767,7 @@ impl NodeState {
         let txindex_status = Arc::new(crate::txindex_worker::TxIndexCapability::new(
             tx_index_lifecycle.clone(),
             tx_index_runtime.clone(),
-            config.txindex || config.script_index.is_enabled(),
+            tx_index_capabilities(&config),
         ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let network_active = Arc::new(AtomicBool::new(true));
@@ -1435,7 +1812,7 @@ impl NodeState {
                 Arc::new(composite),
             )
         };
-        let apply_handles = crate::apply::ApplyHandles {
+        let mut apply_handles = crate::apply::ApplyHandles {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
@@ -1455,27 +1832,47 @@ impl NodeState {
             undo_store,
             admission: Arc::new(crate::apply::ApplyAdmission::new()),
             shutdown: Arc::clone(&shutdown),
-            chain_transition: Arc::new(parking_lot::Mutex::new(())),
-            assume_valid_height: config.assume_valid_height,
+            chain_transition,
+            assume_valid_height: config.validation.assume_valid_height,
             assume_valid_gate: Arc::new(crate::apply::AssumeValidGate::new(
                 config.network,
-                config.assume_valid_height,
+                config.validation.assume_valid_height,
             )),
-            recovery_meta_path: Some(config.data_dir.join(crate::crash_recovery::META_FILENAME)),
+            journal,
+            checkpoint_publisher: None,
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
+        // A restored checkpoint is durable at its own height by definition, so
+        // start there rather than at zero, which would refuse all undo pruning.
+        let durable_tip_height = Arc::new(AtomicU32::new(
+            applied_tip.load().as_ref().map_or(0, |tip| tip.height),
+        ));
+        apply_handles.checkpoint_publisher =
+            Some(Arc::new(crate::checkpoint_worker::CheckpointPublisher {
+                admission: Arc::clone(&apply_handles.admission),
+                undo_store: Arc::clone(&apply_handles.undo_store),
+                block_body_store: Arc::clone(&block_body_store),
+                applied_tip: Arc::clone(&applied_tip),
+                checkpoint_data_dir: crate::checkpoint_fs::open_data_dir(&config.data_dir)
+                    .with_context(|| format!("open data_dir {}", config.data_dir.display()))?,
+                network: config.network,
+                genesis_hash: config.network.genesis_block_hash(),
+                block_tree: Arc::clone(&block_tree),
+                utxo: Arc::clone(&utxo),
+                coin_stats: Arc::clone(&coin_stats),
+                chain_tx_count: Arc::clone(&chain_tx_count),
+                journal: apply_handles.journal.clone(),
+                data_dir: config.data_dir.clone(),
+                chain_events: Arc::clone(&chain_events),
+                durable_tip_height: Arc::clone(&durable_tip_height),
+            }));
         let sync = Arc::new(crate::BlockSync::new(
             apply_handles.clone(),
             Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
         ));
-        // A restored checkpoint is durable at its own height by definition, so
-        // start there rather than at zero, which would refuse all undo pruning.
-        let durable_tip_height = Arc::new(AtomicU32::new(
-            applied_tip.load().as_ref().map_or(0, |tip| tip.height),
-        ));
-        let prune_service = if config.prune_target_mb > 0 {
+        let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.prune_service(
                 &block_files,
                 &block_body_store,
@@ -1500,7 +1897,6 @@ impl NodeState {
             durable_tip_height,
             config,
             data_dir,
-            checkpoint_data_dir,
             #[cfg(test)]
             resume_source,
             storage,
@@ -1539,7 +1935,6 @@ impl NodeState {
             chain_event_hints_rx,
             apply_handles,
             sync,
-            replayed: Mutex::new(Vec::new()),
             warning_store,
         })
     }
@@ -1601,6 +1996,7 @@ impl NodeState {
             utxo: Arc::clone(&self.utxo),
             coin_stats: Arc::clone(&self.coin_stats),
             chain_tx_count: Arc::clone(&self.chain_tx_count),
+            journal: self.apply_handles.journal.clone(),
             data_dir: self.data_dir.clone(),
             chain_events: Arc::clone(&self.chain_events),
             durable_tip_height: Arc::clone(&self.durable_tip_height),
@@ -1634,64 +2030,7 @@ impl NodeState {
         &self,
     ) -> core::result::Result<crate::checkpoint::CheckpointWrite, crate::checkpoint::CheckpointError>
     {
-        let _exclusive_apply = self.apply_handles.admission.close();
-        if let Some(marker) = self.apply_handles.undo_store.load_disconnect_marker()?
-            && marker.phase == crate::apply::DisconnectPhase::InFlight
-        {
-            return Err(crate::checkpoint::CheckpointError::DisconnectInFlight {
-                hash: marker.hash,
-                height: marker.height,
-            });
-        }
-        // A checkpoint may name this tip only after body files then index rows sync.
-        self.block_body_store.sync()?;
-        let applied_tip = self.applied_tip.load_full();
-        let written = crate::checkpoint::write_checkpoint_from_dir(
-            &self.checkpoint_data_dir,
-            crate::checkpoint::HeaderCheckpointConfig {
-                network: self.config.network,
-                genesis: self.config.network.genesis_block_hash(),
-            },
-            &self.block_tree,
-            &self.utxo,
-            &self.coin_stats,
-            applied_tip.as_deref(),
-            self.chain_tx_count
-                .load(core::sync::atomic::Ordering::Relaxed),
-        )?;
-        // A2: Only after `CheckpointWrite::Published` and root fsync, write
-        // the applied-tip witness for the same captured tip. A witness failure
-        // is not swallowed: return a typed checkpoint error.
-        if let crate::checkpoint::CheckpointWrite::Published { .. } = written {
-            if let Some(tip) = applied_tip.as_ref() {
-                let genesis_hex = self.config.network.genesis_block_hash().to_string_be();
-                let witness = crate::recovery_evidence::AppliedTipWitness::new(
-                    genesis_hex,
-                    self.chain_events.epoch(),
-                    tip.height,
-                    tip.hash.to_string_be(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_secs()),
-                );
-                crate::recovery_evidence::write_witness(&self.data_dir, &witness)
-                    .map_err(|e| crate::checkpoint::CheckpointError::Invalid(e.to_string()))?;
-            }
-        }
-        // Remove the marker only after this checkpoint publishes the matching
-        // UTXO set and applied tip. TxIndex is outside the authoritative
-        // disconnect transaction and recovers from its own atomic capability watermarks.
-        self.apply_handles
-            .undo_store
-            .disarm_disconnect()
-            .map_err(crate::checkpoint::CheckpointError::from)?;
-        // Everything up to this tip is now recoverable, so undo records below it
-        // may be pruned. Published after the write, never before.
-        self.durable_tip_height.store(
-            applied_tip.as_ref().map_or(0, |tip| tip.height),
-            Ordering::Release,
-        );
-        Ok(written)
+        self.checkpoint_publisher()?.publish()
     }
 
     /// Returns the configured storage backend that was opened.
@@ -1715,7 +2054,7 @@ impl NodeState {
     /// Returns the node-owned complete transaction-index query adapter.
     #[must_use]
     pub fn tx_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery>> {
-        if !self.config.txindex {
+        if !self.config.indexes.txindex {
             return None;
         }
         self.tx_index_adapter.as_ref().map(|adapter| {
@@ -1739,7 +2078,7 @@ impl NodeState {
     /// Returns the node-owned complete generic script-index query adapter.
     #[must_use]
     pub fn script_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery>> {
-        if !self.config.script_index.is_enabled() {
+        if !self.config.indexes.script_index.is_enabled() {
             return None;
         }
         self.tx_index_adapter.as_ref().map(|adapter| {
@@ -1858,6 +2197,22 @@ impl NodeState {
     #[must_use]
     pub fn chain_tx_count_handle(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.chain_tx_count)
+    }
+
+    /// Shares the chain-transition mutex with the RPC layer.
+    ///
+    /// The applied tip and the cumulative transaction count are published one
+    /// after the other inside a transition. An RPC reader that takes this lock
+    /// sees the pair as the transition left it, rather than catching it halfway
+    /// through and reporting the new tip's height beside the old tip's count.
+    ///
+    /// Handing out the lock means an RPC read can wait for a connect to finish.
+    /// That is the trade Bitcoin Core already makes -- `getchaintxstats` holds
+    /// `cs_main` for its whole body -- and the wait here covers two atomic
+    /// loads rather than a whole handler.
+    #[must_use]
+    pub fn chain_transition_handle(&self) -> Arc<parking_lot::Mutex<()>> {
+        Arc::clone(&self.apply_handles.chain_transition)
     }
 
     /// Returns the shared block-records handle exposed to RPC handlers.
@@ -1985,30 +2340,6 @@ impl NodeState {
         Arc::clone(&self.sync)
     }
 
-    /// Heights walked by the most recent crash-recovery replay.
-    #[must_use]
-    pub fn replayed_heights(&self) -> Vec<u32> {
-        self.replayed.lock().clone()
-    }
-
-    /// Records a height in the in-memory replay log.
-    pub(crate) fn push_replayed(&self, height: u32) {
-        self.replayed.lock().push(height);
-    }
-
-    /// Test helper: writes the recovery metadata as if a block at `height`
-    /// had just been fully committed. Real block commits flow through the
-    /// `crates/utxo` listener; this helper exists so crash-recovery tests
-    /// can simulate a chain without bringing up the full subsystem stack.
-    pub fn record_synthetic_block_for_recovery(&self, height: u32) -> Result<()> {
-        let meta = crate::crash_recovery::Meta {
-            height,
-            last_committed_height: height,
-            tip_hash_hex: None,
-        };
-        crate::crash_recovery::write_meta(self, &meta)
-    }
-
     /// Returns the process-wide shutdown signal shared by all runtime workers.
     #[must_use]
     pub fn shutdown(&self) -> Arc<AtomicBool> {
@@ -2106,11 +2437,45 @@ impl Drop for NodeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin_rs_index::IndexCapabilities;
     use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
         Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, consensus_bytes,
     };
     use bitcoin_rs_rpc::context::BlockRecord;
+
+    #[test]
+    fn script_index_capabilities_match_the_storage_contract() {
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.indexes.txindex = false;
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        assert_eq!(tx_index_capabilities(&config), IndexCapabilities::NONE);
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
+        assert_eq!(
+            tx_index_capabilities(&config),
+            IndexCapabilities::SCRIPT_LIVE,
+            "utxo mode owns only the compact live-output view"
+        );
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Full;
+        assert_eq!(tx_index_capabilities(&config), IndexCapabilities::ALL);
+
+        config.indexes.txindex = true;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        assert_eq!(tx_index_capabilities(&config), IndexCapabilities::TX_LOOKUP);
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
+        assert_eq!(
+            tx_index_capabilities(&config),
+            IndexCapabilities {
+                tx_lookup: true,
+                script_history: false,
+                script_live: true,
+            }
+        );
+    }
 
     fn publish_applied_tip_height(state: &NodeState, height: u32) {
         let mut hash = [0_u8; 32];
@@ -2124,13 +2489,28 @@ mod tests {
     }
 
     #[test]
+    fn full_revalidation_marker_is_sticky_when_journal_is_disabled() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.chainstate_journal.enabled = false;
+        let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
+        let marker = journal_dir.join(crate::chainstate_journal::FULL_REVALIDATION_MARKER);
+        std::fs::create_dir_all(&journal_dir)?;
+        std::fs::write(&marker, b"force full validation\n")?;
+
+        assert!(requires_full_revalidation(&config.data_dir));
+        Ok(())
+    }
+
+    #[test]
     fn open_constructs_empty_handles() -> anyhow::Result<()> {
         use tempfile::tempdir;
 
         let dir = tempdir()?;
         let config = crate::NodeConfig {
             data_dir: dir.path().join("node"),
-            ..crate::NodeConfig::default()
+            ..crate::NodeConfig::default_for_network(crate::Network::Regtest)
         };
 
         let state = NodeState::open(config, None)?;
@@ -2154,7 +2534,7 @@ mod tests {
         let dir = tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let tree = state.block_tree();
 
@@ -2170,7 +2550,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let snapshot = state.coin_stats().snapshot();
         assert_eq!(
@@ -2185,7 +2565,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
 
         assert!(
@@ -2204,8 +2584,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = true;
+        config.p2p.listen.clear();
+        config.indexes.txindex = true;
         let mut state = NodeState::open(config, None)?;
         state.start_index_workers()?;
         let (Some(a), Some(b)) = (state.tx_index_query(), state.tx_index_query()) else {
@@ -2230,8 +2610,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = true;
+        config.p2p.listen.clear();
+        config.indexes.txindex = true;
         let mut state = NodeState::open(config, None)?;
 
         assert!(state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
@@ -2265,9 +2645,9 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = false;
-        config.script_index = crate::config::ScriptIndexMode::Full;
+        config.p2p.listen.clear();
+        config.indexes.txindex = false;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Full;
 
         let mut state = NodeState::open(config, None)?;
         state.start_index_workers()?;
@@ -2292,17 +2672,16 @@ mod tests {
     /// Opens a node in each accepted `scriptindex` mode and asserts the
     /// concrete answer for `unspent_outputs`, rather than only the `full` path.
     ///
-    /// This is the guard that the two accepted modes give distinct, concrete
-    /// answers instead of both degrading to `Retry`.
+    /// `utxo` must be independently usable while historical rows are absent;
+    /// this test pins that both enabled modes converge to a concrete answer.
     #[test]
     fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<()> {
         use bitcoin_rs_index::ScriptHash;
         use bitcoin_rs_rpc::context::TxQueryError;
 
-        // Genesis is applied in each case so the index worker has at least one
-        // block to index. Without it the worker never publishes a
-        // `ScriptHistory` watermark and every mode retries forever, which would
-        // make both cases indistinguishable.
+        // Genesis is applied in each case so the index worker has a published
+        // chain tip to anchor. The disabled case has no adapter; the enabled
+        // modes must publish their own capability watermarks independently.
         let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 
         // `disabled`: no script index at all, so no query adapter is handed
@@ -2310,9 +2689,9 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = false;
-        config.script_index = crate::config::ScriptIndexMode::Disabled;
+        config.p2p.listen.clear();
+        config.indexes.txindex = false;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
         let state = NodeState::open(config, None)?;
         let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
         assert!(
@@ -2321,14 +2700,46 @@ mod tests {
         );
         drop(state);
 
+        // `utxo`: the compact live-output view is independently usable while
+        // historical script rows are not maintained.
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p.listen.clear();
+        config.indexes.txindex = false;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
+        let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
+        let Some(query) = state.script_index_query() else {
+            panic!("utxo mode must hand out a script-index query adapter")
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match query.unspent_outputs(scripthash) {
+                Ok(records) => {
+                    assert!(records.is_empty(), "an unfunded script has no outputs");
+                    break;
+                }
+                Err(TxQueryError::Retry | TxQueryError::Unavailable(_)) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "utxo mode must converge on the live view"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("unexpected script-index error: {error}"),
+            }
+        }
+
         // `full`: the accepted mode. It converges on a concrete answer — an
         // empty set for an unfunded script — rather than retrying forever.
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = false;
-        config.script_index = crate::config::ScriptIndexMode::Full;
+        config.p2p.listen.clear();
+        config.indexes.txindex = false;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Full;
         let mut state = NodeState::open(config, None)?;
         state.start_index_workers()?;
         let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
@@ -2366,8 +2777,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = true;
+        config.p2p.listen.clear();
+        config.indexes.txindex = true;
 
         {
             let mut state = NodeState::open(config.clone(), None)?;
@@ -2385,9 +2796,9 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = true;
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.indexes.txindex = true;
+        config.storage.prune_target_mb = 1;
 
         let error = match NodeState::open(config, None) {
             Ok(_) => anyhow::bail!("txindex with pruning must be rejected"),
@@ -2407,7 +2818,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let sync_a = state.sync();
         let sync_b = state.sync();
@@ -2423,7 +2834,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
 
         assert!(
@@ -2440,7 +2851,7 @@ mod tests {
         let dir = tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
 
         assert!(
@@ -2457,7 +2868,7 @@ mod tests {
         let dir = tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
 
         assert!(state.peer_table().is_empty());
@@ -2469,7 +2880,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let publisher = state.zmq_publisher();
         // No-op publisher accepts publish calls silently.
@@ -2482,7 +2893,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         config.notifications.zmq = vec![
             crate::zmq_publisher::ZmqEndpointConfig {
                 endpoint: "inproc://state-zmq-block".to_owned(),
@@ -2525,7 +2936,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let tx1 = state.inbound_headers_sender();
         let tx2 = state.inbound_headers_sender();
@@ -2547,7 +2958,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let _tx1 = state.inbound_blocks_sender();
         let _tx2 = state.inbound_blocks_sender();
@@ -2559,7 +2970,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let tx = state.inbound_blocks_sender();
         let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -2585,7 +2996,7 @@ mod tests {
         let dir = tempdir()?;
         let config = crate::NodeConfig {
             data_dir: dir.path().join("node"),
-            ..crate::NodeConfig::default()
+            ..crate::NodeConfig::default_for_network(crate::Network::Regtest)
         };
 
         let state = NodeState::open(config, None)?;
@@ -2610,15 +3021,15 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("without-txindex");
-        config.p2p_listen.clear();
-        config.txindex = false;
+        config.p2p.listen.clear();
+        config.indexes.txindex = false;
         let state = NodeState::open(config, None)?;
         assert!(state.apply_handles().tx_index_runtime.is_none());
 
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("with-txindex");
-        config.p2p_listen.clear();
-        config.txindex = true;
+        config.p2p.listen.clear();
+        config.indexes.txindex = true;
         let state = NodeState::open(config, None)?;
         assert!(state.apply_handles().tx_index_runtime.is_some());
         Ok(())
@@ -2629,8 +3040,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 0;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 0;
 
         let state = NodeState::open(config, None)?;
 
@@ -2643,8 +3054,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 0;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 0;
         let state = NodeState::open(config, None)?;
         let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
@@ -2668,7 +3079,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[7_u8; 32]);
         let body = b"idempotent block body";
@@ -2692,7 +3103,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::write(config.data_dir.join(".CURRENT_SCHEMA.tmp"), b"partial")?;
 
@@ -2712,7 +3123,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("legacy-node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::write(config.data_dir.join("legacy-state"), b"old")?;
 
@@ -2734,7 +3145,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("old-node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::write(
             config
@@ -2763,16 +3174,16 @@ mod tests {
         let dir_a = tempfile::tempdir()?;
         let mut config_a = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config_a.data_dir = dir_a.path().join("node-a");
-        config_a.p2p_listen.clear();
-        config_a.prune_target_mb = 0;
+        config_a.p2p.listen.clear();
+        config_a.storage.prune_target_mb = 0;
         let state_a = NodeState::open(config_a, None)?;
         state_a.apply_block(&block)?;
 
         let dir_b = tempfile::tempdir()?;
         let mut config_b = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config_b.data_dir = dir_b.path().join("node-b");
-        config_b.p2p_listen.clear();
-        config_b.prune_target_mb = 0;
+        config_b.p2p.listen.clear();
+        config_b.storage.prune_target_mb = 0;
         let state_b = NodeState::open(config_b, None)?;
         crate::apply::apply_block_with_serialized(&state_b.apply_handles(), &block, serialized)?;
 
@@ -2801,7 +3212,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let expected = {
             let state = NodeState::open(config.clone(), None)?;
@@ -2852,8 +3263,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
 
@@ -2912,8 +3323,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
 
@@ -3004,8 +3415,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
         std::fs::create_dir_all(&config.data_dir)?;
         let blocks_dir = config.data_dir.join("blocks");
         std::fs::create_dir_all(&blocks_dir)?;
@@ -3078,8 +3489,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
 
         std::fs::create_dir_all(&config.data_dir)?;
 
@@ -3157,8 +3568,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
 
@@ -3212,8 +3623,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
 
         {
             let state = NodeState::open(config.clone(), None)?;
@@ -3243,8 +3654,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
         let state = NodeState::open(config.clone(), None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
         let Some(service) = state.prune_service() else {
@@ -3306,8 +3717,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.prune_target_mb = 1;
+        config.p2p.listen.clear();
+        config.storage.prune_target_mb = 1;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
         let Some(service) = state.prune_service() else {
@@ -3381,7 +3792,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut authority_config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         authority_config.data_dir = dir.path().join("authority");
-        authority_config.p2p_listen.clear();
+        authority_config.p2p.listen.clear();
         let authority_state = NodeState::open(authority_config, None)?;
         publish_applied_tip_height(&authority_state, 12 + CORE_REORG_SAFETY_MARGIN);
         let data_dir = dir.path().join("node");
@@ -3474,7 +3885,7 @@ mod tests {
         let data_dir = dir.path().join("node");
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         let genesis_tip = state.apply_block(&genesis)?;
@@ -3488,7 +3899,7 @@ mod tests {
 
         let mut reopen_config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         reopen_config.data_dir = data_dir.clone();
-        reopen_config.p2p_listen.clear();
+        reopen_config.p2p.listen.clear();
         let resumed = NodeState::open(reopen_config.clone(), None)?;
         assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
         let applied = resumed
@@ -3522,9 +3933,9 @@ mod tests {
             bitcoin_rs_utxo::stats::scan_coin_stats(view, next_tip.height, true)
         })?;
         rescanned.tx_count = listener_after_apply.tx_count;
-        assert_ne!(
+        assert_eq!(
             listener_after_apply.total_amount, rescanned.total_amount,
-            "default resume must not receive rolling UTXO notifications"
+            "checkpoint resume must keep rolling CoinStats attached to UTXO commits"
         );
         resumed.write_clean_checkpoint()?;
 
@@ -3565,8 +3976,8 @@ mod tests {
             let dir = tempfile::tempdir()?;
             let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
             config.data_dir = dir.path().join(backend);
-            config.storage_backend = backend.to_owned();
-            config.p2p_listen.clear();
+            config.storage.backend = backend.parse().map_err(anyhow::Error::msg)?;
+            config.p2p.listen.clear();
             let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
             let state = NodeState::open(config.clone(), None)?;
             state.apply_block(&genesis)?;
@@ -3586,7 +3997,7 @@ mod tests {
         let data_dir = dir.path().join("node-g2");
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         state.apply_block(&genesis)?;
@@ -3596,7 +4007,7 @@ mod tests {
 
         let mut reopen_config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         reopen_config.data_dir = data_dir;
-        reopen_config.p2p_listen.clear();
+        reopen_config.p2p.listen.clear();
         let resumed = NodeState::open(reopen_config, None)?;
         assert_eq!(resumed.coin_stats().snapshot(), before);
         resumed.apply_block(&mined_regtest_child(genesis.block_hash())?)?;
@@ -3605,12 +4016,60 @@ mod tests {
             bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
         })?;
         scanned.tx_count = rolling.tx_count;
-        // Rolling per-coin accumulation is off by design (89f1dac5): the live
-        // listener tracks height and tx count only, and totals come from the
-        // on-demand scan. This mirrors clean_checkpoint's assertion below.
-        assert_ne!(
+        // The listener is attached only after checkpoint/journal restoration,
+        // then tracks subsequent live UTXO mutations without double-counting
+        // the restored snapshot.
+        assert_eq!(
             rolling.total_amount, scanned.total_amount,
-            "default resume must not receive rolling UTXO notifications"
+            "restored state must receive subsequent rolling UTXO notifications"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
+        fn stable_hash(
+            view: &bitcoin_rs_utxo::UtxoSetView<'_>,
+        ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+            view.hash_serialized_3()
+        }
+
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("journal-resume");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir;
+        config.p2p.listen.clear();
+        config.chainstate_journal.blocks = 1;
+
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let first = NodeState::open(config.clone(), None)?;
+        first.apply_block(&genesis)?;
+        first.write_clean_checkpoint()?;
+        drop(first);
+
+        // The first reopen discards the pre-checkpoint journal generation and
+        // initializes one whose authenticated base is the published checkpoint.
+        let base = NodeState::open(config.clone(), None)?;
+        assert_eq!(base.resume_source(), ResumeSource::Checkpoint);
+        let child = mined_regtest_child(genesis.block_hash())?;
+        let expected_tip = base.apply_block(&child)?;
+        let expected_utxo = base.utxo().with_stable_view(stable_hash)?;
+        let expected_stats = base.coin_stats().snapshot();
+        let expected_tx_count = base.chain_tx_count_handle().load(Ordering::Relaxed);
+        drop(base);
+
+        let resumed = NodeState::open(config, None)?;
+        assert_eq!(resumed.resume_source(), ResumeSource::Journal);
+        let resumed_tip = resumed
+            .applied_tip()
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("journal replay did not publish a tip"))?;
+        assert_eq!(resumed_tip.as_ref(), &expected_tip);
+        assert_eq!(resumed.utxo().with_stable_view(stable_hash)?, expected_utxo);
+        assert_eq!(resumed.coin_stats().snapshot(), expected_stats);
+        assert_eq!(
+            resumed.chain_tx_count_handle().load(Ordering::Relaxed),
+            expected_tx_count
         );
         Ok(())
     }
@@ -3620,7 +4079,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         assert!(Arc::ptr_eq(
             &state.shutdown(),
@@ -3635,7 +4094,7 @@ mod tests {
         let data_dir = dir.path().join("node");
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         state.apply_block(&genesis)?;
@@ -3691,7 +4150,7 @@ mod tests {
         let data_dir = dir.path().join("node");
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config.clone(), None)?;
         state.apply_handles().undo_store.arm_disconnect(
             10,
@@ -3716,11 +4175,185 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("node");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir.clone();
+        config.p2p.listen.clear();
+        // Journal rewind disarms disconnect markers itself. These tests own the
+        // checkpoint-settlement path that remains when the journal cannot.
+        config.chainstate_journal.enabled = false;
+        let state = NodeState::open(config, None)?;
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        state.apply_block(&genesis)?;
+        let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+        state.apply_block(&block_one)?;
+        state.publish_checkpoint()?;
+
+        let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+        let block_two = mined_regtest_child_at(block_one.block_hash(), genesis.header.time + 2, 2)?;
+        state.apply_block(&block_two)?;
+
+        crate::reorg::invalidate_block(
+            &state.apply_handles(),
+            Hash256::from(block_two.block_hash()),
+        )?;
+
+        assert!(
+            state
+                .apply_handles()
+                .undo_store
+                .load_disconnect_marker()?
+                .is_none()
+        );
+        let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+        assert!(current_after > current_before);
+        assert_eq!(state.durable_tip_height.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn invalidate_block_settlement_failure_is_not_success() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("node");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir;
+        config.p2p.listen.clear();
+        config.chainstate_journal.enabled = false;
+        let state = NodeState::open(config.clone(), None)?;
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        state.apply_block(&genesis)?;
+        let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+        state.apply_block(&block_one)?;
+        state.publish_checkpoint()?;
+
+        let block_two = mined_regtest_child_at(block_one.block_hash(), genesis.header.time + 2, 2)?;
+        state.apply_block(&block_two)?;
+
+        crate::checkpoint::inject_next_checkpoint_failpoint(
+            crate::checkpoint::CheckpointFailpoint::ManifestWrite,
+        );
+        let result = crate::reorg::invalidate_block(
+            &state.apply_handles(),
+            Hash256::from(block_two.block_hash()),
+        );
+        let Err(crate::reorg::ReorgError::CheckpointSettlement(_)) = result else {
+            anyhow::bail!("expected CheckpointSettlement, got {result:?}");
+        };
+
+        let marker = state
+            .apply_handles()
+            .undo_store
+            .load_disconnect_marker()?
+            .ok_or_else(|| anyhow::anyhow!("settlement failure cleared the disconnect marker"))?;
+        assert_eq!(
+            marker.phase,
+            bitcoin_rs_storage::DisconnectPhase::RolledBack
+        );
+
+        drop(state);
+        let error = match NodeState::open(config, None) {
+            Ok(_) => anyhow::bail!("node reopened with unsettled RolledBack debt"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("did not reach a clean checkpoint"),
+            "startup refusal omitted the checkpoint debt: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("node");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir.clone();
+        config.p2p.listen.clear();
+        config.chainstate_journal.enabled = false;
+        let state = NodeState::open(config, None)?;
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        state.apply_block(&genesis)?;
+        let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+        state.apply_block(&block_one)?;
+        state.publish_checkpoint()?;
+
+        let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+
+        let genesis_id = state
+            .block_tree
+            .read()
+            .lookup(Hash256::from(genesis.block_hash()))
+            .ok_or_else(|| anyhow::anyhow!("missing genesis node"))?;
+        let mut parent = genesis_id;
+        let mut previous_hash = genesis.block_hash();
+        let mut fork_bodies = HashMap::new();
+        for height in 1..=2 {
+            let block =
+                mined_regtest_child_at(previous_hash, genesis.header.time + 10 + height, height)?;
+            let node_id = state.block_tree.write().insert_node(
+                Some(parent),
+                block.header,
+                bitcoin_rs_chain::node::NodeStatus::HeaderValid,
+            )?;
+            fork_bodies.insert(
+                Hash256::from(block.block_hash()),
+                (block.clone(), bytes::Bytes::from(consensus_bytes(&block))),
+            );
+            parent = node_id;
+            previous_hash = block.block_hash();
+        }
+
+        let handles = state.apply_handles();
+        crate::reorg::switch_to_branch(
+            &handles,
+            parent,
+            |hash| fork_bodies.get(&hash).cloned(),
+            |_| {},
+        )?;
+
+        assert!(
+            state
+                .apply_handles()
+                .undo_store
+                .load_disconnect_marker()?
+                .is_none()
+        );
+        let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+        assert!(current_after > current_before);
+        assert_eq!(state.durable_tip_height.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[test]
     fn publish_checkpoint_refuses_when_no_applied_tip() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
         let Err(error) = state.publish_checkpoint() else {
             anyhow::bail!("checkpoint publication succeeded without an applied tip");
@@ -3738,7 +4371,7 @@ mod tests {
         let data_dir = dir.path().join("node");
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir;
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
         let state = NodeState::open(config.clone(), None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         let tip = state.apply_block(&genesis)?;
@@ -3765,7 +4398,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let first = NodeState::open(config.clone(), None)?
             .active_chain_snapshot()
@@ -3791,7 +4424,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let state = NodeState::open(config.clone(), None)?;
         let epoch = state.chain_event_publisher().epoch();
@@ -3813,7 +4446,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let (tip, first_epoch) = {
             let state = NodeState::open(config.clone(), None)?;
@@ -3849,7 +4482,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let state = NodeState::open(config, None)?;
         let publisher = state.chain_event_publisher();
@@ -3911,7 +4544,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let state = NodeState::open(config, None)?;
         let publisher = state.chain_event_publisher();
@@ -3978,7 +4611,7 @@ mod tests {
 
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir;
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let Err(error) = NodeState::open(config, None) else {
             anyhow::bail!("a corrupt process-epoch file must refuse startup");
@@ -4113,7 +4746,7 @@ mod tests {
 
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let Err(error) = NodeState::open(config, None) else {
             anyhow::bail!("a symlinked epoch lock must refuse startup");
@@ -4132,6 +4765,7 @@ mod tests {
 
     #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
+    #[cfg(not(target_vendor = "apple"))]
     fn non_regular_epoch_lock_refuses_start() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let data_dir = dir.path().join("node");
@@ -4146,7 +4780,7 @@ mod tests {
 
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let Err(error) = NodeState::open(config, None) else {
             anyhow::bail!("a non-regular epoch lock must refuse startup");
@@ -4164,12 +4798,23 @@ mod tests {
     }
 
     fn mined_regtest_child(prev_blockhash: BlockHash) -> anyhow::Result<Block> {
+        mined_regtest_child_at(prev_blockhash, 1_296_688_603, 1)
+    }
+
+    fn mined_regtest_child_at(
+        prev_blockhash: BlockHash,
+        time: u32,
+        height: u32,
+    ) -> anyhow::Result<Block> {
+        let mut script_sig = vec![8];
+        script_sig.extend_from_slice(&height.to_le_bytes());
+        script_sig.extend_from_slice(&time.to_le_bytes());
         let coinbase = Tx {
             version: 2,
             lock_time: 0,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![1, 1],
+                script_sig,
                 sequence: u32::MAX,
                 witness: Vec::new(),
             }],
@@ -4183,7 +4828,7 @@ mod tests {
                 version: 1,
                 prev_blockhash,
                 merkle_root: Hash256::default(),
-                time: 1_296_688_603,
+                time,
                 bits: 0x207f_ffff,
                 nonce: 0,
             },
@@ -4252,7 +4897,7 @@ mod tests {
         let data_dir = dir.path().join("node");
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
+        config.p2p.listen.clear();
 
         let state = NodeState::open(config.clone(), None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -4279,7 +4924,7 @@ mod tests {
         let data_dir2 = dir2.path().join("node");
         let mut config2 = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config2.data_dir = data_dir2.clone();
-        config2.p2p_listen.clear();
+        config2.p2p.listen.clear();
 
         let state2 = NodeState::open(config2.clone(), None)?;
         let genesis2 = bitcoin_rs_primitives::Network::Regtest.genesis_block();
@@ -4313,8 +4958,8 @@ mod tests {
         let data_dir = dir.path().join("node");
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = data_dir.clone();
-        config.p2p_listen.clear();
-        config.script_index = crate::config::ScriptIndexMode::Disabled;
+        config.p2p.listen.clear();
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
 
         // Apply genesis and publish a checkpoint at height 0.
         let state = NodeState::open(config.clone(), None)?;

@@ -76,14 +76,15 @@ Configuration defaults:
 | Flag | Default |
 |---|---|
 | `--data-dir` | `.bitcoin-rs` |
-| `--network` | `mainnet` (`mainnet`, `testnet3`, `testnet4`, `signet`, `regtest`) |
+| `--network` | `mainnet` (`mainnet`, `testnet3`, `testnet4`, `signet`, `regtest`, `drynet4`) |
 | `--storage-backend` | `fjall` |
 | `--rpc-bind` | `127.0.0.1:8332` on mainnet, network Core port otherwise |
+| `--rest` | off (enables unauthenticated Core-compatible REST routes on the RPC port) |
 | `--rpc-user` / `--rpc-password` | `bitcoin-rs` / `bitcoin-rs` |
 | `--dbcache-mb` | 450 (split 80/20 across chainstate and txindex when enabled, with disabled shares going to chainstate) |
 | `--prune-target-mb` | 0 (no pruning) |
 | `--txindex` | off |
-| `--scriptindex` | off |
+| `--scriptindex` | off (accepts `full` or boolean; defaults to `full` when passed without a value) |
 | `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` consensus engine |
 
 The node logs its startup banner, effective cache allocation, and the address
@@ -93,7 +94,8 @@ the JSON-RPC listener bound to.
 `--scriptindex` enables address and scripthash UTXO queries and confirmed
 funding/spending history exposed via Esplora-compatible HTTP endpoints.
 Address and scripthash routes return HTTP 503 until `--scriptindex` catches up,
-or when it is disabled.
+or when it is disabled. `--rest` enables the unauthenticated Core REST gateway
+(`/rest/tx`, `/rest/block`, `/rest/headers`, etc.) alongside JSON-RPC.
 
 The datadir schema marker covers the transaction and script indexes as well as
 chainstate. An unmarked or incompatible datadir fails before any derived index

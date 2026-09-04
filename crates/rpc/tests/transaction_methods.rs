@@ -10,7 +10,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use bitcoin_rs_mempool::MempoolEntry;
+use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 use bitcoin_rs_primitives::{
     Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
 };
@@ -141,6 +141,9 @@ fn sendrawtransaction_rejects_missing_inputs() {
     assert_eq!(err.code(), RpcError::CORE_VERIFY_REJECTED);
 }
 
+/// POL-01 (`docs/policies/mempool-policy.md`, Duplicate submission):
+/// re-submitting a transaction that is still in the mempool succeeds
+/// without error and without a second insert.
 #[test]
 fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -160,6 +163,45 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn 
     // Second submission should succeed without error.
     let result = handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
     assert_eq!(result.as_str(), Some(txid.to_string().as_str()));
+    Ok(())
+}
+
+/// POL-01 (`docs/policies/mempool-policy.md`, Duplicate submission): a
+/// transaction the mempool evicted after an earlier `sendrawtransaction`
+/// must be admitted again on resubmission. Wallets rebroadcast unconfirmed
+/// transactions; a success reply that leaves the pool untouched would make
+/// that rebroadcast a silent no-op.
+#[test]
+fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
+    let prevout = fund_utxo(&ctx, 0x44, 10_000);
+    let tx = make_tx(prevout, 9_000, script);
+    let txid = tx.txid();
+    let raw = hex_encode(&consensus_bytes(&tx));
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
+    assert!(ctx.mempool.read().contains_txid(&txid), "first admission");
+
+    // Policy eviction (fee-rate trim), not an RBF replacement: the
+    // transaction is still valid and must be admitted again.
+    let removed = ctx
+        .mempool
+        .evict_below_fee_rate(AdmissionOrigin::Rpc, u64::MAX);
+    assert!(
+        !removed.changes.is_empty(),
+        "the eviction must have removed the entry"
+    );
+    assert!(!ctx.mempool.read().contains_txid(&txid));
+
+    let result = handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
+    assert_eq!(result.as_str(), Some(txid.to_string().as_str()));
+    assert!(
+        ctx.mempool.read().contains_txid(&txid),
+        "resubmitting an evicted transaction must admit it again, not report success silently"
+    );
     Ok(())
 }
 

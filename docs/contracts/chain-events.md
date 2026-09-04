@@ -75,7 +75,10 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `RolledBack` means the in-memory UTXO set and applied tip moved together
   and still need one clean checkpoint. Startup refuses either phase and names
   the directories to remove. Only the checkpoint that publishes the
-  rolled-back authoritative state may remove the marker.
+  rolled-back authoritative state may remove the marker. The reorg owner
+  (`invalidate_block`, `switch_to_branch`) settles this debt before reporting
+  success; a checkpoint publication failure is `ReorgError::CheckpointSettlement`
+  and leaves the marker in place.
 - `ChainChangeProof` binds a `ChainTransition` to the `ChainChangeGuard`
   that reserved the active odd generation. Apply-path functions accept
   `&ChainChangeProof`, not independent `&ChainTransition` and
@@ -87,10 +90,20 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   through the `KvStore::write` path; `InMemoryUndoStore` is the test
   default. The marker lives in the `UndoData` column family.
 
+### Startup crash recovery
+
+On daemon start, `NodeState::open` restores the authenticated checkpoint
+and, when enabled, replays the journal's committed suffix
+(`docs/chainstate-recovery.md`) before `NodeState::start_index_workers`
+(`crates/node/src/run.rs`). Chain-event consumers therefore reconcile
+against a restored applied tip. The V1 recovery-meta sidecar is neither
+authoritative nor read. System-level convergence after crash, checkpoint
+fallback, and reorg is owned by [recovery.md](recovery.md).
+
 ## Live gaps
 
 - **Cross-crate lifecycle boundary**: Slimming `crates/node` orchestration and shifting domain-owned mechanics to their respective crates is tracked under #217 (open).
-- **Full-stack crash convergence**: System-level convergence rules across chainstate checkpoints, block data, and secondary indexes are normative in [recovery.md](recovery.md). The recovery-meta sidecar protocol (`crates/node/src/crash_recovery.rs`) and the recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) are unit-proven; full-stack `kill -9` convergence with real block-body re-application is not yet exercised by a gate.
+- **Full-stack crash convergence**: System-level convergence rules across chainstate checkpoints, block data, and secondary indexes are normative in [recovery.md](recovery.md). Chainstate restart uses the authenticated checkpoint plus the redo-only journal contract in `docs/chainstate-recovery.md`; `crates/node/tests/crash_recovery.rs` exercises process `SIGKILL` boundaries, journal replay, reorg rewind/fallback, and upgrade compatibility. The retired recovery-meta sidecar is neither authoritative nor read, while the recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) remains proven by G11. End-to-end convergence spanning real block-body and secondary-index replay remains a live gap.
 
 ## Proven by
 
@@ -109,12 +122,10 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `stable_generation_is_even_before_and_after_connect`,
   `stable_generation_is_even_after_disconnect`.
 - `crates/node/src/state.rs`:
-  `checkpoint_refuses_inflight_disconnect_and_preserves_state`.
-- `crates/node/tests/crash_recovery.rs` (G11):
-  `recovery_replays_from_last_committed_height_to_tip`,
-  `recovery_meta_write_leaves_readable_sidecar_without_tmp`,
-  `torn_meta_after_crash_is_refused`,
-  `stale_tmp_after_crash_does_not_corrupt_recovery`.
+  `checkpoint_refuses_inflight_disconnect_and_preserves_state`,
+  `invalidate_block_settles_disconnect_debt`,
+  `invalidate_block_settlement_failure_is_not_success`,
+  `switch_to_branch_settles_disconnect_debt`.
 - `crates/node/src/recovery_evidence.rs` tests (G11):
   `witness_round_trips_and_falls_back_to_prev`,
   `foreign_genesis_current_cannot_displace_valid_prev`,

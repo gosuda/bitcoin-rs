@@ -215,6 +215,31 @@ impl Shard {
         }
     }
 
+    pub(crate) fn scan_all(&self, scan: &mut UtxoScan) {
+        let table = self.inner.read();
+        for record in &table.table {
+            for output in record.outputs() {
+                scan.txouts = scan.txouts.saturating_add(1);
+                scan.unspents.push(ScannedUtxo {
+                    outpoint: OutPoint::new(record.txid().into(), output.vout),
+                    txout: txout_from_parts(output.value, output.script_pubkey),
+                    coinbase: output.coinbase,
+                    height: output.height,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn for_each_all(&self, mut f: impl FnMut(&OutPoint, &[u8])) {
+        let table = self.inner.read();
+        for record in &table.table {
+            for output in record.outputs() {
+                let outpoint = OutPoint::new(record.txid().into(), output.vout);
+                f(&outpoint, output.script_pubkey);
+            }
+        }
+    }
+
     pub(crate) fn record_count(&self) -> usize {
         let table = self.inner.read();
         table.record_count()

@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use bitcoin_rs::bitcoin_conf;
-use bitcoin_rs_node::{Auth, Network, NodeConfig, UserConfig};
+use bitcoin_rs_node::{Auth, Network, resolve};
 use std::fs;
 
 #[test]
@@ -24,13 +24,13 @@ fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Mainnet)?;
-    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
+    let config = resolve(&[&layer])?;
 
-    assert_eq!(config.prune_target_mb, 550);
-    assert_auth(&config.rpc_auth, "foo", "bar");
-    assert!(config.p2p_listen.is_empty());
-    assert!(config.txindex);
-    assert_eq!(config.dbcache_mb, 768);
+    assert_eq!(config.storage.prune_target_mb, 550);
+    assert_auth(&config.rpc.auth, "foo", "bar");
+    assert!(config.p2p.listen.is_empty());
+    assert!(config.indexes.txindex);
+    assert_eq!(config.storage.dbcache_mb, 768);
     Ok(())
 }
 
@@ -50,10 +50,10 @@ fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Resu
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Regtest)?;
-    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
+    let config = resolve(&[&layer])?;
 
-    assert_eq!(config.prune_target_mb, 900);
-    assert_auth(&config.rpc_auth, "regtest-user", "regtest-pass");
+    assert_eq!(config.storage.prune_target_mb, 900);
+    assert_auth(&config.rpc.auth, "regtest-user", "regtest-pass");
     Ok(())
 }
 
@@ -76,7 +76,7 @@ fn bitcoin_conf_zmq_keys_are_not_promoted_into_node_config() -> Result<()> {
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Regtest)?;
-    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
+    let config = resolve(&[&layer])?;
 
     assert!(config.notifications.zmq.is_empty());
     Ok(())
@@ -94,10 +94,10 @@ assumevalid=0000000000000000000000000000000000000000000000000000000000000000
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Mainnet)?;
-    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
+    let config = resolve(&[&layer])?;
 
     assert_eq!(
-        config.assume_valid_height,
+        config.validation.assume_valid_height,
         Network::Mainnet
             .assume_valid_anchor()
             .map_or(0, |(height, _)| height),

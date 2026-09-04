@@ -10,10 +10,8 @@ use bitcoin_rs_chain::{
     node::{BlockHeader, NodeId},
     softfork_state,
 };
-use bitcoin_rs_consensus::locktime_cutoff;
+use bitcoin_rs_consensus::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 use bitcoin_rs_primitives::{Hash256, Network};
-
-const MTP_WINDOW: usize = 11;
 
 /// Contextual facts for the block that would extend `previous_tip_id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,7 +61,7 @@ impl MiningChainContext {
             })?;
         let softfork = softfork_state(tree, network, Some(previous_tip_id), height);
         let prev_median_time_past = tree
-            .median_time_past_at(previous_tip_id, MTP_WINDOW)
+            .median_time_past_at(previous_tip_id, MEDIAN_TIME_PAST_WINDOW)
             .ok_or(ChainError::UnknownNode {
                 id: previous_tip_id,
             })?;

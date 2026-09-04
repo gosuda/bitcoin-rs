@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_rpc::context::BlockLog;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -24,13 +24,15 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> TxIndexOpenSpec {
     TxIndexOpenSpec {
         data_dir: dir.to_path_buf(),
         namespace: "txindex",
-        storage_backend: "fjall".to_owned(),
+        storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,
         cache_bytes: 8 * 1024 * 1024,
         batch_limits: DEFAULT_BATCH_LIMITS,
         epoch,
         enabled: IndexCapabilities::default(),
         rollback_rebuild_cutover: 0,
         canonical_data_root: dir.to_path_buf(),
+        utxo: None,
+        chain_transition: None,
     }
 }
 
@@ -391,11 +393,12 @@ fn async_index_open_preserves_backend() {
         let fjall_dir = dir.path().join("txindex-fjall");
         std::fs::create_dir_all(&fjall_dir).expect("create fjall dir");
         let result = open_tx_index_on_worker(
-            "fjall",
+            bitcoin_rs_storage::StorageBackend::Fjall,
             &fjall_dir,
             8 * 1024 * 1024,
             DEFAULT_BATCH_LIMITS,
             1,
+            Duration::ZERO,
         );
         assert!(
             result.is_ok(),
@@ -408,8 +411,14 @@ fn async_index_open_preserves_backend() {
     {
         let redb_dir = dir.path().join("txindex-redb");
         std::fs::create_dir_all(&redb_dir).expect("create redb dir");
-        let result =
-            open_tx_index_on_worker("redb", &redb_dir, 8 * 1024 * 1024, REDB_BATCH_LIMITS, 1);
+        let result = open_tx_index_on_worker(
+            bitcoin_rs_storage::StorageBackend::Redb,
+            &redb_dir,
+            8 * 1024 * 1024,
+            REDB_BATCH_LIMITS,
+            1,
+            Duration::ZERO,
+        );
         assert!(
             result.is_ok(),
             "redb backend open must succeed: {:?}",
@@ -422,11 +431,12 @@ fn async_index_open_preserves_backend() {
         let rocks_dir = dir.path().join("txindex-rocksdb");
         std::fs::create_dir_all(&rocks_dir).expect("create rocksdb dir");
         let result = open_tx_index_on_worker(
-            "rocksdb",
+            bitcoin_rs_storage::StorageBackend::RocksDb,
             &rocks_dir,
             8 * 1024 * 1024,
             ROCKSDB_BATCH_LIMITS,
             1,
+            Duration::ZERO,
         );
         assert!(
             result.is_ok(),
@@ -439,8 +449,14 @@ fn async_index_open_preserves_backend() {
     {
         let mdbx_dir = dir.path().join("txindex-mdbx");
         std::fs::create_dir_all(&mdbx_dir).expect("create mdbx dir");
-        let result =
-            open_tx_index_on_worker("mdbx", &mdbx_dir, 8 * 1024 * 1024, DEFAULT_BATCH_LIMITS, 1);
+        let result = open_tx_index_on_worker(
+            bitcoin_rs_storage::StorageBackend::Mdbx,
+            &mdbx_dir,
+            8 * 1024 * 1024,
+            DEFAULT_BATCH_LIMITS,
+            1,
+            Duration::ZERO,
+        );
         assert!(
             result.is_ok(),
             "mdbx backend open must succeed: {:?}",
@@ -603,21 +619,17 @@ fn open_timeout_publishes_error_not_infinite_spin() {
     // Simulate a stuck open: the helper thread will sleep 10 seconds before
     // even attempting the store open. The timeout is set to 1 second, so the
     // deadline fires while the helper is still sleeping.
-    OPEN_DELAY_SECS.store(10, Ordering::Relaxed);
-    OPEN_TIMEOUT_OVERRIDE_SECS.store(1, Ordering::Relaxed);
-
     let result = open_tx_index_with_timeout(
-        "fjall",
+        bitcoin_rs_storage::StorageBackend::Fjall,
         &dir.path().join("txindex"),
         8 * 1024 * 1024,
         DEFAULT_BATCH_LIMITS,
         1,
+        Duration::from_secs(10),
+        Duration::from_secs(1),
         &shutdown,
     );
 
-    // Restore overrides immediately so other tests are not affected.
-    OPEN_DELAY_SECS.store(0, Ordering::Relaxed);
-    OPEN_TIMEOUT_OVERRIDE_SECS.store(0, Ordering::Relaxed);
     let Err(TxIndexWorkerError::OpenTimeout { secs }) = result else {
         panic!("expected OpenTimeout, got a different error variant");
     };

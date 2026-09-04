@@ -2,7 +2,7 @@ use crate::standardness::StandardnessPolicy;
 
 use thiserror::Error;
 
-/// Mempool ancestor, descendant, and replacement limits.
+/// Mempool ancestor, descendant, cluster, and replacement limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MempoolLimits {
     /// Maximum number of transactions in an ancestor package, including the transaction itself.
@@ -19,6 +19,20 @@ pub struct MempoolLimits {
     /// Minimum relay fee rate in sat/kvB. Transactions with lower `fee_rate` are
     /// not relayed. Default 1000 sat/kvB = 1 sat/vB (Bitcoin Core default).
     pub min_relay_fee_sat_per_kvb: u64,
+    /// Maximum number of transactions in one cluster, including the candidate.
+    ///
+    /// A cluster is the set of mempool transactions directly or indirectly
+    /// connected to a transaction through spends -- a connected component of
+    /// the spend graph, not an ancestor package. Two children of one parent
+    /// share a cluster although neither is an ancestor of the other.
+    ///
+    /// Core's `-limitclustercount`, `DEFAULT_CLUSTER_LIMIT` (`policy.h`).
+    pub cluster_count: u32,
+    /// Maximum virtual size of one cluster in vbytes, including the candidate.
+    ///
+    /// Core's `-limitclustersize`, `DEFAULT_CLUSTER_SIZE_LIMIT_KVB * 1000`
+    /// (`policy.h`, `kernel/mempool_limits.h`).
+    pub cluster_size_vbytes: u64,
 }
 
 impl Default for MempoolLimits {
@@ -30,6 +44,13 @@ impl Default for MempoolLimits {
             max_replacement_evictions: 100,
             max_total_bytes: 300_000_000,
             min_relay_fee_sat_per_kvb: 1_000,
+            cluster_count: 64,
+            // 101 kvB, the same number `max_ancestor_size` carries. The
+            // coincidence is why ancestor limits look like a stand-in for
+            // cluster limits and are not one: Core 31 deprecated
+            // `-limitancestorcount`/`-limitdescendantcount` and replaced them
+            // with these, keeping the old ones only for wallet coin selection.
+            cluster_size_vbytes: 101_000,
         }
     }
 }
@@ -54,6 +75,12 @@ pub enum PolicyError {
     /// The transaction would exceed a configured descendant count limit.
     #[error("too many unconfirmed descendants")]
     TooManyDescendants,
+    /// The transaction would join a cluster holding too many transactions.
+    #[error("too many transactions in cluster")]
+    ClusterCountLimit,
+    /// The transaction would join a cluster exceeding the virtual size limit.
+    #[error("cluster is too large")]
+    ClusterSizeLimit,
 }
 
 /// Fee-rate increment the eviction-floor projection and BIP125 rule 4 quote,
@@ -78,16 +105,14 @@ pub struct MempoolPolicySnapshot {
     /// accepts up to 3-key bare multisig and has no opt-out), so the v31
     /// `permitbaremultisig` field reports the enforced `true`.
     pub permit_bare_multisig: bool,
-    /// Enforced ancestor-package count bound
-    /// (`PolicyError::TooManyAncestors`). The v31 `limitclustercount` field
-    /// projects this: the pool has no cluster tracking (the
-    /// `getmempoolcluster` manifest row is Unimplemented), so the projection
-    /// is a recorded manifest deviation, not cluster enforcement.
-    pub max_ancestor_count: u32,
-    /// Enforced ancestor-package size bound in vbytes
-    /// (`PolicyError::AncestorSizeLimit`). Projected onto the v31
-    /// `limitclustersize` field under the same recorded deviation.
-    pub max_ancestor_size_vbytes: u64,
+    /// Enforced cluster count bound (`PolicyError::ClusterCountLimit`).
+    /// The v31 `limitclustercount` field projects this — the limit admission
+    /// actually applies, not the ancestor-package cap.
+    pub cluster_count: u32,
+    /// Enforced cluster virtual-size bound in vbytes
+    /// (`PolicyError::ClusterSizeLimit`). The v31 `limitclustersize` field
+    /// projects this.
+    pub cluster_size_vbytes: u64,
     /// Fee-rate increment the eviction-floor projection and BIP125 rule 4
     /// (`RbfError::Rule4InsufficientIncrementalFee`) quote, in sat/kvB.
     pub incremental_relay_fee_sat_per_kvb: u64,
@@ -110,8 +135,8 @@ impl MempoolPolicySnapshot {
         Self {
             standardness,
             permit_bare_multisig: true,
-            max_ancestor_count: limits.max_ancestors,
-            max_ancestor_size_vbytes: limits.max_ancestor_size,
+            cluster_count: limits.cluster_count,
+            cluster_size_vbytes: limits.cluster_size_vbytes,
             incremental_relay_fee_sat_per_kvb: DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB,
             full_rbf: false,
             optimal: true,
@@ -142,8 +167,8 @@ mod tests {
         );
         assert!(snapshot.permit_bare_multisig);
         assert_eq!(snapshot.max_data_carrier_size(), 83);
-        assert_eq!(snapshot.max_ancestor_count, 25);
-        assert_eq!(snapshot.max_ancestor_size_vbytes, 101_000);
+        assert_eq!(snapshot.cluster_count, 64);
+        assert_eq!(snapshot.cluster_size_vbytes, 101_000);
         assert_eq!(snapshot.incremental_relay_fee_sat_per_kvb, 1_000);
         // BIP125 rule 1 (opt-in signaling) is enforced: the pool is not
         // full-rbf, so the projection must not fabricate `true`.
@@ -155,14 +180,14 @@ mod tests {
     fn configured_limits_flow_into_the_cluster_projections() {
         let snapshot = MempoolPolicySnapshot::from_enforced(
             MempoolLimits {
-                max_ancestors: 7,
-                max_ancestor_size: 42_000,
+                cluster_count: 7,
+                cluster_size_vbytes: 42_000,
                 ..MempoolLimits::default()
             },
             StandardnessPolicy::default(),
         );
-        assert_eq!(snapshot.max_ancestor_count, 7);
-        assert_eq!(snapshot.max_ancestor_size_vbytes, 42_000);
+        assert_eq!(snapshot.cluster_count, 7);
+        assert_eq!(snapshot.cluster_size_vbytes, 42_000);
     }
 
     #[test]

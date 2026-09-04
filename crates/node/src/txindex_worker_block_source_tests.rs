@@ -1,3 +1,10 @@
+//! Confirmed-body serving for the txindex worker (`IndexBlockSource`).
+//!
+//! Pins `IDX-03` (`docs/contracts/indexing.md`): a height/hash miss or
+//! identity mismatch returns `None`; a matched record yields one consistent
+//! decoded body. Pins `RCV-01` (`docs/contracts/recovery.md`): height alone
+//! never identifies a block.
+
 use super::*;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::{Network, consensus_bytes};

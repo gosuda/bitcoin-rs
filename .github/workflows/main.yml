@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Compile the retained Criterion targets. All benches use
+      # Compile retained benchmark targets. All benches use
       # --no-default-features (or --features fjall for storage/node/utxo),
       # so no C++ toolchain is needed -- the kernel feature is never enabled.
       # Bin package has no bench targets; all benchmarks live in their own
@@ -86,6 +86,7 @@ jobs:
           cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
           cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
           cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
+          cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
 
 
   # The imported qa-assets corpora (fuzz/corpus/, provenance in

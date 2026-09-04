@@ -293,8 +293,8 @@ impl Node {
     /// mempool `sequence` events and the mining generation wake; there is
     /// no second admission path and no per-call gateway.
     ///
-    /// An already-known transaction succeeds with an empty result, matching
-    /// RPC admission's already-known success.
+    /// Membership follows `POL-01` Duplicate submission in
+    /// `docs/policies/mempool-policy.md`.
     ///
     /// # Errors
     ///
@@ -542,9 +542,9 @@ mod tests {
     fn embedded_config(data_dir: &std::path::Path) -> NodeConfig {
         let mut config = NodeConfig::default_for_network(Network::Regtest);
         config.data_dir = data_dir.to_path_buf();
-        config.p2p_listen.clear();
-        config.rpc_bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
-        config.metrics_bind = None;
+        config.p2p.listen.clear();
+        config.rpc.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        config.observability.metrics_bind = None;
         config
     }
 

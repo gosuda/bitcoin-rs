@@ -10,6 +10,8 @@ use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCo
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 type FixedTable<const N: usize> = TableDefinition<'static, &'static [u8; N], ()>;
 type TxIndexValueTable = TableDefinition<'static, &'static [u8; 12], &'static [u8]>;
+/// `ScriptLive` key width: `prefix(8) || txid(32) || vout(4)`.
+const SCRIPT_LIVE_KEY_LEN: usize = 44;
 
 const TXINDEX_TX_CONFIRMED: FixedTable<12> = TableDefinition::new("txindex_v1_tx_confirmed");
 const TXINDEX_TX_CONFIRMED_VALUES: TxIndexValueTable =
@@ -17,7 +19,11 @@ const TXINDEX_TX_CONFIRMED_VALUES: TxIndexValueTable =
 const TXINDEX_FUNDING: FixedTable<12> = TableDefinition::new("txindex_v1_funding");
 const TXINDEX_FUNDING_VALUES: TxIndexValueTable = TableDefinition::new("txindex_v1_funding_values");
 const TXINDEX_SPENDING: FixedTable<12> = TableDefinition::new("txindex_v1_spending");
+const TXINDEX_SPENDING_VALUES: TxIndexValueTable =
+    TableDefinition::new("txindex_v1_spending_values");
 const TXINDEX_BLOCK_HEADERS: FixedTable<80> = TableDefinition::new("txindex_v1_block_headers");
+const TXINDEX_SCRIPT_LIVE: FixedTable<SCRIPT_LIVE_KEY_LEN> =
+    TableDefinition::new("txindex_v1_script_live");
 const TXINDEX_META: ByteTable = TableDefinition::new("txindex_v1_meta");
 
 /// redb's builder-default page-cache capacity for the transaction index.
@@ -71,6 +77,7 @@ impl RedbStore {
         batch: RedbWriteBatch,
         durability: Durability,
     ) -> Result<(), StorageError> {
+        validate_redb_store_batch(&batch)?;
         let durability_label = match durability {
             Durability::Immediate => "durable",
             Durability::None => "deferred",
@@ -128,6 +135,9 @@ impl KvStore for RedbStore {
     }
 
     fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        if cf == ColumnFamily::ScriptLive {
+            validate_script_live_put(key, value)?;
+        }
         let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         {
             let mut table = write_txn
@@ -155,6 +165,7 @@ impl KvStore for RedbStore {
         conditions: &[WriteCondition<'_>],
         batch: RedbWriteBatch,
     ) -> Result<bool, StorageError> {
+        validate_redb_store_batch(&batch)?;
         let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         write_txn
             .set_durability(Durability::Immediate)
@@ -250,7 +261,17 @@ impl RedbTxIndexStore {
         );
         drop(
             write_txn
+                .open_table(TXINDEX_SPENDING_VALUES)
+                .map_err(StorageError::backend)?,
+        );
+        drop(
+            write_txn
                 .open_table(TXINDEX_BLOCK_HEADERS)
+                .map_err(StorageError::backend)?,
+        );
+        drop(
+            write_txn
+                .open_table(TXINDEX_SCRIPT_LIVE)
                 .map_err(StorageError::backend)?,
         );
         drop(
@@ -300,8 +321,11 @@ impl KvStore for RedbTxIndexStore {
             ColumnFamily::Funding => {
                 fixed_value_get(&read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, key)
             }
-            ColumnFamily::Spending => fixed_get(&read_txn, TXINDEX_SPENDING, key),
+            ColumnFamily::Spending => {
+                fixed_value_get(&read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, key)
+            }
             ColumnFamily::BlockHeaders => fixed_get(&read_txn, TXINDEX_BLOCK_HEADERS, key),
+            ColumnFamily::ScriptLive => fixed_get(&read_txn, TXINDEX_SCRIPT_LIVE, key),
             ColumnFamily::UtxoMeta => byte_get(&read_txn, TXINDEX_META, key),
             _ => Err(invalid_txindex_cf()),
         }
@@ -396,9 +420,9 @@ impl KvStore for RedbTxIndexStore {
 ///
 /// The concrete store type is an implementation detail. The store serves
 /// [`ColumnFamily::TxConfirmed`], [`ColumnFamily::Funding`],
-/// [`ColumnFamily::Spending`], [`ColumnFamily::BlockHeaders`], and
-/// [`ColumnFamily::UtxoMeta`]; every other family returns
-/// [`StorageError::InvalidOperation`].
+/// [`ColumnFamily::Spending`], [`ColumnFamily::BlockHeaders`],
+/// [`ColumnFamily::ScriptLive`], and [`ColumnFamily::UtxoMeta`]; every other
+/// family returns [`StorageError::InvalidOperation`].
 pub fn open_redb_tx_index_store(path: &Path) -> Result<impl KvStore, StorageError> {
     RedbTxIndexStore::open(path)
 }
@@ -491,10 +515,15 @@ fn apply_redb_batch_op(
     op: BatchOp,
 ) -> Result<(), StorageError> {
     match op {
-        BatchOp::Put { key, value, .. } => table
-            .insert(key.as_slice(), value.as_ref())
-            .map(|_| ())
-            .map_err(StorageError::backend),
+        BatchOp::Put { cf, key, value } => {
+            if cf == ColumnFamily::ScriptLive {
+                validate_script_live_put(&key, &value)?;
+            }
+            table
+                .insert(key.as_slice(), value.as_ref())
+                .map(|_| ())
+                .map_err(StorageError::backend)
+        }
         BatchOp::Delete { key, .. } => table
             .remove(key.as_slice())
             .map(|_| ())
@@ -590,8 +619,14 @@ impl KvSnapshot for RedbTxIndexSnapshot {
             ColumnFamily::Funding => {
                 fixed_value_get(&self.read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, key)
             }
-            ColumnFamily::Spending => fixed_get(&self.read_txn, TXINDEX_SPENDING, key),
+            ColumnFamily::Spending => fixed_value_get(
+                &self.read_txn,
+                TXINDEX_SPENDING,
+                TXINDEX_SPENDING_VALUES,
+                key,
+            ),
             ColumnFamily::BlockHeaders => fixed_get(&self.read_txn, TXINDEX_BLOCK_HEADERS, key),
+            ColumnFamily::ScriptLive => fixed_get(&self.read_txn, TXINDEX_SCRIPT_LIVE, key),
             ColumnFamily::UtxoMeta => byte_get(&self.read_txn, TXINDEX_META, key),
             _ => Err(invalid_txindex_cf()),
         }
@@ -700,6 +735,7 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
         ColumnFamily::UtxoMeta => TableDefinition::new("utxo_meta"),
         ColumnFamily::BlockBodies => TableDefinition::new("block_bodies"),
         ColumnFamily::UndoData => TableDefinition::new("undo_data"),
+        ColumnFamily::ScriptLive => TableDefinition::new("script_live"),
     }
 }
 
@@ -746,6 +782,31 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// Rejects a `ScriptLive` write that is not a 44-byte key with an empty value.
+///
+/// The dedicated txindex store enforces this with a fixed-width table. The
+/// generic [`RedbStore`] path uses variable-width tables, so the same
+/// `ScriptLiveRow` contract is checked here before any write is persisted.
+fn validate_script_live_put(key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+    fixed_key::<SCRIPT_LIVE_KEY_LEN>(key).map(|_| ())?;
+    if !value.is_empty() {
+        return Err(fixed_value_error());
+    }
+    Ok(())
+}
+
+/// Validates `ScriptLive` puts in a generic [`RedbStore`] batch before a
+/// transaction begins, matching the dedicated txindex store's reject-first
+/// contract.
+fn validate_redb_store_batch(batch: &RedbWriteBatch) -> Result<(), StorageError> {
+    batch.ops.iter().try_for_each(|op| match op {
+        BatchOp::Put { cf, key, value } if *cf == ColumnFamily::ScriptLive => {
+            validate_script_live_put(key, value)
+        }
+        _ => Ok(()),
+    })
 }
 
 fn invalid_txindex_cf() -> StorageError {
@@ -969,9 +1030,14 @@ fn collect_txindex_prefix(
         ColumnFamily::Funding => {
             fixed_value_prefix_collect(read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, prefix)
         }
-        ColumnFamily::Spending => fixed_prefix_collect::<12>(read_txn, TXINDEX_SPENDING, prefix),
+        ColumnFamily::Spending => {
+            fixed_value_prefix_collect(read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, prefix)
+        }
         ColumnFamily::BlockHeaders => {
             fixed_prefix_collect::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix)
+        }
+        ColumnFamily::ScriptLive => {
+            fixed_prefix_collect::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix)
         }
         ColumnFamily::UtxoMeta => collect_prefix(read_txn, TXINDEX_META, prefix),
         _ => Err(invalid_txindex_cf()),
@@ -999,11 +1065,18 @@ fn scan_txindex_prefix(
             prefix,
             limit,
         ),
-        ColumnFamily::Spending => {
-            fixed_prefix_scan::<12>(read_txn, TXINDEX_SPENDING, prefix, limit)
-        }
+        ColumnFamily::Spending => fixed_value_prefix_scan(
+            read_txn,
+            TXINDEX_SPENDING,
+            TXINDEX_SPENDING_VALUES,
+            prefix,
+            limit,
+        ),
         ColumnFamily::BlockHeaders => {
             fixed_prefix_scan::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, limit)
+        }
+        ColumnFamily::ScriptLive => {
+            fixed_prefix_scan::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix, limit)
         }
         ColumnFamily::UtxoMeta => scan_prefix(read_txn, TXINDEX_META, prefix, limit),
         _ => Err(invalid_txindex_cf()),
@@ -1141,7 +1214,7 @@ fn apply_byte_run(
 fn validate_txindex_batch(batch: &RedbWriteBatch) -> Result<(), StorageError> {
     batch.ops.iter().try_for_each(|op| match op {
         BatchOp::Put { cf, key, value } => {
-            if matches!(cf, ColumnFamily::Spending | ColumnFamily::BlockHeaders)
+            if matches!(cf, ColumnFamily::BlockHeaders | ColumnFamily::ScriptLive)
                 && !value.is_empty()
             {
                 return Err(fixed_value_error());
@@ -1164,6 +1237,7 @@ fn validate_txindex_key(cf: ColumnFamily, key: &[u8]) -> Result<(), StorageError
             fixed_key::<12>(key).map(|_| ())
         }
         ColumnFamily::BlockHeaders => fixed_key::<80>(key).map(|_| ()),
+        ColumnFamily::ScriptLive => fixed_key::<SCRIPT_LIVE_KEY_LEN>(key).map(|_| ()),
         ColumnFamily::UtxoMeta => Ok(()),
         _ => Err(invalid_txindex_cf()),
     }
@@ -1191,9 +1265,18 @@ fn apply_txindex_ops(
                 op,
                 &mut ops,
             )?,
-            ColumnFamily::Spending => apply_fixed_run(write_txn, TXINDEX_SPENDING, op, &mut ops)?,
+            ColumnFamily::Spending => apply_fixed_value_run(
+                write_txn,
+                TXINDEX_SPENDING,
+                TXINDEX_SPENDING_VALUES,
+                op,
+                &mut ops,
+            )?,
             ColumnFamily::BlockHeaders => {
                 apply_fixed_run(write_txn, TXINDEX_BLOCK_HEADERS, op, &mut ops)?;
+            }
+            ColumnFamily::ScriptLive => {
+                apply_fixed_run(write_txn, TXINDEX_SCRIPT_LIVE, op, &mut ops)?;
             }
             ColumnFamily::UtxoMeta => apply_byte_run(write_txn, TXINDEX_META, op, &mut ops)?,
             _ => return Err(invalid_txindex_cf()),
@@ -1222,11 +1305,18 @@ fn txindex_condition_matches(
             key,
             condition,
         ),
-        ColumnFamily::Spending => {
-            txindex_fixed_condition_matches(write_txn, TXINDEX_SPENDING, key, condition)
-        }
+        ColumnFamily::Spending => txindex_fixed_value_condition_matches(
+            write_txn,
+            TXINDEX_SPENDING,
+            TXINDEX_SPENDING_VALUES,
+            key,
+            condition,
+        ),
         ColumnFamily::BlockHeaders => {
             txindex_fixed_condition_matches(write_txn, TXINDEX_BLOCK_HEADERS, key, condition)
+        }
+        ColumnFamily::ScriptLive => {
+            txindex_fixed_condition_matches(write_txn, TXINDEX_SCRIPT_LIVE, key, condition)
         }
         ColumnFamily::UtxoMeta => {
             let table = write_txn

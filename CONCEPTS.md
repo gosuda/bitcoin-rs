@@ -28,11 +28,21 @@ router returns `503` if the applied-tip identity changed before composition
 finished, rather than mixing answers from opposite sides of a reorg.
 
 ### Sequence stream
-The Core-compatible `pubsequence` ZMQ stream: each event carries the block hash,
-one label (`C` connect, `D` disconnect), and a topic-local little-endian `u32`
-counter. Reorg disconnects are emitted tip-first before connects on the
-replacement branch. Mempool `A`/`R` events are deliberately omitted until the
-mempool has per-transaction sequence assignment and explicit removal reasons.
+The Core-compatible `pubsequence` ZMQ stream. Block events carry the 32-byte
+reversed block hash and label byte (`C` connect, `D` disconnect). Mempool
+events carry the 32-byte reversed txid, label byte (`A` admission, `R`
+removal), and the 8-byte little-endian mempool sequence number assigned to the
+change. A transaction mined in a connected block emits no `R`: the block's `C`
+event covers it, matching Core. Every event concludes with a topic-local
+little-endian `u32` sequence counter frame. Reorg disconnects are emitted
+tip-first before connects on the replacement branch.
+
+### Authoritative peer table
+The single owner of live peer connections and their published handshake
+metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
+address, cancels predecessors atomically on replacement, prevents stale
+connection handles from evicting newer sessions via connection-identity checks,
+and ties handshake metadata strictly to the live connection identity.
 
 ### Embedded node
 The typed in-process surface (`bitcoin_rs_node::Node`) over the same
@@ -232,6 +242,16 @@ The bounded-channel wake-up `ChainEventPublisher::record` emits after replacing 
 
 ### Reconciliation consumer
 An index that mirrors the applied chain by re-planning positionally against a fresh chain snapshot instead of receiving inline writes from the apply path. The txindex worker is the current consumer. A consumer owns its rows, its cursor, and its batch atomicity, and a failure or lag in it can never stall block application.
+
+### ScriptLive view
+The compact, rebuildable reverse view from script-hash prefix to currently
+unspent outpoints. A `ScriptLive` row stores only an empty value and the full
+outpoint after the lossy eight-byte prefix; the authoritative UTXO set owns
+coin value, height, and script bytes. Queries hold the chain-transition
+authority, resolve locators from one stable UTXO view, and exact-check the full
+script before returning a result. Its watermark is independent of historical
+script rows, so live queries can become ready while history is still catching
+up.
 
 ### Consumer cursor
 The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/node/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.

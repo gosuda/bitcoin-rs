@@ -10,14 +10,13 @@ extern crate alloc;
 
 /// Block-apply pipeline executed by `NodeState::apply_block` and `BlockSync::tick`.
 pub mod apply;
+mod chainstate_journal;
 mod checkpoint;
 mod checkpoint_fs;
 /// Periodic chainstate checkpoint publication during sync.
 mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
-/// Startup crash recovery.
-pub mod crash_recovery;
 /// Typed in-process node lifecycle: the embedding surface over the same
 /// service graph the daemon wires.
 pub mod embed;
@@ -63,7 +62,10 @@ pub mod zmq_publisher;
 
 pub use bitcoin_rs_primitives::Network;
 pub use config::{
-    Auth, NodeConfig, NotificationConfig, RuntimeInputs, ScriptIndexMode, UserConfig,
+    Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
+    NetworkSelection, NodeConfig, NotificationConfig, ObservabilityConfig, ObservabilityOverrides,
+    P2pConfig, P2pOverrides, RpcConfig, RpcOverrides, RuntimeInputs, ScriptIndexMode,
+    StorageConfig, StorageOverrides, UserConfig, ValidationConfig, ValidationOverrides, resolve,
 };
 pub use embed::{Node, NodeError, SyncProgress};
 pub use mining::{GenerationKey, MiningCoordinator};

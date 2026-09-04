@@ -292,6 +292,12 @@ fn pool_with_conflict(
             max_ancestor_size: 1_000_000,
             max_descendants: 200,
             max_replacement_evictions: 100,
+            // A chain this long is one cluster this long, so the cluster caps
+            // have to be lifted alongside the ancestor caps or admission
+            // refuses the fixture before the replacement rules are reached.
+            // This test is about BIP125, not about cluster limits.
+            cluster_count: 400,
+            cluster_size_vbytes: 1_000_000,
             ..MempoolLimits::default()
         }
     };

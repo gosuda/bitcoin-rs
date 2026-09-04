@@ -467,6 +467,119 @@ fn acceptance_preview_surfaces_ancestor_limits() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Builds a root with `output_count` outputs so siblings can share a cluster
+/// without being in each other's ancestor or descendant packages.
+fn fanout_root(label: u8, output_count: usize) -> Tx {
+    Tx {
+        version: 2,
+        lock_time: 0,
+        inputs: vec![TxIn {
+            previous_output: outpoint(label, 0),
+            script_sig: Vec::new(),
+            sequence: 0xFF_FF_FF_FF,
+            witness: Vec::new(),
+        }],
+        outputs: (0..output_count)
+            .map(|index| TxOut {
+                value: 1_000_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                script_pubkey: p2wpkh_script(),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<(), Box<dyn Error>>
+{
+    // Root plus two siblings is three; a limit of two must refuse the second
+    // sibling. Ancestor and descendant packages stay size two, so only the
+    // cluster walk can refuse.
+    let limits = MempoolLimits {
+        cluster_count: 2,
+        max_ancestors: 100,
+        max_ancestor_size: 1_000_000,
+        max_descendants: 100,
+        ..MempoolLimits::default()
+    };
+    let mut pool = Mempool::new(limits);
+    let root = fanout_root(0xC1, 2);
+    let root_txid = root.txid();
+    pool.insert_entry(entry(root, 100, 10_000))?;
+    let first = tx(OutPoint::new(root_txid, 0), 900, 0xFF_FF_FF_FF);
+    pool.insert_entry(entry(first, 100, 10_000))?;
+    let second = tx(OutPoint::new(root_txid, 1), 800, 0xFF_FF_FF_FF);
+    assert_eq!(
+        preview_reason(&pool, &second, context(10_000, 100)),
+        Some(AcceptanceRejectReason::PackageLimit(
+            PolicyError::ClusterCountLimit
+        )),
+        "preview must surface cluster count limits"
+    );
+    let err = pool
+        .insert_entry(entry(second, 100, 10_000))
+        .err()
+        .ok_or("expected ClusterCountLimit rejection")?;
+    assert_eq!(err, MempoolError::Policy(PolicyError::ClusterCountLimit));
+    Ok(())
+}
+
+#[test]
+fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), Box<dyn Error>> {
+    let limits = MempoolLimits {
+        cluster_count: 100,
+        cluster_size_vbytes: 250,
+        max_ancestors: 100,
+        max_ancestor_size: 1_000_000,
+        max_descendants: 100,
+        ..MempoolLimits::default()
+    };
+    let mut pool = Mempool::new(limits);
+    let root = fanout_root(0xC2, 1);
+    let root_txid = root.txid();
+    pool.insert_entry(entry(root, 200, 10_000))?;
+    let child = tx(OutPoint::new(root_txid, 0), 900, 0xFF_FF_FF_FF);
+    assert_eq!(
+        preview_reason(&pool, &child, context(10_000, 100)),
+        Some(AcceptanceRejectReason::PackageLimit(
+            PolicyError::ClusterSizeLimit
+        )),
+        "preview must surface cluster size limits"
+    );
+    let err = pool
+        .insert_entry(entry(child, 100, 10_000))
+        .err()
+        .ok_or("expected ClusterSizeLimit rejection")?;
+    assert_eq!(err, MempoolError::Policy(PolicyError::ClusterSizeLimit));
+    Ok(())
+}
+
+#[test]
+fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), Box<dyn Error>> {
+    let limits = MempoolLimits {
+        cluster_count: 2,
+        ..MempoolLimits::default()
+    };
+    let mut pool = Mempool::new(limits);
+    let root = fanout_root(0xC3, 1);
+    let root_txid = root.txid();
+    pool.insert_entry(entry(root, 100, 10_000))?;
+    let original = tx(OutPoint::new(root_txid, 0), 900, 0xFF_FF_FF_FD);
+    pool.insert_entry(entry(original.clone(), 100, 10_000))?;
+    let replacement = tx(OutPoint::new(root_txid, 0), 800, 0xFF_FF_FF_FF);
+    assert!(
+        preview_allowed(&pool, &replacement, context(12_000, 100)),
+        "preview must project the post-eviction cluster"
+    );
+    pool.replace_transaction(
+        ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1_000),
+        0,
+        1,
+        0,
+    )?;
+    assert!(!pool.contains_txid(&original.txid()));
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Standardness
 // ---------------------------------------------------------------------------

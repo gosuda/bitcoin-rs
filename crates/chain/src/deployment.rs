@@ -6,14 +6,13 @@
 
 use bitcoin_rs_consensus::bip9::versionbits_block_version;
 use bitcoin_rs_consensus::{
-    CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState, SEGWIT_DEPLOYMENT_ID,
-    SoftforkState, compute_state, deployment_params,
+    CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState,
+    MEDIAN_TIME_PAST_WINDOW, SEGWIT_DEPLOYMENT_ID, SoftforkState, compute_state, deployment_params,
 };
 use bitcoin_rs_primitives::Network;
 
 use crate::{BlockTree, CachedState, NodeId};
 
-const MTP_WINDOW: usize = 11;
 const KNOWN_DEPLOYMENT_IDS: [u32; 2] = [CSV_DEPLOYMENT_ID, SEGWIT_DEPLOYMENT_ID];
 
 /// Read-only [`DeploymentContext`] over a [`BlockTree`] rooted at `tip_id`.
@@ -111,12 +110,12 @@ fn cached_deployment_state(
 ) -> DeploymentState {
     let period_start = (height / params.period).saturating_mul(params.period);
     if period_start == 0 {
-        return compute_state(ctx, height, params, MTP_WINDOW);
+        return compute_state(ctx, height, params, MEDIAN_TIME_PAST_WINDOW);
     }
 
     let anchor_height = period_start.saturating_sub(1);
     let Some(anchor_node) = tree.node_at_height_from(previous_tip_id, anchor_height) else {
-        return compute_state(ctx, height, params, MTP_WINDOW);
+        return compute_state(ctx, height, params, MEDIAN_TIME_PAST_WINDOW);
     };
     if let Some(cached) = tree.cached_bip9_state(anchor_node, deployment_id)
         && let Some(state) = DeploymentState::from_cache_tag(cached.tag)
@@ -124,7 +123,7 @@ fn cached_deployment_state(
         return state;
     }
 
-    let state = compute_state(ctx, height, params, MTP_WINDOW);
+    let state = compute_state(ctx, height, params, MEDIAN_TIME_PAST_WINDOW);
     tree.cache_bip9_state(
         anchor_node,
         deployment_id,
