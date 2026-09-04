@@ -5,9 +5,10 @@
 //! that peer. Inbound `headers` batches are drained into the shared
 //! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are staged in the
 //! P2P [`bitcoin_rs_p2p::BlockStager`] and applied through
-//! [`crate::apply::apply_block`]. The download window and staging policy live
-//! in `bitcoin-rs-p2p`; this module is the coordinator that routes peer
-//! events into that policy and committed blocks into chainstate.
+//! [`crate::apply::apply_block`]. Download window, staging, and stall
+//! conviction live in [`bitcoin_rs_p2p::SyncPlanner`]; this module is the
+//! executor that routes peer events into that planner and committed blocks
+//! into chainstate.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -31,7 +32,8 @@ use bitcoin_rs_p2p::download_window::{
     statically_fanout_eligible,
 };
 use bitcoin_rs_p2p::{
-    BlockStager, DrainedBlock, InboundBlock, InboundHeaders, Message, PeerTable, StagedBlock,
+    DrainedBlock, InboundBlock, InboundHeaders, Message, PeerTable, StagedBlock, SyncAction,
+    SyncDisconnectReason, SyncPlanner,
 };
 use bitcoin_rs_primitives::{Block, Hash256};
 use crossbeam_channel::Receiver;
@@ -50,7 +52,7 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
 ///
-/// Drives the P2P-owned [`DownloadWindow`] and [`BlockStager`]. Session
+/// Drives the P2P-owned [`SyncPlanner`] (window + stager + conviction). Session
 /// identity stays on the shared [`PeerTable`]; this orchestrator calls
 /// identity-checked table methods and does not schedule through
 /// `P2pService::select_download_peers`.
@@ -60,8 +62,7 @@ pub struct BlockSync {
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
-    download_window: Arc<Mutex<DownloadWindow>>,
-    block_stager: Arc<Mutex<BlockStager>>,
+    planner: Arc<Mutex<SyncPlanner>>,
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     known_sessions: Mutex<HashMap<SocketAddr, bitcoin_rs_p2p::ConnectionId>>,
@@ -144,8 +145,7 @@ impl BlockSync {
             peer_table,
             inbound_headers_rx,
             inbound_blocks_rx,
-            download_window: Arc::new(Mutex::new(DownloadWindow::new(default_sync_budget()))),
-            block_stager: Arc::new(Mutex::new(BlockStager::new(default_sync_budget()))),
+            planner: Arc::new(Mutex::new(SyncPlanner::new(default_sync_budget()))),
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
             known_sessions: Mutex::new(HashMap::new()),
@@ -173,8 +173,7 @@ impl BlockSync {
     /// `budget`. Intended for tests and benchmarks that need to exercise
     /// non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
-        *self.download_window.lock() = DownloadWindow::new(budget);
-        *self.block_stager.lock() = BlockStager::new(budget);
+        self.planner.lock().install_budget(budget);
     }
 
     /// Applies a window, then dispatches derived consumers while the
@@ -217,13 +216,13 @@ impl BlockSync {
     /// connection. Stale sources are ignored; see
     /// `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
     pub fn on_peer_ready(&self, source: bitcoin_rs_p2p::PeerSource) {
-        // Window before table, matching `tick` / `send_getdata_for_pending_blocks`.
-        let mut window = self.download_window.lock();
+        // Planner before table, matching `tick` / `send_getdata_for_pending_blocks`.
+        let mut planner = self.planner.lock();
         if !self.peer_table.is_current(source) {
             return;
         }
-        window.forget_peer(source.addr);
-        drop(window);
+        planner.forget_peer(source.addr);
+        drop(planner);
         let mut pending = self.pending_getheaders.lock();
         if pending.is_some_and(|request| request.peer_addr == source.addr)
             && self.peer_table.is_current(source)
@@ -234,7 +233,8 @@ impl BlockSync {
 
     fn reconcile_peer_sessions(&self) {
         let live = self.peer_table.live_connections();
-        let mut window = self.download_window.lock();
+        let mut planner = self.planner.lock();
+        let window = planner.window_mut();
         let mut known = self.known_sessions.lock();
         for (addr, id) in &live {
             if known.insert(*addr, *id).is_some_and(|prev| prev != *id) {
@@ -265,9 +265,7 @@ impl BlockSync {
         // Peer conviction runs after the apply drain and before peer release
         // so released blocks can be re-requested in the same tick. At most
         // one peer is disconnected per tick.
-        if !self.disconnect_window_staller(applied_tip.as_deref(), now) {
-            self.disconnect_timed_out_peer(now);
-        }
+        self.disconnect_convicted_peer(applied_tip.as_deref(), now);
         self.reconcile_peer_sessions();
         let sync_peer_selection = self.sync_peer_selection(applied_height, now);
         if sync_peer_selection.header_peer.is_none() {
@@ -374,7 +372,8 @@ impl BlockSync {
                     drop(tree);
                     let mut blamed_peer = None;
                     if let Some(source) = source {
-                        let mut window = self.download_window.lock();
+                        let mut planner = self.planner.lock();
+                        let window = planner.window_mut();
                         if self.peer_table.disconnect_source(source) {
                             window.mark_peer_unresponsive(source.addr, Instant::now());
                             blamed_peer = Some(source.addr);
@@ -468,12 +467,12 @@ impl BlockSync {
                 );
             }
         }
-        if received == 0 && self.block_stager.lock().received_len() == 0 {
+        if received == 0 && self.planner.lock().stager_mut().received_len() == 0 {
             return;
         }
 
         let now = Instant::now();
-        let dropped = self.block_stager.lock().prune_expired(now);
+        let dropped = self.planner.lock().stager_mut().prune_expired(now);
         let pruned = !dropped.is_empty();
         if pruned {
             let tree = self.handles.block_tree.read();
@@ -487,7 +486,8 @@ impl BlockSync {
                 })
                 .collect();
             drop(tree);
-            let mut window = self.download_window.lock();
+            let mut planner = self.planner.lock();
+            let window = planner.window_mut();
             for (hash, height) in height_updates {
                 window.update_received_height(&hash, height);
             }
@@ -574,7 +574,8 @@ impl BlockSync {
         let mut staged_blocks = Vec::with_capacity(blocks.len());
         let now = Instant::now();
         {
-            let mut stager = self.block_stager.lock();
+            let mut planner = self.planner.lock();
+            let stager = planner.stager_mut();
             for inbound in blocks.drain(..) {
                 let hash = Hash256::from(inbound.block.block_hash());
                 let source = inbound.source;
@@ -592,7 +593,8 @@ impl BlockSync {
         let mut retry_count = 0_u64;
         let staged_count = staged_blocks.len();
         {
-            let mut window = self.download_window.lock();
+            let mut planner = self.planner.lock();
+            let window = planner.window_mut();
             for (hash, source, staged) in staged_blocks {
                 let source_peer = source
                     .filter(|source| self.peer_table.is_current(*source))
@@ -647,7 +649,7 @@ impl BlockSync {
             &self.handles,
             &self.followers,
             target,
-            |hash| self.block_stager.lock().staged_body(hash),
+            |hash| self.planner.lock().stager_mut().staged_body(hash),
             |hash| self.retire_applied_reorg_body(hash),
         );
         match outcome {
@@ -684,18 +686,7 @@ impl BlockSync {
                 // Invalid descendants cannot occupy bounded download state or
                 // they can prevent the newly selected valid branch from refilling.
                 if !invalidated.is_empty() {
-                    {
-                        let mut stager = self.block_stager.lock();
-                        for invalid_hash in &invalidated {
-                            stager.retire_applied(invalid_hash);
-                        }
-                    }
-                    {
-                        let mut window = self.download_window.lock();
-                        for invalid_hash in &invalidated {
-                            window.drop_for_retry(invalid_hash);
-                        }
-                    }
+                    self.planner.lock().purge_invalidated(&invalidated);
                     // Invalidation can move the active branch away from the
                     // pinned assume-valid anchor.
                     self.handles
@@ -726,8 +717,11 @@ impl BlockSync {
     }
 
     fn retire_applied_reorg_body(&self, hash: Hash256) {
-        self.download_window.lock().mark_received_applied(&hash);
-        self.block_stager.lock().retire_applied(&hash);
+        self.planner
+            .lock()
+            .window_mut()
+            .mark_received_applied(&hash);
+        self.planner.lock().stager_mut().retire_applied(&hash);
     }
 
     /// Returns the header tip when the applied chain is not on its branch.
@@ -751,8 +745,9 @@ impl BlockSync {
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let Some(staged_count) = self
-            .block_stager
+            .planner
             .lock()
+            .stager_mut()
             .ready_received_len(next_expected_hash)
         else {
             return (0, 0);
@@ -769,7 +764,11 @@ impl BlockSync {
                 let run = self.expected_block_hashes(horizon);
                 let expected_len = run.as_ref().map_or(0, |run| run.hashes.len());
                 let drained = match run.as_ref() {
-                    Some(run) => self.block_stager.lock().drain_expected_prefix(&run.hashes),
+                    Some(run) => self
+                        .planner
+                        .lock()
+                        .stager_mut()
+                        .drain_expected_prefix(&run.hashes),
                     None => Vec::new(),
                 };
                 if let Some(run) = run {
@@ -829,8 +828,9 @@ impl BlockSync {
                         .saturating_add(stopped)
                         .saturating_add(1)
                         .min(drained.len());
-                    self.block_stager
+                    self.planner
                         .lock()
+                        .stager_mut()
                         .restore_many(drained[restore_from..].iter().cloned());
                     if error.disposition == crate::apply::WindowApplyDisposition::Permanent {
                         // The failed block's descendants can never become
@@ -840,18 +840,7 @@ impl BlockSync {
                         // from the window's pending/received maps; the
                         // expected-apply cache is dropped below because the
                         // round failed.
-                        {
-                            let mut stager = self.block_stager.lock();
-                            for invalid_hash in &error.invalidated {
-                                stager.retire_applied(invalid_hash);
-                            }
-                        }
-                        {
-                            let mut window = self.download_window.lock();
-                            for invalid_hash in &error.invalidated {
-                                window.drop_for_retry(invalid_hash);
-                            }
-                        }
+                        self.planner.lock().purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
                     }
@@ -866,7 +855,8 @@ impl BlockSync {
         }
         if !applied_hashes.is_empty() || failed_hash.is_some() {
             {
-                let mut window = self.download_window.lock();
+                let mut planner = self.planner.lock();
+                let window = planner.window_mut();
                 for hash in &applied_hashes {
                     window.mark_received_applied(hash);
                 }
@@ -896,7 +886,7 @@ impl BlockSync {
     fn expected_apply_horizon(&self, staged_count: usize) -> usize {
         // Snapshot the cap and release the window lock before any tree read so we
         // never invert the tree -> window lock order used elsewhere.
-        let max_pending_blocks = self.download_window.lock().max_pending_blocks();
+        let max_pending_blocks = self.planner.lock().window_mut().max_pending_blocks();
         staged_count.max(max_pending_blocks)
     }
 
@@ -991,8 +981,9 @@ impl BlockSync {
         }
         let expected_end = cache.offset.saturating_add(expected_len);
         let drained = self
-            .block_stager
+            .planner
             .lock()
+            .stager_mut()
             .drain_expected_prefix(&cache.hashes[cache.offset..expected_end]);
         Some((drained, expected_len))
     }
@@ -1093,13 +1084,14 @@ impl BlockSync {
             });
         }
         let (request_peer_limit, fanout_active, cold_preferred) = {
-            let mut window = self.download_window.lock();
+            let mut planner = self.planner.lock();
+            let window = planner.window_mut();
             for candidate in &mut candidates {
                 candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.addr, now)
                     || window.peer_in_staller_cooldown(candidate.peer.addr, now);
                 candidate.fanout_eligible = candidate.fanout_eligible && !candidate.soft_blocked;
             }
-            let cold_preferred = configure_request_mode(&mut window, &candidates, now);
+            let cold_preferred = configure_request_mode(window, &candidates, now);
             (
                 window.request_peer_scan_limit(now),
                 window.fanout_active(),
@@ -1163,7 +1155,8 @@ impl BlockSync {
     /// Every alternate receives the same earliest hashes, so the probe cannot
     /// create a unique out-of-order height hole. It runs once per deep owner.
     fn send_prefix_probes(&self, probe_peers: &[SyncPeer], now: Instant) {
-        let mut window = self.download_window.lock();
+        let mut planner = self.planner.lock();
+        let window = planner.window_mut();
         let Some((owner, hashes, required_height)) = window.prefix_probe_plan() else {
             return;
         };
@@ -1228,7 +1221,8 @@ impl BlockSync {
         };
         let request_start_height = first_connect.height;
 
-        let mut window = self.download_window.lock();
+        let mut planner = self.planner.lock();
+        let window = planner.window_mut();
         let request = window.next_peer_request(
             sync_peer_addr,
             allow_expired_retry_from_peer,
@@ -1323,7 +1317,7 @@ impl BlockSync {
         };
         let target_height = u32::try_from(target_height).unwrap_or(0);
         let now = Instant::now();
-        let _window = self.download_window.lock();
+        let _planner = self.planner.lock();
         if self.has_pending_getheaders(sync_peer_addr, locator_tip_hash, target_height, now) {
             tracing::trace!(
                 peer_addr = %sync_peer_addr,
@@ -1439,7 +1433,8 @@ impl BlockSync {
             }
         }
         let candidates: SmallVec<[SocketAddr; 8]> = {
-            let window = self.download_window.lock();
+            let planner = self.planner.lock();
+            let window = planner.window();
             candidates
                 .into_iter()
                 .filter(|addr| {
@@ -1475,82 +1470,69 @@ impl BlockSync {
         }
         None
     }
-    /// R8: window-blocked staller detection and disconnect.
+    /// Window-blocked stall, then pending-timeout conviction.
     ///
-    /// Computes the sync-layer terms of the stall predicate and advances the
-    /// window's stall state machine ([`DownloadWindow::observe_stall`] holds
-    /// the predicate itself). While the stager holds the next expected block,
-    /// the apply side owns the frontier and no peer is blamed.
-    ///
-    /// On fire the peer's outbound entry is removed. The p2p loop observes
-    /// that lease removal and exits; the next tick releases and reassigns the
-    /// peer's in-flight blocks. The cooldown prevents an immediate reconnect
-    /// from reacquiring the same stripe.
-    fn disconnect_window_staller(&self, applied_tip: Option<&TipSnapshot>, now: Instant) -> bool {
-        let Some(applied_tip) = applied_tip else {
-            return false;
-        };
-        let Some(next_apply_height) = applied_tip.height.checked_add(1) else {
-            return false;
-        };
-        let apply_side_busy = self
-            .next_expected_block_hash()
-            .is_some_and(|hash| self.block_stager.lock().contains(&hash));
-        let mut cold_hedge = None;
-        let mut fired = false;
-        let removed_peer = self.select_and_evict_window_peer(|window| {
-            cold_hedge = window.observe_cold_front(next_apply_height, apply_side_busy, now);
-            let selected = window.observe_stall(next_apply_height, apply_side_busy, now);
-            fired = selected.is_some();
-            let stall_seconds = window
-                .stalling_peer()
-                .map_or(0.0, |(_, since)| now.duration_since(since).as_secs_f64());
-            metrics::gauge!("node.sync.stall_seconds").set(stall_seconds);
-            selected
-        });
-        if fired {
-            let Some(peer_addr) = removed_peer else {
-                return false;
-            };
-            metrics::counter!("node.sync.staller_disconnects").increment(1);
-            tracing::warn!(
-                peer_addr = %peer_addr,
-                next_apply_height,
-                "block sync: peer is stalling the download window; disconnecting and re-queueing its blocks"
-            );
-            return true;
-        }
-        if let Some((owner, front_hash)) = cold_hedge
-            && let Some(alternate) =
-                self.send_cold_front_hedge(owner, front_hash, next_apply_height, now)
-        {
-            self.download_window
+    /// The planner decides; this executor disconnects the current
+    /// [`PeerTable`] identity and may send a cold-front hedge. At most one
+    /// disconnect per tick.
+    fn disconnect_convicted_peer(&self, applied_tip: Option<&TipSnapshot>, now: Instant) -> bool {
+        let next_apply_height = applied_tip.and_then(|tip| tip.height.checked_add(1));
+        let next_expected = self.next_expected_block_hash();
+        let (action, hedge) =
+            self.planner
                 .lock()
-                .confirm_cold_front_hedge(owner, alternate, front_hash);
+                .plan_conviction(next_apply_height, next_expected, now);
+        let stall_seconds = self
+            .planner
+            .lock()
+            .window()
+            .stalling_peer()
+            .map_or(0.0, |(_, since)| now.duration_since(since).as_secs_f64());
+        metrics::gauge!("node.sync.stall_seconds").set(stall_seconds);
+        match action {
+            Some(SyncAction::Disconnect { addr, reason }) => {
+                if !self.evict_planned_peer(addr) {
+                    return false;
+                }
+                match reason {
+                    SyncDisconnectReason::WindowStaller { next_apply_height } => {
+                        metrics::counter!("node.sync.staller_disconnects").increment(1);
+                        tracing::warn!(
+                            peer_addr = %addr,
+                            next_apply_height,
+                            "block sync: peer is stalling the download window; disconnecting and re-queueing its blocks"
+                        );
+                    }
+                    SyncDisconnectReason::PendingTimeout => {
+                        metrics::counter!("node.sync.pending_timeout_disconnects").increment(1);
+                        tracing::warn!(
+                            peer_addr = %addr,
+                            "block sync: peer missed the block request timeout; disconnecting and re-queueing its blocks"
+                        );
+                    }
+                }
+                true
+            }
+            None => {
+                if let (Some(height), Some(hedge)) = (next_apply_height, hedge)
+                    && let Some(alternate) =
+                        self.send_cold_front_hedge(hedge.owner, hedge.front_hash, height, now)
+                {
+                    self.planner.lock().window_mut().confirm_cold_front_hedge(
+                        hedge.owner,
+                        alternate,
+                        hedge.front_hash,
+                    );
+                }
+                false
+            }
         }
-        false
-    }
-
-    fn disconnect_timed_out_peer(&self, now: Instant) -> bool {
-        let apply_side_busy = self
-            .next_expected_block_hash()
-            .is_some_and(|hash| self.block_stager.lock().contains(&hash));
-        let Some(peer_addr) = self.select_and_evict_window_peer(|window| {
-            window.observe_pending_timeout(apply_side_busy, now)
-        }) else {
-            return false;
-        };
-        metrics::counter!("node.sync.pending_timeout_disconnects").increment(1);
-        tracing::warn!(
-            peer_addr = %peer_addr,
-            "block sync: peer missed the block request timeout; disconnecting and re-queueing its blocks"
-        );
-        true
     }
 
     fn record_sync_metrics(&self) {
-        let window = self.download_window.lock();
-        let stager = self.block_stager.lock();
+        let planner = self.planner.lock();
+        let window = planner.window();
+        let stager = planner.stager();
         metrics::gauge!("node.sync.pending_blocks").set(metric_count(window.pending_len()));
         metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
         metrics::gauge!("node.sync.received_blocks").set(metric_count(stager.received_len()));
@@ -1567,19 +1549,41 @@ impl BlockSync {
     }
 
     fn record_pending_sync_metrics(&self) {
-        let window = self.download_window.lock();
+        let planner = self.planner.lock();
+        let window = planner.window();
         metrics::gauge!("node.sync.pending_blocks").set(metric_count(window.pending_len()));
         metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
     }
 
+    /// Disconnects a planner-convicted download peer only when its latest
+    /// reconciled connection identity is still live.
+    fn evict_planned_peer(&self, peer_addr: SocketAddr) -> bool {
+        let Some(connection_id) = self.known_sessions.lock().get(&peer_addr).copied() else {
+            return false;
+        };
+        if !self
+            .peer_table
+            .disconnect_connection(peer_addr, connection_id)
+        {
+            return false;
+        }
+        let mut pending = self.pending_getheaders.lock();
+        if pending.is_some_and(|request| request.peer_addr == peer_addr) {
+            *pending = None;
+        }
+        true
+    }
+
     /// Selects and evicts a download-window owner only when its latest
     /// reconciled connection identity is still live.
+    #[cfg(test)]
     fn select_and_evict_window_peer(
         &self,
         select: impl FnOnce(&mut DownloadWindow) -> Option<SocketAddr>,
     ) -> Option<SocketAddr> {
-        let mut window = self.download_window.lock();
-        let peer_addr = select(&mut window)?;
+        let mut planner = self.planner.lock();
+        let window = planner.window_mut();
+        let peer_addr = select(window)?;
         let connection_id = self.known_sessions.lock().get(&peer_addr).copied()?;
         if !self
             .peer_table
@@ -1868,7 +1872,7 @@ mod tests {
             "retargeted requests must not retain hashes from the losing branch"
         );
         assert_eq!(
-            sync.download_window.lock().pending_len(),
+            sync.planner.lock().window_mut().pending_len(),
             winning_hashes.len(),
             "retargeting must release losing-branch pending capacity"
         );
@@ -1984,21 +1988,22 @@ mod tests {
             .tip()
             .ok_or_else(|| std::io::Error::other("fork tip was not published"))?;
         sync.handles.chain_tip.store(Some(fork_tip));
-        assert_eq!(sync.block_stager.lock().received_len(), 2);
-        assert_eq!(sync.download_window.lock().received_len(), 0);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 2);
+        assert_eq!(sync.planner.lock().window_mut().received_len(), 0);
 
         let stage_received = |block: &Block| {
             stage_body(&sync, block);
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let bytes = consensus_bytes(block).len();
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .mark_received(hash, bytes, Instant::now());
             hash
         };
 
         let first_hash = stage_received(&fork[0]);
-        assert_eq!(sync.block_stager.lock().received_len(), 3);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 3);
         assert_eq!(
             sync.outweighed_branch_target(),
             Some(fork_parent),
@@ -2010,13 +2015,13 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("branch prefix did not publish a tip"))?;
         assert_eq!(first_tip.height, 1);
         assert_eq!(first_tip.hash, first_hash);
-        assert_eq!(sync.block_stager.lock().received_len(), 2);
-        assert_eq!(sync.download_window.lock().received_len(), 0);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 2);
+        assert_eq!(sync.planner.lock().window_mut().received_len(), 0);
 
         for (index, block) in fork.iter().enumerate().skip(1) {
             let hash = stage_received(block);
             assert_eq!(
-                sync.block_stager.lock().received_len(),
+                sync.planner.lock().stager_mut().received_len(),
                 3,
                 "the tiny stager has room for one suffix body"
             );
@@ -2030,8 +2035,8 @@ mod tests {
                 .ok_or_else(|| std::io::Error::other("forward suffix did not publish a tip"))?;
             assert_eq!(tip.height, u32::try_from(index + 1)?);
             assert_eq!(tip.hash, hash);
-            assert_eq!(sync.block_stager.lock().received_len(), 2);
-            assert_eq!(sync.download_window.lock().received_len(), 0);
+            assert_eq!(sync.planner.lock().stager_mut().received_len(), 2);
+            assert_eq!(sync.planner.lock().window_mut().received_len(), 0);
         }
 
         install_budget(
@@ -2048,13 +2053,13 @@ mod tests {
             stage_body(&sync, block);
         }
         assert_eq!(
-            sync.block_stager.lock().received_len(),
+            sync.planner.lock().stager_mut().received_len(),
             5,
             "bounded staging must contain every reverse-switch plan body"
         );
         // The reverse switch must resolve all five disconnect and connect bodies from
         // the bounded stager, without durable storage or fixture-vector lookup.
-        let explicit_body = |hash: Hash256| sync.block_stager.lock().staged_body(hash);
+        let explicit_body = |hash: Hash256| sync.planner.lock().stager_mut().staged_body(hash);
         let main_target = sync
             .handles
             .block_tree
@@ -2079,7 +2084,7 @@ mod tests {
             "bounded staging must supply the reverse branch switch without durable storage"
         );
         assert_eq!(
-            sync.block_stager.lock().received_len(),
+            sync.planner.lock().stager_mut().received_len(),
             3,
             "only connected bodies retire from bounded staging after the reverse switch"
         );
@@ -2150,7 +2155,7 @@ mod tests {
                     &sync.followers,
                     fork_parent,
                     |hash| {
-                        let body = sync.block_stager.lock().staged_body(hash);
+                        let body = sync.planner.lock().stager_mut().staged_body(hash);
                         if !paused {
                             paused = true;
                             assert!(preloaded_tx.send(()).is_ok());
@@ -2220,8 +2225,9 @@ mod tests {
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let bytes = consensus_bytes(&block).len();
             stage_body(&sync, &block);
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .mark_received(hash, bytes, Instant::now());
             fork.push(block);
         }
@@ -2229,7 +2235,7 @@ mod tests {
             &sync.handles,
             &sync.followers,
             fork_parent,
-            |hash| sync.block_stager.lock().staged_body(hash),
+            |hash| sync.planner.lock().stager_mut().staged_body(hash),
             |hash| sync.retire_applied_reorg_body(hash),
         );
         assert!(
@@ -2250,10 +2256,10 @@ mod tests {
         );
         let first = Hash256::from_le_bytes(fork[0].block_hash().as_bytes());
         let failed = Hash256::from_le_bytes(fork[1].block_hash().as_bytes());
-        assert!(!sync.block_stager.lock().contains(&first));
-        assert!(sync.block_stager.lock().contains(&failed));
+        assert!(!sync.planner.lock().stager_mut().contains(&first));
+        assert!(sync.planner.lock().stager_mut().contains(&failed));
         assert_eq!(
-            sync.download_window.lock().received_len(),
+            sync.planner.lock().window_mut().received_len(),
             1,
             "only the failed block may retain download accounting"
         );
@@ -2296,8 +2302,9 @@ mod tests {
             stage_body(&sync, block);
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let bytes = consensus_bytes(block).len();
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .mark_received(hash, bytes, Instant::now());
         }
 
@@ -2313,12 +2320,11 @@ mod tests {
                 "the valid main branch must win after subtree invalidation"
             );
         }
-        let stager = sync.block_stager.lock();
-        assert!(stager.contains(&main_hash));
-        assert!(!stager.contains(&invalid_hash));
-        assert!(!stager.contains(&descendant_hash));
-        drop(stager);
-        assert_eq!(sync.download_window.lock().received_len(), 0);
+        let planner = sync.planner.lock();
+        assert!(planner.stager().contains(&main_hash));
+        assert!(!planner.stager().contains(&invalid_hash));
+        assert!(!planner.stager().contains(&descendant_hash));
+        assert_eq!(planner.window().received_len(), 0);
         Ok(())
     }
 
@@ -2361,8 +2367,9 @@ mod tests {
             stage_body(&sync, block);
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let bytes = consensus_bytes(block).len();
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .mark_received(hash, bytes, Instant::now());
         }
 
@@ -2374,11 +2381,10 @@ mod tests {
             assert_ne!(tree.node(descendant_id)?.status, NodeStatus::Invalid);
             assert_eq!(tree.tip().map(|tip| tip.tip_id), Some(descendant_id));
         }
-        let stager = sync.block_stager.lock();
-        assert!(stager.contains(&fork_hash));
-        assert!(stager.contains(&descendant_hash));
-        drop(stager);
-        assert_eq!(sync.download_window.lock().received_len(), 2);
+        let planner = sync.planner.lock();
+        assert!(planner.stager().contains(&fork_hash));
+        assert!(planner.stager().contains(&descendant_hash));
+        assert_eq!(planner.window().received_len(), 2);
         Ok(())
     }
 
@@ -3143,7 +3149,7 @@ mod tests {
         sync.tick();
 
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        assert_eq!(sync.download_window.lock().pending_len(), 0);
+        assert_eq!(sync.planner.lock().window_mut().pending_len(), 0);
         Ok(())
     }
 
@@ -3163,7 +3169,8 @@ mod tests {
         };
         assert_eq!(witness_block_inventory(inventory)?, expected);
 
-        let window = sync.download_window.lock();
+        let planner = sync.planner.lock();
+        let window = planner.window();
         assert_eq!(window.pending_len(), expected.len());
         for hash in expected {
             let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(hash.as_bytes());
@@ -3182,21 +3189,23 @@ mod tests {
             .checked_sub(super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
             .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        let staged = sync
-            .block_stager
-            .lock()
-            .insert(hash, None, block, serialized, received_at);
+        let staged =
+            sync.planner
+                .lock()
+                .stager_mut()
+                .insert(hash, None, block, serialized, received_at);
         let StagedBlock::Memory { bytes, .. } = staged else {
             return Err(std::io::Error::other("test block should stage in memory").into());
         };
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .mark_received(hash, bytes, Instant::now());
 
         sync.drain_inbound_blocks();
 
-        assert_eq!(sync.block_stager.lock().received_len(), 0);
-        assert_eq!(sync.download_window.lock().received_len(), 0);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 0);
+        assert_eq!(sync.planner.lock().window_mut().received_len(), 0);
         Ok(())
     }
 
@@ -3258,7 +3267,8 @@ mod tests {
         );
         let _headers = rx.try_recv()?;
         {
-            let mut window = sync.download_window.lock();
+            let mut planner = sync.planner.lock();
+            let window = planner.window_mut();
             window.mark_applied(&Hash256::from_le_bytes(block1_hash.as_bytes()));
             window.mark_applied(&Hash256::from_le_bytes(expected_hash.as_bytes()));
         }
@@ -3266,8 +3276,8 @@ mod tests {
         inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2))?;
         sync.drain_inbound_blocks();
 
-        assert_eq!(sync.block_stager.lock().received_len(), 0);
-        assert_eq!(sync.download_window.lock().received_len(), 0);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 0);
+        assert_eq!(sync.planner.lock().window_mut().received_len(), 0);
 
         sync.tick();
 
@@ -3298,7 +3308,7 @@ mod tests {
             return Err(std::io::Error::other("expected getdata").into());
         };
         assert_eq!(inventory.len(), 1);
-        assert_eq!(sync.download_window.lock().pending_len(), 1);
+        assert_eq!(sync.planner.lock().window_mut().pending_len(), 1);
         Ok(())
     }
 
@@ -3371,7 +3381,7 @@ mod tests {
             assert!(rx.try_recv().is_err(), "no peer may exceed the fan-out cap");
         }
         assert_eq!(
-            sync.download_window.lock().pending_len(),
+            sync.planner.lock().window_mut().pending_len(),
             super::PENDING_BUDGET,
             "fan-out must fill the deep window"
         );
@@ -3405,7 +3415,7 @@ mod tests {
             assert_eq!(witness_block_inventory(next_getdata(rx)?)?, expected[..8]);
         }
         assert_eq!(
-            sync.download_window.lock().pending_len(),
+            sync.planner.lock().window_mut().pending_len(),
             super::PENDING_BUDGET
         );
         Ok(())
@@ -3455,7 +3465,7 @@ mod tests {
             "the alternate must receive the one-shot probe prefix"
         );
         assert!(
-            !sync.download_window.lock().fanout_active(),
+            !sync.planner.lock().window_mut().fanout_active(),
             "below the threshold fanout must stay off"
         );
 
@@ -3468,7 +3478,7 @@ mod tests {
         }
         sync.tick();
         assert!(
-            !sync.download_window.lock().fanout_active(),
+            !sync.planner.lock().window_mut().fanout_active(),
             "a fresh prefix probe must defer the threshold-crossing tick"
         );
 
@@ -3477,7 +3487,8 @@ mod tests {
         // `Instant::now()` used when the probe is created, so read it back and
         // add exactly `stall_timeout_initial`. Then assert the planned
         // duration equals the budget before engaging fanout.
-        let mut window = sync.download_window.lock();
+        let mut planner = sync.planner.lock();
+        let window = planner.window_mut();
         let started_at = window
             .active_prefix_probe_started_at()
             .ok_or_else(|| std::io::Error::other("probe must remain active after deferral"))?;
@@ -3697,8 +3708,9 @@ mod tests {
             "a peer that misses the request timeout must release its outbound slot"
         );
         assert!(
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .peer_in_staller_cooldown(test_addr(9250, 0)?, Instant::now()),
             "a timed-out peer must not immediately reacquire the same block stripe"
         );
@@ -3740,7 +3752,8 @@ mod tests {
         // Two of three staging slots already occupied: the staged-byte gate is
         // still open, but only one more estimated block fits.
         {
-            let mut window = sync.download_window.lock();
+            let mut planner = sync.planner.lock();
+            let window = planner.window_mut();
             let now = Instant::now();
             window.mark_received(Hash256::from_le_bytes(&[0xEE; 32]), slot, now);
             window.mark_received(Hash256::from_le_bytes(&[0xEF; 32]), slot, now);
@@ -3784,7 +3797,8 @@ mod tests {
         sync.tick();
 
         {
-            let window = sync.download_window.lock();
+            let planner = sync.planner.lock();
+            let window = planner.window();
             assert_eq!(window.received_len(), 14);
             assert_eq!(window.pending_len(), 2);
             for front in &expected[..2] {
@@ -3804,7 +3818,8 @@ mod tests {
         for rx in &rxs {
             assert_no_getdata(rx)?;
         }
-        let stager = sync.block_stager.lock();
+        let planner = sync.planner.lock();
+        let stager = planner.stager();
         assert_eq!(stager.received_len(), 14, "no evictions may occur");
         for height in 3..=16_u32 {
             let hash = Hash256::from_le_bytes(expected[usize::try_from(height)? - 1].as_bytes());
@@ -3813,7 +3828,7 @@ mod tests {
                 "every delivered block must remain staged (height {height})"
             );
         }
-        assert_eq!(sync.download_window.lock().pending_len(), 2);
+        assert_eq!(planner.window().pending_len(), 2);
         Ok(())
     }
 
@@ -3826,7 +3841,7 @@ mod tests {
         // Tick 2: wedge — staged + pending at the count budget, scan limit
         // zero, the stalled front still pending.
         sync.tick();
-        assert_eq!(sync.download_window.lock().pending_len(), 2);
+        assert_eq!(sync.planner.lock().window_mut().pending_len(), 2);
 
         // Past the pending timeout the wedge must process its own deadlines:
         // the expired front credits the scan-limit count headroom, the
@@ -3852,12 +3867,13 @@ mod tests {
             "the stalled front stripe must be re-requested from a healthy peer"
         );
         assert_eq!(
-            sync.block_stager.lock().received_len(),
+            sync.planner.lock().stager_mut().received_len(),
             14,
             "staged progress must survive the wedge"
         );
         {
-            let window = sync.download_window.lock();
+            let planner = sync.planner.lock();
+            let window = planner.window();
             assert_eq!(window.pending_len(), 2);
             for front in &expected[..2] {
                 assert!(window.contains_pending(&Hash256::from_le_bytes(front.as_bytes())));
@@ -3878,7 +3894,7 @@ mod tests {
 
         // The first drain builds the asymmetric wedge and starts the episode.
         sync.tick();
-        assert_eq!(sync.download_window.lock().pending_len(), 2);
+        assert_eq!(sync.planner.lock().window_mut().pending_len(), 2);
         std::thread::sleep(Duration::from_millis(150));
         sync.tick();
 
@@ -3895,7 +3911,7 @@ mod tests {
             }
         }
         assert_eq!(hedged, expected[..1]);
-        assert_eq!(sync.download_window.lock().pending_len(), 2);
+        assert_eq!(sync.planner.lock().window_mut().pending_len(), 2);
 
         // The confirmed front hash is not duplicated again on later ticks.
         std::thread::sleep(Duration::from_millis(50));
@@ -3935,12 +3951,13 @@ mod tests {
         sync.tick();
 
         assert_eq!(
-            sync.download_window.lock().preferred_peer(),
+            sync.planner.lock().window_mut().preferred_peer(),
             Some(alternate)
         );
         assert!(
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .peer_in_staller_cooldown(owner, Instant::now())
         );
         assert_eq!(
@@ -3951,12 +3968,13 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(peers.is_connected(owner));
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .mark_peer_unresponsive(alternate, Instant::now());
         sync.tick();
         assert_eq!(
-            sync.download_window.lock().preferred_peer(),
+            sync.planner.lock().window_mut().preferred_peer(),
             Some(alternate),
             "a temporary soft block skips the winner without erasing its election"
         );
@@ -3995,7 +4013,7 @@ mod tests {
         sync.tick();
         let _ = next_getdata(&alternate_rx)?;
         assert_eq!(
-            sync.download_window.lock().preferred_peer(),
+            sync.planner.lock().window_mut().preferred_peer(),
             Some(alternate)
         );
 
@@ -4013,7 +4031,8 @@ mod tests {
         }
         sync.tick();
 
-        let window = sync.download_window.lock();
+        let planner = sync.planner.lock();
+        let window = planner.window();
         assert!(window.preferred_peer().is_none());
         assert!(window.fanout_active());
         drop(window);
@@ -4107,7 +4126,11 @@ mod tests {
         );
         let stale_hash = Hash256::from_le_bytes(blocks[0].block_hash().as_bytes());
         assert!(
-            !sync.download_window.lock().contains_pending(&stale_hash),
+            !sync
+                .planner
+                .lock()
+                .window_mut()
+                .contains_pending(&stale_hash),
             "the replay must be unsolicited after its request was applied"
         );
 
@@ -4116,8 +4139,9 @@ mod tests {
         ))?;
         sync.tick();
 
-        assert!(!sync.block_stager.lock().contains(&stale_hash));
-        let window = sync.download_window.lock();
+        assert!(!sync.planner.lock().stager_mut().contains(&stale_hash));
+        let planner = sync.planner.lock();
+        let window = planner.window();
         assert_eq!(window.pending_len(), 0);
         assert_eq!(window.received_len(), 0);
         assert!(!window.contains_pending(&stale_hash));
@@ -4145,15 +4169,17 @@ mod tests {
         // suppression, pinned at the window level). Seed it at 50ms — the
         // decay floor stays max(2x50ms, 100ms) = the injected initial
         // threshold — so this test keeps pinning the adaptive-timeout fire.
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .seed_front_cadence_for_test(50, Instant::now());
 
         // Tick 2: the wedge forms (staged 14 + pending 2 at the count
         // budget) and the stall episode starts on the front-stripe owner.
         sync.tick();
         {
-            let window = sync.download_window.lock();
+            let planner = sync.planner.lock();
+            let window = planner.window();
             assert_eq!(window.received_len(), 14);
             assert_eq!(window.pending_len(), 2);
             assert_eq!(
@@ -4174,8 +4200,9 @@ mod tests {
             "staller's outbound lease must be revoked"
         );
         assert!(
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .peer_in_staller_cooldown(staller, Instant::now()),
             "disconnected staller must enter the cooldown"
         );
@@ -4194,12 +4221,13 @@ mod tests {
             "the stalled front stripe must be re-requested from a healthy peer"
         );
         assert_eq!(
-            sync.block_stager.lock().received_len(),
+            sync.planner.lock().stager_mut().received_len(),
             14,
             "staged progress must survive the staller disconnect"
         );
         {
-            let window = sync.download_window.lock();
+            let planner = sync.planner.lock();
+            let window = planner.window();
             assert_eq!(window.pending_len(), 2);
             for front in &expected[..2] {
                 assert!(window.contains_pending(&Hash256::from_le_bytes(front.as_bytes())));
@@ -4217,8 +4245,9 @@ mod tests {
         };
         let (sync, peers, _expected, _rxs, _blocks_tx) = staged_count_wedge(budget)?;
         let staller = test_addr(9320, 0)?;
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .seed_front_cadence_for_test(50, Instant::now());
 
         sync.tick();
@@ -4289,8 +4318,9 @@ mod tests {
         // is seeded directly instead of via two real front deliveries (the
         // real sampling path is pinned by the window tests). 50ms keeps the
         // decay floor at the injected 100ms initial threshold.
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .seed_front_cadence_for_test(50, Instant::now());
 
         sync.tick();
@@ -4309,7 +4339,8 @@ mod tests {
         ))?;
         sync.tick();
         {
-            let window = sync.download_window.lock();
+            let planner = sync.planner.lock();
+            let window = planner.window();
             assert!(!window.has_request_capacity());
             assert_eq!(window.stalling_peer().map(|(addr, _)| addr), Some(staller));
         }
@@ -4323,7 +4354,7 @@ mod tests {
         sync.tick();
         assert!(!peers.is_connected(staller));
         assert_eq!(
-            sync.block_stager.lock().received_len(),
+            sync.planner.lock().stager_mut().received_len(),
             1,
             "recovery must not discard staged progress (prune-free)"
         );
@@ -4389,8 +4420,9 @@ mod tests {
                 ))?;
                 sync.tick();
                 assert_eq!(
-                    sync.download_window
+                    sync.planner
                         .lock()
+                        .window_mut()
                         .stalling_peer()
                         .map(|(addr, _)| addr),
                     Some(trickler),
@@ -4416,9 +4448,9 @@ mod tests {
                     blocks[offset].clone(),
                 ))?;
                 sync.tick();
-                assert!(sync.download_window.lock().stalling_peer().is_none());
+                assert!(sync.planner.lock().window_mut().stalling_peer().is_none());
                 assert_eq!(
-                    sync.download_window.lock().stall_timeout(),
+                    sync.planner.lock().window_mut().stall_timeout(),
                     super::BLOCK_STALLING_TIMEOUT,
                     "front progress must keep the adaptive threshold at its floor"
                 );
@@ -4469,8 +4501,9 @@ mod tests {
         // own and this test would pass vacuously. Seed it (50ms keeps the
         // decay floor at the default 2s initial threshold) so the no-fire
         // phase below pins the apply-side no-blame guard specifically.
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .seed_front_cadence_for_test(50, Instant::now());
 
         sync.tick();
@@ -4484,12 +4517,17 @@ mod tests {
         {
             let block = Network::Regtest.genesis_block();
             let serialized = bytes::Bytes::from(consensus_bytes(&block));
-            sync.block_stager
-                .lock()
-                .insert(successor, None, block, serialized, Instant::now());
+            sync.planner.lock().stager_mut().insert(
+                successor,
+                None,
+                block,
+                serialized,
+                Instant::now(),
+            );
         }
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .mark_received(successor, 80, Instant::now());
 
         // Apply-side backpressure: the next expected block (the frontier) is
@@ -4498,9 +4536,13 @@ mod tests {
         {
             let block = Network::Regtest.genesis_block();
             let serialized = bytes::Bytes::from(consensus_bytes(&block));
-            sync.block_stager
-                .lock()
-                .insert(frontier, None, block, serialized, Instant::now());
+            sync.planner.lock().stager_mut().insert(
+                frontier,
+                None,
+                block,
+                serialized,
+                Instant::now(),
+            );
         }
 
         let applied = sync
@@ -4511,24 +4553,29 @@ mod tests {
         let far_future = Instant::now() + Duration::from_mins(1);
 
         // Far past any threshold, but the apply side is busy: frozen.
-        sync.disconnect_window_staller(Some(&applied), far_future);
-        assert!(sync.download_window.lock().stalling_peer().is_none());
+        sync.disconnect_convicted_peer(Some(&applied), far_future);
+        assert!(sync.planner.lock().window_mut().stalling_peer().is_none());
         assert!(peers.is_connected(staller));
 
         // The apply side drains the frontier: blame starts from scratch and
         // only then runs to a fire — the busy interval was not charged.
-        let drained = sync.block_stager.lock().drain_expected_prefix(&[frontier]);
+        let drained = sync
+            .planner
+            .lock()
+            .stager_mut()
+            .drain_expected_prefix(&[frontier]);
         assert_eq!(drained.len(), 1);
-        sync.disconnect_window_staller(Some(&applied), far_future);
+        sync.disconnect_convicted_peer(Some(&applied), far_future);
         assert_eq!(
-            sync.download_window
+            sync.planner
                 .lock()
+                .window_mut()
                 .stalling_peer()
                 .map(|(addr, _)| addr),
             Some(staller)
         );
         assert!(peers.is_connected(staller));
-        sync.disconnect_window_staller(Some(&applied), far_future + super::BLOCK_STALLING_TIMEOUT);
+        sync.disconnect_convicted_peer(Some(&applied), far_future + super::BLOCK_STALLING_TIMEOUT);
         assert!(
             !peers.is_connected(staller),
             "with the apply side idle the same state must fire normally"
@@ -4709,7 +4756,7 @@ mod tests {
         // Tick 1: eight eligible peers engage fan-out and stripe the window.
         sync.tick();
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        assert!(sync.download_window.lock().fanout_active());
+        assert!(sync.planner.lock().window_mut().fanout_active());
         for (idx, rx) in rxs.iter().enumerate() {
             let Message::GetData(inventory) = rx.try_recv()? else {
                 return Err(std::io::Error::other("expected striped getdata").into());
@@ -4734,7 +4781,7 @@ mod tests {
         // so the stalled stripe is redistributed in cap-sized batches instead
         // of re-concentrating the whole window on one deep peer.
         assert!(
-            sync.download_window.lock().fanout_active(),
+            sync.planner.lock().window_mut().fanout_active(),
             "one demotion below the threshold must not disengage fan-out"
         );
         assert_no_getdata(&rxs[0])?;
@@ -4763,7 +4810,7 @@ mod tests {
         // Tick 3: the dip heals (7 -> 8) and the mode is still fan-out — the
         // window stayed in one mode across 8 -> 7 -> 8.
         sync.tick();
-        assert!(sync.download_window.lock().fanout_active());
+        assert!(sync.planner.lock().window_mut().fanout_active());
         Ok(())
     }
 
@@ -4803,7 +4850,8 @@ mod tests {
         let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
         let received_hash = Hash256::from_le_bytes(expected[1].as_bytes());
         {
-            let mut window = sync.download_window.lock();
+            let mut planner = sync.planner.lock();
+            let window = planner.window_mut();
             let needs_height = window.mark_received(received_hash, 80, Instant::now());
             assert!(needs_height);
             window.update_received_height(&received_hash, 2);
@@ -4852,7 +4900,7 @@ mod tests {
 
         assert_eq!(requested, expected);
         assert_eq!(
-            sync.download_window.lock().pending_len(),
+            sync.planner.lock().window_mut().pending_len(),
             super::PENDING_BUDGET
         );
         Ok(())
@@ -4916,8 +4964,9 @@ mod tests {
         };
         assert_eq!(witness_block_inventory(first)?, expected[..3]);
         let _headers = rx.try_recv()?;
-        sync.download_window
+        sync.planner
             .lock()
+            .window_mut()
             .mark_applied(&Hash256::from_le_bytes(expected[0].as_bytes()));
 
         sync.tick();
@@ -4958,7 +5007,8 @@ mod tests {
         assert_eq!(witness_block_inventory(first)?, expected[..4]);
         let _headers = rx.try_recv()?;
         {
-            let mut window = sync.download_window.lock();
+            let mut planner = sync.planner.lock();
+            let window = planner.window_mut();
             window.mark_applied(&Hash256::from_le_bytes(expected[0].as_bytes()));
             window.drop_for_retry(&Hash256::from_le_bytes(expected[1].as_bytes()));
         }
@@ -4972,7 +5022,7 @@ mod tests {
             witness_block_inventory(second)?,
             vec![expected[1], expected[4]]
         );
-        assert_eq!(sync.download_window.lock().pending_len(), 4);
+        assert_eq!(sync.planner.lock().window_mut().pending_len(), 4);
         Ok(())
     }
 
@@ -5077,13 +5127,14 @@ mod tests {
             alloc::vec![expected_hash]
         );
         let _headers = rx.try_recv()?;
-        assert_eq!(sync.download_window.lock().pending_len(), 1);
+        assert_eq!(sync.planner.lock().window_mut().pending_len(), 1);
 
         inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block))?;
         sync.drain_inbound_blocks();
 
         {
-            let window = sync.download_window.lock();
+            let planner = sync.planner.lock();
+            let window = planner.window();
             assert_eq!(window.pending_len(), 0);
             assert_eq!(window.pending_bytes(), 0);
         }
@@ -5167,7 +5218,7 @@ mod tests {
         inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2.clone()))?;
         sync.drain_inbound_blocks();
         assert_eq!(
-            sync.block_stager.lock().received_bytes(),
+            sync.planner.lock().stager_mut().received_bytes(),
             consensus_bytes(&block2).len()
         );
 
@@ -5176,7 +5227,7 @@ mod tests {
         // not dropped for re-download.
         sync.tick();
         assert!(rx.try_recv().is_err());
-        assert_eq!(sync.block_stager.lock().received_len(), 1);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 1);
 
         // The window-front block arrives: the stager admits it past the
         // exhausted budget (expected-block exemption), apply drains both, and
@@ -5189,7 +5240,7 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
             .height;
         assert_eq!(applied_height, 2);
-        assert_eq!(sync.block_stager.lock().received_len(), 0);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 0);
         let Message::GetData(recovered) = rx.try_recv()? else {
             return Err(std::io::Error::other("expected recovery getdata").into());
         };
@@ -5230,7 +5281,7 @@ mod tests {
                 .into());
             }
         }
-        assert_eq!(sync.block_stager.lock().received_len(), 1);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 1);
         Ok(())
     }
 
@@ -5257,9 +5308,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(125));
         sync.tick();
 
-        assert_eq!(sync.block_stager.lock().received_len(), 0);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 0);
         {
-            let window = sync.download_window.lock();
+            let planner = sync.planner.lock();
+            let window = planner.window();
             assert_eq!(window.received_len(), 0);
             assert!(window.has_request_capacity());
             assert!(window.contains_pending(&Hash256::from_le_bytes(block1_hash.as_bytes())));
@@ -5359,7 +5411,7 @@ mod tests {
         // budget, closing the request gate.
         inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2))?;
         sync.drain_inbound_blocks();
-        assert!(!sync.download_window.lock().has_request_capacity());
+        assert!(!sync.planner.lock().window_mut().has_request_capacity());
 
         let healthy_rx = connect_peer(&peers, synthetic_peer(healthy_addr, 100));
 
@@ -5419,7 +5471,8 @@ mod tests {
             }
             sync.drain_inbound_blocks();
             let (received_count, peak_staged_bytes) = {
-                let stager = sync.block_stager.lock();
+                let planner = sync.planner.lock();
+                let stager = planner.stager();
                 (stager.received_len(), stager.received_bytes())
             };
             assert_eq!(received_count, DETERMINISTIC_PROXY_BLOCKS.saturating_sub(1));
@@ -5438,8 +5491,8 @@ mod tests {
                 .ok_or_else(|| std::io::Error::other("proxy apply did not publish tip"))?
                 .height;
             assert_eq!(applied_height, DETERMINISTIC_PROXY_TIP_HEIGHT);
-            assert_eq!(sync.block_stager.lock().received_len(), 0);
-            assert_eq!(sync.download_window.lock().pending_len(), 0);
+            assert_eq!(sync.planner.lock().stager_mut().received_len(), 0);
+            assert_eq!(sync.planner.lock().window_mut().pending_len(), 0);
             assert_histogram(&recorder, "node.sync.apply_buffered_blocks_seconds");
 
             println!(
@@ -5573,14 +5626,14 @@ mod tests {
             Some(1),
             "height 1 should apply before the fail-once height 2 body persistence error"
         );
-        assert_eq!(sync.block_stager.lock().received_len(), 1);
-        assert_eq!(sync.download_window.lock().received_len(), 1);
+        assert_eq!(sync.planner.lock().stager_mut().received_len(), 1);
+        assert_eq!(sync.planner.lock().window_mut().received_len(), 1);
         assert!(
-            !sync.block_stager.lock().contains(&block2_hash),
+            !sync.planner.lock().stager_mut().contains(&block2_hash),
             "failed block should be dropped for retry rather than restored"
         );
         assert!(
-            sync.block_stager.lock().contains(&block3_hash),
+            sync.planner.lock().stager_mut().contains(&block3_hash),
             "tail block must be restored after the mid-batch failure"
         );
         // G5: the mid-batch failure leaves the gateway generation odd
@@ -5632,11 +5685,11 @@ mod tests {
         fixture.sync.drain_inbound_blocks();
 
         assert!(
-            fixture.sync.block_stager.lock().received_len() <= max_received_blocks,
+            fixture.sync.planner.lock().stager_mut().received_len() <= max_received_blocks,
             "block stager must enforce received block count budget"
         );
         assert!(
-            fixture.sync.download_window.lock().received_len() <= max_received_blocks,
+            fixture.sync.planner.lock().window_mut().received_len() <= max_received_blocks,
             "download window must mirror received block count budget"
         );
         assert!(
@@ -5712,9 +5765,13 @@ mod tests {
     fn stage_body(sync: &BlockSync, block: &Block) {
         let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
         let serialized = bytes::Bytes::from(consensus_bytes(block));
-        sync.block_stager
-            .lock()
-            .insert(hash, None, block.clone(), serialized, Instant::now());
+        sync.planner.lock().stager_mut().insert(
+            hash,
+            None,
+            block.clone(),
+            serialized,
+            Instant::now(),
+        );
     }
 
     fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
@@ -5972,7 +6029,7 @@ mod tests {
         // descendants while the transition was held. They can never become
         // applicable, so instead of returning to the stager they are purged
         // from it: the frontier must not cycle on invalidated blocks.
-        let restored = fixture.sync.block_stager.lock().received_len();
+        let restored = fixture.sync.planner.lock().stager_mut().received_len();
         assert_eq!(
             restored, 0,
             "invalidated blocks and their descendants are purged, not restored"
@@ -6869,8 +6926,9 @@ mod tests {
         assert!(peers.is_connected(peer_addr));
         assert!(
             !sync
-                .download_window
+                .planner
                 .lock()
+                .window_mut()
                 .peer_in_staller_cooldown(peer_addr, Instant::now()),
             "local-clock rejection must not blame the peer"
         );
@@ -7099,7 +7157,7 @@ mod tests {
             assert!(receiver.try_recv().is_err());
         }
         assert_eq!(
-            sync.download_window.lock().pending_len(),
+            sync.planner.lock().window_mut().pending_len(),
             super::PENDING_BUDGET
         );
         Ok(())
@@ -7144,7 +7202,7 @@ mod tests {
         };
         assert_eq!(witness_block_inventory(inventory)?, expected[cap..2 * cap]);
         assert_eq!(
-            sync.download_window.lock().pending_len(),
+            sync.planner.lock().window_mut().pending_len(),
             super::PENDING_BUDGET
         );
         Ok(())
@@ -7347,8 +7405,8 @@ mod tests {
         );
         let bad_hash = Hash256::from_le_bytes(bad.block_hash().as_bytes());
         let descendant_hash = Hash256::from_le_bytes(descendant.block_hash().as_bytes());
-        assert!(!sync.block_stager.lock().contains(&bad_hash));
-        let descendant_staged = sync.block_stager.lock().contains(&descendant_hash);
+        assert!(!sync.planner.lock().stager_mut().contains(&bad_hash));
+        let descendant_staged = sync.planner.lock().stager_mut().contains(&descendant_hash);
         assert!(
             !descendant_staged,
             "invalid descendants must be purged from bounded staging"

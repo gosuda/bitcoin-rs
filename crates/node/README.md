@@ -10,9 +10,8 @@ drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `Chainstate` facade for
 authoritative apply; `ChainFollowers` dispatch post-commit RPC/ZMQ/index,
 mining, and admission work while the `ChainTransition` is still held;
-`BlockSync` orchestrates block download against P2P-owned `DownloadWindow`
-and `BlockStager`; `reorg` switches the applied chain
-from one branch to another. The chainstate facade serializes connect,
+`BlockSync` executes block download against the P2P-owned `SyncPlanner`;
+`reorg` switches the applied chain from one branch to another. The chainstate facade serializes connect,
 disconnect, and window apply behind `ChainTransition`. Owning crates expose
 the domain surfaces `node` wires:
 chain BIP9/softfork lookups, P2P `ActiveChainQuery`, mining candidate context,
