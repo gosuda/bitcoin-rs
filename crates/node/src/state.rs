@@ -708,6 +708,13 @@ impl NodeStorage {
             Self::Redb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
             #[cfg(feature = "mdbx")]
             Self::Mdbx(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
         }
     }
 
