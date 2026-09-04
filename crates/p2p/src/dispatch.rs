@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
 use crate::handshake::feature_messages;
@@ -43,14 +43,15 @@ pub trait ChainQuery: Send + Sync {
     /// Serves block inventory one body at a time, in `items` order. For each
     /// block-typed item `headroom` is consulted EXACTLY ONCE, immediately
     /// BEFORE its body load; `false` halts production and sets `halted`
-    /// (I7, I9). Each loaded body is delivered through `serve`; a `serve`
+    /// (I7, I9). Each loaded body is the stored consensus payload, delivered
+    /// through `serve` without a decode/re-encode round trip. A `serve`
     /// error aborts production and propagates. Non-block / unservable items
     /// are collected into `not_found` and never loaded.
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
 }
 
@@ -267,7 +268,7 @@ fn serve_getdata(
                     let outcome = chain.serve_inventory_blocks(
                         std::slice::from_ref(block_item),
                         headroom,
-                        &mut |block| send(Message::Block(block)),
+                        &mut |payload| send(Message::BlockPayload(payload)),
                     )?;
                     if outcome.halted {
                         return Err(PeerError::Protocol(
@@ -298,8 +299,8 @@ fn serve_getdata_blocks(
     match chain {
         None => send(Message::NotFound(items.to_vec()))?,
         Some(chain) => {
-            let outcome = chain.serve_inventory_blocks(items, headroom, &mut |block| {
-                send(Message::Block(block))
+            let outcome = chain.serve_inventory_blocks(items, headroom, &mut |payload| {
+                send(Message::BlockPayload(payload))
             })?;
             if outcome.halted {
                 return Err(PeerError::Protocol(
@@ -351,6 +352,14 @@ mod tests {
     use crate::peer::{Peer, PeerState};
     use crate::wire::{Message, PeerError};
 
+    fn block_payload_bytes(block: &Block) -> bytes::Bytes {
+        bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(block))
+    }
+
+    fn block_payload(block: &Block) -> Message {
+        Message::BlockPayload(block_payload_bytes(block))
+    }
+
     #[derive(Default)]
     struct FakeChain {
         headers: Vec<Header>,
@@ -392,7 +401,7 @@ mod tests {
             &self,
             items: &[Inventory],
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -408,7 +417,7 @@ mod tests {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(found.clone())?;
+                serve(block_payload_bytes(found))?;
             }
             Ok(outcome)
         }
@@ -446,7 +455,7 @@ mod tests {
             &self,
             _items: &[Inventory],
             _headroom: &dyn Fn() -> bool,
-            _serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            _serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             Ok(InventoryServing::default())
         }
@@ -579,9 +588,12 @@ mod tests {
 
         let responses = dispatch_collect(&mut peer, &message, Some(&chain))?;
 
-        let [Message::Block(found), Message::NotFound(not_found)] = responses.as_slice() else {
-            panic!("expected block plus notfound, got {responses:?}");
+        let [Message::BlockPayload(found), Message::NotFound(not_found)] = responses.as_slice()
+        else {
+            panic!("expected block payload plus notfound, got {responses:?}");
         };
+        let found = Block::consensus_decode(found)
+            .unwrap_or_else(|error| panic!("served payload must decode: {error}"));
         assert_eq!(found.block_hash(), chain.headers[0].compute_hash());
         assert_eq!(not_found, &vec![missing]);
         Ok(())
@@ -628,7 +640,7 @@ mod tests {
             &self,
             items: &[Inventory],
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -652,7 +664,7 @@ mod tests {
                     );
                 }
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                serve(found.clone())?;
+                serve(block_payload_bytes(found))?;
             }
             Ok(outcome)
         }
@@ -694,8 +706,8 @@ mod tests {
         assert_eq!(
             emitted,
             vec![
-                Message::Block(block_a),
-                Message::Block(block_b),
+                block_payload(&block_a),
+                block_payload(&block_b),
                 Message::NotFound(vec![tx_inv, unknown]),
             ],
             "streamed emission must equal the pre-change batch shape (I8)"
