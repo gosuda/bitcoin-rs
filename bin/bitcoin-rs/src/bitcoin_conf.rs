@@ -198,11 +198,11 @@ fn strip_inline_comment(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_for_network;
+    use super::{Result, parse_for_network};
     use bitcoin_rs_node::{Network, resolve};
 
     #[test]
-    fn network_section_overrides_globals() {
+    fn network_section_overrides_globals() -> Result<()> {
         let layer = parse_for_network(
             "
 -prune=550
@@ -213,7 +213,8 @@ mod tests {
 ",
             Network::Regtest,
         );
-        let config = resolve(&[&layer]).expect("layer resolves");
+        let config = resolve(&[&layer])?;
         assert_eq!(config.storage.prune_target_mb, 900);
+        Ok(())
     }
 }
