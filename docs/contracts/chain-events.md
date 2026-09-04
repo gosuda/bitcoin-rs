@@ -40,6 +40,9 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   itself. Ancestry comes from `BlockTree::active_node_at_height` and
   `BlockTree::find_common_ancestor` (`crates/chain`); bodies come from
   `PruneBodyStore::load_block_body`.
+- RPC `BlockLog`, ZMQ projections, and TxIndex wake are not this hint
+  channel. They are owned by `ChainEffects` (`ARCH-07`) and run around the
+  same commit point without being able to fail apply.
 
 ### `EVT-03`: Consumer cursor and positional reconciliation
 
