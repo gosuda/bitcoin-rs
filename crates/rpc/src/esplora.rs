@@ -11,207 +11,94 @@
     clippy::unnecessary_semicolon
 )]
 
+mod backend;
+mod http;
 mod model;
 mod projection;
+mod public;
 
-use alloc::sync::Arc;
-
-use core::str::FromStr as _;
-
-// WHY rust-bitcoin: `/tx/:id/merkleblock-proof` returns the serialized
-// rust-bitcoin `MerkleBlock`; no native merkle-proof builder exists in-tree
-// (sanctioned compat seam).
-use bitcoin::consensus::encode::serialize;
-use bitcoin::hashes::Hash as _;
-use bitcoin::hex::{DisplayHex as _, FromHex as _};
-use bitcoin::merkle_tree::MerkleBlock;
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize};
-use serde_json::json;
-use sonic_rs::{JsonValueTrait as _, json as sonic_json};
-
-use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
+use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::Response;
 
-use self::model::{
-    AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
-    RecentTransaction, ScriptSummary, TransactionValue,
-};
-use self::projection::{Confirmation, Projection};
+use self::http::not_found;
+use self::projection::Projection;
 
-const CHAIN_PAGE: usize = 25;
-const MEMPOOL_PAGE: usize = 50;
+/// Which Esplora directory a request landed in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Surface {
+    /// Wallet and explorer electrs tree at `/api`. No mempool-backend helpers.
+    Public,
+    /// Electrs plus mempool-backend `/internal` and `/block-template` at `/esplora`.
+    Backend,
+}
 
 /// Routes a read-only Esplora request from the node HTTP listener.
 ///
-/// Esplora lives only at `/api` on this listener. Unprefixed paths 404 so
-/// JSON-RPC owns `/` and a wallet base URL is unambiguous.
+/// `/api` is the public electrs directory. `/esplora` is the mempool-backend
+/// superset of that tree. Unprefixed paths 404 so JSON-RPC owns `/`.
 #[must_use]
 pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
-    let Some(path) = namespace(path) else {
+    let Some((surface, path)) = namespace(path) else {
         return not_found();
     };
     let ctx = handler.context();
     let projection = Projection::new(&ctx);
     let chain_view = projection.capture_chain_view();
-    let response = dispatch_get(handler, &ctx, path, query);
+    let response = dispatch_get(handler, &ctx, surface, path, query);
     match projection.ensure_chain_view(chain_view.as_ref()) {
         Ok(()) => response,
         Err(response) => response,
     }
 }
 
-fn dispatch_get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Response {
-    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
-    match parts.as_slice() {
-        ["blocks", "tip", "height"] => text(ctx.applied_height().to_string()),
-        ["blocks", "tip", "hash"] => text(ctx.applied_hash().to_string_be()),
-        ["internal", "mempool", "txs"] => internal_mempool_txs(&ctx, None, query),
-        ["internal", "mempool", "txs", last] => internal_mempool_txs(&ctx, Some(last), query),
-        ["internal", "block", hash, "txs"] => internal_block_txs(&ctx, hash),
-        ["tx", id, "hex"] => tx_hex(&ctx, id),
-        ["tx", id, "raw"] => tx_raw(&ctx, id),
-        ["tx", id, "status"] => tx_status(&ctx, id),
-        ["tx", id, "merkleblock-proof"] => tx_merkleblock_proof(&ctx, id),
-        ["tx", id, "merkle-proof"] => tx_merkle_proof(&ctx, id),
-        ["tx", id, "outspend", vout] => tx_outspend(&ctx, id, vout),
-        ["tx", id, "outspends"] => tx_outspends(&ctx, id),
-        ["tx", id] => tx(&ctx, id),
-        ["block", hash, "header"] => block_header(&ctx, hash),
-        ["block", hash, "status"] => block_status(&ctx, hash),
-        ["block", hash, "raw"] => block_raw(&ctx, hash),
-        ["block", hash, "txs"] => block_txs(&ctx, hash, 0),
-        ["block", hash, "txs", start] => match start.parse::<usize>() {
-            Ok(n) if n % CHAIN_PAGE == 0 => block_txs(&ctx, hash, n),
-            _ => bad("transaction start index must be a multiple of 25"),
-        },
-        ["block", hash, "txids"] => block_txids(&ctx, hash),
-        ["block", hash, "txid", index] => block_txid(&ctx, hash, index),
-        ["block", hash] => block(&ctx, hash),
-        ["block-height", height] => height.parse::<u32>().map_or_else(
-            |_| bad("height must be an unsigned integer"),
-            |height| {
-                ctx.block_hash_at_height(height)
-                    .map_or_else(not_found, |hash| text(hash.to_string_be()))
-            },
-        ),
-        ["blocks"] => blocks(&ctx, None),
-        ["blocks", height] => height.parse::<u32>().map_or_else(
-            |_| bad("start height must be an unsigned integer"),
-            |h| blocks(&ctx, Some(h)),
-        ),
-        ["mempool"] => mempool(&ctx),
-        ["mempool", "txids"] => json_response(
-            ctx.mempool
-                .read()
-                .iter_txids()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>(),
-        ),
-        ["mempool", "recent"] => mempool_recent(&ctx),
-        ["fee-estimates"] => fee_estimates(handler),
-        ["block-template"] => block_template(handler),
-        ["scripthash", hash] => summary(&ctx, hash, None),
-        ["address", address] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| summary_for(&ctx, h, Some(address)))
+fn dispatch_get(
+    handler: &Handler,
+    ctx: &Context,
+    surface: Surface,
+    path: &str,
+    query: &str,
+) -> Response {
+    if surface == Surface::Backend {
+        if let Some(response) = backend::get(handler, ctx, path, query) {
+            return response;
         }
-        ["scripthash", hash, "utxo"] => parse_script(hash).map_or_else(|r| r, |h| utxos(&ctx, h)),
-        ["address", address, "utxo"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| utxos(&ctx, h))
-        }
-        ["scripthash", hash, "txs"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, None, true))
-        }
-        ["address", address, "txs"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, None, true))
-        }
-        ["scripthash", hash, "txs", "summary"] => {
-            parse_script(hash).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
-        }
-        ["address", address, "txs", "summary"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| address_transaction_summary(&ctx, h))
-        }
-        ["scripthash", hash, "txs", "mempool"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, Some(""), true))
-        }
-        ["address", address, "txs", "mempool"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, Some(""), true))
-        }
-        ["scripthash", hash, "txs", "chain"] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, None, false))
-        }
-        ["address", address, "txs", "chain"] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, None, false))
-        }
-        ["scripthash", hash, "txs", "chain", last] => {
-            parse_script(hash).map_or_else(|r| r, |h| history(&ctx, h, Some(last), false))
-        }
-        ["address", address, "txs", "chain", last] => {
-            address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, Some(last), false))
-        }
-        ["address-prefix", _] => unavailable("address prefix search requires an address index"),
-        _ => not_found(),
     }
+    public::get(handler, ctx, path, query)
 }
 
 /// Routes Esplora raw-transaction broadcast and mempool-backend POSTs.
 ///
-/// Returns `None` outside `/api` so the HTTP demux can fall through to
-/// JSON-RPC. Inside `/api` the namespace is closed: unknown paths 404.
+/// Returns `None` outside `/api` and `/esplora` so the HTTP demux can fall
+/// through to JSON-RPC. Inside either directory the namespace is closed:
+/// unknown paths 404.
 #[must_use]
 pub fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
-    let path = namespace(path)?;
-    match path {
-        "/tx" => {
-            let Ok(hex) = core::str::from_utf8(body) else {
-                return Some(bad("transaction body must be UTF-8 hex"));
-            };
-            Some(
-                match handler.dispatch("sendrawtransaction", &sonic_json!([hex.trim()])) {
-                    Ok(value) => match value.as_str() {
-                        Some(id) => text(id.to_owned()),
-                        None => json_response(value),
-                    },
-                    Err(error) => dispatch_error(error),
-                },
-            )
+    let (surface, path) = namespace(path)?;
+    if surface == Surface::Backend {
+        if let Some(response) = backend::post(handler, path, body) {
+            return Some(response);
         }
-        "/internal/txs" => Some(internal_transactions(
-            handler.context().as_ref(),
-            body,
-            false,
-        )),
-        "/internal/mempool/txs" => Some(internal_transactions(
-            handler.context().as_ref(),
-            body,
-            true,
-        )),
-        "/internal/txs/outspends/by-txid" => {
-            Some(internal_outspends_by_txid(handler.context().as_ref(), body))
-        }
-        "/internal/txs/outspends/by-outpoint" => Some(internal_outspends_by_outpoint(
-            handler.context().as_ref(),
-            body,
-        )),
-        // `/txs/package` is in this namespace so it cannot fall through to
-        // JSON-RPC. API.md makes package relay conditional on a
-        // package-admission backend; 404 is preferable to sequential
-        // sendrawtransaction calls pretending to be atomic.
-        _ => Some(not_found()),
     }
+    Some(public::post(handler, path, body))
 }
 
 /// See `docs/contracts/wallet-facing.md` WF-02.
 ///
-/// `/api` is the sole Esplora directory on this listener. `/api/v1` is not an
-/// alias: that prefix is Mempool's own API on the explorer port, so
-/// `/api/v1/block-height/{h}` is `/v1/block-height/{h}` here and 404s.
+/// `/api` is the public electrs directory. `/esplora` is the mempool-backend
+/// electrs tree (public routes plus `/internal` and `/block-template`).
+/// `/api/v1` is not an alias: that prefix is Mempool's own API on the
+/// explorer port, so `/api/v1/block-height/{h}` is `/v1/block-height/{h}`
+/// here and 404s.
 #[must_use]
-pub fn namespace(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("/api")?;
+pub fn namespace(path: &str) -> Option<(Surface, &str)> {
+    strip_dir(path, "/api")
+        .map(|rest| (Surface::Public, rest))
+        .or_else(|| strip_dir(path, "/esplora").map(|rest| (Surface::Backend, rest)))
+}
+
+fn strip_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix(prefix)?;
     if rest.is_empty() {
         Some("/")
     } else if rest.starts_with('/') {
@@ -221,749 +108,33 @@ pub fn namespace(path: &str) -> Option<&str> {
     }
 }
 
-fn tx(ctx: &Context, id: &str) -> Response {
-    let projection = Projection::new(ctx);
-    projection.required_transaction(id).map_or_else(
-        |r| r,
-        |(tx, status)| {
-            projection
-                .transaction_value(&tx, status)
-                .map_or_else(|r| r, json_response)
-        },
-    )
-}
-fn tx_hex(ctx: &Context, id: &str) -> Response {
-    Projection::new(ctx).required_transaction(id).map_or_else(
-        |r| r,
-        |(tx, _)| text(consensus_bytes(&tx).to_lower_hex_string()),
-    )
-}
-fn tx_raw(ctx: &Context, id: &str) -> Response {
-    Projection::new(ctx).required_transaction(id).map_or_else(
-        |r| r,
-        |(tx, _)| Response {
-            status: 200,
-            reason: "OK",
-            content_type: "application/octet-stream",
-            body: consensus_bytes(&tx),
-        },
-    )
-}
-fn tx_status(ctx: &Context, id: &str) -> Response {
-    Projection::new(ctx).required_transaction(id).map_or_else(
-        |r| r,
-        |(_, status)| json_response(Projection::status_value(status)),
-    )
-}
-
-fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
-    confirmed_block(ctx, id).map_or_else(
-        |r| r,
-        |(record, bytes, txid)| {
-            // MerkleBlock construction requires bitcoin::Block (sanctioned seam).
-            let Ok(block) = bitcoin::consensus::encode::deserialize::<bitcoin::Block>(&bytes)
-            else {
-                return internal("stored block body is corrupt");
-            };
-            let proof = MerkleBlock::from_block_with_predicate(&block, |candidate| {
-                candidate.as_byte_array() == txid.as_bytes()
-            });
-            let _ = record;
-            text(serialize(&proof).to_lower_hex_string())
-        },
-    )
-}
-
-fn tx_merkle_proof(ctx: &Context, id: &str) -> Response {
-    confirmed_block(ctx, id).map_or_else(
-        |r| r,
-        |(record, bytes, txid)| {
-            let Ok(block) = deserialize::<Block>(&bytes) else {
-                return internal("stored block body is corrupt");
-            };
-            let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-            let Some(position) = txids.iter().position(|candidate| *candidate == txid) else {
-                return internal("confirmed transaction is absent from its block");
-            };
-            let proof = merkle_proof(txids, position);
-            json_response(MerkleProof {
-                block_height: record.height,
-                merkle: proof,
-                pos: position,
-            })
-        },
-    )
-}
-
-fn confirmed_block(
-    ctx: &Context,
-    id: &str,
-) -> Result<(crate::context::BlockRecord, Vec<u8>, Txid), Response> {
-    let (transaction, Some(status)) = Projection::new(ctx).required_transaction(id)? else {
-        return Err(not_found());
-    };
-    let txid = transaction.txid();
-    let record = ctx
-        .block_by_height(status.height)
-        .ok_or_else(|| unavailable("confirming block unavailable"))?;
-    let bytes = ctx
-        .block_body_bytes(&record)
-        .ok_or_else(|| unavailable("confirming block body unavailable"))?;
-    Ok((record, bytes, txid))
-}
-
-fn merkle_proof(mut level: Vec<Txid>, mut position: usize) -> Vec<String> {
-    let mut proof = Vec::new();
-    while level.len() > 1 {
-        let sibling = if position.is_multiple_of(2) {
-            level.get(position + 1).unwrap_or(&level[position])
-        } else {
-            &level[position - 1]
-        };
-        proof.push(sibling.to_string());
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pair in level.chunks(2) {
-            let right = pair.get(1).unwrap_or(&pair[0]);
-            let mut bytes = [0_u8; 64];
-            bytes[..32].copy_from_slice(pair[0].as_bytes());
-            bytes[32..].copy_from_slice(right.as_bytes());
-            next.push(Txid(double_sha256(&bytes)));
-        }
-        level = next;
-        position /= 2;
-    }
-    proof
-}
-
-fn tx_outspend(ctx: &Context, id: &str, vout: &str) -> Response {
-    let Ok(vout) = vout.parse::<u32>() else {
-        return bad("vout must be an unsigned integer");
-    };
-    let projection = Projection::new(ctx);
-    projection.required_transaction(id).map_or_else(
-        |r| r,
-        |(transaction, _)| {
-            let Some(_) = transaction
-                .outputs
-                .get(usize::try_from(vout).unwrap_or(usize::MAX))
-            else {
-                return not_found();
-            };
-            outspend(&projection, OutPoint::new(transaction.txid(), vout))
-                .map_or_else(|r| r, json_response)
-        },
-    )
-}
-
-fn tx_outspends(ctx: &Context, id: &str) -> Response {
-    let projection = Projection::new(ctx);
-    projection.required_transaction(id).map_or_else(
-        |r| r,
-        |(transaction, _)| {
-            outspends_for_transaction(&projection, &transaction).map_or_else(|r| r, json_response)
-        },
-    )
-}
-
-fn outspends_for_transaction(
-    projection: &Projection<'_>,
-    transaction: &Tx,
-) -> Result<Vec<Outspend>, Response> {
-    transaction
-        .outputs
-        .iter()
-        .enumerate()
-        .map(|(vout, _)| {
-            let vout = u32::try_from(vout).map_err(|_| internal("output index is too large"))?;
-            outspend(projection, OutPoint::new(transaction.txid(), vout))
-        })
-        .collect()
-}
-
-fn outspend(projection: &Projection<'_>, outpoint: OutPoint) -> Result<Outspend, Response> {
-    let ctx = projection.ctx;
-    let pool = ctx.mempool.read();
-    if let Some(spender) = pool
-        .outpoint_spender(outpoint)
-        .map_err(|_| internal("mempool spending index is inconsistent"))?
-    {
-        return Ok(Outspend {
-            spent: true,
-            txid: Some(spender.entry.txid.to_string()),
-            vin: Some(spender.vin),
-            status: Some(Projection::status_value(None)),
-        });
-    }
-    drop(pool);
-
-    let index = ctx
-        .script_index
-        .as_ref()
-        .ok_or_else(|| unavailable("script index is disabled"))?;
-    let Some(spender) = index.spender(outpoint).map_err(query_error)? else {
-        return Ok(Outspend::unspent());
-    };
-    let confirmation = projection
-        .confirmation_at_height(spender.height)
-        .ok_or_else(|| unavailable("spending block unavailable"))?;
-    Ok(Outspend {
-        spent: true,
-        txid: Some(spender.txid.to_string()),
-        vin: Some(spender.vin),
-        status: Some(Projection::status_value(Some(confirmation))),
-    })
-}
-
-fn block(ctx: &Context, text_hash: &str) -> Response {
-    let projection = Projection::new(ctx);
-    let record = match projection.required_block_record(text_hash) {
-        Ok(record) => record,
-        Err(response) => return response,
-    };
-    projection
-        .block_value(&record)
-        .map_or_else(|r| r, json_response)
-}
-fn block_header(ctx: &Context, h: &str) -> Response {
-    let record = match Projection::new(ctx).required_block_record(h) {
-        Ok(record) => record,
-        Err(response) => return response,
-    };
-    record.header_bytes().map_or_else(
-        || unavailable("block header unavailable"),
-        |bytes| text(bytes.to_lower_hex_string()),
-    )
-}
-fn block_status(ctx: &Context, text_hash: &str) -> Response {
-    let record = match Projection::new(ctx).required_block_record(text_hash) {
-        Ok(record) => record,
-        Err(response) => return response,
-    };
-    let in_best_chain =
-        ctx.active_hash_at_height(record.height) == Some(Hash256::from(record.hash));
-    json_response(BlockStatus {
-        in_best_chain,
-        height: record.height,
-        next_best: in_best_chain
-            .then(|| ctx.block_hash_at_height(record.height.saturating_add(1)))
-            .flatten()
-            .map(|hash| hash.to_string_be()),
-    })
-}
-fn block_raw(ctx: &Context, text_hash: &str) -> Response {
-    let record = match Projection::new(ctx).required_block_record(text_hash) {
-        Ok(record) => record,
-        Err(response) => return response,
-    };
-    let Some(bytes) = ctx.block_body_bytes(&record) else {
-        return unavailable("block body unavailable");
-    };
-    Response {
-        status: 200,
-        reason: "OK",
-        content_type: "application/octet-stream",
-        body: bytes,
-    }
-}
-fn block_txs(ctx: &Context, h: &str, start: usize) -> Response {
-    let (record, block) = match Projection::new(ctx).required_block(h) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    block_transaction_values(ctx, &record, block.txs.iter().skip(start).take(CHAIN_PAGE))
-        .map_or_else(|r| r, json_response)
-}
-
-fn block_transaction_values<'a>(
-    ctx: &Context,
-    record: &crate::context::BlockRecord,
-    transactions: impl IntoIterator<Item = &'a Tx>,
-) -> Result<Vec<TransactionValue>, Response> {
-    // A record fetched by hash can be from a losing branch. Do not reuse the
-    // active block at the same height for its transactions' confirmation data.
-    let block_status = (ctx.active_hash_at_height(record.height)
-        == Some(Hash256::from(record.hash)))
-    .then_some(Confirmation {
-        height: record.height,
-        hash: record.hash,
-        time: record.time,
-    });
-    let projection = Projection::new(ctx);
-    transactions
-        .into_iter()
-        .map(|tx| {
-            let state = match block_status {
-                Some(state) => Some(state),
-                None => projection.confirmation(&tx.txid())?,
-            };
-            projection.transaction_value(tx, state)
-        })
-        .collect::<Result<Vec<_>, _>>()
-}
-fn block_txids(ctx: &Context, h: &str) -> Response {
-    let (_, block) = match Projection::new(ctx).required_block(h) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    json_response(
-        block
-            .txs
-            .iter()
-            .map(|tx| tx.txid().to_string())
-            .collect::<Vec<_>>(),
-    )
-}
-fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
-    let Ok(index) = index.parse::<usize>() else {
-        return bad("transaction index must be an unsigned integer");
-    };
-    let (_, block) = match Projection::new(ctx).required_block(h) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    block
-        .txs
-        .get(index)
-        .map_or_else(not_found, |tx| text(tx.txid().to_string()))
-}
-fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
-    let start = start_height.unwrap_or_else(|| ctx.applied_height());
-    if ctx.block_by_height(start).is_none() {
-        return not_found();
-    }
-    let mut values = Vec::with_capacity(10);
-    let projection = Projection::new(ctx);
-    for height in (0..=start).rev().take(10) {
-        let Some(record) = ctx.block_by_height(height) else {
-            continue;
-        };
-        let value = match projection.block_value(&record) {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
-        values.push(value);
-    }
-    json_response(values)
-}
-fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
-    let (record, block) = match Projection::new(ctx).required_block(hash) {
-        Ok(value) => value,
-        Err(response) => return response,
-    };
-    block_transaction_values(ctx, &record, block.txs.iter()).map_or_else(|r| r, json_response)
-}
-
-fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
-    let max_txs = query_limit(query, "max_txs").unwrap_or(usize::MAX);
-    // Ordering needs every entry, the answer needs `max_txs` of them. The pool
-    // payload stays behind its `Arc` until the page is cut, so a one-transaction
-    // request no longer copies the whole mempool under the read lock.
-    let transactions = {
-        let pool = ctx.mempool.read();
-        let mut ordered = pool
-            .iter_entries()
-            .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
-            .collect::<Vec<_>>();
-        drop(pool);
-        ordered.sort_unstable_by(|left, right| {
-            left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
-        });
-        let start = last
-            .and_then(|last| {
-                ordered
-                    .iter()
-                    .position(|(_, txid, _)| txid.to_string() == last)
-            })
-            .map_or(0, |position| position.saturating_add(1));
-        ordered
-            .into_iter()
-            .skip(start)
-            .take(max_txs)
-            .map(|(_, _, transaction)| transaction)
-            .collect::<Vec<_>>()
-    };
-    let projection = Projection::new(ctx);
-    transactions
-        .into_iter()
-        .map(|transaction| projection.transaction_value(&transaction, None))
-        .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
-}
-
-fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
-    let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
-        return bad("transaction request body must be a JSON array of txids");
-    };
-    let ids = match text_ids
-        .into_iter()
-        .map(|id| Txid::from_str(&id).map_err(|_| bad("txid must be 64 hex characters")))
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(ids) => ids,
-        Err(response) => return response,
-    };
-    let projection = Projection::new(ctx);
-    ids.into_iter()
-        .filter_map(|id| {
-            let transaction = if mempool_only {
-                ctx.mempool
-                    .read()
-                    .transaction_by_txid(&id)
-                    .map(|transaction| ((*transaction).clone(), None))
-            } else {
-                match projection.transaction(&id) {
-                    Ok(transaction) => transaction,
-                    Err(response) => return Some(Err(response)),
-                }
-            };
-            transaction
-                .map(|(transaction, status)| projection.transaction_value(&transaction, status))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
-}
-
-fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
-    let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
-        return bad("outspend request body must be a JSON array of txids");
-    };
-    let projection = Projection::new(ctx);
-    text_ids
-        .into_iter()
-        .map(|id| {
-            Txid::from_str(&id).ok().map_or(Ok(Vec::new()), |id| {
-                projection
-                    .transaction(&id)?
-                    .map_or(Ok(Vec::new()), |(transaction, _)| {
-                        outspends_for_transaction(&projection, &transaction)
-                    })
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
-}
-
-fn internal_outspends_by_outpoint(ctx: &Context, body: &[u8]) -> Response {
-    let Ok(outpoints) = serde_json::from_slice::<Vec<String>>(body) else {
-        return bad("outspend request body must be a JSON array of outpoints");
-    };
-    let projection = Projection::new(ctx);
-    outpoints
-        .into_iter()
-        .map(|outpoint| internal_outspend(&projection, &outpoint))
-        .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
-}
-
-fn internal_outspend(
-    projection: &Projection<'_>,
-    text_outpoint: &str,
-) -> Result<Outspend, Response> {
-    let Some((text_txid, text_vout)) = text_outpoint.split_once(':') else {
-        return Ok(Outspend::unspent());
-    };
-    let Ok(txid) = Txid::from_str(text_txid) else {
-        return Ok(Outspend::unspent());
-    };
-    let Ok(vout) = text_vout.parse::<u32>() else {
-        return Ok(Outspend::unspent());
-    };
-    let Some((transaction, _)) = projection.transaction(&txid)? else {
-        return Ok(Outspend::unspent());
-    };
-    let Some(_) = transaction
-        .outputs
-        .get(usize::try_from(vout).unwrap_or(usize::MAX))
-    else {
-        return Ok(Outspend::unspent());
-    };
-    outspend(projection, OutPoint::new(txid, vout))
-}
-
-fn query_limit(query: &str, name: &str) -> Option<usize> {
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == name).then(|| value.parse().ok()).flatten()
-    })
-}
-
-fn mempool(ctx: &Context) -> Response {
-    let pool = ctx.mempool.read();
-    let stats = pool.stats();
-    let mut bins = std::collections::BTreeMap::new();
-    for entry in pool.iter_entries() {
-        *bins.entry(entry.fee_rate).or_insert(0_u64) += u64::from(entry.vsize);
-    }
-    json_response(MempoolSummary {
-        count: stats.txs,
-        vsize: stats.bytes,
-        total_fee: stats.total_fee,
-        fee_histogram: bins
-            .into_iter()
-            .rev()
-            .map(|(rate, size)| (rate as f64 / 1000.0, size))
-            .collect(),
-    })
-}
-fn mempool_recent(ctx: &Context) -> Response {
-    let pool = ctx.mempool.read();
-    let mut entries = pool.iter_entries().collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        right
-            .time
-            .cmp(&left.time)
-            .then_with(|| right.txid.cmp(&left.txid))
-    });
-    json_response(
-        entries
-            .into_iter()
-            .take(10)
-            .map(|entry| RecentTransaction {
-                txid: entry.txid.to_string(),
-                fee: entry.fee,
-                vsize: entry.vsize,
-                value: entry
-                    .tx
-                    .outputs
-                    .iter()
-                    .fold(0_u64, |sum, output| sum.saturating_add(output.value)),
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-fn fee_estimates(handler: &Handler) -> Response {
-    let mut values = serde_json::Map::new();
-    for target in (1_u32..=25).chain([144, 504, 1008]) {
-        let fee = handler
-            .dispatch("estimatesmartfee", &sonic_json!([target]))
-            .ok()
-            .and_then(|v| v.get("feerate").and_then(sonic_rs::JsonValueTrait::as_f64))
-            .map(|v| v * 100_000_000.0 / 1000.0)
-            .unwrap_or(1.0);
-        values.insert(target.to_string(), json!(fee));
-    }
-    json_response(values)
-}
-fn block_template(handler: &Handler) -> Response {
-    handler
-        .dispatch("getblocktemplate", &sonic_json!([]))
-        .map_or_else(dispatch_error, json_response)
-}
-
-fn summary(ctx: &Context, text: &str, address: Option<&str>) -> Response {
-    parse_script(text).map_or_else(|r| r, |h| summary_for(ctx, h, address))
-}
-fn summary_for(ctx: &Context, h: ScriptHash, address: Option<&str>) -> Response {
-    let projection = Projection::new(ctx);
-    let activity = match projection.script_activity(h) {
-        Ok(activity) => activity,
-        Err(response) => return response,
-    };
-    let chain_stats = activity.chain_stats();
-    json_response(ScriptSummary {
-        address: address.map(str::to_owned),
-        scripthash: address
-            .is_none()
-            .then(|| h.to_byte_array().to_lower_hex_string()),
-        chain_stats,
-        mempool_stats: activity.mempool_stats(h),
-    })
-}
-fn utxos(ctx: &Context, h: ScriptHash) -> Response {
-    Projection::new(ctx)
-        .script_utxos(h)
-        .map_or_else(|response| response, json_response)
-}
-fn history(ctx: &Context, h: ScriptHash, last: Option<&str>, include_mempool: bool) -> Response {
-    let projection = Projection::new(ctx);
-    let activity = match projection.script_activity(h) {
-        Ok(activity) => activity,
-        Err(response) => return response,
-    };
-    if last == Some("") {
-        return activity
-            .mempool
-            .into_iter()
-            .take(MEMPOOL_PAGE)
-            .map(|t| projection.transaction_value(&t, None))
-            .collect::<Result<Vec<_>, _>>()
-            .map_or_else(|r| r, json_response);
-    };
-    let start = last.and_then(|x| {
-        activity
-            .confirmed
-            .iter()
-            .position(|entry| entry.record.txid.to_string() == x)
-            .map(|n| n + 1)
-    });
-    if last.is_some() && start.is_none() {
-        return not_found();
-    }
-    let out = if include_mempool {
-        activity
-            .mempool
-            .iter()
-            .take(MEMPOOL_PAGE)
-            .map(|t| projection.transaction_value(t, None))
-            .collect::<Result<Vec<_>, _>>()
-    } else {
-        Ok(Vec::new())
-    };
-    let mut out = match out {
-        Ok(out) => out,
-        Err(r) => return r,
-    };
-    let chain = match activity
-        .confirmed
-        .into_iter()
-        .skip(start.unwrap_or(0))
-        .take(CHAIN_PAGE)
-        .map(|entry| {
-            projection
-                .confirmed_transaction(&entry.record.txid)
-                .and_then(|transaction| {
-                    projection.transaction_value(&transaction, Some(entry.confirmation))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(chain) => chain,
-        Err(r) => return r,
-    };
-    out.extend(chain);
-    json_response(out)
-}
-
-fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Response {
-    let activity = match Projection::new(ctx).script_activity(h) {
-        Ok(activity) => activity,
-        Err(response) => return response,
-    };
-    let mut funded = std::collections::BTreeMap::<Txid, u64>::new();
-    for row in &activity.confirmed_funding {
-        let total = funded.entry(row.txid).or_default();
-        *total = total.saturating_add(row.value);
-    }
-    json_response(
-        activity
-            .confirmed
-            .into_iter()
-            .map(|entry| AddressTransactionSummary {
-                txid: entry.record.txid.to_string(),
-                value: funded.get(&entry.record.txid).copied().unwrap_or_default(),
-                height: entry.confirmation.height,
-                time: entry.confirmation.time,
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-fn address_hash(ctx: &Context, a: &str) -> Result<ScriptHash, Response> {
-    let n = Projection::new(ctx).bitcoin_network();
-    let a = bitcoin::Address::from_str(a)
-        .map_err(|_| bad("invalid address"))?
-        .require_network(n)
-        .map_err(|_| bad("address network does not match node"))?;
-    Ok(ScriptHash::from_script_bytes(a.script_pubkey().as_bytes()))
-}
-fn parse_script(s: &str) -> Result<ScriptHash, Response> {
-    Ok(ScriptHash::from_byte_array(
-        <[u8; 32]>::from_hex(s).map_err(|_| bad("scripthash must be 64 hex characters"))?,
-    ))
-}
-fn query_error(e: TxQueryError) -> Response {
-    match e {
-        TxQueryError::Retry | TxQueryError::Unavailable(_) => unavailable(&e.to_string()),
-        TxQueryError::Storage(_) => internal(&e.to_string()),
-    }
-}
-fn dispatch_error(e: crate::RpcError) -> Response {
-    match e {
-        crate::RpcError::NotFound(_) => not_found(),
-        // 400: the request is the problem, and re-sending it unchanged will not
-        // help. That covers a malformed request and a refused transaction
-        // alike -- `unavailable` is 503, which tells a broadcaster to retry,
-        // and the one thing a rejected transaction will not do is succeed on a
-        // retry. Esplora answers `POST /tx` with 400 and the reject reason, and
-        // a wallet reads that as "fix the transaction" rather than "come back
-        // later".
-        //
-        // `TxRejected` is what policy or consensus refused; `TxVerifyError` a
-        // guard the caller configured themselves. Neither improves with time.
-        crate::RpcError::InvalidParams(_)
-        | crate::RpcError::InvalidType(_)
-        | crate::RpcError::TxRejected(_)
-        | crate::RpcError::TxVerifyError(_) => bad(&e.to_string()),
-        _ => unavailable(&e.to_string()),
-    }
-}
-fn json_response(v: impl serde::Serialize) -> Response {
-    sonic_rs::to_string(&v).map_or_else(
-        |_| internal("failed to serialize response"),
-        |b| Response {
-            status: 200,
-            reason: "OK",
-            content_type: "application/json",
-            body: b.into_bytes(),
-        },
-    )
-}
-fn text(b: String) -> Response {
-    Response {
-        status: 200,
-        reason: "OK",
-        content_type: "text/plain",
-        body: b.into_bytes(),
-    }
-}
-fn bad(m: &str) -> Response {
-    Response {
-        status: 400,
-        reason: "Bad Request",
-        content_type: "text/plain",
-        body: m.as_bytes().to_vec(),
-    }
-}
-fn not_found() -> Response {
-    Response {
-        status: 404,
-        reason: "Not Found",
-        content_type: "text/plain",
-        body: b"not found".to_vec(),
-    }
-}
-fn unavailable(m: &str) -> Response {
-    Response {
-        status: 503,
-        reason: "Service Unavailable",
-        content_type: "text/plain",
-        body: m.as_bytes().to_vec(),
-    }
-}
-fn internal(m: &str) -> Response {
-    Response {
-        status: 500,
-        reason: "Internal Server Error",
-        content_type: "text/plain",
-        body: m.as_bytes().to_vec(),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_index::ScriptHash;
     use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{BlockHash, Header, TxIn, TxOut};
+    use bitcoin_rs_primitives::encode::double_sha256;
+    use bitcoin_rs_primitives::{
+        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
-    use super::*;
+    use super::projection::Projection;
+    use super::public::{
+        CHAIN_PAGE, address_transaction_summary, block_txs, history, outspend, summary,
+    };
+    use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
+    use crate::handlers::Handler;
+    use crate::rest::Response;
 
-    /// Canonical Esplora lives at `/api`. Tests that omit the prefix are
-    /// naming the surface, not a second listener root.
+    /// Canonical public Esplora lives at `/api`. Tests that omit the prefix
+    /// are naming that surface, not a second listener root.
     fn route(handler: &Handler, path: &str, query: &str) -> Response {
         super::route(handler, &api(path), query)
     }
@@ -972,10 +143,26 @@ mod tests {
         super::route_post(handler, &api(path), body)
     }
 
+    fn backend_route(handler: &Handler, path: &str, query: &str) -> Response {
+        super::route(handler, &esplora(path), query)
+    }
+
+    fn backend_route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
+        super::route_post(handler, &esplora(path), body)
+    }
+
     fn api(path: &str) -> String {
+        prefixed("/api", path)
+    }
+
+    fn esplora(path: &str) -> String {
+        prefixed("/esplora", path)
+    }
+
+    fn prefixed(prefix: &str, path: &str) -> String {
         match super::namespace(path) {
             Some(_) => path.to_owned(),
-            None => format!("/api{path}"),
+            None => format!("{prefix}{path}"),
         }
     }
 
@@ -1488,7 +675,6 @@ mod tests {
             ("/mempool/txids".to_owned(), 200, "application/json"),
             ("/mempool/recent".to_owned(), 200, "application/json"),
             ("/fee-estimates".to_owned(), 200, "application/json"),
-            ("/block-template".to_owned(), 503, "text/plain"),
             ("/address-prefix/bcrt1".to_owned(), 503, "text/plain"),
         ];
         for (path, expected_status, expected_content_type) in routes {
@@ -1730,12 +916,17 @@ mod tests {
     }
 
     #[test]
-    fn api_is_the_closed_esplora_and_backend_namespace() -> Result<(), Box<dyn std::error::Error>> {
+    fn api_is_the_public_electrs_directory() -> Result<(), Box<dyn std::error::Error>> {
         let (handler, _, _, _) = contract_fixture()?;
         assert_eq!(
             route(&handler, "/internal/mempool/txs", "").status,
-            200,
-            "mempool backend uses ESPLORA_REST_API_URL=…/api, so /internal is under /api"
+            404,
+            "/api/internal is not a wallet-facing route"
+        );
+        assert_eq!(
+            route(&handler, "/block-template", "").status,
+            404,
+            "/api/block-template is not a wallet-facing route"
         );
         assert_eq!(
             super::route(&handler, "/internal/mempool/txs", "").status,
@@ -1743,19 +934,9 @@ mod tests {
             "unprefixed /internal is not served"
         );
         assert_eq!(
-            route(&handler, "/block-template", "").status,
-            503,
-            "/api/block-template stays on the node listener for the backend"
-        );
-        assert_eq!(
-            super::route(&handler, "/block-template", "").status,
-            404,
-            "unprefixed /block-template is not served"
-        );
-        assert_eq!(
             super::route_post(&handler, "/api/internal/txs", b"[]").map(|response| response.status),
-            Some(200),
-            "POST /api/internal/txs is the mempool-backend bulk path"
+            Some(404),
+            "POST /api/internal/txs stays in the public directory (404)"
         );
         assert_eq!(
             super::route_post(&handler, "/api/v1/not-esplora", b"{}")
@@ -1766,6 +947,43 @@ mod tests {
         assert!(
             super::route_post(&handler, "/not-esplora", b"{}").is_none(),
             "unprefixed unknown POST still falls through to JSON-RPC"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn esplora_is_the_mempool_backend_superset() -> Result<(), Box<dyn std::error::Error>> {
+        let (handler, _, _, _) = contract_fixture()?;
+        assert_eq!(
+            backend_route(&handler, "/internal/mempool/txs", "").status,
+            200,
+            "mempool backend uses ESPLORA_REST_API_URL=…/esplora"
+        );
+        assert_eq!(
+            backend_route(&handler, "/block-template", "").status,
+            503,
+            "/esplora/block-template stays on the node listener for the backend"
+        );
+        assert_eq!(
+            backend_route(&handler, "/block-height/0", "").status,
+            200,
+            "/esplora is a superset: public electrs routes still answer"
+        );
+        assert_eq!(
+            super::route_post(&handler, "/esplora/internal/txs", b"[]")
+                .map(|response| response.status),
+            Some(200),
+            "POST /esplora/internal/txs is the mempool-backend bulk path"
+        );
+        assert_eq!(
+            super::route_post(&handler, "/esplora/not-esplora", b"{}")
+                .map(|response| response.status),
+            Some(404),
+            "unknown POST under /esplora must not fall through to JSON-RPC"
+        );
+        assert!(
+            super::route_post(&handler, "/esplorafoo", b"{}").is_none(),
+            "POST /esplorafoo is not an Esplora path"
         );
         Ok(())
     }
@@ -1814,10 +1032,10 @@ mod tests {
         let handler = Handler::new(Arc::clone(&ctx));
         let body = serde_json::to_vec(&vec![txid.to_string()]).expect("txids serialize");
 
-        let post = route_post(&handler, "/internal/mempool/txs", &body)
+        let post = backend_route_post(&handler, "/internal/mempool/txs", &body)
             .expect("internal route is handled");
         assert_eq!(post.status, 200);
-        let paged = route(&handler, "/internal/mempool/txs", "max_txs=1");
+        let paged = backend_route(&handler, "/internal/mempool/txs", "max_txs=1");
         assert_eq!(paged.status, 200);
         let values: Value = serde_json::from_slice(&paged.body).expect("mempool response json");
         assert_eq!(values[0]["txid"], json!(txid.to_string()));
@@ -1837,12 +1055,13 @@ mod tests {
             ("/internal/txs/outspends/by-txid", ids.as_slice()),
             ("/internal/txs/outspends/by-outpoint", outpoints.as_slice()),
         ] {
-            let response = route_post(&handler, path, body).expect("internal POST route exists");
+            let response =
+                backend_route_post(&handler, path, body).expect("internal POST route exists");
             assert_eq!(response.status, 200, "status for {path}");
             assert_eq!(response.content_type, "application/json");
         }
 
-        let block_response = route(
+        let block_response = backend_route(
             &handler,
             &format!("/internal/block/{}/txs", block.block_hash()),
             "",

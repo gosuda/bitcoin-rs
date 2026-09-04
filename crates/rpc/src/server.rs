@@ -155,8 +155,7 @@ fn serve_connection(
 
         if request.method == "GET" {
             let (path, query) = split_path_query(&request.path);
-            // Routing policy is defined in docs/contracts/wallet-facing.md, WF-02;
-            // see that contract for the complete routing policy.
+            // Routing contract: `docs/contracts/wallet-facing.md` WF-02.
             let response = if path.starts_with("/rest/") {
                 crate::rest::route(handler.context(), path, query, rest_enabled)
             } else {
