@@ -34,8 +34,11 @@ out of tree.
   index covers the applied tip.
 - Broadcast: `POST /tx` (hex body), which dispatches `sendrawtransaction`
   through the same admission owner as JSON-RPC.
-- `/api/…` and `/api/v1/…` are aliases of the same routes. Wallets that
-  copy a mempool.space base URL (`…/api`) must not 404 on `/block-height`.
+- `/api/…` and `/api/v1/…` are a closed public alias of the same routes.
+  Wallets that copy a mempool.space base URL (`…/api`) must not 404 on
+  `/block-height`. The alias does not expose `/internal/*` or
+  `/block-template`. A request in this namespace never falls through to
+  JSON-RPC.
 
 ### `WF-03`: Proof is a public-HTTP consumer
 
@@ -62,6 +65,7 @@ out of tree.
 ## Proven by
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
+- `crates/rpc/src/esplora.rs` tests `mempool_space_api_prefixes_alias_the_root_esplora_surface` and `public_api_prefix_is_a_closed_esplora_namespace`
 - `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
 
 ## Vocabulary
