@@ -124,7 +124,7 @@ pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let nblocks = required_u32(params, 0, "nblocks is required")?;
     let address = required_str(params, 1, "address is required")?;
     let max_tries = optional_u64(params, 2, GenerateRequest::DEFAULT_MAX_TRIES)?;
-    let payout = decode_address_payout(address, ctx.chain_network)?;
+    let payout = decode_payout(address, ctx.chain_network)?;
     let generated = control
         .generate(GenerateRequest {
             payout,
@@ -147,7 +147,7 @@ pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     let output = required_str(params, 0, "output is required")?;
-    let payout = decode_address_payout(output, ctx.chain_network)?;
+    let payout = decode_payout(output, ctx.chain_network)?;
     let txids = parse_generateblock_txids(params)?;
     let submit = optional_bool(params, 2, true)?;
     let generated = control
@@ -244,14 +244,13 @@ fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcEr
     }
 }
 
-fn decode_address_payout(text: &str, network: bitcoin_rs_primitives::Network) -> Result<Vec<u8>, RpcError> {
-    if let Ok(unchecked) = bitcoin::Address::from_str(text)
-        && let Ok(address) =
-            unchecked.require_network(crate::compat::convert::bitcoin_network(network))
-    {
-        return Ok(address.script_pubkey().as_bytes().to_vec());
-    }
-    Err(RpcError::InvalidAddressOrKey("Invalid address or key".to_owned()))
+fn decode_payout(text: &str, network: bitcoin_rs_primitives::Network) -> Result<Vec<u8>, RpcError> {
+    let unchecked = bitcoin::Address::from_str(text)
+        .map_err(|_| RpcError::InvalidAddressOrKey("Invalid address or key".to_owned()))?;
+    let address = unchecked
+        .require_network(crate::compat::convert::bitcoin_network(network))
+        .map_err(|_| RpcError::InvalidAddressOrKey("Invalid address or key".to_owned()))?;
+    Ok(address.script_pubkey().as_bytes().to_vec())
 }
 
 fn parse_generateblock_txids(params: &Value) -> Result<Vec<Txid>, RpcError> {
@@ -260,7 +259,7 @@ fn parse_generateblock_txids(params: &Value) -> Result<Vec<Txid>, RpcError> {
         return Err(RpcError::InvalidParams("transactions is required"));
     };
     if value.is_null() {
-        return Err(RpcError::InvalidParams("transactions is required"));
+        return Err(RpcError::InvalidParams("transactions must be an array"));
     }
     let Some(entries) = value.as_array() else {
         return Err(RpcError::InvalidType("transactions must be an array"));
