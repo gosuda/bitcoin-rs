@@ -398,6 +398,15 @@ fn active_rules(ctx: &Context, height: u32) -> Vec<&'static str> {
     rules
 }
 
+fn template_candidate_time(ctx: &Context, tip: &bitcoin_rs_chain::TipSnapshot) -> u64 {
+    ctx.mining_template_cache
+        .read()
+        .as_ref()
+        .filter(|cached| cached.tip == tip.hash)
+        .map(|cached| u64::from(cached.template.current_time))
+        .unwrap_or_else(now_seconds)
+}
+
 fn now_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -409,7 +418,6 @@ fn now_seconds() -> u64 {
 /// Bitcoin Core's `DEFAULT_BLOCK_MIN_TX_FEE` is 1 satoshi per kvB, and it is
 /// configurable there (`-blockmintxfee`). It is not configurable here, so this
 /// reports the default this node's selection actually applies.
-const BLOCK_MIN_TX_FEE_BTC_PER_KVB: f64 = 0.000_000_01;
 
 pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
@@ -424,7 +432,7 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let tip = ctx.applied_tip.load_full();
     let chain = tip.as_ref().map(|tip| {
         let tree = ctx.block_tree.read();
-        ChainFields::read(ctx, &tree, tip)
+        ChainFields::read(ctx, &tree, tip, template_candidate_time(ctx, tip))
     });
 
     let tip_bits = chain.as_ref().and_then(|chain| chain.bits);
@@ -458,7 +466,7 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         json!(chain.as_ref().map_or(0.0, |chain| chain.network_hashps)),
     );
     let _ = response.insert(&"pooledtx", ctx.mempool.read().stats().txs);
-    let _ = response.insert(&"blockmintxfee", json!(BLOCK_MIN_TX_FEE_BTC_PER_KVB));
+    let _ = response.insert(&"blockmintxfee", json!(ctx.mempool.read().min_relay_fee_sat_per_kvb() as f64 / 100_000_000.0));
     let _ = response.insert(&"chain", chain_name(ctx.chain_network));
 
     // The next block's difficulty, which is the number a miner is actually
@@ -550,12 +558,13 @@ impl ChainFields {
         ctx: &Context,
         tree: &bitcoin_rs_chain::BlockTree,
         tip: &bitcoin_rs_chain::TipSnapshot,
+        candidate_time: u64,
     ) -> Self {
         let bits = tree.node(tip.tip_id).ok().map(|node| node.header.bits);
         let min_time = tree
             .median_time_past_at(tip.tip_id, MEDIAN_TIME_SPAN)
             .map_or(0, |mtp| mtp.saturating_add(1));
-        let candidate_time = u32::try_from(now_seconds())
+        let candidate_time = u32::try_from(candidate_time)
             .unwrap_or(u32::MAX)
             .max(min_time);
         let next_bits = bitcoin_rs_chain::expected_next_bits(
