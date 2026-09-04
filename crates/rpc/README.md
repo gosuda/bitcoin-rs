@@ -18,7 +18,7 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 ### 1. Protocol demuxing and authentication
 - **Transport Demuxing**: Private free function `serve_connection` (`crates/rpc/src/server.rs`) demuxes incoming HTTP requests before authentication:
   - `GET`: If path starts with `/rest/*`, routed to unauthenticated `rest::route`; all other `GET` paths are routed to unauthenticated `esplora::route`.
-  - `POST` (Esplora): Recognized paths (`/tx`, `/internal/*`) route to unauthenticated `esplora::route_post`.
+  - `POST` (Esplora): Recognized paths (`/tx`, `/internal/*`) route to unauthenticated `esplora::route_post`. Paths under `/api` or `/api/v1` are a closed public Esplora namespace: they never fall through to JSON-RPC, and they do not alias `/internal/*` or `/block-template`.
   - `POST` (JSON-RPC): Unhandled POST paths (such as `/`) fall through to JSON-RPC authentication. `serve_connection` in `crates/rpc/src/server.rs` calls `Auth::validate_header`, which is owned by `crates/rpc/src/auth.rs` (HTTP Basic / Cookie).
 - **JSON-RPC Framing & Protocol Versioning**: `JsonRpcVersion` (`crates/rpc/src/server.rs`) governs wire framing:
   - Requests with `"jsonrpc": "2.0"` use JSON-RPC 2.0 (`JsonRpcVersion::V2`): success responses emit `{"jsonrpc":"2.0","result":...,"id":...}` (HTTP 200), error responses emit `{"jsonrpc":"2.0","error":...,"id":...}` (HTTP 200), and requests omitting `id` are treated as notifications returning HTTP 204 No Content.
