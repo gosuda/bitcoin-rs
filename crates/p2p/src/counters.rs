@@ -108,9 +108,11 @@ pub struct CountingStream<S> {
     read_end: usize,
 }
 
-/// Sized to hold a max `headers` payload (~162 KiB) plus the next command
-/// header so IBD header sync does not round-trip to the socket per message.
-const INBOUND_READ_BUFFER: usize = 256 * 1024;
+/// Matches `std::io::BufReader`'s default. Unauthenticated inbound
+/// connections allocate this on the first small read; a 256 KiB cache would
+/// let a flood of half-open handshakes pin large RSS. Payloads whose caller
+/// buffer is already this size or larger bypass the cache.
+const INBOUND_READ_BUFFER: usize = 8 * 1024;
 
 impl<S> CountingStream<S> {
     /// Wraps `inner`, counting into `counters`.
@@ -293,8 +295,18 @@ mod tests {
         assert_ne!(counters.last_recv(), 0, "a read must stamp the time");
     }
 
+    /// Unauthenticated inbound sessions allocate this cache on the first
+    /// small read. Keep it at the `BufReader` default so a flood of
+    /// half-open handshakes cannot pin 256 KiB each.
+    #[test]
+    fn inbound_read_cache_matches_bufreader_default() {
+        assert_eq!(INBOUND_READ_BUFFER, 8 * 1024);
+    }
+
     /// One kernel delivery can contain the next message. The wrapper must
     /// keep those leftover bytes instead of asking the socket again.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn leftover_bytes_do_not_revisit_the_socket() {
         struct OneShot {
@@ -339,6 +351,8 @@ mod tests {
 
     /// Two framed pings delivered in one inner read must both decode without
     /// a second socket read — the IBD headers path between small messages.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn two_wire_messages_decode_from_one_socket_read() {
         struct OneShot {

@@ -56,3 +56,6 @@ normative; it places them under the
   `inbound_handshake_reaches_ready_after_remote_version_and_verack`: inbound
   handshake writes framed version, feature, and verack bytes once and reaches
   Ready (`P2P-01`).
+- `crates/p2p/src/counters.rs` tests `leftover_bytes_do_not_revisit_the_socket`
+  and `two_wire_messages_decode_from_one_socket_read`: one kernel delivery of
+  two v1 frames decodes both without a second socket read (`P2P-01`).
