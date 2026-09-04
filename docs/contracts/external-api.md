@@ -156,3 +156,6 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
     `getblocktemplate_rejects_mainnet_during_ibd`,
     `getblocktemplate_proposal_skips_mainnet_connection_gates`
+    - Execution evidence: `cargo test -p bitcoin-rs-rpc getblocktemplate_` completed
+      successfully; all three API-08 tests passed (3 passed, 0 failed). The tests
+      respectively cover the no-peer gate, the IBD gate, and proposal-mode bypass.
