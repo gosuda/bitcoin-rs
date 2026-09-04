@@ -22,6 +22,7 @@
 
 use hashbrown::HashMap;
 use std::path::Path;
+use std::time::Instant;
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
 
@@ -314,6 +315,7 @@ fn main() {
 
     let temp = tempfile::TempDir::new().expect("tempdir");
     let path = temp.path();
+    let started = Instant::now();
 
     match backend.as_str() {
         #[cfg(feature = "fjall")]
@@ -326,7 +328,8 @@ fn main() {
             drop(store);
             let total = dir_size(path);
             let (cf_sizes, journal) = fjall_cf_sizes(path);
-            print_results(&backend, total, logical, &cf_sizes, journal);
+            println!("Elapsed wall-clock: {:.3} s", started.elapsed().as_secs_f64());
+              print_results(&backend, total, logical, &cf_sizes, journal);
         }
         #[cfg(feature = "redb")]
         "redb" => {
@@ -335,7 +338,8 @@ fn main() {
             drop(store);
             let total = dir_size(path);
             let (cf_sizes, journal) = redb_cf_sizes(path);
-            print_results(&backend, total, logical, &cf_sizes, journal);
+            println!("Elapsed wall-clock: {:.3} s", started.elapsed().as_secs_f64());
+              print_results(&backend, total, logical, &cf_sizes, journal);
         }
         #[cfg(feature = "rocksdb")]
         "rocksdb" => {
@@ -344,7 +348,8 @@ fn main() {
             drop(store);
             let total = dir_size(path);
             let (cf_sizes, journal) = rocksdb_cf_sizes(path);
-            print_results(&backend, total, logical, &cf_sizes, journal);
+            println!("Elapsed wall-clock: {:.3} s", started.elapsed().as_secs_f64());
+              print_results(&backend, total, logical, &cf_sizes, journal);
         }
         other => {
             eprintln!("Unknown backend: {other}");
