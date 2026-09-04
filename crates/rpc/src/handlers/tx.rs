@@ -437,10 +437,8 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
 /// or mempool mutation between capture and commit returns a transient
 /// error and the loop retries with fresh facts.
 ///
-/// An already-in-mempool transaction succeeds with an empty [`MutationResult`],
-/// matching Core's `sendrawtransaction` already-known success. The RPC lookup
-/// cache is not membership: a transaction that has left the pool must be
-/// re-evaluated, not treated as still admitted.
+/// Membership behavior follows `POL-01` and its Duplicate submission row in
+/// `docs/policies/mempool-policy.md`; the lookup cache is not membership.
 ///
 /// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap, matching
 /// `sendrawtransaction`'s `maxfeerate=0` behavior.
@@ -536,6 +534,11 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     let max_feerate = optional_max_feerate(params, 1)?;
     let tx = decode_tx(raw)?;
     let txid = tx.txid();
+
+    return ctx
+        .admit_transaction(&tx, max_feerate)
+        .map(|_| typed_to_sonic(&v31::SendRawTransaction(txid.to_string())))
+        .map_err(RpcError::TxRejected);
 
     // Bounded retry: each attempt reads a fresh stable generation, captures
     // the exact mempool sequence under a read guard, resolves UTXO data
