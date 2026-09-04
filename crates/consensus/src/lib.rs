@@ -168,7 +168,7 @@ pub enum ConsensusError {
     /// Bitcoin Core's `bad-witness-nonce-size`.
     #[error("coinbase witness reserved nonce is missing or the wrong size")]
     WitnessNonceSize,
-    /// Witness data is present without a BIP141 commitment, or before SegWit.
+    /// Witness data is present without a BIP141 commitment, or before `SegWit`.
     ///
     /// Bitcoin Core's `unexpected-witness`.
     #[error("unexpected witness data")]
