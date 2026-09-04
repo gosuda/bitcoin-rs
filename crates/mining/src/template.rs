@@ -171,7 +171,7 @@ impl Candidate {
         txs.extend(self.transactions.iter().map(|tx| (*tx.tx).clone()));
         let merkle_root = merkle_root_from_txids(
             core::iter::once(self.coinbase.txid())
-                .chain(self.transactions.iter().map(|tx| tx.txid)),
+                .chain(self.transactions.iter().map(|tx| tx.tx.txid())),
         );
         Block {
             header: Header {
