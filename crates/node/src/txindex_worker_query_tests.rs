@@ -379,6 +379,7 @@ fn tx_queries_can_be_ready_while_script_history_is_backfilling()
     Ok(())
 }
 
+/// CONTRACT: IDX-01, IDX-02 — UTXO mode has no historical script queries.
 #[test]
 fn utxo_mode_history_is_disabled_not_backfilling() -> Result<(), Box<dyn std::error::Error>> {
     let block = Network::Regtest.genesis_block();
