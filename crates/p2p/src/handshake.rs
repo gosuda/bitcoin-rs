@@ -248,6 +248,7 @@ mod tests {
         }
     }
 
+    // Contract: P2P-01 (protocol wire framing and handshake compatibility).
     #[test]
     fn inbound_handshake_reaches_ready_after_remote_version_and_verack() -> Result<(), PeerError> {
         let magic = Magic::BITCOIN;
