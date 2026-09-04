@@ -476,7 +476,7 @@ impl NodeServices {
         // Join every worker and signal owner before publishing the clean
         // checkpoint. Startup rollback has no clean state to record, and
         // any earlier cleanup failure suppresses checkpoint publication.
-        self.join_bootstrap_and_signal_workers(&mut first_error);
+        self.join_bootstrap_and_signal_workers(state, &mut first_error);
         publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
         if let Some(error) = first_error {
             return Err(error);
@@ -548,14 +548,22 @@ impl NodeServices {
             }
         }
         if let Some(state) = state {
-            state.p2p().join();
+            state.p2p().join_core_workers();
         }
     }
 
     /// Joins the stages that must finish before any checkpoint is published:
     /// the p2p bootstrap worker and the process signal handler. The first
     /// failure lands in `first_error`.
-    fn join_bootstrap_and_signal_workers(&mut self, first_error: &mut Option<anyhow::Error>) {
+    fn join_bootstrap_and_signal_workers(
+        &mut self,
+        state: Option<&NodeState>,
+        first_error: &mut Option<anyhow::Error>,
+    ) {
+        if let Some(state) = state {
+            state.p2p().join_bootstrap_worker();
+            mark_bootstrap_drain_reached();
+        }
         if let Some(handle) = self.bootstrap_worker.take() {
             mark_bootstrap_drain_reached();
             let thread_name = handle

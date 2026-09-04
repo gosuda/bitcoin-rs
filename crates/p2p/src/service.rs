@@ -109,7 +109,7 @@ pub enum P2pControlError {
 
 struct Workers {
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
-    outbound: JoinHandle<()>,
+    outbound: Option<JoinHandle<()>>,
     bootstrap: Option<JoinHandle<()>>,
 }
 
@@ -256,7 +256,7 @@ impl P2pService {
         let _ = peer_ready;
         *slot = Some(Workers {
             listeners,
-            outbound,
+            outbound: Some(outbound),
             bootstrap,
         });
         Ok(())
@@ -399,26 +399,60 @@ impl P2pService {
         self.lifecycle.cancel_all();
     }
 
-    /// Joins the workers owned by this service. Calling it more than once is harmless.
-    pub fn join(&self) {
-        let Some(workers) = self.workers.lock().take() else {
-            return;
+    /// Joins listener and outbound workers. Bootstrap is joined separately so
+    /// node teardown can keep that drain after the bounded subsystem wait.
+    pub fn join_core_workers(&self) {
+        let (listeners, outbound) = {
+            let mut slot = self.workers.lock();
+            let Some(workers) = slot.as_mut() else {
+                return;
+            };
+            let listeners = std::mem::take(&mut workers.listeners);
+            let outbound = workers.outbound.take();
+            if workers.bootstrap.is_none() {
+                *slot = None;
+            }
+            (listeners, outbound)
         };
-        for handle in workers.listeners {
+        for handle in listeners {
             match handle.join() {
                 Ok(Ok(())) => tracing::info!("p2p listener exited cleanly"),
                 Ok(Err(error)) => tracing::warn!(%error, "p2p listener exited with error"),
                 Err(_) => tracing::error!("p2p listener panicked"),
             }
         }
-        if workers.outbound.join().is_err() {
+        if let Some(handle) = outbound
+            && handle.join().is_err()
+        {
             tracing::error!("p2p outbound drain panicked");
         }
-        if let Some(bootstrap) = workers.bootstrap
-            && bootstrap.join().is_err()
+    }
+
+    /// Joins the bootstrap worker if one was started.
+    pub fn join_bootstrap_worker(&self) {
+        let bootstrap = {
+            let mut slot = self.workers.lock();
+            let Some(workers) = slot.as_mut() else {
+                return;
+            };
+            let bootstrap = workers.bootstrap.take();
+            if workers.listeners.is_empty() && workers.outbound.is_none() {
+                *slot = None;
+            }
+            bootstrap
+        };
+        if let Some(handle) = bootstrap
+            && handle.join().is_err()
         {
             tracing::error!("p2p bootstrap worker panicked");
         }
+    }
+
+    /// Joins every worker owned by this service. Calling it more than once is
+    /// harmless.
+    pub fn join(&self) {
+        self.join_core_workers();
+        self.join_bootstrap_worker();
     }
 
     /// Returns the shared connection lifecycle view used by sync and RPC reads.

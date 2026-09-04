@@ -456,8 +456,10 @@ mod tests {
     #[test]
     fn with_current_rejects_stale_source_and_holds_live_identity() {
         let table = PeerTable::new();
-        let stale = lease();
-        let current = lease();
+        let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
+        let (current_tx, current_rx) = crossbeam_channel::unbounded();
+        let stale = PeerLease::new(stale_tx);
+        let current = PeerLease::new(current_tx);
         table.register(addr(1), stale.clone());
         let stale_source = stale.source(addr(1));
         table.register(addr(1), current.clone());
@@ -470,6 +472,7 @@ mod tests {
         assert!(called);
         assert!(table.send(stale_source, crate::Message::Ping(1)).is_err());
         assert!(table.send(current_source, crate::Message::Ping(2)).is_ok());
+        assert!(matches!(current_rx.try_recv(), Ok(crate::Message::Ping(2))));
     }
 
     #[test]
