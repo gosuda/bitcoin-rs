@@ -963,17 +963,15 @@ fn run_connected_session(
         "p2p handshake complete; entering message loop",
     );
 
-    let loop_result = (|| {
-        run_message_loop(
-            peer,
-            peer_addr,
-            &lease,
-            inbound_sync_sinks,
-            shared.chain_query.as_deref(),
-            shared.tx_inventory.as_deref(),
-            shared.totals.as_ref(),
-        )
-    })();
+    let loop_result = run_message_loop(
+        peer,
+        peer_addr,
+        &lease,
+        inbound_sync_sinks,
+        shared.chain_query.as_deref(),
+        shared.tx_inventory.as_deref(),
+        shared.totals.as_ref(),
+    );
 
     shared.peer_table.remove_current(peer_addr, &lease);
     lease.cancel();
