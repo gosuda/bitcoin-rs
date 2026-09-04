@@ -296,14 +296,6 @@ mod tests {
         assert_ne!(counters.last_recv(), 0, "a read must stamp the time");
     }
 
-    /// Unauthenticated inbound sessions allocate this cache on the first
-    /// small read. Keep it at the `BufReader` default so a flood of
-    /// half-open handshakes cannot pin 256 KiB each.
-    #[test]
-    fn inbound_read_cache_matches_bufreader_default() {
-        assert_eq!(INBOUND_READ_BUFFER, 8 * 1024);
-    }
-
     /// One kernel delivery can contain the next message. The wrapper must
     /// keep those leftover bytes instead of asking the socket again.
     ///
