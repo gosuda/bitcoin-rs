@@ -2508,11 +2508,9 @@ impl NodeState {
 
     /// Synthetically applies `block` as the next tip after consensus checks.
     ///
-    /// Delegates to `crate::apply::apply_block` over the shared handles, then
-    /// dispatches derived consumers from the committed outcome.
+    /// Holds the chain transition through follower dispatch (`ARCH-07`).
     pub fn apply_block(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
-        let outcome = self.apply_handles.apply_block(block)?;
-        self.followers.connected(block, &outcome);
+        let outcome = self.followers.apply_connect(&self.apply_handles, block)?;
         Ok(outcome.tip)
     }
 

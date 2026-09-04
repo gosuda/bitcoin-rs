@@ -607,9 +607,8 @@ impl MiningCoordinator {
             }
         }
 
-        match self.apply_handles.apply_block(block) {
+        match self.followers.apply_connect(&self.apply_handles, block) {
             Ok(outcome) => {
-                self.followers.connected(block, &outcome);
                 let tip = outcome.tip;
                 let visible = self.applied_tip.load_full().ok_or_else(|| {
                     MiningControlError::Failed(CompactString::from(

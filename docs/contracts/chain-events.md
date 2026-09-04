@@ -42,7 +42,8 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `PruneBodyStore::load_block_body`.
 - RPC `BlockLog`, ZMQ projections, and TxIndex wake are not this hint
   channel. They are owned by `ChainEffects` (`ARCH-07`) and run after the
-  committed outcome is returned, without being able to fail apply.
+  committed outcome is returned, while the chain transition is still held,
+  without being able to fail apply.
 
 ### `EVT-03`: Consumer cursor and positional reconciliation
 

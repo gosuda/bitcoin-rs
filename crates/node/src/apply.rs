@@ -1181,7 +1181,10 @@ impl Chainstate {
     /// Admits a transition, connects `block`, and finishes on success.
     ///
     /// Persistence matches [`ChainTransition::connect`]. Derived consumers are
-    /// not invoked; the caller dispatches from the returned outcome.
+    /// not invoked. Production paths with followers must dispatch while the
+    /// [`ChainTransition`] is still held, then [`ChainTransition::finish`]
+    /// (`ARCH-07`); [`crate::chain_effects::ChainFollowers::apply_connect`]
+    /// is that sequence.
     pub fn apply_block(&self, block: &Block) -> core::result::Result<ConnectOutcome, ApplyError> {
         apply_block_inner(self, block, None, BlockProvenance::Network)
     }
@@ -1213,7 +1216,8 @@ impl Chainstate {
     /// Admits a transition, disconnects `block`, and finishes on success.
     ///
     /// Persistence matches [`ChainTransition::disconnect`]. An admission
-    /// failure is `DisconnectError::Refused`.
+    /// failure is `DisconnectError::Refused`. Derived consumers are not
+    /// invoked; see [`crate::chain_effects::ChainFollowers::apply_disconnect`].
     pub fn disconnect_block(
         &self,
         block: &Block,
@@ -9404,6 +9408,71 @@ mod consensus_rule_tests {
         Ok(())
     }
 
+    struct TransitionHeldPublisher {
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    impl core::fmt::Debug for TransitionHeldPublisher {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("TransitionHeldPublisher")
+        }
+    }
+
+    impl crate::ZmqPublisher for TransitionHeldPublisher {
+        fn publish_hashblock(&self, _hash: Hash256) {
+            self.entered.wait();
+            self.release.wait();
+        }
+
+        fn publish_hashtx(&self, _txid: Txid) {}
+
+        fn publish_rawblock(&self, _bytes: &[u8]) {}
+
+        fn publish_rawtx(&self, _bytes: &[u8]) {}
+    }
+
+    /// `ARCH-07`: follower dispatch must run before the transition lock is
+    /// released, so a later connect cannot publish derived effects first.
+    #[test]
+    fn follower_dispatch_holds_the_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = Hash256::from(genesis.block_hash());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(6)],
+        )?;
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let publisher = Arc::new(TransitionHeldPublisher {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let publisher_handle: Arc<dyn crate::ZmqPublisher> = publisher;
+        let followers = zmq_followers(publisher_handle);
+
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let worker_handles = handles.clone();
+            let worker_followers = followers.clone();
+            let worker =
+                scope.spawn(move || apply_followed(&worker_handles, &worker_followers, &block));
+            entered.wait();
+            assert!(
+                handles.chain_transition.try_lock().is_none(),
+                "a competing transition must not enter during follower dispatch"
+            );
+            release.wait();
+            worker
+                .join()
+                .map_err(|_| std::io::Error::other("apply worker panicked"))??;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     #[test]
     fn a_disconnect_body_store_failure_moves_nothing() -> Result<(), Box<dyn std::error::Error>> {
         let ReorgBodyLoadingFixture {
@@ -9963,9 +10032,7 @@ mod consensus_rule_tests {
         followers: &crate::chain_effects::ChainFollowers,
         block: &Block,
     ) -> core::result::Result<TipSnapshot, ApplyError> {
-        let outcome = handles.apply_block(block)?;
-        followers.connected(block, &outcome);
-        Ok(outcome.tip)
+        Ok(followers.apply_connect(handles, block)?.tip)
     }
 
     fn disconnect_followed(
@@ -9973,9 +10040,7 @@ mod consensus_rule_tests {
         followers: &crate::chain_effects::ChainFollowers,
         block: &Block,
     ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
-        let outcome = handles.disconnect_block(block)?;
-        followers.disconnected(&outcome);
-        Ok(outcome.parent_tip)
+        Ok(followers.apply_disconnect(handles, block)?.parent_tip)
     }
 
     fn zmq_followers(

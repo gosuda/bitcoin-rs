@@ -1404,9 +1404,8 @@ impl BlockSync {
 
         let had_chain_tip = self.handles.chain_tip.load_full().is_some();
         let genesis = self.handles.network.genesis_block();
-        match self.handles.apply_block(&genesis) {
+        match self.followers.apply_connect(&self.handles, &genesis) {
             Ok(outcome) => {
-                self.followers.connected(&genesis, &outcome);
                 if !had_chain_tip {
                     self.handles.chain_tip.store(Some(Arc::new(outcome.tip)));
                 }

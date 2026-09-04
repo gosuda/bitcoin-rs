@@ -159,12 +159,14 @@ Owners:
   (`Chainstate::capturing`) are set at construction so apply can produce
   `rawtx` and canonical block bytes without holding the consumers.
 - The composition root (`NodeState`, `BlockSync`, reorg, mining) dispatches
-  `ChainFollowers` after the committed outcome is returned: RPC `BlockLog`,
-  hash/raw ZMQ, TxIndex wake, sequence `C`/`D`, mining generation, and
-  admission. Mempool eviction stays inside apply. Consumer failure cannot
-  invalidate chainstate. Issue #77 owns the durable event journal; this is
-  dependency direction, not a second event contract. Do not push cross-store
-  ordering into `utxo` or `storage`.
+  `ChainFollowers` while the `ChainTransition` is still held, then calls
+  `finish`. Convenience methods that finish before returning
+  (`Chainstate::apply_block`, `disconnect_block`) do not dispatch followers.
+  RPC `BlockLog`, hash/raw ZMQ, TxIndex wake, sequence `C`/`D`, mining
+  generation, and admission run from that dispatch. Mempool eviction stays
+  inside apply. Consumer failure cannot invalidate chainstate. Issue #77
+  owns the durable event journal; this is dependency direction, not a second
+  event contract. Do not push cross-store ordering into `utxo` or `storage`.
 
 ## Live gaps
 
@@ -205,8 +207,10 @@ Owners:
   through `ChainTransition` is the mutation path.
 - `crates/node/src/apply.rs` tests `apply_block_publishes_rawtx_bytes_in_block_order`,
   `connected_sequence_event_observes_the_published_applied_tip`,
-  `connect_and_disconnect_wake_the_mining_generation`: apply returns a
-  committed outcome; `ChainFollowers` consume it after the tip is published.
+  `connect_and_disconnect_wake_the_mining_generation`,
+  `follower_dispatch_holds_the_chain_transition`: apply returns a committed
+  outcome; `ChainFollowers` consume it after the tip is published and while
+  the transition is still held.
 - `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is

@@ -47,10 +47,10 @@ tip-first before connects on the replacement branch.
 ### Post-commit chain effects
 Derived work that follows a committed connect or disconnect: RPC `BlockLog`,
 ZMQ projections, TxIndex wake, mining generation, and P2P admission. Owned by
-`ChainFollowers` / `ChainEffects`. Dispatched after apply returns the
-committed outcome. It cannot fail or delay the authoritative transition.
-Index recovery still uses `ChainEventPublisher` hints (`EVT-02`); this is
-not a second event log.
+`ChainFollowers` / `ChainEffects`. Dispatched after the tip is published,
+while the chain transition is still held. It cannot fail the authoritative
+transition. Index recovery still uses `ChainEventPublisher` hints (`EVT-02`);
+this is not a second event log.
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake

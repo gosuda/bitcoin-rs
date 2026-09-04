@@ -1,7 +1,7 @@
 //! Derived consumers of committed chain transitions.
 //!
 //! Ownership and ordering are specified by `ARCH-07` in
-//! [`docs/contracts/architecture.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md). Apply does not import these consumers.
+//! `docs/contracts/architecture.md`. Apply does not import these consumers.
 
 use std::sync::Arc;
 
@@ -264,6 +264,40 @@ impl ChainFollowers {
                 admission.enqueue_orphans_waiting_on(*parent);
             }
         }
+    }
+
+    /// Connects `block` and dispatches this set before the transition ends.
+    ///
+    /// See `ARCH-07`: production single-block paths must not finish the
+    /// [`crate::apply::ChainTransition`] and then dispatch, or a later
+    /// connect or disconnect can publish derived effects first.
+    pub fn apply_connect(
+        &self,
+        handles: &crate::apply::Chainstate,
+        block: &Block,
+    ) -> core::result::Result<ConnectOutcome, crate::ApplyError> {
+        let transition = handles.begin_transition()?;
+        let outcome = transition.connect(block)?;
+        self.connected(block, &outcome);
+        let _ = transition.finish();
+        Ok(outcome)
+    }
+
+    /// Disconnects `block` and dispatches this set before the transition ends.
+    ///
+    /// See `ARCH-07`. An admission failure is `DisconnectError::Refused`.
+    pub fn apply_disconnect(
+        &self,
+        handles: &crate::apply::Chainstate,
+        block: &Block,
+    ) -> core::result::Result<DisconnectOutcome, crate::DisconnectError> {
+        let transition = handles
+            .begin_transition()
+            .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
+        let outcome = transition.disconnect(block)?;
+        self.disconnected(&outcome);
+        let _ = transition.finish();
+        Ok(outcome)
     }
 }
 
