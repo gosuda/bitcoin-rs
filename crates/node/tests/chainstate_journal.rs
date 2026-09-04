@@ -4,7 +4,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
+use bitcoin_rs_node::{
+    Network, NodeConfig,
+    state::{ApplyError, NodeState},
+};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 use sha2::{Digest, Sha256};
 
@@ -200,6 +203,75 @@ fn periodic_publication_compacts_and_journals_new_suffix() -> Result<()> {
         .load_full()
         .ok_or_else(|| std::io::Error::other("periodic journal tip missing"))?;
     assert_eq!(resumed_tip.as_ref(), &expected_tip);
+    Ok(())
+}
+
+#[test]
+fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("idle-flush-node");
+    config.p2p_listen.clear();
+    config.chainstate_journal.blocks = 100;
+    config.chainstate_journal.seconds = 1;
+    config.chainstate_journal.max_lag_blocks = 100;
+
+    let genesis = Network::Regtest.genesis_block();
+    let state = NodeState::open(config.clone(), None)?;
+    state.apply_block(&genesis)?;
+    state.publish_checkpoint()?;
+    let child = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let expected_tip = state.apply_block(&child)?;
+
+    let worker = state.start_periodic_checkpoint(u32::MAX, Duration::from_hours(1))?;
+    std::thread::sleep(Duration::from_secs(3));
+    state.shutdown().store(true, Ordering::Release);
+    worker
+        .join()
+        .map_err(|_| std::io::Error::other("checkpoint worker panicked"))?;
+    drop(state);
+
+    let resumed = NodeState::open(config, None)?;
+    let resumed_tip = resumed
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("idle journal record was not durable"))?;
+    assert_eq!(resumed_tip.as_ref(), &expected_tip);
+    Ok(())
+}
+
+#[test]
+fn retention_pressure_stops_apply_before_tip_mutation() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("retention-node");
+    config.p2p_listen.clear();
+    config.chainstate_journal.max_journal_mib = 1;
+    config.chainstate_journal.rotate_mib = 1;
+
+    let genesis = Network::Regtest.genesis_block();
+    let state = NodeState::open(config.clone(), None)?;
+    let genesis_tip = state.apply_block(&genesis)?;
+    state.publish_checkpoint()?;
+    let pressure = config
+        .data_dir
+        .join("chainstate-journal/segment-9999999999.log");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pressure)?
+        .set_len(1024 * 1024)?;
+
+    let child = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    assert!(matches!(
+        state.apply_block(&child),
+        Err(ApplyError::JournalBackpressure(_))
+    ));
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("genesis tip missing"))?;
+    assert_eq!(tip.as_ref(), &genesis_tip);
     Ok(())
 }
 

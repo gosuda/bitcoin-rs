@@ -2200,6 +2200,17 @@ fn apply_block_admitted<'b>(
     let block_hash = block.block_hash().0;
     let prev_hash = block.header.prev_blockhash.0;
     let (prior, height) = applied_predecessor(handles, block_hash, prev_hash)?;
+    if let Some(journal) = &handles.journal {
+        let maintenance = {
+            let mut journal = journal.lock();
+            journal.prepare_for_apply()
+        };
+        if let Err(error) = maintenance {
+            metrics::counter!("node.chainstate_journal.backpressure_total").increment(1);
+            tracing::error!(height, %error, "chainstate journal backpressure stopped block apply");
+            return Err(ApplyError::JournalBackpressure(error.to_string()));
+        }
+    }
 
     // Self-consistency PoW: the block header's hash must satisfy its
     // declared target. This is the cheapest consensus gate; do it before

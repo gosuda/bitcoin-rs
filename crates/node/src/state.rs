@@ -349,6 +349,12 @@ pub enum ApplyError {
     /// not disconnect it, so the block must not be applied.
     #[error("undo persistence: {0}")]
     UndoPersistence(#[source] bitcoin_rs_storage::StorageError),
+    /// Journal durability or retention cannot recover within configured bounds.
+    ///
+    /// Refused before this block mutates chainstate; retry is safe after the
+    /// journal flushes or a checkpoint compacts retained segments.
+    #[error("chainstate journal backpressure stopped block apply: {0}")]
+    JournalBackpressure(String),
     /// A spent output had no resolved prevout, so the undo record would be
     /// unable to restore it.
     #[error("undo record cannot restore spent output {txid}:{vout}")]
@@ -782,6 +788,9 @@ fn build_journal_writer<S: KvStore + 'static>(
         bootstrap.config.blocks,
         Duration::from_secs(bootstrap.config.seconds),
         bootstrap.config.rotate_mib,
+        bootstrap.config.max_journal_mib,
+        bootstrap.config.max_lag_blocks,
+        Duration::from_secs(bootstrap.config.max_lag_seconds),
     )?;
     Ok(crate::chainstate_journal::shared_journal_writer(writer))
 }

@@ -50,6 +50,8 @@ const DEFAULT_BATCH_SECONDS: u64 = 5;
 const DEFAULT_ROTATE_MIB: u64 = 256;
 /// Retention bound on total journal size, in MiB (plan §2.1; config lands in Task 3).
 const DEFAULT_MAX_JOURNAL_MIB: u64 = 2048;
+const DEFAULT_MAX_LAG_BLOCKS: u32 = DEFAULT_BATCH_BLOCKS;
+const DEFAULT_MAX_LAG_SECONDS: u64 = 30;
 
 /// Zero-padded 10-digit generation: lexicographic order equals numeric order.
 const SEGMENT_GEN_WIDTH: usize = 10;
@@ -115,6 +117,9 @@ pub(crate) enum JournalWriterError {
     /// The active segment does not match the durable cursor it claims.
     #[error("chainstate journal cursor mismatch: {0}")]
     CursorMismatch(String),
+    /// Retained segment bytes reached the configured compaction budget.
+    #[error("chainstate journal size {bytes} bytes reached configured limit {limit} bytes")]
+    RetentionLimit { bytes: u64, limit: u64 },
     /// A reorg crossed below the checkpoint base this journal presupposes.
     #[error("journal fork height {fork_height} is below checkpoint base {base_height}")]
     ForkBelowBase { fork_height: u32, base_height: u32 },
@@ -281,6 +286,12 @@ pub(crate) struct JournalWriter<S: KvStore> {
     batch_blocks: u32,
     /// Seconds-per-boundary default.
     batch_seconds: Duration,
+    /// Total retained segment-byte budget.
+    max_journal_bytes: u64,
+    /// Maximum pending block count before pre-apply backpressure.
+    max_lag_blocks: u32,
+    /// Maximum pending age before pre-apply backpressure.
+    max_lag_seconds: Duration,
     /// Last boundary instant, for the time-based trigger.
     last_boundary: Instant,
     /// Hash of the durable head block (from the last boundary record).
@@ -379,6 +390,9 @@ impl<S: KvStore> JournalWriter<S> {
             rotate_bytes: DEFAULT_ROTATE_MIB * 1024 * 1024,
             batch_blocks: DEFAULT_BATCH_BLOCKS,
             batch_seconds: Duration::from_secs(DEFAULT_BATCH_SECONDS),
+            max_journal_bytes: DEFAULT_MAX_JOURNAL_MIB * 1024 * 1024,
+            max_lag_blocks: DEFAULT_MAX_LAG_BLOCKS,
+            max_lag_seconds: Duration::from_secs(DEFAULT_MAX_LAG_SECONDS),
             last_boundary: Instant::now(),
             state: WriterState::Open,
             failpoint: None,
@@ -423,8 +437,17 @@ impl<S: KvStore> JournalWriter<S> {
         batch_blocks: u32,
         batch_seconds: Duration,
         rotate_mib: u64,
+        max_journal_mib: u64,
+        max_lag_blocks: u32,
+        max_lag_seconds: Duration,
     ) -> Result<(), JournalWriterError> {
-        if batch_blocks == 0 || batch_seconds.is_zero() || rotate_mib == 0 {
+        if batch_blocks == 0
+            || batch_seconds.is_zero()
+            || rotate_mib == 0
+            || max_journal_mib == 0
+            || max_lag_blocks == 0
+            || max_lag_seconds.is_zero()
+        {
             return Err(JournalWriterError::CursorMismatch(
                 "journal runtime limits must be non-zero".to_owned(),
             ));
@@ -434,7 +457,61 @@ impl<S: KvStore> JournalWriter<S> {
         self.rotate_bytes = rotate_mib.checked_mul(1024 * 1024).ok_or_else(|| {
             JournalWriterError::CursorMismatch("journal rotation size overflow".to_owned())
         })?;
+        self.max_journal_bytes = max_journal_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("journal retention size overflow".to_owned())
+        })?;
+        self.max_lag_blocks = max_lag_blocks;
+        self.max_lag_seconds = max_lag_seconds;
         Ok(())
+    }
+
+    /// Applies time/lag/retention maintenance before the next block mutates
+    /// chainstate. A failed durability retry stops that apply before any write.
+    pub(crate) fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
+        self.ensure_open()?;
+        self.flush_due()?;
+        let lag = self
+            .next_height
+            .saturating_sub(1)
+            .saturating_sub(self.durable.height);
+        if lag >= self.max_lag_blocks
+            || (!self.pending_records.is_empty()
+                && self.last_boundary.elapsed() >= self.max_lag_seconds)
+        {
+            self.advance_durability()?;
+        }
+        let bytes = self.journal_size_bytes()?;
+        if bytes >= self.max_journal_bytes {
+            return Err(JournalWriterError::RetentionLimit {
+                bytes,
+                limit: self.max_journal_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Flushes an idle pending batch once its configured time boundary elapses.
+    pub(crate) fn flush_due(&mut self) -> Result<(), JournalWriterError> {
+        if self.state == WriterState::Open
+            && !self.pending_records.is_empty()
+            && self.last_boundary.elapsed() >= self.batch_seconds
+        {
+            self.advance_durability()?;
+        }
+        Ok(())
+    }
+
+    /// Whether segment retention requires an immediate checkpoint compaction.
+    pub(crate) fn requires_compaction(&self) -> Result<bool, JournalWriterError> {
+        Ok(self.journal_size_bytes()? >= self.max_journal_bytes)
+    }
+
+    fn ensure_open(&self) -> Result<(), JournalWriterError> {
+        match self.state {
+            WriterState::Open => Ok(()),
+            WriterState::Frozen => Err(JournalWriterError::NotOpen { state: "frozen" }),
+            WriterState::Compacted => Err(JournalWriterError::NotOpen { state: "compacted" }),
+        }
     }
 
     /// Durable head marker, for the boot path and metrics.
@@ -662,21 +739,23 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     fn record_size_metric(&self) {
-        let bytes = self
-            .dir
-            .entries()
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                parse_segment_name(entry.file_name().to_string_lossy().as_ref()).is_some()
-            })
-            .filter_map(|entry| entry.metadata().ok())
-            .map(|metadata| metadata.len())
-            .sum::<u64>();
+        let Ok(bytes) = self.journal_size_bytes() else {
+            return;
+        };
         let kib = u32::try_from(bytes / 1024).unwrap_or(u32::MAX);
         metrics::gauge!("node.chainstate_journal.size_mib").set(f64::from(kib) / 1024.0);
+    }
+
+    fn journal_size_bytes(&self) -> Result<u64, JournalWriterError> {
+        self.dir.entries()?.try_fold(0_u64, |total, entry| {
+            let entry = entry?;
+            if parse_segment_name(entry.file_name().to_string_lossy().as_ref()).is_none() {
+                return Ok(total);
+            }
+            total.checked_add(entry.metadata()?.len()).ok_or_else(|| {
+                JournalWriterError::CursorMismatch("journal segment size overflow".to_owned())
+            })
+        })
     }
 
     /// Byte length of the first `target` buffered records.
@@ -890,8 +969,13 @@ impl<S: KvStore> JournalWriter<S> {
             });
         }
         self.state = WriterState::Frozen;
-        self.advance_durability()?;
-        Ok(())
+        match self.advance_durability() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.state = WriterState::Open;
+                Err(error)
+            }
+        }
     }
 
     /// §2.5 compact: rebase the empty post-publication journal on the newly
@@ -995,11 +1079,13 @@ impl<S: KvStore> JournalWriter<S> {
                 state: "already open",
             });
         }
-        // Publish the (possibly unchanged) head with the new base cursor.
-        self.publish_head_now()?;
+        // Publish the (possibly unchanged) head with the new base cursor. The
+        // durable cursor was already committed by freeze/compaction, so a
+        // redundant republish failure must not strand the runtime as Frozen.
+        let publish_result = self.publish_head_now();
         self.state = WriterState::Open;
         self.last_boundary = Instant::now();
-        Ok(())
+        publish_result
     }
 
     /// Rotates the active segment when it crosses the size threshold.
@@ -1010,17 +1096,35 @@ impl<S: KvStore> JournalWriter<S> {
         // Close the current segment durably: the boundary covers buffered
         // records, then the next append starts a new generation.
         self.advance_durability()?;
-        self.segment_gen = self
-            .segment_gen
+        let previous_gen = self.segment_gen;
+        let previous_offset = self.segment_offset;
+        let previous_durable = self.durable;
+        let next_gen = previous_gen
             .checked_add(1)
             .ok_or_else(|| JournalWriterError::CursorMismatch("generation overflow".to_owned()))?;
+        // A head may name a zero-offset generation only after the directory
+        // entry itself is durable. Reuse after a pre-head crash truncates the
+        // uncommitted generation before publishing it again.
+        let name = segment_name(next_gen);
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        let file = self.dir.open_with(&name, &options)?;
+        file.sync_all()?;
+        crate::checkpoint_fs::sync_dir(&self.dir)?;
+
+        self.segment_gen = next_gen;
         self.segment_offset = 0;
         self.durable = DurableCursor {
-            generation: self.segment_gen,
+            generation: next_gen,
             offset: 0,
-            height: self.durable.height,
+            height: previous_durable.height,
         };
-        self.publish_head_now()?;
+        if let Err(error) = self.publish_head_now() {
+            self.segment_gen = previous_gen;
+            self.segment_offset = previous_offset;
+            self.durable = previous_durable;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1465,6 +1569,150 @@ mod tests {
         writer.resume()?;
         assert_eq!(writer.state(), WriterState::Open);
         writer.append(&sample_record(2))?;
+        Ok(())
+    }
+
+    #[test]
+    fn configured_lag_limits_retry_persistent_flush_failures() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("lag-backpressure", Arc::clone(&store))?;
+        writer.configure(
+            1,
+            Duration::from_secs(10),
+            1,
+            10,
+            1,
+            Duration::from_secs(10),
+        )?;
+        store.set_fail_flush(true);
+        assert!(matches!(
+            writer.append(&sample_record(1)),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert_eq!(writer.head().height, 0);
+
+        store.set_fail_flush(false);
+        writer.prepare_for_apply()?;
+        assert_eq!(writer.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn configured_lag_time_forces_pre_apply_durability() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("lag-time", store)?;
+        writer.configure(
+            10,
+            Duration::from_secs(10),
+            1,
+            10,
+            10,
+            Duration::from_secs(1),
+        )?;
+        writer.append(&sample_record(1))?;
+        writer.last_boundary = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .ok_or("test instant underflow")?;
+        writer.prepare_for_apply()?;
+        assert_eq!(writer.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("retention", store)?;
+        writer.configure(
+            10,
+            Duration::from_secs(10),
+            1,
+            1,
+            10,
+            Duration::from_secs(10),
+        )?;
+        let name = segment_name(writer.segment_gen);
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create(true);
+        writer.dir.open_with(name, &options)?.set_len(1024 * 1024)?;
+        assert!(writer.requires_compaction()?);
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::RetentionLimit { .. })
+        ));
+
+        writer.freeze()?;
+        writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0)?;
+        writer.resume()?;
+        assert!(!writer.requires_compaction()?);
+        writer.prepare_for_apply()?;
+        Ok(())
+    }
+
+    #[test]
+    fn freeze_failures_restore_open_state_for_retry() -> TestResult {
+        for boundary in [
+            JournalWriterFailpoint::StorageFlush,
+            JournalWriterFailpoint::SegmentSync,
+            JournalWriterFailpoint::HeadTempWrite,
+            JournalWriterFailpoint::HeadTempSync,
+            JournalWriterFailpoint::HeadRename,
+            JournalWriterFailpoint::HeadDirSync,
+        ] {
+            let store = Arc::new(CountingStore::new());
+            let mut writer = open_fresh("freeze-retry", store)?;
+            writer.append(&sample_record(1))?;
+            writer.inject_failpoint(boundary);
+            assert!(writer.freeze().is_err(), "{boundary:?} did not fail");
+            assert_eq!(writer.state(), WriterState::Open);
+            writer.failpoint = None;
+            writer.append(&sample_record(2))?;
+            writer.freeze()?;
+            assert_eq!(writer.head().height, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_failure_does_not_strand_frozen_writer() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("resume-retry", store)?;
+        writer.append(&sample_record(1))?;
+        writer.freeze()?;
+        writer.inject_failpoint(JournalWriterFailpoint::HeadTempWrite);
+        assert!(writer.resume().is_err());
+        assert_eq!(writer.state(), WriterState::Open);
+        writer.failpoint = None;
+        writer.append(&sample_record(2))?;
+        writer.freeze()?;
+        assert_eq!(writer.head().height, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_head_never_names_a_missing_segment() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let dir;
+        {
+            let mut writer = open_fresh("rotation-crash", Arc::clone(&store))?;
+            let first = sample_record(1);
+            writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+            writer.append(&first)?;
+            writer.flush_to(1)?;
+            writer.inject_failpoint(JournalWriterFailpoint::HeadTempWrite);
+            assert!(writer.append(&sample_record(2)).is_err());
+            dir = writer.dir.try_clone()?;
+        }
+
+        let mut reopened = JournalWriter::open(dir, store)?;
+        assert_eq!(reopened.head().journal_gen, 0);
+        assert_eq!(reopened.head().height, 1);
+        reopened.append(&sample_record(2))?;
+        reopened.flush_to(2)?;
+        assert_eq!(reopened.head().height, 2);
         Ok(())
     }
 }

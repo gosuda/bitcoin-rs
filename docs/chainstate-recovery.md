@@ -55,7 +55,7 @@ The `[chainstate_journal]` configuration controls the independent durability and
 | `max_lag_blocks` | 500 | Apply backpressure threshold in blocks |
 | `max_lag_seconds` | 30 | Apply backpressure threshold in time |
 
-Durability lag and replay length are different properties. `blocks`/`seconds` bound new progress that a crash can lose. Checkpoint cadence plus `max_journal_mib` bounds the amount of journal work a restart may replay.
+Durability lag and replay length are different properties. `blocks`/`seconds` bound new progress that a crash can lose; the periodic checkpoint worker flushes the time boundary even when no new block arrives. Before each block mutation, `max_lag_blocks` and `max_lag_seconds` force a synchronous durability retry. Persistent failure stops that block before mutation. Reaching `max_journal_mib` likewise stops apply and asks the checkpoint worker to publish and compact immediately.
 
 ## Metrics and logs
 
@@ -70,6 +70,9 @@ Prometheus names use the `node.chainstate_journal` prefix:
 | `fallback_total{reason}` | counter | Checkpoint/cold fallback classified by a bounded reason label |
 | `checksum_failures_total` | counter | Head or committed-record checksum rejection |
 | `append_failures` | counter | Journal extraction or append failure after block commit |
+| `flush_failures` | counter | Idle-timer durability failure |
+| `backpressure_total` | counter | Block applies refused by a journal lag/retention gate |
+| `maintenance_failures` | counter | Journal retention inspection failure in the worker |
 | `storage_flush_seconds` | histogram | Storage-side flush latency at a durability boundary |
 
 Restore logs include `restore_source`, checkpoint generation/height, selected height/hash, transaction count, replayed record count, duration, and fallback reason where applicable.
@@ -91,4 +94,4 @@ cargo test -p bitcoin-rs-node --test chainstate_journal_bench \
   replay_10k_records_with_bounded_time_and_memory -- --ignored --exact --nocapture
 ```
 
-A single synthetic regtest run against the rebased Task 10 candidate replayed 10,000 one-transaction records in **2.929 seconds**, with a measured peak-RSS delta of **11,280 KiB** (`VmHWM`, isolated replay process). The gate limits replay to 60 seconds and 256 MiB RSS delta. This is a bounded regression datapoint, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.
+The test enforces 60-second and 256-MiB RSS-delta ceilings and prints its observed values for CI artifacts. Keep machine-specific measurements in CI or pull-request evidence rather than treating one developer host as a permanent performance baseline. This is a bounded regression gate, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.

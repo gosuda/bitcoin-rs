@@ -65,7 +65,7 @@ pub(crate) const CHECKPOINT_INTERVAL_SECS: u64 = 1800;
 
 /// Poll interval for the worker loop. Short enough to publish soon after a
 /// trigger fires; long enough to avoid busy-waiting.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// All the shared handles needed to publish a checkpoint from a background
 /// thread, without holding a reference to [`crate::state::NodeState`].
@@ -93,6 +93,25 @@ pub(crate) struct CheckpointPublisher {
 }
 
 impl CheckpointPublisher {
+    fn maintain_journal(&self) -> bool {
+        let Some(journal) = &self.journal else {
+            return false;
+        };
+        let mut journal = journal.lock();
+        if let Err(error) = journal.flush_due() {
+            metrics::counter!("node.chainstate_journal.flush_failures").increment(1);
+            tracing::warn!(%error, "idle chainstate journal flush failed; apply backpressure remains armed");
+        }
+        match journal.requires_compaction() {
+            Ok(required) => required,
+            Err(error) => {
+                metrics::counter!("node.chainstate_journal.maintenance_failures").increment(1);
+                tracing::warn!(%error, "failed to inspect chainstate journal retention");
+                false
+            }
+        }
+    }
+
     /// Publishes a durable checkpoint, mirroring
     /// [`crate::state::NodeState::write_clean_checkpoint`].
     ///
@@ -245,6 +264,7 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                     break;
                 }
 
+                let retention_pressure = publisher.maintain_journal();
                 let current_tip = publisher.applied_tip.load();
                 let Some(tip) = current_tip.as_ref() else {
                     // No applied tip yet; nothing to checkpoint.
@@ -254,7 +274,10 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                 let blocks_advanced = tip.height.saturating_sub(last_published_height);
                 let elapsed = last_published_at.elapsed();
 
-                if blocks_advanced < interval_blocks && elapsed < interval_secs {
+                if !retention_pressure
+                    && blocks_advanced < interval_blocks
+                    && elapsed < interval_secs
+                {
                     continue;
                 }
 
@@ -267,6 +290,7 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                             height = tip.height,
                             blocks_advanced,
                             elapsed_secs = elapsed.as_secs(),
+                            retention_pressure,
                             "published periodic chainstate checkpoint during sync",
                         );
                     }
