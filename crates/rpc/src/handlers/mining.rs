@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
+use bitcoin_rs_mempool::tx_has_dust_outputs;
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
     BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
@@ -31,6 +32,7 @@ const GBT_REQUIRE_SEGWIT: &str =
 const GBT_REQUIRE_SIGNET: &str = r#"getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})"#;
 const PRIORITISE_DUMMY_ERROR: &str =
     "Priority is no longer supported, dummy argument to prioritisetransaction must be 0.";
+const PRIORITISE_DUST_ERROR: &str = "Priority is not supported for transactions with dust outputs.";
 
 fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
     fn nibble(byte: u8) -> Result<u8, ()> {
@@ -172,6 +174,17 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
             return Err(RpcError::InvalidParameter(
                 PRIORITISE_DUMMY_ERROR.to_owned(),
             ));
+        }
+    }
+    // Core `require_standard` defaults on except regtest (`-acceptnonstdtxn`).
+    // Dust in the pool cannot have its fee overlay modified afterwards.
+    if ctx.chain_network != Network::Regtest {
+        let pool = ctx.mempool.read();
+        if let Some(entry) = pool.entry_by_txid(&txid) {
+            let dust_relay_fee = pool.policy_snapshot().standardness.dust_relay_fee;
+            if tx_has_dust_outputs(&entry.tx, dust_relay_fee) {
+                return Err(RpcError::InvalidParameter(PRIORITISE_DUST_ERROR.to_owned()));
+            }
         }
     }
     ctx.mempool
@@ -1547,6 +1560,68 @@ mod tests {
             .expect_err("two-arg form must not treat dummy as fee_delta");
         assert!(matches!(error, RpcError::InvalidType(_)));
         assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+    }
+
+    fn dust_priority_tx() -> Tx {
+        Tx {
+            version: 2,
+            inputs: Vec::new(),
+            outputs: vec![TxOut {
+                value: 1,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn prioritisetransaction_rejects_dust_outputs_like_core() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let ctx = Arc::new(Context::new());
+        assert_eq!(ctx.chain_network, Network::Mainnet);
+        let tx = dust_priority_tx();
+        let txid = tx.txid();
+        {
+            let mut pool = ctx.mempool.pool().write();
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        }
+        let txid_hex = txid.to_string();
+        let error = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500]))
+            .expect_err("dust mempool tx must not be prioritised");
+        assert!(matches!(error, RpcError::InvalidParameter(_)));
+        assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(error.to_string(), PRIORITISE_DUST_ERROR);
+    }
+
+    #[test]
+    fn prioritisetransaction_allows_dust_overlay_on_regtest() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let mut ctx = Context::new();
+        ctx.chain_network = Network::Regtest;
+        let ctx = Arc::new(ctx);
+        let tx = dust_priority_tx();
+        let txid = tx.txid();
+        {
+            let mut pool = ctx.mempool.pool().write();
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        }
+        let txid_hex = txid.to_string();
+        let result = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500]))
+            .unwrap_or_else(|err| panic!("regtest may prioritise dust: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn prioritisetransaction_allows_absent_txid_overlay() {
+        let ctx = Arc::new(Context::new());
+        let txid = "11".repeat(32);
+        let result = prioritisetransaction(&ctx, &json!([txid.as_str(), 0, 500]))
+            .unwrap_or_else(|err| panic!("absent txid overlay must be accepted: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
     }
 
     #[test]
