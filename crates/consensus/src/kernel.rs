@@ -193,6 +193,39 @@ mod enabled {
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
         Ok(bitcoinkernel::TxOut::new(&script, amount))
     }
+
+    /// Compares native accept/reject against Core. Agreement on reject is
+    /// `Ok` so the caller can keep the native error; disagreement is
+    /// [`ConsensusError::Kernel`].
+    pub fn compare_script_verdicts(
+        txs_and_spent: &[(&Tx, Vec<(OutPoint, TxOut)>)],
+        flags: VerifyFlags,
+        native_accepted: bool,
+    ) -> Result<(), ConsensusError> {
+        let mut kernel_error = None;
+        for (tx, spent) in txs_and_spent {
+            if spent.is_empty() {
+                continue;
+            }
+            if let Err(error) = verify_tx_scripts(tx, spent, flags) {
+                kernel_error = Some(error);
+                break;
+            }
+        }
+        let kernel_accepted = kernel_error.is_none();
+        match (native_accepted, kernel_accepted) {
+            (true, true) | (false, false) => Ok(()),
+            (true, false) => Err(ConsensusError::Kernel(format!(
+                "native accepted, kernel rejected: {}",
+                kernel_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "unknown kernel error".to_owned())
+            ))),
+            (false, true) => Err(ConsensusError::Kernel(
+                "native rejected, kernel accepted".to_owned(),
+            )),
+        }
+    }
 }
 
 /// Returns whether this build compiled `libbitcoinkernel`.
@@ -205,9 +238,28 @@ pub const fn kernel_compiled() -> bool {
 }
 
 #[cfg(feature = "kernel")]
-pub use enabled::{KernelBlock, KernelContext, verify_tx_scripts};
+pub use enabled::{KernelBlock, KernelContext, compare_script_verdicts, verify_tx_scripts};
 
 #[cfg(not(feature = "kernel"))]
 /// Stub kernel context available when the `kernel` feature is off.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KernelContext;
+
+#[cfg(not(feature = "kernel"))]
+/// Runtime `--verify-kernel` requires a build that compiled `libbitcoinkernel`.
+pub fn compare_script_verdicts(
+    txs_and_spent: &[(
+        &bitcoin_rs_primitives::Tx,
+        Vec<(
+            bitcoin_rs_primitives::OutPoint,
+            bitcoin_rs_primitives::TxOut,
+        )>,
+    )],
+    flags: bitcoin_rs_script::VerifyFlags,
+    native_accepted: bool,
+) -> Result<(), crate::ConsensusError> {
+    let _ = (txs_and_spent, flags, native_accepted);
+    Err(crate::ConsensusError::Kernel(
+        "verify_kernel requires a build with --features kernel".to_owned(),
+    ))
+}

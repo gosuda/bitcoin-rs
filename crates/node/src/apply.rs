@@ -949,6 +949,8 @@ pub struct Chainstate {
     pub(crate) chain_transition: Arc<parking_lot::Mutex<()>>,
     pub(crate) assume_valid_height: u32,
     pub(crate) assume_valid_gate: Arc<AssumeValidGate>,
+    /// When set, native script verdicts are compared against `libbitcoinkernel`.
+    pub(crate) verify_kernel: bool,
     /// Chainstate-journal writer, when the journal is enabled (issue #230).
     ///
     /// `None` = journal off: the apply path emits nothing and behaves exactly
@@ -1342,6 +1344,7 @@ impl Chainstate {
             chain_transition: Arc::new(parking_lot::Mutex::new(())),
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
+            verify_kernel: false,
             journal: None,
             checkpoint_publisher: None,
             capture_rawtx: false,
@@ -2307,6 +2310,13 @@ fn prove_window<'a>(
             .record(verify_started.elapsed().as_secs_f64());
         if verdict.is_err() {
             return Vec::new();
+        }
+        if handles.verify_kernel {
+            for (unit, unit_flags) in units.iter().zip(&flags) {
+                if unit.compare_kernel_scripts(*unit_flags, true).is_err() {
+                    return Vec::new();
+                }
+            }
         }
         if !units.is_empty() {
             metrics::counter!("node.window.verify_success_total").increment(1);
@@ -3486,6 +3496,32 @@ fn run_non_script_checks_only(
     Ok(())
 }
 
+fn spent_outputs_for_kernel_oracle<'a>(
+    block: &'a Block,
+    resolved: &[Vec<Option<TxOut>>],
+) -> Vec<(&'a Tx, Vec<(OutPoint, TxOut)>)> {
+    block
+        .txs
+        .iter()
+        .zip(resolved.iter())
+        .filter(|(tx, _)| !is_coinbase_tx(tx))
+        .map(|(tx, row)| {
+            let spent = tx
+                .inputs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, input)| {
+                    row.get(index)
+                        .and_then(Option::as_ref)
+                        .cloned()
+                        .map(|prevout| (input.previous_output, prevout))
+                })
+                .collect();
+            (tx, spent)
+        })
+        .collect()
+}
+
 #[allow(
     clippy::as_conversions,
     clippy::cast_sign_loss,
@@ -3534,6 +3570,9 @@ fn verify_block_transactions(
     metrics::histogram!("node.apply_block.script_resolution_seconds")
         .record(resolution_dur.as_secs_f64());
     let resolved = resolution_result?;
+    let oracle_spent = handles
+        .verify_kernel
+        .then(|| spent_outputs_for_kernel_oracle(block, &resolved));
     view.set_resolved(resolved);
     // preparation and parallel input-check fan-out internally and reports both
     // sub-stage durations back; record them here on the success and error paths
@@ -3550,6 +3589,13 @@ fn verify_block_transactions(
         .record(script_timings.prepare_seconds);
     metrics::histogram!("node.apply_block.script_parallel_seconds")
         .record(script_timings.parallel_seconds);
+    if let Some(spent) = oracle_spent {
+        bitcoin_rs_consensus::kernel::compare_script_verdicts(
+            &spent,
+            context.flags,
+            script_input_result.is_ok(),
+        )?;
+    }
     script_input_result?;
     tracing::debug!(
         height = context.height,
@@ -4175,6 +4221,51 @@ mod consensus_rule_tests {
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE),
             BlockProvenance::Network,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn verify_kernel_tap_does_not_feed_kernel_data_into_apply()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base_prevout = OutPoint::new(fixture_txid(0x61), 0);
+        let utxo = utxo_with_output(base_prevout, 1)?;
+        let mut handles = apply_handles(utxo);
+        handles.verify_kernel = true;
+        let funding_tx = spending_transaction_to_script(base_prevout, u32::MAX, op_true_script());
+        let funding_outpoint = OutPoint::new(funding_tx.txid(), 0);
+        let same_block_spend =
+            spending_transaction_to_script(funding_outpoint, u32::MAX, op_true_script());
+        let block = block_with_transactions(vec![funding_tx, same_block_spend]);
+
+        let result = verify_block_transactions(
+            &handles,
+            &block,
+            &mut bitcoin_rs_consensus::BlockView::new(&block.txs, block_txids(&block)),
+            &tx_plan(&block),
+            Arc::new(ResolvedUtxoView::resolve(
+                handles.utxo.as_ref(),
+                &block,
+                &tx_plan(&block),
+            )),
+            &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE),
+            BlockProvenance::Network,
+        );
+        if bitcoin_rs_consensus::kernel::kernel_compiled() {
+            result?;
+        } else {
+            match result {
+                Ok(()) => panic!("verify_kernel without the kernel feature must fail"),
+                Err(ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
+                    reason,
+                ))) => {
+                    assert!(
+                        reason.contains("verify_kernel"),
+                        "unexpected kernel error: {reason}"
+                    );
+                }
+                Err(other) => panic!("expected Kernel compile-time error, got {other:?}"),
+            }
+        }
         Ok(())
     }
 
