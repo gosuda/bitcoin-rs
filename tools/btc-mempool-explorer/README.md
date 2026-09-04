@@ -5,13 +5,13 @@ This Compose example runs the upstream `mempool/mempool` explorer against
 endpoints (`MEMPOOL_BACKEND=esplora`) and its Core-compatible JSON-RPC methods
 on the same node listener. It starts no Electrum or electrs service.
 
-The stock Mempool frontend proxies `/api/v1` to the Mempool backend and every
-other `/api/` path to electrs. This example mounts `nginx-mempool.conf` to keep
-`/api/v1` on the Mempool backend and send every other `/api/` path to
-bitcoin-rs on `:8332/api/` (wallet-facing electrs; contract WF-02). The
+The stock Mempool frontend proxies `/api/v1` to the Mempool backend and other
+Esplora paths to electrs. This example mounts `nginx-mempool.conf` to keep
+`/api/v1` on the Mempool backend and allowlist the public, read-only Esplora
+resource paths on bitcoin-rs at `:8332/api/` (wallet-facing electrs; contract
+WF-02). Only `/api/tx` also permits POST for transaction broadcast. The
 Mempool backend uses `ESPLORA_REST_API_URL=http://node:8332/esplora`. JSON-RPC
-keeps the listener root. The public explorer port proxies `/api/` as-is; it
-does not need a denylist.
+keeps the listener root. The public explorer port exposes only the allowlisted Esplora resources.
 
 The Mempool project has a frontend, backend, and MariaDB dependency, so this
 stack contains those three services plus `bitcoin-rs`. The frontend is the only
