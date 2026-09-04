@@ -42,6 +42,12 @@ pub enum RpcError {
     /// The node is still catching up with the chain.
     #[error("{0}")]
     ClientInInitialDownload(&'static str),
+    /// A hex-encoded consensus object could not be decoded.
+    ///
+    /// Bitcoin Core's `RPC_DESERIALIZATION_ERROR` (-22).
+    #[error("{0}")]
+    Deserialization(&'static str),
+
     /// A transaction was refused before the network's rules were consulted.
     ///
     /// Bitcoin Core's `RPC_VERIFY_ERROR` (-25), which it uses for submissions
@@ -76,6 +82,9 @@ impl RpcError {
     pub const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
     /// Bitcoin Core still-syncing code, `RPC_CLIENT_IN_INITIAL_DOWNLOAD`.
     pub const CORE_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
+    /// Bitcoin Core decode-failure code, `RPC_DESERIALIZATION_ERROR`.
+    pub const CORE_DESERIALIZATION_ERROR: i64 = -22;
+
     /// Bitcoin Core general submission-error code, `RPC_VERIFY_ERROR`.
     pub const CORE_VERIFY_ERROR: i64 = -25;
 
@@ -100,6 +109,7 @@ impl RpcError {
             Self::TxVerifyError(_) => Self::CORE_VERIFY_ERROR,
             Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
             Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
+            Self::Deserialization(_) => Self::CORE_DESERIALIZATION_ERROR,
             Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
         }
     }

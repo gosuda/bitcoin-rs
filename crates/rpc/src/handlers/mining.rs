@@ -3,6 +3,7 @@ use core::time::Duration;
 
 use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_mining::{BlockTemplate, BlockTemplateParams};
+use bitcoin_rs_primitives::Hash256;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::context::{CachedBlockTemplate, Context};
@@ -47,14 +48,10 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .unwrap_or("template")
     {
         "template" => {}
-        // BIP23 block proposal. Answering it means validating a full block
-        // against the tip without connecting it, which this node has no path
-        // for yet; saying so is better than accepting every proposal.
-        "proposal" => {
-            return Err(RpcError::MethodDisabled(
-                "getblocktemplate proposal mode is not implemented",
-            ));
-        }
+        // BIP23 block proposal. Answered before the rule handshake and before
+        // the connected/still-syncing preconditions, as Core does: a proposal
+        // asks about one specific block, it does not ask for work.
+        "proposal" => return proposal(ctx, request),
         _ => return Err(RpcError::InvalidParameter("invalid mode".to_owned())),
     }
 
@@ -78,6 +75,66 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
 
     let template = template_for_tip(ctx, now)?;
     Ok(render(ctx, &template))
+}
+
+/// Answers a BIP23 block proposal: would this block connect on top of the tip?
+///
+/// Bitcoin Core's `getblocktemplate` proposal path. A `null` result means the
+/// block is valid; every other answer is a string naming why it is not, or why
+/// the question could not be answered.
+fn proposal(ctx: &Context, request: Option<&Value>) -> Result<Value, RpcError> {
+    use bitcoin::hashes::Hash as _;
+
+    let data = request
+        .and_then(|request| request.get("data"))
+        .and_then(|data| data.as_str())
+        .ok_or(RpcError::InvalidType(
+            "missing data string key for proposal",
+        ))?;
+    let bytes = <Vec<u8> as bitcoin::hex::FromHex>::from_hex(data)
+        .map_err(|_| RpcError::Deserialization("block decode failed"))?;
+    let block: bitcoin::Block = bitcoin::consensus::encode::deserialize(&bytes)
+        .map_err(|_| RpcError::Deserialization("block decode failed"))?;
+
+    let hash = Hash256::from_le_bytes(block.block_hash().as_byte_array());
+    if let Some(verdict) = duplicate_verdict(ctx, hash) {
+        return Ok(json!(verdict));
+    }
+    // A proposal is weighed against the tip it names. Built on anything else it
+    // is not wrong, it is unanswerable -- the UTXO set this node can offer is
+    // the one at its own tip.
+    if block.header.prev_blockhash.as_byte_array() != &ctx.applied_hash().to_le_bytes() {
+        return Ok(json!("inconclusive-not-best-prevblk"));
+    }
+
+    let Some(control) = ctx.chain_control.as_ref() else {
+        return Err(RpcError::MethodDisabled(
+            "this node has no block validator installed",
+        ));
+    };
+    match control.test_block_validity(&block) {
+        Ok(()) => Ok(Value::new_null()),
+        Err(reason) => Ok(json!(reason.0)),
+    }
+}
+
+/// Core's three answers for a block the node has already seen.
+///
+/// `None` means the block is genuinely new and worth validating.
+fn duplicate_verdict(ctx: &Context, hash: Hash256) -> Option<&'static str> {
+    use bitcoin_rs_chain::NodeStatus;
+
+    let tree = ctx.block_tree.read();
+    let node = tree.node_by_hash(hash)?;
+    Some(match node.status {
+        // Connected at some point, so its transactions were validated. Core
+        // asks the same question as `IsValid(BLOCK_VALID_SCRIPTS)`.
+        NodeStatus::Active | NodeStatus::Stale => "duplicate",
+        NodeStatus::Invalid => "duplicate-invalid",
+        // The header is known but the body has never been checked, so this node
+        // has no verdict to report -- not a claim that the block is fine.
+        NodeStatus::HeaderValid => "duplicate-inconclusive",
+    })
 }
 
 /// BIP22's rule handshake: a client must name the rules it understands.
@@ -285,7 +342,9 @@ fn render(ctx: &Context, template: &BlockTemplate) -> Value {
         .collect::<Vec<_>>();
 
     json!({
-        "capabilities": Vec::<String>::new(),
+        // `proposal` is what this node can be asked to do beyond handing out
+        // work, and BIP23 says a server must name it for a miner to rely on it.
+        "capabilities": vec!["proposal"],
         "version": template.version,
         "rules": active_rules(ctx, template.height),
         // No BIP9 deployment is currently signalling on any network this node
@@ -669,8 +728,19 @@ mod getblocktemplate_tests {
     /// Eleven so the median-time-past window is full: a shorter chain would
     /// let a `mintime` bug hide behind a degenerate median.
     fn context_with_chain(network: Network, tip_time: u32) -> Arc<Context> {
+        context_with_chain_and_control(network, tip_time, None)
+    }
+
+    fn context_with_chain_and_control(
+        network: Network,
+        tip_time: u32,
+        control: Option<Arc<dyn crate::context::ChainControl>>,
+    ) -> Arc<Context> {
         let mut context = Context::new();
         context.chain_network = network;
+        if let Some(control) = control {
+            context = context.with_chain_control(control);
+        }
         let ctx = Arc::new(context);
 
         let (tip_id, tip_hash, height) = {
@@ -730,19 +800,6 @@ mod getblocktemplate_tests {
         assert!(
             getblocktemplate(&ctx, &json!([{"rules": ["segwit"]}])).is_ok(),
             "declaring segwit must be enough"
-        );
-    }
-
-    /// Answering a proposal without validating it would be worse than saying no.
-    #[test]
-    fn proposal_mode_is_refused_rather_than_answered() {
-        let ctx = context_with_chain(Network::Regtest, now_seconds());
-
-        let outcome = getblocktemplate(&ctx, &json!([{"mode": "proposal", "data": "00"}]));
-
-        assert!(
-            matches!(outcome, Err(RpcError::MethodDisabled(_))),
-            "expected a refusal, got {outcome:?}"
         );
     }
 
@@ -1074,5 +1131,307 @@ mod getblocktemplate_tests {
             start_height: 0,
             conn_time: 0,
         }
+    }
+
+    use bitcoin::hex::DisplayHex as _;
+
+    /// A validator that records what it was handed and answers as configured.
+    #[derive(Debug)]
+    struct StubValidator {
+        calls: core::sync::atomic::AtomicUsize,
+        verdict: Result<(), crate::context::BlockRejectReason>,
+    }
+
+    impl StubValidator {
+        fn new(verdict: Result<(), crate::context::BlockRejectReason>) -> Arc<Self> {
+            Arc::new(Self {
+                calls: core::sync::atomic::AtomicUsize::new(0),
+                verdict,
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(core::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    impl crate::context::ChainControl for StubValidator {
+        fn invalidate_block(
+            &self,
+            _hash: Hash256,
+        ) -> Result<(), crate::context::ChainControlError> {
+            Ok(())
+        }
+
+        fn test_block_validity(
+            &self,
+            _block: &bitcoin::Block,
+        ) -> Result<(), crate::context::BlockRejectReason> {
+            self.calls
+                .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            self.verdict.clone()
+        }
+    }
+
+    /// A block whose header names `previous` as its parent.
+    ///
+    /// Its contents do not matter to the handler: everything past the tip check
+    /// is the validator's question, and these tests stub the validator so that
+    /// the handler's own decisions are what fail.
+    fn block_on(previous: BlockHash) -> bitcoin::Block {
+        let coinbase = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::null(),
+                script_sig: bitcoin::script::Builder::new()
+                    .push_int(11)
+                    .push_slice([0_u8; 4])
+                    .into_script(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(50 * 100_000_000),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            }],
+        };
+        let mut block = bitcoin::Block {
+            header: header(previous, 1_700_000_000, 7),
+            txdata: vec![coinbase],
+        };
+        block.header.merkle_root = block
+            .compute_merkle_root()
+            .unwrap_or_else(|| panic!("a one-transaction block always has a merkle root"));
+        block
+    }
+
+    fn control(validator: &Arc<StubValidator>) -> Arc<dyn crate::context::ChainControl> {
+        let cloned: Arc<StubValidator> = Arc::clone(validator);
+        cloned
+    }
+
+    fn proposal_params(block: &bitcoin::Block) -> sonic_rs::Value {
+        let hex = bitcoin::consensus::encode::serialize(block).to_lower_hex_string();
+        json!([{"mode": "proposal", "data": hex}])
+    }
+
+    fn tip_hash(ctx: &Context) -> BlockHash {
+        BlockHash::from_byte_array(ctx.applied_hash().to_le_bytes())
+    }
+
+    /// A valid proposal answers `null`, which is what BIP22 calls acceptance.
+    #[test]
+    fn a_valid_proposal_answers_null() -> Result<(), RpcError> {
+        let validator = StubValidator::new(Ok(()));
+        let ctx = context_with_chain_and_control(
+            Network::Regtest,
+            1_700_000_000,
+            Some(control(&validator)),
+        );
+        let block = block_on(tip_hash(&ctx));
+
+        let answer = getblocktemplate(&ctx, &proposal_params(&block))?;
+
+        assert!(
+            answer.is_null(),
+            "a valid proposal answers null: {answer:?}"
+        );
+        assert_eq!(
+            validator.calls(),
+            1,
+            "the proposal must reach the validator exactly once"
+        );
+        Ok(())
+    }
+
+    /// A refused proposal answers with the reason, not with an RPC error.
+    #[test]
+    fn a_refused_proposal_answers_with_the_reject_reason() -> Result<(), RpcError> {
+        let validator = StubValidator::new(Err(crate::context::BlockRejectReason(
+            "bad-cb-amount".to_owned(),
+        )));
+        let ctx = context_with_chain_and_control(
+            Network::Regtest,
+            1_700_000_000,
+            Some(control(&validator)),
+        );
+        let block = block_on(tip_hash(&ctx));
+
+        let answer = getblocktemplate(&ctx, &proposal_params(&block))?;
+
+        assert_eq!(answer.as_str(), Some("bad-cb-amount"));
+        Ok(())
+    }
+
+    /// A block the node already holds is a duplicate, and which duplicate it is
+    /// depends on how far the node got with it.
+    ///
+    /// The `HeaderValid` case hangs off an earlier block rather than the tip:
+    /// a child of the tip carries the most work, so the tree publishes it as
+    /// the active tip and the status under test would not survive insertion.
+    /// `Stale` shares its answer with `Active` and is not separately reachable
+    /// without driving a reorg through the fixture.
+    #[test]
+    fn a_proposal_the_node_already_holds_is_a_duplicate() -> Result<(), RpcError> {
+        for (status, expected, on_tip) in [
+            (NodeStatus::Active, "duplicate", true),
+            (NodeStatus::Invalid, "duplicate-invalid", true),
+            (NodeStatus::HeaderValid, "duplicate-inconclusive", false),
+        ] {
+            let validator = StubValidator::new(Ok(()));
+            let ctx = context_with_chain_and_control(
+                Network::Regtest,
+                1_700_000_000,
+                Some(control(&validator)),
+            );
+            let (parent, parent_hash) = {
+                let tree = ctx.block_tree.read();
+                let node = if on_tip {
+                    tree.active_node_at_height(10)
+                } else {
+                    tree.active_node_at_height(3)
+                };
+                let node = node.unwrap_or_else(|| panic!("the fixture builds eleven blocks"));
+                let id = tree
+                    .lookup(node.hash)
+                    .unwrap_or_else(|| panic!("a node the tree returned must be findable"));
+                (id, BlockHash::from_byte_array(node.hash.to_le_bytes()))
+            };
+            let block = block_on(parent_hash);
+            ctx.block_tree
+                .write()
+                .insert_node(Some(parent), block.header, status)
+                .unwrap_or_else(|err| panic!("insert_node failed: {err}"));
+
+            let answer = getblocktemplate(&ctx, &proposal_params(&block))?;
+
+            assert_eq!(
+                answer.as_str(),
+                Some(expected),
+                "a {status:?} block must answer {expected}"
+            );
+            assert_eq!(
+                validator.calls(),
+                0,
+                "a block the node already holds must not be revalidated"
+            );
+        }
+        Ok(())
+    }
+
+    /// A proposal built on anything but the tip cannot be answered.
+    ///
+    /// The UTXO set this node can weigh a block against is the one at its own
+    /// tip, so the honest answer is that the question is inconclusive -- not
+    /// that the block is invalid.
+    #[test]
+    fn a_proposal_that_does_not_build_on_the_tip_is_inconclusive() -> Result<(), RpcError> {
+        let validator = StubValidator::new(Ok(()));
+        let ctx = context_with_chain_and_control(
+            Network::Regtest,
+            1_700_000_000,
+            Some(control(&validator)),
+        );
+        let block = block_on(BlockHash::from_byte_array([0x33; 32]));
+
+        let answer = getblocktemplate(&ctx, &proposal_params(&block))?;
+
+        assert_eq!(answer.as_str(), Some("inconclusive-not-best-prevblk"));
+        assert_eq!(
+            validator.calls(),
+            0,
+            "a proposal for another tip must not be validated against this one"
+        );
+        Ok(())
+    }
+
+    /// A proposal is a question about one block, so the rule handshake that
+    /// guards template requests does not apply to it.
+    ///
+    /// Core answers proposals before it reads `rules`, and a proposal carries a
+    /// finished block: there is nothing for the miner to opt into.
+    #[test]
+    fn a_proposal_is_answered_without_the_rules_handshake() -> Result<(), RpcError> {
+        let validator = StubValidator::new(Ok(()));
+        let ctx = context_with_chain_and_control(
+            Network::Regtest,
+            1_700_000_000,
+            Some(control(&validator)),
+        );
+        let block = block_on(tip_hash(&ctx));
+
+        // No `rules` key at all: a template request with this shape is refused.
+        let answer = getblocktemplate(&ctx, &proposal_params(&block))?;
+
+        assert!(answer.is_null(), "got {answer:?}");
+        Ok(())
+    }
+
+    /// Missing `data` is a type error, as it is in Core.
+    #[test]
+    fn a_proposal_without_data_is_a_type_error() {
+        let ctx = context_with_chain(Network::Regtest, 1_700_000_000);
+        let error = getblocktemplate(&ctx, &json!([{"mode": "proposal"}]))
+            .err()
+            .unwrap_or_else(|| panic!("a proposal with no data must be refused"));
+        assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+    }
+
+    /// Data that is not a block is a decode error, not an invalid block.
+    ///
+    /// Both halves of the decode are covered: `zz` is not hexadecimal at all,
+    /// and `deadbeef` is perfectly good hexadecimal that is not a block. They
+    /// fail on different lines and must answer the same way.
+    #[test]
+    fn a_proposal_whose_data_is_not_a_block_is_a_decode_error() {
+        let ctx = context_with_chain(Network::Regtest, 1_700_000_000);
+        for data in ["zz", "deadbeef"] {
+            let error = getblocktemplate(&ctx, &json!([{"mode": "proposal", "data": data}]))
+                .err()
+                .unwrap_or_else(|| panic!("undecodable data must be refused: {data}"));
+            assert_eq!(
+                error.code(),
+                RpcError::CORE_DESERIALIZATION_ERROR,
+                "for {data}"
+            );
+        }
+    }
+
+    /// With no validator installed the node says so rather than approving.
+    ///
+    /// Answering `null` here would tell a miner the block is valid on the
+    /// authority of nothing having been checked.
+    #[test]
+    fn a_proposal_is_refused_when_no_validator_is_installed() {
+        let ctx = context_with_chain(Network::Regtest, 1_700_000_000);
+        let block = block_on(tip_hash(&ctx));
+        let error = getblocktemplate(&ctx, &proposal_params(&block))
+            .err()
+            .unwrap_or_else(|| panic!("a node with no validator must refuse the proposal"));
+        assert!(matches!(error, RpcError::MethodDisabled(_)), "{error:?}");
+    }
+
+    /// BIP23 asks a server to name what it can be asked to do.
+    #[test]
+    fn the_template_advertises_the_proposal_capability() -> Result<(), RpcError> {
+        let ctx = context_with_chain(Network::Regtest, 1_700_000_000);
+        let template = getblocktemplate(&ctx, &json!([{"rules": ["segwit"]}]))?;
+        let capabilities = template
+            .get("capabilities")
+            .and_then(sonic_rs::JsonContainerTrait::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(sonic_rs::JsonValueTrait::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(
+            capabilities.iter().any(|value| value == "proposal"),
+            "capabilities must name proposal, got {capabilities:?}"
+        );
+        Ok(())
     }
 }

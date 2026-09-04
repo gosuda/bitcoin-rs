@@ -376,3 +376,29 @@ buys 12 points of the 16 GiB tip-RSS budget. **If G14 tip RSS measures well
 under budget — say below 10 GiB — this complexity is not earning its keep and
 reverting is the right call.** v4 remains in the tree as the equivalence oracle
 and the benchmark's `before` arm, so a revert is a revert, not a rewrite.
+
+## §10 — `getblocktemplate` proposal mode: reject-reason vocabulary
+
+BIP23 proposal mode answers with a *string* naming why a block would not
+connect, and Bitcoin Core returns whatever its `BlockValidationState` carries --
+`bad-cb-amount`, `bad-txnmrklroot`, and so on. The vocabulary is open by
+specification, so there is no list to conform to.
+
+`crates/node/src/run.rs::reject_reason` maps this node's `ApplyError` onto
+Core's token wherever one corresponds, transcribed from the vendored Core tree
+(`src/validation.cpp`, `src/consensus/tx_check.cpp`,
+`src/consensus/tx_verify.cpp`). A rejection with no Core counterpart -- a kernel
+failure, an encoding failure, a BIP check Core words differently -- is passed
+through as its own message rather than forced into a token that means something
+else. A miner comparing the two implementations sees the same word for the same
+failure, and never sees a word for a failure that did not happen.
+
+Two rejections are block-wide here where Core reaches the same conclusion per
+transaction, and are reported with Core's per-transaction token:
+`BlockOutputsExceedInputs` as `bad-txns-in-belowout`, and `BlockValueOverflow`
+as `bad-txns-accumulated-fee-outofrange`.
+
+Validation itself is not a deviation: a proposal runs
+`crates/node/src/apply.rs::validate_block_for_apply`, the same function the
+connect path runs, with proof of work switched off exactly as Core's
+`TestBlockValidity` does with `fCheckPOW = false`.

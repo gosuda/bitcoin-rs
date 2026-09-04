@@ -147,6 +147,13 @@ impl ChainControl for RecordingChainControl {
         self.called.store(true, Ordering::Release);
         self.result.clone()
     }
+
+    fn test_block_validity(
+        &self,
+        _block: &bitcoin::Block,
+    ) -> Result<(), bitcoin_rs_rpc::BlockRejectReason> {
+        Ok(())
+    }
 }
 
 #[test]
