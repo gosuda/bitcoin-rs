@@ -270,15 +270,10 @@ pub const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 
 /// One live-output row: a currently unspent outpoint filed under its script.
 ///
-/// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian as
-/// rust-bitcoin serializes it) || vout(3, little-endian u24)` -- and the value is
-/// empty. The 8-byte prefix is lossy exactly like `Funding`'s (readers
-/// exact-check the resolved coin's `script_pubkey`), but the outpoint half is
-/// complete: `txid || vout` is injective, so two scripts that collide on the
-/// prefix can never collide on a whole key. That is what makes a **point
-/// delete collision-safe**: removing a spent output deletes one exact key and
-/// cannot touch a colliding script's rows. Prefix-range scans over this family
-/// are read-only by contract; a delete is always a whole-key point delete.
+/// The key is `scan-prefix(8) || txid(32, little-endian as rust-bitcoin
+/// serializes it) || vout(3, little-endian u24)` and the value is empty.
+/// See the indexing contract (`docs/contracts/indexing.md`) for locator,
+/// collision, deletion, and scan semantics.
 ///
 /// `vout` is packed to 3 bytes. Consensus transaction output counts cannot
 /// reach `2^24` under the serialized-block size cap, so this does not drop
@@ -292,7 +287,7 @@ pub struct ScriptLiveRow {
 impl ScriptLiveRow {
     /// Builds the row for `outpoint` held by a script hashing to `scripthash`.
     pub fn new(scripthash: ScriptHash, outpoint: &OutPoint) -> Self {
-        debug_assert!(outpoint.vout <= U24_MAX);
+        assert!(outpoint.vout <= U24_MAX, "vout exceeds packed u24 range");
         let mut key = [0_u8; SCRIPT_LIVE_ROW_SIZE];
         key[..HASH_PREFIX_LEN].copy_from_slice(&ScriptHashRow::scan_prefix(scripthash));
         key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + 32].copy_from_slice(outpoint.txid.as_bytes());
@@ -377,7 +372,7 @@ impl TxPosition {
     /// Creates a position from a native-endian offset and length.
     #[must_use]
     pub const fn new(offset: u32, byte_len: u32) -> Self {
-        debug_assert!(offset <= U24_MAX && byte_len <= U24_MAX);
+        assert!(offset <= U24_MAX && byte_len <= U24_MAX, "position exceeds packed u24 range");
         Self {
             offset: encode_u24_le(offset),
             len: encode_u24_le(byte_len),
@@ -541,6 +536,7 @@ mod tests {
         );
     }
 
+    /// Contract: docs/contracts/indexing.md, live locator collision semantics.
     #[test]
     fn colliding_script_prefixes_keep_distinct_live_keys() {
         let txid = Txid::from(Hash256::from_le_bytes(&[9_u8; 32]));
@@ -569,6 +565,7 @@ mod tests {
         );
     }
 
+    /// Format: docs/benchmarks/scriptindex-format.md, packed position encoding.
     #[test]
     fn packed_positions_are_six_bytes_and_round_trip() {
         assert_eq!(TX_POSITION_SIZE, 6);
@@ -585,6 +582,7 @@ mod tests {
         assert_eq!(TxPositionValue::encode(&[TxPosition::new(1, 2)]).len(), 6);
     }
 
+    /// Format: docs/benchmarks/scriptindex-format.md, header identity key.
     #[test]
     fn header_identity_key_is_double_sha256() {
         let header = [0xab_u8; 80];
