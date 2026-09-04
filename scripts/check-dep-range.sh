@@ -4,7 +4,7 @@
 #
 #   scripts/check-dep-range.sh minimal
 #     cargo +nightly update -Zdirect-minimal-versions
-#     then cargo +nightly check --workspace --all-targets
+#     then cargo +nightly check --workspace --all-targets --all-features
 #
 #   scripts/check-dep-range.sh maximum
 #     cargo update (newest versions still inside the declared ranges)
@@ -60,7 +60,7 @@ case "${RANGE}" in
     log "resolving direct dependencies at their oldest allowed versions"
     cargo +nightly update -Zdirect-minimal-versions
     log "checking the resolved minimal graph"
-    cargo +nightly check --workspace --all-targets
+    cargo +nightly check --workspace --all-targets --all-features
     ;;
   maximum)
     log "resolving every crate to the newest version inside its declared range"
