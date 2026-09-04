@@ -333,6 +333,9 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 fn descriptor_error(error: DescriptorError) -> RpcError {
     match error {
         DescriptorError::Range(message) => RpcError::InvalidParameter(message.to_owned()),
+        DescriptorError::PrivateKeys => {
+            RpcError::InvalidAddressOrKey(GENERATEBLOCK_NEEDS_PRIVATE_KEYS.to_owned())
+        }
         DescriptorError::Parse(message) => RpcError::InvalidAddressOrKey(message),
     }
 }
@@ -532,6 +535,8 @@ enum DescriptorError {
     Parse(String),
     /// The derivation range does not match the descriptor.
     Range(&'static str),
+    /// `Expand` needs a private key (hardened path from an xpub, …).
+    PrivateKeys,
 }
 
 impl core::fmt::Display for DescriptorError {
@@ -539,6 +544,7 @@ impl core::fmt::Display for DescriptorError {
         match self {
             Self::Parse(message) => write!(f, "{message}"),
             Self::Range(message) => write!(f, "{message}"),
+            Self::PrivateKeys => write!(f, "{GENERATEBLOCK_NEEDS_PRIVATE_KEYS}"),
         }
     }
 }
@@ -972,17 +978,25 @@ fn strip_checksum(text: &str) -> &str {
 }
 
 pub(crate) const GENERATEBLOCK_INVALID_OUTPUT: &str = "Error: Invalid address or descriptor";
+pub(crate) const GENERATEBLOCK_MULTIPATH: &str = "Multipath descriptor not accepted";
+pub(crate) const GENERATEBLOCK_RANGED: &str =
+    "Ranged descriptor not accepted. Maybe pass through deriveaddresses first?";
+pub(crate) const GENERATEBLOCK_NEEDS_PRIVATE_KEYS: &str =
+    "Cannot derive script without private keys";
 
 /// Coinbase script for `generateblock`'s `output` argument (`API-05`).
 ///
 /// CONTRACT: docs/contracts/external-api.md#API-26
+/// CONTRACT: docs/contracts/external-api.md#API-28
 pub(crate) fn generateblock_payout_script(
     text: &str,
     network: bitcoin::Network,
 ) -> Result<Vec<u8>, RpcError> {
     match script_from_descriptor(text, network) {
         Ok(script) => Ok(script),
-        Err(error @ DescriptorError::Range(_)) => Err(descriptor_error(error)),
+        Err(error @ (DescriptorError::Range(_) | DescriptorError::PrivateKeys)) => {
+            Err(descriptor_error(error))
+        }
         Err(_) => payout_script_from_address(text, network, GENERATEBLOCK_INVALID_OUTPUT),
     }
 }
@@ -1028,20 +1042,26 @@ fn script_from_descriptor(
     let (descriptor, keys) =
         MiniscriptDescriptor::<DescriptorPublicKey>::parse_descriptor(&secp, &checksummed)
             .map_err(|error| DescriptorError::Parse(error.to_string()))?;
-    if descriptor.has_wildcard() || descriptor.is_multipath() {
+    if descriptor.is_multipath() {
+        return Err(multipath_descriptor_rejected());
+    }
+    if descriptor.has_wildcard() {
         return Err(ranged_descriptor_rejected());
     }
     ensure_keys_match_network(&descriptor, network)?;
     ensure_secret_keys_match_network(keys, network)?;
     let derived = descriptor
         .at_derivation_index(0)
-        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+        .map_err(|_| DescriptorError::PrivateKeys)?;
     Ok(derived.script_pubkey().as_bytes().to_vec())
 }
 
 fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, DescriptorError> {
     let combo = parse_combo_info(key, network)?;
-    if combo.is_range || combo.paths.len() != 1 {
+    if combo.paths.len() != 1 {
+        return Err(multipath_descriptor_rejected());
+    }
+    if combo.is_range {
         return Err(ranged_descriptor_rejected());
     }
     let path = combo
@@ -1050,16 +1070,18 @@ fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, 
         .ok_or_else(|| DescriptorError::Parse("Invalid combo descriptor".into()))?;
     let derived = path
         .at_derivation_index(0)
-        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+        .map_err(|_| DescriptorError::PrivateKeys)?;
     // Core's combo Expand emits P2PK first and generateblock uses scripts[0].
     let pk = MiniscriptDescriptor::new_pk(combo_key(&derived)?);
     Ok(pk.script_pubkey().as_bytes().to_vec())
 }
 
+fn multipath_descriptor_rejected() -> DescriptorError {
+    DescriptorError::Range(GENERATEBLOCK_MULTIPATH)
+}
+
 fn ranged_descriptor_rejected() -> DescriptorError {
-    DescriptorError::Range(
-        "Ranged descriptor not accepted. Maybe pass through deriveaddresses first?",
-    )
+    DescriptorError::Range(GENERATEBLOCK_RANGED)
 }
 
 fn descriptor_text_with_optional_checksum(text: &str) -> Result<String, DescriptorError> {

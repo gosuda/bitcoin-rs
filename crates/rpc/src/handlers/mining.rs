@@ -759,7 +759,10 @@ mod tests {
     };
     use parking_lot::Mutex;
 
-    use crate::handlers::util::{GENERATEBLOCK_INVALID_OUTPUT, descriptor_checksum};
+    use crate::handlers::util::{
+        GENERATEBLOCK_INVALID_OUTPUT, GENERATEBLOCK_MULTIPATH, GENERATEBLOCK_NEEDS_PRIVATE_KEYS,
+        GENERATEBLOCK_RANGED, descriptor_checksum,
+    };
 
     struct FakeMiningControl {
         template: Mutex<Option<BlockTemplate>>,
@@ -2243,5 +2246,41 @@ mod tests {
             .unwrap_or_else(|| panic!("garbage output must fail"));
         assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
         assert_eq!(error.to_string(), GENERATEBLOCK_INVALID_OUTPUT);
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-28
+    #[test]
+    fn generateblock_rejects_multipath_before_ranged_like_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let tpub = "tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B";
+        let multipath = generateblock(&ctx, &json!([format!("wpkh({tpub}/<0;1>/0)"), []]))
+            .err()
+            .unwrap_or_else(|| panic!("multipath descriptor must fail"));
+        assert_eq!(multipath.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(multipath.to_string(), GENERATEBLOCK_MULTIPATH);
+        let both = generateblock(&ctx, &json!([format!("wpkh({tpub}/<0;1>/*)"), []]))
+            .err()
+            .unwrap_or_else(|| panic!("multipath+ranged descriptor must fail as multipath"));
+        assert_eq!(both.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(both.to_string(), GENERATEBLOCK_MULTIPATH);
+        let ranged = generateblock(&ctx, &json!([format!("wpkh({tpub}/0/*)"), []]))
+            .err()
+            .unwrap_or_else(|| panic!("ranged descriptor must fail"));
+        assert_eq!(ranged.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(ranged.to_string(), GENERATEBLOCK_RANGED);
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-28
+    #[test]
+    fn generateblock_rejects_hardened_xpub_like_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let tpub = "tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B";
+        let error = generateblock(&ctx, &json!([format!("wpkh({tpub}/0h/0)"), []]))
+            .err()
+            .unwrap_or_else(|| panic!("hardened xpub must fail Expand"));
+        assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
+        assert_eq!(error.to_string(), GENERATEBLOCK_NEEDS_PRIVATE_KEYS);
     }
 }
