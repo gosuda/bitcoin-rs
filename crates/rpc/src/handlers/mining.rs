@@ -9,10 +9,11 @@ use bitcoin_rs_mining::{
 };
 use bitcoin_rs_primitives::{Block, Tx, Txid, consensus_bytes, deserialize};
 use compact_str::CompactString;
-use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
     self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic,
+    typed_to_sonic_omitting_nulls,
 };
 use crate::context::Context;
 use crate::error::RpcError;
@@ -455,7 +456,7 @@ fn ensure_client_supports_mandatory_rules(
 }
 
 fn rule_is_mandatory(rule: &str) -> bool {
-    rule == "segwit"
+    matches!(rule, "segwit" | "signet")
 }
 
 fn render_template_transactions(
@@ -503,7 +504,7 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    typed_to_sonic(&v31::GetBlockTemplate {
+    let mut value = typed_to_sonic_omitting_nulls(&v31::GetBlockTemplate {
         version: candidate.version,
         rules,
         version_bits_available,
@@ -528,12 +529,22 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
         current_time: u64::from(candidate.current_time),
         bits: format!("{:08x}", candidate.bits),
         height: i64::from(candidate.height),
-        signet_challenge: None,
+        signet_challenge: template
+            .signet
+            .as_ref()
+            .map(|signet| to_lower_hex(&signet.challenge)),
         default_witness_commitment: candidate
             .witness_commitment
             .as_ref()
             .map(|commitment| to_lower_hex(&witness_commitment_script(commitment))),
-    })
+    })?;
+    if let Some(submit_old) = template.submit_old
+        && let Some(object) = value.as_object_mut()
+    {
+        // BIP23 `submitold` is not on corepc's pinned GetBlockTemplate type.
+        let _ = object.insert("submitold", json!(submit_old));
+    }
+    Ok(value)
 }
 
 fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
@@ -772,7 +783,7 @@ mod tests {
                 TemplateMutation::PreviousBlock,
             ],
             submit_old: None,
-            work_id: None,
+            signet: None,
         }
     }
 
@@ -891,7 +902,7 @@ mod tests {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
         let longpoll = sample_candidate().template_id.as_str().to_owned();
-        getblocktemplate(
+        let result = getblocktemplate(
             &ctx,
             &json!([{
                 "rules": ["segwit"],
@@ -908,8 +919,53 @@ mod tests {
             request.long_poll_id.as_deref(),
             Some(sample_candidate().template_id.as_str())
         );
-        // `submitold`/`workid` are BIP23 extras outside the pinned v17
-        // GetBlockTemplate contract and are no longer emitted.
+        assert_eq!(
+            result.get("submitold").and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn getblocktemplate_emits_submitold_and_omits_it_when_unset() {
+        let mut template = sample_template();
+        template.submit_old = Some(false);
+        let control = FakeMiningControl::with_template(template);
+        let ctx = ctx_with_control(control);
+        let result = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .unwrap_or_else(|err| panic!("submitold template failed: {err}"));
+        assert_eq!(
+            result.get("submitold").and_then(JsonValueTrait::as_bool),
+            Some(false)
+        );
+        assert!(result.get("signet_challenge").is_none());
+        assert!(result.get("workid").is_none());
+    }
+
+    #[test]
+    fn getblocktemplate_requires_signet_rule_on_signet() {
+        let mut template = sample_template();
+        template.rules.push(MiningRule::new("signet"));
+        template.signet = Some(SignetMiningInfo {
+            challenge: vec![0x51],
+        });
+        let control = FakeMiningControl::with_template(template);
+        let ctx = ctx_with_control(control);
+        let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .expect_err("missing signet support must fail");
+        assert!(matches!(error, RpcError::InvalidParams(_)));
+        let accepted = getblocktemplate(&ctx, &json!([{"rules":["segwit", "signet"]}]))
+            .unwrap_or_else(|err| panic!("signet template failed: {err}"));
+        let rules = accepted
+            .get("rules")
+            .and_then(JsonContainerTrait::as_array)
+            .expect("rules array");
+        assert!(rules.iter().any(|rule| rule.as_str() == Some("!signet")));
+        assert_eq!(
+            accepted
+                .get("signet_challenge")
+                .and_then(JsonValueTrait::as_str),
+            Some("51")
+        );
     }
 
     #[test]
@@ -1179,7 +1235,6 @@ mod tests {
             },
         ];
         template.version_bits_required = 1 << 2;
-        template.work_id = Some(CompactString::from("work-abc"));
         let control = FakeMiningControl::with_template(template);
         let ctx = ctx_with_control(control);
         let result = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))

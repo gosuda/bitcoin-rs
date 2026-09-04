@@ -2,7 +2,8 @@
 
 `API-01`–`API-04` place owners under the
 [contracts precedence rule](README.md). `API-05` is the solo-mining generate
-path. `API-06` is `getnetworkhashps` snapshot consistency.
+path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
+BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 
 ## Clauses
 
@@ -85,6 +86,18 @@ path. `API-06` is `getnetworkhashps` snapshot consistency.
 - `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
   does not use this RPC height-validation error path.
 
+### `API-07`: BIP22/BIP23 template extras
+
+- **Owner**: `MiningCoordinator::template_from_candidate` in
+  `crates/node/src/mining.rs`; JSON projection in
+  `crates/rpc/src/handlers/mining.rs` `render_block_template`.
+- Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
+  Client-advertised names are not echoed.
+- `submitold` is present after a long-poll wait and omitted otherwise. `workid`
+  is not emitted.
+- On signet, the template carries `signet` in `rules` (mandatory) and
+  `signet_challenge`. Other networks omit `signet_challenge`.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -119,3 +132,10 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`
   - `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows`
   - `crates/rpc/src/handlers/mining.rs` test `getnetworkhashps_projects_control_invalid_request_as_invalid_parameter`
+- `API-07`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
+    `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
+    `getblocktemplate_requires_signet_rule_on_signet`
+  - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
+  - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
+    `signet_template_includes_challenge_and_signet_rule`
