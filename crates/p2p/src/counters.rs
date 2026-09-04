@@ -307,7 +307,9 @@ mod tests {
     /// forwards the first slice through `write`, which would split the
     /// header/payload coalescing this wrapper exists to preserve.
     #[test]
-    fn a_vectored_write_counts_every_slice_in_one_inner_call() {
+    /// Contract `P2P-04` requires vectored message writes to preserve coalescing
+      /// and count every byte accepted by the inner writer.
+      fn a_vectored_write_counts_every_slice_in_one_inner_call() {
         struct RecordingWriter {
             writes: usize,
             vectored: usize,

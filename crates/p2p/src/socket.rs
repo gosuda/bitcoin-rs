@@ -45,7 +45,9 @@ mod tests {
     }
 
     #[test]
-    fn configure_peer_stream_disables_nagle_on_both_halves() {
+    /// Contract `P2P-03` requires the same `TCP_NODELAY` policy on both inbound
+      /// and outbound peer streams.
+      fn configure_peer_stream_disables_nagle_on_both_halves() {
         let (client, server) = loopback_pair();
         configure_peer_stream(&client).expect("configure client");
         configure_peer_stream(&server).expect("configure server");
