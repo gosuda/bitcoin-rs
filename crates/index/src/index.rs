@@ -157,10 +157,8 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
-/// Durable store format. Version 5 stores hash-prefix heights big-endian so a
-/// prefix scan is chronological. Versions 3 and 4 used little-endian heights;
-/// opening them resets `TxLookup` and `ScriptHistory` and leaves `ScriptLive`
-/// (`IDX-04`). Any other version is foreign.
+/// Durable store format; the encoding and predecessor-reset policy are defined
+/// by the canonical `IDX-05` contract in `docs/contracts/indexing.md`.
 const FORMAT_VERSION_VALUE: [u8; 4] = 5_u32.to_le_bytes();
 const FORMAT_VERSION_V3: [u8; 4] = 3_u32.to_le_bytes();
 const FORMAT_VERSION_V4: [u8; 4] = 4_u32.to_le_bytes();
@@ -3096,10 +3094,15 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Opens a writer over `store`, rejecting unversioned index tables.
     ///
-    /// Formats 3 and 4 stored little-endian heights in `HashPrefixRow` keys.
-    /// Opening them resets `TxLookup` and `ScriptHistory` so those families
-    /// rebuild with sortable heights, and leaves `ScriptLive` (its locator has
-    /// no height suffix) (`IDX-04`). Any other version mismatch is
+    /// For the predecessor formats described by `IDX-05`, opening performs a
+    /// durable historical-capability reset. The reset's commit point is the
+    /// durable completion marker written after all deletion batches; each
+    /// deletion batch and the marker is persisted before the next step. If the
+    /// process crashes, a later open resumes the recorded claim and completes
+    /// the reset, so callers do not need compensation. Conditional conflicts
+    /// are retried internally; other storage errors are returned and must be
+    /// retried by the caller (or handled by its storage/recovery layer).
+    /// Any other version mismatch is
     /// [`IndexError::UnsupportedTxIndexFormatVersion`].
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
