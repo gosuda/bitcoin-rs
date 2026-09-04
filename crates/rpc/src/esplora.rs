@@ -191,9 +191,7 @@ pub fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response
     }
 }
 
-/// Mempool.space and many wallet examples put Esplora under `/api` or
-/// `/api/v1`. The node serves the same surface at the listener root; those
-/// prefixes are aliases, not a second API.
+/// See `docs/contracts/wallet-facing.md` WF-02 for the wallet-facing path aliases.
 fn canonical_path(path: &str) -> &str {
     for prefix in ["/api/v1", "/api"] {
         if let Some(rest) = path.strip_prefix(prefix) {
