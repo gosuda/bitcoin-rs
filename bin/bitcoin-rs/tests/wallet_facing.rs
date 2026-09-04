@@ -129,6 +129,7 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn startup_child_kills_the_process_unless_handed_off() -> TestResult {
     let failed = spawn_held_child()?;
@@ -151,6 +152,7 @@ fn startup_child_kills_the_process_unless_handed_off() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 fn spawn_held_child() -> TestResult<Child> {
     Command::new("sleep")
         .arg("30")
@@ -161,6 +163,7 @@ fn spawn_held_child() -> TestResult<Child> {
         .map_err(|error| format!("failed to spawn sleep: {error}").into())
 }
 
+#[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -168,10 +171,10 @@ fn pid_is_alive(pid: u32) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success())
 }
 
+#[cfg(unix)]
 fn wait_until_dead(pid: u32) -> bool {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
