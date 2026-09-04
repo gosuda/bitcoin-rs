@@ -596,6 +596,45 @@ fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
 }
 
 #[test]
+fn submit_block_fills_omitted_coinbase_witness() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let template = expect_template(mining.get_block_template(template_request(None))?);
+    let mut block = template
+        .candidate
+        .solve(1_000_000)
+        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))?;
+    let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+        panic!("solved candidate missing coinbase input");
+    };
+    assert!(
+        !input.witness.is_empty(),
+        "assembled candidate must carry the reserved nonce"
+    );
+    input.witness.clear();
+    let has_commitment = block.txs[0].outputs.iter().any(|output| {
+        output.script_pubkey.len() >= 38
+            && output
+                .script_pubkey
+                .starts_with(&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed])
+    });
+    assert!(
+        has_commitment,
+        "assembled candidate must carry a BIP141 commitment"
+    );
+    let block_hash = block.block_hash();
+    assert_eq!(mining.submit_block(block)?, BlockValidationResult::Accepted);
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after submit"));
+    assert_eq!(tip.hash, Hash256::from(block_hash));
+    Ok(())
+}
+
+#[test]
 fn submit_header_admits_a_mined_child_and_is_idempotent() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;

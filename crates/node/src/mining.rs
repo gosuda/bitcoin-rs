@@ -25,7 +25,7 @@ use bitcoin_rs_mining::{
     GenerateSelection, GenerateTx, GeneratedBlock, LastCandidateInfo, MiningCapability,
     MiningChainContext, MiningControl, MiningControlError, MiningInfo, MiningRule,
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
-    difficulty_for_bits,
+    difficulty_for_bits, update_uncommitted_block_structures,
 };
 use bitcoin_rs_primitives::{Block, Hash256, Header, Network, Tx, consensus_bytes};
 use compact_str::CompactString;
@@ -740,6 +740,22 @@ impl MiningCoordinator {
         .map_err(header_reject_reason)
     }
 
+    /// Core `submitblock` fills the coinbase reserved nonce when the block
+    /// already has a BIP141 commitment but no coinbase witness. Proposal skips this.
+    fn fill_uncommitted_witness(&self, block: &mut Block) {
+        let tree = self.block_tree.read();
+        let Some(prev_id) = tree.lookup(block.header.prev_blockhash.into()) else {
+            return;
+        };
+        let Ok(prev) = tree.node(prev_id) else {
+            return;
+        };
+        let height = prev.height.saturating_add(1);
+        let segwit_active = self.network.is_segwit_active(height);
+        drop(tree);
+        update_uncommitted_block_structures(block, segwit_active);
+    }
+
     fn submit(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = block.block_hash().into();
         {
@@ -904,7 +920,8 @@ impl MiningControl for MiningCoordinator {
         hash_ps_at(&tree, tip.as_deref(), lookup, height, self.network)
     }
 
-    fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
+    fn submit_block(&self, mut block: Block) -> Result<BlockValidationResult, MiningControlError> {
+        self.fill_uncommitted_witness(&mut block);
         self.submit(&block)
     }
 

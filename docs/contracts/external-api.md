@@ -6,7 +6,8 @@ path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
 BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 `API-08` is mainnet template operational gates. `API-09` is `submitheader`.
 `API-10` is GBT client-rule negotiation. `API-11` is `submitblock` decode.
-`API-12` is GBT proposal request parsing.
+`API-12` is GBT proposal request parsing. `API-13` is `submitblock` uncommitted
+witness fill.
 
 ## Clauses
 
@@ -164,6 +165,18 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
   `decode_submitted_block` (`API-11`): `-22` `Block decode failed`, leftover
   bytes ignored.
 
+### `API-13`: `submitblock` uncommitted witness nonce
+
+- **Owner**: `update_uncommitted_block_structures` in
+  `crates/mining/src/coinbase.rs`, called from
+  `MiningCoordinator::submit_block` in `crates/node/src/mining.rs`.
+- When the previous header is known, SegWit is active for the submitted
+  height, the coinbase already has a BIP141 commitment output, and the
+  coinbase witness is empty, `submitblock` inserts the 32-byte reserved
+  nonce. This matches Core `UpdateUncommittedBlockStructures`.
+- An existing coinbase witness is left unchanged. Proposal mode does not
+  apply this fill.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -231,3 +244,8 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_invalid_mode`,
     `getblocktemplate_proposal_decode_matches_core`,
     `getblocktemplate_proposal_skips_client_rule_negotiation`
+- `API-13`:
+  - `crates/mining/src/coinbase.rs` tests `fills_reserved_nonce_when_commitment_present_and_witness_empty`,
+    `leaves_an_existing_coinbase_witness_alone`,
+    `skips_without_commitment_or_when_segwit_is_inactive`
+  - `crates/node/tests/mining.rs` test `submit_block_fills_omitted_coinbase_witness`
