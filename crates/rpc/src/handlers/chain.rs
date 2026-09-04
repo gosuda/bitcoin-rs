@@ -1030,17 +1030,35 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash_type = if params.is_null() {
-        "hash_serialized_3"
+    // Core 31.1: gettxoutsetinfo hash_type hash_or_height use_index.
+    // Production timing uses `["muhash", null, false]`: current tip, no
+    // CoinStatsIndex. bitcoin-rs has no historical coinstats index, so a
+    // specific height/hash is refused the same way Core refuses it without
+    // the index. `use_index` is parsed so the production triplet is a
+    // first-class request; the query always scans the in-memory UtxoSet.
+    let array = if params.is_null() {
+        None
     } else {
-        match params_array(params)?.first() {
-            Some(value) if value.is_null() => "hash_serialized_3",
-            Some(value) => value
-                .as_str()
-                .ok_or(RpcError::InvalidType("hash_type must be a string"))?,
-            None => "hash_serialized_3",
-        }
+        Some(params_array(params)?)
     };
+    let hash_type = match array.and_then(|values| values.first()) {
+        None => "hash_serialized_3",
+        Some(value) if value.is_null() => "hash_serialized_3",
+        Some(value) => value
+            .as_str()
+            .ok_or(RpcError::InvalidType("hash_type must be a string"))?,
+    };
+    let specific_block = match array.and_then(|values| values.get(1)) {
+        None => false,
+        Some(value) if value.is_null() => false,
+        Some(_) => true,
+    };
+    let _use_index = optional_bool(params, 2, true)?;
+    if specific_block {
+        return Err(RpcError::InvalidParameter(
+            "Querying specific block heights requires coinstatsindex".to_owned(),
+        ));
+    }
     let want_muhash = hash_type == "muhash";
     let (stats, txouts, transactions, set_hash) = ctx.utxo.with_stable_view(|view| {
         let stats =
@@ -2019,6 +2037,44 @@ mod tests {
         let ctx = Arc::new(Context::new());
         let result = gettxoutsetinfo(&ctx, &json!(["sha3"]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn gettxoutsetinfo_accepts_production_muhash_triplet() {
+        let ctx = Arc::new(Context::new());
+        let result = gettxoutsetinfo(&ctx, &json!(["muhash", null, false]))
+            .unwrap_or_else(|err| panic!("production triplet must be accepted: {err}"));
+        assert_eq!(
+            result.get("muhash").and_then(JsonValueTrait::as_str),
+            Some("dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8")
+        );
+        assert!(result.get("height").is_some());
+        assert!(result.get("bestblock").is_some());
+    }
+
+    #[test]
+    fn gettxoutsetinfo_rejects_historical_query_without_coinstatsindex() {
+        let ctx = Arc::new(Context::new());
+        let historical_hash = "aa".repeat(32);
+        for params in [
+            json!(["muhash", 1000, false]),
+            json!(["muhash", 1000]),
+            json!(["muhash", historical_hash]),
+        ] {
+            let error =
+                gettxoutsetinfo(&ctx, &params).expect_err("historical height must be refused");
+            assert_eq!(
+                error.code(),
+                RpcError::CORE_INVALID_PARAMETER,
+                "{params:?} -> {error}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("Querying specific block heights requires coinstatsindex"),
+                "{error}"
+            );
+        }
     }
 
     /// A genesis, an applied child at height 1, and a competing branch off the
