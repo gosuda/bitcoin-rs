@@ -1135,6 +1135,7 @@ impl Context {
     /// Publishes a new best-applied-block tip.
     pub fn set_applied_tip(&self, tip: TipSnapshot) {
         self.applied_tip.store(Some(Arc::new(tip)));
+        let _ignored = self.mining_sender.send(());
     }
 
     /// Stores a block record for block and header RPCs.

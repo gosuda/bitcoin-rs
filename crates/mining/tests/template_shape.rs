@@ -29,6 +29,7 @@ fn block_template_serializes_core_required_fields() -> Result<(), Box<dyn Error>
     let params = BlockTemplateParams {
         previous_block_hash: Hash256::from_le_bytes(&[1_u8; 32]),
         height: 800_001,
+        subsidy_halving_interval: 210_000,
         version: 0x2000_0000,
         bits: "17034219".to_owned(),
         target: "0000000000000000000342190000000000000000000000000000000000000000".to_owned(),
