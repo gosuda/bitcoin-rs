@@ -1037,7 +1037,6 @@ mod tests {
         assert_eq!(
             first
                 .get("coinbaseaux")
-                .and_then(JsonContainerTrait::as_object)
                 .and_then(|aux| aux.get("flags"))
                 .and_then(JsonValueTrait::as_str),
             Some("")
