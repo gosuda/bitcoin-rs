@@ -3432,6 +3432,13 @@ mod tests {
         std::fs::write(&current_file, [])?;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
+        // Block files are pruned against the durable tip, not the applied one.
+        // A crash restores to the last checkpoint, so a file whose max height
+        // sits at 10 is only reclaimable once that durable base clears 11 by
+        // the reorg-safety margin. Without this the prune is a no-op.
+        state
+            .durable_tip_height
+            .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
         let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[10_u8; 32]);
 
         match &state.storage {
@@ -3513,6 +3520,12 @@ mod tests {
 
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
+        // Same durable-base requirement as
+        // `prune_reclaims_whole_files_and_keeps_current_file`: files are
+        // selected against the checkpoint height, not the applied tip.
+        state
+            .durable_tip_height
+            .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
         let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         // The hash is not needed: this test counts bytes in files, not bodies.
         let record = BlockRecord::from_block(10, &block);
