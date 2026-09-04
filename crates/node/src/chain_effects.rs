@@ -1,13 +1,8 @@
-//! Derived consumers of a committed connect or disconnect.
+//! Derived consumers of committed chain transitions.
 //!
-//! Authoritative apply publishes the applied tip and a [`ChainEventPublisher`]
-//! hint. This type owns the work that must not be able to fail a transition:
-//! RPC [`BlockLog`], ZMQ projections, and `TxIndex` wake.
-//!
-//! Issue #77 owns the durable event journal and cursor contract. This module
-//! establishes dependency direction for #217 without a second event contract:
-//! apply calls these methods around the existing commit point; it does not
-//! import presentation types.
+//! Ownership and ordering rules are defined by `ARCH-07` in
+//! [`docs/contracts/architecture.md`](../../docs/contracts/architecture.md). Apply
+//! does not import these consumer types.
 
 use std::sync::Arc;
 
@@ -15,6 +10,8 @@ use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Txid};
 use bitcoin_rs_rpc::context::{BlockLog, BlockRecord};
 use parking_lot::RwLock;
 
+use crate::apply::{ConnectOutcome, DisconnectOutcome};
+use crate::tx_admission::TxAdmission;
 use crate::txindex_worker::TxIndexRuntime;
 use crate::zmq_publisher::{SequenceEvent, ZmqPublisher};
 
@@ -167,6 +164,142 @@ impl ChainEffects {
     pub fn set_tx_index(&mut self, tx_index: Option<Arc<TxIndexRuntime>>) {
         self.tx_index = tx_index;
     }
+
+    /// RPC log, ZMQ, and index wake for a committed connect.
+    pub fn connected(&self, block: &Block, outcome: &ConnectOutcome) {
+        self.record_connected(outcome.height, block);
+        self.emit_connected(
+            outcome.hash,
+            &outcome.block_bytes,
+            &outcome.txids,
+            outcome.raw_txs.as_deref(),
+        );
+        self.after_connect(outcome.hash);
+    }
+
+    /// RPC log, ZMQ, and index wake for a committed disconnect.
+    pub fn disconnected(&self, outcome: &DisconnectOutcome) {
+        self.before_disconnect(outcome.hash);
+        self.after_disconnect(outcome.hash);
+    }
+}
+
+/// Node-owned derived work that follows a committed chain event.
+///
+/// `Chainstate` does not hold this. The composition root dispatches after
+/// each committed connect or disconnect.
+#[derive(Clone)]
+pub struct ChainFollowers {
+    effects: ChainEffects,
+    mining: Arc<crate::mining::MiningGenerationSignal>,
+    tx_admission: Option<Arc<TxAdmission>>,
+}
+
+impl ChainFollowers {
+    /// Production follower set.
+    #[must_use]
+    pub fn new(
+        effects: ChainEffects,
+        mining: Arc<crate::mining::MiningGenerationSignal>,
+        tx_admission: Option<Arc<TxAdmission>>,
+    ) -> Self {
+        Self {
+            effects,
+            mining,
+            tx_admission,
+        }
+    }
+
+    /// No RPC log, no-op ZMQ, no index, no admission, a fresh mining signal.
+    #[must_use]
+    pub fn noop() -> Self {
+        Self::new(
+            ChainEffects::noop(),
+            Arc::new(crate::mining::MiningGenerationSignal::new()),
+            None,
+        )
+    }
+
+    /// Capture flags the apply path should honour for later dispatch.
+    #[must_use]
+    pub fn capture_flags(&self) -> (bool, bool) {
+        (self.effects.needs_rawtx(), self.effects.needs_block_bytes())
+    }
+
+    /// Post-commit adapters (RPC, ZMQ, index).
+    #[must_use]
+    pub fn effects(&self) -> &ChainEffects {
+        &self.effects
+    }
+
+    /// Mutable post-commit adapters, for tests that attach an index after open.
+    pub fn effects_mut(&mut self) -> &mut ChainEffects {
+        &mut self.effects
+    }
+
+    /// Mining generation signal.
+    #[must_use]
+    pub fn mining(&self) -> &Arc<crate::mining::MiningGenerationSignal> {
+        &self.mining
+    }
+
+    /// Dispatches a committed connect: RPC/ZMQ/index, mining wake, orphan wake.
+    pub fn connected(&self, block: &Block, outcome: &ConnectOutcome) {
+        self.effects.connected(block, outcome);
+        self.mining.publish_generation();
+        if let Some(admission) = &self.tx_admission {
+            admission.invalidate_recent_rejects();
+            for txid in &outcome.txids {
+                admission.enqueue_orphans_waiting_on(*txid);
+            }
+        }
+    }
+
+    /// Dispatches a committed disconnect: RPC/ZMQ/index, mining wake, orphan wake.
+    pub fn disconnected(&self, outcome: &DisconnectOutcome) {
+        self.effects.disconnected(outcome);
+        self.mining.publish_generation();
+        if let Some(admission) = &self.tx_admission {
+            admission.invalidate_recent_rejects();
+            for parent in &outcome.restored_parents {
+                admission.enqueue_orphans_waiting_on(*parent);
+            }
+        }
+    }
+
+    /// Connects `block` and dispatches this set before the transition ends.
+    ///
+    /// See `ARCH-07`: production single-block paths must not finish the
+    /// [`crate::apply::ChainTransition`] and then dispatch, or a later
+    /// connect or disconnect can publish derived effects first.
+    pub fn apply_connect(
+        &self,
+        handles: &crate::apply::Chainstate,
+        block: &Block,
+    ) -> core::result::Result<ConnectOutcome, crate::ApplyError> {
+        let transition = handles.begin_transition()?;
+        let outcome = transition.connect(block)?;
+        self.connected(block, &outcome);
+        let _ = transition.finish();
+        Ok(outcome)
+    }
+
+    /// Disconnects `block` and dispatches this set before the transition ends.
+    ///
+    /// See `ARCH-07`. An admission failure is `DisconnectError::Refused`.
+    pub fn apply_disconnect(
+        &self,
+        handles: &crate::apply::Chainstate,
+        block: &Block,
+    ) -> core::result::Result<DisconnectOutcome, crate::DisconnectError> {
+        let transition = handles
+            .begin_transition()
+            .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
+        let outcome = transition.disconnect(block)?;
+        self.disconnected(&outcome);
+        let _ = transition.finish();
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]
@@ -213,8 +346,8 @@ mod tests {
         let genesis = Network::Regtest.genesis_block();
         let hash = Hash256::from(genesis.block_hash());
         let publisher = Arc::new(RecordingPublisher::default());
-        let effects = ChainEffects::noop()
-            .with_zmq_publisher(Arc::clone(&publisher) as Arc<dyn ZmqPublisher>);
+        let zmq: Arc<dyn ZmqPublisher> = publisher.clone();
+        let effects = ChainEffects::noop().with_zmq_publisher(zmq);
 
         effects.record_connected(0, &genesis);
         assert_eq!(effects.block_log().read().len(), 1);

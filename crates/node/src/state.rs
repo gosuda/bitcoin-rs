@@ -1492,6 +1492,8 @@ pub struct NodeState {
     chain_events: Arc<ChainEventPublisher>,
     chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
     apply_handles: crate::apply::Chainstate,
+    /// Derived consumers of committed chain events. Not held by `Chainstate`.
+    followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
     /// Process-wide rollback-evidence warning snapshot (`ArcSwap`).
     warning_store: Arc<crate::recovery_evidence::WarningStore>,
@@ -1857,6 +1859,17 @@ impl NodeState {
         ) {
             tracing::error!(error, "failed to attach orphan-wake observer");
         }
+        // Construct followers before Chainstate so capture policy has one owner.
+        let followers = crate::chain_effects::ChainFollowers::new(
+            crate::chain_effects::ChainEffects::new(
+                Arc::clone(&blocks),
+                Arc::clone(&zmq_publisher),
+                tx_index_runtime.clone(),
+            ),
+            Arc::clone(&mining_generation),
+            Some(Arc::clone(&tx_admission)),
+        );
+        let (capture_rawtx, capture_block_bytes) = followers.capture_flags();
         let mut apply_handles = crate::apply::Chainstate {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
@@ -1868,12 +1881,6 @@ impl NodeState {
             coin_stats: Arc::clone(&coin_stats),
             mempool: Arc::clone(&mempool),
             mempool_gateway: Arc::clone(&mempool_gateway),
-            mining_generation: Arc::clone(&mining_generation),
-            effects: crate::chain_effects::ChainEffects::new(
-                Arc::clone(&blocks),
-                Arc::clone(&zmq_publisher),
-                tx_index_runtime.clone(),
-            ),
             chain_events: Arc::clone(&chain_events),
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
@@ -1887,7 +1894,8 @@ impl NodeState {
             )),
             journal,
             checkpoint_publisher: None,
-            tx_admission: Some(Arc::clone(&tx_admission)),
+            capture_rawtx,
+            capture_block_bytes,
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
         // A restored checkpoint is durable at its own height by definition, so
@@ -1916,6 +1924,7 @@ impl NodeState {
             }));
         let sync = Arc::new(crate::BlockSync::new(
             apply_handles.clone(),
+            followers.clone(),
             Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
@@ -1986,6 +1995,7 @@ impl NodeState {
             chain_events: Arc::clone(&chain_events),
             chain_event_hints_rx,
             apply_handles,
+            followers,
             sync,
             warning_store,
         })
@@ -2491,11 +2501,18 @@ impl NodeState {
         self.chainstate()
     }
 
+    /// Clone of the derived-consumer set used after committed transitions.
+    #[must_use]
+    pub fn chain_followers(&self) -> crate::chain_effects::ChainFollowers {
+        self.followers.clone()
+    }
+
     /// Synthetically applies `block` as the next tip after consensus checks.
     ///
-    /// Delegates to `crate::apply::apply_block` over the shared handles.
+    /// Holds the chain transition through follower dispatch (`ARCH-07`).
     pub fn apply_block(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
-        self.apply_handles.apply_block(block)
+        let outcome = self.followers.apply_connect(&self.apply_handles, block)?;
+        Ok(outcome.tip)
     }
 
     #[cfg(test)]
@@ -2742,7 +2759,7 @@ mod tests {
         let mut state = NodeState::open(config, None)?;
         state.start_index_workers()?;
 
-        assert!(state.apply_handles().effects.tx_index().is_some());
+        assert!(state.chain_followers().effects().tx_index().is_some());
         assert!(state.tx_index_query().is_none());
         assert!(state.esplora_tx_index_query().is_some());
         assert!(state.script_index_query().is_some());
@@ -3153,14 +3170,14 @@ mod tests {
         config.p2p.listen.clear();
         config.indexes.txindex = false;
         let state = NodeState::open(config, None)?;
-        assert!(state.apply_handles().effects.tx_index().is_none());
+        assert!(state.chain_followers().effects().tx_index().is_none());
 
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("with-txindex");
         config.p2p.listen.clear();
         config.indexes.txindex = true;
         let state = NodeState::open(config, None)?;
-        assert!(state.apply_handles().effects.tx_index().is_some());
+        assert!(state.chain_followers().effects().tx_index().is_some());
         Ok(())
     }
 
@@ -4341,6 +4358,7 @@ mod tests {
 
         crate::reorg::invalidate_block(
             &state.apply_handles(),
+            &state.chain_followers(),
             Hash256::from(block_two.block_hash()),
         )?;
 
@@ -4385,6 +4403,7 @@ mod tests {
         );
         let result = crate::reorg::invalidate_block(
             &state.apply_handles(),
+            &state.chain_followers(),
             Hash256::from(block_two.block_hash()),
         );
         let Err(crate::reorg::ReorgError::CheckpointSettlement(_)) = result else {
@@ -4464,6 +4483,7 @@ mod tests {
         let handles = state.apply_handles();
         crate::reorg::switch_to_branch(
             &handles,
+            &state.chain_followers(),
             parent,
             |hash| fork_bodies.get(&hash).cloned(),
             |_| {},

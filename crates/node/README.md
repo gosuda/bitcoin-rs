@@ -8,7 +8,8 @@ subsystem crates.
 `run` is the top-level entry point: it loads the layered `Config` (with RPC `Auth`), and
 drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `Chainstate` facade for
-authoritative apply; `ChainEffects` owns post-commit RPC/ZMQ/index consumers;
+authoritative apply; `ChainFollowers` dispatch post-commit RPC/ZMQ/index,
+mining, and admission work while the `ChainTransition` is still held;
 `BlockSync` orchestrates block download; `reorg` switches the applied chain
 from one branch to another. The chainstate facade serializes connect,
 disconnect, and window apply behind `ChainTransition`. Owning crates expose

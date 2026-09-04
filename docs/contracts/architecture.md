@@ -163,14 +163,20 @@ Owners:
   not persist. BIP22 proposal omits proof-of-work; every other pre-write gate
   is the same function commit runs. Owner: `crates/node/src/apply.rs`.
 - Authoritative apply still lives in `crates/node` because it composes chain,
-  consensus, utxo, and storage. It does not import RPC, ZMQ, or TxIndex
-  types. `ChainEffects` owns those post-commit consumers and is invoked around
-  the existing commit point: RPC `BlockLog` and hash/raw ZMQ topics before
-  `applied_tip` publication (hash/raw after mempool eviction), TxIndex wake
-  and sequence `C`/`D` after publication. Consumer failure cannot invalidate
-  chainstate. Issue #77 owns the durable event journal; this is dependency
-  direction, not a second event contract. Do not push cross-store ordering
-  into `utxo` or `storage`.
+  consensus, utxo, and storage. `Chainstate` does not hold or import RPC,
+  ZMQ, TxIndex, mining, or P2P admission types. Apply publishes the tip and
+  returns a `ConnectOutcome` or `DisconnectOutcome`. Capture flags
+  (`Chainstate::capturing`) are set at construction so apply can produce
+  `rawtx` and canonical block bytes without holding the consumers.
+- The composition root (`NodeState`, `BlockSync`, reorg, mining) dispatches
+  `ChainFollowers` while the `ChainTransition` is still held, then calls
+  `finish`. Convenience methods that finish before returning
+  (`Chainstate::apply_block`, `disconnect_block`) do not dispatch followers.
+  RPC `BlockLog`, hash/raw ZMQ, TxIndex wake, sequence `C`/`D`, mining
+  generation, and admission run from that dispatch. Mempool eviction stays
+  inside apply. Consumer failure cannot invalidate chainstate. Issue #77
+  owns the durable event journal; this is dependency direction, not a second
+  event contract. Do not push cross-store ordering into `utxo` or `storage`.
 
 ## Live gaps
 
@@ -179,14 +185,17 @@ Owners:
   #217, #218). BIP9/softfork lookups, P2P chain serving, txindex status
   projection, mempool mutation consumers, and block-body access live with their
   owner crates (#272). Applied-tip mutation goes through the `Chainstate`
-  / `ChainTransition` facade (`ARCH-07`). Post-commit RPC/ZMQ/index wiring
-  lives in `ChainEffects`, not in apply. `crates/node` still carries leftover
+  / `ChainTransition` facade (`ARCH-07`). Derived consumers live in
+  `ChainFollowers` / `ChainEffects` and are dispatched after commit
+  while the `ChainTransition` is still held; `Chainstate` does not hold
+  them. `crates/node` still carries leftover
   domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
   the P2P download scheduler (`sync.rs`), and direct backend construction and
   cache share dispatch (`state.rs`). Relocating those into `crates/utxo`,
   `crates/storage`, and `crates/p2p` remains tracked under #217 (open). A
-  dedicated `crates/chainstate` waits until the facade is dependency-acyclic.
-  `crates/node` is the composition layer, but is not yet fully slim.
+  dedicated `crates/chainstate` waits until journal, checkpoint, and
+  `ChainEventPublisher` also leave node. `crates/node` is the composition
+  layer, but is not yet fully slim.
 
 ## Proven by
 
@@ -209,6 +218,13 @@ Owners:
   `proposal_omits_proof_of_work`: the facade copies published tips without
   reserving generation, connect/finish through `ChainTransition` is the
   mutation path, and BIP22 proposal reuses the apply gates without persistence.
+- `crates/node/src/apply.rs` tests `apply_block_publishes_rawtx_bytes_in_block_order`,
+  `connected_sequence_event_observes_the_published_applied_tip`,
+  `connect_and_disconnect_wake_the_mining_generation`,
+  `follower_dispatch_holds_the_chain_transition`,
+  `with_zmq_publisher_swaps_handle`: apply returns a committed outcome;
+  `ChainFollowers` consume it after the tip is published and while the
+  transition is still held; ZMQ publishers are configured outside apply.
 - `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
