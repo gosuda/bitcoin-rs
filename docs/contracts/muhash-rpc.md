@@ -28,9 +28,11 @@ the send-time proof.
 ### `MRPC-03`: Spawned `{config}` is the pinned bytes
 
 Campaign command templates include `{config}`. `run_campaign` copies the
-pinned config into the workspace with `O_EXCL`, re-hashes that copy before
-every spawn, and substitutes the copy path. Receipts keep the original
-FileRef identity.
+pinned config into the workspace with `O_EXCL` and mode `0o400`. Every spawn
+opens that copy, re-hashes it, copies the verified bytes into a write-sealed
+memfd, and passes `/proc/self/fd/<n>` to the child. A rename of the workspace
+pathname or a later write to that inode cannot change the bytes the daemon
+reads. Receipts keep the original FileRef identity.
 
 ## Proven by
 
@@ -41,4 +43,6 @@ FileRef identity.
   `test_readiness_rejects_a_listener_the_child_does_not_own`,
   `test_command_must_include_config_placeholder`,
   `test_pinned_config_copy_ignores_later_operator_path_writes`,
+  `test_verified_config_inode_survives_workspace_path_replace`,
+  `test_spawn_reads_verified_config_after_workspace_replace`,
   `test_warm_campaign_agrees_across_all_backends`
