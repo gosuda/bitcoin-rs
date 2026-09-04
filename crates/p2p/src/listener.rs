@@ -139,10 +139,8 @@ impl InboundSyncSinks {
 
     /// Forwards a decoded transaction into the node's ingress channel.
     ///
-    /// The send is blocking on the bounded channel: a full queue applies
-    /// backpressure to this peer's read loop (and therefore its TCP window)
-    /// rather than dropping the body. A disconnected channel is the node's
-    /// shutdown path; the body is then dropped with a warning.
+    /// See P2P-01 in the canonical P2P compatibility contract for channel
+    /// backpressure and shutdown behavior.
     fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
         let Some(tx_tx) = self.tx_tx.as_ref() else {
             return;
