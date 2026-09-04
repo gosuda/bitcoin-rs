@@ -14,7 +14,7 @@ use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateParams, DEFAULT_BLOCK_RESERVED_WEIGHT,
     DEFAULT_COINBASE_RESERVED_SIGOPS, MiningPolicy,
 };
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, Network};
 
 const SIGOP_BUDGET: u32 = 80_000;
 
@@ -419,7 +419,7 @@ fn params_with_sigops(max_weight: u32, max_sigops: u32) -> BlockTemplateParams {
     BlockTemplateParams {
         previous_block_hash: Hash256::from_le_bytes(&[1_u8; 32]),
         height: 800_001,
-        subsidy_halving_interval: 210_000,
+        subsidy_halving_interval: Network::Mainnet.subsidy_halving_interval(),
         version: 0x2000_0000,
         bits: "17034219".to_owned(),
         target: "0000000000000000000342190000000000000000000000000000000000000000".to_owned(),

@@ -241,7 +241,7 @@ fn template_for_tip(ctx: &Arc<Context>, now: u64) -> Result<BlockTemplate, RpcEr
             }
         }
 
-        let template = assemble(ctx, &tip, now)?;
+        let (template, sequence) = assemble(ctx, &tip, now)?;
 
         // The chain may have moved while this was being built. The template
         // is still internally consistent -- every field came from one snapshot
@@ -277,7 +277,7 @@ fn assemble(
     ctx: &Arc<Context>,
     tip: &bitcoin_rs_chain::TipSnapshot,
     now: u64,
-) -> Result<BlockTemplate, RpcError> {
+) -> Result<(BlockTemplate, u64), RpcError> {
     let height = tip.height.saturating_add(1);
     let (min_time, bits) = {
         let tree = ctx.block_tree.read();
@@ -296,8 +296,9 @@ fn assemble(
     };
     let current_time = u32::try_from(now).unwrap_or(u32::MAX).max(min_time);
 
-    let sequence = ctx.mempool.read().sequence_number();
-      let params = BlockTemplateParams {
+    let pool = ctx.mempool.read();
+    let sequence = pool.sequence_number();
+    let params = BlockTemplateParams {
         previous_block_hash: tip.hash,
         height,
         subsidy_halving_interval: ctx.chain_network.subsidy_halving_interval(),
@@ -312,9 +313,9 @@ fn assemble(
         max_size: MAX_BLOCK_SERIALIZED_SIZE,
     };
 
-    let pool = ctx.mempool.read();
-    BlockTemplate::from_mempool(&pool, &bitcoin_rs_mining::MiningPolicy, params)
-        .map_err(|error| RpcError::Internal(format!("block template assembly failed: {error}")))
+    let template = BlockTemplate::from_mempool(&pool, &bitcoin_rs_mining::MiningPolicy, params)
+        .map_err(|error| RpcError::Internal(format!("block template assembly failed: {error}")))?;
+    Ok((template, sequence))
 }
 
 /// The full target as conventional big-endian hex.
