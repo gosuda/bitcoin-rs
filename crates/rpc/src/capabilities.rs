@@ -110,12 +110,7 @@ mod tests {
 
     impl TxIndexCapabilitySource for ReadyEnabled {
         fn capability(&self) -> CapabilityStatus {
-            CapabilityStatus {
-                id: TXINDEX_CAPABILITY.to_owned(),
-                compiled: true,
-                enabled: true,
-                state: CapabilityState::Ready,
-            }
+            txindex_status(true, CapabilityState::Ready)
         }
     }
 
@@ -127,9 +122,12 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/indexing.md#IDX-02
     fn attached_source_is_the_worker_row() {
         let snapshot = txindex_snapshot(Some(&ReadyEnabled));
-        assert_eq!(snapshot.capabilities[0].state, CapabilityState::Ready);
-        assert!(snapshot.capabilities[0].enabled);
+        assert_eq!(
+            snapshot.capabilities,
+            vec![txindex_status(true, CapabilityState::Ready)]
+        );
     }
 }

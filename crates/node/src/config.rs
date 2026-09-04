@@ -300,6 +300,30 @@ pub struct ChainstateJournalOverrides {
 }
 
 impl ChainstateJournalOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.enabled.is_some() {
+            self.enabled = other.enabled;
+        }
+        if other.blocks.is_some() {
+            self.blocks = other.blocks;
+        }
+        if other.seconds.is_some() {
+            self.seconds = other.seconds;
+        }
+        if other.rotate_mib.is_some() {
+            self.rotate_mib = other.rotate_mib;
+        }
+        if other.max_journal_mib.is_some() {
+            self.max_journal_mib = other.max_journal_mib;
+        }
+        if other.max_lag_blocks.is_some() {
+            self.max_lag_blocks = other.max_lag_blocks;
+        }
+        if other.max_lag_seconds.is_some() {
+            self.max_lag_seconds = other.max_lag_seconds;
+        }
+    }
+
     fn apply_to(self, config: &mut ChainstateJournalConfig) {
         if let Some(enabled) = self.enabled {
             config.enabled = enabled;
@@ -486,8 +510,12 @@ impl UserConfig {
         if other.notifications.is_some() {
             self.notifications.clone_from(&other.notifications);
         }
-        if other.chainstate_journal.is_some() {
-            self.chainstate_journal = other.chainstate_journal;
+        if let Some(other_journal) = other.chainstate_journal {
+            if let Some(journal) = &mut self.chainstate_journal {
+                journal.overlay(&other_journal);
+            } else {
+                self.chainstate_journal = Some(other_journal);
+            }
         }
         self.validation.overlay(&other.validation);
     }
@@ -824,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/indexing.md#CFG-01
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn user_config_overlay_lets_set_fields_win() {
         let mut base = UserConfig {
             storage: StorageOverrides {
@@ -836,6 +864,10 @@ mod tests {
                 password: Some("g".to_owned()),
                 ..RpcOverrides::default()
             },
+            chainstate_journal: Some(ChainstateJournalOverrides {
+                blocks: Some(900),
+                ..ChainstateJournalOverrides::default()
+            }),
             ..UserConfig::default()
         };
         let other = UserConfig {
@@ -847,11 +879,23 @@ mod tests {
                 user: Some("regtest".to_owned()),
                 ..RpcOverrides::default()
             },
+            chainstate_journal: Some(ChainstateJournalOverrides {
+                seconds: Some(45),
+                ..ChainstateJournalOverrides::default()
+            }),
             ..UserConfig::default()
         };
         base.overlay(&other);
         assert_eq!(base.storage.prune_target_mb, Some(900));
         assert_eq!(base.rpc.user.as_deref(), Some("regtest"));
         assert_eq!(base.rpc.password.as_deref(), Some("g"));
+        assert_eq!(
+            base.chainstate_journal,
+            Some(ChainstateJournalOverrides {
+                blocks: Some(900),
+                seconds: Some(45),
+                ..ChainstateJournalOverrides::default()
+            })
+        );
     }
 }

@@ -14,14 +14,6 @@ Owners:
 
 ## Clauses
 
-### `CFG-01`: Configuration overlay precedence
-
-- Layered `UserConfig` values override earlier layers only when the later layer
-  provides a field; unset fields preserve the earlier value.
-- Proof: `crates/node/src/config.rs::user_config_overlay_lets_set_fields_win`.
-
-
-
 ### `IDX-01`: Capability configuration and internal enablement
 
 - CLI `--txindex` (env `BITCOIN_RS_TXINDEX`, configuration `txindex=1`) enables
@@ -53,6 +45,10 @@ Owners:
   routes without advertising Core `txindex` unless `--txindex` is also set.
 - `getindexinfo` reports `synced: true` if and only if the advertised
   capability watermark matches the height and block hash of the active chain tip.
+- `getcapabilities` reports one compiled txindex row. A missing worker is
+  `enabled: false` / `Disabled`; an attached worker supplies the row through
+  `TxIndexCapabilitySource`. Proof: `crates/rpc/src/capabilities.rs` tests
+  `missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`.
 
 `ScriptLive` is not a duplicate coin table. Its empty-valued key is
 `script-hash-prefix || full-outpoint`; the prefix is only a scan accelerator.
@@ -187,3 +183,6 @@ remove another script's output.
   serving by height/hash (`IDX-03`, `RCV-01`).
 - `crates/node/src/apply.rs`:
   `txindex_worker_failure_makes_queries_unavailable_without_blocking_apply`.
+- `crates/rpc/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
+  `attached_source_is_the_worker_row`: `getcapabilities` advertises one
+  txindex row from `txindex_status` (`IDX-02`).
