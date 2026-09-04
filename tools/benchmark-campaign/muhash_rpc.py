@@ -47,23 +47,19 @@ MAX_COMMAND_ARGS = 64
 ARM_READY_TIMEOUT_NS = 10_000_000_000
 CHILD_TERMINATE_GRACE_NS = 1_000_000_000
 CHILD_KILL_REAP_NS = 1_000_000_000
-CACHE_POLICIES = frozenset(
-    {
-        "warm",
-        "process-cold/page-cache-unspecified",
-        "process-cold/page-cache-evicted",
-    }
-)
 CACHE_POLICY_ACTIONS = {
     "warm": "warm-untimed-query-done",
     "process-cold/page-cache-unspecified": "fresh-process-before-observation",
     "process-cold/page-cache-evicted": "page-cache-evicted",
 }
+CACHE_POLICIES = frozenset(CACHE_POLICY_ACTIONS)
 _CAMPAIGN_PLACEHOLDERS = frozenset(
     {"{binary}", "{config}", "{data_dir}", "{rpc_port}", "{rpc_bind}", "{cookie}"}
 )
+_TCP_ESTABLISHED = 0x01
 _TCP_LISTEN = 0x0A
 _LOOPBACK_V4 = "0100007F"
+_LOOPBACK_V6 = "00000000000000000000000001000000"
 OPERATOR_TRUST_BOUNDARY = (
     "operator-controlled observation; not remote binary authentication"
 )
@@ -851,6 +847,8 @@ def _rpc_once(
     max_bytes: int,
     expected_height: int,
     expected_hash: str,
+    owner_pid: int,
+    owner_starttime: int,
 ) -> tuple[bytes, bytes, int, int, UtxoState]:
     body = _request_body()
     parsed = urllib.parse.urlsplit(endpoint)
@@ -886,6 +884,9 @@ def _rpc_once(
                 if connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0:
                     break
                 raise RpcTransportError("RPC connect failed")
+            _require_peer_owned(
+                connection, host, port, owner_pid, owner_starttime, deadline
+            )
             _send_all(connection, selector, request, deadline)
             # Receive phases register read interest only: a permanently
             # write-ready socket must never wake a read wait.
@@ -1118,6 +1119,12 @@ def run_trial(input_path: Path) -> JsonObject:
         ),
         _uint(expected["height"], "trial input.expected.height"),
         _hash(expected["bestblock"], "trial input.expected.bestblock"),
+        _uint(pre["attested_pid"], "controller pre-receipt.attested_pid", positive=True),
+        _uint(
+            pre["attested_starttime"],
+            "controller pre-receipt.attested_starttime",
+            positive=True,
+        ),
     )
     observation: JsonObject = {
         "schema": OBSERVATION_SCHEMA,
@@ -1718,26 +1725,51 @@ def _allocate_distinct_loopback_ports(count: int) -> tuple[int, ...]:
             sock.close()
 
 
-def _listen_inodes(port: int) -> set[int]:
-    needle = f"{_LOOPBACK_V4}:{port:04X}"
+def _loopback_endpoint(host: str, port: int) -> tuple[Path, str]:
+    if host == "127.0.0.1":
+        return Path("/proc/net/tcp"), f"{_LOOPBACK_V4}:{port:04X}"
+    if host == "::1":
+        return Path("/proc/net/tcp6"), f"{_LOOPBACK_V6}:{port:04X}"
+    raise ContractError("RPC peer is not loopback")
+
+
+def _tcp_inodes(
+    table: Path, local: str, remote: str | None, state: int
+) -> set[int]:
     inodes: set[int] = set()
     try:
-        text = Path("/proc/net/tcp").read_text()
+        text = table.read_text()
     except OSError as error:
-        raise ContractError("cannot read /proc/net/tcp") from error
+        raise ContractError(f"cannot read {table}") from error
     for line in text.splitlines()[1:]:
         fields = line.split()
         if len(fields) < 10:
             continue
-        if fields[1].upper() != needle:
+        if fields[1].upper() != local:
+            continue
+        if remote is not None and fields[2].upper() != remote:
             continue
         try:
-            if int(fields[3], 16) != _TCP_LISTEN:
+            if int(fields[3], 16) != state:
                 continue
-            inodes.add(int(fields[9]))
+            inode = int(fields[9])
         except ValueError as error:
-            raise ContractError("/proc/net/tcp is unparsable") from error
+            raise ContractError(f"{table} is unparsable") from error
+        if inode == 0:
+            continue
+        inodes.add(inode)
     return inodes
+
+
+def _listen_inodes(port: int) -> set[int]:
+    table, local = _loopback_endpoint("127.0.0.1", port)
+    return _tcp_inodes(table, local, None, _TCP_LISTEN)
+
+
+def _established_inodes(host: str, server_port: int, client_port: int) -> set[int]:
+    table, local = _loopback_endpoint(host, server_port)
+    _, remote = _loopback_endpoint(host, client_port)
+    return _tcp_inodes(table, local, remote, _TCP_ESTABLISHED)
 
 
 def _pid_owns_inode(pid: int, inode: int) -> bool:
@@ -1761,6 +1793,33 @@ def _endpoint_owned_by(pid: int, port: int) -> None:
         raise ContractError("RPC port does not have exactly one loopback listener")
     if not _pid_owns_inode(pid, next(iter(inodes))):
         raise ContractError("RPC endpoint is not owned by the arm process")
+
+
+def _require_peer_owned(
+    connection: socket.socket,
+    host: str,
+    server_port: int,
+    pid: int,
+    starttime: int,
+    deadline_ns: int,
+) -> None:
+    while True:
+        if _read_starttime(pid) != starttime:
+            raise ContractError("arm process identity changed")
+        try:
+            client_port = int(connection.getsockname()[1])
+        except (OSError, TypeError, ValueError) as error:
+            raise ContractError("RPC connection has no local port") from error
+        inodes = _established_inodes(host, server_port, client_port)
+        if len(inodes) > 1:
+            raise ContractError("RPC connection is not unique")
+        if len(inodes) == 1:
+            if not _pid_owns_inode(pid, next(iter(inodes))):
+                raise ContractError("RPC connection is not owned by the arm process")
+            return
+        if time.perf_counter_ns() >= deadline_ns:
+            raise ContractError("RPC connection was never owned by the arm process")
+        time.sleep(0.001)
 
 
 def _wait_owned_endpoint(
@@ -1831,26 +1890,46 @@ def _read_proc_io(pid: int) -> JsonObject:
     return {key: values[key] for key in sorted(required)}
 
 
-def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
+def _copy_pinned_file(
+    source: Path,
+    expected: str,
+    destination: Path,
+    *,
+    cap: int,
+    mode: int,
+    field: str,
+) -> Path:
+    """Copy pinned bytes onto a new workspace path.
+
+    The commit point is ``fsync`` of the destination fd, then ``chmod``.
+    The parent directory is not fsynced: this is a campaign workspace
+    artifact, not a published result. ``O_EXCL`` refuses a destination
+    that already exists. Hash mismatch and any I/O failure after create
+    unlink the destination and raise ``ContractError``; those failures
+    are not retried here. ``run_campaign`` owns the workspace and does
+    not retry a failed copy. Spawn re-hashes the copy before exec.
+    """
+    created = False
     try:
         descriptor = os.open(
             source,
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
         )
     except OSError as error:
-        raise ContractError("cannot open arm binary") from error
+        raise ContractError(f"cannot open {field}") from error
     digest = hashlib.sha256()
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
-            raise ContractError("arm binary must be a regular file")
-        if info.st_size > MAX_BINARY_BYTES:
-            raise ContractError("arm binary exceeds the size cap")
+            raise ContractError(f"{field} must be a regular file")
+        if info.st_size > cap:
+            raise ContractError(f"{field} exceeds the size cap")
         target_fd = os.open(
             destination,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-            0o500,
+            mode,
         )
+        created = True
         try:
             while True:
                 chunk = os.read(descriptor, 1024 * 1024)
@@ -1864,20 +1943,41 @@ def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
         finally:
             os.close(target_fd)
     except OSError as error:
-        raise ContractError("cannot copy arm binary") from error
+        if created:
+            destination.unlink(missing_ok=True)
+        raise ContractError(f"cannot copy {field}") from error
     finally:
         os.close(descriptor)
     if digest.hexdigest() != expected:
         destination.unlink(missing_ok=True)
-        raise ContractError("arm binary SHA-256 does not match its pin")
-    destination.chmod(0o500)
+        raise ContractError(f"{field} SHA-256 does not match its pin")
+    try:
+        destination.chmod(mode)
+    except OSError as error:
+        destination.unlink(missing_ok=True)
+        raise ContractError(f"cannot copy {field}") from error
     return destination
 
 
-def _rehash_binary(path: Path, expected: str) -> None:
-    raw = _read_regular_file(path, MAX_BINARY_BYTES, "arm binary copy")
+def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
+    return _copy_pinned_file(
+        source,
+        expected,
+        destination,
+        cap=MAX_BINARY_BYTES,
+        mode=0o500,
+        field="arm binary",
+    )
+
+
+def _rehash_copy(path: Path, expected: str, cap: int, field: str) -> None:
+    raw = _read_regular_file(path, cap, field)
     if hashlib.sha256(raw).hexdigest() != expected:
-        raise ContractError("arm binary changed after its verified copy")
+        raise ContractError(f"{field} changed after its verified copy")
+
+
+def _rehash_binary(path: Path, expected: str) -> None:
+    _rehash_copy(path, expected, MAX_BINARY_BYTES, "arm binary copy")
 
 
 def _expand_command(
@@ -1907,6 +2007,7 @@ class _ArmProcess:
         self,
         spec: ArmSpec,
         binary: Path,
+        config: Path,
         cookie: Path,
         port: int,
         credentials: tuple[str, str],
@@ -1917,6 +2018,7 @@ class _ArmProcess:
     ) -> None:
         self.spec = spec
         self.binary = binary
+        self.config = config
         self.cookie = cookie
         self.port = port
         self.endpoint = f"http://127.0.0.1:{port}/"
@@ -1935,10 +2037,13 @@ class _ArmProcess:
             raise ContractError(f"{self.spec.kind} process is already running")
         self.spec.datadir.mkdir(parents=True, exist_ok=True)
         _rehash_binary(self.binary, self.spec.binary_sha256)
+        _rehash_copy(
+            self.config, self.spec.config.sha256, MAX_RECEIPT_BYTES, "arm config copy"
+        )
         argv = _expand_command(
             self.spec.command,
             binary=self.binary,
-            config=self.spec.config.path,
+            config=self.config,
             data_dir=self.spec.datadir,
             port=self.port,
             cookie=self.cookie,
@@ -1981,6 +2086,7 @@ class _ArmProcess:
         if self._warmed:
             return
         self.require_endpoint()
+        pid, starttime = self.identity()
         _rpc_once(
             self.endpoint,
             self._credentials,
@@ -1988,6 +2094,8 @@ class _ArmProcess:
             self._max_bytes,
             self._expected_height,
             self._expected_hash,
+            pid,
+            starttime,
         )
         self._warmed = True
 
@@ -2092,6 +2200,22 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
         config.candidate.binary_sha256,
         workspace / "candidate-node",
     )
+    core_config = _copy_pinned_file(
+        config.core.config.path,
+        config.core.config.sha256,
+        workspace / "core-config",
+        cap=MAX_RECEIPT_BYTES,
+        mode=0o400,
+        field="core config",
+    )
+    candidate_config = _copy_pinned_file(
+        config.candidate.config.path,
+        config.candidate.config.sha256,
+        workspace / "candidate-config",
+        cap=MAX_RECEIPT_BYTES,
+        mode=0o400,
+        field="candidate config",
+    )
     expected_height = _uint(config.expected["height"], "campaign expected.height")
     expected_hash = _hash(config.expected["bestblock"], "campaign expected.bestblock")
     core_port, candidate_port = _allocate_distinct_loopback_ports(2)
@@ -2099,6 +2223,7 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
         "core": _ArmProcess(
             config.core,
             core_bin,
+            core_config,
             config.credential_file.path,
             core_port,
             credentials,
@@ -2110,6 +2235,7 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
         "bitcoin-rs": _ArmProcess(
             config.candidate,
             candidate_bin,
+            candidate_config,
             config.credential_file.path,
             candidate_port,
             credentials,
