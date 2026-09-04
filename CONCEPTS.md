@@ -103,6 +103,7 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 `bitcoin-rs-storage --bench kvstore_backends`, `bitcoin-rs-utxo --bench record_codec`,
 `bitcoin-rs-utxo --bench utxo_commit`, `bitcoin-rs-mining --bench candidate`,
 `bitcoin-rs-node --bench sync_pipeline`).
+
 ## Consensus validation
 
 ### bitcoinkernel
@@ -285,6 +286,20 @@ generic extension registry or lifecycle abstraction.
 Recording a statistic when its outcome is known rather than when the subject arrives. The fee estimator samples numerator and denominator together at the moment a confirmation target resolves, so both decay from the same block. A transaction leaving for an unrelated reason (eviction) is untracked without being sampled.
 
 ## Measurement
+
+### Product performance cell
+One coordinate of the frozen 36-cell denominator: one product domain
+(`offline`, `p2p`, `muhash`), one corpus (`c150` or `cmodern`), one native
+architecture (`x86_64` or `arm64`), and one backend (`fjall`, `rocksdb`,
+or `redb`). Diagnostics are not cells. See
+`docs/contracts/hot-path-attribution.md`.
+
+### Hot-path attribution ledger
+The single inventory of product hot paths, overlap groups, and
+dispositions. Nested stage histograms are diagnostics. A cell residual
+stays `unmeasured` until seven valid bitcoin-rs walls exist and the
+exclusive union is subtracted from whole-run wall. Owner:
+`docs/benchmarks/hot-path-ledger.toml`.
 
 ### Retained benchmark contract
 Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained set: node sync/apply, reduced UTXO commit, end-to-end mempool admission, Merkle dispatch, and the real-file index resolver.
