@@ -458,8 +458,7 @@ fn ensure_client_supports_mandatory_rules(
     Ok(())
 }
 
-/// Core refuses template assembly on mainnet while disconnected or still in IBD.
-/// Proposal mode skips these gates. Test chains (`Network != Mainnet`) skip them.
+/// Enforces the `API-08` mainnet template operational gates.
 fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
     if ctx.chain_network != bitcoin_rs_primitives::Network::Mainnet {
         return Ok(());
@@ -888,6 +887,7 @@ mod tests {
         );
     }
 
+    // API-08: mainnet template requests require a connected peer.
     #[test]
     fn getblocktemplate_rejects_mainnet_without_peers() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -900,6 +900,7 @@ mod tests {
         assert_eq!(error.to_string(), "bitcoin-rs is not connected!");
     }
 
+    // API-08: mainnet template requests are rejected while the node is in IBD.
     #[test]
     fn getblocktemplate_rejects_mainnet_during_ibd() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -916,6 +917,7 @@ mod tests {
         );
     }
 
+    // API-08: proposal mode bypasses the mainnet connection and IBD gates.
     #[test]
     fn getblocktemplate_proposal_skips_mainnet_connection_gates() {
         let control = FakeMiningControl::with_template(sample_template());
