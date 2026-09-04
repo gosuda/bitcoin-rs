@@ -309,10 +309,10 @@ fn network_hash_ps_answers_on_the_applied_tip() -> anyhow::Result<()> {
         genesis_rate.abs() < f64::EPSILON,
         "genesis has no lookback window, got {genesis_rate}"
     );
-    assert_eq!(
-        mining.network_hash_ps(120, 0)?,
-        0.0,
-        "Core reports 0 at the genesis height"
+    let genesis_height_rate = mining.network_hash_ps(120, 0)?;
+    assert!(
+        genesis_height_rate.abs() < f64::EPSILON,
+        "Core reports 0 at the genesis height, got {genesis_height_rate}"
     );
     Ok(())
 }

@@ -1080,7 +1080,8 @@ mod network_hashps_oracle_tests {
     }
 
     fn work_to_f64(work: bitcoin_rs_chain::ChainWork) -> f64 {
-        work.to_be_bytes()
+        let bytes: [u8; 32] = work.to_be_bytes();
+        bytes
             .iter()
             .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)))
     }
@@ -1204,7 +1205,6 @@ mod network_hashps_oracle_tests {
 
 #[cfg(test)]
 mod candidate_template_tests {
-    use super::CoordinatorState;
     use alloc::sync::Arc;
     use bitcoin_rs_mining::{Candidate, TemplateId};
     use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
