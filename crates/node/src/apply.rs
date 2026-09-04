@@ -155,6 +155,14 @@ pub(crate) trait PruneBodyStore: Send + Sync {
     /// key-value index hold undo rows, and a `ScriptLive`-selecting worker
     /// step fails closed on `None` rather than indexing without its spent-coin
     /// anchor (#225).
+    ///
+    /// A successful read is a committed, snapshot-consistent value visible to
+    /// subsequent worker operations. Records may disappear after pruning or a
+    /// crash/recovery; `None` is terminal for that indexing step and must not
+    /// be treated as an empty record. Storage errors are classified by the
+    /// implementation; transient errors may be retried by the worker, while
+    /// permanent errors fail the optional index. Retry and recovery ownership
+    /// belongs to the caller/worker, not this interface.
     fn undo_record(
         &self,
         height: u32,
