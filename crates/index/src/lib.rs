@@ -10,7 +10,7 @@ pub mod types;
 
 pub use index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
-    IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
+    IndexFormat, IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
     IndexerLike, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits,
     PreparedBlock, ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan,
     TxIndexScanRow, TxIndexSnapshot,

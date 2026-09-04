@@ -164,6 +164,15 @@ const FORMAT_VERSION_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
 /// authoritative chain/UTXO state. There is no dual-read, dual-write, or
 /// in-place conversion.
 const PREVIOUS_FORMAT_VERSIONS: &[[u8; 4]] = &[[0x03, 0x00, 0x00, 0x00], [0x04, 0x00, 0x00, 0x00]];
+
+/// Classification of the persisted index format.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum IndexFormat {
+    /// The current single-marker format.
+    Current,
+    /// A format that must be reset before use.
+    Previous,
+}
 /// Leftover ASCII row-value marker from formats 1–4. Written nowhere; deleted
 /// on reset so a store does not carry two version keys.
 const INDEX_FORMAT_VERSION_KEY: &[u8] = b"index:format_version";
@@ -810,7 +819,8 @@ fn resume_capability_reset<S: KvStore>(
             ORDINARY_STATE_REVISION_KEY,
             &work.next_revision,
         );
-        if store.write_durable_if(&conditions, completion)? {
+        completion.delete(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY);
+          if store.write_durable_if(&conditions, completion)? {
             return Ok(());
         }
     }
@@ -1727,9 +1737,9 @@ impl<S: KvStore> Indexer<S> {
     /// (`IDX-05`). The commit point is that durable batch. A crash before it
     /// is durable leaves the store unmarked; the next call retries. Storage
     /// errors belong to the caller.
-    pub fn ensure_format_version(&self) -> Result<(), IndexError> {
+    pub fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
         match self.store.get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)? {
-            Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => Ok(()),
+            Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => Ok(IndexFormat::Current),
             Some(value) => {
                 let version = value
                     .get(..4)
@@ -3700,7 +3710,7 @@ pub trait IndexerLike: Send + Sync {
     ///
     /// Defaults to success for in-memory and stub indexers, which have no
     /// persisted rows. A store-backed implementation must override this.
-    fn ensure_format_version(&self) -> Result<(), IndexError> {
+    fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
         Ok(())
     }
 
@@ -3843,7 +3853,7 @@ impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
         Self::ingest_block(self, block, height)
     }
 
-    fn ensure_format_version(&self) -> Result<(), IndexError> {
+    fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
         Self::ensure_format_version(self)
     }
 
