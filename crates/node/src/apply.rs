@@ -835,8 +835,8 @@ pub enum BlockProvenance {
 enum ApplyIntent {
     /// Validate, persist, commit the UTXO set, and publish the new applied tip.
     Commit,
-    /// BIP22 proposal: run the consensus gates that precede the first write,
-    /// omit proof-of-work, and leave chainstate untouched.
+    /// BIP22 proposal semantics are defined by `docs/contracts/architecture.md`
+    /// (`ARCH-07`).
     Propose,
 }
 
