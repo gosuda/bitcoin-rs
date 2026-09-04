@@ -331,40 +331,50 @@ fn checked_checksum(
     descriptor: &str,
     requirement: ChecksumRequirement,
 ) -> Result<String, RpcError> {
+    checksummed_payload(descriptor, requirement)
+        .map(|(_, computed)| computed)
+        .map_err(RpcError::InvalidAddressOrKey)
+}
+
+/// Splits an optional BIP380 checksum and verifies it when present.
+///
+/// Returns the descriptor body and the computed checksum. A supplied checksum
+/// may be omitted when `requirement` is [`ChecksumRequirement::Optional`], but
+/// a present checksum is always checked.
+fn checksummed_payload(
+    descriptor: &str,
+    requirement: ChecksumRequirement,
+) -> Result<(&str, String), String> {
     let mut parts = descriptor.split('#');
     let Some(payload) = parts.next() else {
-        return Err(RpcError::InvalidAddressOrKey(
-            "Invalid characters in payload".to_owned(),
-        ));
+        return Err("Invalid characters in payload".to_owned());
     };
     let supplied = parts.next();
     if parts.next().is_some() {
-        return Err(RpcError::InvalidAddressOrKey(
-            "Multiple '#' symbols".to_owned(),
-        ));
+        return Err("Multiple '#' symbols".to_owned());
     }
     if supplied.is_none() && requirement == ChecksumRequirement::Required {
-        return Err(RpcError::InvalidAddressOrKey("Missing checksum".to_owned()));
+        return Err("Missing checksum".to_owned());
     }
     if let Some(supplied) = supplied
         && supplied.len() != 8
     {
-        return Err(RpcError::InvalidAddressOrKey(format!(
+        return Err(format!(
             "Expected 8 character checksum, not {} characters",
             supplied.len()
-        )));
+        ));
     }
 
-    let computed = descriptor_checksum(payload)
-        .ok_or_else(|| RpcError::InvalidAddressOrKey("Invalid characters in payload".to_owned()))?;
+    let computed =
+        descriptor_checksum(payload).ok_or_else(|| "Invalid characters in payload".to_owned())?;
     if let Some(supplied) = supplied
         && supplied != computed
     {
-        return Err(RpcError::InvalidAddressOrKey(format!(
+        return Err(format!(
             "Provided checksum '{supplied}' does not match computed checksum '{computed}'"
-        )));
+        ));
     }
-    Ok(computed)
+    Ok((payload, computed))
 }
 
 /// Bitcoin Core's `ParseDescriptorRange`: an end, or an inclusive `[begin,end]`.
@@ -556,8 +566,7 @@ fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, Desc
 }
 
 fn parse_combo(text: &str) -> Result<Option<&str>, DescriptorError> {
-    let body = strip_checksum(text);
-    if let Some(key) = body
+    if let Some(key) = text
         .strip_prefix("combo(")
         .and_then(|s| s.strip_suffix(')'))
     {
@@ -908,6 +917,107 @@ fn parse_unspendable(text: &str) -> Option<Result<Unspendable, DescriptorError>>
 /// Drops a trailing `#checksum`, which is not part of the descriptor body.
 fn strip_checksum(text: &str) -> &str {
     text.rsplit_once('#').map_or(text, |(body, _)| body)
+}
+
+/// Coinbase script for `generateblock`'s `output` argument (`API-05`).
+pub(crate) fn generateblock_payout_script(
+    text: &str,
+    network: bitcoin::Network,
+) -> Result<Vec<u8>, RpcError> {
+    match script_from_descriptor(text, network) {
+        Ok(script) => Ok(script),
+        Err(error @ DescriptorError::Range(_)) => Err(descriptor_error(error)),
+        Err(error) => {
+            match payout_script_from_address(text, network, "Error: Invalid address or script") {
+                Ok(script) => Ok(script),
+                Err(_) => Err(descriptor_error(error)),
+            }
+        }
+    }
+}
+
+/// Network-valid address script, with no descriptor or raw-script fallback.
+pub(crate) fn payout_script_from_address(
+    text: &str,
+    network: bitcoin::Network,
+    invalid_message: &'static str,
+) -> Result<Vec<u8>, RpcError> {
+    let unchecked = bitcoin::Address::from_str(text)
+        .map_err(|_| RpcError::InvalidAddressOrKey(invalid_message.to_owned()))?;
+    let address = unchecked
+        .require_network(network)
+        .map_err(|_| RpcError::InvalidAddressOrKey(invalid_message.to_owned()))?;
+    Ok(address.script_pubkey().as_bytes().to_vec())
+}
+
+fn script_from_descriptor(
+    text: &str,
+    network: bitcoin::Network,
+) -> Result<Vec<u8>, DescriptorError> {
+    let (payload, _) =
+        checksummed_payload(text, ChecksumRequirement::Optional).map_err(DescriptorError::Parse)?;
+    if let Some(key) = parse_combo(payload)? {
+        return combo_payout_script(key, network);
+    }
+
+    if let Some(unspendable) = parse_unspendable(payload) {
+        return match unspendable? {
+            Unspendable::Address(address) => {
+                let address = address
+                    .require_network(network)
+                    .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+                Ok(address.script_pubkey().as_bytes().to_vec())
+            }
+            Unspendable::Raw(script) => Ok(script.as_bytes().to_vec()),
+        };
+    }
+
+    let checksummed = descriptor_text_with_optional_checksum(payload)?;
+    let secp = bitcoin::secp256k1::Secp256k1::signing_only();
+    let (descriptor, keys) =
+        MiniscriptDescriptor::<DescriptorPublicKey>::parse_descriptor(&secp, &checksummed)
+            .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    if descriptor.has_wildcard() || descriptor.is_multipath() {
+        return Err(ranged_descriptor_rejected());
+    }
+    ensure_keys_match_network(&descriptor, network)?;
+    ensure_secret_keys_match_network(keys, network)?;
+    let derived = descriptor
+        .at_derivation_index(0)
+        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    Ok(derived.script_pubkey().as_bytes().to_vec())
+}
+
+fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, DescriptorError> {
+    let combo = parse_combo_info(key, network)?;
+    if combo.is_range || combo.paths.len() != 1 {
+        return Err(ranged_descriptor_rejected());
+    }
+    let path = combo
+        .paths
+        .first()
+        .ok_or_else(|| DescriptorError::Parse("Invalid combo descriptor".into()))?;
+    let derived = path
+        .at_derivation_index(0)
+        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    // Core's combo Expand emits P2PK first and generateblock uses scripts[0].
+    let pk = MiniscriptDescriptor::new_pk(combo_key(&derived)?);
+    Ok(pk.script_pubkey().as_bytes().to_vec())
+}
+
+fn ranged_descriptor_rejected() -> DescriptorError {
+    DescriptorError::Range(
+        "Ranged descriptor not accepted. Maybe pass through deriveaddresses first?",
+    )
+}
+
+fn descriptor_text_with_optional_checksum(text: &str) -> Result<String, DescriptorError> {
+    if text.contains('#') {
+        return Ok(text.to_owned());
+    }
+    let checksum = descriptor_checksum(text)
+        .ok_or_else(|| DescriptorError::Parse("Invalid descriptor".into()))?;
+    Ok(format!("{text}#{checksum}"))
 }
 
 const BIP380_INPUT_CHARSET: &str = "0123456789()[],'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#\"\\ ";

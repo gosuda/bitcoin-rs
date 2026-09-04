@@ -14,15 +14,18 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
-use bitcoin_rs_mempool::{Mempool, MempoolObserver, MutationEnvelope};
+use bitcoin_rs_mempool::{
+    Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
+};
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, Candidate, CandidateContext, LastCandidateInfo,
-    MiningCapability, MiningChainContext, MiningControl, MiningControlError, MiningInfo,
-    MiningRule, SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate,
+    BlockTemplateResult, BlockValidationResult, Candidate, CandidateContext, GenerateRequest,
+    GenerateSelection, GenerateTx, GeneratedBlock, LastCandidateInfo, MiningCapability,
+    MiningChainContext, MiningControl, MiningControlError, MiningInfo, MiningRule,
+    SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network};
+use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
 use compact_str::CompactString;
 use hashbrown::HashMap;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -538,6 +541,107 @@ impl MiningCoordinator {
         Ok(Arc::new(candidate))
     }
 
+    fn assemble_fresh(
+        &self,
+        payout: &[u8],
+        selection: &GenerateSelection,
+    ) -> Result<Candidate, MiningControlError> {
+        let tip = self.applied_tip.load_full().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
+        })?;
+        let snapshot = {
+            let mempool = self.mempool.read();
+            snapshot_for_selection(&mempool, selection)?
+        };
+        let current_time = Self::current_time_secs().max(1);
+        let chain = {
+            let tree = self.block_tree.read();
+            MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time).map_err(
+                |error| MiningControlError::Failed(CompactString::from(error.to_string())),
+            )?
+        };
+        let context = CandidateContext {
+            previous_block_hash: chain.previous_block_hash,
+            height: chain.height,
+            version: chain.version,
+            bits: chain.bits,
+            min_time: chain.min_time,
+            current_time: current_time.max(chain.min_time),
+            locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
+            network: self.network,
+            csv_active: chain.csv_active,
+            segwit_active: chain.segwit_active,
+            max_weight: MAX_BLOCK_WEIGHT,
+            max_size: MAX_BLOCK_SIZE,
+            max_sigops: u64::from(bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST),
+        };
+        match selection {
+            GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
+            GenerateSelection::Ordered(_) => {
+                assemble_ordered_candidate(&context, &snapshot, payout)
+            }
+        }
+        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
+    }
+
+    /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).
+    ///
+    /// Each submitted block is applied through `apply::apply_block` before the
+    /// next iteration; that is the commit point (`ARCH-07`). Failure after *N*
+    /// accepted submissions leaves those *N* blocks durable at the applied tip.
+    /// `submit = false` dry-validates through `apply::validate_block` and does
+    /// not persist. The result vector grows one block at a time, so `count` cannot
+    /// force a large allocation up front. Callers own retry after inspecting the
+    /// tip. [`MiningControlError::InvalidRequest`] is not retriable without
+    /// changing the request; `Unavailable` and `Failed` may be retried.
+    fn generate_blocks(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        if request.count == 0 {
+            return Ok(Vec::new());
+        }
+        if !request.submit && request.count != 1 {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "submit=false requires nblocks=1",
+            )));
+        }
+        let mut generated = Vec::new();
+        for _ in 0..request.count {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
+            let block = candidate.solve(request.max_tries).map_err(|error| {
+                MiningControlError::Failed(CompactString::from(error.to_string()))
+            })?;
+            if request.submit {
+                match self.submit(&block)? {
+                    BlockValidationResult::Accepted => {}
+                    other => {
+                        return Err(MiningControlError::Failed(CompactString::from(format!(
+                            "generated block was not accepted: {other:?}"
+                        ))));
+                    }
+                }
+            } else {
+                let validation = self.propose(&block);
+                if validation != BlockValidationResult::Accepted {
+                    return Err(MiningControlError::Failed(CompactString::from(format!(
+                        "generated block failed validation: {validation:?}"
+                    ))));
+                }
+            }
+            generated.push(GeneratedBlock {
+                hash: block.block_hash(),
+                hex: hex_encode(&consensus_bytes(&block)),
+            });
+        }
+        Ok(generated)
+    }
+
     fn template_from_candidate(
         network: Network,
         candidate: Arc<Candidate>,
@@ -793,6 +897,13 @@ impl MiningControl for MiningCoordinator {
     fn publish_generation(&self) {
         Self::publish_generation(self);
     }
+
+    fn generate(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        self.generate_blocks(&request)
+    }
 }
 
 impl MempoolSequenceWake for MiningCoordinator {
@@ -875,7 +986,7 @@ fn hashps_missing_height() -> MiningControlError {
 /// This is the sole height-resolution owner for that RPC. `None` is an empty
 /// chain (rate `0.0`). An explicit height that is absent from that snapshot is
 /// Core's invalid-parameter error, not a zero rate.
-// CONTRACT: docs/contracts/external-api.md#API-05
+// CONTRACT: docs/contracts/external-api.md#API-06
 fn resolve_hash_ps_start(
     tree: &BlockTree,
     tip: Option<&TipSnapshot>,
@@ -968,6 +1079,89 @@ fn estimate_network_hashps(
     let time_delta_secs = i64::from(max_time).saturating_sub(i64::from(min_time));
     let work_bytes: [u8; 32] = work_delta.to_be_bytes();
     hashes_per_second(work_bytes, time_delta_secs)
+}
+
+fn snapshot_for_selection(
+    mempool: &Mempool,
+    selection: &GenerateSelection,
+) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    match selection {
+        GenerateSelection::Mempool => Ok(mempool.mining_snapshot()),
+        GenerateSelection::Ordered(items) => {
+            let full = mempool.mining_snapshot();
+            let mut by_txid = HashMap::with_capacity(full.entries.len());
+            for (index, entry) in full.entries.iter().enumerate() {
+                let position = u32::try_from(index).unwrap_or(u32::MAX);
+                by_txid.insert(entry.txid, position);
+            }
+            let mut selected = Vec::with_capacity(items.len());
+            let mut old_to_new = HashMap::with_capacity(items.len());
+            for item in items {
+                match item {
+                    GenerateTx::Mempool(txid) => {
+                        let Some(&old) = by_txid.get(txid) else {
+                            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                                "transaction not in mempool",
+                            )));
+                        };
+                        let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+                        old_to_new.insert(old, new_index);
+                        let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
+                        selected.push(full.entries[old_usize].clone());
+                    }
+                    GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
+                }
+            }
+            for entry in &mut selected {
+                entry.ancestors.retain_mut(|ancestor| {
+                    if let Some(&new_index) = old_to_new.get(ancestor) {
+                        *ancestor = new_index;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            Ok(MempoolMiningSnapshot {
+                sequence: full.sequence,
+                entries: selected,
+            })
+        }
+    }
+}
+
+fn snapshot_entry_from_raw(tx: &Tx) -> SnapshotEntry {
+    let tx = Arc::new(tx.clone());
+    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+    let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
+    SnapshotEntry {
+        txid: tx.txid(),
+        wtxid: tx.wtxid(),
+        vsize,
+        bip141_vsize: vsize,
+        size,
+        weight: tx.weight(),
+        sigop_cost: bitcoin_rs_script::count_tx_legacy(&tx),
+        fee: 0,
+        fee_delta: 0,
+        time: 0,
+        height: 0,
+        ancestor_size: u64::from(vsize),
+        ancestor_fee: 0,
+        ancestor_fee_delta: 0,
+        ancestors: Vec::new(),
+        tx,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
@@ -1236,7 +1430,7 @@ mod network_hashps_oracle_tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/external-api.md#API-05
+    // CONTRACT: docs/contracts/external-api.md#API-06
     fn hash_ps_at_rejects_a_height_the_tip_cannot_resolve() {
         let mut tree = BlockTree::new();
         let genesis = append(&mut tree, BlockHash::default(), 1_000_000);
@@ -1481,6 +1675,13 @@ mod generation_signal_tests {
 
         fn publish_generation(&self) {
             *self.published.lock() += 1;
+        }
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+            Err(unavailable())
         }
     }
 

@@ -367,6 +367,16 @@ group = "mining"
 status = "implemented_unverified"
 
 [[rpc]]
+method = "generatetoaddress"
+group = "mining"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "generateblock"
+group = "mining"
+status = "implemented_unverified"
+
+[[rpc]]
 method = "getnetworkhashps"
 group = "mining"
 status = "implemented_unverified"

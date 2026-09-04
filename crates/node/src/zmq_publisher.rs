@@ -1261,6 +1261,13 @@ mod compat_manifest_tests {
             fn publish_generation(&self) {
                 *self.published.lock() += 1;
             }
+
+            fn generate(
+                &self,
+                _request: bitcoin_rs_mining::GenerateRequest,
+            ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+                Err(unavailable())
+            }
         }
 
         impl MempoolSequenceWake for RecordingControl {
@@ -1535,6 +1542,13 @@ mod sequence_observer_tests {
 
             fn publish_generation(&self) {
                 *self.published.lock() += 1;
+            }
+
+            fn generate(
+                &self,
+                _request: bitcoin_rs_mining::GenerateRequest,
+            ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+                Err(unavailable())
             }
         }
 

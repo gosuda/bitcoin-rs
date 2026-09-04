@@ -10340,6 +10340,13 @@ mod consensus_rule_tests {
         fn publish_generation(&self) {
             *self.published.lock() += 1;
         }
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+            Err(generation_unavailable())
+        }
     }
 
     /// Authoritative applied-tip moves must reach the template coordinator's

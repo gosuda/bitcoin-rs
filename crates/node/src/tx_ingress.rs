@@ -527,6 +527,16 @@ mod tests {
         fn publish_generation(&self) {
             self.publishes.fetch_add(1, Ordering::Relaxed);
         }
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, bitcoin_rs_mining::MiningControlError>
+        {
+            Err(bitcoin_rs_mining::MiningControlError::Failed(
+                "not implemented".to_owned().into(),
+            ))
+        }
     }
 
     /// Builds a valid coinbase tx for testing (no inputs, one output).

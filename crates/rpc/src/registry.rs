@@ -139,6 +139,8 @@ declare_rows! {
     "getmininginfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator.", "0.4.0", Some(mining::getmininginfo);
     "submitblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::submitblock);
     "prioritisetransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::prioritisetransaction);
+    "generatetoaddress", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator.", "0.4.0", Some(mining::generatetoaddress);
+    "generateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag.", "0.4.0", Some(mining::generateblock);
     "getnetworkhashps", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip.", "0.4.0", Some(mining::getnetworkhashps);
     "getprioritisedtransactions", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled.", "0.4.0", Some(mining::getprioritisedtransactions);
 

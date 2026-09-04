@@ -111,6 +111,13 @@ impl MiningControl for SmokeMiningControl {
     }
 
     fn publish_generation(&self) {}
+
+    fn generate(
+        &self,
+        _request: bitcoin_rs_mining::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+        Err(MiningControlError::Unavailable("not wired".into()))
+    }
 }
 
 #[test]
