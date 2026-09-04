@@ -113,7 +113,7 @@ declare_rows! {
     "getrawmempool", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mempool::getrawmempool);
     "getmempoolancestors", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolancestors);
     "getmempooldescendants", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempooldescendants);
-    "estimatesmartfee", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "No estimate_mode handling: Core parses the mode string and rejects unknown values with -8; conf_target is not range-checked against Core's 1-1008 (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::estimatesmartfee);
+    "estimatesmartfee", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Parses estimate_mode (UNSET/ECONOMICAL/CONSERVATIVE) and conf_target 1-1008 like Core. The estimate itself comes from this node's mempool horizon, not Core's confirmation estimator (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::estimatesmartfee);
     "uptime", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(util::uptime);
     "getrpcinfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(util::getrpcinfo);
     "getmemoryinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::getmemoryinfo);

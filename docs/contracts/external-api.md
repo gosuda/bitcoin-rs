@@ -14,7 +14,8 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 `prioritisetransaction` dummy/`fee_delta` arity. `API-20` is
 `prioritisetransaction` dust-output refusal. `API-21` is GBT proposal /
 `submitblock` duplicate for reorged scripts-valid bodies. `API-22` is
-`getmininginfo` omitting unset optional fields.
+`getmininginfo` omitting unset optional fields. `API-23` is
+`estimatesmartfee` Core `conf_target` and `estimate_mode` gates.
 
 ## Clauses
 
@@ -285,6 +286,18 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
   only when set. Unset optionals are omitted, not JSON `null`. Projection
   uses `typed_to_sonic_omitting_nulls`, the same helper as GBT.
 
+### `API-23`: `estimatesmartfee` Core `conf_target` and `estimate_mode`
+
+- **Owner**: `estimatesmartfee` in `crates/rpc/src/handlers/util.rs`.
+- `conf_target` must be in `1..=1008` (Core `MAX_CONFIRM_TARGET`). Otherwise
+  `-8` `Invalid conf_target, must be between 1 and 1008`.
+- `estimate_mode` is optional, case-insensitive `UNSET` / `ECONOMICAL` /
+  `CONSERVATIVE` (Core `FeeModeFromString`). Unknown strings are `-8`
+  `Invalid estimate_mode parameter, must be UNSET, ECONOMICAL or
+  CONSERVATIVE`. A non-string is `-3`. Accepted modes are parsed only;
+  this node's estimator has one horizon.
+- Trailing parameters are refused.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -407,3 +420,8 @@ owned by [wallet-facing.md](wallet-facing.md).
     `getmininginfo_omits_unset_optional_fields`,
     `getmininginfo_can_include_signet_challenge`,
     `getmininginfo_projects_control_state`
+- `API-23`:
+  - `crates/rpc/src/handlers/util.rs` tests
+    `estimatesmartfee_rejects_conf_target_outside_core_range`,
+    `estimatesmartfee_rejects_unknown_estimate_mode`,
+    `estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing`

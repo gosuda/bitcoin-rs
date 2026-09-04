@@ -19,6 +19,12 @@ use crate::handlers::{params_array, required_str, required_u64};
 
 static SERVER_START: OnceLock<Instant> = OnceLock::new();
 
+/// Core `MAX_CONFIRM_TARGET` in `policy/fees.h`.
+const ESTIMATE_SMART_FEE_MAX_TARGET: u64 = 1008;
+const ESTIMATE_SMART_FEE_TARGET_ERROR: &str = "Invalid conf_target, must be between 1 and 1008";
+const ESTIMATE_SMART_FEE_MODE_ERROR: &str =
+    "Invalid estimate_mode parameter, must be UNSET, ECONOMICAL or CONSERVATIVE";
+
 fn conf_target_blocks(conf_target: u64) -> u32 {
     u32::try_from(conf_target).unwrap_or(u32::MAX)
 }
@@ -122,7 +128,15 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
 }
 
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    // CONTRACT: docs/contracts/external-api.md#API-23
+    ensure_at_most_params(params, 2)?;
     let conf_target = required_u64(params, 0, "conf_target is required")?;
+    if !(1..=ESTIMATE_SMART_FEE_MAX_TARGET).contains(&conf_target) {
+        return Err(RpcError::InvalidParameter(
+            ESTIMATE_SMART_FEE_TARGET_ERROR.to_owned(),
+        ));
+    }
+    parse_estimate_mode(params)?;
     let blocks = conf_target_blocks(conf_target);
     let pool = ctx.mempool.read();
     match pool.estimate_fee_rate(blocks) {
@@ -139,6 +153,44 @@ pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Val
             blocks,
         }),
     }
+}
+
+fn ensure_at_most_params(params: &Value, max: usize) -> Result<(), RpcError> {
+    if params.is_null() {
+        return Ok(());
+    }
+    let array = params_array(params)?;
+    if array.len() > max {
+        return Err(RpcError::InvalidParams("too many parameters"));
+    }
+    Ok(())
+}
+
+fn parse_estimate_mode(params: &Value) -> Result<(), RpcError> {
+    let Some(array) = params.as_array() else {
+        return Ok(());
+    };
+    let Some(value) = array.get(1) else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let Some(mode) = value.as_str() else {
+        return Err(RpcError::InvalidType("parameter must be a string"));
+    };
+    if is_core_fee_estimate_mode(mode) {
+        return Ok(());
+    }
+    Err(RpcError::InvalidParameter(
+        ESTIMATE_SMART_FEE_MODE_ERROR.to_owned(),
+    ))
+}
+
+fn is_core_fee_estimate_mode(mode: &str) -> bool {
+    mode.eq_ignore_ascii_case("unset")
+        || mode.eq_ignore_ascii_case("economical")
+        || mode.eq_ignore_ascii_case("conservative")
 }
 
 /// Local response shape: the fee estimator does not expose Core's
@@ -1114,6 +1166,51 @@ mod tests {
             result.get("blocks").and_then(JsonValueTrait::as_u64),
             Some(3)
         );
+    }
+
+    #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-23
+    fn estimatesmartfee_rejects_conf_target_outside_core_range() {
+        let ctx = Arc::new(Context::new());
+        for target in [0_u64, 1009] {
+            let error = estimatesmartfee(&ctx, &json!([target]))
+                .expect_err("conf_target outside 1..=1008 must fail");
+            assert!(matches!(error, RpcError::InvalidParameter(_)));
+            assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+            assert_eq!(error.to_string(), ESTIMATE_SMART_FEE_TARGET_ERROR);
+        }
+    }
+
+    #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-23
+    fn estimatesmartfee_rejects_unknown_estimate_mode() {
+        let ctx = Arc::new(Context::new());
+        let error = estimatesmartfee(&ctx, &json!([3, "hurry"]))
+            .expect_err("unknown estimate_mode must fail");
+        assert!(matches!(error, RpcError::InvalidParameter(_)));
+        assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(error.to_string(), ESTIMATE_SMART_FEE_MODE_ERROR);
+        let type_error =
+            estimatesmartfee(&ctx, &json!([3, 1])).expect_err("non-string estimate_mode must fail");
+        assert!(matches!(type_error, RpcError::InvalidType(_)));
+        assert_eq!(type_error.code(), RpcError::CORE_INVALID_TYPE);
+    }
+
+    #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-23
+    fn estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing() {
+        let ctx = Arc::new(Context::new());
+        for mode in ["unset", "ECONOMICAL", "Conservative"] {
+            estimatesmartfee(&ctx, &json!([3, mode]))
+                .unwrap_or_else(|err| panic!("Core estimate_mode {mode} must be accepted: {err}"));
+        }
+        estimatesmartfee(&ctx, &json!([3, null]))
+            .unwrap_or_else(|err| panic!("null estimate_mode must be accepted: {err}"));
+        estimatesmartfee(&ctx, &json!([3]))
+            .unwrap_or_else(|err| panic!("omitted estimate_mode must be accepted: {err}"));
+        let extra = estimatesmartfee(&ctx, &json!([3, "conservative", 1]))
+            .expect_err("trailing estimatesmartfee arguments must fail");
+        assert!(matches!(extra, RpcError::InvalidParams(_)));
     }
 
     #[test]
