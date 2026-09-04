@@ -24,7 +24,7 @@ struct DeploymentView<'a> {
 impl<'a> DeploymentView<'a> {
     /// Anchors lookups at `tip_id` within `tree`.
     #[must_use]
-    pub const fn new(tree: &'a BlockTree, tip_id: NodeId) -> Self {
+    const fn new(tree: &'a BlockTree, tip_id: NodeId) -> Self {
         Self { tree, tip_id }
     }
 }
