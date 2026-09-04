@@ -149,6 +149,15 @@ struct NodeProcess {
     child: Child,
 }
 
+struct StartupChild(Child);
+
+impl Drop for StartupChild {
+    fn drop(&mut self) {
+        let _ignored = self.0.kill();
+        let _ignored = self.0.wait();
+    }
+}
+
 impl NodeProcess {
     fn spawn(root: &Path) -> TestResult<Self> {
         let data_dir = root.join("node");
@@ -178,8 +187,10 @@ impl NodeProcess {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("failed to spawn bitcoin-rs: {error}"))?;
+        let mut child = StartupChild(child);
 
         let stderr = child
+            .0
             .stderr
             .take()
             .ok_or("bitcoin-rs stderr was not piped")?;
@@ -196,7 +207,11 @@ impl NodeProcess {
                 logs.lock().clone()
             )
         })?;
-        Ok(Self { addr, logs, child })
+        Ok(Self {
+            addr,
+            logs,
+            child: child.0,
+        })
     }
 }
 

@@ -143,13 +143,19 @@ or address and scripthash routes return HTTP 503.
 [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw`) is the
 named external consumer:
 
+Start the node in one terminal:
+
 ```sh
 ./target/release/bitcoin-rs \
   --network regtest \
   --scriptindex \
   --data-dir .bitcoin-rs-regtest \
   --rpc-bind 127.0.0.1:18443
+```
 
+Then, in a second terminal, run the wallet while the node is still running:
+
+```sh
 btcw balance -n regtest -u http://127.0.0.1:18443
 ```
 
