@@ -1598,7 +1598,7 @@ mod descriptor_checksum_tests {
         let bare = format!("combo({key})");
         let checksum =
             descriptor_checksum(&bare).unwrap_or_else(|| panic!("{bare} must have a checksum"));
-        let without = getdescriptorinfo(&ctx, &json!([bare.clone()]))
+        let without = getdescriptorinfo(&ctx, &json!([&bare]))
             .unwrap_or_else(|err| panic!("bare combo must analyse: {err}"));
         let with = getdescriptorinfo(&ctx, &json!([format!("{bare}#{checksum}")]))
             .unwrap_or_else(|err| panic!("checksummed combo must analyse: {err}"));
