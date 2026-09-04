@@ -301,8 +301,9 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
     Ok(())
 }
 
-/// Portable per-input script verdict: the Rust interpreter handles taproot
-/// key-path; non-taproot spends require the kernel production path.
+/// Portable per-input script verdict: the native interpreter covers every
+/// consensus spend class (legacy, P2SH, segwit v0, taproot key-path and
+/// script-path).
 #[cfg(not(feature = "kernel"))]
 fn verify_input_script_portable(
     input_index: usize,

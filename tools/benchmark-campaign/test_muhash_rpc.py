@@ -11,6 +11,9 @@ import io
 import json
 import os
 import shutil
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2062,6 +2065,8 @@ class CampaignControllerTests(unittest.TestCase):
             "{rpc_port}",
             "--cookie",
             "{cookie}",
+            "--config",
+            "{config}",
             "--data-dir",
             "{data_dir}",
         ]
@@ -2086,7 +2091,7 @@ class CampaignControllerTests(unittest.TestCase):
                 "arm_id": arm_id,
                 "binary": daemon["path"],
                 "binary_sha256": daemon["sha256"],
-                "command": command + ["--config", str(config["path"])],
+                "command": command,
                 "backend": kind_backend,
                 "config": config,
                 "datadir": str(datadir),
@@ -2230,6 +2235,42 @@ class CampaignControllerTests(unittest.TestCase):
         core["backend"] = "fjall"
         with self.assertRaises(module.ContractError):
             module._parse_campaign_config(parsed)
+
+    def test_command_must_include_config_placeholder(self) -> None:
+        _root, config_path, _output = self._campaign_files()
+        parsed, _ = module._load_json_path(
+            config_path, module.MAX_INPUT_BYTES, "campaign config"
+        )
+        assert isinstance(parsed, dict)
+        candidate = parsed["candidate"]
+        assert isinstance(candidate, dict)
+        command = list(candidate["command"])  # type: ignore[arg-type]
+        command[command.index("{config}")] = str(_root / "other.json")
+        candidate["command"] = command
+        with self.assertRaises(module.ContractError):
+            module._parse_campaign_config(parsed)
+
+    def test_readiness_rejects_a_listener_the_child_does_not_own(self) -> None:
+        decoy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        decoy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        decoy.bind(("127.0.0.1", 0))
+        decoy.listen()
+        port = int(decoy.getsockname()[1])
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            with self.assertRaises(module.ContractError) as raised:
+                module._wait_owned_endpoint(
+                    child, port, time.perf_counter_ns() + 2_000_000_000
+                )
+            self.assertIn("not owned", str(raised.exception))
+        finally:
+            child.kill()
+            child.wait(timeout=2)
+            decoy.close()
 
 
 if __name__ == "__main__":

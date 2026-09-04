@@ -2074,6 +2074,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gettxoutsetinfo_rejects_trailing_parameters() {
+        let ctx = Arc::new(Context::new());
+        let error = gettxoutsetinfo(&ctx, &json!(["muhash", null, false, true]))
+            .expect_err("trailing parameters must be refused");
+        assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
+    }
+
     /// A genesis, an applied child at height 1, and a competing branch off the
     /// same genesis whose *header* chain reaches height 2.
     ///

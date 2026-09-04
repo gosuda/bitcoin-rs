@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use bitcoin_rs_primitives::{Sighash, SighashCache, Tx, TxOut};
-use secp256k1::{Message, Secp256k1, XOnlyPublicKey, schnorr::Signature};
+use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use thiserror::Error;
 
 use crate::checker::{SigVersion, TxSignatureChecker};
@@ -877,10 +877,13 @@ fn verify_taproot_keypath(
         .taproot_signature_hash(input_idx, prevouts, annex_bytes, None, sighash_type)
         .map_err(|error| ScriptError::Verification(error.to_string()))?;
     let message = Message::from_digest(*sighash.as_byte_array());
-    let secp = Secp256k1::verification_only();
-    secp.verify_schnorr(&signature, &message, &public_key)
-        .map(|()| true)
-        .map_err(|error| ScriptError::Verification(error.to_string()))
+    if taproot::verify_taproot_keypath(&signature, &message, &public_key) {
+        Ok(true)
+    } else {
+        Err(ScriptError::Verification(
+            "taproot key-path Schnorr verification failed".to_owned(),
+        ))
+    }
 }
 
 /// Verifies a taproot script-path spend (BIP341/BIP342).
