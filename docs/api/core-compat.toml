@@ -348,11 +348,8 @@ status = "implemented_unverified"
 method = "getmininginfo"
 group = "mining"
 status = "deviation"
-deviation = "Optional `currentblocktx`, `currentblockweight`, and `signet_challenge` are serialized as JSON null; Core omits them. `warnings` is an array here and a string in Core's declaration. The earlier missing `bits`/`target`/`blockmintxfee`/`next` gap is closed. Tracked in #160."
+deviation = "`warnings` is an array here and a string in Core's declaration. Optional `currentblocktx`, `currentblockweight`, and `signet_challenge` are omitted when unset, matching Core. Tracked in #160."
 schema_mismatched = [
-    "currentblocktx: Null vs NUM",
-    "currentblockweight: Null vs NUM",
-    "signet_challenge: Null vs STR_HEX",
     "warnings: Array vs STR",
 ]
 

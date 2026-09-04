@@ -15,7 +15,7 @@ use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
-    self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic,
+    self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_btc,
     typed_to_sonic_omitting_nulls,
 };
 use crate::context::Context;
@@ -666,7 +666,8 @@ fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
     let next_bits = format!("{:08x}", info.next_bits);
     let next_target = compact_target_hex(info.next_bits);
     let next_height = u64::from(info.blocks) + 1;
-    typed_to_sonic(&v31::GetMiningInfo {
+    // Core pushes currentblockweight/tx and signet_challenge only when set.
+    typed_to_sonic_omitting_nulls(&v31::GetMiningInfo {
         blocks: u64::from(info.blocks),
         current_block_weight: info.last_candidate.map(|candidate| candidate.weight),
         // Core's `currentblocktx` excludes the coinbase. `LastCandidateInfo`
@@ -1461,6 +1462,21 @@ mod tests {
             Some("regtest")
         );
         assert_eq!(control.info_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn getmininginfo_omits_unset_optional_fields() {
+        let control = FakeMiningControl::with_template(sample_template());
+        {
+            let mut info = control.info.lock();
+            info.last_candidate = None;
+        }
+        let ctx = ctx_with_control(control);
+        let result = getmininginfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
+        assert!(result.get("currentblockweight").is_none());
+        assert!(result.get("currentblocktx").is_none());
+        assert!(result.get("signet_challenge").is_none());
     }
 
     #[test]
