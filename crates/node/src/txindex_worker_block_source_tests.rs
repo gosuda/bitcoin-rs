@@ -1,3 +1,7 @@
+//! Contract coverage: `docs/contracts/indexing.md` `IDX-03` requires block
+//! queries to resolve against a consistent, active-chain snapshot and decline
+//! unavailable or incomplete data rather than returning a torn result.
+
 use super::*;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::{Network, consensus_bytes};
