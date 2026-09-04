@@ -765,6 +765,12 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
+        if lookup != -1 && lookup <= 0 {
+            return Err(MiningControlError::InvalidRequest("lookup must be positive or -1".into()));
+        }
+        if height < -1 || height >= 0 && self.applied_tip.load_full().as_ref().map_or(true, |tip| height > i64::from(tip.height)) {
+            return Err(MiningControlError::InvalidRequest("height is outside the applied chain".into()));
+        }
         let tip = self.applied_tip.load_full();
         Ok(estimate_network_hashps(
             &self.block_tree,
