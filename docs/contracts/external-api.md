@@ -2,7 +2,8 @@
 
 `API-01`–`API-04` place owners under the
 [contracts precedence rule](README.md). `API-05` is the solo-mining generate
-path. `API-06` is `getnetworkhashps` snapshot consistency.
+path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is HTTP
+socket posture and response framing.
 
 ## Clauses
 
@@ -85,6 +86,13 @@ path. `API-06` is `getnetworkhashps` snapshot consistency.
 - `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
   does not use this RPC height-validation error path.
 
+### `API-07`: HTTP socket posture and response framing
+
+- **Owner**: `prepare_http_socket` and `write_http` in
+  `crates/rpc/src/server.rs`.
+- Accepted HTTP sockets enable `TCP_NODELAY`, and each response emits its
+  headers and body with one vectored write when a body is present.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -115,7 +123,10 @@ owned by [wallet-facing.md](wallet-facing.md).
   `generate_without_submit_does_not_advance_the_tip`
 - `crates/mining/tests/template_shape.rs` tests `candidate_solves_an_unsolved_regtest_header`,
   `ordered_assembly_keeps_snapshot_order`
-- `API-06`:
+- `API-07`: `crates/rpc/src/server.rs` tests
+    `write_http_emits_header_and_body_as_one_vectored_write` and
+    `prepare_http_socket_disables_nagle`
+  - `API-06`:
   - `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`
   - `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows`
   - `crates/rpc/src/handlers/mining.rs` test `getnetworkhashps_projects_control_invalid_request_as_invalid_parameter`
