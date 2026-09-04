@@ -3432,10 +3432,8 @@ mod tests {
         std::fs::write(&current_file, [])?;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
-        // Block files are pruned against the durable tip, not the applied one.
-        // A crash restores to the last checkpoint, so a file whose max height
-        // sits at 10 is only reclaimable once that durable base clears 11 by
-        // the reorg-safety margin. Without this the prune is a no-op.
+        // Publish the durable tip; `storage::pruning::stage_block_and_undo_prune`
+        // is the authoritative policy for selecting block files to prune.
         state
             .durable_tip_height
             .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
@@ -3520,9 +3518,8 @@ mod tests {
 
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
-        // Same durable-base requirement as
-        // `prune_reclaims_whole_files_and_keeps_current_file`: files are
-        // selected against the checkpoint height, not the applied tip.
+        // Publish the durable tip; `storage::pruning::stage_block_and_undo_prune`
+        // is the authoritative policy for selecting block files to prune.
         state
             .durable_tip_height
             .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
