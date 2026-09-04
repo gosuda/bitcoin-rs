@@ -54,5 +54,5 @@ normative; it places them under the
   and outbound session sockets set `TCP_NODELAY` (`P2P-02`).
 - `crates/p2p/src/handshake.rs` test
   `inbound_handshake_reaches_ready_after_remote_version_and_verack`: inbound
-  handshake writes framed version, feature, and verack bytes and reaches Ready
-  (`P2P-01`).
+  handshake writes framed version, feature, and verack bytes once and reaches
+  Ready (`P2P-01`).
