@@ -54,50 +54,44 @@ The native interpreter executes legacy, P2SH, SegWit v0, and Taproot
 key-path and script-path spends. The earlier stub that accepted only
 `OP_TRUE` is gone.
 
-### Performance, signed-spend proxy (pre-change baseline, 2026-09-02)
+### Performance, signed-spend proxy (2026-09-04)
 
-Artifact: [`data/overhaul-signed-spend-20260902.md`](data/overhaul-signed-spend-20260902.md).
-This is the two-run pre-change baseline only; it is not the required post-change
-three-run decision measurement. Host: Intel Xeon Gold 6138. Corpus: 117-block
-regtest skeleton, 16 spend blocks, P2PKH / P2WPKH / P2WSH 2-of-3.
+Artifact: [`data/overhaul-signed-spend-20260904.md`](data/overhaul-signed-spend-20260904.md).
+Commit `0299e677`, rustc 1.95.0, 4-CPU Xeon, Linux 6.12.94+. Corpus: same
+117-block signed-spend proxy as the 2026-09-02 pre-change baseline. Three
+independent runs per arm after the `secp256k1::SECP256K1` reuse.
 
-| Arm | Run 1 Criterion median | Run 2 Criterion median |
+| Arm | Median of apply p50s | Run-median spread |
 |---|---:|---:|
-| Native (`fjall`) | 588.24 ms | 819.31 ms |
-| Kernel (`fjall,kernel`) | 532.21 ms | 616.60 ms |
+| Native (`fjall`) | 50.014 ms | 0.58% |
+| Kernel (`fjall,kernel`) | 45.784 ms | 1.82% |
 
-Native was slower on both runs. Neither arm stayed within five percent of
-its own independent-run median, so the comparison did not count under the
-#213 stability rule.
+Both arms stay within five percent of their own median. Native / kernel =
+1.092. Native does not win.
+
+The 2026-09-02 artifact was a different host (80-core Xeon Gold 6138) and
+is not a paired control for these numbers. On that host native apply p50
+was 486–639 ms; the context reuse is why this host sits near 50 ms, not a
+claim that the two hosts are comparable.
 
 ### Attributed lever
 
-Production CHECKSIG / Schnorr / Taproot tweak checks constructed
+Production CHECKSIG, Schnorr, and Taproot tweak checks constructed
 `Secp256k1::verification_only()` per signature. That rebuilds secp256k1's
-verification tables on every input. `crates/script/src/batch.rs` and
-`taproot::verify_taproot_keypath` already used the process-wide
-`secp256k1::SECP256K1` context. This change makes the remaining production
-paths use that same context.
+verification tables on every input. Those paths now share
+`secp256k1::SECP256K1`, which `batch.rs` and `taproot::verify_taproot_keypath`
+already used.
+
+### Peak RSS
+
+Profile-time child rusage: native 14.3 MiB, kernel 15.6 MiB. Allocation
+count is not reported by this harness.
 
 ## Disposition
 
 | Gate | Status |
 |---|---|
 | Core vector parity (available corpus) | Pass (zero pinned native mismatches) |
-| Signed-spend native faster, stable medians | Insufficient evidence: the 2026-09-02 artifact is a two-run pre-change baseline; three post-change runs per arm are pending |
+| Signed-spend native faster, stable medians | Fail (stable; native 9.2% slower on apply p50) |
 | Full-mainnet replay | Blocked on #34 / #42 |
-| Library / image default | Keep `kernel` until signed-spend passes |
-
-Do not flip `crates/consensus` or `crates/node` defaults on this page's
-current evidence. Re-run:
-
-```sh
-cargo bench -p bitcoin-rs-node --bench sync_pipeline \
-  --no-default-features --features fjall -- signed_spend
-cargo bench -p bitcoin-rs-node --bench sync_pipeline \
-  --no-default-features --features fjall,kernel -- signed_spend
-```
-
-Three independent runs per arm. Record p50 / p95 / p99 / max under
-`docs/benchmarks/data/` and update the disposition table here. Flip the
-library defaults only when that artifact shows a stable native win.
+| Library / image default | Keep `kernel` |
