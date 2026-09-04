@@ -4,7 +4,8 @@
 //! applied. Slot-count eviction and byte-budget backpressure live here;
 //! [`crate::DownloadWindow`] owns in-flight assignment. The node sync
 //! coordinator stages arrivals and drains a contiguous apply prefix; it does
-//! not own this policy.
+//! not own this policy. The ownership boundary is defined by the
+//! [architecture contract](../../../docs/contracts/architecture.md).
 
 use std::{
     collections::VecDeque,
@@ -955,6 +956,8 @@ mod tests {
         assert!(stager.contains(&second));
     }
 
+    // Architecture Contract (`docs/contracts/architecture.md`): the staging
+    // budget evicts a same-height fork before the expected hash.
     #[test]
     fn insert_evicts_same_height_fork_before_expected_hash() {
         let expected_hash = Hash256::from_le_bytes(&[0x11; 32]);
