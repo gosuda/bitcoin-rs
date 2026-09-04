@@ -1599,9 +1599,10 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// API-05: decoded generateblock hex is included without mempool lookup;
-/// consensus validation still runs when submit is false.
+/// API-05: decoded generateblock hex is included without mempool lookup.
+/// Invalid spends fail Core `TestBlockValidity` before the nonce search.
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-27
 fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
@@ -1630,10 +1631,19 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
             submit: false,
         })
         .expect_err("invalid raw spend must fail validation, not mempool lookup");
-    assert!(
-        matches!(error, MiningControlError::Failed(_)),
-        "raw generateblock txs skip mempool membership: {error:?}"
-    );
+    match error {
+        MiningControlError::Rejected(reason) => {
+            assert!(
+                reason.starts_with("TestBlockValidity failed:"),
+                "Core wraps TestBlockValidity: {reason}"
+            );
+            assert!(
+                reason.contains("bad-txns-inputs-missingorspent"),
+                "missing prevout is Core's GetRejectReason: {reason}"
+            );
+        }
+        other => panic!("raw generateblock txs skip mempool membership: {other:?}"),
+    }
     Ok(())
 }
 

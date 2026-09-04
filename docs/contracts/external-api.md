@@ -18,7 +18,8 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 `estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-24`
 is `generateblock` Core txid/raw-tx parse errors. `API-25` is
 `getprioritisedtransactions` `modified_fee` in satoshis. `API-26` is
-Core `generatetoaddress` / `generateblock` invalid-output text.
+Core `generatetoaddress` / `generateblock` invalid-output text. `API-27`
+is `generateblock` `TestBlockValidity` before solve.
 
 ## Clauses
 
@@ -69,10 +70,11 @@ Core `generatetoaddress` / `generateblock` invalid-output text.
 - **Owner**: `MiningControl::generate` in `crates/mining/src/control.rs`,
   implemented by `MiningCoordinator::generate_blocks` in
   `crates/node/src/mining.rs`.
-- The operation assembles a fresh candidate (no GBT cache), solves it, then
-  either submits through `Chainstate::apply_block` or dry-validates through
-  `Chainstate::validate_block` (`ARCH-07`). Persistence and tip advancement
-  are conditional on `submit`; validation is not.
+- The operation assembles a fresh candidate (no GBT cache). `generateblock`
+  validates the unsolved block first (`API-27`), then both generate paths
+  solve and either submit through `Chainstate::apply_block` or dry-validate
+  through `Chainstate::validate_block` (`ARCH-07`). Persistence and tip
+  advancement are conditional on `submit`; validation is not.
 - Each submitted block is a separate commit. An error after *N* successful
   submissions leaves those *N* blocks durable. Callers own retry after reading
   the applied tip. `nblocks` is not capped; the result vector grows one block
@@ -85,7 +87,8 @@ Core `generatetoaddress` / `generateblock` invalid-output text.
   Listed order is kept, those fees are not added to the coinbase, 64-character
   hex is a mempool txid, and decoded raw transactions are included without
   mempool admission. Extra positional arguments are rejected. Transaction
-  parse errors are `API-24`. Output parse errors are `API-26`.
+  parse errors are `API-24`. Output parse errors are `API-26`. Consensus
+  failures before the nonce search are `API-27`.
 
 ### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
 
@@ -337,6 +340,24 @@ Core `generatetoaddress` / `generateblock` invalid-output text.
   `src/rpc/mining.cpp`. A supplied checksum that fails Parse is refused
   through that fallback, not CheckChecksum's wording.
 
+### `API-27`: `generateblock` `TestBlockValidity` before solve
+
+- **Owner**: `MiningCoordinator::generate_blocks` in
+  `crates/node/src/mining.rs`.
+- Core v31 `generateblock` runs `TestBlockValidity` with
+  `check_pow = false` and `check_merkle_root = false` before
+  `GenerateBlock`. Failure is Core `-25`
+  (`RpcError::TxVerifyError`) `TestBlockValidity failed: {reason}`,
+  where `{reason}` is the BIP22 GetRejectReason string (`API-15`).
+- This pre-check applies only to `GenerateSelection::Ordered`
+  (`generateblock`). `generatetoaddress` (`Mempool`) matches Core
+  `generateBlocks` and does not run it.
+- The check calls `apply::validate_block` directly.
+  `ApplyIntent::Propose` already skips hash-meets-target. It does not
+  go through GBT `propose` (`API-14`/`API-21` LookupBlockIndex
+  vocabulary). Shutdown and journal backpressure stay `Unavailable`,
+  not TestBlockValidity.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -362,7 +383,8 @@ owned by [wallet-facing.md](wallet-facing.md).
     `generateblock_rejects_trailing_parameters`,
     `generateblock_rejects_invalid_supplied_checksums`,
     `generateblock_rejects_unknown_mempool_txid_like_core`,
-    `generateblock_rejects_undecodable_raw_tx_like_core`
+    `generateblock_rejects_undecodable_raw_tx_like_core`,
+    `generateblock_maps_test_block_validity_to_verify_error`
 - `crates/node/tests/mining.rs` tests `generate_mines_coinbase_only_blocks_to_the_tip`,
   `generateblock_rejects_unknown_mempool_txid`,
   `generateblock_raw_tx_does_not_require_mempool_admission`,
@@ -479,3 +501,11 @@ owned by [wallet-facing.md](wallet-facing.md).
     `generatetoaddress_rejects_script_hex_and_descriptors`,
     `generateblock_rejects_garbage_output_like_core`,
     `generateblock_rejects_invalid_supplied_checksums`
+- `API-27`:
+  - `crates/node/src/mining.rs` tests
+    `generateblock_validity_wraps_bip22_reason`,
+    `generateblock_validity_keeps_shutdown_operational`
+  - `crates/node/tests/mining.rs` test
+    `generateblock_raw_tx_does_not_require_mempool_admission`
+  - `crates/rpc/src/handlers/mining.rs` test
+    `generateblock_maps_test_block_validity_to_verify_error`

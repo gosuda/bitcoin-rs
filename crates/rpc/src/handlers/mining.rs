@@ -866,6 +866,10 @@ mod tests {
             &self,
             request: GenerateRequest,
         ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+            let fail = self.fail.lock().clone();
+            if let Some(error) = fail {
+                return Err(error);
+            }
             *self.last_generate.lock() = Some(request.clone());
             let hash = bitcoin_rs_primitives::BlockHash::from(Hash256::from_le_bytes(&[0xab; 32]));
             Ok(vec![
@@ -2210,6 +2214,23 @@ mod tests {
                 "for `{input}`"
             );
         }
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-27
+    #[test]
+    fn generateblock_maps_test_block_validity_to_verify_error() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.fail.lock() = Some(MiningControlError::Rejected(CompactString::from(
+            "TestBlockValidity failed: bad-txns-inputs-missingorspent",
+        )));
+        let ctx = ctx_with_control(control);
+        let error = generateblock(&ctx, &json!([REGTEST_ADDRESS, []]))
+            .expect_err("TestBlockValidity must be Core -25");
+        assert_eq!(error.code(), RpcError::CORE_VERIFY_ERROR);
+        assert_eq!(
+            error.to_string(),
+            "TestBlockValidity failed: bad-txns-inputs-missingorspent"
+        );
     }
 
     // CONTRACT: docs/contracts/external-api.md#API-26
