@@ -728,7 +728,6 @@ mod tests {
 #[cfg(test)]
 mod usage_wiring_tests {
     use alloc::sync::Arc;
-    use alloc::vec::Vec;
 
     use bitcoin_rs_mempool::MempoolEntry;
     use bitcoin_rs_primitives::{

@@ -1,6 +1,9 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Tx, Txid, Witness, Wtxid};
+use bitcoin_rs_primitives::{Tx, Txid, Wtxid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Witness};
 use bitcoin_rs_script::count_tx_legacy;
 
 /// Stable mempool entry identifier.

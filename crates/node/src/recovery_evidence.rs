@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use bitcoin_rs_primitives::Witness;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------

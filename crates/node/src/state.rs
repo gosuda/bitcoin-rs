@@ -8,9 +8,10 @@
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, LockTime, Script, Sequence, Tx, Txid, Witness, deserialize,
-};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::LockTime;
+use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::context::{
     BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
     ZmqNotification,

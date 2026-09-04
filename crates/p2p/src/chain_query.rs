@@ -9,7 +9,10 @@ use std::sync::Arc;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree};
-use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Hash256, Header};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::CompactTarget;
 use parking_lot::RwLock;
 
 use crate::dispatch::{ChainQuery, InventoryServing};

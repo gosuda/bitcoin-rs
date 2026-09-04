@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Sighash, Tx, Witness};
+use bitcoin_rs_primitives::{Amount, Sighash, Tx};
 
 use crate::ConsensusError;
 

@@ -9,7 +9,10 @@ use alloc::vec::Vec;
 
 use hashbrown::HashSet;
 
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Tx, TxOut, Txid, Witness, Wtxid};
+use bitcoin_rs_primitives::{Tx, TxOut, Txid, Wtxid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_script::{
     Instruction, is_multisig, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh,
     is_p2wsh, is_push_only, minimal_non_dust, opcode, script::instructions,

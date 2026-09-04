@@ -23,7 +23,10 @@ use std::sync::Arc;
 
 use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_p2p::{InboundTx, PeerSource, TxInventory};
-use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Sequence, Tx, Txid, Witness, Wtxid};
+use bitcoin_rs_primitives::{Hash256, Tx, Txid, Wtxid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Sequence, Witness};
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 

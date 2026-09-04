@@ -10,9 +10,11 @@ use alloc::sync::Arc;
 use std::str::FromStr;
 
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Script, Sequence, TxOut,
-    Txid, Witness, consensus_bytes, deserialize,
+    Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
 use crate::context::{BlockRecord, Context};

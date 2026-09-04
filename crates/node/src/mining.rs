@@ -25,9 +25,7 @@ use bitcoin_rs_mining::{
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
-use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, Network, Script, Tx, consensus_bytes,
-};
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Network, Tx, consensus_bytes};
 use compact_str::CompactString;
 use hashbrown::HashMap;
 use parking_lot::{Condvar, Mutex, RwLock};

@@ -5,9 +5,11 @@ use core::{fmt, fmt::Write as _};
 use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, Script, Sequence,
-    TxOut, Witness, consensus_bytes, deserialize,
+    Block, BlockHash, CompactTarget, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use hashbrown::HashMap;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};

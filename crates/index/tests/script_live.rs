@@ -220,7 +220,7 @@ fn coinbase(tag: u8) -> Transaction {
         }],
         output: vec![TxOut {
             value: Amount::from_sat(50),
-            script_pubkey: script(0xc0 ^ tag).into(),
+            script_pubkey: script(0xc0 ^ tag),
         }],
     }
 }
@@ -246,7 +246,7 @@ fn spend(inputs: &[OutPoint], outputs: &[ScriptBuf]) -> Transaction {
             .iter()
             .map(|script_pubkey| TxOut {
                 value: Amount::from_sat(10),
-                script_pubkey: script_pubkey.clone().into(),
+                script_pubkey: script_pubkey.clone(),
             })
             .collect(),
     }

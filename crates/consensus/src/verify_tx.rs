@@ -2,9 +2,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{
-    Amount, CompactTarget, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness,
-};
+use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Txid};
 
 use crate::block_view::BlockView;
 #[cfg(not(feature = "kernel"))]
@@ -16,7 +14,7 @@ use bitcoin_rs_script::{
 use rayon::prelude::*;
 
 use crate::rust_path::UtxoView;
-use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, MAX_MONEY};
+use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST};
 
 const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 const SEQUENCE_FINAL: u32 = 0xffff_ffff;
@@ -791,7 +789,7 @@ fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
         let next = sum
             .checked_add(output.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
-        if next > MAX_MONEY {
+        if Amount::from_sat(next) > Amount::MAX_MONEY {
             Err(ConsensusError::OutputValueOverflow)
         } else {
             Ok(next)

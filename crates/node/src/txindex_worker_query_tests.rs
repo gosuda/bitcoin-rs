@@ -7,8 +7,8 @@ use bitcoin_rs_index::{
     HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow, TxidRow,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn,
-    TxOut, Txid, Witness, consensus_bytes, encode::double_sha256,
+    Block, BlockHash, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes, encode::double_sha256,
 };
 use bitcoin_rs_rpc::context::{BlockRecord, ScriptHistoryRecord};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};

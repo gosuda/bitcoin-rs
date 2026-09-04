@@ -13,7 +13,10 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Tx, Txid, Witness};
+use bitcoin_rs_primitives::{Tx, Txid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use hashbrown::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Instant;

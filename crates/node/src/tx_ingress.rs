@@ -25,9 +25,10 @@ use bitcoin_rs_mempool::{
     standardness::{PackageTxContext, is_standard_tx},
 };
 use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness,
-};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;

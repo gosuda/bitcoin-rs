@@ -18,9 +18,10 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MutationResult,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block as NativeBlock, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx,
-    TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
 };
+
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 

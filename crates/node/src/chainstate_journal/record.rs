@@ -1,6 +1,6 @@
 //! Framed, checksummed chainstate journal records.
 
-use bitcoin_rs_primitives::{Amount, ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
 use thiserror::Error;
 
 const MAGIC: [u8; 4] = *b"JRNL";

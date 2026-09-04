@@ -5,9 +5,11 @@ use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationResult};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Network, OutPoint, Script, Tx, Txid,
-    consensus_bytes,
+    Block, BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, Script};
 use compact_str::CompactString;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};

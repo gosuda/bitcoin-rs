@@ -6,7 +6,7 @@
 //! file declares the contract those commits fill in.
 
 use anyhow::{Context as _, Result};
-use bitcoin_rs_primitives::{Block, CompactTarget, Hash256};
+use bitcoin_rs_primitives::{Block, Hash256};
 
 use crate::state::NodeState;
 

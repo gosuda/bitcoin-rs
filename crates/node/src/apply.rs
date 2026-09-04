@@ -14,9 +14,12 @@ use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, MEDIAN_TIME_PAST_WINDOW, rust_path::UtxoView};
 use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeGuard, Mempool, MempoolGateway};
 use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, ConsensusEncode as _, Hash256, LockTime, Network, OutPoint,
-    Script, Sequence, Tx, TxOut, Txid, Witness, consensus_bytes, varint,
+    Block, CompactTarget, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid,
+    consensus_bytes, varint,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_utxo::{
     LiveOutput, LiveOutputMeta, UtxoSet,
     connect::{BlockChangeError, SpentOutputLookup, build_block_changes},

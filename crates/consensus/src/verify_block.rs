@@ -1,7 +1,4 @@
-use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Tx, Txid, Witness, Wtxid,
-    encode::double_sha256,
-};
+use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
 use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};

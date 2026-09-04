@@ -2,10 +2,7 @@ use std::cell::RefCell;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
-    Witness, Wtxid,
-};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
 use crate::handshake::feature_messages;
@@ -344,8 +341,8 @@ mod tests {
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
     use bitcoin_rs_primitives::{
-        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Script, Sequence, Tx,
-        Txid, Witness, Wtxid,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
+        Witness, Wtxid,
     };
 
     use super::{

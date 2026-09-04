@@ -17,7 +17,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
 use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerTable};
-use bitcoin_rs_primitives::{Block, CompactTarget, Hash256};
+use bitcoin_rs_primitives::{Block, Hash256};
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
 use parking_lot::Mutex;

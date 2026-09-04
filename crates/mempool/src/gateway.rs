@@ -19,9 +19,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use bitcoin_rs_consensus::{UtxoView, verify_transaction};
-use bitcoin_rs_primitives::{
-    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness,
-};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};

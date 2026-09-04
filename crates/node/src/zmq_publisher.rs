@@ -8,7 +8,10 @@
 #[cfg(feature = "zmq")]
 use anyhow::{Context as _, bail};
 use anyhow::{Result, ensure};
-use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Script, Sequence, Txid, Witness};
+use bitcoin_rs_primitives::{Hash256, Txid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 #[cfg(feature = "zmq")]
 use core::fmt;
 #[cfg(feature = "zmq")]

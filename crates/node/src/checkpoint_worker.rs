@@ -50,7 +50,6 @@ use crate::apply::{ApplyAdmission, PruneBodyStore, UndoStore};
 use crate::checkpoint::{self, CheckpointError, CheckpointWrite};
 use crate::recovery_evidence;
 use crate::state::ChainEventPublisher;
-use bitcoin_rs_primitives::Witness;
 
 fn retire_full_revalidation_marker(data_dir: &std::path::Path) -> Result<(), CheckpointError> {
     crate::chainstate_journal::clear_full_revalidation_marker_at(data_dir).map_err(|error| {

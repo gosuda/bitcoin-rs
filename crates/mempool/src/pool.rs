@@ -2,9 +2,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{Bound, RangeInclusive};
 
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, Wtxid,
-};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use hashbrown::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
 use slab::Slab;

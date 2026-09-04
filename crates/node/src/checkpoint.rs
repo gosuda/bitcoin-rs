@@ -2,7 +2,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot, accept_headers};
-use bitcoin_rs_primitives::{Amount, CompactTarget, Hash256, Header, Network, deserialize};
+use bitcoin_rs_primitives::{Hash256, Header, Network, deserialize};
 use bitcoin_rs_utxo::stats::{
     CoinStats, CoinStatsAccumulator, CoinStatsListener, coin_stats::COIN_STATS_ENCODED_LEN,
 };
@@ -215,7 +215,7 @@ fn write_headers_inner<W: Write>(
         if node.height != height {
             return Err(HeaderCheckpointError::MalformedAncestry { height });
         }
-        let encoded = encode_header(&node.header)?;
+        let encoded = encode_header(&node.header);
         writer.write_all(&encoded)?;
         best_hasher.update(encoded);
         if node.height <= applied.height {
@@ -412,8 +412,8 @@ fn tip_from_node(
     })
 }
 
-fn encode_header(header: &Header) -> Result<[u8; HEADER_LEN], HeaderCheckpointError> {
-    Ok(header.to_bytes())
+fn encode_header(header: &Header) -> [u8; HEADER_LEN] {
+    header.to_bytes()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1884,7 +1884,7 @@ mod tests {
         while pow_meets_target(invalid.bits, invalid.compute_hash().0) {
             invalid.nonce = invalid.nonce.checked_add(1).ok_or("nonce exhausted")?;
         }
-        bad_pow[header_offset..header_offset + 80].copy_from_slice(&encode_header(&invalid)?);
+        bad_pow[header_offset..header_offset + 80].copy_from_slice(&encode_header(&invalid));
         assert!(read_headers(&mut Cursor::new(bad_pow), config(), written.metadata).is_err());
 
         let mut bad_nbits = bytes;
@@ -1895,7 +1895,7 @@ mod tests {
         };
         mine_header_to_declared_target(&mut nbits_mismatch)?;
         bad_nbits[header_offset..header_offset + 80]
-            .copy_from_slice(&encode_header(&nbits_mismatch)?);
+            .copy_from_slice(&encode_header(&nbits_mismatch));
         assert!(read_headers(&mut Cursor::new(bad_nbits), config(), written.metadata).is_err());
         Ok(())
     }

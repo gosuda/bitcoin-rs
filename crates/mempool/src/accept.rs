@@ -22,9 +22,10 @@ use alloc::vec::Vec;
 
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_consensus::{ConsensusError, verify_transaction};
-use bitcoin_rs_primitives::{
-    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness,
-};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{Instruction, instructions, is_p2sh, is_witness_program, opcode};
 use bitcoin_rs_script::sigops::{count_segwit, count_tx_legacy};

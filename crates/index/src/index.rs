@@ -1,9 +1,6 @@
 use std::ops::ControlFlow;
 
-use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, Txid, Witness,
-    encode, varint,
-};
+use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, encode, varint};
 use bitcoin_rs_storage::{
     ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit, StorageError, WriteBatch, WriteCondition,
 };

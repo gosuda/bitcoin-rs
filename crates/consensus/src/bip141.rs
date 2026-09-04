@@ -24,9 +24,7 @@ pub fn check_bip141(tx: &Tx) -> Result<(), ConsensusError> {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{
-        Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-    };
+    use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut};
 
     use super::check_bip141;
 

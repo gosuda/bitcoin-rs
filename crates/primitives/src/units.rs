@@ -18,7 +18,7 @@ impl Amount {
     /// One bitcoin in satoshis.
     pub const COIN: Self = Self(100_000_000);
     /// Consensus maximum money (21 million bitcoin).
-    pub const MAX_MONEY: Self = Self(21_000_000 * 100_000_000);
+    pub const MAX_MONEY: Self = Self(21_000_000 * Self::COIN.0);
 
     /// Constructs an amount from satoshis.
     #[must_use]
@@ -335,6 +335,10 @@ mod tests {
     fn amount_sat_roundtrip_and_overflow() {
         assert_eq!(Amount::from_sat(50_000).to_sat(), 50_000);
         assert_eq!(Amount::COIN.to_sat(), 100_000_000);
+        assert_eq!(
+            Amount::MAX_MONEY.to_sat(),
+            21_000_000 * Amount::COIN.to_sat()
+        );
         assert_eq!(Amount::from_sat(u64::MAX).checked_add(Amount::SAT), None);
         assert_eq!(
             Amount::from_sat(2)

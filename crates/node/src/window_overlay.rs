@@ -5,9 +5,7 @@
 //! committed UTXO set. This module supplies exactly that view and nothing else:
 //! it answers lookups and it is advanced one block at a time.
 
-use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, LockTime, OutPoint, Script, Sequence, Txid, Witness,
-};
+use bitcoin_rs_primitives::{Block, OutPoint, Txid};
 use bitcoin_rs_utxo::{UtxoSet, shard::LiveOutput};
 use hashbrown::HashMap;
 

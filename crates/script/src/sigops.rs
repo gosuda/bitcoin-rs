@@ -8,7 +8,7 @@
 //! data pushes are skipped, and a malformed push ends the count (Core's
 //! `if (!GetOp(pc, opcode)) break;`).
 
-use bitcoin_rs_primitives::{Amount, Block, LockTime, Script, Sequence, Tx, Witness};
+use bitcoin_rs_primitives::{Block, Tx};
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
@@ -94,7 +94,7 @@ mod tests {
     use bitcoin::ScriptBuf as OracleScriptBuf;
 
     use bitcoin_rs_primitives::{
-        Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        Amount, Block, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
 
     const fn pushnum(n: u8) -> u8 {

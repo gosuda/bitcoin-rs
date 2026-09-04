@@ -5,7 +5,7 @@ use crate::{
     SnapshotCoin, SnapshotCoinObserver, UtxoChangeEvents, UtxoChangeListener, UtxoCommittedEvent,
     UtxoInserted, UtxoRemoved,
 };
-use bitcoin_rs_primitives::{Amount, OutPoint, TxOut};
+use bitcoin_rs_primitives::{OutPoint, TxOut};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use smallvec::SmallVec;
