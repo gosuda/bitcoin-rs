@@ -90,11 +90,11 @@ impl ConnectionShared {
     }
 
     /// Publish handshake info only for the currently registered lease, then
-    /// notify BlockSync. `publish_info` is the identity-checked Ready
+    /// notify `BlockSync`. `publish_info` is the identity-checked Ready
     /// transition; a stale predecessor must not clear the replacement's
     /// address-scoped download or header state.
     ///
-    /// The table lock is not held across notify: BlockSync takes
+    /// The table lock is not held across notify: `BlockSync` takes
     /// `download_window` / `pending_getheaders`, the opposite order of `tick`.
     fn publish_info_and_notify_ready(
         &self,
