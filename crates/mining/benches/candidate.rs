@@ -1,9 +1,8 @@
-//! Candidate assembly benchmarks for package selection and coinbase finish.
+//! End-to-end mining candidate benchmarks for package selection and coinbase finish.
 //!
-//! Times [`assemble_candidate`] against a pre-captured mining snapshot. Snapshot
-//! capture and mempool insertion are fixtures, not the measured path: those are
-//! distinct seams. Budgets stay unset until a measured p95 plus run-to-run
-//! noise is recorded.
+//! Each iteration captures a mining snapshot from the mempool and assembles the
+//! observable candidate result. Budgets stay unset until a measured p95 plus
+//! run-to-run noise is recorded.
 // PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
 #![allow(missing_docs)]
 #![allow(clippy::expect_used)]
@@ -11,7 +10,7 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
-use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot};
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
 use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -58,7 +57,7 @@ fn distinct_tx(seed: u64, parent: Option<Txid>) -> Tx {
     }
 }
 
-fn snapshot_with(count: usize) -> MempoolMiningSnapshot {
+fn snapshot_with(count: usize) -> Mempool {
     let mut pool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
@@ -78,13 +77,12 @@ fn snapshot_with(count: usize) -> MempoolMiningSnapshot {
         .unwrap_or_else(|error| panic!("fixture insert {seed} failed: {error}"));
         last_txid = Some(txid);
     }
-    let snapshot = pool.mining_snapshot();
     assert_eq!(
-        snapshot.entries.len(),
+        pool.mining_snapshot().entries.len(),
         count,
         "fixture pool must retain every inserted transaction"
     );
-    snapshot
+    pool
 }
 
 fn assemble_candidate_bench(c: &mut Criterion) {
@@ -93,15 +91,17 @@ fn assemble_candidate_bench(c: &mut Criterion) {
     let ctx = context();
     let payout = [0x51_u8];
     for &count in &POOL_SIZES {
-        let snapshot = snapshot_with(count);
+        let pool = snapshot_with(count);
+        let snapshot = pool.mining_snapshot();
         let assembled = assemble_candidate(&ctx, &snapshot, &payout)
             .unwrap_or_else(|error| panic!("fixture assemble {count} failed: {error}"));
         assert!(
             assembled.transactions.len() <= count,
             "selection must not invent transactions"
         );
-        group.bench_function(BenchmarkId::new("snapshot_entries", count), |b| {
+        group.bench_function(BenchmarkId::new("end_to_end", count), |b| {
             b.iter(|| {
+                let snapshot = pool.mining_snapshot();
                 black_box(
                     assemble_candidate(&ctx, &snapshot, &payout)
                         .unwrap_or_else(|error| panic!("assemble failed: {error}")),
