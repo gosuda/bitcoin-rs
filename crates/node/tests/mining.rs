@@ -572,6 +572,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     Ok(())
 }
 
+/// API-15 / BIP22 contract: a proposal without a coinbase is `bad-cb-missing`.
 #[test]
 fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -594,6 +595,7 @@ fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-15 / BIP22 contract: a merkle mismatch is `bad-txnmrklroot`.
 #[test]
 fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
     let state = open_regtest()?;
