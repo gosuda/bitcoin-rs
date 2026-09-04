@@ -23,6 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
+use bitcoin_rs_p2p::download_window::RECEIVED_BLOCK_BUDGET;
 use bitcoin_rs_index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, NoSpentScripts, PreparedBatch,
@@ -91,11 +92,9 @@ pub(crate) const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
 
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
 const POSITION_PREFETCH_BLOCKS: usize = 65_536;
-/// Maximum number of blocks whose bodies are held in memory and whose
-/// `prepare_block_with_spent_scripts` row-build work is fanned out across the rayon pool
-/// in one parallel prepare step. Matches the IBD download window so a filled
-/// 256-block staging cap can prepare in one pass when bodies are small.
-const PREPARE_CHUNK_BLOCKS: usize = 256;
+/// Maximum number of blocks prepared in one parallel step, matching the IBD
+/// received-block staging budget.
+const PREPARE_CHUNK_BLOCKS: usize = RECEIVED_BLOCK_BUDGET;
 /// Serialized-body budget for one parallel prepare step. Stops a 1 MiB-class
 /// window from holding 256 bodies in RAM while still packing early-chain
 /// blocks up to the count cap.
