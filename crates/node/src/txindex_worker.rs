@@ -2039,11 +2039,19 @@ impl Worker {
         watermark: IndexWatermark,
         target: &TipSnapshot,
     ) -> Result<(), TxIndexWorkerError> {
-        let capability = match (capabilities.tx_lookup, capabilities.script_history) {
-            (true, true) => "tx_lookup,script_history",
-            (true, false) => "tx_lookup",
-            (false, true) => "script_history",
-            (false, false) => return Ok(()),
+        let capability = match (
+            capabilities.tx_lookup,
+            capabilities.script_history,
+            capabilities.script_live,
+        ) {
+            (true, true, true) => "tx_lookup,script_history,script_live",
+            (true, true, false) => "tx_lookup,script_history",
+            (true, false, true) => "tx_lookup,script_live",
+            (true, false, false) => "tx_lookup",
+            (false, true, true) => "script_history,script_live",
+            (false, true, false) => "script_history",
+            (false, false, true) => "script_live",
+            (false, false, false) => return Ok(()),
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
