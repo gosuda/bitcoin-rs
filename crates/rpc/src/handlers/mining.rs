@@ -2,18 +2,19 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 
 use bitcoin_rs_mining::witness_commitment_script;
-use bitcoin_rs_primitives::{Block, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{Block, Tx, Txid, consensus_bytes, deserialize};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{compact_target_hex, i64_saturated, sat_to_btc, typed_to_sonic};
+use crate::compat::convert::{self, compact_target_hex, i64_saturated, sat_to_btc, typed_to_sonic};
 use crate::context::Context;
 use crate::context::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection,
+    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
     MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
 };
 use crate::error::RpcError;
+use crate::handlers::util::{generateblock_payout_script, payout_script_from_address};
 use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str, required_u64};
 use corepc_types::v31;
 
@@ -124,7 +125,11 @@ pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let nblocks = required_u32(params, 0, "nblocks is required")?;
     let address = required_str(params, 1, "address is required")?;
     let max_tries = optional_u64(params, 2, GenerateRequest::DEFAULT_MAX_TRIES)?;
-    let payout = decode_payout(address, ctx.chain_network)?;
+    let payout = payout_script_from_address(
+        address,
+        convert::bitcoin_network(ctx.chain_network),
+        "Invalid address or key",
+    )?;
     let generated = control
         .generate(GenerateRequest {
             payout,
@@ -147,15 +152,15 @@ pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     let output = required_str(params, 0, "output is required")?;
-    let payout = decode_payout(output, ctx.chain_network)?;
-    let txids = parse_generateblock_txids(params)?;
+    let payout = generateblock_payout_script(output, convert::bitcoin_network(ctx.chain_network))?;
+    let transactions = parse_generateblock_transactions(params)?;
     let submit = optional_bool(params, 2, true)?;
     let generated = control
         .generate(GenerateRequest {
             payout,
             count: 1,
             max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
-            selection: GenerateSelection::Txids(txids),
+            selection: GenerateSelection::Ordered(transactions),
             submit,
         })
         .map_err(map_mining_control_error)?;
@@ -244,16 +249,7 @@ fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcEr
     }
 }
 
-fn decode_payout(text: &str, network: bitcoin_rs_primitives::Network) -> Result<Vec<u8>, RpcError> {
-    let unchecked = bitcoin::Address::from_str(text)
-        .map_err(|_| RpcError::InvalidAddressOrKey("Invalid address or key".to_owned()))?;
-    let address = unchecked
-        .require_network(crate::compat::convert::bitcoin_network(network))
-        .map_err(|_| RpcError::InvalidAddressOrKey("Invalid address or key".to_owned()))?;
-    Ok(address.script_pubkey().as_bytes().to_vec())
-}
-
-fn parse_generateblock_txids(params: &Value) -> Result<Vec<Txid>, RpcError> {
+fn parse_generateblock_transactions(params: &Value) -> Result<Vec<GenerateTx>, RpcError> {
     let array = params_array(params)?;
     let Some(value) = array.get(1) else {
         return Err(RpcError::InvalidParams("transactions is required"));
@@ -264,7 +260,7 @@ fn parse_generateblock_txids(params: &Value) -> Result<Vec<Txid>, RpcError> {
     let Some(entries) = value.as_array() else {
         return Err(RpcError::InvalidType("transactions must be an array"));
     };
-    let mut txids = Vec::with_capacity(entries.len());
+    let mut transactions = Vec::with_capacity(entries.len());
     for entry in entries {
         let Some(text) = entry.as_str() else {
             return Err(RpcError::InvalidType(
@@ -272,16 +268,16 @@ fn parse_generateblock_txids(params: &Value) -> Result<Vec<Txid>, RpcError> {
             ));
         };
         if let Ok(txid) = Txid::from_str(text) {
-            txids.push(txid);
+            transactions.push(GenerateTx::Mempool(txid));
             continue;
         }
         let bytes = from_hex(text)
             .map_err(|()| RpcError::InvalidParams("transaction hex is not valid hexadecimal"))?;
-        let tx: bitcoin_rs_primitives::Tx = deserialize(&bytes)
+        let tx: Tx = deserialize(&bytes)
             .map_err(|_| RpcError::InvalidParams("transaction hex could not be decoded"))?;
-        txids.push(tx.txid());
+        transactions.push(GenerateTx::Raw(tx));
     }
-    Ok(txids)
+    Ok(transactions)
 }
 
 fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, RpcError> {
@@ -579,8 +575,9 @@ mod tests {
 
     use crate::context::{
         AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-        BlockTemplateResult, BlockValidationResult, LastCandidateInfo, MiningControl,
-        MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation,
+        BlockTemplateResult, BlockValidationResult, GenerateSelection, GenerateTx,
+        LastCandidateInfo, MiningControl, MiningControlError, MiningInfo, MiningRule,
+        SignetMiningInfo, TemplateMutation,
     };
 
     struct FakeMiningControl {
@@ -589,6 +586,7 @@ mod tests {
         submit: Mutex<BlockValidationResult>,
         info: Mutex<MiningInfo>,
         last_request: Mutex<Option<BlockTemplateRequest>>,
+        last_generate: Mutex<Option<crate::context::GenerateRequest>>,
         template_calls: AtomicUsize,
         submit_calls: AtomicUsize,
         info_calls: AtomicUsize,
@@ -603,6 +601,7 @@ mod tests {
                 submit: Mutex::new(BlockValidationResult::Accepted),
                 info: Mutex::new(sample_mining_info()),
                 last_request: Mutex::new(None),
+                last_generate: Mutex::new(None),
                 template_calls: AtomicUsize::new(0),
                 submit_calls: AtomicUsize::new(0),
                 info_calls: AtomicUsize::new(0),
@@ -664,6 +663,7 @@ mod tests {
             &self,
             request: crate::context::GenerateRequest,
         ) -> Result<Vec<crate::context::GeneratedBlock>, MiningControlError> {
+            *self.last_generate.lock() = Some(request.clone());
             let hash = bitcoin_rs_primitives::BlockHash::from(Hash256::from_le_bytes(&[0xab; 32]));
             Ok(vec![
                 crate::context::GeneratedBlock {
@@ -1214,11 +1214,31 @@ mod tests {
         );
     }
 
+    const MAINNET_ADDRESS: &str = "1111111111111111111114oLvT2";
+
+    fn sample_raw_tx() -> Tx {
+        Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), 0),
+                script_sig: vec![],
+                sequence: u32::MAX,
+                witness: vec![],
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }
+    }
+
+    // API-05: generatetoaddress pays a network-valid address and returns n hashes.
     #[test]
     fn generatetoaddress_projects_solved_hashes() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control);
-        let result = generatetoaddress(&ctx, &json!([2, "51"]))
+        let result = generatetoaddress(&ctx, &json!([2, MAINNET_ADDRESS]))
             .unwrap_or_else(|err| panic!("generatetoaddress failed: {err}"));
         let hashes = result
             .as_array()
@@ -1227,11 +1247,25 @@ mod tests {
         assert!(hashes.iter().all(|hash| hash.as_str().is_some()));
     }
 
+    // API-05: generatetoaddress rejects raw script hex and descriptors.
+    #[test]
+    fn generatetoaddress_rejects_script_hex_and_descriptors() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        for payout in ["51", &format!("addr({MAINNET_ADDRESS})")] {
+            let error = generatetoaddress(&ctx, &json!([1, payout]))
+                .err()
+                .unwrap_or_else(|| panic!("`{payout}` must not be an address"));
+            assert_eq!(error.code(), RpcError::CORE_NOT_FOUND, "for `{payout}`");
+        }
+    }
+
+    // API-05: generateblock output is an address or descriptor; empty txs is coinbase-only.
     #[test]
     fn generateblock_projects_hash_object() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(control);
-        let result = generateblock(&ctx, &json!(["51", []]))
+        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, []]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
             result
@@ -1240,13 +1274,50 @@ mod tests {
                 .is_some()
         );
         assert!(result.get("hex").is_none());
+        let request = control
+            .last_generate
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("generateblock must call generate"));
+        assert_eq!(request.selection, GenerateSelection::Ordered(Vec::new()));
+        assert!(request.submit);
     }
 
+    // API-05: generateblock accepts addr() without a checksum.
+    #[test]
+    fn generateblock_accepts_addr_descriptor() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let result = generateblock(&ctx, &json!([format!("addr({MAINNET_ADDRESS})"), []]))
+            .unwrap_or_else(|err| panic!("addr() descriptor must be accepted: {err}"));
+        assert!(
+            result
+                .get("hash")
+                .and_then(JsonValueTrait::as_str)
+                .is_some()
+        );
+        let request = control
+            .last_generate
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("generateblock must call generate"));
+        assert_eq!(
+            request.payout,
+            payout_script_from_address(
+                MAINNET_ADDRESS,
+                bitcoin::Network::Bitcoin,
+                "Invalid address or key",
+            )
+            .unwrap_or_else(|err| panic!("fixture address must decode: {err}"))
+        );
+    }
+
+    // API-05: generateblock submit=false returns solved hex without persisting.
     #[test]
     fn generateblock_without_submit_includes_hex() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(control);
-        let result = generateblock(&ctx, &json!(["51", [], false]))
+        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, [], false]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
             result
@@ -1257,6 +1328,52 @@ mod tests {
         assert_eq!(
             result.get("hex").and_then(JsonValueTrait::as_str),
             Some("00")
+        );
+        let request = control
+            .last_generate
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("generateblock must call generate"));
+        assert!(!request.submit);
+    }
+
+    // API-05: generateblock requires the transactions array; null is not an empty list.
+    #[test]
+    fn generateblock_requires_transactions_array() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let missing = generateblock(&ctx, &json!([MAINNET_ADDRESS]))
+            .err()
+            .unwrap_or_else(|| panic!("omitted transactions must fail"));
+        assert_eq!(missing.code(), RpcError::INVALID_PARAMS);
+        let null = generateblock(&ctx, &json!([MAINNET_ADDRESS, Value::new_null()]))
+            .err()
+            .unwrap_or_else(|| panic!("null transactions must fail"));
+        assert_eq!(null.code(), RpcError::INVALID_PARAMS);
+        let hex = generateblock(&ctx, &json!(["51", []]))
+            .err()
+            .unwrap_or_else(|| panic!("bare script hex must fail"));
+        assert_eq!(hex.code(), RpcError::CORE_NOT_FOUND);
+    }
+
+    // API-05: 64-character hex is a mempool txid; longer hex is a raw transaction.
+    #[test]
+    fn generateblock_keeps_raw_transactions() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let tx = sample_raw_tx();
+        let raw_hex = to_lower_hex(&consensus_bytes(&tx));
+        let txid = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));
+        generateblock(&ctx, &json!([MAINNET_ADDRESS, [txid.to_string(), raw_hex]]))
+            .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
+        let request = control
+            .last_generate
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("generateblock must call generate"));
+        assert_eq!(
+            request.selection,
+            GenerateSelection::Ordered(vec![GenerateTx::Mempool(txid), GenerateTx::Raw(tx)])
         );
     }
 

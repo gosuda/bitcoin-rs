@@ -74,7 +74,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `submitblock` | 0.4.0 |  |
 | `prioritisetransaction` | 0.4.0 |  |
 | `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. |
-| `generateblock` | 0.4.0 | Assembles and solves one block paying output from the listed mempool txids or raw txs in that order; third param is Core's submit flag. |
+| `generateblock` | 0.4.0 | Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag. |
 | `getnetworkhashps` | 0.4.0 | Reuses the coordinator's chainwork/time window; nblocks<=0 uses the span since the last retarget. |
 | `getprioritisedtransactions` | 0.4.0 | Projects the mempool's persistent fee-delta overlay, including txids not currently admitted. |
 

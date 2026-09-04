@@ -354,6 +354,7 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
+    // API-05: Candidate::solve searches nonces until the compact target is met.
     let mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
@@ -387,6 +388,7 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
+    // API-05: generateblock keeps listed order and does not add those fees to the coinbase.
     let mut mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
@@ -422,6 +424,8 @@ fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
         max_sigops: 80_000,
     };
     let candidate = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
+    assert_eq!(candidate.fees, 0);
+    assert_eq!(candidate.coinbase_value, 5_000_000_000);
     assert_eq!(
         candidate
             .transactions

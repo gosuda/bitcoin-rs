@@ -910,6 +910,104 @@ fn strip_checksum(text: &str) -> &str {
     text.rsplit_once('#').map_or(text, |(body, _)| body)
 }
 
+/// Coinbase script for `generateblock`'s `output` argument.
+///
+/// Bitcoin Core tries `getScriptFromDescriptor` with `require_checksum = false`
+/// first, then `DecodeDestination`. Ranged descriptors are refused rather than
+/// falling through to address parsing. Bare script hex is not a payout form.
+pub(crate) fn generateblock_payout_script(
+    text: &str,
+    network: bitcoin::Network,
+) -> Result<Vec<u8>, RpcError> {
+    match script_from_descriptor(text, network) {
+        Ok(script) => Ok(script),
+        Err(error @ DescriptorError::Range(_)) => Err(descriptor_error(error)),
+        Err(_) => payout_script_from_address(text, network, "Error: Invalid address or script"),
+    }
+}
+
+/// Network-valid address script, with no descriptor or raw-script fallback.
+pub(crate) fn payout_script_from_address(
+    text: &str,
+    network: bitcoin::Network,
+    invalid_message: &'static str,
+) -> Result<Vec<u8>, RpcError> {
+    let unchecked = bitcoin::Address::from_str(text)
+        .map_err(|_| RpcError::InvalidAddressOrKey(invalid_message.to_owned()))?;
+    let address = unchecked
+        .require_network(network)
+        .map_err(|_| RpcError::InvalidAddressOrKey(invalid_message.to_owned()))?;
+    Ok(address.script_pubkey().as_bytes().to_vec())
+}
+
+fn script_from_descriptor(
+    text: &str,
+    network: bitcoin::Network,
+) -> Result<Vec<u8>, DescriptorError> {
+    if let Some(key) = parse_combo(text)? {
+        return combo_payout_script(key, network);
+    }
+
+    if let Some(unspendable) = parse_unspendable(strip_checksum(text)) {
+        return match unspendable? {
+            Unspendable::Address(address) => {
+                let address = address
+                    .require_network(network)
+                    .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+                Ok(address.script_pubkey().as_bytes().to_vec())
+            }
+            Unspendable::Raw(script) => Ok(script.as_bytes().to_vec()),
+        };
+    }
+
+    let checksummed = descriptor_text_with_optional_checksum(text)?;
+    let secp = bitcoin::secp256k1::Secp256k1::signing_only();
+    let (descriptor, keys) =
+        MiniscriptDescriptor::<DescriptorPublicKey>::parse_descriptor(&secp, &checksummed)
+            .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    if descriptor.has_wildcard() || descriptor.is_multipath() {
+        return Err(ranged_descriptor_rejected());
+    }
+    ensure_keys_match_network(&descriptor, network)?;
+    ensure_secret_keys_match_network(keys, network)?;
+    let derived = descriptor
+        .at_derivation_index(0)
+        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    Ok(derived.script_pubkey().as_bytes().to_vec())
+}
+
+fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, DescriptorError> {
+    let combo = parse_combo_info(key, network)?;
+    if combo.is_range || combo.paths.len() != 1 {
+        return Err(ranged_descriptor_rejected());
+    }
+    let path = combo
+        .paths
+        .first()
+        .ok_or_else(|| DescriptorError::Parse("Invalid combo descriptor".into()))?;
+    let derived = path
+        .at_derivation_index(0)
+        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    // Core's combo Expand emits P2PK first and generateblock uses scripts[0].
+    let pk = MiniscriptDescriptor::new_pk(combo_key(&derived)?);
+    Ok(pk.script_pubkey().as_bytes().to_vec())
+}
+
+fn ranged_descriptor_rejected() -> DescriptorError {
+    DescriptorError::Range(
+        "Ranged descriptor not accepted. Maybe pass through deriveaddresses first?",
+    )
+}
+
+fn descriptor_text_with_optional_checksum(text: &str) -> Result<String, DescriptorError> {
+    if text.contains('#') {
+        return Ok(text.to_owned());
+    }
+    let checksum = descriptor_checksum(text)
+        .ok_or_else(|| DescriptorError::Parse("Invalid descriptor".into()))?;
+    Ok(format!("{text}#{checksum}"))
+}
+
 const BIP380_INPUT_CHARSET: &str = "0123456789()[],'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#\"\\ ";
 const BIP380_CHECKSUM_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 const BIP380_GENERATOR: [u64; 5] = [

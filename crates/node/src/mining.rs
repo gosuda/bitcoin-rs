@@ -14,18 +14,20 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
-use bitcoin_rs_mempool::MempoolMiningSnapshot;
-use bitcoin_rs_mempool::{Mempool, MempoolObserver, MutationEnvelope};
+use bitcoin_rs_mempool::{
+    Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
+};
 use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningChainContext, TemplateId, assemble_candidate,
     assemble_ordered_candidate,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network, consensus_bytes};
+use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
 use bitcoin_rs_rpc::context::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GeneratedBlock,
-    LastCandidateInfo, MiningCapability, MiningControl, MiningControlError, MiningInfo, MiningRule,
-    PrioritisedTransaction, SignetMiningInfo, TemplateMutation, difficulty_for_bits,
+    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
+    GeneratedBlock, LastCandidateInfo, MiningCapability, MiningControl, MiningControlError,
+    MiningInfo, MiningRule, PrioritisedTransaction, SignetMiningInfo, TemplateMutation,
+    difficulty_for_bits,
 };
 use compact_str::CompactString;
 use hashbrown::HashMap;
@@ -573,7 +575,9 @@ impl MiningCoordinator {
         };
         match selection {
             GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
-            GenerateSelection::Txids(_) => assemble_ordered_candidate(&context, &snapshot, payout),
+            GenerateSelection::Ordered(_) => {
+                assemble_ordered_candidate(&context, &snapshot, payout)
+            }
         }
         .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
     }
@@ -590,13 +594,7 @@ impl MiningCoordinator {
                 "submit=false requires nblocks=1",
             )));
         }
-        const MAX_GENERATED_BLOCKS: u32 = 1_000;
-        if request.count > MAX_GENERATED_BLOCKS {
-            return Err(MiningControlError::InvalidRequest(CompactString::from(
-                "nblocks exceeds the generation limit",
-            )));
-        }
-        let mut generated = Vec::with_capacity(request.count as usize);
+        let mut generated = Vec::new();
         for _ in 0..request.count {
             if self.shutdown.load(Ordering::Acquire) {
                 return Err(MiningControlError::Unavailable(CompactString::from(
@@ -607,13 +605,7 @@ impl MiningCoordinator {
             let block = candidate.solve(request.max_tries).map_err(|error| {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
-            let validation = self.propose(&block);
-              if validation != BlockValidationResult::Accepted {
-                  return Err(MiningControlError::Failed(CompactString::from(format!(
-                      "generated block failed validation: {validation:?}"
-                  ))));
-              }
-              if request.submit {
+            if request.submit {
                 match self.submit(&block)? {
                     BlockValidationResult::Accepted => {}
                     other => {
@@ -621,6 +613,13 @@ impl MiningCoordinator {
                             "generated block was not accepted: {other:?}"
                         ))));
                     }
+                }
+            } else {
+                let validation = self.propose(&block);
+                if validation != BlockValidationResult::Accepted {
+                    return Err(MiningControlError::Failed(CompactString::from(format!(
+                        "generated block failed validation: {validation:?}"
+                    ))));
                 }
             }
             generated.push(GeneratedBlock {
@@ -932,25 +931,30 @@ fn snapshot_for_selection(
 ) -> Result<MempoolMiningSnapshot, MiningControlError> {
     match selection {
         GenerateSelection::Mempool => Ok(mempool.mining_snapshot()),
-        GenerateSelection::Txids(txids) => {
+        GenerateSelection::Ordered(items) => {
             let full = mempool.mining_snapshot();
             let mut by_txid = HashMap::with_capacity(full.entries.len());
             for (index, entry) in full.entries.iter().enumerate() {
                 let position = u32::try_from(index).unwrap_or(u32::MAX);
                 by_txid.insert(entry.txid, position);
             }
-            let mut selected = Vec::with_capacity(txids.len());
-            let mut old_to_new = HashMap::with_capacity(txids.len());
-            for txid in txids {
-                let Some(&old) = by_txid.get(txid) else {
-                    return Err(MiningControlError::InvalidRequest(CompactString::from(
-                        "transaction not in mempool",
-                    )));
-                };
-                let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
-                old_to_new.insert(old, new_index);
-                let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
-                selected.push(full.entries[old_usize].clone());
+            let mut selected = Vec::with_capacity(items.len());
+            let mut old_to_new = HashMap::with_capacity(items.len());
+            for item in items {
+                match item {
+                    GenerateTx::Mempool(txid) => {
+                        let Some(&old) = by_txid.get(txid) else {
+                            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                                "transaction not in mempool",
+                            )));
+                        };
+                        let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+                        old_to_new.insert(old, new_index);
+                        let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
+                        selected.push(full.entries[old_usize].clone());
+                    }
+                    GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
+                }
             }
             for entry in &mut selected {
                 entry.ancestors.retain_mut(|ancestor| {
@@ -967,6 +971,30 @@ fn snapshot_for_selection(
                 entries: selected,
             })
         }
+    }
+}
+
+fn snapshot_entry_from_raw(tx: &Tx) -> SnapshotEntry {
+    let tx = Arc::new(tx.clone());
+    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+    let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
+    SnapshotEntry {
+        txid: tx.txid(),
+        wtxid: tx.wtxid(),
+        vsize,
+        bip141_vsize: vsize,
+        size,
+        weight: tx.weight(),
+        sigop_cost: bitcoin_rs_script::count_tx_legacy(&tx),
+        fee: 0,
+        fee_delta: 0,
+        time: 0,
+        height: 0,
+        ancestor_size: u64::from(vsize),
+        ancestor_fee: 0,
+        ancestor_fee_delta: 0,
+        ancestors: Vec::new(),
+        tx,
     }
 }
 

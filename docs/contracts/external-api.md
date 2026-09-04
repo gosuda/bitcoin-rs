@@ -44,6 +44,27 @@ nothing normative; it places the owners under the
 - Statistical and script index queries are bounded by `QueryBudget` to prevent
   memory exhaustion.
 
+### `API-05`: Solo-mining generate path
+
+- **Owner**: `MiningControl::generate` in `crates/rpc/src/context.rs`,
+  implemented by `MiningCoordinator::generate_blocks` in
+  `crates/node/src/mining.rs`.
+- The operation assembles a fresh candidate (no GBT cache), solves it, then
+  either submits through `Chainstate::apply_block` or dry-validates through
+  `Chainstate::validate_block` (`ARCH-07`). Persistence and tip advancement
+  are conditional on `submit`; validation is not.
+- Each submitted block is a separate commit. An error after *N* successful
+  submissions leaves those *N* blocks durable. Callers own retry after reading
+  the applied tip. `nblocks` is not capped; the result vector grows one block
+  at a time.
+- `generatetoaddress` accepts only a network-valid address, uses mempool
+  package selection, collects fees, and always submits.
+- `generateblock` accepts an address or descriptor (`require_checksum = false`;
+  ranged/multipath descriptors are refused), requires the transactions array
+  (an explicit `[]` is coinbase-only), keeps listed order, does not add those
+  fees to the coinbase, treats 64-character hex as a mempool txid, and includes
+  decoded raw transactions without requiring mempool admission.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -61,3 +82,14 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `zmq_rows_are_valid_core_topics`
   - `every_unimplemented_rpc_row_answers_method_not_found`
   - `generated_reference_matches_checked_in`
+- `crates/rpc/src/handlers/mining.rs` tests `generatetoaddress_projects_solved_hashes`,
+  `generatetoaddress_rejects_script_hex_and_descriptors`,
+  `generateblock_projects_hash_object`, `generateblock_accepts_addr_descriptor`,
+  `generateblock_without_submit_includes_hex`,
+  `generateblock_requires_transactions_array`, `generateblock_keeps_raw_transactions`
+- `crates/node/tests/mining.rs` tests `generate_mines_coinbase_only_blocks_to_the_tip`,
+  `generateblock_rejects_unknown_mempool_txid`,
+  `generateblock_raw_tx_does_not_require_mempool_admission`,
+  `generate_without_submit_does_not_advance_the_tip`
+- `crates/mining/tests/template_shape.rs` tests `candidate_solves_an_unsolved_regtest_header`,
+  `ordered_assembly_keeps_snapshot_order`

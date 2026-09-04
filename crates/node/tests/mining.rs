@@ -10,7 +10,7 @@ use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 use bitcoin_rs_rpc::context::{
     BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
-    GenerateRequest, GenerateSelection, MiningControl, MiningControlError,
+    GenerateRequest, GenerateSelection, GenerateTx, MiningControl, MiningControlError,
 };
 use compact_str::CompactString;
 use crossbeam_channel::bounded;
@@ -995,6 +995,8 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
 
 #[test]
 fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
+    // API-05: MiningControl::generate submits each solved block through the
+    // apply path before assembling the next; the last hash is the new tip.
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
@@ -1003,7 +1005,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
         payout: vec![0x51],
         count: 2,
         max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
-        selection: GenerateSelection::Txids(Vec::new()),
+        selection: GenerateSelection::Ordered(Vec::new()),
         submit: true,
     })?;
     assert_eq!(hashes.len(), 2);
@@ -1021,6 +1023,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
 
 #[test]
 fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
+    // API-05: a 64-character generateblock entry must already be in the mempool.
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
@@ -1030,11 +1033,49 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
             payout: vec![0x51],
             count: 1,
             max_tries: 16,
-            selection: GenerateSelection::Txids(vec![missing]),
+            selection: GenerateSelection::Ordered(vec![GenerateTx::Mempool(missing)]),
             submit: true,
         })
         .expect_err("missing mempool txid must fail");
     assert!(matches!(error, MiningControlError::InvalidRequest(_)));
+    Ok(())
+}
+
+#[test]
+fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<()> {
+    // API-05: decoded generateblock hex is included without mempool lookup;
+    // consensus validation still runs when submit is false.
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let raw = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x11; 32])), 0),
+            script_sig: vec![],
+            sequence: u32::MAX,
+            witness: vec![],
+        }],
+        outputs: vec![TxOut {
+            value: 50_000,
+            script_pubkey: vec![0x51],
+        }],
+        lock_time: 0,
+    };
+    let error = mining
+        .generate(GenerateRequest {
+            payout: vec![0x51],
+            count: 1,
+            max_tries: 16,
+            selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(raw)]),
+            submit: false,
+        })
+        .expect_err("invalid raw spend must fail validation, not mempool lookup");
+    assert!(
+        matches!(error, MiningControlError::Failed(_)),
+        "raw generateblock txs skip mempool membership: {error:?}"
+    );
     Ok(())
 }
 
@@ -1051,6 +1092,7 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
 
 #[test]
 fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
+    // API-05: submit=false dry-validates through the apply gates and does not persist.
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
@@ -1063,7 +1105,7 @@ fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
         payout: vec![0x51],
         count: 1,
         max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
-        selection: GenerateSelection::Txids(Vec::new()),
+        selection: GenerateSelection::Ordered(Vec::new()),
         submit: false,
     })?;
     assert_eq!(generated.len(), 1);

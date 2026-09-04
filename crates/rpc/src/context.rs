@@ -719,13 +719,22 @@ pub enum MiningControlError {
     Failed(CompactString),
 }
 
+/// One `generateblock` body transaction: a mempool txid or a decoded raw tx.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GenerateTx {
+    /// Include this currently-pooled transaction, looked up by txid.
+    Mempool(Txid),
+    /// Include this decoded raw transaction even if it is not in the mempool.
+    Raw(Tx),
+}
+
 /// How [`MiningControl::generate`] selects non-coinbase transactions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GenerateSelection {
     /// Full mempool package selection (`generatetoaddress`).
     Mempool,
-    /// Only these currently-pooled txids, in this order. Empty is coinbase-only.
-    Txids(Vec<Txid>),
+    /// These transactions, in this order. Empty is coinbase-only.
+    Ordered(Vec<GenerateTx>),
 }
 
 /// Request to assemble, solve, and optionally submit one or more blocks.
@@ -787,11 +796,17 @@ pub trait MiningControl: Send + Sync {
 
     /// Assembles, solves, and optionally submits `request.count` blocks paying `request.payout`.
     ///
-    /// Each submitted block is committed independently before the next block is
-    /// assembled; an error may therefore leave earlier blocks durable and visible.
-    /// Unsubmitted blocks are only dry-validated and are not persisted. Callers
-    /// own retry and any compensation for partial progress; failures are reported
-    /// as [`MiningControlError`] values.
+    /// Each submitted block's commit point is the ordinary apply path (`ARCH-07`):
+    /// validation, persistence, and applied-tip publication complete before the
+    /// next block is assembled. Durability, crash recovery, and visibility match
+    /// [`Self::submit_block`]. An error after *N* successful submissions leaves
+    /// those *N* blocks durable and visible; the failed block and any remaining
+    /// count are not applied. Unsubmitted blocks (`submit = false`) are
+    /// dry-validated through the same pre-write gates and are not persisted.
+    /// Callers own retry and any compensation for partial progress. Failures are
+    /// classified as [`MiningControlError`]: `InvalidRequest` is not retriable
+    /// without changing the request; `Unavailable` and `Failed` may be retried
+    /// by the caller after inspecting the applied tip.
     fn generate(&self, request: GenerateRequest)
     -> Result<Vec<GeneratedBlock>, MiningControlError>;
 
