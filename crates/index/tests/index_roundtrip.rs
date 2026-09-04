@@ -693,11 +693,13 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `IDX-05` / `IDX-04`: format 3 open resets historical keys and keeps Live.
 #[test]
 fn format_3_open_resets_historical_keys_and_keeps_live() -> Result<(), Box<dyn std::error::Error>> {
     predecessor_height_format_resets_historical(3)
 }
 
+/// `IDX-05` / `IDX-04`: format 4 open resets historical keys and keeps Live.
 #[test]
 fn format_4_open_resets_historical_keys_and_keeps_live() -> Result<(), Box<dyn std::error::Error>> {
     predecessor_height_format_resets_historical(4)
