@@ -1030,16 +1030,16 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    // Core 31.1: gettxoutsetinfo hash_type hash_or_height use_index.
-    // Production timing uses `["muhash", null, false]`: current tip, no
-    // CoinStatsIndex. bitcoin-rs has no historical coinstats index, so a
-    // specific height/hash is refused the same way Core refuses it without
-    // the index. `use_index` is parsed so the production triplet is a
-    // first-class request; the query always scans the in-memory UtxoSet.
+    // See docs/benchmarks/muhash-rpc.md for the authoritative measured contract.
+    // This implementation scans the in-memory UtxoSet.
     let array = if params.is_null() {
         None
     } else {
-        Some(params_array(params)?)
+        let values = params_array(params)?;
+        if values.len() > 3 {
+            return Err(RpcError::InvalidParams("expected at most three parameters"));
+        }
+        Some(values)
     };
     let hash_type = match array.and_then(|values| values.first()) {
         None => "hash_serialized_3",
