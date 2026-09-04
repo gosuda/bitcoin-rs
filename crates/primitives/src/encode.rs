@@ -305,14 +305,18 @@ pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
     let version = read_i32_le(reader)?;
     let mut input_count = read_compact(reader)?;
     let mut segwit = false;
+    let mut output_count = None;
     if input_count == 0 {
-        // BIP144: a zero input count is the segwit marker; the flag byte must be 0x01.
+        // Core treats a zero flag as the legacy empty-input/empty-output form.
         let flag = read_u8(reader)?;
-        if flag != 0x01 {
+        if flag == 0 {
+            output_count = Some(0);
+        } else if flag == 0x01 {
+            segwit = true;
+            input_count = read_compact(reader)?;
+        } else {
             return Err(DecodeError::InvalidSegwitFlag { got: flag });
         }
-        segwit = true;
-        input_count = read_compact(reader)?;
     }
 
     let mut inputs = Vec::new();
@@ -320,7 +324,10 @@ pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
         inputs.push(TxIn::consensus_decode(reader)?);
     }
     let mut outputs = Vec::new();
-    let output_count = read_compact(reader)?;
+    let output_count = match output_count {
+        Some(count) => count,
+        None => read_compact(reader)?,
+    };
     for _ in 0..output_count {
         outputs.push(TxOut::consensus_decode(reader)?);
     }
