@@ -1,12 +1,7 @@
-//! Derived consumers of a committed connect or disconnect.
+//! Derived consumers of committed chain transitions.
 //!
-//! Authoritative apply publishes the applied tip and returns a [`ChainEvent`].
-//! This module consumes that event: RPC [`BlockLog`], ZMQ projections,
-//! `TxIndex` wake, mining generation, and P2P admission. Apply does not
-//! import those types.
-//!
-//! Issue #77 owns the durable event journal and cursor contract. This is
-//! dependency direction for #217, not a second event contract.
+//! Ownership and ordering are specified by `ARCH-07` in
+//! [`docs/contracts/architecture.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md). Apply does not import these consumers.
 
 use std::sync::Arc;
 
