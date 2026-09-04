@@ -68,6 +68,13 @@ Owners:
 - `crates/consensus/tests/kernel_block_parity.rs`:
   `script_verdict_parity` (Taproot key-path differential),
   `differential_is_non_vacuous` (script-path non-vacuity).
+- `crates/consensus/src/kernel.rs`:
+  `compare_block_parse_agrees_or_requires_kernel_feature`,
+  `compare_block_parse_rejects_txid_mismatch_when_compiled` (block parse
+  and native txid comparison).
+- `crates/node/src/apply.rs`:
+  `verify_kernel_parse_tap_keeps_native_txids` (apply-path native txid
+  preservation).
 - Manifests: `crates/consensus/Cargo.toml` `default = []`,
   `crates/node/Cargo.toml` `default = ["fjall", "zmq"]`,
   `bin/bitcoin-rs/Cargo.toml` `default = ["fjall", "redb", "zmq"]`.

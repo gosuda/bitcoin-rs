@@ -338,6 +338,7 @@ mod tests {
         }
     }
 
+    // CONTRACT: docs/contracts/validation-default.md#VAL-03
     #[test]
     fn compare_block_parse_agrees_or_requires_kernel_feature() {
         let block = coinbase_block();
@@ -361,6 +362,7 @@ mod tests {
         }
     }
 
+    // CONTRACT: docs/contracts/validation-default.md#VAL-03
     #[test]
     fn compare_block_parse_rejects_txid_mismatch_when_compiled() {
         if !kernel_compiled() {
