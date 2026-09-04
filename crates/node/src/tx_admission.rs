@@ -222,10 +222,8 @@ impl TxAdmission {
     fn lookup_tx_by_wtxid(&self, wtxid: &Wtxid) -> Option<Tx> {
         {
             let pool = self.gateway.read();
-            for (_, entry) in &pool.entries {
-                if entry.wtxid == *wtxid {
-                    return Some((*entry.tx).clone());
-                }
+            if let Some(entry) = pool.entry_by_wtxid(wtxid) {
+                return Some((*entry.tx).clone());
             }
         }
         let inner = self.inner.lock();
@@ -255,7 +253,7 @@ impl TxAdmission {
         if wtxid_relay {
             let wtxid = Wtxid::from(hash);
             let pool = self.gateway.read();
-            pool.entries.iter().any(|(_, entry)| entry.wtxid == wtxid)
+            pool.contains_wtxid(&wtxid)
         } else {
             let txid = Txid::from(hash);
             self.gateway.read().contains_txid(&txid)
