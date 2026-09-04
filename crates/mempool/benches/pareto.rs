@@ -13,7 +13,9 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 /// Pool sizes large enough to cover admission from a small node to a mature
@@ -31,18 +33,18 @@ fn distinct_tx(seed: u64) -> Tx {
     previous[..8].copy_from_slice(&seed.to_le_bytes());
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             // Distinct prevouts: entries that conflict would be rejected rather
             // than accepted, and the fill would measure the rejection path.
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&previous)), 0),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 10_000,
-            script_pubkey: seed.to_le_bytes().to_vec(),
+            value: Amount::from_sat(10_000),
+            script_pubkey: seed.to_le_bytes().to_vec().into(),
         }],
     }
 }

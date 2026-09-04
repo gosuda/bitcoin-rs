@@ -18,7 +18,10 @@ use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Candidate,
     MiningCapability, MiningControl, MiningControlError, MiningInfo, TemplateId, TemplateMutation,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Tx, TxIn, Txid, client_version};
+use bitcoin_rs_primitives::{
+    Block, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Txid,
+    Witness, client_version,
+};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -278,7 +281,7 @@ impl MiningControl for CompatMiningControl {
                 previous_block_hash,
                 height: 0,
                 version: 0x2000_0000,
-                bits: 0x1d00_ffff,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
                 min_time: 0,
                 current_time: 0,
                 csv_active: false,
@@ -289,12 +292,12 @@ impl MiningControl for CompatMiningControl {
                 mempool_sequence: 0,
                 coinbase: Tx {
                     version: 1,
-                    lock_time: 0,
+                    lock_time: LockTime::ZERO,
                     inputs: vec![TxIn {
                         previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                        script_sig: Vec::new(),
-                        sequence: u32::MAX,
-                        witness: Vec::new(),
+                        script_sig: Script::new(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
                     }],
                     outputs: Vec::new(),
                 },
@@ -326,12 +329,12 @@ impl MiningControl for CompatMiningControl {
         Ok(MiningInfo {
             blocks: 0,
             last_candidate: None,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             difficulty: 1.0,
             network_hashes_per_second: 0.0,
             pooled_transactions: 0,
             network: Network::Regtest,
-            next_bits: 0x207f_ffff,
+            next_bits: CompactTarget::from_consensus(0x207f_ffff),
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,

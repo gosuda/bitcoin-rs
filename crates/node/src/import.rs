@@ -46,7 +46,8 @@ mod tests {
     use super::*;
     use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -147,7 +148,7 @@ mod tests {
         Some(Hash256::from_le_bytes(&leaves[0]))
     }
 
-    fn pow_met(bits: u32, hash: Hash256) -> bool {
+    fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
         // Interpret the hash as a little-endian 256-bit integer and compare it
         // against the decoded compact target. Regtest bits 0x207f_ffff is the
         // easiest target (about half of all hashes pass); lower targets reject
@@ -160,7 +161,8 @@ mod tests {
         uint_be(&hash.to_le_bytes()) <= target
     }
 
-    fn compact_to_target(bits: u32) -> [u8; 32] {
+    fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
+        let bits = bits.to_consensus();
         let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
         let mantissa = u64::from(bits & 0x007f_ffff);
         let mut target = [0_u8; 32];
@@ -227,7 +229,7 @@ mod tests {
         let mut block = Block::consensus_decode(&genesis_bytes)?;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.header.bits = 0x0010_0001;
+        block.header.bits = CompactTarget::from_consensus(0x0010_0001);
 
         let block_bytes = consensus_bytes(&block);
 
@@ -271,8 +273,8 @@ mod tests {
         let mut block = genesis_block.clone();
         block.header.prev_blockhash = genesis_block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.header.bits = 0x207f_ffff;
-        block.txs[0].inputs[0].script_sig = vec![1, 1];
+        block.header.bits = CompactTarget::from_consensus(0x207f_ffff);
+        block.txs[0].inputs[0].script_sig = vec![1, 1].into();
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
         mine_block_to_declared_target(&mut block)?;
@@ -316,8 +318,8 @@ mod tests {
         let mut block = Block::consensus_decode(&genesis_bytes)?;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.header.bits = 0x207e_ffff;
-        block.txs[0].inputs[0].script_sig = vec![1, 1];
+        block.header.bits = CompactTarget::from_consensus(0x207e_ffff);
+        block.txs[0].inputs[0].script_sig = vec![1, 1].into();
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
         mine_block_to_declared_target(&mut block)?;
@@ -365,7 +367,7 @@ mod tests {
         let mut follow_up = Block::consensus_decode(&genesis_bytes)?;
         follow_up.header.prev_blockhash = follow_up.block_hash();
         follow_up.header.time = follow_up.header.time.saturating_add(1);
-        follow_up.txs[0].inputs[0].script_sig = vec![1, 1];
+        follow_up.txs[0].inputs[0].script_sig = vec![1, 1].into();
         follow_up.header.merkle_root = compute_merkle_root(&follow_up)
             .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
         mine_block_to_declared_target(&mut follow_up)?;
@@ -395,7 +397,7 @@ mod tests {
         let mut follow_up = Block::consensus_decode(&genesis_bytes)?;
         follow_up.header.prev_blockhash = follow_up.block_hash();
         follow_up.header.time = follow_up.header.time.saturating_add(1);
-        follow_up.txs[0].inputs[0].script_sig = vec![1, 1];
+        follow_up.txs[0].inputs[0].script_sig = vec![1, 1].into();
         follow_up.header.merkle_root = compute_merkle_root(&follow_up)
             .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
         mine_block_to_declared_target(&mut follow_up)?;
@@ -421,20 +423,20 @@ mod tests {
         let mut block = Block::consensus_decode(&genesis_bytes)?;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.txs[0].inputs[0].script_sig = vec![1, 1];
+        block.txs[0].inputs[0].script_sig = vec![1, 1].into();
         block.txs.push(Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0_u8; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         });
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
@@ -486,7 +488,7 @@ mod tests {
         let mut coinbase_block = genesis_block.clone();
         coinbase_block.header.prev_blockhash = genesis_block.block_hash();
         coinbase_block.header.time = coinbase_block.header.time.saturating_add(1);
-        coinbase_block.txs[0].inputs[0].script_sig = vec![1, 1];
+        coinbase_block.txs[0].inputs[0].script_sig = vec![1, 1].into();
         coinbase_block.header.merkle_root = compute_merkle_root(&coinbase_block)
             .ok_or_else(|| anyhow::anyhow!("height-1 block should have merkle root"))?;
         mine_block_to_declared_target(&mut coinbase_block)?;
@@ -497,20 +499,20 @@ mod tests {
         let mut block = coinbase_block;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.txs[0].inputs[0].script_sig = vec![1, 2];
+        block.txs[0].inputs[0].script_sig = vec![1, 2].into();
         block.txs.push(Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(immature_coinbase_txid, 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         });
 
         let Err(error) = state.check_coinbase_maturity(&block, 2) else {
@@ -597,7 +599,7 @@ mod tests {
         let synthetic_tip = seed_synthetic_header_tip(&state, 499)?;
 
         block.header.prev_blockhash = BlockHash(synthetic_tip.hash);
-        block.txs[0].inputs[0].script_sig = Vec::new();
+        block.txs[0].inputs[0].script_sig = Vec::new().into();
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
         mine_block_to_declared_target(&mut block)?;
@@ -649,7 +651,7 @@ mod tests {
                 prev_blockhash,
                 merkle_root: Hash256::from_le_bytes(&merkle),
                 time: current_height,
-                bits,
+                bits: CompactTarget::from_consensus(bits),
                 nonce: 0,
             };
             mine_header_to_declared_target(&mut header)?;

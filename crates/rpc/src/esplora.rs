@@ -120,7 +120,8 @@ mod tests {
     use bitcoin_rs_mempool::MempoolEntry;
     use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
     };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use serde_json::{Value, json};
@@ -185,13 +186,13 @@ mod tests {
                 .into_iter()
                 .map(|previous_output| TxIn {
                     previous_output,
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: vec![output],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -228,14 +229,14 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_700_000_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 1,
             },
             txs: vec![transaction(
                 Some(null_outpoint()),
                 TxOut {
-                    value: 5_000_000_000,
-                    script_pubkey: vec![0x51],
+                    value: Amount::from_sat(5_000_000_000),
+                    script_pubkey: vec![0x51].into(),
                 },
             )],
         };
@@ -252,8 +253,8 @@ mod tests {
         let funding = transaction(
             None,
             TxOut {
-                value: 10_000,
-                script_pubkey: spendable.clone(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: spendable.clone().into(),
             },
         );
         let txid = ctx.add_transaction(funding);
@@ -261,8 +262,8 @@ mod tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(txid, 0),
             TxOut {
-                value: 10_000,
-                script_pubkey: spendable,
+                value: Amount::from_sat(10_000),
+                script_pubkey: spendable.into(),
             },
             false,
             1,
@@ -273,8 +274,8 @@ mod tests {
         transaction(
             Some(OutPoint::new(txid, 0)),
             TxOut {
-                value: 9_000,
-                script_pubkey: script,
+                value: Amount::from_sat(9_000),
+                script_pubkey: script.into(),
             },
         )
     }
@@ -307,7 +308,7 @@ mod tests {
                         .get(usize::try_from(out_vout).unwrap_or(usize::MAX))
                 })
                 .flatten()
-                .map(|output| output.value))
+                .map(|output| output.value.to_sat()))
         }
 
         fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
@@ -373,7 +374,7 @@ mod tests {
                         .outputs
                         .get(usize::try_from(out_vout).unwrap_or(usize::MAX))
                 })
-                .map(|output| output.value))
+                .map(|output| output.value.to_sat()))
         }
 
         fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
@@ -504,15 +505,15 @@ mod tests {
         let mut transaction = transaction(
             None,
             TxOut {
-                value: 5_000_000_000,
-                script_pubkey: target,
+                value: Amount::from_sat(5_000_000_000),
+                script_pubkey: target.into(),
             },
         );
         transaction.inputs.push(TxIn {
             previous_output: null_outpoint(),
-            script_sig: vec![1, 1],
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: vec![1, 1].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         });
         let mut block = Block {
             header: Header {
@@ -520,7 +521,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_700_000_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 1,
             },
             txs: vec![transaction.clone()],
@@ -1018,8 +1019,8 @@ mod tests {
         let transaction = transaction(
             None,
             TxOut {
-                value: 125,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(125),
+                script_pubkey: vec![0x51].into(),
             },
         );
         let txid = transaction.txid();
@@ -1104,8 +1105,8 @@ mod tests {
                 transaction(
                     None,
                     TxOut {
-                        value,
-                        script_pubkey: target.clone(),
+                        value: Amount::from_sat(value),
+                        script_pubkey: target.clone().into(),
                     },
                 )
             })
@@ -1152,8 +1153,8 @@ mod tests {
                 transaction(
                     None,
                     TxOut {
-                        value,
-                        script_pubkey: target.clone(),
+                        value: Amount::from_sat(value),
+                        script_pubkey: target.clone().into(),
                     },
                 )
             })
@@ -1229,8 +1230,8 @@ mod tests {
         let spending = transaction(
             Some(OutPoint::new(confirmed.txid, confirmed.vout)),
             TxOut {
-                value: 100,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(100),
+                script_pubkey: vec![0x52].into(),
             },
         );
         let mut ctx = Context::new();
@@ -1310,15 +1311,15 @@ mod tests {
         let parent = transaction(
             None,
             TxOut {
-                value: 125,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(125),
+                script_pubkey: vec![0x51].into(),
             },
         );
         let child = transaction(
             Some(OutPoint::new(parent.txid(), 0)),
             TxOut {
-                value: 100,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(100),
+                script_pubkey: vec![0x52].into(),
             },
         );
         let mut ctx = Context::new();
@@ -1347,8 +1348,8 @@ mod tests {
         let transaction = transaction(
             Some(null_outpoint()),
             TxOut {
-                value: 125,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(125),
+                script_pubkey: vec![0x51].into(),
             },
         );
         let genesis = Header {
@@ -1356,7 +1357,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1_000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         };
         let stale_block = Block {
@@ -1365,7 +1366,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 2_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,
             },
             txs: vec![transaction.clone()],
@@ -1395,7 +1396,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_500,
-                bits: 0x1d00_ffff,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
                 nonce: 1,
             };
             tree.insert_node(Some(genesis_id), active, NodeStatus::Active)?;

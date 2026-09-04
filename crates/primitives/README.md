@@ -1,8 +1,9 @@
 # bitcoin-rs-primitives
 
 The fixed-layout consensus primitives the rest of the workspace speaks in: the
-256-bit hash type, transaction outpoints, the compact-size varint codec, and the
-transaction, block, and header wrappers with their txid/wtxid and header-hash
+256-bit hash type, transaction outpoints, the compact-size varint codec, native
+amount/sequence/locktime/compact-target newtypes, script and witness stacks, and
+the transaction, block, and header types with their txid/wtxid and header-hash
 computation.
 
 This crate is self-contained with respect to Bitcoin protocol primitives. It
@@ -14,7 +15,9 @@ type vocabulary.
 `Tx`, `TxIn`, and `TxOut` wrap transactions and compute txid/wtxid; `Block` and
 `Header` do the same at block level with block-level hashing helpers; `OutPoint` is
 the fixed-layout transaction outpoint; and `Hash256` is the fixed-width 256-bit hash
-type the wrappers hash into. `encode` holds the consensus encoding and hashing helpers
+type the wrappers hash into. Output values are `Amount`, input sequences
+`Sequence`, locktime `LockTime`, nBits `CompactTarget`, and script/witness
+bytes `Script` / `Witness`. `encode` holds the consensus encoding and hashing helpers
 shared by the primitive wrappers (`Sink`, `ConsensusEncode`, analytic `consensus_size`),
 `varint` the Bitcoin compact-size integer codec,
 `sighash` the signature-hash mode wrappers (`Sighash`, `SighashError`), and `network`

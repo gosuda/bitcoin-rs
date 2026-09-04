@@ -38,7 +38,7 @@ use bitcoin_rs_p2p::{
     PINNED_CORE_VERSION, Peer, PeerState, PeerTable,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash as NativeBlockHash, Hash256, Header, consensus_bytes,
+    Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
 };
 use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
@@ -104,7 +104,7 @@ fn child_headers(parent: &Header, count: usize) -> Vec<Header> {
             prev_blockhash: current.compute_hash(),
             merkle_root: Hash256::default(),
             time: current.time + 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         };
         headers.push(next);

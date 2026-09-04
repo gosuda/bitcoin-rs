@@ -23,6 +23,9 @@ use alloc::vec::Vec;
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_consensus::{ConsensusError, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{Instruction, instructions, is_p2sh, is_witness_program, opcode};
 use bitcoin_rs_script::sigops::{count_segwit, count_tx_legacy};
@@ -238,7 +241,7 @@ where
         match view.lookup(&input.previous_output) {
             Some(prevout) => {
                 value_in = value_in
-                    .checked_add(prevout.value)
+                    .checked_add(prevout.value.to_sat())
                     .ok_or(AcceptError::InputValueOverflow)?;
                 prevouts.push((input.previous_output, prevout));
             }
@@ -275,7 +278,7 @@ where
     let mut value_out = 0_u64;
     for output in &tx.outputs {
         value_out = value_out
-            .checked_add(output.value)
+            .checked_add(output.value.to_sat())
             .ok_or(AcceptError::OutputValueOverflow)?;
     }
     // Verification already rejected `value_out > value_in`; saturating rather
@@ -511,19 +514,19 @@ mod tests {
     fn spending_tx(inputs: &[OutPoint], output_value: u64, tag: u8) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: inputs
                 .iter()
                 .map(|previous_output| TxIn {
                     previous_output: *previous_output,
-                    script_sig: Vec::new(),
-                    sequence: 0xffff_ffff,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: vec![TxOut {
-                value: output_value,
-                script_pubkey: p2pkh(tag),
+                value: Amount::from_sat(output_value),
+                script_pubkey: p2pkh(tag).into(),
             }],
         }
     }
@@ -536,8 +539,8 @@ mod tests {
                     (
                         outpoint_key(outpoint),
                         TxOut {
-                            value: *value,
-                            script_pubkey: anyone_can_spend(),
+                            value: Amount::from_sat(*value),
+                            script_pubkey: anyone_can_spend().into(),
                         },
                     )
                 })
@@ -625,7 +628,7 @@ mod tests {
             ..context()
         };
         let mut parent = spending_tx(&[outpoint(1, 0)], 90_000, 7);
-        parent.outputs[0].script_pubkey = anyone_can_spend();
+        parent.outputs[0].script_pubkey = anyone_can_spend().into();
         let parent_txid = parent.txid();
         let Ok(_parent) = accept_to_mempool(&mut pool, parent, &chain, &relaxed) else {
             panic!("parent must be accepted or the child case is untested");
@@ -664,7 +667,7 @@ mod tests {
         let mut pool = pool();
         let chain = chain_with(&[]);
         let mut tx = spending_tx(&[OutPoint::new(Txid::default(), u32::MAX)], 90_000, 7);
-        tx.inputs[0].script_sig = push_int(800_001);
+        tx.inputs[0].script_sig = push_int(800_001).into();
         assert!(is_coinbase(&tx), "the fixture must be a coinbase");
 
         assert_eq!(
@@ -739,7 +742,7 @@ mod tests {
         let mut pool = pool();
         let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
         let mut original = spending_tx(&[outpoint(1, 0)], 90_000, 7);
-        original.inputs[0].sequence = 0xffff_fffd;
+        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let original_txid = original.txid();
         let Ok(_first) = accept_to_mempool(&mut pool, original, &chain, &context()) else {
             panic!("the original must be accepted");
@@ -747,7 +750,7 @@ mod tests {
 
         // Same input, higher fee, different output so it is a distinct txid.
         let mut replacement = spending_tx(&[outpoint(1, 0)], 50_000, 8);
-        replacement.inputs[0].sequence = 0xffff_fffd;
+        replacement.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let Ok(result) = accept_to_mempool(&mut pool, replacement, &chain, &context()) else {
             panic!("a higher-feerate replacement must be accepted");
         };
@@ -829,8 +832,8 @@ mod tests {
                     (
                         outpoint_key(outpoint),
                         TxOut {
-                            value: 1_000,
-                            script_pubkey: script_pubkey.clone(),
+                            value: Amount::from_sat(1_000),
+                            script_pubkey: script_pubkey.clone().into(),
                         },
                     )
                 })
@@ -839,7 +842,7 @@ mod tests {
 
         let mut tx = spending_tx(&inputs, 190_000, 7);
         for input in &mut tx.inputs {
-            input.script_sig = script_sig.clone();
+            input.script_sig = script_sig.clone().into();
         }
 
         let blind = count_tx_legacy(&tx).saturating_mul(4);

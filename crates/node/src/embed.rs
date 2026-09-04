@@ -29,6 +29,9 @@
 
 use bitcoin_rs_mempool::{FeeRate, MempoolStats, MutationResult};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network, Tx, Txid, deserialize};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence};
 use bitcoin_rs_rpc::capabilities::CapabilitySnapshot;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -568,16 +571,16 @@ mod tests {
     fn spending_tx(previous_output: OutPoint) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output,
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: vec![vec![0x51]],
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: vec![vec![0x51]].into(),
             }],
             outputs: vec![TxOut {
-                value: 92_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(92_000),
+                script_pubkey: spendable_script().into(),
             }],
         }
     }
@@ -608,8 +611,8 @@ mod tests {
             changes.add(UtxoAdd::new(
                 prevout,
                 TxOut {
-                    value: 100_000,
-                    script_pubkey: spendable_script(),
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: spendable_script().into(),
                 },
                 false,
                 1,

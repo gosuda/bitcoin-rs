@@ -129,7 +129,7 @@ pub(crate) fn mutations_for_block(
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
     use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd};
 
     use super::{Coin, Mutation, mutations_for_block};
@@ -138,8 +138,8 @@ mod tests {
         Coin {
             outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
             txout: TxOut {
-                value,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(value),
+                script_pubkey: vec![0x51].into(),
             },
             height,
             coinbase: true,
@@ -152,7 +152,7 @@ mod tests {
         let old = coin(1, 10, 50);
         let mut new = old.clone();
         new.height = 100;
-        new.txout.value = 25;
+        new.txout.value = Amount::from_sat(25);
         let spent = coin(2, 20, 12);
         let mut changes = BorrowedBlockChanges::with_capacity(1, 1);
         changes.add(BorrowedUtxoAdd::new(

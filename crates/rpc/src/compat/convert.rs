@@ -13,7 +13,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{Network, Tx, TxIn, TxOut, consensus_bytes};
+use bitcoin_rs_primitives::{CompactTarget, Network, Tx, TxIn, TxOut, consensus_bytes};
 use sonic_rs::{JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
 use crate::error::RpcError;
@@ -92,7 +92,8 @@ pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
 /// the degenerate exponents that collapse to an all-zero target. The sign bit
 /// only negates in Core's arithmetic; the rendered magnitude is unaffected.
 #[must_use]
-pub(crate) fn compact_target_hex(bits: u32) -> String {
+pub(crate) fn compact_target_hex(bits: CompactTarget) -> String {
+    let bits = bits.to_consensus();
     let exponent = bits >> 24;
     let word = u64::from(bits & 0x007f_ffff);
     // Least-significant byte first; reversed for the wire's big-endian hex.
@@ -195,8 +196,8 @@ pub(crate) fn coinbase_transaction_typed(
     let input = tx.inputs.first()?;
     Some(corepc_types::v31::CoinbaseTransaction {
         version: tx.version,
-        locktime: tx.lock_time,
-        sequence: input.sequence,
+        locktime: tx.lock_time.to_consensus(),
+        sequence: input.sequence.to_consensus(),
         coinbase: hex_encode(&input.script_sig),
         witness: input.witness.first().map(|item| hex_encode(item)),
     })
@@ -254,7 +255,7 @@ pub(crate) fn raw_transaction_verbose(
         vsize: tx.vsize(),
         weight: tx.weight(),
         version: tx.version,
-        lock_time: tx.lock_time,
+        lock_time: tx.lock_time.to_consensus(),
         inputs,
         outputs,
         block_hash,
@@ -294,7 +295,7 @@ pub(crate) fn raw_transaction(
         vsize: tx.vsize(),
         weight: tx.weight(),
         version: tx.version,
-        lock_time: tx.lock_time,
+        lock_time: tx.lock_time.to_consensus(),
         inputs,
         outputs,
     })
@@ -316,7 +317,7 @@ fn raw_input_typed(input: &TxIn, coinbase: bool) -> corepc_types::v31::RawTransa
             vout: None,
             script_sig: None,
             txin_witness,
-            sequence: input.sequence,
+            sequence: input.sequence.to_consensus(),
         };
     }
     // Field copies come before any `&self` method: `OutPoint` is
@@ -329,7 +330,7 @@ fn raw_input_typed(input: &TxIn, coinbase: bool) -> corepc_types::v31::RawTransa
         vout: Some(prev_vout),
         script_sig: Some(script_sig_typed(&input.script_sig)),
         txin_witness,
-        sequence: input.sequence,
+        sequence: input.sequence.to_consensus(),
     }
 }
 
@@ -340,7 +341,7 @@ fn raw_output_typed(
     network: Network,
 ) -> Result<corepc_types::v31::RawTransactionOutput, RpcError> {
     Ok(corepc_types::v31::RawTransactionOutput {
-        value: sat_to_btc(output.value),
+        value: sat_to_btc(output.value.to_sat()),
         index: u64::try_from(index).unwrap_or(u64::MAX),
         script_pubkey: script_pub_key_typed(&output.script_pubkey, network)?,
     })
@@ -367,12 +368,18 @@ mod compact_target_tests {
         // Historical pow limit 0x1d00ffff: ffff lands at bytes 4-5.
         let mut expected = String::from("00000000ffff");
         expected.push_str(&"0".repeat(52));
-        assert_eq!(compact_target_hex(0x1d00_ffff), expected);
+        assert_eq!(
+            compact_target_hex(CompactTarget::from_consensus(0x1d00_ffff)),
+            expected
+        );
 
         // Regtest difficulty-one 0x207fffff: 7fffff at the very top.
         let mut expected = String::from("7fffff");
         expected.push_str(&"0".repeat(58));
-        assert_eq!(compact_target_hex(0x207f_ffff), expected);
+        assert_eq!(
+            compact_target_hex(CompactTarget::from_consensus(0x207f_ffff)),
+            expected
+        );
     }
 
     #[test]
@@ -381,23 +388,32 @@ mod compact_target_tests {
         let mut expected = String::new();
         expected.push_str(&"0".repeat(62));
         expected.push_str("ff");
-        assert_eq!(compact_target_hex(0x0200_ff00), expected);
+        assert_eq!(
+            compact_target_hex(CompactTarget::from_consensus(0x0200_ff00)),
+            expected
+        );
 
         // Exponent three keeps all three mantissa bytes in place.
         let mut expected = "0".repeat(58);
         expected.push_str("7fff80");
-        assert_eq!(compact_target_hex(0x03ff_ff80), expected);
+        assert_eq!(
+            compact_target_hex(CompactTarget::from_consensus(0x03ff_ff80)),
+            expected
+        );
     }
 
     #[test]
     fn compact_target_ignores_sign_and_drops_overflow_shifts() {
         // The sign bit negates; the rendered magnitude is unchanged.
         assert_eq!(
-            compact_target_hex(0x1d80_ffff),
-            compact_target_hex(0x1d00_ffff)
+            compact_target_hex(CompactTarget::from_consensus(0x1d80_ffff)),
+            compact_target_hex(CompactTarget::from_consensus(0x1d00_ffff))
         );
 
         // Exponent 35 shifts every mantissa byte past 256 bits: zero target.
-        assert_eq!(compact_target_hex(0x2300_ffff), "0".repeat(64));
+        assert_eq!(
+            compact_target_hex(CompactTarget::from_consensus(0x2300_ffff)),
+            "0".repeat(64)
+        );
     }
 }

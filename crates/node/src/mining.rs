@@ -25,7 +25,7 @@ use bitcoin_rs_mining::{
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Network, Tx, consensus_bytes};
 use compact_str::CompactString;
 use hashbrown::HashMap;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -790,7 +790,12 @@ impl MiningCoordinator {
                     difficulty_for_bits(next.bits),
                 )
             }
-            None => (0, 0.0, 0, 0.0),
+            None => (
+                CompactTarget::from_consensus(0),
+                0.0,
+                CompactTarget::from_consensus(0),
+                0.0,
+            ),
         };
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
@@ -1275,7 +1280,7 @@ mod network_hashps_oracle_tests {
     use super::{estimate_network_hashps, hash_ps_at};
     use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
     use bitcoin_rs_mining::MiningControlError;
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 
     const BITS: u32 = 0x207f_ffff;
 
@@ -1285,7 +1290,7 @@ mod network_hashps_oracle_tests {
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time,
-            bits: BITS,
+            bits: CompactTarget::from_consensus(BITS),
             nonce: 0,
         }
     }
@@ -1449,7 +1454,9 @@ mod network_hashps_oracle_tests {
 mod candidate_template_tests {
     use alloc::sync::Arc;
     use bitcoin_rs_mining::{Candidate, TemplateId};
-    use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
+    use bitcoin_rs_primitives::{
+        Amount, CompactTarget, Hash256, LockTime, Network, Script, Tx, TxOut,
+    };
 
     #[test]
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
@@ -1459,11 +1466,11 @@ mod candidate_template_tests {
         let mut state = super::CoordinatorState::new();
         let coinbase = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut first_id = None;
@@ -1479,7 +1486,7 @@ mod candidate_template_tests {
                 previous_block_hash: hash,
                 height: 1,
                 version: 1,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 min_time: 1,
                 current_time: 1,
                 csv_active: false,
@@ -1516,7 +1523,7 @@ mod candidate_template_tests {
             previous_block_hash: previous,
             height: 1,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 1,
             csv_active,
@@ -1527,11 +1534,11 @@ mod candidate_template_tests {
             mempool_sequence: 1,
             coinbase: Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::ZERO,
                 inputs: Vec::new(),
                 outputs: vec![TxOut {
-                    value: 50,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(50),
+                    script_pubkey: Script::new(),
                 }],
             },
             coinbase_value: 50,

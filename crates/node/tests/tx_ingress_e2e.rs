@@ -44,7 +44,9 @@ use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
 use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
 use bitcoin_rs_p2p::{InboundTx, Message, Peer, PeerLease};
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -95,8 +97,8 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> anyhow::Result<()> 
     changes.add(UtxoAdd::new(
         OutPoint::new(parent, 0),
         TxOut {
-            value,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51].into(),
         },
         false,
         100,
@@ -114,15 +116,15 @@ fn spending_tx(parent: Txid, output_value: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: output_value,
-            script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+            value: Amount::from_sat(output_value),
+            script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 

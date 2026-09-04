@@ -1,5 +1,5 @@
 //! Snapshot trailer integration tests for coinstats.
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{
     BlockChanges, UndoBatch, UtxoAdd, UtxoChangeListener, UtxoInserted, UtxoKey, UtxoRemoved,
@@ -68,7 +68,7 @@ fn snapshot_trailer_tracks_listener_after_removal() -> Result<(), Box<dyn std::e
         before_removal.muhash.finalize()
     );
     assert_eq!(after_removal.utxo_count, 1);
-    assert_eq!(after_removal.total_amount, kept_txout.value);
+    assert_eq!(after_removal.total_amount, kept_txout.value.to_sat());
 
     let mut snapshot = Vec::new();
     let trailer = write_snapshot(&set, &txid(101), 8, &mut snapshot)?;
@@ -106,7 +106,7 @@ fn listener_tracks_duplicate_txid_overwrite() -> Result<(), Box<dyn std::error::
     assert_eq!(set.get(&outpoint), Some(replacement.clone()));
     assert_eq!(after_overwrite, expected);
     assert_eq!(after_overwrite.utxo_count, 1);
-    assert_eq!(after_overwrite.total_amount, replacement.value);
+    assert_eq!(after_overwrite.total_amount, replacement.value.to_sat());
     Ok(())
 }
 
@@ -398,8 +398,8 @@ fn first_undo_test_block(
 
 fn txout(index: u32) -> TxOut {
     TxOut {
-        value: 50_000 + u64::from(index),
-        script_pubkey: vec![0x51, index.to_le_bytes()[0]],
+        value: Amount::from_sat(50_000 + u64::from(index)),
+        script_pubkey: vec![0x51, index.to_le_bytes()[0]].into(),
     }
 }
 

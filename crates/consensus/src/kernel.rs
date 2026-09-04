@@ -132,7 +132,7 @@ mod enabled {
     ) -> Result<(), ConsensusError> {
         let script = bitcoinkernel::ScriptPubkey::new(&prevout.script_pubkey)
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
-        let amount = i64::try_from(prevout.value)
+        let amount = i64::try_from(prevout.value.to_sat())
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
         bitcoinkernel::verify(
             &script,
@@ -204,7 +204,7 @@ mod enabled {
     fn kernel_txout(prevout: &TxOut) -> Result<bitcoinkernel::TxOut, ConsensusError> {
         let script = bitcoinkernel::ScriptPubkey::new(&prevout.script_pubkey)
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
-        let amount = i64::try_from(prevout.value)
+        let amount = i64::try_from(prevout.value.to_sat())
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
         Ok(bitcoinkernel::TxOut::new(&script, amount))
     }

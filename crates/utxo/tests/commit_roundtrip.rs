@@ -1,6 +1,6 @@
 //! Public commit/get coverage for the UTXO set.
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, varint};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, varint};
 use bitcoin_rs_utxo::{
     BlockChanges, UtxoAdd, UtxoError, UtxoSet, hash_serialized_3,
     set::{BorrowedBlockChanges, BorrowedUtxoAdd},
@@ -21,8 +21,8 @@ fn txout(seed: u64) -> TxOut {
     script.extend_from_slice(&[0x51, 0x20]);
     script.extend_from_slice(&seed.to_le_bytes());
     TxOut {
-        value: 1_000 + seed,
-        script_pubkey: script,
+        value: Amount::from_sat(1_000 + seed),
+        script_pubkey: script.into(),
     }
 }
 
@@ -109,8 +109,8 @@ fn invalid_add_does_not_apply_removes_in_same_commit() -> Result<(), Box<dyn std
     invalid.add(UtxoAdd::new(
         OutPoint::new(txid(12).into(), 0),
         TxOut {
-            value: 12,
-            script_pubkey: vec![0; usize::from(u16::MAX) + 1],
+            value: Amount::from_sat(12),
+            script_pubkey: vec![0; usize::from(u16::MAX) + 1].into(),
         },
         false,
         2,
@@ -225,8 +225,8 @@ fn borrowed_commit_preserves_invalid_add_atomicity() -> Result<(), Box<dyn std::
     let invalid_adds = vec![(
         invalid_outpoint,
         TxOut {
-            value: 8_012,
-            script_pubkey: vec![0; usize::from(u16::MAX) + 1],
+            value: Amount::from_sat(8_012),
+            script_pubkey: vec![0; usize::from(u16::MAX) + 1].into(),
         },
         false,
         2,
@@ -501,24 +501,24 @@ fn zero_and_unequal_script_lengths_roundtrip_and_scan() -> Result<(), Box<dyn st
     let script_10kb = vec![0x52; 10_000];
 
     let txout_empty = TxOut {
-        value: 100,
-        script_pubkey: script_empty.clone(),
+        value: Amount::from_sat(100),
+        script_pubkey: script_empty.clone().into(),
     };
     let txout_1b = TxOut {
-        value: 200,
-        script_pubkey: script_1b,
+        value: Amount::from_sat(200),
+        script_pubkey: script_1b.into(),
     };
     let txout_34b = TxOut {
-        value: 300,
-        script_pubkey: script_34b,
+        value: Amount::from_sat(300),
+        script_pubkey: script_34b.into(),
     };
     let txout_520b = TxOut {
-        value: 400,
-        script_pubkey: script_520b,
+        value: Amount::from_sat(400),
+        script_pubkey: script_520b.into(),
     };
     let txout_10kb = TxOut {
-        value: 500,
-        script_pubkey: script_10kb.clone(),
+        value: Amount::from_sat(500),
+        script_pubkey: script_10kb.clone().into(),
     };
 
     let op0 = OutPoint::new(live_txid.into(), 0);
@@ -586,8 +586,8 @@ fn multi_shard_invalid_add_preserves_commit_rejection_atomicity()
     invalid_changes.add(UtxoAdd::new(
         OutPoint::new(txid_in_shard(1, 101).into(), 0),
         TxOut {
-            value: 103,
-            script_pubkey: vec![0; usize::from(u16::MAX) + 1],
+            value: Amount::from_sat(103),
+            script_pubkey: vec![0; usize::from(u16::MAX) + 1].into(),
         },
         false,
         11,
@@ -623,16 +623,16 @@ fn hash_serialized_3_matches_independent_core_serialization_for_edge_cases()
     let op3 = OutPoint::new(txid(842).into(), 64);
 
     let txout1 = TxOut {
-        value: 0,
-        script_pubkey: Vec::new(),
+        value: Amount::from_sat(0),
+        script_pubkey: Script::new(),
     };
     let txout2 = TxOut {
-        value: u64::MAX,
-        script_pubkey: vec![0x51; 520],
+        value: Amount::from_sat(u64::MAX),
+        script_pubkey: vec![0x51; 520].into(),
     };
     let txout3 = TxOut {
-        value: 12_345,
-        script_pubkey: vec![0x6a],
+        value: Amount::from_sat(12_345),
+        script_pubkey: vec![0x6a].into(),
     };
 
     let mut changes = BlockChanges::default();

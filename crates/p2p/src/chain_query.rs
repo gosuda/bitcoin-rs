@@ -10,6 +10,9 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::CompactTarget;
 use parking_lot::RwLock;
 
 use crate::dispatch::{ChainQuery, InventoryServing};
@@ -543,7 +546,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::default(),
             time: nonce,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce,
         }
     }

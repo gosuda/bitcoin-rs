@@ -8,6 +8,9 @@ use bitcoin_rs_mining::{
     witness_commitment_script,
 };
 use bitcoin_rs_primitives::{Block, Tx, Txid, consensus_bytes, deserialize};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
@@ -729,7 +732,7 @@ mod tests {
             previous_block_hash: previous,
             height: 101,
             version: 0x2000_0000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1_700_000_001,
             current_time: 1_700_000_010,
             csv_active: true,
@@ -742,7 +745,7 @@ mod tests {
                 version: 2,
                 inputs: Vec::new(),
                 outputs: Vec::new(),
-                lock_time: 0,
+                lock_time: LockTime::ZERO,
             },
             coinbase_value: 5_000_000_000,
             fees: 0,
@@ -783,12 +786,12 @@ mod tests {
                 weight: 2_500,
                 transactions: 3,
             }),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             difficulty: 1.0,
             network_hashes_per_second: 42.5,
             pooled_transactions: 4,
             network: Network::Regtest,
-            next_bits: 0x207f_ffff,
+            next_bits: CompactTarget::from_consensus(0x207f_ffff),
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,
@@ -796,7 +799,7 @@ mod tests {
         }
     }
 
-    fn ctx_with_control(control: Arc<dyn MiningControl>) -> Arc<Context> {
+    fn ctx_with_control(control: Arc<impl MiningControl + 'static>) -> Arc<Context> {
         Arc::new(Context::new().with_mining_control(control))
     }
 
@@ -805,15 +808,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0xffff_ffff),
-                script_sig: vec![0x51],
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: vec![0x51].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50 * 100_000_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50 * 100_000_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let merkle_root = coinbase.txid().0;
         Block {
@@ -822,7 +825,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root,
                 time: 1_296_688_602,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,
             },
             txs: vec![coinbase],
@@ -1048,9 +1051,9 @@ mod tests {
         let control = FakeMiningControl::with_template(sample_template());
         {
             let mut info = control.info.lock();
-            info.bits = 0x1d00_ffff;
+            info.bits = CompactTarget::from_consensus(0x1d00_ffff);
             info.difficulty = 1.0;
-            info.next_bits = 0x1c00_ffff;
+            info.next_bits = CompactTarget::from_consensus(0x1c00_ffff);
         }
         let ctx = ctx_with_control(control);
         let result = getmininginfo(&ctx, &json!([]))
@@ -1068,12 +1071,18 @@ mod tests {
             result.get("bits").and_then(JsonValueTrait::as_str),
             Some("1d00ffff")
         );
-        assert_eq!(target, compact_target_hex(0x1d00_ffff));
+        assert_eq!(
+            target,
+            compact_target_hex(CompactTarget::from_consensus(0x1d00_ffff))
+        );
         assert_eq!(
             next.get("bits").and_then(JsonValueTrait::as_str),
             Some("1c00ffff")
         );
-        assert_eq!(next_target, compact_target_hex(0x1c00_ffff));
+        assert_eq!(
+            next_target,
+            compact_target_hex(CompactTarget::from_consensus(0x1c00_ffff))
+        );
         assert_ne!(target, next_target);
     }
 
@@ -1096,7 +1105,7 @@ mod tests {
             version: 2,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let txid = tx.txid();
         {
@@ -1123,10 +1132,10 @@ mod tests {
             version: 2,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let txid = tx.txid();
         let wtxid = tx.wtxid();
@@ -1344,7 +1353,7 @@ mod tests {
             version: 2,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let pooled = pooled_tx.txid();
         {
@@ -1411,15 +1420,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: vec![],
-                sequence: u32::MAX,
-                witness: vec![],
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50_000),
+                script_pubkey: vec![0x51].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1454,7 +1463,7 @@ mod tests {
     #[test]
     fn generateblock_projects_hash_object() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, []]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
@@ -1473,11 +1482,11 @@ mod tests {
         assert!(request.submit);
     }
 
-    /// API-05: generateblock accepts addr() without a checksum.
+    /// API-05: generateblock accepts `addr()` without a checksum.
     #[test]
     fn generateblock_accepts_addr_descriptor() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let result = generateblock(&ctx, &json!([format!("addr({MAINNET_ADDRESS})"), []]))
             .unwrap_or_else(|err| panic!("addr() descriptor must be accepted: {err}"));
         assert!(
@@ -1506,7 +1515,7 @@ mod tests {
     #[test]
     fn generateblock_without_submit_includes_hex() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, [], false]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
@@ -1550,7 +1559,7 @@ mod tests {
     #[test]
     fn generateblock_keeps_raw_transactions() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let tx = sample_raw_tx();
         let raw_hex = to_lower_hex(&consensus_bytes(&tx));
         let txid = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));

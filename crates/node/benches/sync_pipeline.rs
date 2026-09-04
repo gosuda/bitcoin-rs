@@ -40,7 +40,10 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::script::push_int;
 // seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
@@ -48,9 +51,10 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::{All, Message as SecpMessage, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{
-    Amount, OutPoint as OracleOutPoint, ScriptBuf as OracleScriptBuf, Sequence as OracleSequence,
-    Transaction as OracleTx, TxIn as OracleTxIn, TxOut as OracleTxOut, Txid as OracleTxid, Witness,
-    absolute, opcodes, script::Builder as OracleBuilder, transaction,
+    Amount as OracleAmount, OutPoint as OracleOutPoint, ScriptBuf as OracleScriptBuf,
+    Sequence as OracleSequence, Transaction as OracleTx, TxIn as OracleTxIn, TxOut as OracleTxOut,
+    Txid as OracleTxid, Witness as OracleWitness, absolute, opcodes,
+    script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
@@ -1194,7 +1198,7 @@ fn child_coinbase_block(parent: &Block, height: u32) -> Block {
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase_transaction(height)],
@@ -1211,7 +1215,7 @@ fn child_fanout_coinbase_block(parent: &Block, height: u32) -> Block {
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![fanout_coinbase_transaction(height)],
@@ -1241,7 +1245,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs,
@@ -1257,7 +1261,7 @@ fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
         prev_blockhash,
         merkle_root: Hash256::default(),
         time,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         nonce: 0,
     }
 }
@@ -1265,16 +1269,16 @@ fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
 fn coinbase_transaction(height: u32) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: coinbase_script_sig(height),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: coinbase_script_sig(height).into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 50_0000_0000,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(50_0000_0000),
+            script_pubkey: Script::new(),
         }],
     }
 }
@@ -1282,18 +1286,18 @@ fn coinbase_transaction(height: u32) -> Tx {
 fn fanout_coinbase_transaction(height: u32) -> Tx {
     let outputs = (0..SPEND_PROXY_FANOUT)
         .map(|_| TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: push_int(1),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: push_int(1).into(),
         })
         .collect();
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: coinbase_script_sig(height),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: coinbase_script_sig(height).into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs,
     }
@@ -1302,16 +1306,16 @@ fn fanout_coinbase_transaction(height: u32) -> Tx {
 fn spend_proxy_transaction(prev_txid: Txid, vout: u32) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(prev_txid, vout),
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: SPEND_PROXY_SPEND_OUTPUT_VALUE,
-            script_pubkey: push_int(1),
+            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            script_pubkey: push_int(1).into(),
         }],
     }
 }
@@ -1355,7 +1359,8 @@ fn block_merkle_root(block: &Block) -> Hash256 {
 
 /// Decodes a 256-bit compact target into little-endian bytes. Negative,
 /// overflowed, and zero-mantissa encodings decode to an unreachable zero.
-fn compact_to_target(bits: u32) -> [u8; 32] {
+fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
+    let bits = bits.to_consensus();
     let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
     let mantissa = u64::from(bits & 0x007f_ffff);
     let mut target = [0_u8; 32];
@@ -1379,7 +1384,7 @@ fn compact_to_target(bits: u32) -> [u8; 32] {
 
 /// Returns true when `hash` is at or below the compact target, comparing the
 /// little-endian byte arrays from the most significant end.
-fn pow_met(bits: u32, hash: &BlockHash) -> bool {
+fn pow_met(bits: CompactTarget, hash: &BlockHash) -> bool {
     let target = compact_to_target(bits);
     let hash_le = hash.as_bytes();
     for index in (0..32).rev() {
@@ -1490,7 +1495,7 @@ fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &Signin
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase],
@@ -1507,8 +1512,8 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
         let pkh = keys.p2pkh[usize::try_from(i).unwrap()].pubkey_hash();
         let script = OracleScriptBuf::new_p2pkh(&pkh);
         outputs.push(TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: script.as_bytes().to_vec(),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
     // P2WPKH outputs (indices 22..44).
@@ -1518,8 +1523,8 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             .unwrap();
         let script = OracleScriptBuf::new_p2wpkh(&pkh);
         outputs.push(TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: script.as_bytes().to_vec(),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
     // P2WSH 2-of-3 outputs (indices 44..64).
@@ -1528,25 +1533,25 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
         let script_hash = redeem.wscript_hash();
         let script = OracleScriptBuf::new_p2wsh(&script_hash);
         outputs.push(TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: script.as_bytes().to_vec(),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
     // BIP141 witness commitment output.
     let commitment = witness_commitment_for_coinbase(&outputs);
     outputs.push(TxOut {
-        value: 0,
-        script_pubkey: witness_commitment_script_pubkey(&commitment),
+        value: Amount::from_sat(0),
+        script_pubkey: witness_commitment_script_pubkey(&commitment).into(),
     });
 
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: coinbase_script_sig(height),
-            sequence: u32::MAX,
-            witness: vec![WITNESS_RESERVED_VALUE.to_vec()],
+            script_sig: coinbase_script_sig(height).into(),
+            sequence: Sequence::MAX,
+            witness: vec![WITNESS_RESERVED_VALUE.to_vec()].into(),
         }],
         outputs,
     }
@@ -1616,7 +1621,7 @@ fn child_signed_spend_fanout_block(
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs,
@@ -1630,7 +1635,7 @@ fn child_signed_spend_fanout_block(
         .outputs
         .last_mut()
         .unwrap_or_else(|| panic!("coinbase missing commitment output"));
-    last.script_pubkey = witness_commitment_script_pubkey(&commitment);
+    last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
     // Recompute merkle root after updating the commitment.
     block.header.merkle_root = block_merkle_root(&block);
     mine_block_to_declared_target(&mut block);
@@ -1731,10 +1736,10 @@ fn build_signed_p2pkh_spend(
             },
             script_sig: OracleScriptBuf::new(),
             sequence: OracleSequence::MAX,
-            witness: Witness::new(),
+            witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
             script_pubkey: OracleBuilder::new().push_int(1).into_script(),
         }],
     };
@@ -1779,10 +1784,10 @@ fn build_signed_p2wpkh_spend(
             },
             script_sig: OracleScriptBuf::new(),
             sequence: OracleSequence::MAX,
-            witness: Witness::new(),
+            witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
             script_pubkey: OracleBuilder::new().push_int(1).into_script(),
         }],
     };
@@ -1791,7 +1796,7 @@ fn build_signed_p2wpkh_spend(
         .p2wpkh_signature_hash(
             0,
             &script_pubkey,
-            Amount::from_sat(prevout_value),
+            OracleAmount::from_sat(prevout_value),
             EcdsaSighashType::All,
         )
         .unwrap_or_else(|e| panic!("p2wpkh sighash: {e}"));
@@ -1801,7 +1806,8 @@ fn build_signed_p2wpkh_spend(
     sig.normalize_s();
     let mut sig_bytes = sig.serialize_der().as_ref().to_vec();
     sig_bytes.push(EcdsaSighashType::All as u8);
-    tx.input[0].witness = Witness::from_slice(&[sig_bytes, pubkey.inner.serialize().to_vec()]);
+    tx.input[0].witness =
+        OracleWitness::from_slice(&[sig_bytes, pubkey.inner.serialize().to_vec()]);
     to_native_tx(&tx)
 }
 
@@ -1826,10 +1832,10 @@ fn build_signed_p2wsh_spend(
             },
             script_sig: OracleScriptBuf::new(),
             sequence: OracleSequence::MAX,
-            witness: Witness::new(),
+            witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
             script_pubkey: OracleBuilder::new().push_int(1).into_script(),
         }],
     };
@@ -1838,7 +1844,7 @@ fn build_signed_p2wsh_spend(
         .p2wsh_signature_hash(
             0,
             &redeem,
-            Amount::from_sat(prevout_value),
+            OracleAmount::from_sat(prevout_value),
             EcdsaSighashType::All,
         )
         .unwrap_or_else(|e| panic!("p2wsh sighash: {e}"));
@@ -1860,7 +1866,7 @@ fn build_signed_p2wsh_spend(
         sigs[1].clone(),
         redeem.as_bytes().to_vec(),
     ];
-    tx.input[0].witness = Witness::from_slice(&witness_items);
+    tx.input[0].witness = OracleWitness::from_slice(&witness_items);
     to_native_tx(&tx)
 }
 

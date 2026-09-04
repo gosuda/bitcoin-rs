@@ -199,7 +199,11 @@ pub enum ConsensusError {
 }
 
 /// Maximum valid money supply in satoshis.
-pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
+///
+/// The 21-million-BTC rule is owned by
+/// [`bitcoin_rs_primitives::Amount::MAX_MONEY`]; consensus checks use this
+/// satoshi view of that constant.
+pub const MAX_MONEY: u64 = bitcoin_rs_primitives::Amount::MAX_MONEY.to_sat();
 
 /// Coinbase subsidy at `height`, in satoshis.
 ///

@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use bitcoin_rs_primitives::{Sighash, SighashCache, Tx, TxOut};
+use bitcoin_rs_primitives::{Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness};
 use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use thiserror::Error;
 
@@ -522,8 +522,8 @@ impl Interpreter {
                         index: input_idx,
                         inputs,
                     })?;
-            grafted_input.script_sig = script_sig.to_vec();
-            grafted_input.witness = witness.to_vec();
+            grafted_input.script_sig = Script::from_bytes(script_sig.to_vec());
+            grafted_input.witness = Witness::from_stack(witness.to_vec());
             Cow::Owned(grafted)
         };
 
@@ -955,7 +955,7 @@ fn verify_taproot_scriptpath(
         i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
     );
 
-    let mut checker = TxSignatureChecker::new(spending, input_idx, 0, prevouts);
+    let mut checker = TxSignatureChecker::new(spending, input_idx, Amount::ZERO, prevouts);
     checker.set_annex(annex_bytes);
 
     eval::eval_script(
@@ -990,7 +990,9 @@ fn varint_len(data_len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
 
     use super::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 
@@ -999,8 +1001,8 @@ mod tests {
         let interpreter = Interpreter;
         let tx = unsigned_spend();
         let prevout = TxOut {
-            value: 50_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50_000),
+            script_pubkey: vec![0x51].into(),
         };
 
         assert_eq!(
@@ -1030,15 +1032,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_fffe,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xffff_fffe),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 49_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(49_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 }

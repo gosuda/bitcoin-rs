@@ -128,7 +128,7 @@ pub fn build_block_changes<'a>(
             // Before the unspendable-output skip below: an OP_RETURN output
             // never enters the UTXO set, but the transaction that created it
             // still paid for it, so it counts against the fee.
-            let value = txout.value;
+            let value = txout.value.to_sat();
             let vout =
                 u32::try_from(vout_idx).map_err(|_| BlockChangeError::HeightOverflow(height))?;
             let outpoint = OutPoint::new(txid, vout);
@@ -194,7 +194,7 @@ pub fn build_block_changes<'a>(
                 )?;
                 totals.spent_in = totals
                     .spent_in
-                    .checked_add(spent.txout.value)
+                    .checked_add(spent.txout.value.to_sat())
                     .ok_or(BlockChangeError::BlockValueOverflow)?;
                 undo.restore(UtxoAdd::new(
                     previous_output,
