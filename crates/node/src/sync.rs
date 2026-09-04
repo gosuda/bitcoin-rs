@@ -6466,13 +6466,9 @@ mod tests {
             Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_utxo::stats::CoinStats::default(),
             )),
-            None,
             mempool,
             mempool_gateway,
             mining_generation,
-            Arc::new(RwLock::new(bitcoin_rs_rpc::context::BlockLog::new())),
-            Arc::new(RwLock::new(HashMap::<Txid, Tx>::new())),
-            Arc::new(crate::NoOpZmqPublisher),
             Arc::new(crate::state::ChainEventPublisher::detached(0).0),
         )
     }
@@ -6738,7 +6734,7 @@ mod tests {
         assert_eq!(tip.height, 0);
         assert_eq!(tip.hash, genesis_hash);
         assert_eq!(block_tree.read().height_of_hash(genesis_hash), Some(0));
-        assert_eq!(handles.blocks.read().len(), 1);
+        assert_eq!(handles.effects.block_log().read().len(), 1);
         assert_eq!(handles.utxo.len(), 0);
         Ok(())
     }

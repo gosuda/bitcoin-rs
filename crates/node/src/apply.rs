@@ -1,7 +1,8 @@
 //! Authoritative chainstate mutation: connect, disconnect, and window apply.
 //!
 //! Ownership, admission, and the `Chainstate` / `ChainTransition` boundary
-//! are specified by `ARCH-07` in `docs/contracts/architecture.md`.
+//! are specified by `ARCH-07` in `docs/contracts/architecture.md`. Post-commit
+//! RPC, ZMQ, and `TxIndex` work lives in [`crate::chain_effects`].
 
 mod scratch;
 
@@ -12,10 +13,9 @@ use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, MEDIAN_TIME_PAST_WINDOW, rust_path::UtxoView};
 use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeGuard, Mempool, MempoolGateway};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid,
-    consensus_bytes, varint,
+    Block, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid, consensus_bytes,
+    varint,
 };
-use bitcoin_rs_rpc::context::{BlockLog, BlockRecord};
 use bitcoin_rs_utxo::{
     LiveOutput, LiveOutputMeta, UtxoSet,
     connect::{BlockChangeError, SpentOutputLookup, build_block_changes},
@@ -830,13 +830,11 @@ pub enum BlockProvenance {
     LocalReplay,
 }
 
-/// Whether this connect persists or only dry-runs the pre-write consensus gates.
+/// Connect intent. See `ARCH-07` in `docs/contracts/architecture.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApplyIntent {
-    /// Validate, persist, commit the UTXO set, and publish the new applied tip.
     Commit,
-    /// BIP22 proposal semantics are defined by `docs/contracts/architecture.md`
-    /// (`ARCH-07`).
+    /// See `ARCH-07` in `docs/contracts/architecture.md`.
     Propose,
 }
 
@@ -844,7 +842,7 @@ enum ApplyIntent {
 enum ApplyFinish {
     /// Commit path: the new applied tip, already published.
     Committed(TipSnapshot),
-    /// Propose path: consensus gates passed and nothing was written.
+    /// See `ARCH-07` in `docs/contracts/architecture.md`.
     Proposed,
 }
 
@@ -893,7 +891,6 @@ pub struct Chainstate {
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
-    pub(crate) tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
     /// Read-only pool handle shared with `NodeState`. Apply mutates through
     /// `mempool_gateway`. Tests inspect this cell; production apply does not.
     #[allow(
@@ -907,15 +904,8 @@ pub struct Chainstate {
     /// node code that still needs the pool.
     pub(crate) mempool_gateway: Arc<MempoolGateway>,
     pub(crate) mining_generation: Arc<crate::mining::MiningGenerationSignal>,
-    pub(crate) blocks: Arc<RwLock<BlockLog>>,
-    /// Confirmed-tx cache shared with `NodeState` / RPC. Apply does not
-    /// populate it on the hot path.
-    #[allow(
-        dead_code,
-        reason = "shared with NodeState and tests; apply does not read it"
-    )]
-    pub(crate) transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-    pub(crate) zmq_publisher: Arc<dyn crate::ZmqPublisher>,
+    /// RPC `BlockLog`, ZMQ, and `TxIndex` wake. Not authoritative chainstate.
+    pub(crate) effects: crate::chain_effects::ChainEffects,
     pub(crate) chain_events: Arc<crate::state::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
@@ -1177,13 +1167,6 @@ impl Chainstate {
         }
     }
 
-    /// Notifies the transaction index runtime that the applied tip changed.
-    pub(crate) fn wake_tx_index(&self) {
-        if let Some(runtime) = &self.tx_index_runtime {
-            runtime.wake();
-        }
-    }
-
     /// Admits a transition, connects `block`, and finishes on success.
     ///
     /// Persistence matches [`ChainTransition::connect`].
@@ -1269,12 +1252,11 @@ impl Chainstate {
         result
     }
 
-    /// Dry-runs the apply path's consensus gates without persisting.
+    /// See `ARCH-07` in `docs/contracts/architecture.md`.
     ///
     /// Holds [`Self::lock_transition`] so a concurrent connect cannot move the
-    /// tip under the check. Does not take a mempool chain-change proof: finishing
-    /// that proof would bump the mining generation. BIP22 proposal omits
-    /// proof-of-work; every other pre-write gate is the same function commit runs.
+    /// tip under the check. Does not take a mempool [`ChainChangeProof`]: finishing
+    /// that proof would bump the mining generation.
     pub fn validate_block(&self, block: &Block) -> core::result::Result<(), ApplyError> {
         let _lock = self.lock_transition()?;
         match apply_block_admitted(
@@ -1294,6 +1276,9 @@ impl Chainstate {
 
     /// Builds a chainstate facade for tests and composition that do not go
     /// through `NodeState::open`.
+    ///
+    /// Post-commit consumers default to [`crate::chain_effects::ChainEffects::noop`].
+    /// Attach RPC, ZMQ, or `TxIndex` with [`Self::with_effects`].
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -1303,13 +1288,9 @@ impl Chainstate {
         block_tree: Arc<RwLock<BlockTree>>,
         utxo: Arc<UtxoSet>,
         coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
-        tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
         mempool: Arc<RwLock<Mempool>>,
         mempool_gateway: Arc<MempoolGateway>,
         mining_generation: Arc<crate::mining::MiningGenerationSignal>,
-        blocks: Arc<RwLock<BlockLog>>,
-        transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-        zmq_publisher: Arc<dyn crate::ZmqPublisher>,
         chain_events: Arc<crate::state::ChainEventPublisher>,
     ) -> Self {
         Self {
@@ -1322,12 +1303,9 @@ impl Chainstate {
             utxo,
             coin_stats,
             mempool,
-            tx_index_runtime,
             mempool_gateway,
             mining_generation,
-            blocks,
-            transactions,
-            zmq_publisher,
+            effects: crate::chain_effects::ChainEffects::noop(),
             chain_events,
             block_body_store: None,
             undo_store: Arc::new(InMemoryUndoStore::default()),
@@ -1342,14 +1320,20 @@ impl Chainstate {
         }
     }
 
-    /// Returns `self` with `zmq_publisher` swapped to `publisher`.
+    /// Returns `self` with post-commit consumers swapped to `effects`.
+    #[must_use]
+    pub fn with_effects(mut self, effects: crate::chain_effects::ChainEffects) -> Self {
+        self.effects = effects;
+        self
+    }
+
+    /// Returns `self` with the ZMQ publisher swapped on the post-commit consumers.
     ///
-    /// Useful for tests + integration scenarios that want a custom publisher
-    /// without going through `NodeState::open` (which currently always
-    /// installs `NoOpZmqPublisher`).
+    /// Useful for tests that want a custom publisher without going through
+    /// `NodeState::open`.
     #[must_use]
     pub fn with_zmq_publisher(mut self, publisher: Arc<dyn crate::ZmqPublisher>) -> Self {
-        self.zmq_publisher = publisher;
+        self.effects = self.effects.with_zmq_publisher(publisher);
         self
     }
 }
@@ -1490,10 +1474,8 @@ fn plan_disconnect(
 /// |---|---|
 /// | `utxo`, `applied_tip` | restored here |
 /// | `coin_stats` | restored here in two halves: per-coin fields ride the `UtxoSet` change listener; block-level height and transaction count are explicitly rewound |
-/// | `blocks` | rewound here — pops the cached block record so RPC reflects the parent tip |
-/// | `transactions` | nothing owed: connection never populates it |
-/// | `chain_event_publisher` / `tx_index_runtime` | sequence counter advanced and hints emitted; index workers reconcile asynchronously |
-/// | `zmq_publisher` | publishes `SequenceEvent::Disconnected` after the tip moves |
+/// | `effects` | rewinds the RPC `BlockLog` before publication; wakes `TxIndex` and publishes ZMQ `D` after the tip moves |
+/// | `chain_events` | sequence counter advanced and hints emitted; index workers reconcile asynchronously |
 /// | `mempool` | owned at the branch-switch boundary in `crate::reorg::reconsider_disconnected_transactions`, which re-admits disconnected transactions through `MempoolGateway` |
 /// | `block_tree` | retained deliberately — the header stays valid and known |
 /// | `block_body_store` | retained deliberately — the body is still a real block available for future reorgs or RPC |
@@ -1610,27 +1592,7 @@ pub(crate) fn disconnect_block_admitted(
         })
     })?;
 
-    // RPC serves blocks from this vector, so the disconnected block's record
-    // must go or `getblock` keeps answering for it.
-    //
-    // Absence is legitimate and must never be an error. This is a best-effort
-    // in-process cache, not authoritative state: it starts empty on every boot
-    // while `applied_tip` resumes from a checkpoint at height N, and pruning
-    // removes records from it. Failing a consensus rollback because an optional
-    // cache is empty would refuse the first disconnect after any restart.
-    //
-    // The hash check is what stops the pop from truncating a record that is not
-    // ours. The tail can only be ours or gone, because disconnect runs on the
-    // applied tip and connection pushed that tip's record last.
-    {
-        let mut blocks = handles.blocks.write();
-        if blocks
-            .last()
-            .is_some_and(|record| record.hash == BlockHash::from(block_hash))
-        {
-            blocks.pop();
-        }
-    }
+    handles.effects.before_disconnect(block_hash);
 
     // The per-coin coinstats fields need nothing here: `coin_stats` is the
     // `UtxoSet` change listener, so `undo_block` already drove them in reverse.
@@ -1683,17 +1645,9 @@ pub(crate) fn disconnect_block_admitted(
             }
         }
     });
-    handles.wake_tx_index();
+    handles.effects.after_disconnect(block_hash);
     // The applied tip moved: every template long-poll waiter must observe it.
     handles.mining_generation.publish_generation();
-
-    if handles.zmq_publisher.wants_notifications() {
-        handles
-            .zmq_publisher
-            .publish_sequence(crate::zmq_publisher::SequenceEvent::Disconnected(
-                block_hash,
-            ));
-    }
 
     // The rollback finished in memory, so the marker moves to `RolledBack`.
     // It stays set: a checkpoint has not captured this yet.
@@ -1832,9 +1786,7 @@ pub fn apply_block(
     handles.apply_block(block)
 }
 
-/// Dry-runs the apply path's consensus gates without persisting.
-///
-/// BIP22 proposal mode omits proof-of-work. See [`Chainstate::validate_block`].
+/// See [`Chainstate::validate_block`].
 pub fn validate_block(handles: &Chainstate, block: &Block) -> core::result::Result<(), ApplyError> {
     handles.validate_block(block)
 }
@@ -2618,11 +2570,12 @@ fn apply_committed_block_admitted<'b>(
     }
 }
 
-/// Shared connect body for commit and BIP22 proposal.
+/// Shared connect body for [`ApplyIntent::Commit`] and [`ApplyIntent::Propose`].
 ///
-/// Commit callers hold a [`ChainChangeProof`] via [`apply_committed_block_admitted`].
-/// Proposal holds only [`Chainstate::lock_transition`]: a mempool chain-change
-/// proof would bump generation if finished, and must not be taken for a dry-run.
+/// See `ARCH-07` in `docs/contracts/architecture.md`. Commit callers hold a
+/// [`ChainChangeProof`] via [`apply_committed_block_admitted`]. Proposal holds
+/// only [`Chainstate::lock_transition`] so finishing a mempool proof cannot bump
+/// mining generation.
 ///
 /// Split from [`apply_block_inner`] so a window can take both locks once across
 /// its preparation and all of its ordered commits. Re-entering per block would
@@ -2835,8 +2788,7 @@ fn apply_block_admitted<'b>(
     let bip68_dur = bip68_started.elapsed();
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
-    let wants_rawtx = handles.zmq_publisher.wants_rawtx();
-    let wants_rawblock = handles.zmq_publisher.wants_rawblock();
+    let wants_rawtx = handles.effects.needs_rawtx();
     let (txids, scratch_capacities, same_block_spent, same_block_spent_input_count) =
         tx_plan.into_scratch_parts(view.into_txids());
     let scratch = ApplyScratch::from_prepared_parts(
@@ -2910,9 +2862,7 @@ fn apply_block_admitted<'b>(
     // full bytes. During IBD with pruning+txindex disabled this avoids a
     // full-block serialize on every apply.
     let block_bytes: bytes::Bytes = {
-        let needs_body = handles.block_body_store.is_some()
-            || handles.tx_index_runtime.is_some()
-            || wants_rawblock;
+        let needs_body = handles.block_body_store.is_some() || handles.effects.needs_block_bytes();
         if needs_body {
             // The preserved P2P wire payload is byte-identical to the canonical
             // block serialization: the decoder rejects every non-canonical
@@ -3045,31 +2995,13 @@ fn apply_block_admitted<'b>(
     // cannot fail: the tip snapshot was resolved from the tree before the
     // first write, so the publication tail is infallible.
     let block_record_started = quanta::Instant::now();
-    {
-        let block_record = BlockRecord::from_block(height, block);
-        // The record carries no header. `BlockRecord`'s is filled from the block
-        // tree when a caller resolves one, which is sound only because the
-        // header is already in the tree by the time the record is in the log —
-        // `applied_header_tip` above, through these same handles, is what puts
-        // it there.
-        //
-        // That ordering is the whole of the argument, and until this assertion
-        // nothing enforced it. Reverse the two and every `getblock` /
-        // `getblockheader` answer for a freshly applied block loses its header,
-        // with nothing failing at the point the mistake is made.
-        //
-        // The tree lock is free here: `applied_header_tip` released its write
-        // guard before returning. The check is one hash-table lookup, and it is
-        // compiled out of release builds — so this is a guard for the test
-        // suite, where it runs on every block any node test applies.
-        debug_assert!(
-            handles.block_tree.read().node_by_hash(block_hash).is_some(),
-            "block {} is entering the record log with no block-tree node; \
-             its header would be unrecoverable",
-            block_hash.to_string_be()
-        );
-        handles.blocks.write().push(block_record);
-    }
+    debug_assert!(
+        handles.block_tree.read().node_by_hash(block_hash).is_some(),
+        "block {} is entering the record log with no block-tree node; \
+         its header would be unrecoverable",
+        block_hash.to_string_be()
+    );
+    handles.effects.record_connected(height, block);
     let block_record_dur = block_record_started.elapsed();
     metrics::histogram!("node.apply_block.block_record_seconds")
         .record(block_record_dur.as_secs_f64());
@@ -3129,24 +3061,9 @@ fn apply_block_admitted<'b>(
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
-    if handles.zmq_publisher.wants_notifications() {
-        // Best-effort ZMQ event emission. Failures must not propagate per the
-        // ZmqPublisher contract; the trait's methods return `()`.
-        handles.zmq_publisher.publish_hashblock(tip.hash);
-        if wants_rawblock {
-            handles.zmq_publisher.publish_rawblock(&block_bytes);
-        }
-        if let Some(raw_txs) = scratch.raw_txs() {
-            for (txid, rawtx_bytes) in scratch.txids().iter().zip(raw_txs) {
-                handles.zmq_publisher.publish_hashtx(*txid);
-                handles.zmq_publisher.publish_rawtx(rawtx_bytes);
-            }
-        } else {
-            for txid in scratch.txids() {
-                handles.zmq_publisher.publish_hashtx(*txid);
-            }
-        }
-    }
+    handles
+        .effects
+        .emit_connected(tip.hash, &block_bytes, scratch.txids(), scratch.raw_txs());
     {
         let _publication = begin_applied_publication(handles);
         handles.applied_tip.store(Some(Arc::new(tip.clone())));
@@ -3155,14 +3072,9 @@ fn apply_block_admitted<'b>(
             .record(crate::state::HintKind::Connected, tip.height, tip.hash);
         advance_chain_tx_count(handles, height, tx_count_delta_for(block));
     }
-    handles.wake_tx_index();
+    handles.effects.after_connect(tip.hash);
     // The applied tip moved: every template long-poll waiter must observe it.
     handles.mining_generation.publish_generation();
-    if handles.zmq_publisher.wants_notifications() {
-        handles
-            .zmq_publisher
-            .publish_sequence(crate::zmq_publisher::SequenceEvent::Connected(tip.hash));
-    }
 
     Ok(ApplyFinish::Committed(tip))
 }
@@ -4219,7 +4131,7 @@ mod consensus_rule_tests {
     fn applied_record_carries_block_metadata_without_the_body() {
         let block = block_with_transaction(coinbase_transaction(0x42));
         let block_hash = block.block_hash();
-        let record = BlockRecord::from_block(7, &block);
+        let record = bitcoin_rs_rpc::context::BlockRecord::from_block(7, &block);
 
         assert_eq!(record.hash, block_hash);
         assert_eq!(record.height, 7);
@@ -7430,7 +7342,7 @@ mod consensus_rule_tests {
         )?;
         let applied = apply_block(&handles, &block)?;
         let outputs_before = utxo.len();
-        let block_records_before = handles.blocks.read().len();
+        let block_records_before = handles.effects.block_log().read().len();
         let tree_tip_before = handles
             .block_tree
             .read()
@@ -7479,7 +7391,7 @@ mod consensus_rule_tests {
             "a refused disconnect must leave the applied tip unchanged"
         );
         assert_eq!(
-            handles.blocks.read().len(),
+            handles.effects.block_log().read().len(),
             block_records_before,
             "a refused disconnect must leave the RPC block index unchanged"
         );
@@ -7500,7 +7412,7 @@ mod consensus_rule_tests {
         Ok(())
     }
 
-    /// RPC reads blocks from `handles.blocks`. Leaving the entry there would let
+    /// RPC reads blocks from `handles.effects.block_log()`. Leaving the entry there would let
     /// `getblock` keep answering for a block the chain no longer contains.
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
@@ -7511,7 +7423,7 @@ mod consensus_rule_tests {
         let genesis_hash = Hash256::from(genesis.block_hash());
         let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
-        let records_before = handles.blocks.read().len();
+        let records_before = handles.effects.block_log().read().len();
 
         let block = mined_block_with_prev_hash_and_transactions(
             genesis.block_hash(),
@@ -7521,7 +7433,8 @@ mod consensus_rule_tests {
         apply_block(&handles, &block)?;
         assert!(
             handles
-                .blocks
+                .effects
+                .block_log()
                 .read()
                 .iter()
                 .any(|record| record.hash == block_hash),
@@ -7532,14 +7445,15 @@ mod consensus_rule_tests {
 
         assert!(
             !handles
-                .blocks
+                .effects
+                .block_log()
                 .read()
                 .iter()
                 .any(|record| record.hash == block_hash),
             "RPC must not keep serving a disconnected block"
         );
         assert_eq!(
-            handles.blocks.read().len(),
+            handles.effects.block_log().read().len(),
             records_before,
             "exactly the one record must go"
         );
@@ -7792,10 +7706,11 @@ mod consensus_rule_tests {
 
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
-    fn apply_block_skips_confirmed_transaction_cache() -> Result<(), Box<dyn std::error::Error>> {
+    fn apply_block_does_not_require_a_transaction_index() -> Result<(), Box<dyn std::error::Error>>
+    {
         let genesis = Network::Regtest.genesis_block();
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
-        assert!(handles.tx_index_runtime.is_none());
+        assert!(handles.effects.tx_index().is_none());
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -7805,8 +7720,6 @@ mod consensus_rule_tests {
         )?;
 
         apply_block(&handles, &block)?;
-
-        assert!(handles.transactions.read().is_empty());
         Ok(())
     }
 
@@ -7923,7 +7836,7 @@ mod consensus_rule_tests {
             apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
-        handles.tx_index_runtime = Some(Arc::clone(&runtime));
+        handles.effects.set_tx_index(Some(Arc::clone(&runtime)));
         let index: Arc<FailAfterStartupTxIndex> = Arc::new(FailAfterStartupTxIndex::new()?);
         let writer: Arc<dyn crate::txindex_worker::TxIndexWriter> = index.clone();
         let evidence_dir = tempfile::tempdir()?;
@@ -7974,7 +7887,7 @@ mod consensus_rule_tests {
         let query = crate::txindex_worker::TxIndexQueryEngine::new(
             Arc::clone(&runtime),
             reader,
-            crate::txindex_worker::IndexBlockSource::new(Arc::clone(&handles.blocks)),
+            crate::txindex_worker::IndexBlockSource::new(Arc::clone(handles.effects.block_log())),
             Arc::clone(&handles.block_tree),
             Arc::clone(&handles.applied_tip),
             None,
@@ -8052,7 +7965,7 @@ mod consensus_rule_tests {
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
             .with_zmq_publisher(publisher_for_handles);
         assert!(handles.block_body_store.is_none());
-        assert!(handles.tx_index_runtime.is_none());
+        assert!(handles.effects.tx_index().is_none());
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -8104,7 +8017,7 @@ mod consensus_rule_tests {
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
             .with_zmq_publisher(publisher);
         assert!(handles.block_body_store.is_none());
-        assert!(handles.tx_index_runtime.is_none());
+        assert!(handles.effects.tx_index().is_none());
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -9153,7 +9066,8 @@ mod consensus_rule_tests {
         );
         assert_eq!(
             handles
-                .blocks
+                .effects
+                .block_log()
                 .read()
                 .iter()
                 .map(|record| (record.height, record.hash))
@@ -9424,7 +9338,7 @@ mod consensus_rule_tests {
             .bodies
             .write()
             .remove(&(applied.height, applied.hash));
-        handles.blocks.write().clear();
+        handles.effects.block_log().write().clear();
 
         let header_tip_before = handles.chain_tip.load_full();
         let applied_tip_before = handles.applied_tip.load_full();
@@ -9529,7 +9443,7 @@ mod consensus_rule_tests {
         )?;
         let raw = bytes::Bytes::from(consensus_bytes(&block));
         let applied = apply_block_with_serialized(&handles, &block, raw.clone())?;
-        handles.blocks.write().clear();
+        handles.effects.block_log().write().clear();
 
         let store = Arc::new(BlockingBodyStore {
             body: raw.to_vec(),
@@ -9667,7 +9581,8 @@ mod consensus_rule_tests {
             .tip()
             .map(|tip| (tip.tip_id, tip.height, tip.hash));
         let block_records_before = handles
-            .blocks
+            .effects
+            .block_log()
             .read()
             .iter()
             .map(|record| (record.height, record.hash))
@@ -9726,7 +9641,8 @@ mod consensus_rule_tests {
             .tip()
             .map(|tip| (tip.tip_id, tip.height, tip.hash));
         let block_records_before = handles
-            .blocks
+            .effects
+            .block_log()
             .read()
             .iter()
             .map(|record| (record.height, record.hash))
@@ -10180,13 +10096,9 @@ mod consensus_rule_tests {
             Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_utxo::stats::CoinStats::default(),
             )),
-            None,
             mempool,
             mempool_gateway,
             mining_generation,
-            Arc::new(RwLock::new(BlockLog::new())),
-            Arc::new(RwLock::new(HashMap::<Txid, Tx>::new())),
-            Arc::new(crate::NoOpZmqPublisher),
             Arc::new(crate::state::ChainEventPublisher::detached(0).0),
         )
     }
@@ -10562,7 +10474,7 @@ mod consensus_rule_tests {
         )?;
         apply_block(&handles, &applied)?;
         let applied_hash = applied.block_hash().0;
-        let block_log_len = handles.blocks.read().len();
+        let block_log_len = handles.effects.block_log().read().len();
         let utxo_len = handles.utxo.len();
         handles.undo_store = Arc::new(FailingUndoPersist {
             inner: InMemoryUndoStore::default(),
@@ -10585,7 +10497,7 @@ mod consensus_rule_tests {
         );
         assert_eq!(handles.utxo.len(), utxo_len, "no outputs may commit");
         assert_eq!(
-            handles.blocks.read().len(),
+            handles.effects.block_log().read().len(),
             block_log_len,
             "the block log must not grow past the failed bookkeeping"
         );
@@ -10609,6 +10521,7 @@ fn check_pow_limit_and_continuity_for_seeded_tip(
 
 #[cfg(test)]
 mod contextual_softfork_tests {
+    use bitcoin_rs_primitives::BlockHash;
     use bitcoin_rs_script::VerifyFlags;
 
     use super::*;

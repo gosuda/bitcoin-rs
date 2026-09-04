@@ -1,8 +1,9 @@
 //! ZMQ publisher trait and transport-backed implementation for node notifications.
 //!
 //! Bitcoin Core publishes "hashblock", "hashtx", "rawblock", and "rawtx" events
-//! via ZMQ for client subscribers. `bitcoin-rs` keeps the apply path behind a
-//! small trait so notification failures cannot affect block connection.
+//! via ZMQ for client subscribers. `ChainEffects` consumes committed
+//! transitions through this trait so notification failures cannot affect
+//! block connection.
 
 #[cfg(feature = "zmq")]
 use anyhow::{Context as _, bail};

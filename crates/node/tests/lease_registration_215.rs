@@ -10,9 +10,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
-use bitcoin_rs_node::{BlockSync, Network, NoOpZmqPublisher, apply::Chainstate};
+use bitcoin_rs_node::{BlockSync, Network, apply::Chainstate};
 use bitcoin_rs_p2p::{Message, PeerInfo, PeerLease, PeerTable};
-use bitcoin_rs_rpc::context::BlockLog;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
@@ -36,13 +35,9 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         block_tree,
         Arc::new(utxo),
         coin_stats,
-        None,
         mempool,
         gateway,
         Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
-        Arc::new(RwLock::new(BlockLog::new())),
-        Arc::new(RwLock::new(hashbrown::HashMap::new())),
-        Arc::new(NoOpZmqPublisher),
         Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
     );
     BlockSync::new(

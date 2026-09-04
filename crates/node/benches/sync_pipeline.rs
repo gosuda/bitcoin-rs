@@ -56,19 +56,17 @@ use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
-    BlockSync, Network, NoOpZmqPublisher, NodeConfig, TxIndexRuntime,
+    BlockSync, Network, NodeConfig, TxIndexRuntime,
     apply::Chainstate,
     state::NodeState,
     sync::{SyncBudget, default_sync_budget},
 };
 use bitcoin_rs_p2p::Message;
 use bitcoin_rs_primitives::deserialize;
-use bitcoin_rs_rpc::context::BlockLog;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossbeam_channel::unbounded;
-use hashbrown::HashMap;
 use parking_lot::Mutex as ParkingMutex;
 use parking_lot::{Mutex, RwLock};
 use tempfile::TempDir;
@@ -1121,15 +1119,12 @@ fn apply_handles(
         block_tree,
         utxo,
         coin_stats,
-        tx_index_runtime,
         mempool,
         mempool_gateway,
         Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
-        Arc::new(RwLock::new(BlockLog::new())),
-        Arc::new(RwLock::new(HashMap::<Txid, Tx>::new())),
-        Arc::new(NoOpZmqPublisher),
         Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
     )
+    .with_effects(bitcoin_rs_node::ChainEffects::noop().with_tx_index(tx_index_runtime))
 }
 
 fn tx_index_for_mode(mode: TxIndexMode) -> Option<Arc<TxIndexRuntime>> {
