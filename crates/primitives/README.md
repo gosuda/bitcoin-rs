@@ -15,7 +15,8 @@ type vocabulary.
 `Header` do the same at block level with block-level hashing helpers; `OutPoint` is
 the fixed-layout transaction outpoint; and `Hash256` is the fixed-width 256-bit hash
 type the wrappers hash into. `encode` holds the consensus encoding and hashing helpers
-shared by the primitive wrappers, `varint` the Bitcoin compact-size integer codec,
+shared by the primitive wrappers (`Sink`, `ConsensusEncode`, analytic `consensus_size`),
+`varint` the Bitcoin compact-size integer codec,
 `sighash` the signature-hash mode wrappers (`Sighash`, `SighashError`), and `network`
 the Bitcoin network constants re-exported as `Network`. The `version` module publishes
 `PKG_VERSION` and `USER_AGENT`, the workspace release constants carried in wire and

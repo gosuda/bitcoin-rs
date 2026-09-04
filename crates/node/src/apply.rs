@@ -2391,27 +2391,16 @@ struct PreparedApply<'b> {
     resolved: Arc<ResolvedUtxoView>,
 }
 
-/// Parses a block and resolves the outputs it spends.
-///
-/// `source` is where prevouts come from. Today that is always the committed
-/// UTXO set; a window passes an overlay so a block can see outputs an earlier
-/// block in the same window created.
-///
-/// Runs no consensus rule and mutates nothing, which is what lets a window
-/// prepare several blocks before committing any of them.
-/// A sink that compares what is written to it against `expected`.
-///
-/// Used to check preserved bytes against a block without serialising the block
-/// into a second buffer: nothing is allocated and the first differing byte ends
-/// the walk.
+/// Compares encoded bytes against `expected` without allocating a second buffer.
+/// The first differing byte ends the walk.
 struct ByteEquality<'a> {
     expected: &'a [u8],
     offset: usize,
     equal: bool,
 }
 
-impl std::io::Write for ByteEquality<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl bitcoin_rs_primitives::Sink for ByteEquality<'_> {
+    fn write_all(&mut self, buf: &[u8]) {
         if self.equal {
             match self
                 .expected
@@ -2422,11 +2411,6 @@ impl std::io::Write for ByteEquality<'_> {
             }
         }
         self.offset = self.offset.saturating_add(buf.len());
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 
@@ -2437,11 +2421,7 @@ pub(crate) fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
         offset: 0,
         equal: true,
     };
-    // Encoding to a sink cannot fail; a write error here would be a bug in the
-    // sink above, and treating it as inequality is the safe reading either way.
-    if block.consensus_encode(&mut sink).is_err() {
-        return false;
-    }
+    block.consensus_encode(&mut sink);
     // `offset` accumulated every written byte, so a longer `raw` (trailing
     // bytes) fails here just as a shorter one fails in the sink.
     sink.equal && sink.offset == raw.len()

@@ -28,7 +28,8 @@ pub mod version;
 
 pub use block::Block;
 pub use encode::{
-    ConsensusDecode, ConsensusEncode, DecodeError, consensus_bytes, consensus_len, deserialize,
+    ConsensusDecode, ConsensusEncode, DecodeError, Sink, consensus_bytes, consensus_len,
+    deserialize,
 };
 pub use hash::{Hash256, HashError};
 pub use header::Header;

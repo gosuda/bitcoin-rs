@@ -498,15 +498,14 @@ impl Network {
     /// crate's differential tests.
     #[must_use]
     pub fn genesis_block(self) -> crate::Block {
-        let hex = match self {
-            Self::Mainnet => MAINNET_GENESIS_HEX,
-            Self::Testnet3 => TESTNET3_GENESIS_HEX,
-            Self::Testnet4 => TESTNET4_GENESIS_HEX,
-            Self::Signet => SIGNET_GENESIS_HEX,
-            Self::Regtest => REGTEST_GENESIS_HEX,
+        let bytes: &[u8] = match self {
+            Self::Mainnet => &MAINNET_GENESIS,
+            Self::Testnet3 => &TESTNET3_GENESIS,
+            Self::Testnet4 => &TESTNET4_GENESIS,
+            Self::Signet => &SIGNET_GENESIS,
+            Self::Regtest => &REGTEST_GENESIS,
         };
-        let bytes = decode_compiled_hex(hex);
-        let block = crate::Block::consensus_decode(&bytes)
+        let block = crate::Block::consensus_decode(bytes)
             .unwrap_or_else(|error| panic!("compiled-in genesis must decode: {error}"));
         debug_assert_eq!(
             crate::Hash256::from_le_bytes(block.block_hash().as_bytes()),
@@ -530,25 +529,32 @@ const SIGNET_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000
 /// Bitcoin Core regtest genesis serialization.
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
-/// Decodes a lowercase hex literal; compiled-in constants must be valid.
-fn decode_compiled_hex(hex: &str) -> Vec<u8> {
-    fn nibble(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => unreachable!("compiled-in hex constant is lowercase hex"),
-        }
+const fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => panic!("compiled-in hex constant is hex"),
     }
-    let bytes = hex.as_bytes();
-    assert!(
-        bytes.len().is_multiple_of(2),
-        "compiled-in hex constant has even length"
-    );
-    bytes
-        .chunks_exact(2)
-        .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
-        .collect()
 }
+
+const fn decode_compiled_hex<const N: usize>(hex: &str) -> [u8; N] {
+    let bytes = hex.as_bytes();
+    assert!(bytes.len() == N * 2, "compiled-in hex length matches array");
+    let mut out = [0_u8; N];
+    let mut index = 0;
+    while index < N {
+        out[index] = (hex_nibble(bytes[index * 2]) << 4) | hex_nibble(bytes[index * 2 + 1]);
+        index += 1;
+    }
+    out
+}
+
+const MAINNET_GENESIS: [u8; 285] = decode_compiled_hex(MAINNET_GENESIS_HEX);
+const TESTNET3_GENESIS: [u8; 285] = decode_compiled_hex(TESTNET3_GENESIS_HEX);
+const TESTNET4_GENESIS: [u8; 261] = decode_compiled_hex(TESTNET4_GENESIS_HEX);
+const SIGNET_GENESIS: [u8; 285] = decode_compiled_hex(SIGNET_GENESIS_HEX);
+const REGTEST_GENESIS: [u8; 285] = decode_compiled_hex(REGTEST_GENESIS_HEX);
 
 #[cfg(test)]
 mod tests {

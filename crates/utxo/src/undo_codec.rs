@@ -107,9 +107,7 @@ pub fn encode(batch: &UndoBatch, block_hash: Hash256) -> Vec<u8> {
     out.extend_from_slice(&u32_len(restores.len()).to_le_bytes());
     for add in restores {
         put_outpoint(&mut out, add.outpoint);
-        // Encoding into a Vec is infallible; drop the byte count rather than
-        // carry a Result the caller cannot act on.
-        let _ = add.txout.consensus_encode(&mut out);
+        add.txout.consensus_encode(&mut out);
         out.push(u8::from(add.coinbase));
         out.extend_from_slice(&add.height.to_le_bytes());
     }

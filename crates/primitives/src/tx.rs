@@ -4,7 +4,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DecodeError, OutPoint, Txid, Wtxid,
-    encode::{ConsensusEncode, Sha256Writer, deserialize, encode_tx, finalize_double_sha256},
+    encode::{
+        ConsensusEncode, Sha256Sink, deserialize, encode_tx, finalize_double_sha256, tx_base_size,
+    },
 };
 
 /// A Bitcoin transaction input in native owned form.
@@ -53,9 +55,8 @@ impl Tx {
     #[must_use]
     pub fn txid(&self) -> Txid {
         let mut engine = Sha256::new();
-        let mut writer = Sha256Writer(&mut engine);
-        encode_tx(self, &mut writer, false)
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+        let mut writer = Sha256Sink(&mut engine);
+        encode_tx(self, &mut writer, false);
         Txid(finalize_double_sha256(engine))
     }
 
@@ -63,9 +64,8 @@ impl Tx {
     #[must_use]
     pub fn wtxid(&self) -> Wtxid {
         let mut engine = Sha256::new();
-        let mut writer = Sha256Writer(&mut engine);
-        ConsensusEncode::consensus_encode(self, &mut writer)
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+        let mut writer = Sha256Sink(&mut engine);
+        ConsensusEncode::consensus_encode(self, &mut writer);
         Wtxid(finalize_double_sha256(engine))
     }
 
@@ -77,10 +77,7 @@ impl Tx {
     /// Consensus serialization length without BIP144 witness sections (the txid layout).
     #[must_use]
     pub fn base_size(&self) -> usize {
-        let mut total = 0_usize;
-        let () = encode_tx(self, &mut crate::encode::CountWriter(&mut total), false)
-            .unwrap_or_else(|error| unreachable!("count writer is infallible: {error}"));
-        total
+        tx_base_size(self)
     }
 
     /// Full consensus serialization length, including BIP144 witness sections.

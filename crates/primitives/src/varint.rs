@@ -63,6 +63,20 @@ pub fn decode(buf: &[u8]) -> Result<(u64, usize), VarintError> {
     }
 }
 
+/// Byte length of the canonical compact-size encoding of `value`.
+#[must_use]
+pub const fn encoded_len(value: u64) -> usize {
+    if value <= 0xfc {
+        1
+    } else if value <= 0xffff {
+        3
+    } else if value <= 0xffff_ffff {
+        5
+    } else {
+        9
+    }
+}
+
 /// Encodes a Bitcoin compact-size integer into a stack-backed buffer.
 #[must_use]
 pub fn encode(value: u64) -> ArrayVec<[u8; 9]> {
@@ -134,7 +148,7 @@ fn unreachable_capacity() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{VarintError, decode, encode};
+    use super::{VarintError, decode, encode, encoded_len};
 
     #[test]
     fn boundary_encodings_are_canonical() -> Result<(), VarintError> {
@@ -158,6 +172,7 @@ mod tests {
         for (value, bytes) in cases {
             assert_eq!(encode(*value).as_slice(), *bytes);
             assert_eq!(decode(bytes)?, (*value, bytes.len()));
+            assert_eq!(encoded_len(*value), bytes.len());
         }
         Ok(())
     }
