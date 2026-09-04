@@ -95,9 +95,35 @@ fn default_has_kernel(
     features: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
     package: &str,
 ) -> bool {
+    fn reaches_kernel(
+        features: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+        package: &str,
+        feature: &str,
+        visited: &mut std::collections::BTreeSet<(String, String)>,
+    ) -> bool {
+        if feature == "kernel" {
+            return true;
+        }
+        if !visited.insert((package.to_owned(), feature.to_owned())) {
+            return false;
+        }
+        features
+            .get(package)
+            .and_then(|package_features| package_features.get(feature))
+            .into_iter()
+            .flatten()
+            .any(|implied| {
+                if let Some((dependency, dependency_feature)) = implied.split_once('/') {
+                    reaches_kernel(features, dependency, dependency_feature, visited)
+                } else {
+                    reaches_kernel(features, package, implied, visited)
+                }
+            })
+    }
+
     default_features(features, package)
         .iter()
-        .any(|feature| feature == "kernel")
+        .any(|feature| reaches_kernel(features, package, feature, &mut Default::default()))
 }
 
 #[test]
