@@ -187,29 +187,115 @@ fn wait_until_dead(pid: u32) -> bool {
 #[test]
 fn source_does_not_import_node_internals() {
     let source = include_str!("wallet_facing.rs");
-    let code: String = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    // Executable tokens for WF-01. Reconstruct so this function does not
-    // contain the names it forbids. The contract owns the rule; this list
-    // is the proof, not a second policy.
+    let code = uncommented_except_guard(source);
+    // Executable tokens for WF-01. This function is removed from `code`
+    // before the scan, so the list can name the identifiers it forbids.
+    // `bitcoin_rs` also covers `use bitcoin_rs as …` aliases of the package
+    // lib; the `_node` / `_storage` / … tokens are the other workspace crates.
     for banned in [
-        concat!("bitcoin_rs", "::"),
-        concat!("bitcoin_rs", "_node"),
-        concat!("bitcoin_rs", "_storage"),
-        concat!("bitcoin_rs", "_primitives"),
-        concat!("bitcoin_rs", "_index"),
-        concat!("bitcoin_rs", "_utxo"),
-        concat!("Node", "State"),
-        concat!("Utxo", "Set"),
+        "bitcoin_rs",
+        "bitcoin_rs_node",
+        "bitcoin_rs_storage",
+        "bitcoin_rs_primitives",
+        "bitcoin_rs_index",
+        "bitcoin_rs_utxo",
+        "NodeState",
+        "UtxoSet",
     ] {
         assert!(
             !code.contains(banned),
             "wallet-facing proof must not name {banned} (WF-01)"
         );
     }
+}
+
+/// Drop `//` and `/* */` comments, then drop this file's WF-01 guard
+/// function so its token list is not scored as a consumer import.
+fn uncommented_except_guard(source: &str) -> String {
+    strip_fn(
+        &strip_rust_comments(source),
+        "fn source_does_not_import_node_internals() {",
+    )
+}
+
+fn strip_rust_comments(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' || (chars[i] == 'b' && chars.get(i + 1) == Some(&'"')) {
+            if chars[i] == 'b' {
+                out.push('b');
+                i += 1;
+            }
+            out.push('"');
+            i += 1;
+            while i < chars.len() {
+                let next = chars[i];
+                out.push(next);
+                i += 1;
+                if next == '\\' {
+                    if i < chars.len() {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                } else if next == '"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = i.saturating_add(2);
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn strip_fn(source: &str, signature: &str) -> String {
+    let Some(start) = source.find(signature) else {
+        panic!("wallet-facing proof must contain {signature}");
+    };
+    let Some(rel_brace) = source[start..].find('{') else {
+        panic!("wallet-facing proof guard is missing a body");
+    };
+    let brace = start + rel_brace;
+    let mut depth = 0_u32;
+    let mut end = None;
+    for (offset, next) in source[brace..].char_indices() {
+        match next {
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = Some(brace + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        panic!("wallet-facing proof guard is missing a closing brace");
+    };
+    let mut out = String::with_capacity(source.len() - (end - start));
+    out.push_str(&source[..start]);
+    out.push_str(&source[end..]);
+    out
 }
 
 /// Coinbase output the miner pays, besides the witness commitment.
