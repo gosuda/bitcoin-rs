@@ -284,7 +284,9 @@ pub fn write_message<W: Write + ?Sized>(
 
     // Assemble header and payload into one vectored write so each message is
     // emitted with a single syscall instead of five (avoids header/payload
-    // segment splits and per-part syscall overhead on TcpStream).
+    // segment splits and per-part syscall overhead on TcpStream). The writer
+    // must implement `write_vectored`; the default adapter writes only the
+    // first slice, which is why `CountingStream` forwards it.
     let mut slices: &mut [std::io::IoSlice<'_>] = &mut [
         std::io::IoSlice::new(&header),
         std::io::IoSlice::new(&payload),
