@@ -106,6 +106,23 @@ fn script_index_is_valid_without_core_txindex() -> Result<()> {
 }
 
 #[test]
+fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
+    // IDX-01: `scriptindex=utxo` enables ScriptLive only; history stays off.
+    let layer = UserConfig {
+        indexes: bitcoin_rs_node::IndexOverrides {
+            script_index: Some(ScriptIndexMode::Utxo),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config = resolve(&[&layer])?;
+    assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
+    assert!(config.indexes.script_index.is_enabled());
+    assert!(!config.indexes.script_index.keeps_history());
+    Ok(())
+}
+
+#[test]
 fn zmq_endpoint_groups_keep_topics_and_publisher_default_hwm() -> Result<()> {
     let layer = UserConfig {
         notifications: Some(NotificationConfig {

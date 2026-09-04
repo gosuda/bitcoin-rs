@@ -7510,8 +7510,11 @@ mod consensus_rule_tests {
             Arc::clone(&handles.block_tree),
             Arc::clone(&handles.applied_tip),
             None,
-            None,
-            None,
+            crate::txindex_worker::QueryEngineLive {
+                utxo: None,
+                chain_transition: None,
+                enabled: bitcoin_rs_index::IndexCapabilities::TX_LOOKUP,
+            },
         );
         let query_result =
             bitcoin_rs_rpc::context::TxIndexQuery::transaction(&query, &genesis.txs[0].txid());
