@@ -3166,7 +3166,7 @@ impl<S: KvStore> IndexWriter<S> {
     /// Atomically rolls back one block with the exact scripts of its spent
     /// coins. This is the anchored variant used when `ScriptLive` is selected.
     ///
-    /// The fenced store batch is the commit point (`IDX-06`), same as
+    /// The `write_durable_if` batch is the commit point (`IDX-06`), same as
     /// [`Self::commit_forward`]: `Ok` means row deletes, the selected
     /// watermark, and the cursor disposition are durable together. A crash
     /// before that write leaves the previous tip; a crash after it leaves the
@@ -3174,6 +3174,11 @@ impl<S: KvStore> IndexWriter<S> {
     /// [`IndexError::ResetInProgress`]) mean discard derived state and retry
     /// from the persisted watermark. [`IndexError::Storage`] is not retried by
     /// the index worker; supervision marks it failed (`IDX-07`).
+      ///
+      /// A storage error can have an indeterminate outcome at the storage
+      /// boundary, so this method does not retry it. The supervising worker
+      /// owns restart and reconciliation; callers must reload the persisted
+      /// watermark before retrying after a crash or storage failure.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,
