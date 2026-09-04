@@ -90,7 +90,7 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
 ## Live gaps
 
 - **Cross-crate lifecycle boundary**: Slimming `crates/node` orchestration and shifting domain-owned mechanics to their respective crates is tracked under #217 (open).
-- **Crash/reorg recovery invariants**: Explicit system-level convergence rules across chainstate checkpoints, block data, and secondary indexes are tracked under #209 (open). The recovery-meta sidecar protocol (`crates/node/src/crash_recovery.rs`) and the recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) are proven by G11; full-stack `kill -9` convergence with real block-body re-application is not yet exercised by the gate.
+- **Crash/reorg recovery invariants**: Broader convergence across block data and secondary indexes remains tracked under #209 (open). Chainstate restart itself uses the authenticated checkpoint plus redo-only journal contract in `docs/chainstate-recovery.md`; `crates/node/tests/crash_recovery.rs` exercises process `SIGKILL` boundaries, journal replay, reorg rewind/fallback, and upgrade compatibility. The retired recovery-meta sidecar is neither authoritative nor read. The recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) remains proven by G11.
 
 ## Proven by
 

@@ -2525,9 +2525,12 @@ fn apply_block_admitted<'b>(
     // §2.3 linearization point for the chainstate journal (issue #230): the
     // in-memory UTXO commit above is the commit of record; everything the
     // journal needs to reconstruct this block's semantic delta is still
-    // available here. Emit BEFORE `applied_tip.store` so the durable head can
-    // never lag what the applied-tip publication announces. The emission is
-    // best-effort: a transient journal I/O failure is logged + counted (the
+    // available here. Emit BEFORE `applied_tip.store` so any emission failure
+    // records the append gap before the new tip becomes visible; the next apply
+    // then stops in `prepare_for_apply` before mutating state. Successful
+    // emissions advance the pending frontier, while `flush_to` advances the
+    // durable head on the configured batch cadence. Emission remains
+    // best-effort for the current block: a transient journal I/O failure is
     // §2.3 degraded-mode policy owns persistent failure) and must never fail
     // the block — the journal is a recovery accelerator, not a consensus
     // dependency. No fsync on this path; `flush_to` performs the §2.3
@@ -2580,6 +2583,7 @@ fn apply_block_admitted<'b>(
                 }
             }
             Err(error) => {
+                journal.mark_append_gap(height);
                 metrics::counter!("node.chainstate_journal.append_failures").increment(1);
                 tracing::warn!(
                     height,

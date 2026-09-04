@@ -329,6 +329,9 @@ pub(crate) fn replay_from_journal(
         ));
     }
     let state = replay.finish();
+    if let Err(error) = validate_replayed_head(&state, &head) {
+        return ReplayOutcome::Fallback(error);
+    }
     if state.chain_tx_count == head.chain_tx_count {
         ReplayOutcome::Replayed(Box::new(state))
     } else {
@@ -336,6 +339,20 @@ pub(crate) fn replay_from_journal(
             "chain transaction count does not match head marker".to_owned(),
         ))
     }
+}
+
+fn validate_replayed_head(
+    state: &ReplayedState,
+    head: &HeadMarker,
+) -> Result<(), JournalReplayError> {
+    if state.applied_tip.height != head.height
+        || state.applied_tip.hash.to_le_bytes() != head.block_hash
+    {
+        return Err(JournalReplayError::CommittedRangeInvalid(
+            "replayed tip identity does not match head marker".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Applies ordered records above a restored checkpoint state.
@@ -615,8 +632,9 @@ mod tests {
     use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
     use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd, UtxoSet};
 
-    use super::{JournalRecord, Mutation, replay_records};
+    use super::{JournalRecord, Mutation, replay_records, validate_replayed_head};
     use crate::chainstate_journal::Coin;
+    use crate::chainstate_journal::writer::HeadMarker;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
     type BaseState = (BlockTree, UtxoSet, CoinStats, TipSnapshot, Coin);
@@ -713,6 +731,48 @@ mod tests {
         let node = replayed.tree.node(replayed.applied_tip.tip_id)?;
         assert_eq!(node.hash, replayed.applied_tip.hash);
         assert_eq!(node.chainwork, replayed.applied_tip.chainwork);
+        Ok(())
+    }
+
+    #[test]
+    fn replayed_frontier_must_match_the_durable_head_identity() -> TestResult {
+        let (tree, utxo, coin_stats, base_tip, _) = base_state()?;
+        let next_header = header(BlockHash(base_tip.hash), 2, 2);
+        let next_hash = next_header.compute_hash();
+        let base_hash = base_tip.hash.to_le_bytes();
+        let record = JournalRecord {
+            height: 1,
+            block_hash: next_hash.0.to_le_bytes(),
+            prev_hash: base_tip.hash.to_le_bytes(),
+            block_tx_count: 2,
+            coin_stats_height_delta: 1,
+            raw_header: raw_header(&next_header),
+            mutations: Vec::new(),
+        };
+        let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip, 1)?;
+        let head = HeadMarker {
+            base_generation: 1,
+            base_height: 0,
+            base_hash,
+            base_chain_tx_count: 1,
+            start_gen: 1,
+            start_offset: 0,
+            journal_gen: 1,
+            offset: 1,
+            height: replayed.applied_tip.height,
+            block_hash: replayed.applied_tip.hash.to_le_bytes(),
+            prev_hash: base_hash,
+            chain_tx_count: replayed.chain_tx_count,
+            record_count: 1,
+        };
+
+        validate_replayed_head(&replayed, &head)?;
+        let mut wrong_height = head;
+        wrong_height.height += 1;
+        assert!(validate_replayed_head(&replayed, &wrong_height).is_err());
+        let mut wrong_hash = head;
+        wrong_hash.block_hash[0] ^= 0xff;
+        assert!(validate_replayed_head(&replayed, &wrong_hash).is_err());
         Ok(())
     }
 }

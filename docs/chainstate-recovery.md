@@ -20,7 +20,7 @@ Checkpoint publication is one serialized operation: pause chain transitions, fre
 
 | Observed state | Startup action |
 |---|---|
-| Checkpoint and matching journal head | Stream committed records, verify CRC/contiguity/header identity, and publish the journal tip |
+| Checkpoint and matching journal head | Stream committed records, verify CRC/contiguity/header identity plus the final `(height, hash)` against `head.json`, and publish the journal tip |
 | Checkpoint with no journal | Use the checkpoint and initialize an empty journal |
 | Unreadable journal head, committed-range corruption, base mismatch, or rejected header | Discard that journal generation and use the checkpoint |
 | No complete checkpoint | Start cold and initialize a journal |
@@ -37,7 +37,7 @@ A fork below the checkpoint base cannot be represented as a suffix of that check
 
 ## Degraded mode
 
-Journal append, extraction, or durability errors are logged and counted, but do not roll back an already committed block. Recovery then falls back to the last valid checkpoint. This can increase restart work; it does not authorize replay of an unauthenticated or partial journal.
+Journal append, extraction, or durability errors are logged and counted, but do not roll back an already committed block. If the current block cannot be represented in the journal, the writer records that exact append-gap height, truncates any partial segment tail to the known-good cursor, and refuses the next block before mutation. Restart recovery discards uncommitted tail bytes and resumes from the last authenticated frontier. This can increase restart work; it does not authorize replay of an unauthenticated or partial journal or allow an untracked hole to grow.
 
 Investigate repeated `append_failures`, `storage_flush_seconds` spikes, increasing lag, or fallback counters. Preserve the datadir before manually removing files when corruption evidence is needed.
 
@@ -70,6 +70,7 @@ Prometheus names use the `node.chainstate_journal` prefix:
 | `fallback_total{reason}` | counter | Checkpoint/cold fallback classified by a bounded reason label |
 | `checksum_failures_total` | counter | Head or committed-record checksum rejection |
 | `append_failures` | counter | Journal extraction or append failure after block commit |
+| `append_gap` | gauge | Writer is fail-closed after an untracked append failure (0/1) |
 | `flush_failures` | counter | Idle-timer durability failure |
 | `backpressure_total` | counter | Block applies refused by a journal lag/retention gate |
 | `maintenance_failures` | counter | Journal retention inspection failure in the worker |
@@ -90,8 +91,8 @@ Process-level tests kill child processes after journal, reorg, and publication t
 The opt-in Linux/Docker performance gate is:
 
 ```bash
-cargo test -p bitcoin-rs-node --test chainstate_journal_bench \
-  replay_10k_records_with_bounded_time_and_memory -- --ignored --exact --nocapture
+cargo bench -p bitcoin-rs-node --no-default-features --features fjall \
+  --bench chainstate_journal
 ```
 
 The test enforces 60-second and 256-MiB RSS-delta ceilings and prints its observed values for CI artifacts. Keep machine-specific measurements in CI or pull-request evidence rather than treating one developer host as a permanent performance baseline. This is a bounded regression gate, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.

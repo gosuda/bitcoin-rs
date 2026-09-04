@@ -17,7 +17,8 @@
 //! Recovery: a crash before the boundary leaves "record present, head older"
 //! (a torn tail, ignored); a crash after the boundary leaves a valid head.
 //! A partial append is truncated back to the last known-good cursor and the
-//! whole record is retried — appends are idempotent per height.
+//! writer fails closed before the next block mutation. Restart recovery then
+//! permits the missed height to be applied and journaled again.
 //!
 //! Failure classification: append/boundary failures are never consensus-fatal
 //! (the journal only accelerates recovery); callers see [`JournalWriterError`]
@@ -83,6 +84,8 @@ fn parse_segment_name(name: &str) -> Option<u64> {
 pub(crate) enum JournalWriterFailpoint {
     /// Injected just before the buffered record bytes hit the segment file.
     SegmentAppend,
+    /// Injected after a prefix of a record reaches the segment file.
+    SegmentAppendPartial,
     /// Injected just before the segment file is fsynced at the boundary.
     SegmentSync,
     /// Injected just before `head.json.tmp` is written.
@@ -111,6 +114,10 @@ pub(crate) enum JournalWriterError {
     /// A record was appended whose height does not continue the journal.
     #[error("chainstate journal append out of order: got {got}, expected {expected}")]
     OutOfOrder { got: u32, expected: u32 },
+    /// A live block advanced after its journal append failed. Further applies
+    /// must stop until restart recovery discards the partial tail.
+    #[error("chainstate journal has an untracked append gap at height {height}")]
+    AppendGap { height: u32 },
     /// `head.json` is missing, unreadable, or fails its checksum.
     #[error("chainstate journal head marker is unreadable: {0}")]
     HeadUnreadable(String),
@@ -236,6 +243,18 @@ struct ForkCursor {
     block_hash: [u8; 32],
 }
 
+/// Lightweight metadata for a record already written to the active segment.
+/// The encoded payload has a single in-memory owner during `append`; batching
+/// retains only the cursor fields needed to publish a later durability head.
+#[derive(Clone, Copy)]
+struct PendingRecordMeta {
+    end_offset: u64,
+    height: u32,
+    block_hash: [u8; 32],
+    prev_hash: [u8; 32],
+    block_tx_count: u64,
+}
+
 /// Lifecycle of the single-owner writer (plan §2.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WriterState {
@@ -260,10 +279,8 @@ pub(crate) struct JournalWriter<S: KvStore> {
     base_hash: [u8; 32],
     /// Cumulative transaction count through the checkpoint base.
     base_chain_tx_count: u64,
-    /// Buffered record bytes not yet covered by a durability boundary.
-    pending: Vec<u8>,
-    /// Records buffered since the last boundary (for `flush_to` accounting).
-    pending_records: Vec<JournalRecord>,
+    /// Lightweight cursors for records written since the last boundary.
+    pending_records: Vec<PendingRecordMeta>,
     /// Byte offset of the end of the active segment file.
     segment_offset: u64,
     /// Generation of the active segment.
@@ -298,6 +315,10 @@ pub(crate) struct JournalWriter<S: KvStore> {
     durable_block_hash: [u8; 32],
     /// Hash of its predecessor.
     durable_prev_hash: [u8; 32],
+    /// First live height whose append did not complete. Once set, the writer
+    /// fails closed before any later block mutation; restart recovery truncates
+    /// the active segment to the durable cursor and creates a fresh writer.
+    append_gap_height: Option<u32>,
     state: WriterState,
     failpoint: Option<JournalWriterFailpoint>,
 }
@@ -369,7 +390,6 @@ impl<S: KvStore> JournalWriter<S> {
             base_height: head.base_height,
             base_hash: head.base_hash,
             base_chain_tx_count: head.base_chain_tx_count,
-            pending: Vec::new(),
             pending_records: Vec::new(),
             segment_offset: head.offset,
             segment_gen: head.journal_gen,
@@ -394,10 +414,12 @@ impl<S: KvStore> JournalWriter<S> {
             max_lag_blocks: DEFAULT_MAX_LAG_BLOCKS,
             max_lag_seconds: Duration::from_secs(DEFAULT_MAX_LAG_SECONDS),
             last_boundary: Instant::now(),
+            append_gap_height: None,
             state: WriterState::Open,
             failpoint: None,
         };
         writer.recover_active_segment()?;
+        metrics::gauge!("node.chainstate_journal.append_gap").set(0.0);
         Ok(writer)
     }
 
@@ -468,7 +490,7 @@ impl<S: KvStore> JournalWriter<S> {
     /// Applies time/lag/retention maintenance before the next block mutates
     /// chainstate. A failed durability retry stops that apply before any write.
     pub(crate) fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
-        self.ensure_open()?;
+        self.ensure_appendable()?;
         self.flush_due()?;
         let lag = self
             .next_height
@@ -514,6 +536,20 @@ impl<S: KvStore> JournalWriter<S> {
         }
     }
 
+    fn ensure_appendable(&self) -> Result<(), JournalWriterError> {
+        self.ensure_open()?;
+        if let Some(height) = self.append_gap_height {
+            return Err(JournalWriterError::AppendGap { height });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_append_gap(&mut self, height: u32) {
+        self.append_gap_height.get_or_insert(height);
+        metrics::gauge!("node.chainstate_journal.append_gap").set(1.0);
+        self.record_lag_metrics();
+    }
+
     /// Durable head marker, for the boot path and metrics.
     pub(crate) fn head(&self) -> HeadMarker {
         HeadMarker {
@@ -537,51 +573,32 @@ impl<S: KvStore> JournalWriter<S> {
     /// height equals the last appended height is rejected as a duplicate via
     /// the strict ordering rule (callers replay whole records after a crash).
     pub(crate) fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError> {
-        if self.state != WriterState::Open {
-            return Err(JournalWriterError::NotOpen {
-                state: match self.state {
-                    WriterState::Frozen => "frozen",
-                    WriterState::Compacted => "compacted",
-                    WriterState::Open => unreachable!("guarded above"),
-                },
-            });
-        }
+        self.ensure_appendable()?;
         if record.height != self.next_height {
             return Err(JournalWriterError::OutOfOrder {
                 got: record.height,
                 expected: self.next_height,
             });
         }
-        self.maybe_rotate()?;
-        self.fail_segment_append()?;
 
-        let name = segment_name(self.segment_gen);
-        let mut options = cap_std::fs::OpenOptions::new();
-        options.append(true).create(true);
-        let mut file = self.dir.open_with(&name, &options)?;
+        let next_frontier = self.next_append_frontier(record);
+        let (next_height, next_chain_tx_count) = match next_frontier {
+            Ok(frontier) => frontier,
+            Err(error) => return self.fail_append(record.height, error),
+        };
         let bytes = encode_record(record);
-        file.write_all(&bytes)?;
-        self.segment_offset = self
-            .segment_offset
-            .checked_add(u64::try_from(bytes.len()).map_err(|_| {
-                JournalWriterError::CursorMismatch("record byte length overflow".to_owned())
-            })?)
-            .ok_or_else(|| {
-                JournalWriterError::CursorMismatch("segment offset overflow".to_owned())
-            })?;
+        let next_offset = self.append_record_bytes(record.height, &bytes)?;
 
-        self.pending.extend_from_slice(&bytes);
-        self.pending_records.push(record.clone());
-        self.next_height = self
-            .next_height
-            .checked_add(1)
-            .ok_or_else(|| JournalWriterError::CursorMismatch("height overflow".to_owned()))?;
-        self.chain_tx_count = self
-            .chain_tx_count
-            .checked_add(record.block_tx_count)
-            .ok_or_else(|| {
-                JournalWriterError::CursorMismatch("chain_tx_count overflow".to_owned())
-            })?;
+        self.segment_offset = next_offset;
+        self.pending_records.push(PendingRecordMeta {
+            end_offset: next_offset,
+            height: record.height,
+            block_hash: record.block_hash,
+            prev_hash: record.prev_hash,
+            block_tx_count: record.block_tx_count,
+        });
+        self.next_height = next_height;
+        self.chain_tx_count = next_chain_tx_count;
 
         if self.pending_records.len()
             >= usize::try_from(self.batch_blocks).map_err(|_| {
@@ -593,6 +610,94 @@ impl<S: KvStore> JournalWriter<S> {
         }
         self.record_lag_metrics();
         Ok(())
+    }
+
+    fn next_append_frontier(
+        &self,
+        record: &JournalRecord,
+    ) -> Result<(u32, u64), JournalWriterError> {
+        let next_height = self
+            .next_height
+            .checked_add(1)
+            .ok_or_else(|| JournalWriterError::CursorMismatch("height overflow".to_owned()))?;
+        let next_chain_tx_count = self
+            .chain_tx_count
+            .checked_add(record.block_tx_count)
+            .ok_or_else(|| {
+                JournalWriterError::CursorMismatch("chain_tx_count overflow".to_owned())
+            })?;
+        Ok((next_height, next_chain_tx_count))
+    }
+
+    fn append_record_bytes(
+        &mut self,
+        height: u32,
+        bytes: &[u8],
+    ) -> Result<u64, JournalWriterError> {
+        if let Err(error) = self.maybe_rotate() {
+            return self.fail_append(height, error);
+        }
+        if let Err(error) = self.fail_segment_append() {
+            return self.fail_append(height, error);
+        }
+
+        let bytes_len = match u64::try_from(bytes.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                return self.fail_append(
+                    height,
+                    JournalWriterError::CursorMismatch("record byte length overflow".to_owned()),
+                );
+            }
+        };
+        let known_good_offset = self.segment_offset;
+        let Some(next_offset) = known_good_offset.checked_add(bytes_len) else {
+            return self.fail_append(
+                height,
+                JournalWriterError::CursorMismatch("segment offset overflow".to_owned()),
+            );
+        };
+        let name = segment_name(self.segment_gen);
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.append(true).create(true);
+        let mut file = match self.dir.open_with(&name, &options) {
+            Ok(file) => file,
+            Err(error) => return self.fail_append(height, error.into()),
+        };
+        let write_result = if self.failpoint == Some(JournalWriterFailpoint::SegmentAppendPartial) {
+            let prefix_len = (bytes.len() / 2).max(1);
+            file.write_all(&bytes[..prefix_len]).and_then(|()| {
+                Err(std::io::Error::other(
+                    "injected chainstate journal partial append failure",
+                ))
+            })
+        } else {
+            file.write_all(bytes)
+        };
+        if let Err(append_error) = write_result {
+            let rollback_result = file
+                .set_len(known_good_offset)
+                .and_then(|()| file.sync_all());
+            if let Err(rollback_error) = rollback_result {
+                return self.fail_append(
+                    height,
+                    JournalWriterError::CursorMismatch(format!(
+                        "append at height {height} failed ({append_error}); partial-tail rollback failed: {rollback_error}"
+                    )),
+                );
+            }
+            return self.fail_append(height, append_error.into());
+        }
+        Ok(next_offset)
+    }
+
+    fn fail_append<T>(
+        &mut self,
+        height: u32,
+        error: JournalWriterError,
+    ) -> Result<T, JournalWriterError> {
+        self.mark_append_gap(height);
+        Err(error)
     }
 
     /// §2.3 durability boundary, in one serialized step:
@@ -656,12 +761,8 @@ impl<S: KvStore> JournalWriter<S> {
         if self.pending_records.is_empty() || target == 0 {
             return Ok(());
         }
-        let last = &self.pending_records[target - 1];
-        let prefix_len = u64::try_from(self.pending_len_for(target))
-            .map_err(|_| JournalWriterError::CursorMismatch("record bytes overflow".to_owned()))?;
-        let target_offset = self.durable.offset.checked_add(prefix_len).ok_or_else(|| {
-            JournalWriterError::CursorMismatch("segment offset overflow".to_owned())
-        })?;
+        let last = self.pending_records[target - 1];
+        let target_offset = last.end_offset;
         let target_chain_tx_count = self.pending_records[..target].iter().try_fold(
             self.durable_chain_tx_count,
             |count, record| {
@@ -720,11 +821,6 @@ impl<S: KvStore> JournalWriter<S> {
         self.durable_chain_tx_count = target_chain_tx_count;
         self.record_count += u64::try_from(target)
             .map_err(|_| JournalWriterError::CursorMismatch("record count overflow".to_owned()))?;
-        self.pending.drain(
-            ..usize::try_from(prefix_len).map_err(|_| {
-                JournalWriterError::CursorMismatch("record bytes overflow".to_owned())
-            })?,
-        );
         self.pending_records.drain(..target);
         self.last_boundary = Instant::now();
         self.record_lag_metrics();
@@ -732,7 +828,9 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     fn record_lag_metrics(&self) {
-        let latest_height = self.next_height.saturating_sub(1);
+        let latest_height = self
+            .append_gap_height
+            .unwrap_or_else(|| self.next_height.saturating_sub(1));
         let lag = latest_height.saturating_sub(self.durable.height);
         metrics::gauge!("node.chainstate_journal.lag_blocks").set(f64::from(lag));
         metrics::gauge!("node.chainstate_journal.head_height").set(f64::from(self.durable.height));
@@ -758,18 +856,6 @@ impl<S: KvStore> JournalWriter<S> {
         })
     }
 
-    /// Byte length of the first `target` buffered records.
-    fn pending_len_for(&self, target: usize) -> usize {
-        self.pending_records
-            .iter()
-            .take(target)
-            .map(|record| {
-                let encoded = encode_record(record);
-                encoded.len()
-            })
-            .sum()
-    }
-
     /// Durably moves the journal frontier to a canonical fork point and
     /// invalidates every old-branch record above it.
     pub(crate) fn rewind_to(
@@ -779,9 +865,7 @@ impl<S: KvStore> JournalWriter<S> {
         fork_prev_hash: [u8; 32],
         chain_tx_count: u64,
     ) -> Result<(), JournalWriterError> {
-        if self.state != WriterState::Open {
-            return Err(JournalWriterError::NotOpen { state: "not open" });
-        }
+        self.ensure_appendable()?;
         if fork_height < self.base_height {
             self.invalidate_generation()?;
             return Err(JournalWriterError::ForkBelowBase {
@@ -853,7 +937,6 @@ impl<S: KvStore> JournalWriter<S> {
         self.next_height = fork_height
             .checked_add(1)
             .ok_or_else(|| JournalWriterError::CursorMismatch("fork height overflow".to_owned()))?;
-        self.pending.clear();
         self.pending_records.clear();
         self.last_boundary = Instant::now();
         Ok(())
@@ -960,14 +1043,7 @@ impl<S: KvStore> JournalWriter<S> {
     /// last buffered record; publish the final head. Called by the publication
     /// primitive with admission already closed.
     pub(crate) fn freeze(&mut self) -> Result<(), JournalWriterError> {
-        if self.state != WriterState::Open {
-            return Err(JournalWriterError::NotOpen {
-                state: match self.state {
-                    WriterState::Frozen | WriterState::Compacted => "already frozen",
-                    WriterState::Open => unreachable!("guarded above"),
-                },
-            });
-        }
+        self.ensure_appendable()?;
         self.state = WriterState::Frozen;
         match self.advance_durability() {
             Ok(()) => Ok(()),
@@ -1049,7 +1125,6 @@ impl<S: KvStore> JournalWriter<S> {
         self.next_height = tip_height.checked_add(1).ok_or_else(|| {
             JournalWriterError::CursorMismatch("checkpoint height overflow".to_owned())
         })?;
-        self.pending.clear();
         self.pending_records.clear();
         self.state = WriterState::Compacted;
 
@@ -1503,6 +1578,53 @@ mod tests {
     }
 
     #[test]
+    fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("append-gap", store)?;
+        writer.inject_failpoint(JournalWriterFailpoint::SegmentAppend);
+
+        assert!(writer.append(&sample_record(1)).is_err());
+        writer.failpoint = None;
+
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::AppendGap { height: 1 })
+        ));
+        assert!(matches!(
+            writer.append(&sample_record(2)),
+            Err(JournalWriterError::AppendGap { height: 1 })
+        ));
+        assert_eq!(writer.head().height, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn partial_append_rolls_back_tail_and_restart_can_retry() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let dir;
+        {
+            let mut writer = open_fresh("partial-append-gap", Arc::clone(&store))?;
+            writer.inject_failpoint(JournalWriterFailpoint::SegmentAppendPartial);
+
+            assert!(writer.append(&sample_record(1)).is_err());
+            let segment = writer.dir.open(segment_name(writer.segment_gen))?;
+            assert_eq!(segment.metadata()?.len(), writer.segment_offset);
+            assert_eq!(writer.segment_offset, writer.head().offset);
+            assert!(matches!(
+                writer.prepare_for_apply(),
+                Err(JournalWriterError::AppendGap { height: 1 })
+            ));
+            dir = writer.dir.try_clone()?;
+        }
+
+        let mut reopened = JournalWriter::open(dir, store)?;
+        reopened.append(&sample_record(1))?;
+        reopened.flush_to(1)?;
+        assert_eq!(reopened.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
     fn rotation_keeps_cursor_invariants() -> TestResult {
         let store = Arc::new(CountingStore::new());
         let mut writer = open_fresh("rotation", Arc::clone(&store))?;
@@ -1528,6 +1650,7 @@ mod tests {
     fn failpoints_fire_documented_errors() -> TestResult {
         for boundary in [
             JournalWriterFailpoint::SegmentAppend,
+            JournalWriterFailpoint::SegmentAppendPartial,
             JournalWriterFailpoint::StorageFlush,
             JournalWriterFailpoint::SegmentSync,
             JournalWriterFailpoint::HeadTempWrite,
@@ -1538,10 +1661,14 @@ mod tests {
             let store = Arc::new(CountingStore::new());
             let mut writer = open_fresh("failpoints", Arc::clone(&store))?;
             writer.inject_failpoint(boundary);
-            // Segment append fails immediately; durability failures fire only
+            // Append failpoints fire immediately; durability failures fire only
             // when the explicit batch boundary is advanced.
             let append_result = writer.append(&sample_record(1));
-            let result = if boundary == JournalWriterFailpoint::SegmentAppend {
+            let result = if matches!(
+                boundary,
+                JournalWriterFailpoint::SegmentAppend
+                    | JournalWriterFailpoint::SegmentAppendPartial
+            ) {
                 append_result
             } else {
                 append_result?;

@@ -24,10 +24,15 @@ pub(crate) trait JournalEmit: Send + Sync {
 
     /// Buffers one record; batched durability applies (`blocks`/`seconds`).
     ///
-    /// Errors are transient journal-I/O classifications (plan Task 4): the
-    /// apply path logs + counts them and keeps applying; the §2.3 degraded
-    /// mode owns persistent failure.
+    /// The current apply records an append error, but the writer then enters a
+    /// fail-closed append-gap state. `prepare_for_apply` refuses the next block
+    /// before mutation, so a transient I/O failure cannot grow an untracked
+    /// hole between live chainstate and the journal frontier.
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError>;
+
+    /// Records that the live apply could not be represented as a journal
+    /// record. The next pre-apply gate then fails closed at this height.
+    fn mark_append_gap(&mut self, height: u32);
 
     /// Enforces the §2.3 boundary for everything buffered: storage flush,
     /// segment fsync, atomic `head.json` publish — in that order.
@@ -73,6 +78,10 @@ impl<S: KvStore> JournalEmit for JournalWriter<S> {
 
     fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError> {
         JournalWriter::append(self, record)
+    }
+
+    fn mark_append_gap(&mut self, height: u32) {
+        JournalWriter::mark_append_gap(self, height);
     }
 
     fn flush_through(&mut self, height: u32) -> Result<(), JournalWriterError> {

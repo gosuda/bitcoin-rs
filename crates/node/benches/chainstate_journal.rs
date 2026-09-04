@@ -1,4 +1,4 @@
-//! Opt-in 10,000-record journal replay performance and memory gate.
+//! Explicit 10,000-record journal replay performance and memory gate.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -29,8 +29,14 @@ struct ProbeResult {
     tip_hash: String,
 }
 
-#[test]
-#[ignore = "10k record performance gate; run explicitly before release"]
+fn main() -> Result<()> {
+    if std::env::var_os(PROBE_ENV).is_some() {
+        replay_10k_subprocess_probe()
+    } else {
+        replay_10k_records_with_bounded_time_and_memory()
+    }
+}
+
 fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join("node");
@@ -50,12 +56,6 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     drop(state);
 
     let status = Command::new(std::env::current_exe()?)
-        .args([
-            "--ignored",
-            "--exact",
-            "replay_10k_subprocess_probe",
-            "--nocapture",
-        ])
         .env(PROBE_ENV, "1")
         .env(DATA_DIR_ENV, &data_dir)
         .env(RESULT_ENV, &result_path)
@@ -85,12 +85,7 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     Ok(())
 }
 
-#[test]
-#[ignore = "spawned explicitly by replay_10k_records_with_bounded_time_and_memory"]
 fn replay_10k_subprocess_probe() -> Result<()> {
-    if std::env::var_os(PROBE_ENV).is_none() {
-        return Ok(());
-    }
     let data_dir = PathBuf::from(std::env::var(DATA_DIR_ENV)?);
     let result_path = PathBuf::from(std::env::var(RESULT_ENV)?);
     let rss_before_kib = peak_rss_kib()?;
