@@ -7,3 +7,6 @@
 /// Minimum number of blocks kept below the active tip for Core-compatible
 /// reorg safety.
 pub const CORE_REORG_SAFETY_MARGIN: u32 = 288;
+
+/// Maximum script size admitted to the authoritative UTXO set, in bytes.
+pub const MAX_SCRIPT_SIZE: usize = 10_000;

@@ -1054,13 +1054,10 @@ enum LiveOp {
 
 /// Upper bound on a `script_pubkey` admitted into the authoritative UTXO set.
 ///
-/// Mirrors `bitcoin_rs_consensus::MAX_SCRIPT_SIZE` as applied by the node's
-/// `build_utxo_changes`: outputs with `is_op_return()` or a script longer than
-/// this never enter the UTXO set, so they must never enter the Live view
-/// either -- #225 requires the spendability predicate to match authoritative
-/// UTXO admission exactly. Duplicated as a literal because this crate does not
-/// depend on the consensus crate; the node crate asserts the two are equal.
-pub const MAX_LIVE_SCRIPT_SIZE: usize = 10_000;
+/// Outputs with `is_op_return()` or a script longer than this never enter the
+/// UTXO set, so they must never enter the Live view either.
+pub const MAX_LIVE_SCRIPT_SIZE: usize =
+    bitcoin_rs_primitives::chain_constants::MAX_SCRIPT_SIZE;
 
 /// Hard limits for one prepared forward write.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

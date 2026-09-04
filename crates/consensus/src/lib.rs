@@ -15,7 +15,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Maximum consensus script size in bytes.
-pub const MAX_SCRIPT_SIZE: usize = 10_000;
+pub const MAX_SCRIPT_SIZE: usize = bitcoin_rs_primitives::chain_constants::MAX_SCRIPT_SIZE;
 
 /// BIP112 sequence-lock checks.
 pub mod bip112;
