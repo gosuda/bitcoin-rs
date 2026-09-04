@@ -595,6 +595,7 @@ fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-13: submitblock fills an omitted coinbase witness.
 #[test]
 fn submit_block_fills_omitted_coinbase_witness() -> anyhow::Result<()> {
     let state = open_regtest()?;
