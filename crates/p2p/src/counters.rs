@@ -5,7 +5,7 @@
 //! operator reads to tell a peer that is feeding the node from one that is
 //! merely connected to it.
 
-use std::io::{Read, Result as IoResult, Write};
+use std::io::{IoSlice, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -173,6 +173,16 @@ impl<S: Write> Write for CountingStream<S> {
         Ok(written)
     }
 
+    /// Production `write_message` emits the 24-byte header and payload as
+    /// one `write_vectored` call. The default `Write` adapter would write
+    /// only the first slice, splitting that into two syscalls and counting
+    /// only the header if the caller treated the return as a full write.
+    fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+        let written = self.inner.write_vectored(buffers)?;
+        self.counters.record_sent(written);
+        Ok(written)
+    }
+
     fn flush(&mut self) -> IoResult<()> {
         self.inner.flush()
     }
@@ -298,5 +308,118 @@ mod tests {
         assert_eq!(counters.bytes_sent(), 0);
         assert_eq!(counters.last_send(), 0);
         assert_eq!(counters.last_recv(), 0);
+    }
+
+    /// Default `Write::write_vectored` writes only the first non-empty slice.
+    /// Production `write_message` emits header + payload through that method,
+    /// so the wrapper must forward both slices and count every byte taken.
+    #[test]
+    fn a_vectored_write_counts_every_slice_the_socket_took() {
+        struct VectoredWriter;
+        impl Write for VectoredWriter {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_vectored must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(VectoredWriter, Arc::clone(&counters));
+        let written = stream
+            .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 10);
+        assert_eq!(counters.bytes_sent(), 10);
+    }
+
+    /// A short vectored write still counts only the bytes the inner writer
+    /// accepted, matching the scalar `write` contract.
+    #[test]
+    fn a_short_vectored_write_counts_what_the_socket_took() {
+        struct ShortVectoredWriter;
+        impl Write for ShortVectoredWriter {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_vectored must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                Ok(buffers
+                    .iter()
+                    .map(|buffer| buffer.len())
+                    .sum::<usize>()
+                    .min(3))
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(ShortVectoredWriter, Arc::clone(&counters));
+        let written = stream
+            .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 3);
+        assert_eq!(counters.bytes_sent(), 3);
+    }
+
+    /// `write_message` must reach the inner `write_vectored` through this
+    /// wrapper. Falling back to `write` would split header and payload into
+    /// two syscalls and under-count if the first slice were taken as the whole
+    /// message.
+    #[test]
+    fn write_message_through_counting_stream_stays_vectored() {
+        struct FailOnUnvectored {
+            calls: Arc<AtomicU64>,
+        }
+        impl Write for FailOnUnvectored {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_message must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut stream = CountingStream::new(
+            FailOnUnvectored {
+                calls: Arc::clone(&calls),
+            },
+            Arc::clone(&counters),
+        );
+        let written = crate::wire::write_message(
+            &mut stream,
+            bitcoin::p2p::Magic::BITCOIN,
+            &crate::wire::Message::Ping(42),
+        )
+        .unwrap_or_else(|error| panic!("write_message failed: {error}"));
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "header and payload in one writev"
+        );
+        assert_eq!(
+            counters.bytes_sent(),
+            u64::try_from(written).unwrap_or(u64::MAX)
+        );
     }
 }
