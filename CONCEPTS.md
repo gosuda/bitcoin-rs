@@ -326,6 +326,14 @@ The modern product corpus: mainnet genesis through height 709,635, the first hei
 ### Matched-harness comparison
 A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians. See `docs/solutions/performance/allocator-parity-changes-wall-not-cpu.md`.
 
+### Offline full-validation comparator
+The processing-bound cross-node oracle: Bitcoin Core 31.1 and bitcoin-rs both
+build chainstate from one hash-pinned Core-framed archive under full
+validation, matched index posture, and production durability. Wall time is
+process start through durable clean exit. The harness lives in
+`tools/benchmark-campaign/offline_full_validation.py`; see
+`docs/benchmarks/offline-full-validation.md`.
+
 ### CPU-seconds as a first-class metric
 A throughput change is measured against CPU time as well as wall time, because an idle many-core host lets wall-clock tuning spend cores for free. Sampling `utime+stime` from `/proc/<pid>/stat` while polling height is enough; per-thread attribution comes from `/proc/<pid>/task/*/stat`.
 
