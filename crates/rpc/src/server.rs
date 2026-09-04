@@ -155,6 +155,8 @@ fn serve_connection(
 
         if request.method == "GET" {
             let (path, query) = split_path_query(&request.path);
+            // `/rest/*` is Core REST. `/api/*` is Esplora. Unprefixed GET
+            // 404s so JSON-RPC keeps the listener root.
             let response = if path.starts_with("/rest/") {
                 crate::rest::route(handler.context(), path, query, rest_enabled)
             } else {

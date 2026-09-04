@@ -8,10 +8,10 @@ on the same node listener. It starts no Electrum or electrs service.
 The stock Mempool frontend proxies `/api/v1` to the Mempool backend and every
 other `/api/` path to electrs. This example mounts `nginx-mempool.conf` to keep
 `/api/v1` on the Mempool backend and send every other `/api/` path to
-bitcoin-rs on `:8332/api/`. The node owns that prefix as a closed public
-Esplora namespace, so the explorer port does not become a JSON-RPC,
-`/internal/*`, or `/block-template` front, and new Esplora routes do not need
-an nginx allowlist.
+bitcoin-rs on `:8332/api/`. The node serves Esplora only at that prefix, so
+JSON-RPC keeps the listener root. `/api/internal` and `/api/block-template`
+stay on the node for the Mempool backend (`ESPLORA_REST_API_URL=http://node:8332/api`);
+nginx 404s them on the public explorer port.
 
 The Mempool project has a frontend, backend, and MariaDB dependency, so this
 stack contains those three services plus `bitcoin-rs`. The frontend is the only
