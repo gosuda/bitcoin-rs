@@ -161,7 +161,11 @@ Then, in a second terminal, run the wallet while the node is still running:
 
 ```sh
 btcw balance -n regtest -u http://127.0.0.1:18443
+btcw balance -n regtest -u http://127.0.0.1:18443/api
 ```
+
+`/api` and `/api/v1` are aliases of the Esplora surface at the listener
+root, so a mempool.space-style base URL works without a reverse proxy.
 
 The wallet stays in that repository. This node only serves the public
 surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).

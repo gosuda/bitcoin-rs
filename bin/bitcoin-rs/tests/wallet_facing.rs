@@ -4,7 +4,10 @@
 //! This is the executable proof of `docs/contracts/wallet-facing.md`. It
 //! does not import `NodeState`, `UtxoSet`, or index types. The named
 //! out-of-repo consumer is `gosuda/bitcoin-wallet` (`btcw -u`); this test
-//! issues the same operations that wallet issues against any Esplora URL.
+//! issues the BDK/esplora-client operations that wallet uses: tip, block
+//! height, headers, scripthash history, fee estimates, and `POST /tx`,
+//! including the `/api` and `/api/v1` prefixes wallets copy from
+//! mempool.space.
 
 #![allow(missing_docs)]
 
@@ -24,6 +27,7 @@ use bitcoin_rs_primitives::{
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 
 const RPC_USER: &str = "bitcoin-rs";
 const RPC_PASSWORD: &str = "bitcoin-rs";
@@ -79,8 +83,25 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         genesis_hash.trim(),
         "tip must have moved past genesis"
     );
+    assert_eq!(
+        client.esplora_text("/api/v1/block-height/0")?.trim(),
+        genesis_hash.trim(),
+        "BDK/mempool.space /api/v1 prefix must alias /block-height"
+    );
+    assert_eq!(
+        client.esplora_text("/api/blocks/tip/hash")?.trim(),
+        tip_hash.trim(),
+        "/api prefix must alias /blocks/tip/hash"
+    );
 
-    let fees = client.esplora_json("/fee-estimates")?;
+    let header = client.esplora_text(&format!("/block/{}/header", tip_hash.trim()))?;
+    assert_eq!(
+        header.trim().len(),
+        160,
+        "GET /block/{{hash}}/header must be an 80-byte header as hex: {header}"
+    );
+
+    let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
         fees.get("6").and_then(Value::as_f64).is_some(),
         "fee estimates must include the 6-block target wallets use: {fees}"
@@ -105,9 +126,32 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         "address history must list the funding transaction: {history}"
     );
 
+    // BDK talks scripthash, not address. Empty scripthash history is a silent
+    // wallet-sync failure: balance stays 0 and no HTTP error is returned.
+    let scripthash = p2wpkh_scripthash();
+    let script_utxos = client.esplora_json(&format!("/scripthash/{scripthash}/utxo"))?;
+    assert!(
+        script_utxos
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "P2WPKH coinbase must be visible on /scripthash/{{h}}/utxo: {script_utxos}"
+    );
+    let script_history = client.esplora_json(&format!("/scripthash/{scripthash}/txs"))?;
+    assert!(
+        script_history
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "scripthash history must list the funding transaction: {script_history}"
+    );
+
     let spend_hex = spend_first_anyone_can_spend(&client)?;
-    let broadcast = client.esplora_post("/tx", spend_hex.as_bytes())?;
-    assert_eq!(broadcast.status, 200, "POST /tx: {}", broadcast.text());
+    let broadcast = client.esplora_post("/api/v1/tx", spend_hex.as_bytes())?;
+    assert_eq!(
+        broadcast.status,
+        200,
+        "POST /api/v1/tx: {}",
+        broadcast.text()
+    );
     let txid = broadcast.text();
     assert_eq!(
         txid.trim().len(),
@@ -124,7 +168,17 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         Some(false),
         "broadcast transaction must be visible as unconfirmed: {mempool_tx}"
     );
+    let tx_status = client.esplora_json(&format!("/tx/{}/status", txid.trim()))?;
+    assert_eq!(
+        tx_status.get("confirmed").and_then(Value::as_bool),
+        Some(false),
+        "GET /tx/{{id}}/status is the confirmation record BDK syncs: {tx_status}"
+    );
     Ok(())
+}
+
+fn p2wpkh_scripthash() -> String {
+    hex_encode(Sha256::digest(P2WPKH_SCRIPT).as_slice())
 }
 
 /// Coinbase output the miner pays, besides the witness commitment.
