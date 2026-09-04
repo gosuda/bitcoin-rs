@@ -38,7 +38,35 @@ pub struct Command {
 ///
 /// Adding a command updates this table, the decoder, [`crate::Message`], and
 /// the policy §5 table in the same change-set.
-pub const COMMANDS: &[Command] = &[
+#[macro_export]
+macro_rules! command_inventory {
+    ($callback:ident) => {
+        $callback! {
+            ("version", Negotiated), ("verack", Negotiated), ("addr", Ignored),
+            ("inv", Served), ("getdata", Served), ("notfound", Ignored),
+            ("getblocks", Ignored), ("getheaders", Served), ("mempool", Ignored),
+            ("tx", Sink), ("block", Sink), ("headers", Sink),
+            ("sendheaders", Negotiated), ("getaddr", Ignored), ("ping", Served),
+            ("pong", Ignored), ("merkleblock", Ignored), ("filterload", Ignored),
+            ("filteradd", Ignored), ("filterclear", Ignored), ("getcfilters", Ignored),
+            ("cfilter", Ignored), ("getcfheaders", Ignored), ("cfheaders", Ignored),
+            ("getcfcheckpt", Ignored), ("cfcheckpt", Ignored), ("sendcmpct", Ignored),
+            ("cmpctblock", Ignored), ("getblocktxn", Ignored), ("blocktxn", Ignored),
+            ("reject", Legacy), ("alert", Legacy), ("feefilter", Ignored),
+            ("wtxidrelay", Negotiated), ("addrv2", Ignored), ("sendaddrv2", Negotiated),
+        }
+    };
+}
+
+macro_rules! make_commands {
+    ($(($name:literal, $status:ident)),* $(,)?) => {
+        pub const COMMANDS: &[Command] = &[
+            $(Command { name: $name, status: CommandStatus::$status }),*
+        ];
+    };
+}
+command_inventory!(make_commands);
+/*
     Command {
         name: "version",
         status: CommandStatus::Negotiated,
@@ -183,7 +211,8 @@ pub const COMMANDS: &[Command] = &[
         name: "sendaddrv2",
         status: CommandStatus::Negotiated,
     },
-];
+]; 
+*/
 
 /// Bitcoin Core 31.1 commands this node does not type.
 ///
