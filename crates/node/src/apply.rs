@@ -871,6 +871,8 @@ pub struct Chainstate {
     /// Kept beside `applied_tip` and moved with it, so the pair is always
     /// consistent: a count that lagged its tip would be worse than no count.
     pub(crate) chain_tx_count: Arc<AtomicU64>,
+    /// Atomically published read model for the applied tip and transaction count.
+    pub(crate) applied_snapshot: Arc<ArcSwapOption<ChainstateSnapshot>>,
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
@@ -939,6 +941,13 @@ pub struct ChainTransition<'a> {
 
 impl<'a> ChainTransition<'a> {
     /// Connects `block` as the next applied tip.
+    ///
+    /// The tip/count publication follows the durable block and UTXO writes;
+    /// a successful return is committed in memory, while a crash before
+    /// [`Self::finish`] is handled by the journal/checkpoint recovery path.
+    /// Storage or consensus failures are returned to the caller; the caller
+    /// owns retrying operational failures and must not retry fatal consensus
+    /// failures with the same block.
     pub fn connect(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
         apply_block_admitted(
             self.chainstate,
@@ -1074,6 +1083,9 @@ impl Chainstate {
     /// Header tip, applied tip, and chain-tx count as one copied snapshot.
     #[must_use]
     pub fn snapshot(&self) -> ChainstateSnapshot {
+        if let Some(snapshot) = self.applied_snapshot.load_full() {
+            return (*snapshot).clone();
+        }
         ChainstateSnapshot {
             header: self.chain_tip.load_full().as_deref().cloned(),
             applied: self.applied_tip.load_full().as_deref().cloned(),
@@ -1210,6 +1222,7 @@ impl Chainstate {
             chain_tip,
             applied_tip,
             chain_tx_count: Arc::new(AtomicU64::new(0)),
+            applied_snapshot: Arc::new(ArcSwapOption::new(None)),
             block_tree,
             utxo,
             coin_stats,
@@ -1547,6 +1560,11 @@ pub(crate) fn disconnect_block_admitted(
         parent_tip.hash,
     );
     rewind_chain_tx_count(handles, tx_count_delta);
+    handles.applied_snapshot.store(Some(Arc::new(ChainstateSnapshot {
+        header: handles.chain_tip.load_full().as_deref().cloned(),
+        applied: Some(parent_tip.clone()),
+        chain_tx_count: handles.chain_tx_count.load(Ordering::Relaxed),
+    })));
     let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
         let rewind_result = {
             let mut journal = journal.lock();
@@ -2965,6 +2983,11 @@ fn apply_block_admitted<'b>(
         .chain_events
         .record(crate::state::HintKind::Connected, tip.height, tip.hash);
     advance_chain_tx_count(handles, height, tx_count_delta_for(block));
+    handles.applied_snapshot.store(Some(Arc::new(ChainstateSnapshot {
+        header: handles.chain_tip.load_full().as_deref().cloned(),
+        applied: Some(tip.clone()),
+        chain_tx_count: handles.chain_tx_count.load(Ordering::Relaxed),
+    })));
     handles.wake_tx_index();
     // The applied tip moved: every template long-poll waiter must observe it.
     handles.mining_generation.publish_generation();
@@ -10623,6 +10646,7 @@ mod chain_generation_tests {
         (handles, genesis, genesis_hash)
     }
 
+    // ARCH-07 executable proof: snapshots are facade-owned, lock-free reads.
     #[test]
     fn snapshot_reads_applied_tip_without_taking_a_transition() {
         let (handles, _genesis, genesis_hash) = setup_regtest_with_genesis();
@@ -10644,6 +10668,7 @@ mod chain_generation_tests {
         );
     }
 
+    // ARCH-07 executable proof: mutation is admitted only through Chainstate.
     #[test]
     fn chain_transition_connect_and_finish_publish_the_new_tip() {
         let (handles, genesis, genesis_hash) = setup_regtest_with_genesis();
