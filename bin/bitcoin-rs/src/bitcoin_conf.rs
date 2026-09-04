@@ -120,7 +120,7 @@ mod tests {
 ",
             Network::Regtest,
         );
-        let config = resolve(&[&layer]).expect("layer resolves");
+        let config = resolve(&[&layer]).unwrap_or_else(|error| panic!("layer resolves: {error}"));
         assert_eq!(config.storage.prune_target_mb, 900);
     }
 }
