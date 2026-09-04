@@ -1,12 +1,13 @@
 //! Deterministic Bitcoin Core 31.1 P2P compatibility contract tests.
 //!
-//! Every assertion here pins a row of the message table in
-//! `docs/policies/p2p-compatibility.md`: the version/verack handshake shape,
+//! Pins the inventory in [`bitcoin_rs_p2p::COMMANDS`] against the policy
+//! table, rust-bitcoin's v1 envelope, and the decoder: handshake fields,
 //! per-network magic and service bits, getheaders/headers exchange bounds,
 //! inv/getdata relay round-trips, the reject-or-ignore policy for malformed
 //! and unsupported messages, and the peer-visible effect of a chain switch
 //! (reorg) and restart at the [`ChainQuery`] seam the node implements.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::Cursor;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -15,12 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bitcoin::consensus::encode as bitcoin_encode;
 use bitcoin::hashes::Hash as _;
-use bitcoin::p2p::message::CommandString;
+use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
-use bitcoin_rs_p2p::Message;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound,
     dispatch_inbound_with_chain,
@@ -32,7 +33,10 @@ use bitcoin_rs_p2p::wire::{
     MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
     write_message,
 };
-use bitcoin_rs_p2p::{BannedSubnet, InboundBlock, InboundHeaders, Peer, PeerState, PeerTable};
+use bitcoin_rs_p2p::{
+    BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, InboundBlock, InboundHeaders, Message,
+    PINNED_CORE_VERSION, Peer, PeerState, PeerTable,
+};
 use bitcoin_rs_primitives::{
     Block, BlockHash as NativeBlockHash, Hash256, Header, consensus_bytes,
 };
@@ -318,6 +322,18 @@ fn checksum(payload: &[u8]) -> [u8; 4] {
     digest
 }
 
+fn command_field(name: &str) -> Result<[u8; 12], Box<dyn Error>> {
+    if name.len() > 12 {
+        return Err(format!("command {name} exceeds the 12-byte v1 field").into());
+    }
+    let mut field = [0u8; 12];
+    field
+        .get_mut(..name.len())
+        .ok_or("command field")?
+        .copy_from_slice(name.as_bytes());
+    Ok(field)
+}
+
 /// Asserts an outcome is the typed protocol error, returning it for inspection.
 fn expect_protocol_error<T: std::fmt::Debug>(
     outcome: Result<T, PeerError>,
@@ -327,6 +343,185 @@ fn expect_protocol_error<T: std::fmt::Debug>(
         Err(error) => Ok(error),
         Ok(value) => Err(format!("{why}: unexpectedly succeeded with {value:?}").into()),
     }
+}
+
+/// Command names listed in policy §5. Combined rows (`addr` / `addrv2`) split
+/// on `/`; only the first table cell is read, so body backticks are ignored.
+fn policy_message_commands(policy: &str) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let section = policy
+        .split("## 5. Message Surface")
+        .nth(1)
+        .and_then(|rest| rest.split("## 6.").next())
+        .ok_or("policy is missing §5 Message Surface")?;
+    let mut names = BTreeSet::new();
+    for line in section.lines() {
+        let Some(rest) = line.strip_prefix("| `") else {
+            continue;
+        };
+        let Some(cell) = rest.split('|').next() else {
+            continue;
+        };
+        for piece in cell.split('/') {
+            let name = piece.trim().trim_matches('`').trim();
+            if name.is_empty() {
+                continue;
+            }
+            if !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            {
+                return Err(format!("policy §5 cell is not a command name: {name:?}").into());
+            }
+            names.insert(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Command literals in `decode_payload`'s typed match arms, up to the `_` arm.
+fn decoder_match_commands(wire_src: &str) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let start = wire_src
+        .find("fn decode_payload(command: &str, payload: &[u8])")
+        .ok_or("decode_payload missing")?;
+    let body = wire_src
+        .get(start..)
+        .ok_or("decode_payload slice")?
+        .split("let message = match command {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n        _ =>").next())
+        .ok_or("decode_payload match missing")?;
+    let mut names = BTreeSet::new();
+    for line in body.lines() {
+        let Some(rest) = line.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        let Some((name, after)) = rest.split_once('"') else {
+            continue;
+        };
+        if !after.trim_start().starts_with("=>") {
+            continue;
+        }
+        names.insert(name.to_owned());
+    }
+    if names.is_empty() {
+        return Err("no decoder arms parsed".into());
+    }
+    Ok(names)
+}
+
+fn rust_bitcoin_frame(payload: NetworkMessage) -> Vec<u8> {
+    bitcoin_encode::serialize(&RawNetworkMessage::new(Magic::REGTEST, payload))
+}
+
+fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut buffer = Vec::new();
+    write_message(&mut buffer, Magic::REGTEST, message)?;
+    Ok(buffer)
+}
+
+// ---------------------------------------------------------------------------
+// Inventory owner: code table, policy table, decoder, rust-bitcoin envelope
+// ---------------------------------------------------------------------------
+
+#[test]
+fn command_inventory_matches_the_policy_table() -> Result<(), Box<dyn Error>> {
+    const POLICY: &str = include_str!("../../../docs/policies/p2p-compatibility.md");
+    assert!(
+        POLICY.contains(&format!("**{PINNED_CORE_VERSION}**")),
+        "policy must pin {PINNED_CORE_VERSION}"
+    );
+
+    let from_code: BTreeSet<&str> = COMMANDS.iter().map(|entry| entry.name).collect();
+    let from_policy = policy_message_commands(POLICY)?;
+    let from_policy: BTreeSet<&str> = from_policy.iter().map(String::as_str).collect();
+    assert_eq!(
+        from_code, from_policy,
+        "COMMANDS is the owner; the policy §5 table is a checked projection"
+    );
+    Ok(())
+}
+
+#[test]
+fn decoder_match_arms_equal_the_command_inventory() -> Result<(), Box<dyn Error>> {
+    const WIRE: &str = include_str!("../src/wire.rs");
+    let from_code: BTreeSet<&str> = COMMANDS.iter().map(|entry| entry.name).collect();
+    let from_decoder = decoder_match_commands(WIRE)?;
+    let from_decoder: BTreeSet<&str> = from_decoder.iter().map(String::as_str).collect();
+    assert_eq!(
+        from_code, from_decoder,
+        "every decode_payload arm must be in COMMANDS, and every COMMANDS row must have an arm"
+    );
+    Ok(())
+}
+
+#[test]
+fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), Box<dyn Error>> {
+    let magic = Magic::REGTEST;
+    for spec in COMMANDS {
+        let frame = raw_frame(magic, &command_field(spec.name)?, &[]);
+        match read_message(&mut Cursor::new(frame), magic) {
+            Ok((Message::Unknown { command, .. }, _)) => {
+                return Err(format!(
+                    "{} is in COMMANDS but decoded as Unknown ({command})",
+                    spec.name
+                )
+                .into());
+            }
+            Ok(_)
+            | Err(
+                PeerError::Encode(_)
+                | PeerError::Protocol(_)
+                | PeerError::NativeDecode(_)
+                | PeerError::Varint(_),
+            ) => {}
+            Err(error) => {
+                return Err(format!("{}: unexpected decode error {error}", spec.name).into());
+            }
+        }
+    }
+
+    for name in CORE_UNTYPED_COMMANDS {
+        let frame = raw_frame(magic, &command_field(name)?, &[0u8; 8]);
+        let (decoded, _) = read_message(&mut Cursor::new(frame), magic)?;
+        let Message::Unknown { command, .. } = decoded else {
+            return Err(format!("{name} must decode as Unknown").into());
+        };
+        assert_eq!(command.to_string(), *name);
+    }
+    Ok(())
+}
+
+#[test]
+fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result<(), Box<dyn Error>>
+{
+    let version = version_message(0xdead_beef, 777);
+    let inv = vec![Inventory::Transaction(Txid::from_byte_array([9u8; 32]))];
+    let cases = [
+        (Message::Ping(42), NetworkMessage::Ping(42)),
+        (Message::Pong(42), NetworkMessage::Pong(42)),
+        (Message::Verack, NetworkMessage::Verack),
+        (
+            Message::Version(version.clone()),
+            NetworkMessage::Version(version),
+        ),
+        (Message::WtxidRelay, NetworkMessage::WtxidRelay),
+        (Message::SendAddrV2, NetworkMessage::SendAddrV2),
+        (Message::SendHeaders, NetworkMessage::SendHeaders),
+        (Message::Inv(inv.clone()), NetworkMessage::Inv(inv.clone())),
+        (Message::GetData(inv.clone()), NetworkMessage::GetData(inv)),
+        (Message::MemPool, NetworkMessage::MemPool),
+        (Message::GetAddr, NetworkMessage::GetAddr),
+        (Message::FeeFilter(1_000), NetworkMessage::FeeFilter(1_000)),
+    ];
+    for (ours, theirs) in cases {
+        assert_eq!(
+            our_frame(&ours)?,
+            rust_bitcoin_frame(theirs),
+            "v1 frame for {}",
+            ours.command()
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
