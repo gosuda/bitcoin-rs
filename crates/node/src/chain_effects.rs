@@ -2,7 +2,7 @@
 //!
 //! Authoritative apply publishes the applied tip and a [`ChainEventPublisher`]
 //! hint. This type owns the work that must not be able to fail a transition:
-//! RPC [`BlockLog`], ZMQ projections, and TxIndex wake.
+//! RPC [`BlockLog`], ZMQ projections, and `TxIndex` wake.
 //!
 //! Issue #77 owns the durable event journal and cursor contract. This module
 //! establishes dependency direction for #217 without a second event contract:
@@ -44,7 +44,7 @@ impl ChainEffects {
         }
     }
 
-    /// Empty RPC log, no-op ZMQ, no TxIndex. Test and planner handles use this.
+    /// Empty RPC log, no-op ZMQ, no `TxIndex`. Test and planner handles use this.
     #[must_use]
     pub fn noop() -> Self {
         Self::new(
@@ -61,7 +61,7 @@ impl ChainEffects {
         self
     }
 
-    /// Returns `self` with the TxIndex wake handle swapped.
+    /// Returns `self` with the `TxIndex` wake handle swapped.
     #[must_use]
     pub fn with_tx_index(mut self, tx_index: Option<Arc<TxIndexRuntime>>) -> Self {
         self.tx_index = tx_index;
@@ -114,7 +114,7 @@ impl ChainEffects {
         }
     }
 
-    /// TxIndex wake and sequence `C`. Runs after `applied_tip` publication.
+    /// `TxIndex` wake and sequence `C`. Runs after `applied_tip` publication.
     pub fn after_connect(&self, hash: Hash256) {
         self.wake_tx_index();
         if self.zmq.wants_notifications() {
@@ -137,7 +137,7 @@ impl ChainEffects {
         }
     }
 
-    /// TxIndex wake and sequence `D`. Runs after `applied_tip` publication.
+    /// `TxIndex` wake and sequence `D`. Runs after `applied_tip` publication.
     pub fn after_disconnect(&self, hash: Hash256) {
         self.wake_tx_index();
         if self.zmq.wants_notifications() {
@@ -157,13 +157,13 @@ impl ChainEffects {
         &self.blocks
     }
 
-    /// TxIndex runtime, when one is wired.
+    /// `TxIndex` runtime, when one is wired.
     #[must_use]
     pub fn tx_index(&self) -> Option<&Arc<TxIndexRuntime>> {
         self.tx_index.as_ref()
     }
 
-    /// Replaces the TxIndex wake handle in place for tests that attach a worker
+    /// Replaces the `TxIndex` wake handle in place for tests that attach a worker
     /// after constructing the facade.
     pub fn set_tx_index(&mut self, tx_index: Option<Arc<TxIndexRuntime>>) {
         self.tx_index = tx_index;

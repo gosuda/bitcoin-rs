@@ -2,7 +2,7 @@
 //!
 //! Ownership, admission, and the `Chainstate` / `ChainTransition` boundary
 //! are specified by `ARCH-07` in `docs/contracts/architecture.md`. Post-commit
-//! RPC, ZMQ, and TxIndex work lives in [`crate::chain_effects`].
+//! RPC, ZMQ, and `TxIndex` work lives in [`crate::chain_effects`].
 
 mod scratch;
 
@@ -888,7 +888,7 @@ pub struct Chainstate {
     /// node code that still needs the pool.
     pub(crate) mempool_gateway: Arc<MempoolGateway>,
     pub(crate) mining_generation: Arc<crate::mining::MiningGenerationSignal>,
-    /// RPC `BlockLog`, ZMQ, and TxIndex wake. Not authoritative chainstate.
+    /// RPC `BlockLog`, ZMQ, and `TxIndex` wake. Not authoritative chainstate.
     pub(crate) effects: crate::chain_effects::ChainEffects,
     pub(crate) chain_events: Arc<crate::state::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
@@ -1250,7 +1250,7 @@ impl Chainstate {
     /// through `NodeState::open`.
     ///
     /// Post-commit consumers default to [`crate::chain_effects::ChainEffects::noop`].
-    /// Attach RPC, ZMQ, or TxIndex with [`Self::with_effects`].
+    /// Attach RPC, ZMQ, or `TxIndex` with [`Self::with_effects`].
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -1446,7 +1446,7 @@ fn plan_disconnect(
 /// |---|---|
 /// | `utxo`, `applied_tip` | restored here |
 /// | `coin_stats` | restored here in two halves: per-coin fields ride the `UtxoSet` change listener; block-level height and transaction count are explicitly rewound |
-/// | `effects` | rewinds the RPC `BlockLog` before publication; wakes TxIndex and publishes ZMQ `D` after the tip moves |
+/// | `effects` | rewinds the RPC `BlockLog` before publication; wakes `TxIndex` and publishes ZMQ `D` after the tip moves |
 /// | `chain_events` | sequence counter advanced and hints emitted; index workers reconcile asynchronously |
 /// | `mempool` | owned at the branch-switch boundary in `crate::reorg::reconsider_disconnected_transactions`, which re-admits disconnected transactions through `MempoolGateway` |
 /// | `block_tree` | retained deliberately — the header stays valid and known |
