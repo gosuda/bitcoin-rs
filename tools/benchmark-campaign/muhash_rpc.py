@@ -61,6 +61,12 @@ _TCP_ESTABLISHED = 0x01
 _TCP_LISTEN = 0x0A
 _LOOPBACK_V4 = "0100007F"
 _LOOPBACK_V6 = "00000000000000000000000001000000"
+# Linux memfd seals. Some Python 3.13 builds omit these fcntl names.
+_F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1024 + 9)
+_F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+_F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+_F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
+_F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
 OPERATOR_TRUST_BOUNDARY = (
     "operator-controlled observation; not remote binary authentication"
 )
@@ -1908,7 +1914,8 @@ def _copy_pinned_file(
     that already exists. Hash mismatch and any I/O failure after create
     unlink the destination and raise ``ContractError``; those failures
     are not retried here. ``run_campaign`` owns the workspace and does
-    not retry a failed copy. Spawn re-hashes the copy before exec.
+    not retry a failed copy. Spawn re-hashes the copy into a sealed memfd
+    before exec.
     """
     created = False
     try:
@@ -1971,8 +1978,13 @@ def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
     )
 
 
-def _open_verified_inode(path: Path, expected: str, cap: int, field: str) -> int:
-    """Return a sealed, non-CLOEXEC fd containing the verified file bytes."""
+def _open_verified_snapshot(path: Path, expected: str, cap: int, field: str) -> int:
+    """Return a sealed, non-CLOEXEC memfd of the verified bytes.
+
+    The child inherits this descriptor and opens ``/proc/self/fd/<n>``. A
+    later rename or in-place write of the workspace pathname cannot change
+    those bytes. The caller closes the fd after ``Popen``.
+    """
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
         source = os.open(path, flags)
@@ -2004,26 +2016,27 @@ def _open_verified_inode(path: Path, expected: str, cap: int, field: str) -> int
         if hashlib.sha256(raw).hexdigest() != expected:
             raise ContractError(f"{field} changed after its verified copy")
         try:
-            snapshot = os.memfd_create(f"verified-{field}", os.MFD_ALLOW_SEALING)
+            snapshot = os.memfd_create(
+                f"verified-{field.replace(' ', '-')}", os.MFD_ALLOW_SEALING
+            )
             written = 0
             while written < len(raw):
                 written += os.write(snapshot, raw[written:])
+            os.lseek(snapshot, 0, os.SEEK_SET)
+            os.fchmod(snapshot, 0o500)
             fcntl.fcntl(
                 snapshot,
-                fcntl.F_ADD_SEALS,
-                fcntl.F_SEAL_WRITE
-                | fcntl.F_SEAL_SHRINK
-                | fcntl.F_SEAL_GROW
-                | fcntl.F_SEAL_SEAL,
+                _F_ADD_SEALS,
+                _F_SEAL_WRITE | _F_SEAL_SHRINK | _F_SEAL_GROW | _F_SEAL_SEAL,
             )
         except (AttributeError, OSError) as error:
             raise ContractError(f"cannot create sealed {field}") from error
-        return snapshot
-    except Exception:
+        owned = snapshot
+        snapshot = -1
+        return owned
+    finally:
         if snapshot >= 0:
             os.close(snapshot)
-        raise
-    finally:
         os.close(source)
 
 
@@ -2083,11 +2096,11 @@ class _ArmProcess:
         if self._process is not None:
             raise ContractError(f"{self.spec.kind} process is already running")
         self.spec.datadir.mkdir(parents=True, exist_ok=True)
-        binary_fd = _open_verified_inode(
+        binary_fd = _open_verified_snapshot(
             self.binary, self.spec.binary_sha256, MAX_BINARY_BYTES, "arm binary copy"
         )
         try:
-            config_fd = _open_verified_inode(
+            config_fd = _open_verified_snapshot(
                 self.config,
                 self.spec.config.sha256,
                 MAX_RECEIPT_BYTES,
