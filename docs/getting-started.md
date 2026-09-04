@@ -143,8 +143,8 @@ and descriptor helpers remain for external signers.
 
 ## External wallet
 
-Point any Esplora client at the same listener. `--scriptindex` must be on,
-or address and scripthash routes return HTTP 503.
+Point any Esplora client at `/api` on the JSON-RPC listener.
+`--scriptindex` must be on, or address and scripthash routes return HTTP 503.
 
 [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw`) is the
 named external consumer:
@@ -162,13 +162,12 @@ Start the node in one terminal:
 Then, in a second terminal, run the wallet while the node is still running:
 
 ```sh
-btcw balance -n regtest -u http://127.0.0.1:18443
 btcw balance -n regtest -u http://127.0.0.1:18443/api
 ```
 
-`/api` and `/api/v1` are closed public aliases of the Esplora surface at the
-listener root (not `/internal` or `/block-template`), so a mempool.space-style
-base URL works without a reverse proxy.
+`/api` is the Esplora surface (the mempool.space electrs prefix). JSON-RPC
+keeps the listener root. `/api/v1` is Mempool's API on the explorer port,
+not an Esplora alias on this node.
 
 The wallet stays in that repository. This node only serves the public
 surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).

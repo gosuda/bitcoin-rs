@@ -260,7 +260,7 @@ declare_rows! {
     "/rest/deploymentinfo", SurfaceKind::Rest, Status::Implemented, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/blockhashbyheight/", SurfaceKind::Rest, Status::Implemented, "", CORE_VERSION, "", "0.4.0", None;
     "/rest/spenttxouts/", SurfaceKind::Rest, Status::Deviation, "", CORE_VERSION, "Always answers undo-unavailable: undo data is not persisted (crates/rpc/src/rest.rs).", "0.4.0", None;
-    "esplora/*", SurfaceKind::Rest, Status::Extension, "", CORE_VERSION, "Esplora-compatible indexer HTTP surface, a separate non-Core contract (crates/rpc/src/esplora.rs, docs/rest-interface.md).", "0.4.0", None;
+    "esplora/*", SurfaceKind::Rest, Status::Extension, "", CORE_VERSION, "Esplora-compatible indexer HTTP surface at /api on the JSON-RPC listener (crates/rpc/src/esplora.rs, docs/contracts/wallet-facing.md).", "0.4.0", None;
 
     // -- ZMQ topics --------------------------------------------------
     "hashblock", SurfaceKind::Zmq, Status::Implemented, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubhashblock endpoint.", "0.4.0", None;
