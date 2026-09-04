@@ -495,6 +495,7 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
+/// CONTRACT: IDX-06 — electrs-shaped occupancy after one atomic forward commit.
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std::error::Error>> {
     let cases = [
