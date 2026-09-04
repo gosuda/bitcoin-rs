@@ -876,6 +876,7 @@ mod tests {
         );
     }
 
+    // CONTRACT: API-20
     #[test]
     fn dust_relay_fee_changes_the_boundary() {
         let mut tx = standard_tx(1);
