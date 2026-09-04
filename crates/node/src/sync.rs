@@ -49,9 +49,8 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
 ///
-/// Owns the production [`DownloadWindow`]. Session identity stays on the
-/// shared [`PeerTable`]; this orchestrator calls identity-checked table
-/// methods and does not schedule through `P2pService::select_download_peers`.
+/// Production download-window ownership: see
+/// `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
     followers: crate::chain_effects::ChainFollowers,

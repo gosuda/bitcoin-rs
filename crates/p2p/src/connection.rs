@@ -447,15 +447,6 @@ impl PeerLifecycle {
         self.table.lease_source(source)
     }
 
-    /// Selects and disconnects a ready address while excluding same-address
-    /// replacement registration from the selection through the removal.
-    pub(crate) fn disconnect_selected_ready(
-        &self,
-        select: impl FnOnce() -> Option<SocketAddr>,
-    ) -> Option<(SocketAddr, PeerSource)> {
-        self.table.disconnect_selected_ready(select)
-    }
-
     /// Sends a message only while `source` remains the current connection.
     ///
     /// The source check and lease lookup share one read-side critical section,
@@ -486,12 +477,6 @@ impl PeerLifecycle {
     #[must_use]
     pub fn contains(&self, addr: SocketAddr) -> bool {
         self.table.is_connected(addr)
-    }
-
-    /// Snapshots every live connection address, including handshaking peers.
-    #[must_use]
-    pub fn live_addresses(&self) -> Vec<SocketAddr> {
-        self.table.addrs()
     }
 }
 
