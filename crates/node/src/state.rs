@@ -1859,6 +1859,7 @@ impl NodeState {
         ) {
             tracing::error!(error, "failed to attach orphan-wake observer");
         }
+        // Construct followers before Chainstate so capture policy has one owner.
         let followers = crate::chain_effects::ChainFollowers::new(
             crate::chain_effects::ChainEffects::new(
                 Arc::clone(&blocks),

@@ -2,8 +2,8 @@
 //!
 //! Ownership, admission, and the `Chainstate` / `ChainTransition` boundary
 //! are specified by `ARCH-07` in `docs/contracts/architecture.md`. Apply
-//! publishes the applied tip and returns a concrete connect or disconnect
-//! outcome. [`crate::chain_effects`] consumes the outcome after the commit.
+//! publishes the tip and returns a concrete connect or disconnect outcome.
+//! [`crate::chain_effects`] consumes that outcome after the commit.
 
 mod scratch;
 
@@ -10748,9 +10748,8 @@ mod with_zmq_publisher_tests {
         fn publish_rawtx(&self, _: &[u8]) {}
     }
 
-    /// ARCH-07 evidence: configured post-commit ZMQ publishers are used by the
-    /// derived-consumer boundary.
     #[test]
+    // ARCH-07 evidence: derived ZMQ consumers are configured outside apply.
     fn with_zmq_publisher_swaps_handle() {
         let tagged = Arc::new(TaggedPublisher::default());
         let publisher: Arc<dyn crate::ZmqPublisher> = tagged.clone();
