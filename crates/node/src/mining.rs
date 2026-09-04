@@ -723,10 +723,11 @@ impl MiningCoordinator {
 
     /// Core `LookupBlockIndex` / BIP22 proposal vocabulary.
     ///
-    /// A node on the applied chain has had its body connected (Core
-    /// `BLOCK_VALID_SCRIPTS`). `Invalid` is `BLOCK_FAILED_VALID`. Any other
-    /// tree entry, including a header-only `Active` tip, is still
-    /// inconclusive — `NodeStatus::Active` is the header chain, not scripts.
+    /// `Invalid` is `BLOCK_FAILED_VALID`. A non-zero `chain_tx_count` is set
+    /// only after a successful apply (`record_applied_tx_count`) and survives
+    /// disconnect, matching Core `IsValid(BLOCK_VALID_SCRIPTS)` including
+    /// reorged bodies. Header-only entries stay 0 and are inconclusive —
+    /// `NodeStatus::Active` and `Stale` are the header chain, not scripts.
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(block_hash)?;
@@ -734,11 +735,7 @@ impl MiningCoordinator {
         if node.status == NodeStatus::Invalid {
             return Some(BlockValidationResult::DuplicateInvalid);
         }
-        let on_applied = self
-            .applied_tip
-            .load_full()
-            .is_some_and(|tip| tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id));
-        if on_applied {
+        if node.chain_tx_count != 0 {
             return Some(BlockValidationResult::Duplicate);
         }
         Some(BlockValidationResult::DuplicateInconclusive)
@@ -781,9 +778,10 @@ impl MiningCoordinator {
 
     fn submit(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = block.block_hash().into();
-        // Core v31 `submitblock` dropped the index pre-check. `ProcessNewBlock`
-        // returns `duplicate` only when the block was already accepted
-        // (`!new_block && accepted`). A header-only tree entry must still
+        // Core v31 `submitblock` dropped the hash pre-check. `ProcessNewBlock`
+        // still returns `duplicate` when the body is already stored
+        // (`!new_block`). Scripts-valid (`chain_tx_count != 0`), including a
+        // later reorg, is already stored. A header-only tree entry must still
         // receive the body so `submitheader` then `submitblock` works.
         if matches!(
             self.known_block_result(block_hash),

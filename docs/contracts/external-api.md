@@ -12,7 +12,8 @@ vocabulary. `API-15` is BIP22 reject-reason mapping. `API-16` is GBT
 `vbrequired` always 0. `API-17` is Core `CheckWitnessMalleation`
 reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 `prioritisetransaction` dummy/`fee_delta` arity. `API-20` is
-`prioritisetransaction` dust-output refusal.
+`prioritisetransaction` dust-output refusal. `API-21` is GBT proposal /
+`submitblock` duplicate for reorged scripts-valid bodies.
 
 ## Clauses
 
@@ -190,12 +191,12 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 - **Owner**: `MiningCoordinator::known_block_result` in
   `crates/node/src/mining.rs`.
 - GBT proposal looks the block hash up first, matching Core
-  `LookupBlockIndex`: a node on the applied chain is `duplicate`,
+  `LookupBlockIndex`: a scripts-valid body is `duplicate` (`API-21`),
   `Invalid` is `duplicate-invalid`, and any other tree entry (including a
   header-only tip) is `duplicate-inconclusive`.
-- `submitblock` matches Core v31 `ProcessNewBlock`: only an already
-  accepted block is `duplicate`. A header admitted by `submitheader` still
-  receives the body.
+- `submitblock` matches Core v31 `ProcessNewBlock`: a scripts-valid body
+  is `duplicate`. A header admitted by `submitheader` still receives the
+  body.
 
 ### `API-15`: BIP22 reject reasons
 
@@ -258,6 +259,20 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
   everywhere except regtest. Absent txids (fee-delta overlay only) are
   not checked. Dust classification uses the pool's dust-relay fee via
   `tx_has_dust_outputs`.
+
+### `API-21`: reorged scripts-valid bodies are `duplicate`
+
+- **Owner**: `MiningCoordinator::known_block_result` in
+  `crates/node/src/mining.rs`.
+- Core proposal `pindex->IsValid(BLOCK_VALID_SCRIPTS)` is true for a
+  body that was fully connected and later reorged. `chain_tx_count != 0`
+  is written by `record_applied_tx_count` after a successful apply and is
+  not cleared on disconnect. Header-only nodes stay 0.
+- `NodeStatus::Active` and `Stale` are header-chain displacement,
+  including a `submitheader` tip, and are not the scripts-valid test.
+- `submitblock` uses the same test for Core `!new_block` (body already
+  stored). A stale scripts-valid resubmit is `duplicate`, not
+  `inconclusive-not-best-prevblk`.
 
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
@@ -371,3 +386,7 @@ owned by [wallet-facing.md](wallet-facing.md).
     `prioritisetransaction_allows_dust_overlay_on_regtest`,
     `prioritisetransaction_allows_absent_txid_overlay`
   - `crates/mempool/src/standardness.rs` test `dust_relay_fee_changes_the_boundary`
+- `API-21`:
+  - `crates/node/tests/mining.rs` tests
+    `proposal_of_a_disconnected_scripts_valid_block_is_duplicate`,
+    `submit_of_a_disconnected_scripts_valid_block_is_duplicate`
