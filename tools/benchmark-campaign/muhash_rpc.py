@@ -1899,6 +1899,17 @@ def _copy_pinned_file(
     mode: int,
     field: str,
 ) -> Path:
+    """Copy pinned bytes onto a new workspace path.
+
+    The commit point is ``fsync`` of the destination fd, then ``chmod``.
+    The parent directory is not fsynced: this is a campaign workspace
+    artifact, not a published result. ``O_EXCL`` refuses a destination
+    that already exists. Hash mismatch and any I/O failure after create
+    unlink the destination and raise ``ContractError``; those failures
+    are not retried here. ``run_campaign`` owns the workspace and does
+    not retry a failed copy. Spawn re-hashes the copy before exec.
+    """
+    created = False
     try:
         descriptor = os.open(
             source,
@@ -1918,6 +1929,7 @@ def _copy_pinned_file(
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
             mode,
         )
+        created = True
         try:
             while True:
                 chunk = os.read(descriptor, 1024 * 1024)
@@ -1931,13 +1943,19 @@ def _copy_pinned_file(
         finally:
             os.close(target_fd)
     except OSError as error:
+        if created:
+            destination.unlink(missing_ok=True)
         raise ContractError(f"cannot copy {field}") from error
     finally:
         os.close(descriptor)
     if digest.hexdigest() != expected:
         destination.unlink(missing_ok=True)
         raise ContractError(f"{field} SHA-256 does not match its pin")
-    destination.chmod(mode)
+    try:
+        destination.chmod(mode)
+    except OSError as error:
+        destination.unlink(missing_ok=True)
+        raise ContractError(f"cannot copy {field}") from error
     return destination
 
 

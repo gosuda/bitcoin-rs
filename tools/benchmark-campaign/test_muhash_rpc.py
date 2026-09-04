@@ -2153,6 +2153,7 @@ class CampaignControllerTests(unittest.TestCase):
         return code, output, workspace
 
     def test_warm_campaign_agrees_across_all_backends(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
         frozen: object | None = None
         for backend in sorted(module.BITCOIN_RS_BACKENDS):
             code, output, workspace = self._run(backend=backend, policy="warm")

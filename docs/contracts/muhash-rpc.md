@@ -40,4 +40,5 @@ FileRef identity.
   `test_rpc_does_not_send_credentials_to_a_foreign_peer`,
   `test_readiness_rejects_a_listener_the_child_does_not_own`,
   `test_command_must_include_config_placeholder`,
-  `test_pinned_config_copy_ignores_later_operator_path_writes`
+  `test_pinned_config_copy_ignores_later_operator_path_writes`,
+  `test_warm_campaign_agrees_across_all_backends`
