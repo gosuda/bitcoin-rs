@@ -724,11 +724,22 @@ impl MiningCoordinator {
     /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
     fn accept_submitted_header(&self, header: Header) -> Result<(), MiningControlError> {
         let mut tree = self.block_tree.write();
-        if tree.lookup(header.prev_blockhash.into()).is_none() {
-            return Err(MiningControlError::Rejected(CompactString::from(format!(
-                "Must submit previous header ({}) first",
-                header.prev_blockhash
-            ))));
+        // Preserve accept_headers' idempotent duplicate path, including genesis.
+        if tree.lookup(header.block_hash().into()).is_some() {
+            return accept_headers(
+                &mut tree,
+                std::slice::from_ref(&header),
+                self.network,
+                current_unix_seconds(),
+            )
+            .map(|_| ())
+            .map_err(header_reject_reason);
+        }
+        let parent = tree.lookup(header.prev_blockhash.into()).ok_or_else(|| {
+            MiningControlError::Rejected(missing_parent_reason(header.prev_blockhash))
+        })?;
+        if tree.node(parent).map(|node| node.status == bitcoin_rs_chain::NodeStatus::Invalid).unwrap_or(false) {
+            return Err(MiningControlError::Rejected(CompactString::from("bad-prevblk")));
         }
         accept_headers(
             &mut tree,
@@ -757,7 +768,8 @@ impl MiningCoordinator {
                 if on_applied {
                     return Ok(BlockValidationResult::Duplicate);
                 }
-                return Ok(BlockValidationResult::DuplicateInconclusive);
+                // A header-only node still needs its body validated and applied.
+                // apply_connect reuses the existing header in this case.
             }
         }
 
@@ -966,6 +978,10 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     }
 }
 
+fn missing_parent_reason(prev_hash: Hash256) -> CompactString {
+    CompactString::from(format!("Must submit previous header ({prev_hash}) first"))
+}
+
 fn header_reject_reason(error: ChainError) -> MiningControlError {
     let reason = match error {
         ChainError::InvalidPow { .. } => CompactString::from("high-hash"),
@@ -975,7 +991,7 @@ fn header_reject_reason(error: ChainError) -> MiningControlError {
         ChainError::TimestampTooEarly { .. } => CompactString::from("time-too-old"),
         ChainError::TimestampTooFarAhead { .. } => CompactString::from("time-too-new"),
         ChainError::MissingParent { prev_hash } => {
-            CompactString::from(format!("Must submit previous header ({prev_hash}) first"))
+            missing_parent_reason(prev_hash)
         }
         other => CompactString::from(other.to_string()),
     };
@@ -1016,6 +1032,7 @@ mod header_reject_tests {
     use bitcoin_rs_mining::MiningControlError;
     use bitcoin_rs_primitives::Hash256;
 
+    // CONTRACT: docs/contracts/external-api.md#API-09
     #[test]
     fn pow_failure_is_high_hash() {
         assert!(matches!(
