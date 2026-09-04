@@ -3157,6 +3157,19 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Atomically rolls back one block with the exact scripts of its spent
     /// coins. This is the anchored variant used when `ScriptLive` is selected.
+    ///
+    /// The commit point is the successful return from the durable conditional
+    /// store write. Until then, no rollback rows, selected watermark, cursor,
+    /// or ordinary revision is committed; after it, they are committed as one
+    /// batch. Consequently, crash recovery sees either the prior state or the
+    /// complete rollback state, never a partially applied rollback.
+    ///
+    /// Preparation and fence checks are deterministic failures and should be
+    /// corrected rather than retried unchanged. Storage failures are returned
+    /// without claiming whether the write reached the backend; the caller owns
+    /// recovery, and must reacquire a fence and reconcile the stored watermark
+    /// and cursor before retrying or compensating. A successful return is the
+    /// durability guarantee; an error must not be treated as proof of rollback.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,

@@ -1270,6 +1270,17 @@ type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) 
 /// [`Self::prepare_block_with_spent_scripts`] and
 /// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
 /// Callers that are not rebuilding `ScriptLive` pass [`NoSpentScripts`].
+///
+/// The rollback method's commit point is the store's successful durable,
+/// conditional batch write. The rollback rows, selected watermarks, cursor,
+/// and ordinary revision therefore become visible atomically; a crash before
+/// that point leaves the previous state, and recovery observes either the old
+/// or the complete new state. A storage error does not establish that the
+/// batch was committed: the worker owns recovery and must obtain a fresh
+/// fence and inspect/reconcile state before retrying (including an ambiguous
+/// error), rather than blindly replaying it. Deterministic validation,
+/// missing-data, and stale-fence errors are non-retriable until their input
+/// or state changes; transient storage errors may be retried by the worker.
 pub(crate) trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
     fn prepare_block_with_spent_scripts(
