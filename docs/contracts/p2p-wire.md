@@ -27,6 +27,8 @@ normative; it places them under the
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
 - Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
+- Session sockets are configured with the connection-lifecycle options required
+  for responsive peer I/O, including disabled Nagle buffering.
 - The node-side synchronization coordinator consumes peer lifecycle events
   without duplicating connection replacement or cancellation rules.
 
@@ -36,6 +38,8 @@ normative; it places them under the
 
 ## Proven by
 
+- `crates/p2p/src/listener.rs`: `session_sockets_disable_nagle` verifies the
+  session socket options required by `P2P-02`.
 - `crates/p2p/tests/core_compat.rs`:
   - `cargo test -p bitcoin-rs-p2p --test core_compat` pins the command
     inventory against the policy table, rust-bitcoin v1 envelopes, handshake
