@@ -377,6 +377,16 @@ fn encode_varint(payload: &mut Vec<u8>, value: u64) {
 }
 
 fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
+    // COMMANDS is the allow-list for typed decoding. Keep this gate before the
+    // dispatch table so a decoder arm cannot silently create an unlisted
+    // typed command.
+    if crate::compat::command(command).is_none() {
+        return Ok(Message::Unknown {
+            command: command_string(command)?,
+            payload: payload.to_vec(),
+        });
+    }
+
     let message = match command {
         "version" => Message::Version(encode::deserialize::<VersionMessage>(payload)?),
         "verack" => empty_payload(payload, Message::Verack)?,
