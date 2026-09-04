@@ -17,6 +17,7 @@ use bitcoin_rs_storage::StorageError;
 use hashbrown::{HashMap, HashSet};
 
 use crate::apply::{ChainTransition, Chainstate};
+use crate::chain_effects::ChainFollowers;
 use crate::{ApplyError, DisconnectError};
 
 /// Settles a rolled-back disconnect marker once the reorg owner has released
@@ -50,6 +51,7 @@ pub(crate) const DISCONNECT_STREAM_WINDOW: usize = 8;
 /// best remaining valid tip.
 pub fn invalidate_block(
     handles: &Chainstate,
+    followers: &ChainFollowers,
     hash: Hash256,
 ) -> core::result::Result<(), ReorgError> {
     // Validate the block exists and is not genesis before beginning a chain
@@ -113,6 +115,7 @@ pub fn invalidate_block(
 
         let (progress, outcome) = execute_streamed_plan(
             &transition,
+            followers,
             &disconnect_nodes,
             &connect,
             &mut no_staged_body,
@@ -342,6 +345,7 @@ pub enum ReorgError {
 /// whether the node is fine, degraded, or unusable.
 pub fn switch_to_branch<F, G>(
     handles: &Chainstate,
+    followers: &ChainFollowers,
     target: NodeId,
     mut staged_body: F,
     mut connected_body: G,
@@ -389,8 +393,13 @@ where
         let transition = handles
             .begin_transition_locked(lock)
             .map_err(|_| ReorgError::Unavailable(Box::new(ApplyError::Shutdown)))?;
-        let (progress, outcome) =
-            execute_streamed_plan(&transition, &disconnect_nodes, &connect, &mut staged_body);
+        let (progress, outcome) = execute_streamed_plan(
+            &transition,
+            followers,
+            &disconnect_nodes,
+            &connect,
+            &mut staged_body,
+        );
         match &outcome {
             // A fatal disconnect marker left the chainstate torn: abort
             // without reconsidering anything.
@@ -471,6 +480,7 @@ fn applied_tip_height(handles: &Chainstate) -> u32 {
 
 fn execute_streamed_plan<F>(
     transition: &ChainTransition<'_>,
+    followers: &ChainFollowers,
     disconnect_nodes: &[(Hash256, u32)],
     connect: &[LoadedBranchBody],
     staged_body: &mut F,
@@ -507,7 +517,10 @@ where
         }
         for body in bodies {
             match transition.disconnect(&body.block) {
-                Ok(_) => progress.disconnected += 1,
+                Ok(outcome) => {
+                    followers.disconnected(&outcome);
+                    progress.disconnected += 1;
+                }
                 Err(
                     error @ (DisconnectError::Fatal { .. } | DisconnectError::MarkerStuck { .. }),
                 ) => {
@@ -531,7 +544,10 @@ where
     // Connect: from the loaded prefix (bounded by staging).
     for body in connect {
         match transition.connect_serialized(&body.block, body.serialized.clone()) {
-            Ok(_) => progress.connected += 1,
+            Ok(outcome) => {
+                followers.connected(&body.block, &outcome);
+                progress.connected += 1;
+            }
             Err(source) => {
                 let invalidated = if crate::apply::is_permanent_apply_error(&source) {
                     let mut tree = handles.block_tree.write();

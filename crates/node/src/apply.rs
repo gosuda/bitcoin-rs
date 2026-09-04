@@ -1,8 +1,9 @@
 //! Authoritative chainstate mutation: connect, disconnect, and window apply.
 //!
 //! Ownership, admission, and the `Chainstate` / `ChainTransition` boundary
-//! are specified by `ARCH-07` in `docs/contracts/architecture.md`. Post-commit
-//! RPC, ZMQ, and `TxIndex` work lives in [`crate::chain_effects`].
+//! are specified by `ARCH-07` in `docs/contracts/architecture.md`. Apply
+//! publishes the tip and returns a concrete connect or disconnect outcome.
+//! [`crate::chain_effects`] consumes that outcome after the commit.
 
 mod scratch;
 
@@ -830,6 +831,34 @@ pub enum BlockProvenance {
     LocalReplay,
 }
 
+/// Committed connect. Derived consumers read this after the tip is published.
+#[derive(Clone, Debug)]
+pub struct ConnectOutcome {
+    /// New applied tip.
+    pub tip: TipSnapshot,
+    /// Height of the connected block.
+    pub height: u32,
+    /// Hash of the connected block.
+    pub hash: Hash256,
+    /// Transaction ids in block order.
+    pub txids: Vec<Txid>,
+    /// Canonical block bytes when a derived consumer asked for them, else empty.
+    pub block_bytes: bytes::Bytes,
+    /// Per-transaction wire bytes when a derived consumer asked for `rawtx`.
+    pub raw_txs: Option<Vec<Vec<u8>>>,
+}
+
+/// Committed disconnect. Derived consumers read this after the tip is published.
+#[derive(Clone, Debug)]
+pub struct DisconnectOutcome {
+    /// Applied tip after the rollback (the parent).
+    pub parent_tip: TipSnapshot,
+    /// Hash of the disconnected block.
+    pub hash: Hash256,
+    /// Creating txids of coins the undo restored, for orphan re-evaluation.
+    pub restored_parents: Vec<Txid>,
+}
+
 /// Connect intent. See `ARCH-07` in `docs/contracts/architecture.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ApplyIntent {
@@ -841,7 +870,7 @@ enum ApplyIntent {
 /// Outcome of [`apply_block_admitted`] once intent is known.
 enum ApplyFinish {
     /// Commit path: the new applied tip, already published.
-    Committed(TipSnapshot),
+    Committed(ConnectOutcome),
     /// See `ARCH-07` in `docs/contracts/architecture.md`.
     Proposed,
 }
@@ -903,9 +932,6 @@ pub struct Chainstate {
     /// from the weak registry. The raw `mempool` field stays for read-only
     /// node code that still needs the pool.
     pub(crate) mempool_gateway: Arc<MempoolGateway>,
-    pub(crate) mining_generation: Arc<crate::mining::MiningGenerationSignal>,
-    /// RPC `BlockLog`, ZMQ, and `TxIndex` wake. Not authoritative chainstate.
-    pub(crate) effects: crate::chain_effects::ChainEffects,
     pub(crate) chain_events: Arc<crate::state::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
@@ -932,9 +958,10 @@ pub struct Chainstate {
     /// Publishes checkpoints to settle rolled-back disconnect debt after a
     /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint_worker::CheckpointPublisher>>,
-    /// P2P admission policy. Present in production so every chain movement
-    /// can clear recent-rejects and wake orphans; `None` in unit-test sets.
-    pub(crate) tx_admission: Option<Arc<crate::tx_admission::TxAdmission>>,
+    /// Capture per-transaction wire bytes for a derived `rawtx` consumer.
+    pub(crate) capture_rawtx: bool,
+    /// Serialize the full block for a derived consumer (body store, index, rawblock).
+    pub(crate) capture_block_bytes: bool,
 }
 
 /// One admitted chain mutation.
@@ -981,7 +1008,7 @@ impl<'a> ChainTransition<'a> {
     ///
     /// Consensus refusal happens before the first write. See the type-level
     /// persistence notes for the commit point and retry rules.
-    pub fn connect(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
+    pub fn connect(&self, block: &Block) -> core::result::Result<ConnectOutcome, ApplyError> {
         apply_committed_block_admitted(
             self.chainstate,
             block,
@@ -999,7 +1026,7 @@ impl<'a> ChainTransition<'a> {
         &self,
         block: &Block,
         serialized: bytes::Bytes,
-    ) -> core::result::Result<TipSnapshot, ApplyError> {
+    ) -> core::result::Result<ConnectOutcome, ApplyError> {
         apply_block_with_serialized_admitted(self.chainstate, block, serialized, &self.proof)
     }
 
@@ -1011,7 +1038,7 @@ impl<'a> ChainTransition<'a> {
         &self,
         block: &Block,
         serialized: bytes::Bytes,
-    ) -> core::result::Result<TipSnapshot, ApplyError> {
+    ) -> core::result::Result<ConnectOutcome, ApplyError> {
         apply_committed_block_admitted(
             self.chainstate,
             block,
@@ -1029,7 +1056,7 @@ impl<'a> ChainTransition<'a> {
     pub fn disconnect(
         &self,
         block: &Block,
-    ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
+    ) -> core::result::Result<DisconnectOutcome, crate::DisconnectError> {
         disconnect_block_admitted(self.chainstate, block, &self.proof)
     }
 
@@ -1043,7 +1070,7 @@ impl<'a> ChainTransition<'a> {
         &self,
         blocks: &[&Block],
         serialized: &[bytes::Bytes],
-    ) -> core::result::Result<(), WindowApplyError> {
+    ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
         apply_window_admitted(self.chainstate, blocks, serialized, &self.proof)
     }
 
@@ -1169,8 +1196,12 @@ impl Chainstate {
 
     /// Admits a transition, connects `block`, and finishes on success.
     ///
-    /// Persistence matches [`ChainTransition::connect`].
-    pub fn apply_block(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
+    /// Persistence matches [`ChainTransition::connect`]. Derived consumers are
+    /// not invoked. Production paths with followers must dispatch while the
+    /// [`ChainTransition`] is still held, then [`ChainTransition::finish`]
+    /// (`ARCH-07`); [`crate::chain_effects::ChainFollowers::apply_connect`]
+    /// is that sequence.
+    pub fn apply_block(&self, block: &Block) -> core::result::Result<ConnectOutcome, ApplyError> {
         apply_block_inner(self, block, None, BlockProvenance::Network)
     }
 
@@ -1182,7 +1213,7 @@ impl Chainstate {
         &self,
         block: &Block,
         serialized: bytes::Bytes,
-    ) -> core::result::Result<TipSnapshot, ApplyError> {
+    ) -> core::result::Result<ConnectOutcome, ApplyError> {
         apply_block_inner(self, block, Some(serialized), BlockProvenance::Network)
     }
 
@@ -1194,18 +1225,19 @@ impl Chainstate {
         &self,
         block: &Block,
         serialized: bytes::Bytes,
-    ) -> core::result::Result<TipSnapshot, ApplyError> {
+    ) -> core::result::Result<ConnectOutcome, ApplyError> {
         apply_block_inner(self, block, Some(serialized), BlockProvenance::LocalReplay)
     }
 
     /// Admits a transition, disconnects `block`, and finishes on success.
     ///
     /// Persistence matches [`ChainTransition::disconnect`]. An admission
-    /// failure is `DisconnectError::Refused`.
+    /// failure is `DisconnectError::Refused`. Derived consumers are not
+    /// invoked; see [`crate::chain_effects::ChainFollowers::apply_disconnect`].
     pub fn disconnect_block(
         &self,
         block: &Block,
-    ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
+    ) -> core::result::Result<DisconnectOutcome, crate::DisconnectError> {
         let transition = self
             .begin_transition()
             .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
@@ -1224,10 +1256,11 @@ impl Chainstate {
         &self,
         blocks: &[&Block],
         serialized: &[bytes::Bytes],
-    ) -> core::result::Result<(), WindowApplyError> {
+    ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
         if blocks.len() != serialized.len() {
             return Err(WindowApplyError {
                 applied: 0,
+                committed: Vec::new(),
                 source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
                     format!(
                         "window has {} blocks but {} serialized bodies",
@@ -1241,6 +1274,7 @@ impl Chainstate {
         }
         let transition = self.begin_transition().map_err(|source| WindowApplyError {
             applied: 0,
+            committed: Vec::new(),
             source,
             disposition: WindowApplyDisposition::Operational,
             invalidated: Box::default(),
@@ -1273,8 +1307,9 @@ impl Chainstate {
     /// Builds a chainstate facade for tests and composition that do not go
     /// through `NodeState::open`.
     ///
-    /// Post-commit consumers default to [`crate::chain_effects::ChainEffects::noop`].
-    /// Attach RPC, ZMQ, or `TxIndex` with [`Self::with_effects`].
+    /// Derived consumers are not attached. Capture flags default off; set them
+    /// with [`Self::capturing`] when a caller will dispatch `rawtx` or block
+    /// bytes after the commit.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -1286,7 +1321,6 @@ impl Chainstate {
         coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
         mempool: Arc<RwLock<Mempool>>,
         mempool_gateway: Arc<MempoolGateway>,
-        mining_generation: Arc<crate::mining::MiningGenerationSignal>,
         chain_events: Arc<crate::state::ChainEventPublisher>,
     ) -> Self {
         Self {
@@ -1300,8 +1334,6 @@ impl Chainstate {
             coin_stats,
             mempool,
             mempool_gateway,
-            mining_generation,
-            effects: crate::chain_effects::ChainEffects::noop(),
             chain_events,
             block_body_store: None,
             undo_store: Arc::new(InMemoryUndoStore::default()),
@@ -1312,24 +1344,17 @@ impl Chainstate {
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
             journal: None,
             checkpoint_publisher: None,
-            tx_admission: None,
+            capture_rawtx: false,
+            capture_block_bytes: false,
         }
     }
 
-    /// Returns `self` with post-commit consumers swapped to `effects`.
+    /// Captures derived payloads on later connects: per-tx wire bytes and/or
+    /// the canonical block serialization.
     #[must_use]
-    pub fn with_effects(mut self, effects: crate::chain_effects::ChainEffects) -> Self {
-        self.effects = effects;
-        self
-    }
-
-    /// Returns `self` with the ZMQ publisher swapped on the post-commit consumers.
-    ///
-    /// Useful for tests that want a custom publisher without going through
-    /// `NodeState::open`.
-    #[must_use]
-    pub fn with_zmq_publisher(mut self, publisher: Arc<dyn crate::ZmqPublisher>) -> Self {
-        self.effects = self.effects.with_zmq_publisher(publisher);
+    pub fn capturing(mut self, rawtx: bool, block_bytes: bool) -> Self {
+        self.capture_rawtx = rawtx;
+        self.capture_block_bytes = block_bytes;
         self
     }
 }
@@ -1519,7 +1544,7 @@ pub fn disconnect_block(
     handles: &Chainstate,
     block: &Block,
 ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
-    handles.disconnect_block(block)
+    Ok(handles.disconnect_block(block)?.parent_tip)
 }
 
 /// Disconnects one block while the caller holds admission and `chain_transition`.
@@ -1530,7 +1555,7 @@ pub(crate) fn disconnect_block_admitted(
     handles: &Chainstate,
     block: &Block,
     _proof: &ChainChangeProof<'_>,
-) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
+) -> core::result::Result<DisconnectOutcome, crate::DisconnectError> {
     let block_hash = block.block_hash().0;
     let DisconnectPlan {
         parent_tip,
@@ -1588,8 +1613,6 @@ pub(crate) fn disconnect_block_admitted(
         })
     })?;
 
-    handles.effects.before_disconnect(block_hash);
-
     // The per-coin coinstats fields need nothing here: `coin_stats` is the
     // `UtxoSet` change listener, so `undo_block` already drove them in reverse.
     // The block-level fields are not part of that, because `finish_block` sets
@@ -1641,9 +1664,6 @@ pub(crate) fn disconnect_block_admitted(
             }
         }
     });
-    handles.effects.after_disconnect(block_hash);
-    // The applied tip moved: every template long-poll waiter must observe it.
-    handles.mining_generation.publish_generation();
 
     // The rollback finished in memory, so the marker moves to `RolledBack`.
     // It stays set: a checkpoint has not captured this yet.
@@ -1677,21 +1697,15 @@ pub(crate) fn disconnect_block_admitted(
     //
     // [`NodeState::write_clean_checkpoint`] clears the marker only after it
     // publishes the rolled-back UTXO set and tip.
-    if let Some(admission) = &handles.tx_admission {
-        admission.invalidate_recent_rejects();
-        // Restored coins can make a previously-missing spend valid. Those
-        // children are indexed under the creating parent, which is already
-        // confirmed and will not publish another `Accepted` wake.
-        let restored_parents: HashSet<_> = undo
+    Ok(DisconnectOutcome {
+        parent_tip,
+        hash: block_hash,
+        restored_parents: undo
             .restores()
             .iter()
             .map(|restored| restored.outpoint.txid)
-            .collect();
-        for parent in restored_parents {
-            admission.enqueue_orphans_waiting_on(parent);
-        }
-    }
-    Ok(parent_tip)
+            .collect(),
+    })
 }
 
 /// Seqlock guard for the applied-tip / chain-tx-count pair.
@@ -1779,7 +1793,7 @@ pub fn apply_block(
     handles: &Chainstate,
     block: &Block,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
-    handles.apply_block(block)
+    Ok(handles.apply_block(block)?.tip)
 }
 
 /// See [`Chainstate::validate_block`].
@@ -1793,7 +1807,7 @@ pub fn apply_block_with_serialized(
     block: &Block,
     serialized: bytes::Bytes,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
-    handles.apply_block_with_serialized(block, serialized)
+    Ok(handles.apply_block_with_serialized(block, serialized)?.tip)
 }
 
 /// Applies one serialized block while the caller holds admission and `chain_transition`.
@@ -1804,7 +1818,7 @@ pub(crate) fn apply_block_with_serialized_admitted(
     block: &Block,
     serialized: bytes::Bytes,
     proof: &ChainChangeProof<'_>,
-) -> core::result::Result<TipSnapshot, ApplyError> {
+) -> core::result::Result<ConnectOutcome, ApplyError> {
     apply_committed_block_admitted(
         handles,
         block,
@@ -1821,7 +1835,7 @@ pub fn replay_local_block(
     block: &Block,
     serialized: bytes::Bytes,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
-    handles.replay_local_block(block, serialized)
+    Ok(handles.replay_local_block(block, serialized)?.tip)
 }
 
 /// How many consecutive blocks share one script-verification dispatch.
@@ -1912,7 +1926,7 @@ pub fn apply_window(
     blocks: &[&Block],
     serialized: &[bytes::Bytes],
 ) -> core::result::Result<(), WindowApplyError> {
-    handles.apply_window(blocks, serialized)
+    handles.apply_window(blocks, serialized).map(|_| ())
 }
 
 #[allow(clippy::result_large_err)]
@@ -1921,35 +1935,37 @@ fn apply_window_admitted(
     blocks: &[&Block],
     serialized: &[bytes::Bytes],
     proof: &ChainChangeProof<'_>,
-) -> core::result::Result<(), WindowApplyError> {
+) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
     let mut proven = prove_window(handles, blocks, serialized).into_iter();
-    let mut applied = 0_usize;
+    let mut committed = Vec::with_capacity(blocks.len());
     for (block, raw) in blocks.iter().zip(serialized) {
-        apply_committed_block_admitted(
+        match apply_committed_block_admitted(
             handles,
             block,
             Some(raw.clone()),
             proven.next(),
             BlockProvenance::Network,
             proof,
-        )
-        .map_err(|source| {
-            let disposition = if is_permanent_apply_error(&source) {
-                WindowApplyDisposition::Permanent
-            } else {
-                WindowApplyDisposition::Operational
-            };
-            let invalidated = invalidate_failed_subtree(handles, block, &source);
-            WindowApplyError {
-                applied,
-                source,
-                disposition,
-                invalidated,
+        ) {
+            Ok(outcome) => committed.push(outcome),
+            Err(source) => {
+                let disposition = if is_permanent_apply_error(&source) {
+                    WindowApplyDisposition::Permanent
+                } else {
+                    WindowApplyDisposition::Operational
+                };
+                let invalidated = invalidate_failed_subtree(handles, block, &source);
+                return Err(WindowApplyError {
+                    applied: committed.len(),
+                    committed,
+                    source,
+                    disposition,
+                    invalidated,
+                });
             }
-        })?;
-        applied = applied.saturating_add(1);
+        }
     }
-    Ok(())
+    Ok(committed)
 }
 
 /// Marks the failed block's header subtree invalid while the chain transition
@@ -2011,6 +2027,8 @@ pub(crate) fn is_permanent_apply_error(error: &ApplyError) -> bool {
 pub struct WindowApplyError {
     /// Blocks that committed before the failure.
     pub applied: usize,
+    /// Outcomes for the committed prefix, in apply order.
+    pub committed: Vec<ConnectOutcome>,
     /// What stopped the block at index `applied`.
     pub source: ApplyError,
     /// How the caller must treat this failure: `Permanent` failures poisoned
@@ -2527,7 +2545,7 @@ fn apply_block_inner(
     block: &Block,
     provided_serialized: Option<bytes::Bytes>,
     provenance: BlockProvenance,
-) -> core::result::Result<TipSnapshot, ApplyError> {
+) -> core::result::Result<ConnectOutcome, ApplyError> {
     let transition = handles.begin_transition()?;
     let result = apply_committed_block_admitted(
         handles,
@@ -2552,7 +2570,7 @@ fn apply_committed_block_admitted<'b>(
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     _proof: &ChainChangeProof<'_>,
-) -> core::result::Result<TipSnapshot, ApplyError> {
+) -> core::result::Result<ConnectOutcome, ApplyError> {
     match apply_block_admitted(
         handles,
         block,
@@ -2561,7 +2579,7 @@ fn apply_committed_block_admitted<'b>(
         provenance,
         ApplyIntent::Commit,
     )? {
-        ApplyFinish::Committed(tip) => Ok(tip),
+        ApplyFinish::Committed(outcome) => Ok(outcome),
         ApplyFinish::Proposed => unreachable!("commit intent returns a committed tip"),
     }
 }
@@ -2781,7 +2799,7 @@ fn apply_block_admitted<'b>(
     let bip68_dur = bip68_started.elapsed();
     metrics::histogram!("node.apply_block.bip68_seconds").record(bip68_dur.as_secs_f64());
     bip68_result?;
-    let wants_rawtx = handles.effects.needs_rawtx();
+    let wants_rawtx = handles.capture_rawtx;
     let (txids, scratch_capacities, same_block_spent, same_block_spent_input_count) =
         tx_plan.into_scratch_parts(view.into_txids());
     let scratch = ApplyScratch::from_prepared_parts(
@@ -2855,7 +2873,7 @@ fn apply_block_admitted<'b>(
     // full bytes. During IBD with pruning+txindex disabled this avoids a
     // full-block serialize on every apply.
     let block_bytes: bytes::Bytes = {
-        let needs_body = handles.block_body_store.is_some() || handles.effects.needs_block_bytes();
+        let needs_body = handles.block_body_store.is_some() || handles.capture_block_bytes;
         if needs_body {
             // The preserved P2P wire payload is byte-identical to the canonical
             // block serialization: the decoder rejects every non-canonical
@@ -2987,17 +3005,12 @@ fn apply_block_admitted<'b>(
     // Everything past the UTXO commit publishes values prepared above and
     // cannot fail: the tip snapshot was resolved from the tree before the
     // first write, so the publication tail is infallible.
-    let block_record_started = quanta::Instant::now();
     debug_assert!(
         handles.block_tree.read().node_by_hash(block_hash).is_some(),
         "block {} is entering the record log with no block-tree node; \
          its header would be unrecoverable",
         block_hash.to_string_be()
     );
-    handles.effects.record_connected(height, block);
-    let block_record_dur = block_record_started.elapsed();
-    metrics::histogram!("node.apply_block.block_record_seconds")
-        .record(block_record_dur.as_secs_f64());
     let mempool_evict_started = quanta::Instant::now();
     {
         let block_txids = scratch.txids();
@@ -3013,14 +3026,6 @@ fn apply_block_admitted<'b>(
             block_txids,
             height,
         );
-        if let Some(admission) = &handles.tx_admission {
-            // Chain movement itself, not a non-empty pool mutation, owns
-            // reject invalidation: an empty sweep still advances the tip.
-            admission.invalidate_recent_rejects();
-            for txid in block_txids {
-                admission.enqueue_orphans_waiting_on(*txid);
-            }
-        }
     }
     let mempool_evict_dur = mempool_evict_started.elapsed();
     metrics::histogram!("node.apply_block.mempool_evict_seconds")
@@ -3047,16 +3052,12 @@ fn apply_block_admitted<'b>(
         bip68_us = bip68_dur.as_micros(),
         utxo_commit_us = utxo_commit_dur.as_micros(),
         block_body_persist_us = block_body_persist_dur.as_micros(),
-        block_record_us = block_record_dur.as_micros(),
         block_tree_insert_us = block_tree_insert_dur.as_micros(),
         mempool_evict_us = mempool_evict_dur.as_micros(),
         coin_stats_us = coin_stats_dur.as_micros(),
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
-    handles
-        .effects
-        .emit_connected(tip.hash, &block_bytes, scratch.txids(), scratch.raw_txs());
     {
         let _publication = begin_applied_publication(handles);
         handles.applied_tip.store(Some(Arc::new(tip.clone())));
@@ -3065,11 +3066,15 @@ fn apply_block_admitted<'b>(
             .record(crate::state::HintKind::Connected, tip.height, tip.hash);
         advance_chain_tx_count(handles, height, tx_count_delta_for(block));
     }
-    handles.effects.after_connect(tip.hash);
-    // The applied tip moved: every template long-poll waiter must observe it.
-    handles.mining_generation.publish_generation();
-
-    Ok(ApplyFinish::Committed(tip))
+    let (txids, raw_txs) = scratch.into_payloads();
+    Ok(ApplyFinish::Committed(ConnectOutcome {
+        tip,
+        height,
+        hash: block_hash,
+        txids,
+        block_bytes,
+        raw_txs,
+    }))
 }
 
 /// Decodes a compact `bits` encoding into a 256-bit target with Core
@@ -7130,12 +7135,12 @@ mod consensus_rule_tests {
         }
     }
 
-    /// The disconnect event is published after the applied tip moves and before
-    /// marker completion. A marker-completion failure must poison the node but
-    /// must not move the tip back or retract the published event.
+    /// A marker-completion failure poisons the node after the applied tip has
+    /// already moved. Derived consumers are not dispatched on that error: the
+    /// caller got `MarkerStuck`, not a committed outcome.
     #[test]
-    fn disconnect_sequence_event_publishes_before_marker_completion_failure()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn disconnect_marker_stuck_leaves_the_tip_rolled_back() -> Result<(), Box<dyn std::error::Error>>
+    {
         let genesis = Network::Regtest.genesis_block();
         let mut handles =
             apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
@@ -7150,20 +7155,10 @@ mod consensus_rule_tests {
         )?;
         apply_block(&handles, &block)?;
 
-        let publisher = Arc::new(RecordingSequencePublisher::default());
-        let publisher_handle: Arc<dyn crate::ZmqPublisher> = publisher.clone();
-        handles = handles.with_zmq_publisher(publisher_handle);
-        publisher.events.lock().clear();
-        *publisher.next_sequence.lock() = 0;
-
-        let outcome = disconnect_block(&handles, &block);
+        let outcome = handles.disconnect_block(&block);
         assert!(
             matches!(outcome, Err(crate::DisconnectError::MarkerStuck { .. })),
             "marker completion failure must report MarkerStuck, got {outcome:?}"
-        );
-        assert_eq!(
-            publisher.events.lock().as_slice(),
-            &[(Hash256::from(block.block_hash()), b'D', 0)]
         );
         assert_eq!(
             handles
@@ -7335,7 +7330,6 @@ mod consensus_rule_tests {
         )?;
         let applied = apply_block(&handles, &block)?;
         let outputs_before = utxo.len();
-        let block_records_before = handles.effects.block_log().read().len();
         let tree_tip_before = handles
             .block_tree
             .read()
@@ -7384,11 +7378,6 @@ mod consensus_rule_tests {
             "a refused disconnect must leave the applied tip unchanged"
         );
         assert_eq!(
-            handles.effects.block_log().read().len(),
-            block_records_before,
-            "a refused disconnect must leave the RPC block index unchanged"
-        );
-        assert_eq!(
             handles
                 .block_tree
                 .read()
@@ -7405,28 +7394,30 @@ mod consensus_rule_tests {
         Ok(())
     }
 
-    /// RPC reads blocks from `handles.effects.block_log()`. Leaving the entry there would let
-    /// `getblock` keep answering for a block the chain no longer contains.
+    /// RPC reads blocks from the derived `BlockLog`. Leaving the entry there
+    /// would let `getblock` keep answering for a block the chain no longer
+    /// contains.
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
     fn disconnect_drops_the_rpc_block_record() -> Result<(), Box<dyn std::error::Error>> {
         let genesis = Network::Regtest.genesis_block();
         let utxo = Arc::new(UtxoSet::new());
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+        let followers = crate::chain_effects::ChainFollowers::noop();
         let genesis_hash = Hash256::from(genesis.block_hash());
         let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
-        let records_before = handles.effects.block_log().read().len();
+        let records_before = followers.effects().block_log().read().len();
 
         let block = mined_block_with_prev_hash_and_transactions(
             genesis.block_hash(),
             vec![coinbase_transaction(1)],
         )?;
         let block_hash = block.block_hash();
-        apply_block(&handles, &block)?;
+        apply_followed(&handles, &followers, &block)?;
         assert!(
-            handles
-                .effects
+            followers
+                .effects()
                 .block_log()
                 .read()
                 .iter()
@@ -7434,11 +7425,11 @@ mod consensus_rule_tests {
             "connection must publish the record this test then removes"
         );
 
-        disconnect_block(&handles, &block)?;
+        disconnect_followed(&handles, &followers, &block)?;
 
         assert!(
-            !handles
-                .effects
+            !followers
+                .effects()
                 .block_log()
                 .read()
                 .iter()
@@ -7446,7 +7437,7 @@ mod consensus_rule_tests {
             "RPC must not keep serving a disconnected block"
         );
         assert_eq!(
-            handles.effects.block_log().read().len(),
+            followers.effects().block_log().read().len(),
             records_before,
             "exactly the one record must go"
         );
@@ -7703,7 +7694,6 @@ mod consensus_rule_tests {
     {
         let genesis = Network::Regtest.genesis_block();
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
-        assert!(handles.effects.tx_index().is_none());
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -7825,11 +7815,9 @@ mod consensus_rule_tests {
     #[allow(clippy::arc_with_non_send_sync)]
     fn txindex_worker_failure_makes_queries_unavailable_without_blocking_apply()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut handles =
-            apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
-        handles.effects.set_tx_index(Some(Arc::clone(&runtime)));
         let index: Arc<FailAfterStartupTxIndex> = Arc::new(FailAfterStartupTxIndex::new()?);
         let writer: Arc<dyn crate::txindex_worker::TxIndexWriter> = index.clone();
         let evidence_dir = tempfile::tempdir()?;
@@ -7880,7 +7868,9 @@ mod consensus_rule_tests {
         let query = crate::txindex_worker::TxIndexQueryEngine::new(
             Arc::clone(&runtime),
             reader,
-            crate::txindex_worker::IndexBlockSource::new(Arc::clone(handles.effects.block_log())),
+            crate::txindex_worker::IndexBlockSource::new(Arc::new(parking_lot::RwLock::new(
+                bitcoin_rs_rpc::context::BlockLog::new(),
+            ))),
             Arc::clone(&handles.block_tree),
             Arc::clone(&handles.applied_tip),
             None,
@@ -7932,7 +7922,8 @@ mod consensus_rule_tests {
             Network::Regtest,
             utxo_with_output(external_prevout, 1)?,
         )
-        .with_zmq_publisher(publisher_for_handles);
+        .capturing(true, false);
+        let followers = zmq_followers(publisher_for_handles);
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -7943,7 +7934,7 @@ mod consensus_rule_tests {
         let expected_raw_txs = txdata.iter().map(consensus_bytes).collect::<Vec<_>>();
         let block = mined_block_with_prev_hash_and_transactions(genesis.block_hash(), txdata)?;
 
-        apply_block(&handles, &block)?;
+        apply_followed(&handles, &followers, &block)?;
 
         assert_eq!(*publisher.raw_txs.lock(), expected_raw_txs);
         Ok(())
@@ -7956,9 +7947,9 @@ mod consensus_rule_tests {
         let publisher = Arc::new(RecordingRawBlockPublisher::default());
         let publisher_for_handles: Arc<dyn crate::ZmqPublisher> = publisher.clone();
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
-            .with_zmq_publisher(publisher_for_handles);
+            .capturing(false, true);
         assert!(handles.block_body_store.is_none());
-        assert!(handles.effects.tx_index().is_none());
+        let followers = zmq_followers(publisher_for_handles);
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -7968,7 +7959,7 @@ mod consensus_rule_tests {
         )?;
         let expected_block_bytes = consensus_bytes(&block);
 
-        apply_block(&handles, &block)?;
+        apply_followed(&handles, &followers, &block)?;
 
         let published = publisher
             .raw_block
@@ -7986,8 +7977,8 @@ mod consensus_rule_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let genesis = Network::Regtest.genesis_block();
         let publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(PanickingOptOutPublisher);
-        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
-            .with_zmq_publisher(publisher);
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
+        let followers = zmq_followers(publisher);
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -7996,7 +7987,7 @@ mod consensus_rule_tests {
             vec![coinbase_transaction(1)],
         )?;
 
-        apply_block(&handles, &block)?;
+        apply_followed(&handles, &followers, &block)?;
 
         Ok(())
     }
@@ -8008,9 +7999,9 @@ mod consensus_rule_tests {
         let genesis = Network::Regtest.genesis_block();
         let publisher: Arc<dyn crate::ZmqPublisher> = Arc::new(PanickingNoRawblockPublisher);
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()))
-            .with_zmq_publisher(publisher);
+            .capturing(false, true);
         assert!(handles.block_body_store.is_none());
-        assert!(handles.effects.tx_index().is_none());
+        let followers = zmq_followers(publisher);
         let genesis_tip =
             applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
@@ -8019,7 +8010,7 @@ mod consensus_rule_tests {
             vec![coinbase_transaction(1)],
         )?;
 
-        apply_block(&handles, &block)?;
+        apply_followed(&handles, &followers, &block)?;
 
         Ok(())
     }
@@ -9037,7 +9028,6 @@ mod consensus_rule_tests {
         losing: &Block,
         applied: &TipSnapshot,
         tree_tip_before: Option<(bitcoin_rs_chain::NodeId, u32, Hash256)>,
-        block_records_before: &[(u32, BlockHash)],
         utxo_len_before: usize,
     ) {
         assert_eq!(
@@ -9056,17 +9046,6 @@ mod consensus_rule_tests {
                 .map(|tip| (tip.tip_id, tip.height, tip.hash)),
             tree_tip_before,
             "body loading failure must not change the active header index"
-        );
-        assert_eq!(
-            handles
-                .effects
-                .block_log()
-                .read()
-                .iter()
-                .map(|record| (record.height, record.hash))
-                .collect::<Vec<_>>(),
-            block_records_before,
-            "body loading failure must not change the applied block index"
         );
         assert_eq!(
             utxo.len(),
@@ -9125,7 +9104,13 @@ mod consensus_rule_tests {
             last.ok_or_else(|| anyhow::anyhow!("no rival branch built"))?
         };
 
-        let outcome = crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {});
+        let outcome = crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            target,
+            |_| None,
+            |_| {},
+        );
         assert!(
             matches!(outcome, Err(crate::reorg::ReorgError::MissingBody { .. })),
             "an unavailable branch must report a missing body, got {outcome:?}"
@@ -9178,8 +9163,8 @@ mod consensus_rule_tests {
         let utxo = Arc::new(UtxoSet::new());
         let publisher = Arc::new(RecordingSequencePublisher::default());
         let publisher_handle: Arc<dyn crate::ZmqPublisher> = publisher.clone();
-        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo))
-            .with_zmq_publisher(publisher_handle);
+        let followers = zmq_followers(publisher_handle);
+        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
         let bodies = Arc::new(MapBodyStore::default());
         let body_handle: Arc<dyn crate::apply::PruneBodyStore> = bodies.clone();
         handles.block_body_store = Some(body_handle);
@@ -9234,7 +9219,7 @@ mod consensus_rule_tests {
             target.ok_or_else(|| anyhow::anyhow!("new branch has no target"))?
         };
 
-        crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {})?;
+        crate::reorg::switch_to_branch(&handles, &followers, target, |_| None, |_| {})?;
 
         let events = publisher.events.lock().clone();
         assert_eq!(
@@ -9255,8 +9240,8 @@ mod consensus_rule_tests {
         let utxo = Arc::new(UtxoSet::new());
         let publisher = Arc::new(RecordingSequencePublisher::default());
         let publisher_handle: Arc<dyn crate::ZmqPublisher> = publisher.clone();
-        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo))
-            .with_zmq_publisher(publisher_handle);
+        let followers = zmq_followers(publisher_handle);
+        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
         let bodies = Arc::new(MapBodyStore::default());
         let body_handle: Arc<dyn crate::apply::PruneBodyStore> = bodies.clone();
         handles.block_body_store = Some(body_handle);
@@ -9290,7 +9275,7 @@ mod consensus_rule_tests {
         publisher.events.lock().clear();
         *publisher.next_sequence.lock() = 0;
 
-        crate::reorg::invalidate_block(&handles, two_tip.hash)?;
+        crate::reorg::invalidate_block(&handles, &followers, two_tip.hash)?;
 
         assert_eq!(
             handles.applied_tip.load_full().map(|tip| tip.hash),
@@ -9331,12 +9316,15 @@ mod consensus_rule_tests {
             .bodies
             .write()
             .remove(&(applied.height, applied.hash));
-        handles.effects.block_log().write().clear();
 
         let header_tip_before = handles.chain_tip.load_full();
         let applied_tip_before = handles.applied_tip.load_full();
         let utxo_len_before = utxo.len();
-        let outcome = crate::reorg::invalidate_block(&handles, applied.hash);
+        let outcome = crate::reorg::invalidate_block(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            applied.hash,
+        );
 
         assert!(
             matches!(outcome, Err(crate::reorg::ReorgError::MissingBody { .. })),
@@ -9367,11 +9355,15 @@ mod consensus_rule_tests {
 
         let unknown = Hash256::from_le_bytes(&[0x5a; 32]);
         assert!(matches!(
-            crate::reorg::invalidate_block(&handles, unknown),
+            crate::reorg::invalidate_block(&handles, &crate::chain_effects::ChainFollowers::noop(), unknown),
             Err(crate::reorg::ReorgError::UnknownBlock(hash)) if hash == unknown
         ));
         assert!(matches!(
-            crate::reorg::invalidate_block(&handles, genesis_hash),
+            crate::reorg::invalidate_block(
+                &handles,
+                &crate::chain_effects::ChainFollowers::noop(),
+                genesis_hash
+            ),
             Err(crate::reorg::ReorgError::CannotInvalidateGenesis)
         ));
         assert_eq!(handles.chain_tip.load_full(), header_tip_before);
@@ -9436,7 +9428,6 @@ mod consensus_rule_tests {
         )?;
         let raw = bytes::Bytes::from(consensus_bytes(&block));
         let applied = apply_block_with_serialized(&handles, &block, raw.clone())?;
-        handles.effects.block_log().write().clear();
 
         let store = Arc::new(BlockingBodyStore {
             body: raw.to_vec(),
@@ -9452,8 +9443,13 @@ mod consensus_rule_tests {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (acquired_tx, acquired_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-            let invalidator =
-                scope.spawn(move || crate::reorg::invalidate_block(&worker_handles, applied.hash));
+            let invalidator = scope.spawn(move || {
+                crate::reorg::invalidate_block(
+                    &worker_handles,
+                    &crate::chain_effects::ChainFollowers::noop(),
+                    applied.hash,
+                )
+            });
             store.entered.wait();
 
             let contender = scope.spawn(move || {
@@ -9546,11 +9542,76 @@ mod consensus_rule_tests {
             seen: Mutex::new(Vec::new()),
         });
         let publisher_handle: Arc<dyn crate::ZmqPublisher> = publisher.clone();
-        let handles = handles.with_zmq_publisher(publisher_handle);
+        let followers = zmq_followers(publisher_handle);
 
-        apply_block(&handles, &block)?;
+        apply_followed(&handles, &followers, &block)?;
 
         assert_eq!(*publisher.seen.lock(), vec![expected]);
+        Ok(())
+    }
+
+    struct TransitionHeldPublisher {
+        entered: std::sync::Arc<std::sync::Barrier>,
+        release: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    impl core::fmt::Debug for TransitionHeldPublisher {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("TransitionHeldPublisher")
+        }
+    }
+
+    impl crate::ZmqPublisher for TransitionHeldPublisher {
+        fn publish_hashblock(&self, _hash: Hash256) {
+            self.entered.wait();
+            self.release.wait();
+        }
+
+        fn publish_hashtx(&self, _txid: Txid) {}
+
+        fn publish_rawblock(&self, _bytes: &[u8]) {}
+
+        fn publish_rawtx(&self, _bytes: &[u8]) {}
+    }
+
+    /// `ARCH-07`: follower dispatch must run before the transition lock is
+    /// released, so a later connect cannot publish derived effects first.
+    #[test]
+    fn follower_dispatch_holds_the_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
+        let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = Hash256::from(genesis.block_hash());
+        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(6)],
+        )?;
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let publisher = Arc::new(TransitionHeldPublisher {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let publisher_handle: Arc<dyn crate::ZmqPublisher> = publisher;
+        let followers = zmq_followers(publisher_handle);
+
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let worker_handles = handles.clone();
+            let worker_followers = followers.clone();
+            let worker =
+                scope.spawn(move || apply_followed(&worker_handles, &worker_followers, &block));
+            entered.wait();
+            assert!(
+                handles.chain_transition.try_lock().is_none(),
+                "a competing transition must not enter during follower dispatch"
+            );
+            release.wait();
+            worker
+                .join()
+                .map_err(|_| std::io::Error::other("apply worker panicked"))??;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -9573,17 +9634,16 @@ mod consensus_rule_tests {
             .read()
             .tip()
             .map(|tip| (tip.tip_id, tip.height, tip.hash));
-        let block_records_before = handles
-            .effects
-            .block_log()
-            .read()
-            .iter()
-            .map(|record| (record.height, record.hash))
-            .collect::<Vec<_>>();
         let utxo_len_before = utxo.len();
         let marker_before = handles.undo_store.load_disconnect_marker()?;
 
-        let outcome = crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {});
+        let outcome = crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            target,
+            |_| None,
+            |_| {},
+        );
         assert!(
             matches!(
                 outcome,
@@ -9603,7 +9663,6 @@ mod consensus_rule_tests {
             &losing,
             &applied,
             tree_tip_before,
-            &block_records_before,
             utxo_len_before,
         );
         assert_eq!(
@@ -9633,17 +9692,16 @@ mod consensus_rule_tests {
             .read()
             .tip()
             .map(|tip| (tip.tip_id, tip.height, tip.hash));
-        let block_records_before = handles
-            .effects
-            .block_log()
-            .read()
-            .iter()
-            .map(|record| (record.height, record.hash))
-            .collect::<Vec<_>>();
         let utxo_len_before = utxo.len();
         let marker_before = handles.undo_store.load_disconnect_marker()?;
 
-        let outcome = crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {});
+        let outcome = crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            target,
+            |_| None,
+            |_| {},
+        );
         assert!(
             matches!(
                 outcome,
@@ -9658,7 +9716,6 @@ mod consensus_rule_tests {
             &losing,
             &applied,
             tree_tip_before,
-            &block_records_before,
             utxo_len_before,
         );
         assert_eq!(
@@ -9719,7 +9776,13 @@ mod consensus_rule_tests {
         let fork_target = fork_target.ok_or_else(|| anyhow::anyhow!("fork has no target"))?;
         let fork_tip_hash = Hash256::from(fork_prev);
 
-        crate::reorg::switch_to_branch(&handles, fork_target, |_| None, |_| {})?;
+        crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            fork_target,
+            |_| None,
+            |_| {},
+        )?;
 
         assert_eq!(
             handles.applied_tip.load_full().map(|tip| tip.hash),
@@ -9802,7 +9865,13 @@ mod consensus_rule_tests {
             .write()
             .insert((target_tip.height, target_tip.hash));
 
-        let outcome = crate::reorg::switch_to_branch(&handles, fork_target, |_| None, |_| {});
+        let outcome = crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            fork_target,
+            |_| None,
+            |_| {},
+        );
 
         // With DISCONNECT_STREAM_WINDOW = 8, the first window (heights 20..13)
         // disconnects fully (8 blocks), then the second window's load fails at
@@ -10049,7 +10118,13 @@ mod consensus_rule_tests {
         // real tear: some state reverted, some did not.
         handles.coin_stats.finish_block(999, 0);
 
-        let outcome = crate::reorg::switch_to_branch(&handles, target, |_| None, |_| {});
+        let outcome = crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            target,
+            |_| None,
+            |_| {},
+        );
         assert!(
             matches!(outcome, Err(crate::reorg::ReorgError::Refused { .. })),
             "the precheck must refuse rather than tear, got {outcome:?}"
@@ -10079,7 +10154,6 @@ mod consensus_rule_tests {
             bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits::default()),
         ));
         let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
-        let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
         Chainstate::new(
             network,
             Arc::new(ArcSwapOption::empty()),
@@ -10091,8 +10165,33 @@ mod consensus_rule_tests {
             )),
             mempool,
             mempool_gateway,
-            mining_generation,
             Arc::new(crate::state::ChainEventPublisher::detached(0).0),
+        )
+    }
+
+    fn apply_followed(
+        handles: &Chainstate,
+        followers: &crate::chain_effects::ChainFollowers,
+        block: &Block,
+    ) -> core::result::Result<TipSnapshot, ApplyError> {
+        Ok(followers.apply_connect(handles, block)?.tip)
+    }
+
+    fn disconnect_followed(
+        handles: &Chainstate,
+        followers: &crate::chain_effects::ChainFollowers,
+        block: &Block,
+    ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
+        Ok(followers.apply_disconnect(handles, block)?.parent_tip)
+    }
+
+    fn zmq_followers(
+        publisher: Arc<dyn crate::ZmqPublisher>,
+    ) -> crate::chain_effects::ChainFollowers {
+        crate::chain_effects::ChainFollowers::new(
+            crate::chain_effects::ChainEffects::noop().with_zmq_publisher(publisher),
+            Arc::new(crate::mining::MiningGenerationSignal::new()),
+            None,
         )
     }
 
@@ -10264,7 +10363,13 @@ mod consensus_rule_tests {
             published: Mutex::new(0),
         });
         let control_dyn: Arc<dyn bitcoin_rs_mining::MiningControl> = control.clone();
-        handles.mining_generation.attach(&control_dyn);
+        let mining = Arc::new(crate::mining::MiningGenerationSignal::new());
+        mining.attach(&control_dyn);
+        let followers = crate::chain_effects::ChainFollowers::new(
+            crate::chain_effects::ChainEffects::noop(),
+            mining,
+            None,
+        );
         assert_eq!(*control.published.lock(), 0, "nothing ran yet");
 
         let genesis_hash = Hash256::from(genesis.block_hash());
@@ -10275,14 +10380,14 @@ mod consensus_rule_tests {
             genesis.block_hash(),
             vec![coinbase_transaction(1)],
         )?;
-        apply_block(&handles, &block)?;
+        apply_followed(&handles, &followers, &block)?;
         assert_eq!(
             *control.published.lock(),
             1,
             "the connect's tip publication must wake the coordinator once"
         );
 
-        disconnect_block(&handles, &block)?;
+        disconnect_followed(&handles, &followers, &block)?;
         assert_eq!(
             *control.published.lock(),
             2,
@@ -10478,7 +10583,6 @@ mod consensus_rule_tests {
         )?;
         apply_block(&handles, &applied)?;
         let applied_hash = applied.block_hash().0;
-        let block_log_len = handles.effects.block_log().read().len();
         let utxo_len = handles.utxo.len();
         handles.undo_store = Arc::new(FailingUndoPersist {
             inner: InMemoryUndoStore::default(),
@@ -10500,11 +10604,6 @@ mod consensus_rule_tests {
             "a precommit bookkeeping failure must not move the tip"
         );
         assert_eq!(handles.utxo.len(), utxo_len, "no outputs may commit");
-        assert_eq!(
-            handles.effects.block_log().read().len(),
-            block_log_len,
-            "the block log must not grow past the failed bookkeeping"
-        );
         assert!(
             handles.block_tree.read().node_by_hash(next_hash).is_none(),
             "fallible tree preparation must precede the first UTXO mutation and stay absent on failure"
@@ -10640,10 +10739,8 @@ mod zmq_emit_tests {
 mod with_zmq_publisher_tests {
     use std::sync::Arc;
 
-    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_primitives::{Hash256, Txid};
     use parking_lot::Mutex;
-
-    use crate::ZmqPublisher as _;
 
     #[derive(Debug, Default)]
     struct TaggedPublisher {
@@ -10651,7 +10748,7 @@ mod with_zmq_publisher_tests {
     }
 
     impl crate::ZmqPublisher for TaggedPublisher {
-        fn publish_hashblock(&self, _: bitcoin_rs_primitives::Hash256) {
+        fn publish_hashblock(&self, _: Hash256) {
             *self.tag.lock() = 42;
         }
 
@@ -10663,14 +10760,13 @@ mod with_zmq_publisher_tests {
     }
 
     #[test]
+    // ARCH-07 evidence: derived ZMQ consumers are configured outside apply.
     fn with_zmq_publisher_swaps_handle() {
-        let publisher = Arc::new(TaggedPublisher::default());
-        // Building Chainstate directly here is awkward without a full NodeState.
-        // Instead, verify the trait-object swap behavior by constructing the
-        // publisher and exercising the publish path. The builder semantics are
-        // a simple field swap; this test just covers the publisher capture.
-        publisher.publish_hashblock(bitcoin_rs_primitives::Hash256::default());
-        assert_eq!(*publisher.tag.lock(), 42);
+        let tagged = Arc::new(TaggedPublisher::default());
+        let publisher: Arc<dyn crate::ZmqPublisher> = tagged.clone();
+        let effects = crate::chain_effects::ChainEffects::noop().with_zmq_publisher(publisher);
+        effects.emit_connected(Hash256::default(), &[], &[], None);
+        assert_eq!(*tagged.tag.lock(), 42);
     }
 }
 
@@ -11140,7 +11236,8 @@ mod chain_generation_tests {
         recorder.bind(&gateway);
         handles.mempool_gateway = gateway;
 
-        crate::reorg::invalidate_block(&handles, tip_hash)
+        let followers = crate::chain_effects::ChainFollowers::noop();
+        crate::reorg::invalidate_block(&handles, &followers, tip_hash)
             .unwrap_or_else(|error| panic!("invalidate tip: {error}"));
 
         // The spend must have been readmitted to the mempool.

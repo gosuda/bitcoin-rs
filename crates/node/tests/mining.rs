@@ -40,6 +40,7 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.block_tree(),
         state.mempool(),
         state.apply_handles(),
+        state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
     )
@@ -634,6 +635,7 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
             state.block_tree(),
             state.mempool(),
             state.apply_handles(),
+            state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
         )
@@ -670,6 +672,7 @@ fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
             state.block_tree(),
             state.mempool(),
             state.apply_handles(),
+            state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
         )
@@ -1036,6 +1039,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
             state.block_tree(),
             state.mempool(),
             state.apply_handles(),
+            state.chain_followers(),
             state.config().mining.payout_script.clone(),
             state.shutdown(),
         )

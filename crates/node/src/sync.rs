@@ -54,6 +54,7 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 /// methods and does not schedule through `P2pService::select_download_peers`.
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
+    followers: crate::chain_effects::ChainFollowers,
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
@@ -130,12 +131,14 @@ impl BlockSync {
     #[must_use]
     pub fn new(
         handles: crate::apply::Chainstate,
+        followers: crate::chain_effects::ChainFollowers,
         peer_table: Arc<PeerTable>,
         inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
         inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
     ) -> Self {
         Self {
             handles,
+            followers,
             peer_table,
             inbound_headers_rx,
             inbound_blocks_rx,
@@ -147,12 +150,65 @@ impl BlockSync {
         }
     }
 
+    /// Test constructor with no derived consumers.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        handles: crate::apply::Chainstate,
+        peer_table: Arc<PeerTable>,
+        inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
+        inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    ) -> Self {
+        Self::new(
+            handles,
+            crate::chain_effects::ChainFollowers::noop(),
+            peer_table,
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        )
+    }
+
     /// Replaces the download window and block stager with ones configured by
     /// `budget`. Intended for tests and benchmarks that need to exercise
     /// non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
         *self.download_window.lock() = DownloadWindow::new(budget);
         *self.block_stager.lock() = BlockStager::new(budget);
+    }
+
+    /// Applies a window, then dispatches derived consumers while the
+    /// transition is still held.
+    #[allow(clippy::result_large_err)]
+    fn apply_window_followed(
+        &self,
+        blocks: &[&Block],
+        bodies: &[bytes::Bytes],
+    ) -> core::result::Result<usize, crate::apply::WindowApplyError> {
+        let transition =
+            self.handles
+                .begin_transition()
+                .map_err(|source| crate::apply::WindowApplyError {
+                    applied: 0,
+                    committed: Vec::new(),
+                    source,
+                    disposition: crate::apply::WindowApplyDisposition::Operational,
+                    invalidated: Box::default(),
+                })?;
+        match transition.connect_window(blocks, bodies) {
+            Ok(outcomes) => {
+                for (block, outcome) in blocks.iter().zip(&outcomes) {
+                    self.followers.connected(block, outcome);
+                }
+                let applied = outcomes.len();
+                let _ = transition.finish();
+                Ok(applied)
+            }
+            Err(error) => {
+                for (block, outcome) in blocks.iter().zip(&error.committed) {
+                    self.followers.connected(block, outcome);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Clears leftover address-scoped scheduler state for a newly ready
@@ -587,6 +643,7 @@ impl BlockSync {
         };
         let outcome = crate::reorg::switch_to_branch(
             &self.handles,
+            &self.followers,
             target,
             |hash| self.block_stager.lock().staged_body(hash),
             |hash| self.retire_applied_reorg_body(hash),
@@ -746,8 +803,8 @@ impl BlockSync {
             // The window reports how far it got rather than just failing,
             // because only the committed prefix may be marked applied; the rest
             // has to go back on the stager untouched.
-            let committed = match crate::apply::apply_window(&self.handles, &blocks, &bodies) {
-                Ok(()) => chunk.len(),
+            let committed = match self.apply_window_followed(&blocks, &bodies) {
+                Ok(applied) => applied,
                 Err(error) => {
                     let stopped = error.applied.min(chunk.len());
                     failed = failed.saturating_add(1);
@@ -1347,10 +1404,10 @@ impl BlockSync {
 
         let had_chain_tip = self.handles.chain_tip.load_full().is_some();
         let genesis = self.handles.network.genesis_block();
-        match crate::apply::apply_block(&self.handles, &genesis) {
-            Ok(tip) => {
+        match self.followers.apply_connect(&self.handles, &genesis) {
+            Ok(outcome) => {
                 if !had_chain_tip {
-                    self.handles.chain_tip.store(Some(Arc::new(tip)));
+                    self.handles.chain_tip.store(Some(Arc::new(outcome.tip)));
                 }
             }
             Err(error) => {
@@ -1601,7 +1658,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -1679,7 +1736,7 @@ mod tests {
         let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             apply_handles(chain_tip, Arc::clone(&applied_tip), block_tree),
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -1772,7 +1829,7 @@ mod tests {
         let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             apply_handles(Arc::clone(&chain_tip), Arc::clone(&applied_tip), block_tree),
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -1858,7 +1915,7 @@ mod tests {
         let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
         let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             apply_handles(chain_tip, applied_tip, block_tree),
             Arc::new(PeerTable::new()),
             Arc::new(Mutex::new(inbound_headers_rx_raw)),
@@ -2002,9 +2059,15 @@ mod tests {
             .read()
             .lookup(Hash256::from_le_bytes(main[1].block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing original branch tip"))?;
-        crate::reorg::switch_to_branch(&sync.handles, main_target, explicit_body, |hash| {
-            sync.retire_applied_reorg_body(hash);
-        })?;
+        crate::reorg::switch_to_branch(
+            &sync.handles,
+            &sync.followers,
+            main_target,
+            explicit_body,
+            |hash| {
+                sync.retire_applied_reorg_body(hash);
+            },
+        )?;
         let restored = applied_tip
             .load_full()
             .ok_or_else(|| std::io::Error::other("reverse switch did not publish a tip"))?;
@@ -2082,6 +2145,7 @@ mod tests {
                 let mut paused = false;
                 crate::reorg::switch_to_branch(
                     &sync.handles,
+                    &sync.followers,
                     fork_parent,
                     |hash| {
                         let body = sync.block_stager.lock().staged_body(hash);
@@ -2161,6 +2225,7 @@ mod tests {
         }
         let outcome = crate::reorg::switch_to_branch(
             &sync.handles,
+            &sync.followers,
             fork_parent,
             |hash| sync.block_stager.lock().staged_body(hash),
             |hash| sync.retire_applied_reorg_body(hash),
@@ -2352,6 +2417,7 @@ mod tests {
 
         let outcome = crate::reorg::switch_to_branch(
             &sync.handles,
+            &sync.followers,
             target_id,
             |hash| {
                 let block = if hash == target_hash {
@@ -2421,6 +2487,7 @@ mod tests {
 
         let outcome = crate::reorg::switch_to_branch(
             &sync.handles,
+            &sync.followers,
             target_id,
             |hash| {
                 if hash == target_hash {
@@ -2532,7 +2599,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -2592,7 +2659,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -2953,7 +3020,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -3018,7 +3085,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -3160,7 +3227,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -4931,7 +4998,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -5016,7 +5083,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -5100,7 +5167,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -5289,7 +5356,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -5456,7 +5523,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -5524,7 +5591,7 @@ mod tests {
         );
         let fail_once_store = Arc::new(FailOnceBodyStore::new(2));
         handles.block_body_store = Some(fail_once_store.clone());
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -5659,7 +5726,7 @@ mod tests {
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(Arc::clone(&chain_tip), Arc::clone(&applied_tip), block_tree);
-        let sync = BlockSync::new(handles, peers, inbound_headers_rx, inbound_blocks_rx);
+        let sync = BlockSync::for_test(handles, peers, inbound_headers_rx, inbound_blocks_rx);
         // Apply genesis so the applied tip starts at height 0; no block bodies
         // are staged yet, leaving every round below to drive cache state.
         sync.ensure_genesis_tip();
@@ -5807,7 +5874,7 @@ mod tests {
         );
         let fail_once_store = Arc::new(FailOnceBodyStore::new(2));
         handles.block_body_store = Some(fail_once_store);
-        let sync = BlockSync::new(handles, peers, inbound_headers_rx, inbound_blocks_rx);
+        let sync = BlockSync::for_test(handles, peers, inbound_headers_rx, inbound_blocks_rx);
         sync.ensure_genesis_tip();
 
         for block in [&block1, &block2, &block3] {
@@ -6035,7 +6102,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -6087,7 +6154,7 @@ mod tests {
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         );
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -6456,7 +6523,6 @@ mod tests {
     ) -> Chainstate {
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
         let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
-        let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
         Chainstate::new(
             Network::Regtest,
             chain_tip,
@@ -6468,7 +6534,6 @@ mod tests {
             )),
             mempool,
             mempool_gateway,
-            mining_generation,
             Arc::new(crate::state::ChainEventPublisher::detached(0).0),
         )
     }
@@ -6565,7 +6630,7 @@ mod tests {
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(chain_tip, applied_tip, block_tree);
-        let sync = BlockSync::new(
+        let sync = BlockSync::for_test(
             handles,
             Arc::clone(&peers),
             inbound_headers_rx,
@@ -6734,7 +6799,6 @@ mod tests {
         assert_eq!(tip.height, 0);
         assert_eq!(tip.hash, genesis_hash);
         assert_eq!(block_tree.read().height_of_hash(genesis_hash), Some(0));
-        assert_eq!(handles.effects.block_log().read().len(), 1);
         assert_eq!(handles.utxo.len(), 0);
         Ok(())
     }
@@ -7381,6 +7445,7 @@ mod tests {
 
         let outcome = crate::reorg::switch_to_branch(
             &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
             fork_target,
             |hash| bodies.get(&hash).cloned(),
             move |_hash| counter.set(counter.get() + 1),
@@ -7471,6 +7536,7 @@ mod tests {
 
         let outcome = crate::reorg::switch_to_branch(
             &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
             fork_target,
             |hash| bodies.get(&hash).cloned(),
             |_| {},
@@ -7547,6 +7613,7 @@ mod tests {
 
         let outcome = crate::reorg::switch_to_branch(
             &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
             fork_target,
             |hash| bodies.get(&hash).cloned(),
             |_| {},
