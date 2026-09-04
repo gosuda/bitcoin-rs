@@ -9,7 +9,7 @@ subsystem crates.
 drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `Chainstate` facade for
 authoritative apply; `ChainFollowers` dispatch post-commit RPC/ZMQ/index,
-mining, and admission work after apply returns a committed outcome;
+mining, and admission work while the `ChainTransition` is still held;
 `BlockSync` orchestrates block download; `reorg` switches the applied chain
 from one branch to another. The chainstate facade serializes connect,
 disconnect, and window apply behind `ChainTransition`. Owning crates expose

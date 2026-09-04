@@ -180,8 +180,9 @@ Owners:
   projection, mempool mutation consumers, and block-body access live with their
   owner crates (#272). Applied-tip mutation goes through the `Chainstate`
   / `ChainTransition` facade (`ARCH-07`). Derived consumers live in
-  `ChainFollowers` / `ChainEffects` and are dispatched after commit;
-  `Chainstate` does not hold them. `crates/node` still carries leftover
+  `ChainFollowers` / `ChainEffects` and are dispatched after commit
+  while the `ChainTransition` is still held; `Chainstate` does not hold
+  them. `crates/node` still carries leftover
   domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
   the P2P download scheduler (`sync.rs`), and direct backend construction and
   cache share dispatch (`state.rs`). Relocating those into `crates/utxo`,
@@ -206,7 +207,6 @@ Owners:
   - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
     operator-tier backend feature flags.
 - `crates/node/src/apply.rs` tests `snapshot_reads_applied_tip_without_taking_a_transition`,
-- `crates/node/src/apply.rs` tests `snapshot_reads_applied_tip_without_taking_a_transition`,
   `chain_transition_connect_and_finish_publish_the_new_tip`,
   `proposal_rejects_excess_coinbase_without_persisting`,
   `proposal_omits_proof_of_work`: the facade copies published tips without
@@ -215,9 +215,10 @@ Owners:
 - `crates/node/src/apply.rs` tests `apply_block_publishes_rawtx_bytes_in_block_order`,
   `connected_sequence_event_observes_the_published_applied_tip`,
   `connect_and_disconnect_wake_the_mining_generation`,
-  `follower_dispatch_holds_the_chain_transition`: apply returns a committed
-  outcome; `ChainFollowers` consume it after the tip is published and while
-  the transition is still held.
+  `follower_dispatch_holds_the_chain_transition`,
+  `with_zmq_publisher_swaps_handle`: apply returns a committed outcome;
+  `ChainFollowers` consume it after the tip is published and while the
+  transition is still held; ZMQ publishers are configured outside apply.
 - `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
