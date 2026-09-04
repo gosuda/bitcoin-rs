@@ -12,7 +12,10 @@ pub mod policy;
 /// Transport-neutral candidate assembly.
 pub mod template;
 
-pub use coinbase::{MiningError, WITNESS_RESERVED_VALUE, witness_commitment_script};
+pub use coinbase::{
+    MiningError, WITNESS_RESERVED_VALUE, update_uncommitted_block_structures,
+    witness_commitment_script,
+};
 pub use context::{MiningChainContext, check_candidate_header};
 pub use control::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
