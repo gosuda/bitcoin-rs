@@ -26,7 +26,7 @@ use bitcoin_rs_mining::{
     GenerateSelection, GenerateTx, GeneratedBlock, LastCandidateInfo, MiningCapability,
     MiningChainContext, MiningControl, MiningControlError, MiningInfo, MiningRule,
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
-    difficulty_for_bits, update_uncommitted_block_structures,
+    difficulty_for_bits, solve_block, update_uncommitted_block_structures,
 };
 use bitcoin_rs_primitives::{Block, Hash256, Header, Network, Tx, consensus_bytes};
 use compact_str::CompactString;
@@ -589,14 +589,17 @@ impl MiningCoordinator {
 
     /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).
     ///
-    /// Each submitted block is applied through `apply::apply_block` before the
-    /// next iteration; that is the commit point (`ARCH-07`). Failure after *N*
-    /// accepted submissions leaves those *N* blocks durable at the applied tip.
-    /// `submit = false` dry-validates through `apply::validate_block` and does
-    /// not persist. The result vector grows one block at a time, so `count` cannot
-    /// force a large allocation up front. Callers own retry after inspecting the
-    /// tip. [`MiningControlError::InvalidRequest`] is not retriable without
-    /// changing the request; `Unavailable` and `Failed` may be retried.
+    /// `generateblock` (`GenerateSelection::Ordered`) runs Core's
+    /// `TestBlockValidity` before the nonce search (`API-27`).
+    /// `generatetoaddress` (`Mempool`) does not. Each submitted block is
+    /// applied through `apply::apply_block` before the next iteration; that
+    /// is the commit point (`ARCH-07`). Failure after *N* accepted submissions
+    /// leaves those *N* blocks durable at the applied tip. `submit = false`
+    /// dry-validates through `apply::validate_block` and does not persist.
+    /// The result vector grows one block at a time, so `count` cannot force a
+    /// large allocation up front. Callers own retry after inspecting the tip.
+    /// [`MiningControlError::InvalidRequest`] is not retriable without changing
+    /// the request; `Unavailable` and `Failed` may be retried.
     fn generate_blocks(
         &self,
         request: &GenerateRequest,
@@ -617,7 +620,12 @@ impl MiningCoordinator {
                 )));
             }
             let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
-            let block = candidate.solve(request.max_tries).map_err(|error| {
+            let mut block = candidate.into_unsolved_block();
+            if matches!(request.selection, GenerateSelection::Ordered(_)) {
+                // CONTRACT: docs/contracts/external-api.md#API-27
+                self.test_generateblock_validity(&block)?;
+            }
+            solve_block(&mut block, request.max_tries).map_err(|error| {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
             if request.submit {
@@ -643,6 +651,19 @@ impl MiningCoordinator {
             });
         }
         Ok(generated)
+    }
+
+    /// Core `generateblock` `TestBlockValidity` before `GenerateBlock`.
+    ///
+    /// `ApplyIntent::Propose` already skips hash-meets-target. This path does
+    /// not use [`Self::propose`], which owns GBT LookupBlockIndex duplicate
+    /// vocabulary (`API-14`/`API-21`).
+    /// CONTRACT: docs/contracts/external-api.md#API-27
+    fn test_generateblock_validity(&self, block: &Block) -> Result<(), MiningControlError> {
+        match apply::validate_block(&self.apply_handles, block) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(test_block_validity_error(error)),
+        }
     }
 
     fn template_from_candidate(
@@ -1072,6 +1093,22 @@ fn bip22_chain_reason(error: &ChainError) -> CompactString {
     })
 }
 
+/// Core `JSONRPCError(RPC_VERIFY_ERROR, "TestBlockValidity failed: %s")`.
+///
+/// Shutdown and journal backpressure stay operational; they are not wrapped
+/// as TestBlockValidity. CONTRACT: docs/contracts/external-api.md#API-27
+fn test_block_validity_error(error: ApplyError) -> MiningControlError {
+    match error {
+        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
+            MiningControlError::Unavailable(CompactString::from(error.to_string()))
+        }
+        other => MiningControlError::Rejected(CompactString::from(format!(
+            "TestBlockValidity failed: {}",
+            bip22_reject_reason(&other)
+        ))),
+    }
+}
+
 fn header_reject_reason(error: ChainError) -> MiningControlError {
     let reason = match error {
         ChainError::InvalidPow { .. } => CompactString::from("high-hash"),
@@ -1090,11 +1127,13 @@ fn header_reject_reason(error: ChainError) -> MiningControlError {
 
 #[cfg(test)]
 mod apply_error_tests {
-    use super::{BlockValidationResult, map_apply_error};
+    use super::{
+        BlockValidationResult, MiningControlError, map_apply_error, test_block_validity_error,
+    };
     use crate::state::ApplyError;
     use bitcoin_rs_chain::{ChainError, ChainWork};
     use bitcoin_rs_consensus::ConsensusError;
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::{Hash256, Txid};
     use compact_str::CompactString;
 
     fn rejected(error: ApplyError) -> CompactString {
@@ -1109,6 +1148,37 @@ mod apply_error_tests {
         assert!(matches!(
             map_apply_error(ApplyError::JournalBackpressure("test pressure".to_owned())),
             BlockValidationResult::Inconclusive
+        ));
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-27
+    #[test]
+    fn generateblock_validity_wraps_bip22_reason() {
+        let error = test_block_validity_error(ApplyError::UndoPrevoutMissing {
+            txid: Txid::from(Hash256::from_le_bytes(&[0x11; 32])),
+            vout: 0,
+        });
+        match error {
+            MiningControlError::Rejected(reason) => {
+                assert_eq!(
+                    reason.as_str(),
+                    "TestBlockValidity failed: bad-txns-inputs-missingorspent"
+                );
+            }
+            other => panic!("expected rejected, got {other:?}"),
+        }
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-27
+    #[test]
+    fn generateblock_validity_keeps_shutdown_operational() {
+        assert!(matches!(
+            test_block_validity_error(ApplyError::Shutdown),
+            MiningControlError::Unavailable(_)
+        ));
+        assert!(matches!(
+            test_block_validity_error(ApplyError::JournalBackpressure("test pressure".to_owned())),
+            MiningControlError::Unavailable(_)
         ));
     }
 
