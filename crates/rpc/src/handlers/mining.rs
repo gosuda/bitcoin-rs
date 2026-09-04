@@ -385,10 +385,11 @@ fn parse_generateblock_transactions(
         };
         // CONTRACT: docs/contracts/external-api.md#API-24
         if let Ok(txid) = Txid::from_str(text) {
-            if ctx.mempool.read().entry_by_txid(&txid).is_none() {
+            let snapshot = ctx.mempool.read().mining_snapshot();
+            let Some(entry) = snapshot.entries.into_iter().find(|entry| entry.txid == txid) else {
                 return Err(generateblock_unknown_txid(text));
-            }
-            transactions.push(GenerateTx::Mempool(txid));
+            };
+            transactions.push(GenerateTx::ResolvedMempool(entry));
             continue;
         }
         let bytes = from_hex(text).map_err(|()| generateblock_tx_decode_failed(text))?;

@@ -1411,7 +1411,11 @@ fn snapshot_for_selection(
                         let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
                         selected.push(full.entries[old_usize].clone());
                     }
-                    GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
+                    GenerateTx::ResolvedMempool(mut entry) => {
+                          entry.ancestors.clear();
+                          selected.push(entry);
+                      }
+                      GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
                 }
             }
             for entry in &mut selected {
