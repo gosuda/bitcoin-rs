@@ -1253,10 +1253,6 @@ impl Chainstate {
     }
 
     /// See `ARCH-07` in `docs/contracts/architecture.md`.
-    ///
-    /// Holds [`Self::lock_transition`] so a concurrent connect cannot move the
-    /// tip under the check. Does not take a mempool [`ChainChangeProof`]: finishing
-    /// that proof would bump the mining generation.
     pub fn validate_block(&self, block: &Block) -> core::result::Result<(), ApplyError> {
         let _lock = self.lock_transition()?;
         match apply_block_admitted(
@@ -2572,10 +2568,7 @@ fn apply_committed_block_admitted<'b>(
 
 /// Shared connect body for [`ApplyIntent::Commit`] and [`ApplyIntent::Propose`].
 ///
-/// See `ARCH-07` in `docs/contracts/architecture.md`. Commit callers hold a
-/// [`ChainChangeProof`] via [`apply_committed_block_admitted`]. Proposal holds
-/// only [`Chainstate::lock_transition`] so finishing a mempool proof cannot bump
-/// mining generation.
+/// See `ARCH-07` in `docs/contracts/architecture.md`.
 ///
 /// Split from [`apply_block_inner`] so a window can take both locks once across
 /// its preparation and all of its ordered commits. Re-entering per block would
