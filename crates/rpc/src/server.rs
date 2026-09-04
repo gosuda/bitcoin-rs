@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, IoSlice, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::Duration;
@@ -96,7 +96,8 @@ impl RpcServer {
         Ok(())
     }
 
-    fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
+    fn handle_accept(&self, active: &Arc<Mutex<usize>>, stream: TcpStream) -> io::Result<()> {
+        let mut stream = prepare_http_socket(stream)?;
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {
@@ -504,14 +505,7 @@ fn write_status(
     body: &[u8],
     keep_alive: bool,
 ) -> io::Result<()> {
-    let connection = if keep_alive { "keep-alive" } else { "close" };
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
-        body.len()
-    )?;
-    stream.write_all(body)?;
-    stream.flush()
+    write_http(stream, status, reason, "application/json", body, keep_alive)
 }
 
 fn split_path_query(path: &str) -> (&str, &str) {
@@ -544,17 +538,55 @@ fn write_response(
     response: &crate::rest::Response,
     keep_alive: bool,
 ) -> io::Result<()> {
-    let connection = if keep_alive { "keep-alive" } else { "close" };
-    write!(
+    write_http(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
         response.status,
         response.reason,
         response.content_type,
-        response.body.len()
-    )?;
-    stream.write_all(&response.body)?;
+        &response.body,
+        keep_alive,
+    )
+}
+
+/// Applies the HTTP socket contract: disable Nagle once, before any bytes move.
+fn prepare_http_socket(stream: TcpStream) -> io::Result<TcpStream> {
+    stream.set_nodelay(true)?;
+    Ok(stream)
+}
+
+fn write_http(
+    stream: &mut impl Write,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+    keep_alive: bool,
+) -> io::Result<()> {
+    let connection = if keep_alive { "keep-alive" } else { "close" };
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
+        body.len()
+    );
+    write_all_vectored(stream, header.as_bytes(), body)?;
     stream.flush()
+}
+
+fn write_all_vectored(stream: &mut impl Write, header: &[u8], body: &[u8]) -> io::Result<()> {
+    let mut slices: &mut [IoSlice<'_>] = &mut [IoSlice::new(header), IoSlice::new(body)];
+    while !slices.is_empty() {
+        match stream.write_vectored(slices) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write http response",
+                ));
+            }
+            Ok(written) => IoSlice::advance_slices(&mut slices, written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -716,5 +748,57 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows[0].get("result").is_some());
         assert!(rows[1].get("error").is_some());
+    }
+
+    #[test]
+    fn write_http_emits_header_and_body_as_one_vectored_write() {
+        struct VectoredSink {
+            calls: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for VectoredSink {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                panic!("write_http must not fall back to write");
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> io::Result<usize> {
+                self.calls += 1;
+                let mut written = 0;
+                for buffer in buffers {
+                    self.bytes.extend_from_slice(buffer);
+                    written += buffer.len();
+                }
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut sink = VectoredSink {
+            calls: 0,
+            bytes: Vec::new(),
+        };
+        write_http(&mut sink, 200, "OK", "application/json", b"{}", true).expect("write_http");
+        assert_eq!(sink.calls, 1);
+        let text = String::from_utf8(sink.bytes).expect("utf8");
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.ends_with("\r\n\r\n{}"));
+    }
+
+    #[test]
+    fn prepare_http_socket_disables_nagle() -> io::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let accepting = std::thread::spawn(move || listener.accept());
+        let client = TcpStream::connect(addr)?;
+        assert!(
+            !client.nodelay()?,
+            "a raw TcpStream starts with Nagle enabled"
+        );
+        let prepared = prepare_http_socket(client)?;
+        assert!(prepared.nodelay()?, "prepare_http_socket owns TCP_NODELAY");
+        drop(prepared);
+        let _accepted = accepting.join();
+        Ok(())
     }
 }
