@@ -274,17 +274,18 @@ fn serve_connections(
     inbound_sync_sinks: &InboundSyncSinks,
 ) -> Result<(), ListenerError> {
     let listener = bind_listener(addr)?;
-    accept_connections(addr, listener, shutdown, magic, shared, inbound_sync_sinks)
+    accept_connections(addr, &listener, shutdown, magic, shared, inbound_sync_sinks);
+    Ok(())
 }
 
 fn accept_connections(
     addr: SocketAddr,
-    listener: TcpListener,
+    listener: &TcpListener,
     shutdown: &AtomicBool,
     magic: Magic,
     shared: &ConnectionShared,
     inbound_sync_sinks: &InboundSyncSinks,
-) -> Result<(), ListenerError> {
+) {
     let mut accept_backoff = POLL_INTERVAL;
     while !shutdown.load(Ordering::Relaxed) && !shared.is_session_cancelled() {
         #[cfg(test)]
@@ -337,7 +338,6 @@ fn accept_connections(
             }
         }
     }
-    Ok(())
 }
 
 /// Binds `addr` and runs the accept loop driven by one
@@ -467,12 +467,13 @@ pub fn serve_bound_with_session_cancel(
         InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx);
     accept_connections(
         addr,
-        listener,
+        &listener,
         &shutdown,
         magic,
         &shared,
         &inbound_sync_sinks,
-    )
+    );
+    Ok(())
 }
 
 /// Outbound dial that also observes a start-scoped cancellation token.
