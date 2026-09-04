@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
-use bitcoin_rs_mempool::tx_has_dust_outputs;
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
     BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
@@ -176,20 +175,16 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
             ));
         }
     }
-    // Core `require_standard` defaults on except regtest (`-acceptnonstdtxn`).
-    // Dust in the pool cannot have its fee overlay modified afterwards.
-    if ctx.chain_network != Network::Regtest {
-        let pool = ctx.mempool.read();
-        if let Some(entry) = pool.entry_by_txid(&txid) {
-            let dust_relay_fee = pool.policy_snapshot().standardness.dust_relay_fee;
-            if tx_has_dust_outputs(&entry.tx, dust_relay_fee) {
-                return Err(RpcError::InvalidParameter(PRIORITISE_DUST_ERROR.to_owned()));
-            }
-        }
+    // See the authoritative API-20 contract for this network-dependent rule.
+    let prioritised = if ctx.chain_network != Network::Regtest {
+        let dust_relay_fee = ctx.mempool.read().policy_snapshot().standardness.dust_relay_fee;
+        ctx.mempool.prioritise_if_not_dust(txid, fee_delta, dust_relay_fee)
+    } else {
+        ctx.mempool.prioritise(txid, fee_delta).map(|()| true)
+    };
+    if !prioritised.map_err(|_| RpcError::InvalidParams("fee delta would overflow"))? {
+        return Err(RpcError::InvalidParameter(PRIORITISE_DUST_ERROR.to_owned()));
     }
-    ctx.mempool
-        .prioritise(txid, fee_delta)
-        .map_err(|_| RpcError::InvalidParams("fee delta would overflow"))?;
     if let Some(control) = ctx.mining_control.as_ref() {
         control.publish_generation();
     }
@@ -1574,6 +1569,7 @@ mod tests {
         }
     }
 
+    // CONTRACT: API-20
     #[test]
     fn prioritisetransaction_rejects_dust_outputs_like_core() {
         use bitcoin_rs_mempool::MempoolEntry;
@@ -1595,6 +1591,7 @@ mod tests {
         assert_eq!(error.to_string(), PRIORITISE_DUST_ERROR);
     }
 
+    // CONTRACT: API-20
     #[test]
     fn prioritisetransaction_allows_dust_overlay_on_regtest() {
         use bitcoin_rs_mempool::MempoolEntry;
@@ -1615,6 +1612,7 @@ mod tests {
         assert_eq!(result.as_bool(), Some(true));
     }
 
+    // CONTRACT: API-20
     #[test]
     fn prioritisetransaction_allows_absent_txid_overlay() {
         let ctx = Arc::new(Context::new());

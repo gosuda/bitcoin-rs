@@ -779,6 +779,22 @@ impl MempoolGateway {
         pool.prioritise(txid, fee_delta)
     }
 
+    /// Atomically rejects pooled dust before applying a fee overlay.
+    pub fn prioritise_if_not_dust(
+        &self,
+        txid: Txid,
+        fee_delta: i64,
+        dust_relay_fee: u64,
+    ) -> Result<bool, PrioritiseError> {
+        let mut pool = self.pool.write();
+        if let Some(entry) = pool.entry_by_txid(&txid)
+            && crate::standardness::tx_has_dust_outputs(&entry.tx, dust_relay_fee)
+        {
+            return Ok(false);
+        }
+        pool.prioritise(txid, fee_delta).map(|()| true)
+    }
+
     /// Reads the stored fee-delta overlay map.
     #[must_use]
     pub fn prioritised_transactions(&self) -> Vec<PrioritisedTransaction> {
