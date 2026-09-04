@@ -5,9 +5,9 @@
 //! 8-byte prefix. Height 1 (`00 00 00 01`) sorts before height 256
 //! (`00 00 01 00`) in byte order.
 //!
-//! These tests pin two contracts: store iteration is chronological, and
-//! high-level resolvers still sort by numeric height after exact-resolve so
-//! API order does not depend on raw iteration.
+//! These tests pin the format-5 height-order layout: store iteration is
+//! chronological, and high-level resolvers still sort by numeric height after
+//! exact-resolve so API order does not depend on raw iteration.
 
 mod common;
 
