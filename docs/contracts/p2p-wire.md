@@ -50,3 +50,5 @@ normative; it places them under the
   and payload leave as one `write_vectored`, and the wrapper counts every byte
   the socket took (`P2P-01`). Elapsed time is
   `crates/p2p/benches/write_message.rs`.
+- `crates/p2p/src/listener.rs` test `session_sockets_disable_nagle`: inbound
+  and outbound session sockets set `TCP_NODELAY` (`P2P-02`).

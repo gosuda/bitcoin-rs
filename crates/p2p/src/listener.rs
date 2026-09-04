@@ -1304,6 +1304,7 @@ mod session_socket_tests {
 
     use super::{HANDSHAKE_READ_TIMEOUT, STREAM_POLL_INTERVAL, configure_session_socket};
 
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-02`.
     #[test]
     fn session_sockets_disable_nagle() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
