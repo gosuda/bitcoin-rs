@@ -1796,22 +1796,14 @@ fn pending_rows_for_block_with_header(
     height: u32,
     capabilities: IndexCapabilities,
     spent_scripts: &dyn SpentCoinScripts,
-) -> Result<
-    (
-        PendingRows,
-        usize,
-        Option<[u8; crate::types::HEADER_ROW_SIZE]>,
-    ),
-    IndexError,
-> {
+) -> Result<(PendingRows, Option<[u8; crate::types::HEADER_ROW_SIZE]>), IndexError> {
     let mut rows = PendingRows::default();
     let mut header = None;
-    let (txid_count, live_created, live_spent) = {
+    let (live_created, live_spent) = {
         let mut visitor = IndexBlockVisitor {
             rows: &mut rows,
             header: &mut header,
             height_bytes: height.to_le_bytes(),
-            txid_count: 0,
             invalid_header_len: None,
             block,
             pending_funding: Vec::new(),
@@ -1822,7 +1814,7 @@ fn pending_rows_for_block_with_header(
             capabilities,
         };
         match bsl::Block::visit(block, &mut visitor) {
-            Ok(_) => (visitor.txid_count, visitor.live_created, visitor.live_spent),
+            Ok(_) => (visitor.live_created, visitor.live_spent),
             Err(bitcoin_slices::Error::VisitBreak) => {
                 if let Some(len) = visitor.invalid_header_len {
                     return Err(IndexError::InvalidHeaderLength { len });
@@ -1835,7 +1827,7 @@ fn pending_rows_for_block_with_header(
     if capabilities.script_live {
         push_live_ops(&mut rows, live_created, live_spent, height, spent_scripts)?;
     }
-    Ok((rows, txid_count, header))
+    Ok((rows, header))
 }
 
 /// Turns a block's created and spent outputs into ordered live mutations.
@@ -2164,7 +2156,6 @@ struct IndexBlockVisitor<'a> {
     rows: &'a mut PendingRows,
     header: &'a mut Option<[u8; crate::types::HEADER_ROW_SIZE]>,
     height_bytes: [u8; crate::types::HEIGHT_SIZE],
-    txid_count: usize,
     invalid_header_len: Option<usize>,
     /// The serialized block being visited, used as the base for byte offsets.
     block: &'a [u8],
@@ -2262,7 +2253,6 @@ impl Visitor for IndexBlockVisitor<'_> {
                 self.push_txid_row(hash.as_slice(), position);
             }
         }
-        self.txid_count += 1;
         ControlFlow::Continue(())
     }
 
@@ -2928,7 +2918,7 @@ impl<S: KvStore> IndexWriter<S> {
                 watermark: self.watermark()?,
             });
         }
-        let (mut rows, _txid_count, header) =
+        let (mut rows, header) =
             pending_rows_for_block_with_header(body, height, capabilities, spent_scripts)?;
         let header = header.ok_or(IndexError::InvalidHeaderLength { len: 0 })?;
         let actual_hash = encode::double_sha256(header.as_slice()).to_le_bytes();
@@ -2969,6 +2959,11 @@ impl<S: KvStore> IndexWriter<S> {
     /// discard derived state and retry from the persisted watermark.
     /// [`IndexError::Storage`] is not retried by the index worker; supervision
     /// marks it failed (`IDX-07`).
+    ///
+    /// This path selects [`IndexCapabilities::HISTORICAL`]: it advances
+    /// `TxLookup` and `ScriptHistory` only. Callers that maintain `ScriptLive`
+    /// must use [`Self::prepare_block_with_spent_scripts`] with `script_live`
+    /// selected and a spent-script source, then [`Self::commit_forward`].
     pub fn commit_block(&mut self, height: u32, body: &[u8]) -> Result<IndexWatermark, IndexError> {
         let header = body.get(..crate::types::HEADER_ROW_SIZE).ok_or_else(|| {
             IndexError::InvalidHeaderLength {
@@ -3170,6 +3165,15 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Atomically rolls back one block with the exact scripts of its spent
     /// coins. This is the anchored variant used when `ScriptLive` is selected.
+    ///
+    /// The fenced store batch is the commit point (`IDX-06`), same as
+    /// [`Self::commit_forward`]: `Ok` means row deletes, the selected
+    /// watermark, and the cursor disposition are durable together. A crash
+    /// before that write leaves the previous tip; a crash after it leaves the
+    /// parent watermark. Fence races ([`IndexError::StaleIndexState`],
+    /// [`IndexError::ResetInProgress`]) mean discard derived state and retry
+    /// from the persisted watermark. [`IndexError::Storage`] is not retried by
+    /// the index worker; supervision marks it failed (`IDX-07`).
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,
