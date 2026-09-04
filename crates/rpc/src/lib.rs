@@ -12,6 +12,8 @@ extern crate alloc;
 
 /// HTTP Basic and cookie authentication.
 pub mod auth;
+/// Core-compatible projection of concrete service status.
+pub mod capabilities;
 /// Bitcoin Core wire-contract boundary: versioned response types and the
 /// sanctioned native<->bitcoin conversions backing them.
 pub mod compat;

@@ -1136,10 +1136,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 /// `Status::Extension` in the compatibility manifest.
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let snapshot = ctx
-        .capabilities
-        .as_ref()
-        .map_or_else(Default::default, |provider| provider.snapshot());
+    let snapshot = crate::capabilities::txindex_snapshot(ctx.txindex_status.as_deref());
     Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 

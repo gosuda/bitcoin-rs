@@ -7,7 +7,8 @@ rebuilds.
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
-- Capability status provider in `crates/node/src/capabilities.rs` and
+- Capability status in `crates/node/src/txindex_worker.rs` (`TxIndexCapability`)
+  and the RPC projection in `crates/rpc/src/capabilities.rs` and
   `crates/rpc/src/context.rs`
 
 ## Clauses
