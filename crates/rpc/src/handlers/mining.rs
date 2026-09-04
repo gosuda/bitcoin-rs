@@ -120,6 +120,7 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
 }
 
 pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_at_most_params(params, 3)?;
     let control = ctx
         .mining_control
         .as_ref()
@@ -149,6 +150,7 @@ pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Va
 }
 
 pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_at_most_params(params, 3)?;
     let control = ctx
         .mining_control
         .as_ref()
@@ -219,12 +221,7 @@ pub(crate) fn getprioritisedtransactions(
 /// optional, extra positionals are rejected, and omitted/`null` params use the
 /// defaults. Invalid `nblocks`/`height` values are Core `-8`, not JSON-RPC `-32602`.
 fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
-    if !params.is_null() {
-        let array = params_array(params)?;
-        if array.len() > 2 {
-            return Err(RpcError::InvalidParams("too many parameters"));
-        }
-    }
+    ensure_at_most_params(params, 2)?;
     let lookup = optional_i64(params, 0, 120)?;
     let height = optional_i64(params, 1, -1)?;
     if lookup < -1 || lookup == 0 {
@@ -238,6 +235,17 @@ fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
         ));
     }
     Ok((lookup, height))
+}
+
+fn ensure_at_most_params(params: &Value, max: usize) -> Result<(), RpcError> {
+    if params.is_null() {
+        return Ok(());
+    }
+    let array = params_array(params)?;
+    if array.len() > max {
+        return Err(RpcError::InvalidParams("too many parameters"));
+    }
+    Ok(())
 }
 
 fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
@@ -605,6 +613,8 @@ mod tests {
         BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     };
     use parking_lot::Mutex;
+
+    use crate::handlers::util::descriptor_checksum;
 
     struct FakeMiningControl {
         template: Mutex<Option<BlockTemplate>>,
@@ -1309,6 +1319,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-06
     fn getnetworkhashps_projects_control_invalid_request_as_invalid_parameter() {
         let control = FakeMiningControl::with_template(sample_template());
         *control.fail.lock() = Some(MiningControlError::InvalidRequest(CompactString::from(
@@ -1554,5 +1565,51 @@ mod tests {
             request.selection,
             GenerateSelection::Ordered(vec![GenerateTx::Mempool(txid), GenerateTx::Raw(tx)])
         );
+    }
+
+    /// API-05: extra generateblock positionals are rejected, matching Core arity.
+    #[test]
+    fn generateblock_rejects_trailing_parameters() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let extra = generateblock(&ctx, &json!([MAINNET_ADDRESS, [], true, "unexpected"]))
+            .err()
+            .unwrap_or_else(|| panic!("trailing generateblock arguments must fail"));
+        assert!(matches!(
+            extra,
+            RpcError::InvalidParams("too many parameters")
+        ));
+    }
+
+    /// API-05: a supplied descriptor checksum is verified even when optional.
+    #[test]
+    fn generateblock_rejects_invalid_supplied_checksums() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let descriptor = format!("addr({MAINNET_ADDRESS})");
+        let checksum = descriptor_checksum(&descriptor)
+            .unwrap_or_else(|| panic!("fixture descriptor must have a checksum"));
+        generateblock(&ctx, &json!([format!("{descriptor}#{checksum}"), []]))
+            .unwrap_or_else(|err| panic!("a matching checksum must be accepted: {err}"));
+        for (input, expected) in [
+            (format!("{descriptor}#qqqqqqqq"), "does not match"),
+            (
+                format!("{descriptor}#short"),
+                "Expected 8 character checksum",
+            ),
+            (
+                format!("{descriptor}#aaaaaaaa#bbbbbbbb"),
+                "Multiple '#' symbols",
+            ),
+        ] {
+            let error = generateblock(&ctx, &json!([input.clone(), []]))
+                .err()
+                .unwrap_or_else(|| panic!("`{input}` must be refused"));
+            assert_eq!(error.code(), RpcError::CORE_NOT_FOUND, "for `{input}`");
+            assert!(
+                error.to_string().contains(expected),
+                "`{input}` must say why: got {error}"
+            );
+        }
     }
 }

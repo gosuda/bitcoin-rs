@@ -1395,9 +1395,9 @@ mod sequence_observer_tests {
 
     fn wired_sequence_gateway() -> (MempoolGateway, std::sync::Arc<RecordingPublisher>) {
         let publisher = std::sync::Arc::new(RecordingPublisher::default());
-        let observer: std::sync::Arc<dyn MempoolObserver> = std::sync::Arc::new(
-            MempoolSequenceObserver::new(std::sync::Arc::clone(&publisher) as _),
-        );
+        let zmq: std::sync::Arc<dyn ZmqPublisher> = publisher.clone();
+        let observer: std::sync::Arc<dyn MempoolObserver> =
+            std::sync::Arc::new(MempoolSequenceObserver::new(zmq));
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(observer),
@@ -1465,9 +1465,9 @@ mod sequence_observer_tests {
     #[test]
     fn policy_eviction_publishes_r_frames_with_contiguous_sequences() {
         let publisher = std::sync::Arc::new(RecordingPublisher::default());
-        let observer: std::sync::Arc<dyn MempoolObserver> = std::sync::Arc::new(
-            MempoolSequenceObserver::new(std::sync::Arc::clone(&publisher) as _),
-        );
+        let zmq: std::sync::Arc<dyn ZmqPublisher> = publisher.clone();
+        let observer: std::sync::Arc<dyn MempoolObserver> =
+            std::sync::Arc::new(MempoolSequenceObserver::new(zmq));
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits {
                 min_relay_fee_sat_per_kvb: 0,
@@ -1569,16 +1569,16 @@ mod sequence_observer_tests {
         signal.attach(&control_dyn);
         signal.attach_sequence_wake(&wake_dyn);
 
+        let observer: std::sync::Arc<dyn MempoolObserver> = signal;
+        let zmq: std::sync::Arc<dyn ZmqPublisher> = publisher.clone();
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Some(std::sync::Arc::clone(&signal) as std::sync::Arc<dyn MempoolObserver>),
+            Some(observer),
         );
         gateway
             .attach_observer_leg(
                 "sequence",
-                std::sync::Arc::new(MempoolSequenceObserver::new(
-                    std::sync::Arc::clone(&publisher) as _,
-                )),
+                std::sync::Arc::new(MempoolSequenceObserver::new(zmq)),
             )
             .expect("gateway was constructed with an observer slot");
         gateway

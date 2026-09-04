@@ -1,8 +1,8 @@
 # External API contract (pointer)
 
-The external-API contract is declared in code, not prose. This page adds
-nothing normative; it places the owners under the
-[contracts precedence rule](README.md).
+`API-01`–`API-04` place owners under the
+[contracts precedence rule](README.md). `API-05` is the solo-mining generate
+path. `API-06` is `getnetworkhashps` snapshot consistency.
 
 ## Clauses
 
@@ -60,10 +60,30 @@ nothing normative; it places the owners under the
 - `generatetoaddress` accepts only a network-valid address, uses mempool
   package selection, collects fees, and always submits.
 - `generateblock` accepts an address or descriptor (`require_checksum = false`;
-  ranged/multipath descriptors are refused), requires the transactions array
-  (an explicit `[]` is coinbase-only), keeps listed order, does not add those
-  fees to the coinbase, treats 64-character hex as a mempool txid, and includes
-  decoded raw transactions without requiring mempool admission.
+  a supplied checksum is verified). Ranged/multipath descriptors are refused.
+  The transactions array is required (an explicit `[]` is coinbase-only).
+  Listed order is kept, those fees are not added to the coinbase, 64-character
+  hex is a mempool txid, and decoded raw transactions are included without
+  mempool admission. Extra positional arguments are rejected.
+
+### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
+
+- **Owner**: `MiningCoordinator::network_hash_ps` in `crates/node/src/mining.rs`.
+  Height resolution has one owner: `resolve_hash_ps_start`.
+- The method takes the block-tree read lock, then loads one applied-tip
+  snapshot. Height checks and the hash-rate walk use that snapshot and that
+  locked tree, not a second tip load.
+- `nblocks` (`lookup`) must be a positive count or `-1` (since the last
+  difficulty retarget). Otherwise the RPC is Core `-8`
+  (`RpcError::InvalidParameter`) with
+  `"Invalid nblocks. Must be a positive number or -1."`
+- `height` must be `-1` (the snapshot tip) or an existing applied-chain height
+  on that snapshot. Heights below `-1`, above the snapshot tip, or in range
+  but unwalkable from that tip, are Core `-8` with
+  `"Block does not exist at specified height"`, not a zero hash-rate.
+- An empty chain with `height == -1` estimates `0.0`.
+- `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
+  does not use this RPC height-validation error path.
 
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
@@ -86,10 +106,16 @@ owned by [wallet-facing.md](wallet-facing.md).
   `generatetoaddress_rejects_script_hex_and_descriptors`,
   `generateblock_projects_hash_object`, `generateblock_accepts_addr_descriptor`,
   `generateblock_without_submit_includes_hex`,
-  `generateblock_requires_transactions_array`, `generateblock_keeps_raw_transactions`
+  `generateblock_requires_transactions_array`, `generateblock_keeps_raw_transactions`,
+  `generateblock_rejects_trailing_parameters`,
+  `generateblock_rejects_invalid_supplied_checksums`
 - `crates/node/tests/mining.rs` tests `generate_mines_coinbase_only_blocks_to_the_tip`,
   `generateblock_rejects_unknown_mempool_txid`,
   `generateblock_raw_tx_does_not_require_mempool_admission`,
   `generate_without_submit_does_not_advance_the_tip`
 - `crates/mining/tests/template_shape.rs` tests `candidate_solves_an_unsolved_regtest_header`,
   `ordered_assembly_keeps_snapshot_order`
+- `API-06`:
+  - `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`
+  - `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows`
+  - `crates/rpc/src/handlers/mining.rs` test `getnetworkhashps_projects_control_invalid_request_as_invalid_parameter`
