@@ -10,7 +10,9 @@ use bitcoin_rs_consensus::verify_transaction_non_script;
 use bitcoin_rs_mempool::{
     AcceptContext, Mempool, MempoolLimits, StandardnessPolicy, check_acceptance,
 };
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, deserialize as native_deserialize};
+use bitcoin_rs_primitives::{
+    Hash256, OutPoint, Tx, TxOut, Txid, deserialize as native_deserialize,
+};
 
 /// Prevouts for every input in `tx`, so consensus and mempool checks run
 /// past missing-input rejection.
@@ -38,6 +40,13 @@ fn accept_context() -> AcceptContext {
         require_standard: false,
         max_fee: None,
     }
+}
+
+/// Non-null, non-all-zero prevout so a witness-only seed is not treated as
+/// coinbase (`OutPoint::is_null`) or rejected by mempool/node all-zero
+/// outpoint policy.
+fn synthetic_prevout() -> OutPoint {
+    OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0)
 }
 
 fn validate_native(tx: Tx) {
@@ -71,7 +80,7 @@ fn validate_tx(data: &[u8]) {
     let tx = Tx {
         version: 2,
         inputs: vec![bitcoin_rs_primitives::TxIn {
-            previous_output: OutPoint::default(),
+            previous_output: synthetic_prevout(),
             script_sig: Vec::new(),
             sequence: u32::MAX,
             witness: stack,
