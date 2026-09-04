@@ -115,11 +115,7 @@ impl<S> CountingStream<S> {
 }
 
 impl CountingStream<std::net::TcpStream> {
-    /// Takes a connected TCP stream and applies the P2P socket contract.
-    ///
-    /// Disables Nagle so pipelined control messages (`inv`, `getdata`, `ping`)
-    /// are not held for a delayed ACK. Handshake and the message loop still
-    /// set their own read/write timeouts: those intervals differ by phase.
+    /// Takes a connected TCP stream and applies the P2P-03 socket contract.
     ///
     /// # Errors
     ///
@@ -280,7 +276,7 @@ mod tests {
         assert_eq!(counters.last_recv(), 0, "an empty read is not activity");
     }
 
-    /// Vectored writes count every slice, not only the first.
+    /// CONTRACT: P2P-03. Vectored writes count every slice, not only the first.
     ///
     /// `write_message` emits header and payload as two `IoSlice`s. The default
     /// `Write::write_vectored` would take only the header and leave the payload
