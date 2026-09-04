@@ -10,6 +10,17 @@ signing, import, and fee-bump methods are absent. Key-free descriptor helpers,
 `scantxoutset`, `combinepsbt`, and `finalizepsbt` remain node RPCs so an external
 signer can drive a PSBT workflow without giving key custody to the node.
 
+### Watch-only mining payout
+An operator-configured address whose `scriptPubKey` is the candidate coinbase
+payout. The node decodes it at config resolve time and never holds keys. Empty
+configuration keeps transport-only GBT assembly: miners supply their own
+coinbase.
+
+### Mining generation
+The `(applied_tip_hash, mempool_sequence)` key that identifies one block
+template. The node-owned coordinator is the single cache and long-poll waiter
+for that key. RPC does not keep a second template cache.
+
 ### Wallet-facing public surface
 What an external wallet is allowed to call: native Esplora HTTP (tip, fees,
 block-height checkpoints, address/script history and UTXOs, `POST /tx`) and

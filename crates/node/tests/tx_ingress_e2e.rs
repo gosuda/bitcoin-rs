@@ -31,6 +31,10 @@ use anyhow::{anyhow, bail};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin_rs_mining::{
+    BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningControl,
+    MiningControlError, MiningInfo,
+};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::tx_admission::TxAdmission;
 use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
@@ -41,10 +45,6 @@ use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
 use bitcoin_rs_p2p::{InboundTx, Message, Peer, PeerLease};
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
-use bitcoin_rs_rpc::context::{
-    BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningControl,
-    MiningControlError, MiningInfo,
-};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -149,6 +149,12 @@ impl MiningControl for RecordingMining {
     }
 
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
+    }
+
+    fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
         Err(MiningControlError::Failed(
             "not implemented".to_owned().into(),
         ))

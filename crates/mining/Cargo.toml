@@ -17,6 +17,7 @@ bitcoin-rs-consensus.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-mempool.workspace = true
+compact_str.workspace = true
 thiserror.workspace = true
 
 [features]

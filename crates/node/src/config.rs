@@ -279,6 +279,14 @@ pub struct ValidationOverrides {
     pub assume_valid_height: Option<u32>,
 }
 
+/// User-supplied mining overrides.
+#[derive(Clone, Debug, Default)]
+pub struct MiningOverrides {
+    /// Watch-only coinbase payout address. Decoded after every config layer
+    /// has been applied, against the resolved consensus network.
+    pub payout_address: Option<String>,
+}
+
 /// User-supplied chainstate journal overrides.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -410,6 +418,8 @@ pub struct UserConfig {
     pub chainstate_journal: Option<ChainstateJournalOverrides>,
     /// Validation settings.
     pub validation: ValidationOverrides,
+    /// Mining settings.
+    pub mining: MiningOverrides,
 }
 
 impl StorageOverrides {
@@ -493,6 +503,14 @@ impl ValidationOverrides {
     }
 }
 
+impl MiningOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.payout_address.is_some() {
+            self.payout_address.clone_from(&other.payout_address);
+        }
+    }
+}
+
 impl UserConfig {
     /// Applies set fields from `other` over this layer. `other` wins.
     pub fn overlay(&mut self, other: &Self) {
@@ -518,6 +536,7 @@ impl UserConfig {
             }
         }
         self.validation.overlay(&other.validation);
+        self.mining.overlay(&other.mining);
     }
 }
 
@@ -581,6 +600,14 @@ pub struct ValidationConfig {
     pub assume_valid_height: u32,
 }
 
+/// Resolved mining configuration.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MiningConfig {
+    /// Coinbase `scriptPubKey` bytes. Empty means transport-only GBT assembly:
+    /// the coordinator does not own a miner payout.
+    pub payout_script: Vec<u8>,
+}
+
 /// Fully resolved, validated node configuration consumed by the runtime.
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -604,6 +631,8 @@ pub struct NodeConfig {
     pub chainstate_journal: ChainstateJournalConfig,
     /// Validation settings.
     pub validation: ValidationConfig,
+    /// Mining settings.
+    pub mining: MiningConfig,
 }
 
 impl NodeConfig {
@@ -642,6 +671,7 @@ impl NodeConfig {
             validation: ValidationConfig {
                 assume_valid_height: 0,
             },
+            mining: MiningConfig::default(),
         };
         config.apply_network_selection(NetworkSelection::from(network));
         config
@@ -799,8 +829,43 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
     for layer in layers {
         config.apply_layer(layer);
     }
+    let mut payout_address = None;
+    for layer in layers {
+        if let Some(address) = layer.mining.payout_address.as_deref() {
+            payout_address = Some(address);
+        }
+    }
+    if let Some(address) = payout_address {
+        config.mining.payout_script = decode_payout_script(config.network, address)?;
+    }
     config.validate()?;
     Ok(config)
+}
+
+fn bitcoin_network(network: Network) -> bitcoin::Network {
+    match network {
+        Network::Mainnet => bitcoin::Network::Bitcoin,
+        Network::Testnet3 => bitcoin::Network::Testnet,
+        Network::Testnet4 => bitcoin::Network::Testnet4,
+        Network::Signet => bitcoin::Network::Signet,
+        Network::Regtest => bitcoin::Network::Regtest,
+    }
+}
+
+fn decode_payout_script(network: Network, address: &str) -> Result<Vec<u8>> {
+    use std::str::FromStr as _;
+
+    let parsed = bitcoin::Address::from_str(address)
+        .map_err(|err| anyhow::anyhow!("invalid mining payout address: {err}"))?;
+    let checked = parsed
+        .require_network(bitcoin_network(network))
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "mining payout address is not valid for {}: {err}",
+                network.identity_name()
+            )
+        })?;
+    Ok(checked.script_pubkey().as_bytes().to_vec())
 }
 
 /// Process and test dependencies that are not configuration.
@@ -896,6 +961,28 @@ mod tests {
                 seconds: Some(45),
                 ..ChainstateJournalOverrides::default()
             })
+        );
+        assert_eq!(base.mining.payout_address.as_deref(), None);
+    }
+
+    #[test]
+    fn mining_payout_overlay_lets_the_later_address_win() {
+        let mut base = UserConfig {
+            mining: MiningOverrides {
+                payout_address: Some("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080".to_owned()),
+            },
+            ..UserConfig::default()
+        };
+        let other = UserConfig {
+            mining: MiningOverrides {
+                payout_address: Some("bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5".to_owned()),
+            },
+            ..UserConfig::default()
+        };
+        base.overlay(&other);
+        assert_eq!(
+            base.mining.payout_address.as_deref(),
+            Some("bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5")
         );
     }
 }

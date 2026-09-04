@@ -28,6 +28,7 @@ enum EnvSetting {
     LogLevel,
     MetricsBind,
     AssumeValidHeight,
+    MiningPayoutAddress,
     ChainstateJournal,
     ChainstateJournalBlocks,
     ChainstateJournalSeconds,
@@ -75,6 +76,7 @@ fn env_setting(key: &str) -> Option<EnvSetting> {
         "BITCOIN_RS_LOG_LEVEL" => EnvSetting::LogLevel,
         "BITCOIN_RS_METRICS_BIND" => EnvSetting::MetricsBind,
         "BITCOIN_RS_ASSUME_VALID_HEIGHT" => EnvSetting::AssumeValidHeight,
+        "BITCOIN_RS_MINING_PAYOUT_ADDRESS" => EnvSetting::MiningPayoutAddress,
         "BITCOIN_RS_CHAINSTATE_JOURNAL" => EnvSetting::ChainstateJournal,
         "BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS" => EnvSetting::ChainstateJournalBlocks,
         "BITCOIN_RS_CHAINSTATE_JOURNAL_SECONDS" => EnvSetting::ChainstateJournalSeconds,
@@ -135,6 +137,9 @@ fn apply(layer: &mut UserConfig, setting: EnvSetting, value: &str) -> Result<()>
         EnvSetting::MetricsBind => layer.observability.metrics_bind = Some(value.parse()?),
         EnvSetting::AssumeValidHeight => {
             layer.validation.assume_valid_height = Some(value.parse()?);
+        }
+        EnvSetting::MiningPayoutAddress => {
+            layer.mining.payout_address = Some(value.to_owned());
         }
         EnvSetting::ChainstateJournal => journal(layer).enabled = Some(parse_bool(value)?),
         EnvSetting::ChainstateJournalBlocks => journal(layer).blocks = Some(value.parse()?),

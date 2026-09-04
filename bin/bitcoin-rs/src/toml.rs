@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use bitcoin_rs_node::{
-    ChainstateJournalOverrides, IndexOverrides, NetworkSelection, NotificationConfig,
-    ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode, StorageOverrides,
-    UserConfig, ValidationOverrides,
+    ChainstateJournalOverrides, IndexOverrides, MiningOverrides, NetworkSelection,
+    NotificationConfig, ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode,
+    StorageOverrides, UserConfig, ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use serde::Deserialize;
@@ -36,6 +36,7 @@ struct TomlFile {
     notifications: Option<NotificationConfig>,
     chainstate_journal: Option<ChainstateJournalOverrides>,
     assume_valid_height: Option<u32>,
+    mining_payout_address: Option<String>,
 }
 
 pub(crate) fn user_config_from_path(path: &Path) -> Result<UserConfig> {
@@ -106,6 +107,9 @@ impl TomlFile {
             chainstate_journal: self.chainstate_journal,
             validation: ValidationOverrides {
                 assume_valid_height: self.assume_valid_height,
+            },
+            mining: MiningOverrides {
+                payout_address: self.mining_payout_address,
             },
         })
     }
