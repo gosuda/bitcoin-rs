@@ -89,7 +89,7 @@ Skipping script-signature verification for blocks at or below a trusted height w
 The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`). Script verification is skipped at or below it only after the active header chain is shown to contain this exact hash; sub-anchor header tips and diverged chains verify fully.
 
 ### Optimized default posture
-The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 128, 16 in-flight per peer), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles only `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
+The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 128, 16 in-flight per peer), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
 
 ### Node network selection
 `BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. See `docs/solutions/architecture-patterns/network-selection-keeps-p2p-identity-atomic.md`.
@@ -103,15 +103,20 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 `bitcoin-rs-storage --bench kvstore_backends`, `bitcoin-rs-utxo --bench record_codec`,
 `bitcoin-rs-utxo --bench utxo_commit`, `bitcoin-rs-mining --bench candidate`,
 `bitcoin-rs-node --bench sync_pipeline`).
+
 ## Consensus validation
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), the production consensus default. It is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. Default builds need `cmake` and `libboost-dev`.
-### Rust interpreter (portable posture)
-The pure-Rust script path under `--no-default-features`. It fully verifies the Taproot key path; its non-Taproot path is a stub accepting only a bare `OP_TRUE` spend, and it has no Taproot script-path support. Retained for differential testing and lightweight non-production environments; a mainnet sync stops at the first real spend.
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Whether the native path also becomes the library and image default is the #213 measurement gate.
+
+### Native Rust interpreter
+The pure-Rust script path used when `kernel` is off (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context.
 
 ### One-shot kernel block parse
 Parsing each block exactly once with `bitcoinkernel::Block::new` (`KernelBlock`, `crates/consensus/src/kernel.rs`) and reusing that parse downstream for txids and the transaction objects script preparation borrows via `TransactionRef`. Price a replacement by everything it subsumes, not by the line item that motivated it.
+
+### Runtime-dispatched AVX2 Merkle
+Parent hashing of Merkle pairs uses Bitcoin Core's 8-way AVX2 SHA-256d kernel on x86-64 hosts that advertise AVX2, selected at runtime. Hosts without AVX2, and trees too small to fill one 8-pair batch, use the allocation-free scalar spine. Both paths implement Bitcoin's odd-leaf duplication and mutated-tree rule.
 
 ### Script-flag exceptions (BIP16Exception)
 Blocks Core hardcodes in `consensus.script_flag_exceptions` to validate under a reduced flag set. As of Core v29: mainnet 170060 (P2SH) and 692261 (Taproot); testnet3 394. The P2SH waivers are reproduced by `Network::is_bip16_p2sh_exception` (by block hash); missing them wedges full-validation sync. The Taproot override needs no exception because `is_taproot_active` already height-gates TAPROOT. Compare *effective* flag sets, not raw overrides.
@@ -295,8 +300,28 @@ Recording a statistic when its outcome is known rather than when the subject arr
 
 ## Measurement
 
+### Product performance cell
+One coordinate of the frozen 36-cell denominator: one product domain
+(`offline`, `p2p`, `muhash`), one corpus (`c150` or `cmodern`), one native
+architecture (`x86_64` or `arm64`), and one backend (`fjall`, `rocksdb`,
+or `redb`). Diagnostics are not cells. See
+`docs/contracts/hot-path-attribution.md`.
+
+### Hot-path attribution ledger
+The single inventory of product hot paths, overlap groups, and
+dispositions. Nested stage histograms are diagnostics. A cell residual
+stays `unmeasured` until seven valid bitcoin-rs walls exist and the
+exclusive union is subtracted from whole-run wall. Owner:
+`docs/benchmarks/hot-path-ledger.toml`.
+
 ### Retained benchmark contract
 Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained set: node sync/apply, reduced UTXO commit, end-to-end mempool admission, Merkle dispatch, and the real-file index resolver.
+
+### C150
+The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
+
+### Cmodern
+The modern product corpus: mainnet genesis through height 709,635, the first height with executed examples of every required post-P2SH script class. Identities, census, and oracle are owned by `docs/contracts/campaign-corpora.md`.
 
 ### Matched-harness comparison
 A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians. See `docs/solutions/performance/allocator-parity-changes-wall-not-cpu.md`.

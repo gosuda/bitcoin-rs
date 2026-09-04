@@ -55,11 +55,11 @@ mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
 # --- Bitcoin ecosystem --------------------------------------------------------
 # bitcoin 0.32 line; 0.33 is still beta. `default = [std, secp-recovery]`.
 # Keep `bitcoinconsensus-std` out of the workspace-wide dependency: the
-# `bitcoinconsensus` opt-in was removed and bitcoinkernel is the production
-# consensus engine, gated by the consensus crate's `kernel` feature. The
+# `bitcoinconsensus` opt-in was removed and bitcoinkernel is the optional
+# consensus oracle, gated by the consensus crate's `kernel` feature. The
 # `kernel` feature defaults ON in `crates/consensus` and `crates/node` but
-# OFF in `bin/bitcoin-rs`; the #166 flip to opt-in-everywhere is blocked
-# until the portable interpreter can validate ordinary spends.
+# OFF in `bin/bitcoin-rs`; issue #213 is the measurement gate for flipping
+# the library defaults to native.
 bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
     "std", "secp-recovery", "serde", "rand-std",
 ] }

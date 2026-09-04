@@ -40,9 +40,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 use bitcoin_rs_script::script::push_int;
 // seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
@@ -65,7 +63,7 @@ use bitcoin_rs_node::{
 };
 use bitcoin_rs_p2p::Message;
 use bitcoin_rs_primitives::deserialize;
-use bitcoin_rs_rpc::context::{BlockBodySource, BlockLog, BlockRecord};
+use bitcoin_rs_rpc::context::BlockLog;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -451,27 +449,19 @@ fn print_spend_proxy_summary(blocks: &[Block]) {
     );
 }
 
-fn block_source_fixture(max_height: u32) -> bitcoin_rs_node::NodeBlockSource {
+fn block_source_fixture(max_height: u32) -> BenchBlockSource {
     let block = Network::Regtest.genesis_block();
-    let records = (0..=max_height)
-        .map(|height| BlockRecord::from_block(height, &block))
-        .collect();
-    bitcoin_rs_node::NodeBlockSource::new(Arc::new(RwLock::new(records))).with_block_body_source(
-        Arc::new(InstalledBlockBody {
-            hash: block.block_hash(),
-            bytes: consensus_bytes(&block),
-        }),
-    )
+    BenchBlockSource { max_height, block }
 }
 
-struct InstalledBlockBody {
-    hash: BlockHash,
-    bytes: Vec<u8>,
+struct BenchBlockSource {
+    max_height: u32,
+    block: Block,
 }
 
-impl BlockBodySource for InstalledBlockBody {
-    fn block_body(&self, _height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-        (hash == self.hash).then(|| self.bytes.clone())
+impl bitcoin_rs_index::BlockSource for BenchBlockSource {
+    fn block_at_height(&self, height: u32) -> Option<Block> {
+        (height <= self.max_height).then(|| self.block.clone())
     }
 }
 

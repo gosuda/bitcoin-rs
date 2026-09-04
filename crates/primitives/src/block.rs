@@ -2,7 +2,7 @@
 
 use crate::{
     BlockHash, Header, Tx, Txid,
-    encode::{DecodeError, deserialize},
+    encode::{DecodeError, consensus_len, deserialize},
 };
 
 /// A Bitcoin block in native owned form.
@@ -32,6 +32,37 @@ impl Block {
     pub fn consensus_decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         deserialize(bytes)
     }
+
+    /// Full consensus serialization length, including BIP144 witness sections.
+    #[must_use]
+    pub fn total_size(&self) -> usize {
+        consensus_len(self)
+    }
+
+    /// Consensus serialization length without BIP144 witness sections.
+    ///
+    /// Matches Core's `GetSerializeSize(TX_NO_WITNESS(*this))`: the header,
+    /// the transaction-count compact size, and each transaction's base
+    /// (txid-layout) size.
+    #[must_use]
+    pub fn stripped_size(&self) -> usize {
+        consensus_len(&self.header)
+            .saturating_add(crate::varint::encode(crate::encode::compact_len(self.txs.len())).len())
+            .saturating_add(self.txs.iter().map(Tx::base_size).sum())
+    }
+
+    /// BIP141 block weight: `stripped_size * 3 + total_size` weight units.
+    ///
+    /// Matches Core's `GetBlockWeight`. Both sizes include the header and the
+    /// transaction-count compact size; they are not a sum of per-transaction
+    /// weights.
+    #[must_use]
+    pub fn weight(&self) -> u64 {
+        u64::try_from(self.stripped_size())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(3)
+            .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
+    }
 }
 
 #[cfg(test)]
@@ -41,7 +72,7 @@ mod tests {
     use super::Block;
     use crate::encode::DecodeError;
 
-    use crate::{BlockHash, Hash256};
+    use crate::{BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -70,6 +101,87 @@ mod tests {
             BlockHash(Hash256::from_le_bytes(oracle.block_hash().as_byte_array()))
         );
         Ok(())
+    }
+
+    #[test]
+    fn size_and_weight_match_serialized_bytes_and_bitcoin_crate() -> Result<()> {
+        for fixture in ["tests/testdata/0.bin", "tests/testdata/363731.bin"] {
+            let bytes = std::fs::read(fixture)?;
+            let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)?;
+            let block = Block::consensus_decode(&bytes)?;
+
+            assert_eq!(block.total_size(), bytes.len(), "{fixture}");
+            assert_eq!(
+                crate::encode::consensus_bytes(&block).len(),
+                bytes.len(),
+                "{fixture}"
+            );
+            assert_eq!(block.weight(), oracle.weight().to_wu(), "{fixture}");
+            assert_eq!(
+                block.weight(),
+                u64::try_from(block.stripped_size())?
+                    .saturating_mul(3)
+                    .saturating_add(u64::try_from(block.total_size())?),
+                "{fixture}"
+            );
+        }
+        Ok(())
+    }
+
+    fn witness_tx(witness: Vec<Vec<u8>>) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0_u8; 32])), 0),
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness,
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }],
+        }
+    }
+
+    fn block_with_tx(tx: Tx) -> Block {
+        Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash::default(),
+                merkle_root: Hash256::default(),
+                time: 1_700_000_000,
+                bits: 0x207f_ffff,
+                nonce: 0,
+            },
+            txs: vec![tx],
+        }
+    }
+
+    #[test]
+    fn stripped_size_drops_witness_and_matches_header_plus_base_transactions() {
+        let block = block_with_tx(witness_tx(vec![vec![0x21_u8; 64], vec![0x03_u8; 33]]));
+        let total = crate::encode::consensus_bytes(&block).len();
+        let stripped = block.stripped_size();
+        assert!(
+            stripped < total,
+            "the witness discount must be visible: {stripped} vs {total}"
+        );
+        let manual: usize = 80
+            + 1 // compact size for one transaction
+            + block.txs.iter().map(Tx::base_size).sum::<usize>();
+        assert_eq!(stripped, manual);
+    }
+
+    #[test]
+    fn stripped_size_equals_total_size_without_witness() {
+        let block = block_with_tx(witness_tx(Vec::new()));
+        assert_eq!(
+            block.stripped_size(),
+            crate::encode::consensus_bytes(&block).len()
+        );
+        assert_eq!(block.stripped_size(), block.total_size());
     }
 
     #[test]

@@ -435,6 +435,10 @@ pub(crate) struct NodeServices {
     /// Periodic chainstate checkpoint worker; joined before the clean
     /// checkpoint publication so it does not race the final write.
     checkpoint_worker: Option<std::thread::JoinHandle<()>>,
+    /// P2P transaction ingress consumer; drains inbound `tx` into admission.
+    tx_ingress: Option<std::thread::JoinHandle<()>>,
+    /// Outbound transaction-inventory relay worker.
+    tx_relay: Option<std::thread::JoinHandle<()>>,
     /// Process-level SIGINT/SIGTERM forwarding handler, owned by the graph
     /// so the shared teardown — never a leak — closes and joins it.
     signal_handler: Option<crate::signal::ShutdownHandler>,
@@ -496,8 +500,9 @@ impl NodeServices {
 
     /// Joins the stages that run before the bounded subsystem drain: the
     /// event loop, the rpc listener, every p2p listener, the metrics
-    /// listener, and the outbound drain worker. Every stage still runs when
-    /// an earlier one fails; the first failure lands in `first_error`.
+    /// listener, the outbound drain worker, and the tx ingress/relay
+    /// workers. Every stage still runs when an earlier one fails; the first
+    /// failure lands in `first_error`.
     fn join_core_services(
         &mut self,
         state: Option<&NodeState>,
@@ -559,6 +564,22 @@ impl NodeServices {
         if let Some(state) = state {
             if let Err(error) = state.p2p().join_core_workers() {
                 set_first_error(first_error, anyhow::Error::new(error));
+            }
+        }
+        if let Some(handle) = self.tx_ingress.take() {
+            if matches!(handle.join(), Ok(())) {
+                tracing::info!("tx ingress consumer exited cleanly");
+            } else {
+                tracing::error!("tx ingress consumer panicked");
+                set_first_error(first_error, anyhow::anyhow!("tx ingress consumer panicked"));
+            }
+        }
+        if let Some(handle) = self.tx_relay.take() {
+            if matches!(handle.join(), Ok(())) {
+                tracing::info!("tx relay worker exited cleanly");
+            } else {
+                tracing::error!("tx relay worker panicked");
+                set_first_error(first_error, anyhow::anyhow!("tx relay worker panicked"));
             }
         }
     }
@@ -789,7 +810,7 @@ pub(crate) fn start_node(
     let network_active = state.network_active();
     let block_body_source = state.block_body_source();
     let p2p_chain_query: P2pChainQuery = Arc::new(
-        crate::NodeP2pChainQuery::new(state.block_tree())
+        bitcoin_rs_p2p::ActiveChainQuery::new(state.block_tree())
             .with_block_body_source(Arc::clone(&block_body_source)),
     );
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
@@ -812,6 +833,31 @@ pub(crate) fn start_node(
     // coordinator's lifetime: the RPC context owns the coordinator, and an
     // owned reference here would cycle through `apply_handles`.
     state.mining_generation_signal().attach(&mining_control);
+    let tx_admission = state.tx_admission();
+    let cloned_admission = Arc::clone(&tx_admission);
+    let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = cloned_admission;
+    let listener_extras = bitcoin_rs_p2p::ListenerExtras {
+        tx_inventory: Some(tx_inventory),
+        inbound_tx: Some(state.inbound_tx_sender()),
+    };
+    let ingress = crate::tx_ingress::spawn_tx_ingress_consumer(
+        state,
+        state.mempool_gateway(),
+        Arc::clone(&mining_control),
+        Arc::clone(&shutdown),
+        state.inbound_tx_rx_handle(),
+        Arc::clone(&tx_admission),
+    )?;
+    if let Err(error) = state.mempool_gateway().attach_observer_leg(
+        "tx-relay",
+        Arc::new(crate::mempool_observer::LocalTxRelayObserver::new(
+            ingress.queue.clone(),
+        )),
+    ) {
+        tracing::error!(error, "failed to attach local tx-relay observer");
+    }
+    guard.services.tx_ingress = Some(ingress.ingress);
+    guard.services.tx_relay = Some(ingress.relay);
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc.auth)?);
     let mut rpc_context =
         bitcoin_rs_rpc::context::Context::from_handles(bitcoin_rs_rpc::context::ContextHandles {
@@ -843,7 +889,7 @@ pub(crate) fn start_node(
             mining: bitcoin_rs_rpc::context::MiningHandles {
                 mining_control: Some(Arc::clone(&mining_control)),
             },
-            capabilities: Some(state.capability_provider()),
+            txindex_status: Some(state.txindex_status()),
         })
         .with_esplora_tx_index(state.esplora_tx_index_query());
     rpc_context = rpc_context.with_block_body_source(block_body_source);
@@ -876,15 +922,20 @@ pub(crate) fn start_node(
         .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
     guard.services.rpc_thread = Some(rpc_thread);
     // P2pService is the single owner of listener, outbound, bootstrap, and
-    // download-window workers. The node supplies only chain reads and sync
-    // wake delivery.
+    // download-window workers. The node supplies chain reads, sync wake,
+    // and the transaction inventory / ingress sinks.
     let peer_ready: Arc<dyn Fn(bitcoin_rs_p2p::PeerSource) + Send + Sync> =
         Arc::new(move |source: bitcoin_rs_p2p::PeerSource| {
             peer_ready_sync.on_peer_ready(source);
         });
     state
         .p2p()
-        .start(Some(&p2p_chain_query), Some(&sync_wake_tx), &peer_ready)
+        .start(
+            Some(&p2p_chain_query),
+            Some(&sync_wake_tx),
+            &peer_ready,
+            listener_extras,
+        )
         .map_err(anyhow::Error::from)?;
     // Periodic chainstate checkpoint worker: publishes a checkpoint every
     // CHECKPOINT_INTERVAL_BLOCKS or CHECKPOINT_INTERVAL_SECS so a node
@@ -1038,7 +1089,7 @@ mod tests {
     fn disabled_zmq_still_seals_the_observer_slot() {
         // The state constructs the gateway with its observer at
         // `NodeState::open` time. Even without a ZMQ endpoint the
-        // observer slot is occupied by the node's `NodeMutationObserver`
+        // observer slot is occupied by a `CompositeObserver`
         // (mining-generation leg only). Verify the API contract:
         // `shared_with` produces a gateway whose observer is present.
         let pool = Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(

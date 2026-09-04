@@ -15,6 +15,8 @@ use clap::Parser;
 pub(crate) struct CliArgs {
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
+    #[arg(long = "bitcoin-conf")]
+    pub(crate) bitcoin_conf: Option<PathBuf>,
     #[arg(long, value_parser = parse_network)]
     pub(crate) network: Option<NetworkSelection>,
     #[arg(long = "p2p-magic", value_parser = parse_p2p_magic)]

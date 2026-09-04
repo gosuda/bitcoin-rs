@@ -78,7 +78,7 @@ impl Tx {
     #[must_use]
     pub fn base_size(&self) -> usize {
         let mut total = 0_usize;
-        let () = encode_tx(self, &mut CountWriter(&mut total), false)
+        let () = encode_tx(self, &mut crate::encode::CountWriter(&mut total), false)
             .unwrap_or_else(|error| unreachable!("count writer is infallible: {error}"));
         total
     }
@@ -86,10 +86,7 @@ impl Tx {
     /// Full consensus serialization length, including BIP144 witness sections.
     #[must_use]
     pub fn total_size(&self) -> usize {
-        let mut total = 0_usize;
-        let () = ConsensusEncode::consensus_encode(self, &mut CountWriter(&mut total))
-            .unwrap_or_else(|error| unreachable!("count writer is infallible: {error}"));
-        total
+        crate::encode::consensus_len(self)
     }
 
     /// BIP141 transaction weight: `base_size * 3 + total_size` weight units.
@@ -105,20 +102,6 @@ impl Tx {
     #[must_use]
     pub fn vsize(&self) -> u64 {
         self.weight().div_ceil(4)
-    }
-}
-
-/// `io::Write` sink that only accumulates the byte count.
-struct CountWriter<'a>(&'a mut usize);
-
-impl std::io::Write for CountWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        *self.0 = self.0.saturating_add(buf.len());
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 

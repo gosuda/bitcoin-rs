@@ -7,15 +7,15 @@ verify progress before moving on.
 
 - A Rust toolchain for edition 2024 (MSRV 1.95.0 or newer).
 - The default binary build is pure Rust and requires no C++ compiler or system
-  libraries. It uses the portable Rust script interpreter, which verifies
-  Taproot key-path spends only and cannot validate ordinary mainnet spends
-  (see #166). For production consensus validation, enable the `kernel` feature.
+  libraries. It uses the native Rust script interpreter, which verifies Legacy,
+  SegWit v0, and Taproot key-path and script-path spends. Core's committed
+  script and transaction vectors currently pin zero native mismatches.
 
-If you plan to compile with the `kernel` feature for production consensus
-validation via `libbitcoinkernel`, install `cmake` and `libboost-dev`:
+If you plan to compile with the `kernel` feature to run `libbitcoinkernel` as
+an independent verification oracle, install `cmake` and `libboost-dev`:
 
 ```sh
-# Required for the kernel consensus engine feature
+# Required for the kernel verification-oracle feature
 sudo apt-get install -y cmake libboost-dev
 ```
 
@@ -29,13 +29,10 @@ cargo build --release -p bitcoin-rs
 
 This produces `./target/release/bitcoin-rs`. The default configuration includes
 the `fjall` storage backend, `redb`, and `zmq` sequence publishing. The default
-binary build uses the portable Rust script interpreter, which verifies Taproot
-key-path spends only; other script classes (Legacy, SegWit v0, Taproot
-script-path) are stubbed pending a full opcode interpreter (see #166). A
-mainnet sync with this build stops at the first real spend.
+binary build uses the native Rust script interpreter for every consensus spend
+class.
 
-To compile with `libbitcoinkernel` as the consensus engine for full script
-validation across all script classes:
+To compile with `libbitcoinkernel` as an independent verification oracle:
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel
@@ -85,7 +82,7 @@ Configuration defaults:
 | `--prune-target-mb` | 0 (no pruning) |
 | `--txindex` | off |
 | `--scriptindex` | off (accepts `full`, `utxo`, or boolean; defaults to `full` when passed without a value) |
-| `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` consensus engine |
+| `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` as a verification oracle |
 
 The node logs its startup banner, effective cache allocation, and the address
 the JSON-RPC listener bound to.
@@ -161,7 +158,11 @@ Then, in a second terminal, run the wallet while the node is still running:
 
 ```sh
 btcw balance -n regtest -u http://127.0.0.1:18443
+btcw balance -n regtest -u http://127.0.0.1:18443/api
 ```
+
+`/api` and `/api/v1` are aliases of the Esplora surface at the listener
+root, so a mempool.space-style base URL works without a reverse proxy.
 
 The wallet stays in that repository. This node only serves the public
 surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).

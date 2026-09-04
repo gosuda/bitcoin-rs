@@ -1,23 +1,28 @@
 # P2P wire contract (pointer)
 
-The peer-wire contract lives in
-[docs/policies/p2p-compatibility.md](../policies/p2p-compatibility.md). That
-document is the owner: it pins Bitcoin Core 31.1, declares the transport
-envelope, the handshake fields, the 36-command message surface, the
-reject-or-ignore policy, and the deviation ledger. This page adds nothing
-normative; it places the policy under the
+The peer-wire contract is split across two owners. This page adds nothing
+normative; it places them under the
 [contracts precedence rule](README.md).
+
+- [`crates/p2p/src/compat.rs`](../../crates/p2p/src/compat.rs) owns the
+  decoded command inventory and the pinned Core version.
+- [docs/policies/p2p-compatibility.md](../policies/p2p-compatibility.md)
+  owns the handshake fields, reject-or-ignore matrix, deviation ledger,
+  and verification process. The §5 table is a checked projection of
+  `COMMANDS`.
 
 ## Clauses
 
 ### `P2P-01`: Protocol wire framing and handshake compatibility
 
-- **Owner**: `docs/policies/p2p-compatibility.md` owns the P2P wire specification,
-  pinning Bitcoin Core 31.1.
+- **Owner**: `crates/p2p/src/compat.rs` owns the 36-command inventory and
+  `PINNED_CORE_VERSION` (Bitcoin Core 31.1). The policy document owns
+  handshake fields, reject-or-ignore semantics, and recorded deviations.
 - **Scope**: `crates/p2p` wire, handshake, protocol FSM, and message policy; the
-  chain-serving adapter `crates/node/src/p2p_chain.rs`; and node network flags.
-- Message framing, 36-command envelope decoder, service flags, network magic,
-  and reject-or-ignore semantics follow the policy document.
+  chain-serving query `crates/p2p/src/chain_query.rs`; and node network flags.
+- Message framing, envelope decoder, service flags, and network magic follow
+  the inventory and the policy document. v1 frames for handshake and inventory
+  commands are byte-identical to rust-bitcoin's `RawNetworkMessage`.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
@@ -32,8 +37,9 @@ normative; it places the policy under the
 ## Proven by
 
 - `crates/p2p/tests/core_compat.rs`:
-  - `cargo test -p bitcoin-rs-p2p --test core_compat` pins handshake fields,
-    per-network framing, relay round-trips, the reject-or-ignore matrix, and
-    peer-visible reorg/restart behavior.
+  - `cargo test -p bitcoin-rs-p2p --test core_compat` pins the command
+    inventory against the policy table, rust-bitcoin v1 envelopes, handshake
+    fields, per-network framing, relay round-trips, the reject-or-ignore
+    matrix, and peer-visible reorg/restart behavior.
 - `crates/p2p/tests/core_interop_live.rs`: live interop lane running via
   `scripts/run-p2p-core-interop.sh` when an external `bitcoind` is provided.

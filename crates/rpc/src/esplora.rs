@@ -47,6 +47,7 @@ const MEMPOOL_PAGE: usize = 50;
 /// Routes a read-only Esplora request from the node HTTP listener.
 #[must_use]
 pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
+    let path = canonical_path(path);
     let ctx = handler.context();
     let projection = Projection::new(&ctx);
     let chain_view = projection.capture_chain_view();
@@ -150,7 +151,7 @@ pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
 /// Routes Esplora raw-transaction broadcast.
 #[must_use]
 pub fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
-    match path {
+    match canonical_path(path) {
         "/tx" => {
             let Ok(hex) = core::str::from_utf8(body) else {
                 return Some(bad("transaction body must be UTF-8 hex"));
@@ -188,6 +189,21 @@ pub fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response
         "/txs/package" => Some(not_found()),
         _ => None,
     }
+}
+
+/// See `docs/contracts/wallet-facing.md` WF-02 for the wallet-facing path aliases.
+fn canonical_path(path: &str) -> &str {
+    for prefix in ["/api/v1", "/api"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if rest.is_empty() {
+                return "/";
+            }
+            if rest.starts_with('/') {
+                return rest;
+            }
+        }
+    }
+    path
 }
 
 fn tx(ctx: &Context, id: &str) -> Response {
@@ -530,9 +546,8 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     let transactions = {
         let pool = ctx.mempool.read();
         let mut ordered = pool
-            .entries
-            .iter()
-            .map(|(_, entry)| (entry.time, entry.txid, Arc::clone(&entry.tx)))
+            .iter_entries()
+            .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
             .collect::<Vec<_>>();
         drop(pool);
         ordered.sort_unstable_by(|left, right| {
@@ -661,7 +676,7 @@ fn mempool(ctx: &Context) -> Response {
     let pool = ctx.mempool.read();
     let stats = pool.stats();
     let mut bins = std::collections::BTreeMap::new();
-    for (_, entry) in &pool.entries {
+    for entry in pool.iter_entries() {
         *bins.entry(entry.fee_rate).or_insert(0_u64) += u64::from(entry.vsize);
     }
     json_response(MempoolSummary {
@@ -677,7 +692,7 @@ fn mempool(ctx: &Context) -> Response {
 }
 fn mempool_recent(ctx: &Context) -> Response {
     let pool = ctx.mempool.read();
-    let mut entries = pool.entries.iter().map(|(_, e)| e).collect::<Vec<_>>();
+    let mut entries = pool.iter_entries().collect::<Vec<_>>();
     entries.sort_by(|left, right| {
         right
             .time
@@ -1637,6 +1652,36 @@ mod tests {
             .status,
             400
         );
+    }
+
+    #[test]
+    fn mempool_space_api_prefixes_alias_the_root_esplora_surface()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (handler, _, _, _) = contract_fixture()?;
+        let genesis = route(&handler, "/block-height/0", "");
+        assert_eq!(genesis.status, 200);
+        for path in ["/api/block-height/0", "/api/v1/block-height/0"] {
+            let aliased = route(&handler, path, "");
+            assert_eq!(aliased.status, genesis.status, "{path}");
+            assert_eq!(aliased.body, genesis.body, "{path}");
+        }
+        let tip = route(&handler, "/blocks/tip/height", "");
+        assert_eq!(
+            route(&handler, "/api/v1/blocks/tip/height", "").body,
+            tip.body
+        );
+        // `/api` is a directory prefix, not a substring of the first segment.
+        assert_eq!(route(&handler, "/apitx", "").status, 404);
+        assert!(
+            route_post(&handler, "/api/tx", b"00").is_some(),
+            "POST /api/tx must not fall through to JSON-RPC"
+        );
+        assert!(route_post(&handler, "/api/v1/tx", b"00").is_some());
+        assert!(
+            route_post(&handler, "/apitx", b"00").is_none(),
+            "POST /apitx is not an Esplora alias"
+        );
+        Ok(())
     }
 
     #[test]
