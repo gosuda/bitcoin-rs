@@ -824,6 +824,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/indexing.md#CFG-01
     fn user_config_overlay_lets_set_fields_win() {
         let mut base = UserConfig {
             storage: StorageOverrides {

@@ -14,6 +14,14 @@ Owners:
 
 ## Clauses
 
+### `CFG-01`: Configuration overlay precedence
+
+- Layered `UserConfig` values override earlier layers only when the later layer
+  provides a field; unset fields preserve the earlier value.
+- Proof: `crates/node/src/config.rs::user_config_overlay_lets_set_fields_win`.
+
+
+
 ### `IDX-01`: Capability configuration and internal enablement
 
 - CLI `--txindex` (env `BITCOIN_RS_TXINDEX`, configuration `txindex=1`) enables
