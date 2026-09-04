@@ -397,7 +397,7 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn missing_and_cyclic_ancestors_fail_assembly() {
+fn missing_ancestors_fail_assembly_without_rechecking_the_dag() {
     let missing = MempoolMiningSnapshot {
         sequence: 1,
         entries: vec![snapshot_entry(
@@ -415,6 +415,8 @@ fn missing_and_cyclic_ancestors_fail_assembly() {
         Err(MiningError::MissingAncestor { .. })
     ));
 
+    // Cyclic ancestor lists are a mempool snapshot defect. Mining orders by
+    // ancestor count and does not run a second DAG checker.
     let cyclic = MempoolMiningSnapshot {
         sequence: 2,
         entries: vec![
@@ -422,10 +424,9 @@ fn missing_and_cyclic_ancestors_fail_assembly() {
             snapshot_entry(Arc::new(independent_tx(2)), 1_000, 0, 100, 100, 0, vec![0]),
         ],
     };
-    assert!(matches!(
-        assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &cyclic, &[0x51],),
-        Err(MiningError::DependencyCycle { .. })
-    ));
+    let assembled = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &cyclic, &[0x51])
+        .expect("mining does not re-validate snapshot topology");
+    assert_eq!(assembled.transactions.len(), 2);
 }
 
 #[test]

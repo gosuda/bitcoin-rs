@@ -31,12 +31,6 @@ pub enum MiningError {
         /// Invalid ancestor position.
         ancestor: u32,
     },
-    /// The immutable snapshot's dependency graph contains a cycle.
-    #[error("snapshot dependency graph contains a cycle at entry {entry}")]
-    DependencyCycle {
-        /// Snapshot position at which the cycle was detected.
-        entry: usize,
-    },
     /// A selected fee sum exceeded the satoshi range.
     #[error("selected transaction fees overflow the satoshi range")]
     FeeOverflow,
@@ -65,7 +59,7 @@ pub(crate) fn build_coinbase(
     height: u32,
     subsidy_halving_interval: u32,
     fees: u64,
-    payout: Vec<u8>,
+    payout: &[u8],
     witness_commitment: Option<&Hash256>,
 ) -> Result<Tx, MiningError> {
     let value = bitcoin_rs_consensus::block_subsidy(height, subsidy_halving_interval)
@@ -75,7 +69,7 @@ pub(crate) fn build_coinbase(
     let mut witness = Vec::new();
     let mut outputs = vec![TxOut {
         value,
-        script_pubkey: payout,
+        script_pubkey: payout.to_vec(),
     }];
 
     if let Some(commitment) = witness_commitment {

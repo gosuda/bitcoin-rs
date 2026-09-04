@@ -5,7 +5,9 @@ Transport-neutral block-candidate assembly for solo mining.
 `assemble_candidate` builds a [`Candidate`](crate::Candidate) from a
 [`CandidateContext`](crate::CandidateContext) and a mempool mining snapshot.
 The `policy` module selects dependency-closed packages by modified fee rate
-within weight, serialized-size, and sigop limits. The `coinbase` module funds
+within weight, serialized-size, and sigop limits. It consumes the snapshot's
+ancestor lists and consensus `is_final_tx`; it does not re-validate the
+mempool DAG. The `coinbase` module funds
 the coinbase (subsidy plus actual fees) and, when `SegWit` is active, attaches the
 witness commitment through consensus `compute_merkle_root` (the same AVX2/spine
 fold block rules use).

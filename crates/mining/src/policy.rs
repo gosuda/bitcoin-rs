@@ -1,9 +1,10 @@
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 
+use bitcoin_rs_consensus::is_final_tx;
 use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
-use bitcoin_rs_primitives::Tx;
+use bitcoin_rs_primitives::{Tx, Txid};
 
 use crate::MiningError;
 use crate::template::CandidateContext;
@@ -12,12 +13,6 @@ use crate::template::CandidateContext;
 thread_local! {
     static RESIDUAL_PACKAGE_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
 }
-
-/// BIP113 locktime threshold: values below this are height-based, at or above
-/// are timestamp-based.
-const LOCKTIME_THRESHOLD: u32 = 500_000_000;
-/// Sequence value that marks an input as final (disables locktime).
-const SEQUENCE_FINAL: u32 = 0xffff_ffff;
 
 /// One dependency-closed package selected for a candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +58,7 @@ pub(crate) fn select_packages(
     let mut used_size = reserved_size;
     let mut used_sigops = reserved_sigops;
     let mut fees = 0_u64;
+    let pooled: HashSet<Txid> = snapshot.entries.iter().map(|entry| entry.txid).collect();
 
     for index in 0..snapshot.entries.len() {
         if (context.max_weight > 0 && used_weight >= context.max_weight)
@@ -75,7 +71,7 @@ pub(crate) fn select_packages(
         }
 
         let package = residual_package(snapshot, index, &selected)?;
-        if !package_is_final(context, snapshot, &package) {
+        if !package_is_final(context, snapshot, &pooled, &package) {
             continue;
         }
 
@@ -142,13 +138,15 @@ fn residual_package(
             indices.push(ancestor);
         }
     }
-    indices.push(tip);
 
-    // Parents have strictly fewer in-pool ancestors than their descendants, so
-    // sorting by ancestor count yields a deterministic topological order. Equal
-    // counts break on snapshot position.
+    // Snapshot ancestor lists are a mempool invariant. Mining does not re-check
+    // the DAG; parents have strictly fewer in-pool ancestors, so sorting by
+    // that count is topological. Equal counts break on snapshot position.
+    if indices.is_empty() {
+        return Ok(single_entry_package(tip_entry, tip));
+    }
+    indices.push(tip);
     indices.sort_by_key(|&index| (snapshot.entries[index].ancestors.len(), index));
-    detect_cycles(snapshot, tip, &indices)?;
 
     let mut fee = 0_u64;
     let mut weight = 0_u64;
@@ -179,74 +177,32 @@ fn residual_package(
     })
 }
 
-fn detect_cycles(
-    snapshot: &MempoolMiningSnapshot,
-    tip: usize,
-    ordered: &[usize],
-) -> Result<(), MiningError> {
-    let positions: BTreeMap<usize, usize> = ordered
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(position, index)| (index, position))
-        .collect();
-
-    for &index in ordered {
-        for &ancestor in &snapshot.entries[index].ancestors {
-            let ancestor = usize::try_from(ancestor).map_err(|_| MiningError::MissingAncestor {
-                entry: index,
-                ancestor,
-            })?;
-            let Some(&ancestor_position) = positions.get(&ancestor) else {
-                continue;
-            };
-            let self_position = positions[&index];
-            if ancestor_position >= self_position {
-                return Err(MiningError::DependencyCycle { entry: tip });
-            }
-        }
+fn single_entry_package(entry: &SnapshotEntry, index: usize) -> SelectedPackage {
+    SelectedPackage {
+        indices: vec![index],
+        fee: entry.fee,
+        weight: entry.weight,
+        size: u64::from(entry.size),
+        sigop_cost: u64::from(entry.sigop_cost),
     }
-    Ok(())
 }
 
 fn package_is_final(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
+    pooled: &HashSet<Txid>,
     package: &SelectedPackage,
 ) -> bool {
     package.indices.iter().all(|&index| {
         let entry = &snapshot.entries[index];
         is_final_tx(&entry.tx, context.height, context.locktime_cutoff)
-            && next_block_sequence_locks_final(context, snapshot, &entry.tx)
+            && next_block_sequence_locks_final(context, pooled, &entry.tx)
     })
-}
-
-/// Inlined BIP113/BIP68 finality check matching consensus `is_final_tx`.
-///
-/// - locktime == 0: always final.
-/// - locktime < `LOCKTIME_THRESHOLD`: height-based; final iff locktime < `block_height`.
-/// - locktime >= `LOCKTIME_THRESHOLD`: timestamp-based; final iff locktime < `locktime_cutoff`.
-/// - all inputs sequence == `SEQUENCE_FINAL`: final regardless of locktime.
-fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    if tx.lock_time == 0 {
-        return true;
-    }
-    let threshold = if tx.lock_time < LOCKTIME_THRESHOLD {
-        block_height
-    } else {
-        locktime_cutoff
-    };
-    if tx.lock_time < threshold {
-        return true;
-    }
-    tx.inputs
-        .iter()
-        .all(|input| input.sequence == SEQUENCE_FINAL)
 }
 
 fn next_block_sequence_locks_final(
     context: &CandidateContext,
-    snapshot: &MempoolMiningSnapshot,
+    pooled: &HashSet<Txid>,
     tx: &Tx,
 ) -> bool {
     if !context.csv_active {
@@ -256,17 +212,12 @@ fn next_block_sequence_locks_final(
         return true;
     }
     tx.inputs.iter().all(|input| {
-        let sequence = input.sequence;
-        let parent_unconfirmed = snapshot
-            .entries
-            .iter()
-            .any(|entry| entry.txid == input.previous_output.txid);
-        if !parent_unconfirmed {
+        if !pooled.contains(&input.previous_output.txid) {
             return true;
         }
         bitcoin_rs_consensus::bip68::sequence_lock_satisfied(
             tx.version,
-            sequence,
+            input.sequence,
             context.height,
             context.locktime_cutoff,
             context.height,
