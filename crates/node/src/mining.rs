@@ -15,6 +15,7 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
     BlockTree, ChainError, NodeId, TipSnapshot, accept_headers, current_unix_seconds,
+    softfork_state,
 };
 use bitcoin_rs_mempool::{
     Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
@@ -751,7 +752,7 @@ impl MiningCoordinator {
             return;
         };
         let height = prev.height.saturating_add(1);
-        let segwit_active = self.network.is_segwit_active(height);
+        let segwit_active = softfork_state(&tree, self.network, Some(prev_id), height).segwit_active;
         drop(tree);
         update_uncommitted_block_structures(block, segwit_active);
     }
