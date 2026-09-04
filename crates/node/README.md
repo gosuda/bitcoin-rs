@@ -20,6 +20,10 @@ Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journ
 See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability
 ordering, fallback and reorg behavior, configuration, metrics, and verification.
 
+Data-directory storage evidence is an explicit command, not a node service:
+`bitcoin-rs --measure-storage` emits the logical and physical ledgers defined
+in [storage-footprint.md](../../docs/contracts/storage-footprint.md).
+
 The node crate registers only `benches/sync_pipeline.rs` as a Criterion benchmark.
 Large corpus/replay/evidence harnesses are intentionally not shipped by this
 runtime crate.
