@@ -238,12 +238,6 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid request method",
-        ));
-    }
     let mut header_bytes = request_line.len();
     let mut content_length = None;
     let mut authorization = None;
@@ -287,14 +281,14 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
     }
 
     let content_length = match (method, content_length) {
-        ("GET", length) => length.unwrap_or(0),
-        (_, Some(length)) => length,
-        (_, None) => {
+        ("POST", Some(length)) => length,
+        ("POST", None) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "missing content-length",
             ));
         }
+        (_, length) => length.unwrap_or(0),
     };
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
