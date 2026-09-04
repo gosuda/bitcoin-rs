@@ -1175,6 +1175,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-05
     fn getnetworkhashps_projects_control_invalid_request_as_invalid_parameter() {
         let control = FakeMiningControl::with_template(sample_template());
         *control.fail.lock() = Some(MiningControlError::InvalidRequest(CompactString::from(

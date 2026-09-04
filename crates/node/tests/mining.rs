@@ -319,6 +319,7 @@ fn network_hash_ps_answers_on_the_applied_tip() -> anyhow::Result<()> {
 }
 
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-05
 fn network_hash_ps_rejects_core_invalid_windows() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
