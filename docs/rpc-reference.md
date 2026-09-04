@@ -71,7 +71,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getnodeaddresses` | 0.4.0 |  |
 | `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: client must advertise segwit (and signet on signet); submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll, coinbaseaux.flags empty hex. |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator. |
-| `submitblock` | 0.4.0 | Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; only a previously applied block is duplicate. |
+| `submitblock` | 0.4.0 | Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; a previously connected body (including after reorg) is duplicate. |
 | `submitheader` | 0.4.0 | Header-only admission through the same tree path as inbound P2P headers. Decode failures are -22; missing previous or invalid headers are -25. |
 | `prioritisetransaction` | 0.4.0 | Dummy (params[1]) must be 0 or null; fee_delta is params[2]. Non-zero dummy is Core -8. Pooled dust outputs are -8 except on regtest. |
 | `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. |

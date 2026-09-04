@@ -1259,6 +1259,109 @@ fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result
     Ok(())
 }
 
+fn disconnect_applied(state: &NodeState, block: &Block) -> anyhow::Result<()> {
+    state
+        .chain_followers()
+        .apply_disconnect(&state.apply_handles(), block)
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+#[test]
+// CONTRACT: docs/contracts/external-api.md#API-21
+fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    let child_hash = Hash256::from(child.block_hash());
+    assert_eq!(
+        mining.submit_block(child.clone())?,
+        BlockValidationResult::Accepted
+    );
+    disconnect_applied(&state, &child)?;
+    let chain_tx_count = {
+        let tree = state.block_tree();
+        tree.read()
+            .node_by_hash(child_hash)
+            .ok_or_else(|| anyhow::anyhow!("disconnected child missing from tree"))?
+            .chain_tx_count
+    };
+    assert_ne!(
+        chain_tx_count, 0,
+        "disconnect must keep the scripts-valid chain_tx_count"
+    );
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after disconnect"));
+    assert_eq!(tip.hash, Hash256::from(genesis.block_hash()));
+    assert_eq!(
+        propose_block(&mining, child)?,
+        BlockValidationResult::Duplicate
+    );
+    Ok(())
+}
+
+#[test]
+// CONTRACT: docs/contracts/external-api.md#API-21
+fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let genesis_hash = Hash256::from(genesis.block_hash());
+    let child = mined_child(genesis.block_hash())?;
+    assert_eq!(
+        mining.submit_block(child.clone())?,
+        BlockValidationResult::Accepted
+    );
+    disconnect_applied(&state, &child)?;
+    assert_eq!(
+        mining.submit_block(child)?,
+        BlockValidationResult::Duplicate
+    );
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after duplicate submit"));
+    assert_eq!(tip.hash, genesis_hash);
+    Ok(())
+}
+
+#[test]
+// CONTRACT: docs/contracts/external-api.md#API-21
+fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let genesis_hash = Hash256::from(genesis.block_hash());
+    let child = mined_child(genesis.block_hash())?;
+    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    {
+        let tree = state.block_tree();
+        let mut tree = tree.write();
+        let genesis_id = tree
+            .lookup(genesis_hash)
+            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+        tree.restore_chain_tx_count(genesis_id, 0)?;
+    }
+    assert_eq!(
+        propose_block(&mining, genesis.clone())?,
+        BlockValidationResult::Duplicate
+    );
+    assert_eq!(
+        mining.submit_block(genesis)?,
+        BlockValidationResult::Duplicate
+    );
+    Ok(())
+}
+
 #[test]
 fn submit_block_applies_a_header_already_in_the_tree() -> anyhow::Result<()> {
     let state = open_regtest()?;
