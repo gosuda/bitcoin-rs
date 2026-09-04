@@ -796,7 +796,8 @@ mod tests {
         }
     }
 
-    fn ctx_with_control(control: Arc<dyn MiningControl>) -> Arc<Context> {
+    fn ctx_with_control(control: Arc<FakeMiningControl>) -> Arc<Context> {
+        let control: Arc<dyn MiningControl> = control;
         Arc::new(Context::new().with_mining_control(control))
     }
 
@@ -1454,7 +1455,7 @@ mod tests {
     #[test]
     fn generateblock_projects_hash_object() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, []]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
@@ -1473,11 +1474,11 @@ mod tests {
         assert!(request.submit);
     }
 
-    /// API-05: generateblock accepts addr() without a checksum.
+    /// API-05: generateblock accepts `addr()` without a checksum.
     #[test]
     fn generateblock_accepts_addr_descriptor() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let result = generateblock(&ctx, &json!([format!("addr({MAINNET_ADDRESS})"), []]))
             .unwrap_or_else(|err| panic!("addr() descriptor must be accepted: {err}"));
         assert!(
@@ -1506,7 +1507,7 @@ mod tests {
     #[test]
     fn generateblock_without_submit_includes_hex() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, [], false]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
@@ -1550,7 +1551,7 @@ mod tests {
     #[test]
     fn generateblock_keeps_raw_transactions() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(Arc::clone(&control));
         let tx = sample_raw_tx();
         let raw_hex = to_lower_hex(&consensus_bytes(&tx));
         let txid = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));
