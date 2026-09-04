@@ -692,6 +692,14 @@ fn run_outbound_connection(
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
     }
 
+    // Wrapped before registration so a failed socket setup cannot leave a
+    // phantom peer lease in the table.
+    let nonce = generate_nonce(addr);
+    // Wrapped before the handshake, so the bytes it spends are counted too.
+    let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    let stream = crate::CountingStream::from_connected(stream, counters)
+        .map_err(crate::wire::PeerError::Io)?;
+
     // Register the connection before the handshake so live-connection
     // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
@@ -703,12 +711,6 @@ fn run_outbound_connection(
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return Ok(());
     }
-
-    let nonce = generate_nonce(addr);
-    // Wrapped before the handshake, so the bytes it spends are counted too.
-    let counters = std::sync::Arc::new(crate::PeerCounters::default());
-    let stream = crate::CountingStream::from_connected(stream, counters)
-        .map_err(crate::wire::PeerError::Io)?;
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, magic);
