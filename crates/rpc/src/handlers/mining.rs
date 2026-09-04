@@ -413,31 +413,21 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
         Some(value) if value.is_null() => "template",
         Some(value) => value
             .as_str()
-            .ok_or(RpcError::InvalidType("mode must be a string"))?,
+            .ok_or_else(|| RpcError::InvalidParameter("Invalid mode".to_owned()))?,
     };
 
     let mode = match mode_text {
         "template" => BlockTemplateMode::Template,
         "proposal" => {
-            if !capabilities
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case("proposal"))
-            {
-                return Err(RpcError::InvalidParams(
-                    "proposal mode requires the proposal capability",
-                ));
-            }
+            // Core does not require the client to list the proposal capability.
             let data = request.get("data").and_then(JsonValueTrait::as_str).ok_or(
-                RpcError::InvalidParams("proposal mode requires hex-encoded block data"),
+                RpcError::InvalidType("Missing data String key for proposal"),
             )?;
-            let bytes = from_hex(data)
-                .map_err(|()| RpcError::InvalidParams("block data is not valid hexadecimal"))?;
-            let block: Block = deserialize(&bytes)
-                .map_err(|_| RpcError::InvalidParams("block data could not be decoded"))?;
+            let block = decode_submitted_block(data)?;
             BlockTemplateMode::Proposal(block)
         }
         _ => {
-            return Err(RpcError::InvalidParams("mode must be template or proposal"));
+            return Err(RpcError::InvalidParameter("Invalid mode".to_owned()));
         }
     };
 
@@ -1213,11 +1203,57 @@ mod tests {
             &ctx,
             &json!([{
                 "mode": "proposal",
-                "capabilities": ["proposal"],
                 "data": hex,
             }]),
         )
         .unwrap_or_else(|err| panic!("proposal without rules failed: {err}"));
+        assert!(result.is_null());
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn getblocktemplate_rejects_invalid_mode() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        for params in [json!([{"mode": "work"}]), json!([{"mode": 1}])] {
+            let error = getblocktemplate(&ctx, &params).expect_err("invalid mode must fail");
+            assert!(matches!(error, RpcError::InvalidParameter(_)));
+            assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+            assert_eq!(error.to_string(), "Invalid mode");
+        }
+        assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn getblocktemplate_proposal_decode_matches_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.proposal.lock() = BlockValidationResult::Accepted;
+        let ctx = ctx_with_control(control.clone());
+        let missing = getblocktemplate(&ctx, &json!([{"mode": "proposal"}]))
+            .expect_err("proposal without data must fail");
+        assert!(matches!(
+            missing,
+            RpcError::InvalidType("Missing data String key for proposal")
+        ));
+        assert_eq!(missing.code(), RpcError::CORE_INVALID_TYPE);
+        for hex in ["", "00", "zz", "deadbeef"] {
+            let error = getblocktemplate(&ctx, &json!([{"mode": "proposal", "data": hex}]))
+                .expect_err("undecodable proposal must fail");
+            assert!(matches!(error, RpcError::Deserialization(_)));
+            assert_eq!(error.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+            assert_eq!(error.to_string(), "Block decode failed");
+        }
+        let genesis = sample_block();
+        let mut hex = to_lower_hex(&consensus_bytes(&genesis));
+        hex.push_str("ffff");
+        let result = getblocktemplate(
+            &ctx,
+            &json!([{
+                "mode": "proposal",
+                "data": hex,
+            }]),
+        )
+        .unwrap_or_else(|err| panic!("proposal trailing bytes must be ignored: {err}"));
         assert!(result.is_null());
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
     }
