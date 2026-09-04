@@ -32,6 +32,7 @@ pub(super) fn dispatch_error(e: crate::RpcError) -> Response {
         // guard the caller configured themselves. Neither improves with time.
         crate::RpcError::InvalidParams(_)
         | crate::RpcError::InvalidType(_)
+        | crate::RpcError::Deserialization(_)
         | crate::RpcError::TxRejected(_)
         | crate::RpcError::TxVerifyError(_) => bad(&e.to_string()),
         _ => unavailable(&e.to_string()),

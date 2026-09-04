@@ -4,7 +4,7 @@
 [contracts precedence rule](README.md). `API-05` is the solo-mining generate
 path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
 BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
-`API-08` is mainnet template operational gates.
+`API-08` is mainnet template operational gates. `API-09` is `submitheader`.
 
 ## Clauses
 
@@ -32,8 +32,8 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 - JSON-RPC failures map through `RpcError` (`crates/rpc/src/error.rs`):
   standard JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-3`
   (invalid type), `-5` (not found), `-8` (invalid parameter), `-9` (not
-  connected), `-10` (initial download), `-25` (verify error), and `-26`
-  (verify rejected).
+  connected), `-10` (initial download), `-22` (deserialization), `-25`
+  (verify error), and `-26` (verify rejected).
 - The node ships no wallet and holds no private key material. Methods that
   would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. PSBT combination/finalization and descriptor
@@ -111,6 +111,21 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 - Proposal mode does not apply these gates. Networks other than mainnet skip
   them, matching Core `IsTestChain()`.
 
+### `API-09`: `submitheader`
+
+- **Owner**: `MiningCoordinator::submit_header` in `crates/node/src/mining.rs`.
+  RPC decodes the hex and projects the result; it does not admit headers.
+- Decode failures (invalid hex, fewer than 80 bytes) are Core `-22`
+  (`Block header decode failed`). Extra bytes after an 80-byte header are
+  ignored, matching Core `DecodeHexBlockHeader`.
+- The previous header must already be in the block tree. Otherwise the RPC
+  returns `-25` (`Must submit previous header (HASH) first`).
+- Admission uses `accept_headers`, the same consensus gate as inbound P2P
+  headers. Duplicates succeed. Invalid headers return `-25` with Core reject
+  reasons (`high-hash`, `bad-diffbits`, `time-too-old`, `time-too-new`).
+- Success is JSON `null`. Header-only admission does not apply the block or
+  publish a mining generation.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -156,3 +171,13 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
     `getblocktemplate_rejects_mainnet_during_ibd`,
     `getblocktemplate_proposal_skips_mainnet_connection_gates`
+- `API-09`:
+  - `crates/rpc/src/handlers/mining.rs` tests `submitheader_rejects_undecodable_headers`,
+    `submitheader_returns_null_and_forwards_decoded_header`,
+    `submitheader_maps_rejected_to_verify_error`
+  - `crates/node/tests/mining.rs` tests `submit_header_admits_a_mined_child_and_is_idempotent`,
+    `submit_header_requires_the_previous_header`,
+    `submit_header_rejects_bad_diffbits`,
+    `submit_header_rejects_time_too_new`
+  - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
+    `nbits_mismatch_is_bad_diffbits`

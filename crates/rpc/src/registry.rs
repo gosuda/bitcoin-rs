@@ -138,6 +138,7 @@ declare_rows! {
     "getblocktemplate", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "BIP22/BIP23 template: submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll.", "0.4.0", Some(mining::getblocktemplate);
     "getmininginfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator.", "0.4.0", Some(mining::getmininginfo);
     "submitblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::submitblock);
+    "submitheader", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Header-only admission through the same tree path as inbound P2P headers. Decode failures are -22; missing previous or invalid headers are -25.", "0.4.0", Some(mining::submitheader);
     "prioritisetransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::prioritisetransaction);
     "generatetoaddress", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator.", "0.4.0", Some(mining::generatetoaddress);
     "generateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag.", "0.4.0", Some(mining::generateblock);
@@ -169,7 +170,6 @@ declare_rows! {
     "stop", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Lifecycle control not exposed over RPC.", "n/a", None;
 
     // -- JSON-RPC: Core surface not exposed (mining/network/util/signer)
-    "submitheader", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Header-only submission not implemented.", "n/a", None;
     "getaddrmaninfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Addrman table stats not exposed.", "n/a", None;
     "abortprivatebroadcast", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Private-broadcast store not implemented.", "n/a", None;
     "analyzepsbt", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "PSBT analysis not implemented (combine/finalize only).", "n/a", None;
