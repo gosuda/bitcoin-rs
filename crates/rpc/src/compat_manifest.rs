@@ -170,7 +170,26 @@ mod tests {
                 continue;
             }
             let method = field(&entry, "method");
-            let outcome = handler.dispatch(&method, &json!([]));
+            let params = if status == Status::Disabled && method == "deriveaddresses" {
+                let payload = "addr(1111111111111111111114oLvT2)";
+                let checksum = crate::handlers::util::descriptor_checksum(payload)
+                    .unwrap_or_else(|| panic!("descriptor checksum failed"));
+                json!([format!("{payload}#{checksum}"), [0, 1]])
+            } else {
+                json!([])
+            };
+            let outcome = handler.dispatch(&method, &params);
+            if status == Status::Disabled {
+                assert!(
+                    matches!(outcome, Err(RpcError::MethodDisabled(_))),
+                    "`{method}` is listed as disabled but did not return MethodDisabled: {outcome:?}"
+                );
+            } else {
+                assert!(
+                    !matches!(outcome, Err(RpcError::MethodDisabled(_))),
+                    "`{method}` is listed as {status:?} but returned MethodDisabled"
+                );
+            }
             assert!(
                 !matches!(outcome, Err(RpcError::MethodNotFound(_))),
                 "`{method}` is listed as {status:?} but does not dispatch"
@@ -353,9 +372,19 @@ mod tests {
             .map(|entry| field(entry, "path"))
             .collect();
         assert!(!listed.is_empty(), "the manifest must list the REST routes");
-          let listed_prefixes: BTreeSet<String> = listed.iter().map(|path| path.strip_suffix(".json").unwrap_or(path).to_owned()).collect();
-          assert_eq!(listed_prefixes.len(), listed.len(), "the REST manifest must not duplicate routes");
-          let registered: BTreeSet<String> = crate::rest::REGISTRATIONS.iter().map(|path| (*path).to_owned()).collect();
+          let listed_prefixes: BTreeSet<String> = listed
+              .iter()
+              .map(|path| path.strip_suffix(".json").unwrap_or(path).to_owned())
+              .collect();
+          assert_eq!(
+              listed_prefixes.len(),
+              listed.len(),
+              "the REST manifest must not duplicate routes"
+          );
+          let registered: BTreeSet<String> = crate::rest::REGISTRATIONS
+              .iter()
+              .map(|path| (*path).to_owned())
+              .collect();
           assert_eq!(listed_prefixes, registered, "REST manifest and router registrations must agree");
 
         // The manifest writes the header route with its parameters spelled out,
