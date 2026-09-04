@@ -182,6 +182,12 @@ fn input_json(
     // (consensus wire layout), so field references would be unaligned.
     let (prev_txid, prev_vout) = (previous_output.txid, previous_output.vout);
     let mut value = json!({
+        "txid": prev_txid.to_string(),
+        "vout": prev_vout,
+        "scriptSig": {
+            "asm": script_asm(&input.script_sig),
+            "hex": hex_encode(&input.script_sig)
+        },
         "sequence": input.sequence.to_consensus()
     });
     if !input.witness.is_empty() {
