@@ -33,7 +33,6 @@ normative; it places them under the
 ## Live gaps
 
 - **Peer lifecycle boundary**: Moving the remaining P2P scheduling and lifecycle policy out of `crates/node` is tracked under #217 (open).
-- **Production transaction ingress**: inbound `tx` messages are decoded and FSM-accepted but not delivered to the mempool; `getdata` for transactions is `notfound` on the production listener. Tracked under #323 (open).
 
 ## Proven by
 
