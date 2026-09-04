@@ -203,12 +203,20 @@ struct NodeProcess {
     child: Child,
 }
 
-struct StartupChild(Child);
+struct StartupChild(Option<Child>);
+
+impl StartupChild {
+    fn into_inner(mut self) -> Child {
+        self.0.take().unwrap_or_else(|| panic!("startup child already taken"))
+    }
+}
 
 impl Drop for StartupChild {
     fn drop(&mut self) {
-        let _ignored = self.0.kill();
-        let _ignored = self.0.wait();
+        if let Some(mut child) = self.0.take() {
+            let _ignored = child.kill();
+            let _ignored = child.wait();
+        }
     }
 }
 
@@ -218,7 +226,7 @@ impl NodeProcess {
         let config_path = root.join("node.toml");
         std::fs::write(&config_path, "p2p_listen = []\ndns_seeds_enabled = false\n")?;
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_bitcoin-rs"))
+        let child = Command::new(env!("CARGO_BIN_EXE_bitcoin-rs"))
             .arg("--config")
             .arg(&config_path)
             .arg("--network")
@@ -241,12 +249,12 @@ impl NodeProcess {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("failed to spawn bitcoin-rs: {error}"))?;
-        let mut child = StartupChild(child);
+        let mut child = StartupChild(Some(child));
 
         let stderr = child
             .0
-            .stderr
-            .take()
+            .as_mut()
+            .and_then(|child| child.stderr.take())
             .ok_or("bitcoin-rs stderr was not piped")?;
         let logs = Arc::new(Mutex::new(String::new()));
         let (addr_tx, addr_rx) = mpsc::channel();
@@ -264,7 +272,7 @@ impl NodeProcess {
         Ok(Self {
             addr,
             logs,
-            child: child.0,
+            child: child.into_inner(),
         })
     }
 }
