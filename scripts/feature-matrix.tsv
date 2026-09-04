@@ -20,5 +20,6 @@ storage-rocksdb	bitcoin-rs-storage	native	--no-default-features --features rocks
 storage-mdbx	bitcoin-rs-storage	native	--no-default-features --features mdbx
 rpc-default	bitcoin-rs-rpc	pure	--all-targets
 rpc-no-defaults	bitcoin-rs-rpc	pure	--no-default-features --all-targets
+node-default	bitcoin-rs-node	pure	--all-targets
 node-fjall	bitcoin-rs-node	pure	--no-default-features --features fjall --all-targets
 node-fjall-zmq	bitcoin-rs-node	pure	--no-default-features --features fjall,zmq --all-targets

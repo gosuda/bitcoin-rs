@@ -64,6 +64,17 @@ const NODE_CRATE: &str = "bitcoin-rs-node";
 /// The node binary.
 const BIN_CRATE: &str = "bitcoin-rs";
 
+/// Crates permitted to define and forward backend feature selection.
+const BACKEND_FORWARDING_CRATES: [&str; 7] = [
+    "bitcoin-rs-storage",
+    "bitcoin-rs-chain",
+    "bitcoin-rs-utxo",
+    "bitcoin-rs-p2p",
+    "bitcoin-rs-index",
+    "bitcoin-rs-node",
+    "bitcoin-rs",
+];
+
 /// Workspace root manifest, resolved relative to the gate's own checkout.
 fn workspace_root_manifest() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -257,12 +268,12 @@ fn workspace_dependency_direction_is_one_way() {
             );
             let forwards = implies.iter().any(|entry| {
                 let entry = entry.trim_start_matches("dep:");
-                entry.starts_with("bitcoin-rs-storage/")
-                    || entry.starts_with("bitcoin-rs-node/")
-                    || BACKEND_FEATURES.iter().any(|backend| {
-                        entry.split('/').next() == Some(*backend)
-                            || entry.split('/').nth(1).is_some_and(|name| name == *backend)
-                    })
+                let mut parts = entry.split('/');
+                let target = parts.next().unwrap_or_default();
+                let forwarded_feature = parts.next().unwrap_or_default();
+                BACKEND_FORWARDING_CRATES.contains(&name.as_str())
+                    && BACKEND_FORWARDING_CRATES.contains(&target)
+                    && forwarded_feature == feature
             });
             assert!(
                 forwards && layer >= 2,
