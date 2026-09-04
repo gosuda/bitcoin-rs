@@ -240,7 +240,13 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if method.is_empty() {
+    if method.is_empty()
+        || !method.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+'
+                    | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+        })
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request method",
@@ -288,16 +294,9 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
         }
     }
 
-    let content_length = match (method, content_length) {
-        ("GET", length) => length.unwrap_or(0),
-        (_, Some(length)) => length,
-        (_, None) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "missing content-length",
-            ));
-        }
-    };
+    // Unsupported methods still reach the demux.  If a body is framed, consume it;
+    // otherwise a missing Content-Length is valid for methods such as HEAD and PUT.
+    let content_length = content_length.unwrap_or(0);
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
     Ok(Some(HttpRequest {
@@ -617,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_splits_rest_esplora_and_json_rpc() {
+    fn wf_02_classify_splits_rest_esplora_and_json_rpc() {
         assert_eq!(
             classify("GET", "/rest/chaininfo.json"),
             HttpRoute::Rest {
