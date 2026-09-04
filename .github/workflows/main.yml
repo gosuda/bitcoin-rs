@@ -134,6 +134,9 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: dep-range-${{ matrix.range }}
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-deny
+        with:
+          tool: cargo-deny
       - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
   # Main-only (issue #174): the small real feature matrix, not a powerset.

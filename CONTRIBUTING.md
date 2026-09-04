@@ -108,6 +108,8 @@ scripts/check-dep-range.sh maximum
 ```
 
 The original `Cargo.lock` is restored on exit unless `KEEP_LOCK=1`.
+Each lane also runs G20 against the mutated lockfile. Optional native
+storage backends are owned by the named feature matrix, not this script.
 
 ## Architecture and crate hierarchy
 
