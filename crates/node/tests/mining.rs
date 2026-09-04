@@ -1114,7 +1114,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
     assert_eq!(tip.height, 2);
     assert_eq!(
         tip.hash,
-        Hash256::from(hashes.last().expect("two hashes").hash)
+        Hash256::from(hashes.last().unwrap_or_else(|| panic!("two hashes")).hash)
     );
     Ok(())
 }
@@ -1134,7 +1134,8 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
             selection: GenerateSelection::Ordered(vec![GenerateTx::Mempool(missing)]),
             submit: true,
         })
-        .expect_err("missing mempool txid must fail");
+        .err()
+        .unwrap_or_else(|| panic!("missing mempool txid must fail"));
     assert!(matches!(error, MiningControlError::InvalidRequest(_)));
     Ok(())
 }
@@ -1169,7 +1170,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
             selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(raw)]),
             submit: false,
         })
-        .expect_err("invalid raw spend must fail validation, not mempool lookup");
+        .err()
+        .unwrap_or_else(|| panic!("invalid raw spend must fail validation, not mempool lookup"));
     assert!(
         matches!(error, MiningControlError::Failed(_)),
         "raw generateblock txs skip mempool membership: {error:?}"
@@ -1184,7 +1186,11 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     let rate = mining.network_hash_ps(120, -1)?;
-    assert_eq!(rate, info.network_hashes_per_second);
+    assert!(
+        (rate - info.network_hashes_per_second).abs() < f64::EPSILON,
+        "default-window hash rate must match mining info: {rate} vs {}",
+        info.network_hashes_per_second
+    );
     Ok(())
 }
 
