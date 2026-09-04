@@ -169,14 +169,22 @@ observer receives the origin alongside the committed `MutationResult` so
 downstream consumers (ZMQ publisher, metrics) can distinguish relay from
 reorg re-admission without inspecting call sites.
 
+### Chainstate facade
+The in-process owner of applied-tip mutation (`bitcoin_rs_node::Chainstate`).
+Callers copy a `ChainstateSnapshot` or obtain a `ChainTransition`; they do
+not hold the raw UTXO, tip, and lock cells and reproduce a partial
+transition. `chain` still plans the branch. Node-level reorg still sequences
+disconnect then connect. UTXO, storage, and index still own their operations.
+
 ### Chain-change proof
-The type-level binding of a `ChainTransition` to the `ChainChangeGuard` that
-reserved the active odd generation (`crates/node/src/apply.rs`). Apply-path
-functions accept `&ChainChangeProof`, not independent `&ChainTransition` and
-`&ChainChangeGuard` arguments, so a call without an active odd generation
-cannot compile. The proof's `odd_generation` returns the exact reserved
-value, letting admission checks compare against a specific generation rather
-than a snapshot that may have moved.
+The type-level binding of a `TransitionLock` to the `ChainChangeGuard` that
+reserved the active odd generation (`crates/node/src/apply.rs`). The
+caller-facing mutation capability is `ChainTransition`, which holds that
+proof. Apply-path helpers accept `&ChainChangeProof`, not independent lock
+and guard arguments, so a call without an active odd generation cannot
+compile. The proof's `odd_generation` returns the exact reserved value,
+letting admission checks compare against a specific generation rather than a
+snapshot that may have moved.
 
 ### Count-and-byte bound
 A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window uses it; the sync staging budget owes the same shape. One item larger than the whole byte cap still goes through alone.
@@ -196,7 +204,7 @@ The durable record that an authoritative disconnect started and how far it got. 
 The per-block inverse of a UTXO commit, queued before later apply mutations and made durable by the clean checkpoint rather than a per-block fsync. Keyed by height **and** block hash so an abandoned-branch record cannot replay against another block at the same height. Retained after a disconnect because branch flip-flop is normal.
 
 ### Owed derived state
-State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` witness requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
+State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
 
 ## Derived indexes
 

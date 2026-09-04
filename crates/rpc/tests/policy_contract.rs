@@ -1851,7 +1851,7 @@ const REORG_SPEND_FEE_SATS: u64 = 10_000;
 
 /// Routes `invalidateblock` through the production reorg path.
 struct NodeInvalidator {
-    handles: bitcoin_rs_node::apply::ApplyHandles,
+    handles: bitcoin_rs_node::apply::Chainstate,
 }
 
 impl ChainControl for NodeInvalidator {

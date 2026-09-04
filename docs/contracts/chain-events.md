@@ -6,8 +6,8 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
 `crates/node/src/state.rs`; `ConsumerCursor` and the reconciliation plan in
 `crates/node/src/reconcile.rs`; `UndoStore`, `DisconnectMarker`,
 `DisconnectPhase` in `crates/storage/src/undo.rs` and
-`crates/node/src/apply.rs`; `ChainChangeProof`, `ChainChangeGuard` in
-`crates/node/src/apply.rs`.
+`crates/node/src/apply.rs`; `Chainstate`, `ChainTransition`,
+`ChainChangeProof`, `ChainChangeGuard` in `crates/node/src/apply.rs`.
 
 ## Clauses
 
@@ -79,12 +79,13 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   (`invalidate_block`, `switch_to_branch`) settles this debt before reporting
   success; a checkpoint publication failure is `ReorgError::CheckpointSettlement`
   and leaves the marker in place.
-- `ChainChangeProof` binds a `ChainTransition` to the `ChainChangeGuard`
-  that reserved the active odd generation. Apply-path functions accept
-  `&ChainChangeProof`, not independent `&ChainTransition` and
-  `&ChainChangeGuard` arguments, so a call without an active odd generation
-  cannot compile. The proof's `odd_generation` returns the exact reserved
-  value.
+- `ChainChangeProof` binds a `TransitionLock` to the `ChainChangeGuard`
+  that reserved the active odd generation. The caller-facing mutation
+  capability is `ChainTransition`, which holds that proof. Apply-path
+  functions accept `&ChainChangeProof` (or `&ChainTransition`), not
+  independent lock and guard arguments, so a call without an active odd
+  generation cannot compile. The proof's `odd_generation` returns the exact
+  reserved value.
 - The `UndoStore` trait (`crates/storage/src/undo.rs`) abstracts the
   durable marker over all four backends. `KvUndoStore` writes the marker
   through the `KvStore::write` path; `InMemoryUndoStore` is the test

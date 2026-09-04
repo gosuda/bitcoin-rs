@@ -1,6 +1,6 @@
 //! Block download orchestrator.
 //!
-//! Reads the shared apply handles / peer registry / outbound-channel handles
+//! Reads the shared chainstate facade, peer table, and inbound channels
 //! and, when a peer reports a longer chain, sends `getheaders` toward
 //! that peer. Inbound `headers` batches are drained into the shared
 //! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
@@ -48,7 +48,7 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
 pub struct BlockSync {
-    handles: crate::apply::ApplyHandles,
+    handles: crate::apply::Chainstate,
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
@@ -124,7 +124,7 @@ impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
     pub fn new(
-        handles: crate::apply::ApplyHandles,
+        handles: crate::apply::Chainstate,
         peer_table: Arc<PeerTable>,
         inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
         inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
@@ -1534,7 +1534,7 @@ mod tests {
     use parking_lot::{Mutex, RwLock};
 
     use super::{BlockSync, InboundHeaders, Inventory, Message};
-    use crate::apply::ApplyHandles;
+    use crate::apply::Chainstate;
 
     #[test]
     fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std::error::Error>>
@@ -6418,11 +6418,11 @@ mod tests {
         chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
         applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
-    ) -> ApplyHandles {
+    ) -> Chainstate {
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
         let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
-        ApplyHandles::new(
+        Chainstate::new(
             Network::Regtest,
             chain_tip,
             applied_tip,
@@ -6651,7 +6651,7 @@ mod tests {
     fn assert_applied_genesis(
         applied_tip: &Arc<ArcSwapOption<TipSnapshot>>,
         block_tree: &Arc<RwLock<BlockTree>>,
-        handles: &ApplyHandles,
+        handles: &Chainstate,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let genesis_hash = Network::Regtest.genesis_block_hash();
         let tip = applied_tip
@@ -7151,7 +7151,7 @@ mod tests {
     }
 
     type MaturedChain = (
-        ApplyHandles,
+        Chainstate,
         Vec<Block>,
         HashMap<Hash256, (Block, bytes::Bytes)>,
     );

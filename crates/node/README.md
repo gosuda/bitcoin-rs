@@ -7,9 +7,11 @@ subsystem crates.
 
 `run` is the top-level entry point: it loads the layered `Config` (with RPC `Auth`), and
 drives `event_loop`, the central synchronous loop.
-`NodeState` holds the shared state and the `apply` block-apply pipeline;
-`BlockSync` orchestrates block download; `reorg` switches the applied chain from one
-branch to another. Adapters expose node state to the rest of the system —
+`NodeState` holds the shared state and the `Chainstate` facade for
+authoritative apply; `BlockSync` orchestrates block download; `reorg`
+switches the applied chain from one branch to another. The chainstate
+facade serializes connect, disconnect, and window apply behind
+`ChainTransition`. Adapters expose node state to the rest of the system —
 `UtxoSetView` for consensus transaction checks, `NodeBlockSource` bridging in-memory
 block records to the index crate's block source, `NodeP2pChainQuery` for server-side
 P2P responders, and `BlockTreeContext` for BIP9 deployment state. Notifications leave

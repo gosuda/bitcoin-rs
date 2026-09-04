@@ -63,7 +63,7 @@ type OutboundConnectionHandle =
 
 #[derive(Clone)]
 struct RpcChainControl {
-    handles: crate::apply::ApplyHandles,
+    handles: crate::apply::Chainstate,
 }
 
 impl bitcoin_rs_rpc::context::ChainControl for RpcChainControl {

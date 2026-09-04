@@ -59,7 +59,7 @@ use bitcoin_rs_index::BlockSource as _;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
     BlockSync, Network, NoOpZmqPublisher, NodeConfig, TxIndexRuntime,
-    apply::ApplyHandles,
+    apply::Chainstate,
     state::NodeState,
     sync::{SyncBudget, default_sync_budget},
 };
@@ -1117,14 +1117,14 @@ fn apply_handles(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
     tx_index_runtime: Option<Arc<TxIndexRuntime>>,
-) -> ApplyHandles {
+) -> Chainstate {
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let mut utxo = UtxoSet::new();
     utxo.set_listener(Box::new((*coin_stats).clone()));
     let utxo = Arc::new(utxo);
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
     let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
-    ApplyHandles::new(
+    Chainstate::new(
         Network::Regtest,
         chain_tip,
         applied_tip,

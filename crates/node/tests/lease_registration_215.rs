@@ -10,7 +10,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
-use bitcoin_rs_node::{BlockSync, Network, NoOpZmqPublisher, apply::ApplyHandles};
+use bitcoin_rs_node::{BlockSync, Network, NoOpZmqPublisher, apply::Chainstate};
 use bitcoin_rs_p2p::{Message, PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_rpc::context::BlockLog;
 use bitcoin_rs_utxo::UtxoSet;
@@ -29,7 +29,7 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
     utxo.set_listener(Box::new((*coin_stats).clone()));
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
     let gateway = MempoolGateway::shared(Arc::clone(&mempool));
-    let handles = ApplyHandles::new(
+    let handles = Chainstate::new(
         Network::Regtest,
         chain_tip,
         applied_tip,
