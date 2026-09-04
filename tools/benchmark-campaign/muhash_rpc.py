@@ -67,6 +67,9 @@ _F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
 _F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
 _F_SEAL_GROW = getattr(fcntl, "F_SEAL_GROW", 0x0004)
 _F_SEAL_WRITE = getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+_MFD_ALLOW_SEALING = getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+_MFD_NOEXEC_SEAL = getattr(os, "MFD_NOEXEC_SEAL", 0x0008)
+_MFD_EXEC = getattr(os, "MFD_EXEC", 0x0010)
 OPERATOR_TRUST_BOUNDARY = (
     "operator-controlled observation; not remote binary authentication"
 )
@@ -1978,66 +1981,51 @@ def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
     )
 
 
-def _open_verified_snapshot(path: Path, expected: str, cap: int, field: str) -> int:
+def _open_verified_snapshot(
+    path: Path, expected: str, cap: int, field: str, *, executable: bool = False
+) -> int:
     """Return a sealed, non-CLOEXEC memfd of the verified bytes.
 
     The child inherits this descriptor and opens ``/proc/self/fd/<n>``. A
     later rename or in-place write of the workspace pathname cannot change
-    those bytes. The caller closes the fd after ``Popen``.
+    those bytes. Binary snapshots request ``MFD_EXEC``; config snapshots
+    request ``MFD_NOEXEC_SEAL``. Older kernels that reject those flags
+    fall back to ``MFD_ALLOW_SEALING`` alone. The caller closes the fd
+    after ``Popen``.
     """
-    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        source = os.open(path, flags)
-    except OSError as error:
-        raise ContractError(f"cannot open {field}") from error
+    raw = _read_regular_file(path, cap, field)
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ContractError(f"{field} changed after its verified copy")
     snapshot = -1
     try:
-        before = os.fstat(source)
-        if not stat.S_ISREG(before.st_mode):
-            raise ContractError(f"{field} must be a regular file")
-        raw = _read_fd(source, before.st_size, cap, field)
-        after = os.fstat(source)
-        identity_before = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
+        name = f"verified-{field.replace(' ', '-')}"
+        requested = _MFD_ALLOW_SEALING | (
+            _MFD_EXEC if executable else _MFD_NOEXEC_SEAL
         )
-        identity_after = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if identity_before != identity_after:
-            raise ContractError(f"{field} changed while being read")
-        if hashlib.sha256(raw).hexdigest() != expected:
-            raise ContractError(f"{field} changed after its verified copy")
         try:
-            snapshot = os.memfd_create(
-                f"verified-{field.replace(' ', '-')}", os.MFD_ALLOW_SEALING
-            )
-            written = 0
-            while written < len(raw):
-                written += os.write(snapshot, raw[written:])
-            os.lseek(snapshot, 0, os.SEEK_SET)
-            os.fchmod(snapshot, 0o500)
-            fcntl.fcntl(
-                snapshot,
-                _F_ADD_SEALS,
-                _F_SEAL_WRITE | _F_SEAL_SHRINK | _F_SEAL_GROW | _F_SEAL_SEAL,
-            )
-        except (AttributeError, OSError) as error:
-            raise ContractError(f"cannot create sealed {field}") from error
+            snapshot = os.memfd_create(name, requested)
+        except OSError as error:
+            if error.errno != errno.EINVAL:
+                raise
+            snapshot = os.memfd_create(name, _MFD_ALLOW_SEALING)
+        written = 0
+        while written < len(raw):
+            written += os.write(snapshot, raw[written:])
+        os.lseek(snapshot, 0, os.SEEK_SET)
+        os.fchmod(snapshot, 0o500 if executable else 0o400)
+        fcntl.fcntl(
+            snapshot,
+            _F_ADD_SEALS,
+            _F_SEAL_WRITE | _F_SEAL_SHRINK | _F_SEAL_GROW | _F_SEAL_SEAL,
+        )
         owned = snapshot
         snapshot = -1
         return owned
+    except (AttributeError, OSError) as error:
+        raise ContractError(f"cannot create sealed {field}") from error
     finally:
         if snapshot >= 0:
             os.close(snapshot)
-        os.close(source)
 
 
 def _expand_command(
@@ -2097,7 +2085,11 @@ class _ArmProcess:
             raise ContractError(f"{self.spec.kind} process is already running")
         self.spec.datadir.mkdir(parents=True, exist_ok=True)
         binary_fd = _open_verified_snapshot(
-            self.binary, self.spec.binary_sha256, MAX_BINARY_BYTES, "arm binary copy"
+            self.binary,
+            self.spec.binary_sha256,
+            MAX_BINARY_BYTES,
+            "arm binary copy",
+            executable=True,
         )
         try:
             config_fd = _open_verified_snapshot(

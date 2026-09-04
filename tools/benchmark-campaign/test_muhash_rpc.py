@@ -2348,6 +2348,47 @@ class CampaignControllerTests(unittest.TestCase):
             )
         shutil.rmtree(root, ignore_errors=True)
 
+    def test_binary_snapshot_execs_and_config_snapshot_does_not(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        root = _make_root("muhash-memfd-exec-")
+        script = b"#!/usr/bin/env python3\nimport sys\nsys.stdout.write('ran')\n"
+        binary = root / "node.py"
+        binary.write_bytes(script)
+        binary.chmod(0o700)
+        config = root / "workspace-config"
+        config.write_bytes(b"pinned-config")
+        binary_fd = module._open_verified_snapshot(
+            binary,
+            _sha256(script),
+            module.MAX_BINARY_BYTES,
+            "arm binary copy",
+            executable=True,
+        )
+        config_fd = module._open_verified_snapshot(
+            config,
+            _sha256(b"pinned-config"),
+            module.MAX_RECEIPT_BYTES,
+            "arm config copy",
+        )
+        try:
+            ran = subprocess.run(
+                [f"/proc/self/fd/{binary_fd}"],
+                capture_output=True,
+                pass_fds=(binary_fd,),
+                check=True,
+            )
+            self.assertEqual(ran.stdout, b"ran")
+            with self.assertRaises(PermissionError):
+                subprocess.run(
+                    [f"/proc/self/fd/{config_fd}"],
+                    pass_fds=(config_fd,),
+                    check=True,
+                )
+        finally:
+            os.close(binary_fd)
+            os.close(config_fd)
+        shutil.rmtree(root, ignore_errors=True)
+
     def test_verified_config_inode_survives_workspace_path_replace(self) -> None:
         # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
         root = _make_root("muhash-config-inode-")

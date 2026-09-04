@@ -29,10 +29,12 @@ the send-time proof.
 
 Campaign command templates include `{config}`. `run_campaign` copies the
 pinned config into the workspace with `O_EXCL` and mode `0o400`. Every spawn
-opens that copy, re-hashes it, copies the verified bytes into a write-sealed
-memfd, and passes `/proc/self/fd/<n>` to the child. A rename of the workspace
-pathname or a later write to that inode cannot change the bytes the daemon
-reads. Receipts keep the original FileRef identity.
+opens that copy through `_read_regular_file`, re-hashes the bytes, copies
+them into a write-sealed memfd, and passes `/proc/self/fd/<n>` to the child.
+Binary snapshots request `MFD_EXEC`; config snapshots request
+`MFD_NOEXEC_SEAL`. A rename of the workspace pathname or a later write to
+that inode cannot change the bytes the daemon reads. Receipts keep the
+original FileRef identity.
 
 ## Proven by
 
@@ -43,6 +45,7 @@ reads. Receipts keep the original FileRef identity.
   `test_readiness_rejects_a_listener_the_child_does_not_own`,
   `test_command_must_include_config_placeholder`,
   `test_pinned_config_copy_ignores_later_operator_path_writes`,
+  `test_binary_snapshot_execs_and_config_snapshot_does_not`,
   `test_verified_config_inode_survives_workspace_path_replace`,
   `test_spawn_reads_verified_config_after_workspace_replace`,
   `test_warm_campaign_agrees_across_all_backends`
