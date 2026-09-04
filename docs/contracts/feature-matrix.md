@@ -14,6 +14,7 @@ crates that do not own storage are not combinations.
 - Each row is one combination CI must `cargo check` independently.
   `lane=pure` is fjall/redb/zmq with the native interpreter.
   `lane=native` needs cmake/libboost (kernel) and/or C storage engines.
+  `bitcoin-rs-node`'s crate default (`fjall,kernel,zmq`) is a native row.
 - Adding a Cargo feature is not enough to support a combination. Add a
   row here in the same commit, or do not add the feature.
 

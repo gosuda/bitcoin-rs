@@ -22,3 +22,4 @@ rpc-default	bitcoin-rs-rpc	pure	--all-targets
 rpc-no-defaults	bitcoin-rs-rpc	pure	--no-default-features --all-targets
 node-fjall	bitcoin-rs-node	pure	--no-default-features --features fjall --all-targets
 node-fjall-zmq	bitcoin-rs-node	pure	--no-default-features --features fjall,zmq --all-targets
+node-default	bitcoin-rs-node	native	--all-targets
