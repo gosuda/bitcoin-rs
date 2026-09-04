@@ -201,6 +201,9 @@ mod tests {
     use super::{Result, parse_for_network};
     use bitcoin_rs_node::{Network, resolve};
 
+    /// Acceptance criteria: a network-specific `prune` value overrides the
+    /// global value when the configuration is resolved for that network.
+    /// Evidence: the assertions below verify the resolved value is 900.
     #[test]
     fn network_section_overrides_globals() -> Result<()> {
         let layer = parse_for_network(
