@@ -29,7 +29,8 @@
 //! - The engine rule is the storage-boundary rule: only the storage crate may
 //!   name a backend engine. Everything above talks to the `KvStore` facade.
 //! - Backend *feature* forwarding is confined to the operator-facing tiers
-//!   (node, binary) and the services-tier adapters; rpc forwards none.
+//!   (node, binary) and the services-tier adapters that actually select an
+//!   engine; rpc, consensus, script, mempool, and mining define none.
 //!
 //! The gate fails loudly, naming the offending edge, when any assertion does
 //! not hold.
@@ -231,32 +232,42 @@ fn workspace_dependency_direction_is_one_way() {
         );
     }
 
-    // 4. Backend feature forwarding is confined to the tiers that must carry
-    //    the operator's backend choice: node and the binary (operator-facing
-    //    feature tables) and the services-tier adapter crates (whose backend
-    //    features exist so `-p` selection propagates into storage). The RPC
-    //    surface forwards none, and workspace-selection marker features that
-    //    gate no code are tolerated.
+    // 4. Backend feature names are real forwarding, not empty markers.
+    //    Layer 0 (core) and layer 3 (RPC) must not define them. Storage owns
+    //    the engines. Layer 2 adapters forward into storage. Layer 4
+    //    (node/binary) forwards into those adapters. An empty `rocksdb = []`
+    //    on consensus/script/mempool/mining is not a supported combination.
     for (name, feature_map) in &features {
-        if name == STORAGE_CRATE || name == RPC_CRATE {
-            continue;
-        }
-        let carries_choice = approved_layer(name) >= 2;
+        let layer = approved_layer(name);
         for (feature, implies) in feature_map {
-            let forwards = BACKEND_FEATURES.contains(&feature.as_str())
-                || implies.iter().any(|entry| {
-                    let entry = entry.trim_start_matches("dep:");
-                    BACKEND_FEATURES
-                        .iter()
-                        .any(|backend| entry.split('/').next() == Some(backend))
-                });
-            if !forwards || carries_choice || implies.is_empty() {
+            if !BACKEND_FEATURES.contains(&feature.as_str()) {
                 continue;
             }
-            panic!(
-                "`{name}` forwards the backend feature `{feature}`; backend feature \
-                 forwarding above storage is allowed only on node, the binary, and \
-                 the services-tier adapters"
+            assert!(
+                name != RPC_CRATE && layer != 0,
+                "`{name}` (layer {layer}) must not define the backend feature `{feature}`"
+            );
+            if name == STORAGE_CRATE {
+                continue;
+            }
+            assert!(
+                !implies.is_empty(),
+                "`{name}` defines empty backend marker `{feature}`; backend features \
+                 must forward into storage or an adapter that does"
+            );
+            let forwards = implies.iter().any(|entry| {
+                let entry = entry.trim_start_matches("dep:");
+                entry.starts_with("bitcoin-rs-storage/")
+                    || entry.starts_with("bitcoin-rs-node/")
+                    || BACKEND_FEATURES.iter().any(|backend| {
+                        entry.split('/').next() == Some(*backend)
+                            || entry.split('/').nth(1).is_some_and(|name| name == *backend)
+                    })
+            });
+            assert!(
+                forwards && layer >= 2,
+                "`{name}` defines backend feature `{feature}` without forwarding it \
+                 into storage or a layer-2/4 adapter"
             );
         }
     }

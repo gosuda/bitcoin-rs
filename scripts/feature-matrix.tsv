@@ -1,0 +1,24 @@
+# name	package	lane	args
+# Owner of the supported feature combinations (FEAT-01).
+# lane=pure: no C++ / libbitcoinkernel / rocksdb / mdbx
+# lane=native: needs cmake+libboost (kernel) and/or C storage engines
+bin-default	bitcoin-rs	pure	--no-default-features --features fjall,redb,zmq
+portable	bitcoin-rs	pure	--no-default-features --features fjall,zmq
+no-zmq	bitcoin-rs	pure	--no-default-features --features fjall,redb
+fjall-only	bitcoin-rs	pure	--no-default-features --features fjall
+redb-only	bitcoin-rs	pure	--no-default-features --features redb
+portable-kernel	bitcoin-rs	native	--no-default-features --features fjall,zmq,kernel
+full-node	bitcoin-rs	native	--no-default-features --features rocksdb,fjall,redb,mdbx,kernel
+full-node-native	bitcoin-rs	native	--no-default-features --features rocksdb,fjall,redb,mdbx
+rocksdb-only	bitcoin-rs	native	--no-default-features --features rocksdb
+mdbx-index	bitcoin-rs	native	--no-default-features --features fjall,mdbx
+consensus-native	bitcoin-rs-consensus	pure	--no-default-features --all-targets
+consensus-kernel	bitcoin-rs-consensus	native	--features kernel --all-targets
+storage-fjall	bitcoin-rs-storage	pure	--no-default-features --features fjall
+storage-redb	bitcoin-rs-storage	pure	--no-default-features --features redb
+storage-rocksdb	bitcoin-rs-storage	native	--no-default-features --features rocksdb
+storage-mdbx	bitcoin-rs-storage	native	--no-default-features --features mdbx
+rpc-default	bitcoin-rs-rpc	pure	--all-targets
+rpc-no-defaults	bitcoin-rs-rpc	pure	--no-default-features --all-targets
+node-fjall	bitcoin-rs-node	pure	--no-default-features --features fjall --all-targets
+node-fjall-zmq	bitcoin-rs-node	pure	--no-default-features --features fjall,zmq --all-targets

@@ -13,9 +13,6 @@ workspace = true
 
 [features]
 default = []
-rocksdb = []
-fjall = []
-redb = []
 test-seam = []
 
 [dependencies]

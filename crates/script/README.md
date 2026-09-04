@@ -15,9 +15,5 @@ vectors pin zero native mismatches in `tests/core_vectors.rs`. The `kernel`
 feature on `bitcoin-rs-consensus` remains the library production default;
 see [`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md).
 
-## Features
-
-- `rocksdb`, `fjall`, `redb`: no-op in this crate — this crate has no backend code; the names exist so the shared storage-backend features can be enabled uniformly across the workspace.
-
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

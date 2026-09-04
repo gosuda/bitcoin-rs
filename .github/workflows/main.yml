@@ -136,19 +136,19 @@ jobs:
           key: dep-range-${{ matrix.range }}
       - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
-  # Main-only (issue #174): the small real feature matrix, not a powerset.
+  # Main-only (issue #174 / FEAT-01): the named combinations in
+  # scripts/feature-matrix.tsv, not a cargo-hack powerset. `--each-feature`
+  # enables empty markers and illegal singles (mdbx-only, zmq-only).
   feature-combinations:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-hack
-      # `--each-feature` on these crates exercises the `kernel` feature,
-      # which builds libbitcoinkernel from C++ -- install its prerequisites
-      # so the matrix runs unexcluded (deep lanes own the C++ toolchain).
+      # Kernel and rocksdb/mdbx rows need the C++ toolchain; the TSV's
+      # native lane is why this job lives in main.yml.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      - run: cargo hack check --each-feature --no-dev-deps -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
+      - run: scripts/check-feature-matrix.sh
 
   # Full-feature dependency audit: the PR gate's deny job checks the full
   # graph (all backends + kernel); this lane is a confirmation on `main`.

@@ -109,6 +109,16 @@ scripts/check-dep-range.sh maximum
 
 The original `Cargo.lock` is restored on exit unless `KEEP_LOCK=1`.
 
+### Feature combinations
+
+The supported combinations are the rows in
+`scripts/feature-matrix.tsv`, not a feature powerset:
+
+```sh
+scripts/check-feature-matrix.sh        # every row (needs cmake/libboost for kernel)
+scripts/check-feature-matrix.sh pure   # fjall/redb/zmq only
+```
+
 ## Architecture and crate hierarchy
 
 The workspace follows a strict one-way layer hierarchy:
