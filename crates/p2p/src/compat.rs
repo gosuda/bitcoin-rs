@@ -36,37 +36,12 @@ pub struct Command {
 
 /// Commands `decode_payload` types. Order matches the decoder match.
 ///
-/// Adding a command updates this table, the decoder, [`crate::Message`], and
-/// the policy §5 table in the same change-set.
-#[macro_export]
-macro_rules! command_inventory {
-    ($callback:ident) => {
-        $callback! {
-            ("version", Negotiated), ("verack", Negotiated), ("addr", Ignored),
-            ("inv", Served), ("getdata", Served), ("notfound", Ignored),
-            ("getblocks", Ignored), ("getheaders", Served), ("mempool", Ignored),
-            ("tx", Sink), ("block", Sink), ("headers", Sink),
-            ("sendheaders", Negotiated), ("getaddr", Ignored), ("ping", Served),
-            ("pong", Ignored), ("merkleblock", Ignored), ("filterload", Ignored),
-            ("filteradd", Ignored), ("filterclear", Ignored), ("getcfilters", Ignored),
-            ("cfilter", Ignored), ("getcfheaders", Ignored), ("cfheaders", Ignored),
-            ("getcfcheckpt", Ignored), ("cfcheckpt", Ignored), ("sendcmpct", Ignored),
-            ("cmpctblock", Ignored), ("getblocktxn", Ignored), ("blocktxn", Ignored),
-            ("reject", Legacy), ("alert", Legacy), ("feefilter", Ignored),
-            ("wtxidrelay", Negotiated), ("addrv2", Ignored), ("sendaddrv2", Negotiated),
-        }
-    };
-}
-
-macro_rules! make_commands {
-    ($(($name:literal, $status:ident)),* $(,)?) => {
-        pub const COMMANDS: &[Command] = &[
-            $(Command { name: $name, status: CommandStatus::$status }),*
-        ];
-    };
-}
-command_inventory!(make_commands);
-/*
+/// `decode_payload` will not type a command absent from this table, so an
+/// extra match arm cannot invent inventory. Adding a command updates this
+/// table, the decoder, [`crate::Message`], and the policy §5 table in the
+/// same change-set. `decoder_match_arms_equal_the_command_inventory` requires
+/// the match literals and this table to be the same set.
+pub const COMMANDS: &[Command] = &[
     Command {
         name: "version",
         status: CommandStatus::Negotiated,
@@ -211,8 +186,7 @@ command_inventory!(make_commands);
         name: "sendaddrv2",
         status: CommandStatus::Negotiated,
     },
-]; 
-*/
+];
 
 /// Bitcoin Core 31.1 commands this node does not type.
 ///

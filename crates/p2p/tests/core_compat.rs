@@ -378,6 +378,37 @@ fn policy_message_commands(policy: &str) -> Result<BTreeSet<String>, Box<dyn Err
     Ok(names)
 }
 
+/// Command literals in `decode_payload`'s typed match arms, up to the `_` arm.
+fn decoder_match_commands(wire_src: &str) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let start = wire_src
+        .find("fn decode_payload(command: &str, payload: &[u8])")
+        .ok_or("decode_payload missing")?;
+    let body = wire_src
+        .get(start..)
+        .ok_or("decode_payload slice")?
+        .split("let message = match command {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n        _ =>").next())
+        .ok_or("decode_payload match missing")?;
+    let mut names = BTreeSet::new();
+    for line in body.lines() {
+        let Some(rest) = line.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        let Some((name, after)) = rest.split_once('"') else {
+            continue;
+        };
+        if !after.trim_start().starts_with("=>") {
+            continue;
+        }
+        names.insert(name.to_owned());
+    }
+    if names.is_empty() {
+        return Err("no decoder arms parsed".into());
+    }
+    Ok(names)
+}
+
 fn rust_bitcoin_frame(payload: NetworkMessage) -> Vec<u8> {
     bitcoin_encode::serialize(&RawNetworkMessage::new(Magic::REGTEST, payload))
 }
@@ -406,6 +437,19 @@ fn command_inventory_matches_the_policy_table() -> Result<(), Box<dyn Error>> {
     assert_eq!(
         from_code, from_policy,
         "COMMANDS is the owner; the policy §5 table is a checked projection"
+    );
+    Ok(())
+}
+
+#[test]
+fn decoder_match_arms_equal_the_command_inventory() -> Result<(), Box<dyn Error>> {
+    const WIRE: &str = include_str!("../src/wire.rs");
+    let from_code: BTreeSet<&str> = COMMANDS.iter().map(|entry| entry.name).collect();
+    let from_decoder = decoder_match_commands(WIRE)?;
+    let from_decoder: BTreeSet<&str> = from_decoder.iter().map(String::as_str).collect();
+    assert_eq!(
+        from_code, from_decoder,
+        "every decode_payload arm must be in COMMANDS, and every COMMANDS row must have an arm"
     );
     Ok(())
 }
