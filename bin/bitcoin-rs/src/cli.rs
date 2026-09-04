@@ -61,7 +61,7 @@ pub(crate) struct CliArgs {
     pub(crate) metrics_bind: Option<SocketAddr>,
     #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
-    /// Compare native script verdicts against libbitcoinkernel. Requires `--features kernel`.
+    /// Compare native script verdicts against libbitcoinkernel; see `VAL-03`.
     #[arg(long = "verify-kernel", num_args = 0..=1, default_missing_value = "true")]
     pub(crate) verify_kernel: Option<bool>,
     /// Watch-only coinbase payout address for solo mining templates.
