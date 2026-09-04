@@ -939,6 +939,20 @@ impl IndexCapabilities {
         !self.tx_lookup && !self.script_history && !self.script_live
     }
 
+    /// Persisted cursors this selection no longer maintains.
+    ///
+    /// Mode demotion (`full` → `utxo`) and an explicit-`txindex` independence
+    /// change leave durable rows behind. Those leftover families are reset
+    /// and rebuilt or discarded; they are never served as if still configured.
+    #[must_use]
+    pub const fn leftover(self, watermarks: IndexWatermarks) -> Self {
+        Self {
+            tx_lookup: !self.tx_lookup && watermarks.tx_lookup.is_some(),
+            script_history: !self.script_history && watermarks.script_history.is_some(),
+            script_live: !self.script_live && watermarks.script_live.is_some(),
+        }
+    }
+
     fn to_mask(self) -> u8 {
         u8::from(self.tx_lookup)
             | (u8::from(self.script_history) << 1)
@@ -3158,14 +3172,16 @@ impl<S: KvStore> IndexWriter<S> {
     /// Seeds the live view from a producer of compact locators.
     ///
     /// `produce` emits every live `(outpoint, scripthash)` at `seed_tip`.
-    /// Rows are written in bounded deferred batches. Failure ownership
-    /// follows `IDX-07` in `docs/contracts/indexing.md`:
-    /// - [`IndexError::Storage`] is retryable only after the caller resets
-    ///   `ScriptLive`; this method does not compensate a partial seed.
-    /// - [`IndexError::LiveAlreadySeeded`] is not retryable for the same
-    ///   watermark; reset first if a new seed is required.
-    /// - Any other [`IndexError`] is fatal for this call and uses the same
-    ///   caller-owned reset/rebuild rule.
+    /// Each bounded batch, and the watermark stamp, is an ordinary fenced
+    /// write: reset state, ordinary revision, and every capability watermark
+    /// must still match the capture. A lost fence is [`IndexError::StaleIndexState`]
+    /// or [`IndexError::ResetInProgress`]; a storage failure is
+    /// [`IndexError::Storage`]. The caller resets this capability before
+    /// retrying. See `IDX-07` in `docs/contracts/indexing.md`.
+    ///
+    /// The live watermark is written only with the last batch, so an
+    /// interrupted seed stays unqueryable. Refuses to run over an existing
+    /// live watermark ([`IndexError::LiveAlreadySeeded`]).
     ///
     /// A missing live watermark with leftover rows is treated as an
     /// interrupted seed: `ScriptLive` is reset before any new row is
@@ -3182,20 +3198,21 @@ impl<S: KvStore> IndexWriter<S> {
     {
         const SEED_BATCH_ROWS: usize = 4_096;
         self.ensure_prepared_ready()?;
-        if self
-            .indexer
-            .capability_watermark(IndexCapability::ScriptLive)?
-            .is_some()
-        {
+        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        if existing.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
         }
         // An interrupted seed leaves rows without a ready watermark. Clear
         // them before writing so this publication cannot mix leftover
-        // locators from a previous attempt.
+        // locators from a previous attempt. Recapture after the reset: the
+        // claim advances the fence, so a pre-reset capture cannot commit.
         self.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
+        let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        if fence.watermarks.script_live.is_some() {
+            return Err(IndexError::LiveAlreadySeeded);
+        }
         let mut written = 0;
         let mut batch = self.indexer.store.new_batch();
-        // Version the store before publishing deferred seed rows.
         batch.put(
             ColumnFamily::UtxoMeta,
             FORMAT_VERSION_KEY,
@@ -3210,7 +3227,16 @@ impl<S: KvStore> IndexWriter<S> {
             if in_batch >= SEED_BATCH_ROWS {
                 let next = self.indexer.store.new_batch();
                 let old = std::mem::replace(&mut batch, next);
-                self.indexer.store.write_deferred(old)?;
+                commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, old)?;
+                fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+                if fence.watermarks.script_live.is_some() {
+                    return Err(IndexError::LiveAlreadySeeded);
+                }
+                batch.put(
+                    ColumnFamily::UtxoMeta,
+                    FORMAT_VERSION_KEY,
+                    &FORMAT_VERSION_VALUE,
+                );
                 in_batch = 0;
             }
             Ok(())
@@ -3226,13 +3252,13 @@ impl<S: KvStore> IndexWriter<S> {
             SCRIPT_LIVE_WATERMARK_KEY,
             &seed_tip.to_bytes(),
         );
-        self.indexer.store.write_durable(batch)?;
+        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)?;
         Ok(written)
     }
 
     /// Seeds `ScriptLive` from an iterator of compact locators.
     ///
-    /// Delegates to [`Self::seed_script_live_stream`] so deferred write
+    /// Delegates to [`Self::seed_script_live_stream`] so fenced write
     /// failures and watermark publication have one owner.
     pub fn seed_script_live<I>(
         &mut self,

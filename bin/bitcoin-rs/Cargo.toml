@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 description = "bitcoin-rs node binary"
 
+[lib]
+name = "bitcoin_rs"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bitcoin-rs"
 path = "src/main.rs"

@@ -7,7 +7,8 @@ rebuilds.
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
-- Capability status provider in `crates/node/src/capabilities.rs` and
+- Capability status in `crates/node/src/txindex_worker.rs` (`TxIndexCapability`)
+  and the RPC projection in `crates/rpc/src/capabilities.rs` and
   `crates/rpc/src/context.rs`
 
 ## Clauses
@@ -65,13 +66,16 @@ remove another script's output.
   the query engine refuses the request with `TxQueryError::Retry` or
   `TxQueryError::Unavailable`. Stale, unconfirmed, or torn rows are never
   returned to callers.
-- `unspent_outputs` consumes the `ScriptLive` watermark only. It holds the
-  chain-transition authority while taking the index snapshot and checking the
-  live watermark against the applied tip. Locator resolution uses one stable
-  UTXO view after that lock is released; a tip or revision change during
-  resolution is `Retry`. A missing locator after an unchanged tip is
-  unavailable; a compact-prefix collision is filtered by the exact script
-  check.
+- `unspent_outputs` consumes the `ScriptLive` watermark only. The query holds
+  chain-transition authority across watermark validation, live locator scan,
+  and authoritative UTXO resolution. Apply mutates the UTXO set before
+  publishing the applied tip, so a before/after tip comparison cannot exclude
+  that window. History and tx-lookup queries do not take the lock. A missing
+  locator under an otherwise ready matching watermark is unavailable; a
+  compact-prefix collision is filtered by the exact script check.
+- A required capability that is not in the configured selection is
+  `Unavailable` with a distinct disabled reason. A configured capability
+  whose watermark lags is `Retry` (backfilling), never "disabled".
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 
@@ -80,8 +84,11 @@ remove another script's output.
   the degraded capability watermark to `None` and backfills it from the active
   chain.
 - Surviving sibling capabilities remain ready: resetting and rebuilding
-  `ScriptHistory` leaves `TxLookup` online and serving queries as long as its
-  own watermark matches the applied tip, and vice versa.
+  `ScriptHistory` leaves `TxLookup` and `ScriptLive` online and serving
+  queries as long as their own watermarks match the applied tip, and vice versa.
+- Switching `full` → `utxo`, or dropping internal `TxLookup` when explicit
+  `--txindex` is off, resets only leftover persisted families. Configured
+  families are not rebuilt as a side effect.
 
 ### `IDX-05`: Restart reconciliation and schema version refusal
 
@@ -138,9 +145,10 @@ remove another script's output.
   worker resets that capability and reseeds from the authoritative UTXO view;
   `TxLookup` and `ScriptHistory` continue their body-only rollback.
 - When `ScriptLive` has no watermark after restoration or reset, the worker
-  rebuilds it by scanning one stable authoritative UTXO view. Rows are written
-  before the live watermark is durably stamped; without that watermark partial
-  rows are never queryable.
+  rebuilds it by scanning one stable authoritative UTXO view. Each seed batch
+  and the watermark stamp are ordinary fenced writes (reset, revision, and
+  every capability watermark). The watermark is written only with the last
+  batch; without that watermark partial rows are never queryable.
 - Index workers execute in supervised threads under `catch_unwind`. A fatal
   storage failure or panic marks the worker as failed (`publish_failed`) and
   stops the worker. Block validation, UTXO commits, and chainstate progress
@@ -160,6 +168,7 @@ remove another script's output.
   - `absent_tip_rewinds_index_to_empty`
   - `missing_disconnected_body_routes_rewind_to_rebuild`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
+  - `live_only_index_ahead_is_reported_and_reseeded`
 - `crates/node/src/txindex_worker_lifecycle_tests.rs` and
   `crates/node/src/txindex_worker_integration_tests.rs`: lifecycle
   publication, open failure/timeout, and shutdown abandonment.
