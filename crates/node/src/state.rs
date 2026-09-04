@@ -1839,7 +1839,9 @@ impl NodeState {
             } else if let Some(observer) = mempool_observer.cloned() {
                 composite.add_leg("test", observer);
             }
-            composite.add_leg("mining", Arc::clone(&mining_generation) as _);
+            let cloned_mining = Arc::clone(&mining_generation);
+            let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
+            composite.add_leg("mining", mining_leg);
             bitcoin_rs_mempool::MempoolGateway::shared_with(
                 Arc::clone(&mempool),
                 Arc::new(composite),

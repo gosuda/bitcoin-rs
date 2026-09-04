@@ -963,6 +963,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::as_conversions)]
 mod compat_manifest_tests {
     use super::*;
 
