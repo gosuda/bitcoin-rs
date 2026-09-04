@@ -351,6 +351,7 @@ fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), Box<dy
 
 #[test]
 fn gettxoutsetinfo_rejects_trailing_parameters() -> Result<(), Box<dyn std::error::Error>> {
+    // Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
     let error = handler
