@@ -85,7 +85,7 @@ pub fn verify_block_rules_precomputed(
             return Err(ConsensusError::WitnessCommitment);
         }
     }
-    let weight: u64 = block.txs.iter().map(Tx::weight).sum();
+    let weight = block.weight();
     if weight > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BlockWeight {
             weight,

@@ -434,7 +434,7 @@ impl BlockRecord {
         Self {
             hash,
             height,
-            body_size: consensus_bytes(block).len(),
+            body_size: block.total_size(),
             // Not stored: the block tree holds this block's header, and
             // `Context::header_record` supplies it on the way out.
             header: None,
