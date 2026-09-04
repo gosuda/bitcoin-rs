@@ -647,12 +647,9 @@ fn reconsider_disconnected_transactions<F>(
         .reconsider_disconnected(AdmissionOrigin::Reorg, entries);
 }
 
-/// Core's `IsCoinBase`: a single input spending the null prevout (zero txid,
-/// `vout` `u32::MAX`). The derived all-zero outpoint (`vout` 0) is not null.
+/// Core's `IsCoinBase`: a single input spending the null prevout.
 fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Prices `tx` for re-admission, or returns `None` when an input is neither a

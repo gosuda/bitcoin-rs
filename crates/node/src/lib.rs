@@ -28,6 +28,8 @@ pub mod import;
 pub mod logging;
 /// Metrics instrumentation and optional exposition.
 pub mod metrics;
+/// P2P admission and local-relay mempool observer legs.
+mod mempool_observer;
 /// Node-owned mining candidate lifecycle coordinator.
 pub mod mining;
 /// Chain-event reconciliation seam for index consumers.

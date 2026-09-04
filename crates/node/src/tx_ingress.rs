@@ -1,8 +1,9 @@
 //! P2P transaction ingress consumer for the node.
 //!
-//! Each transaction is evaluated through the mempool's standardness +
-//! acceptance policy, and admitted through the one
-//! [`MempoolGateway`](bitcoin_rs_mempool::MempoolGateway).
+//! Each transaction is admitted through the one
+//! [`MempoolGateway::admit_transaction`](bitcoin_rs_mempool::MempoolGateway::admit_transaction)
+//! path RPC uses: policy, then consensus verification under
+//! [`VerifyFlags::STANDARD`](bitcoin_rs_script::VerifyFlags), then insert.
 //!
 //! # Ordering and side effects
 //!
@@ -17,15 +18,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
+use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{
-    AdmissionOrigin, MempoolGateway, PeerToken, ReplacementCandidate,
-    standardness::{PackageTxContext, evaluate_package_acceptance},
+    AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MempoolGateway, PeerToken,
+    standardness::{PackageTxContext, is_standard_tx},
 };
-use bitcoin_rs_primitives::{Hash256, Tx, Txid};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_rpc::context::MiningControl;
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
-use parking_lot::Mutex;
+use hashbrown::HashMap;
+use parking_lot::{Mutex, RwLock};
 
 use crate::state::NodeState;
 use crate::tx_admission::TxAdmission;
@@ -35,13 +39,27 @@ use crate::tx_relay::{PeerRelaySink, TxRelayQueue, spawn_tx_relay_worker};
 const TX_INGRESS_POLL: Duration = Duration::from_millis(100);
 /// Bounded capacity of the outbound tx-relay queue.
 const TX_RELAY_QUEUE_CAPACITY: usize = 1024;
+/// Same generation/sequence retry budget as RPC `sendrawtransaction`.
+const MAX_ADMISSION_RETRIES: usize = 4;
+
+/// Join handles and the shared relay queue returned by
+/// [`spawn_tx_ingress_consumer`].
+pub struct TxIngressHandles {
+    /// The ingress consumer thread.
+    pub ingress: std::thread::JoinHandle<()>,
+    /// The outbound `inv` relay worker started by the same spawn.
+    pub relay: std::thread::JoinHandle<()>,
+    /// Cloneable producer side of the relay queue. Production startup
+    /// attaches this to the gateway observer so RPC-admitted transactions
+    /// announce through the same worker.
+    pub queue: TxRelayQueue,
+}
 
 /// Spawns the single tx-ingress consumer thread.
 ///
 /// The thread drains [`bitcoin_rs_p2p::InboundTx`] items from the bounded
-/// channel, evaluates each through the mempool's acceptance policy, and
-/// admits accepted transactions through the [`MempoolGateway`]. Only
-/// accepted mutations trigger relay and mining wake.
+/// channel and admits each through [`MempoolGateway::admit_transaction`].
+/// Only accepted mutations trigger relay and mining wake.
 ///
 /// # Arguments
 ///
@@ -57,25 +75,40 @@ pub fn spawn_tx_ingress_consumer(
     shutdown: Arc<AtomicBool>,
     tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
     tx_admission: Arc<TxAdmission>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
+) -> std::io::Result<TxIngressHandles> {
     let utxo = state.utxo();
     let transactions = state.transactions();
     let peer_table = state.peer_table();
+    let applied_tip = state.applied_tip();
+    let block_tree = state.block_tree();
     let (relay, relay_rx) = TxRelayQueue::new(TX_RELAY_QUEUE_CAPACITY);
-    let relay_sink = PeerRelaySink::new(peer_table);
-    spawn_tx_relay_worker(relay_sink, relay_rx, Arc::clone(&shutdown))?;
+    let relay_sink = PeerRelaySink::new(Arc::clone(&peer_table));
+    let relay_handle = spawn_tx_relay_worker(relay_sink, relay_rx, Arc::clone(&shutdown))?;
+    let queue = relay.clone();
     let handle = std::thread::Builder::new()
         .name("bitcoin-rs-tx-ingress".to_owned())
         .spawn(move || {
             let consumer = TxIngressConsumer {
                 utxo,
                 transactions,
+                peer_table,
                 mempool_gateway: gateway,
                 mining_control,
                 relay,
                 tx_admission,
+                applied_tip,
+                block_tree,
             };
             while !shutdown.load(Ordering::Relaxed) {
+                loop {
+                    let retries = consumer.tx_admission.take_orphan_retries();
+                    if retries.is_empty() {
+                        break;
+                    }
+                    for (tx, source) in retries {
+                        consumer.process_one(bitcoin_rs_p2p::InboundTx::new((*tx).clone(), source));
+                    }
+                }
                 let recv = {
                     let guard = tx_rx.lock();
                     guard.recv_timeout(TX_INGRESS_POLL)
@@ -89,13 +122,18 @@ pub fn spawn_tx_ingress_consumer(
                 }
             }
         })?;
-    Ok(handle)
+    Ok(TxIngressHandles {
+        ingress: handle,
+        relay: relay_handle,
+        queue,
+    })
 }
 
 /// The single consumer that evaluates and admits peer transactions.
 struct TxIngressConsumer {
     utxo: Arc<UtxoSet>,
     transactions: Arc<parking_lot::RwLock<hashbrown::HashMap<Txid, Tx>>>,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     mempool_gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
     /// Outbound relay queue: enqueues `inv` announcements for the relay
@@ -103,11 +141,14 @@ struct TxIngressConsumer {
     relay: TxRelayQueue,
     /// Orphan map and recent-rejects cache for inbound tx admission.
     tx_admission: Arc<TxAdmission>,
+    /// Applied chain tip; admission height and median-time-past follow this.
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    block_tree: Arc<RwLock<BlockTree>>,
 }
 
 impl TxIngressConsumer {
-    /// Processes one inbound transaction: evaluate acceptance, admit through
-    /// the gateway, and on accepted only — relay inv and wake mining.
+    /// Processes one inbound transaction: admit through the gateway, and on
+    /// accepted only — relay inv and wake mining.
     fn process_one(&self, inbound: bitcoin_rs_p2p::InboundTx) {
         let tx = inbound.tx;
         let source = inbound.source;
@@ -140,181 +181,280 @@ impl TxIngressConsumer {
             return;
         }
 
-        // Evaluate acceptance policy (standardness, fee, missing inputs).
-        let (fact, policy) = {
-            let pool = self.mempool_gateway.read();
-            let policy = pool.policy_snapshot();
-            let contexts = self.package_contexts(&pool, std::slice::from_ref(&tx));
-            let facts = evaluate_package_acceptance(
-                &pool,
-                &policy.standardness,
-                std::slice::from_ref(&tx),
-                &contexts,
-                None,
-                policy.incremental_relay_fee_sat_per_kvb,
-            );
-            let fact = facts.results.into_iter().next().unwrap_or_else(|| {
-                let mut fact = bitcoin_rs_mempool::standardness::TxAcceptanceFact {
-                    txid,
-                    wtxid: tx.wtxid(),
-                    allowed: Some(false),
-                    vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
-                    weight: tx.weight(),
-                    sigop_cost: 0,
-                    base_fee: None,
-                    reject_reason: None,
-                };
-                fact.reject_reason =
-                    Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::PackageTooLarge);
-                fact
-            });
-            (fact, policy)
-        };
+        self.admit_and_relay(tx, source, txid, wtxid);
+    }
 
-        // Rejected: record in recent-rejects so the Inv filter suppresses
-        // future getdata for this tx. Missing-inputs rejections are not
-        // orphans here — the standardness evaluator reports them as
-        // rejected, and the tx is cached. A dedicated orphan path (parent
-        // arrival triggers re-evaluation) is handled by the orphan map in
-        // TxAdmission; this consumer records the reject and moves on.
-        if fact.allowed != Some(true) {
-            tracing::debug!(
-                %txid,
-                reason = ?fact.reject_reason,
-                "p2p tx rejected by mempool policy; not relaying"
-            );
-            self.tx_admission.record_reject(txid, wtxid);
+    fn reject_or_hold_orphan(
+        &self,
+        tx: Tx,
+        source: bitcoin_rs_p2p::PeerSource,
+        txid: Txid,
+        wtxid: bitcoin_rs_primitives::Wtxid,
+        reason: Option<bitcoin_rs_mempool::standardness::AcceptanceRejectReason>,
+    ) {
+        if matches!(
+            reason,
+            Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs)
+        ) {
+            if is_coinbase(&tx) {
+                tracing::debug!(%txid, "p2p coinbase rejected; not held as orphan");
+                self.tx_admission.record_reject(txid, wtxid);
+                return;
+            }
+            let policy = self.mempool_gateway.read().policy_snapshot();
+            if let Err(error) = is_standard_tx(&tx, &policy.standardness) {
+                tracing::debug!(
+                    %txid,
+                    %error,
+                    "p2p missing-input tx failed standardness; not held as orphan"
+                );
+                self.tx_admission.record_reject(txid, wtxid);
+                return;
+            }
+            let held = Arc::new(tx);
+            self.tx_admission.record_orphan(&held, source);
+            self.request_missing_parents(&held, source);
+            tracing::debug!(%txid, "p2p tx missing inputs; held as orphan");
             return;
         }
+        tracing::debug!(%txid, ?reason, "p2p tx rejected by mempool policy; not relaying");
+        self.tx_admission.record_reject(txid, wtxid);
+    }
 
-        // Admit through the one gateway.
+    fn admit_and_relay(
+        &self,
+        tx: Tx,
+        source: bitcoin_rs_p2p::PeerSource,
+        txid: Txid,
+        wtxid: bitcoin_rs_primitives::Wtxid,
+    ) {
         let token = PeerToken {
             addr: source.addr,
             connection_id: source.connection_id().get(),
         };
-        let candidate = ReplacementCandidate::new(
-            Arc::new(tx.clone()),
-            fact.vsize,
-            fact.base_fee.unwrap_or(0),
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
-        let time = unix_time_secs();
-        let height = self.applied_height();
-        let result = self.mempool_gateway.replace_transaction(
-            AdmissionOrigin::Peer(token),
-            candidate,
-            time,
-            height,
-            fact.sigop_cost,
-        );
-
-        match result {
-            // A replacement the size-limit trim shed after commit is not in
-            // the pool: record the reject exactly like a refused admission.
-            Ok(outcome) if outcome.is_shed() => {
-                self.tx_admission.record_reject(txid, wtxid);
-            }
-            Ok(outcome) => {
-                // Accepted-only relay: only relay if the mutation includes
-                // an Accepted outcome for this txid.
-                let accepted = outcome.into_mutation().changes.iter().any(|c| {
-                    c.txid == Hash256::from(txid)
-                        && matches!(c.outcome, bitcoin_rs_mempool::MutationOutcome::Accepted)
-                });
-                if accepted {
-                    self.relay
-                        .announce(txid, tx.wtxid(), Some(source.connection_id().get()));
-                    self.mining_control.publish_generation();
-                    tracing::trace!(%txid, "p2p tx admitted and relayed");
+        let origin = AdmissionOrigin::Peer(token);
+        let tx = Arc::new(tx);
+        for _ in 0..MAX_ADMISSION_RETRIES {
+            let Some(generation) = self.mempool_gateway.stable_generation() else {
+                continue;
+            };
+            let (sequence, mempool_prevouts) = {
+                let pool = self.mempool_gateway.read();
+                if pool.contains_txid(&txid) {
+                    return;
                 }
+                (pool.sequence_number(), resolve_mempool_prevouts(&pool, &tx))
+            };
+            let (context, prevouts) = self.resolve_full_context(&tx, &mempool_prevouts);
+            if context.missing_inputs {
+                self.reject_or_hold_orphan(
+                    (*tx).clone(),
+                    source,
+                    txid,
+                    wtxid,
+                    Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs),
+                );
+                return;
             }
-            Err(error) => {
-                tracing::debug!(%txid, %error, "p2p tx admission failed; not relaying");
-                self.tx_admission.record_reject(txid, wtxid);
+            let request = AdmissionRequest {
+                tx: Arc::clone(&tx),
+                context,
+                prevouts,
+                locktime_cutoff: self.locktime_cutoff(),
+                max_feerate_sat_per_kvb: None,
+                time: unix_time_secs(),
+                height: self.applied_height(),
+                origin,
+                expected_generation: generation,
+                expected_sequence: sequence,
+            };
+            match self.mempool_gateway.admit_transaction(request) {
+                Ok(AdmitOutcome::Committed(result)) => {
+                    let accepted = result.changes.iter().any(|change| {
+                        change.txid == Hash256::from(txid)
+                            && matches!(
+                                change.outcome,
+                                bitcoin_rs_mempool::MutationOutcome::Accepted
+                            )
+                    });
+                    if accepted {
+                        self.relay
+                            .announce(txid, wtxid, Some(source.connection_id().get()));
+                        self.mining_control.publish_generation();
+                        tracing::trace!(%txid, "p2p tx admitted and relayed");
+                    }
+                    return;
+                }
+                Ok(AdmitOutcome::AlreadyKnown) => return,
+                Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => continue,
+                Err(AdmitError::Policy(
+                    bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs,
+                )) => {
+                    self.reject_or_hold_orphan(
+                        (*tx).clone(),
+                        source,
+                        txid,
+                        wtxid,
+                        Some(
+                            bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs,
+                        ),
+                    );
+                    return;
+                }
+                Err(AdmitError::Policy(reason)) => {
+                    tracing::debug!(%txid, %reason, "p2p tx rejected by mempool policy; not relaying");
+                    self.tx_admission.record_reject(txid, wtxid);
+                    return;
+                }
+                Err(AdmitError::Consensus) => {
+                    tracing::debug!(%txid, "p2p tx failed consensus verification; not relaying");
+                    self.tx_admission.record_reject(txid, wtxid);
+                    return;
+                }
             }
         }
+        tracing::debug!(%txid, "p2p tx admission retry exhausted; not relaying");
     }
 
-    /// Resolves prevout contexts for a package of transactions, using the
-    /// mempool and UTXO set — the same logic as the RPC
-    /// `sendrawtransaction` handler.
-    fn package_contexts(
+    /// Combines mempool-dependent prevouts (captured under a read guard) with
+    /// UTXO-set prevouts (resolved without a pool guard).
+    fn resolve_full_context(
         &self,
-        pool: &bitcoin_rs_mempool::Mempool,
-        txs: &[Tx],
-    ) -> Vec<PackageTxContext> {
-        use bitcoin_rs_primitives::OutPoint;
-        use hashbrown::HashMap;
+        tx: &Tx,
+        mempool_prevouts: &HashMap<OutPoint, TxOut>,
+    ) -> (PackageTxContext, Vec<(OutPoint, TxOut)>) {
+        let mut missing_inputs = false;
+        let mut input_value = 0_u64;
+        let mut prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
 
-        let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
-        let mut contexts = Vec::with_capacity(txs.len());
-
-        for tx in txs {
-            let mut missing_inputs = false;
-            let mut input_value = 0_u64;
-
-            for input in &tx.inputs {
-                if input.previous_output == OutPoint::default() {
-                    missing_inputs = true;
-                    continue;
-                }
-                let key = (input.previous_output.txid, input.previous_output.vout);
-                if let Some(value) = package_outputs.get(&key) {
-                    input_value = input_value.saturating_add(*value);
-                    continue;
-                }
-                if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
-                    && let Ok(vout) = usize::try_from(input.previous_output.vout)
-                    && let Some(output) = parent.outputs.get(vout)
-                {
-                    input_value = input_value.saturating_add(output.value);
-                    continue;
-                }
-                if let Some(live) = self.utxo.get_entry(&input.previous_output) {
-                    input_value = input_value.saturating_add(live.txout.value);
-                    continue;
-                }
+        for input in &tx.inputs {
+            if input.previous_output == OutPoint::default() || input.previous_output.is_null() {
                 missing_inputs = true;
+                continue;
             }
+            if let Some(output) = mempool_prevouts.get(&input.previous_output) {
+                input_value = input_value.saturating_add(output.value);
+                prevouts.push((input.previous_output, output.clone()));
+                continue;
+            }
+            if let Some(live) = self.utxo.get_entry(&input.previous_output) {
+                input_value = input_value.saturating_add(live.txout.value);
+                prevouts.push((input.previous_output, live.txout.clone()));
+                continue;
+            }
+            missing_inputs = true;
+        }
 
-            let output_value = tx
-                .outputs
-                .iter()
-                .fold(0_u64, |sum, output| sum.saturating_add(output.value));
-            let fee = input_value.saturating_sub(output_value);
-            let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-            let sigop_cost = bitcoin_rs_script::count_tx_legacy(tx);
+        let output_value = tx
+            .outputs
+            .iter()
+            .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+        let fee = input_value.saturating_sub(output_value);
+        let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+        let sigop_cost = bitcoin_rs_script::count_tx_legacy(tx);
 
-            contexts.push(PackageTxContext {
+        (
+            PackageTxContext {
                 fee,
                 vsize,
                 sigop_cost,
                 missing_inputs,
-            });
+            },
+            prevouts,
+        )
+    }
 
-            let txid = tx.txid();
-            for (vout, output) in tx.outputs.iter().enumerate() {
-                let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-                package_outputs.insert((txid, vout), output.value);
+    /// Asks the delivering peer for each missing parent via `getdata`.
+    ///
+    /// Prevouts only carry the parent txid, so the request is always
+    /// txid-typed even when the peer negotiated BIP339.
+    fn request_missing_parents(&self, tx: &Tx, source: bitcoin_rs_p2p::PeerSource) {
+        use bitcoin::p2p::message_blockdata::Inventory;
+
+        let Some(lease) = self.peer_table.lease(source.addr) else {
+            return;
+        };
+        if !lease.is_current(source) {
+            return;
+        }
+        let mut parent_ids = hashbrown::HashSet::new();
+        {
+            let pool = self.mempool_gateway.read();
+            for input in &tx.inputs {
+                let prevout = input.previous_output;
+                if prevout.is_null() || prevout == OutPoint::default() {
+                    continue;
+                }
+                if pool.contains_txid(&prevout.txid) || self.utxo.get_entry(&prevout).is_some() {
+                    continue;
+                }
+                parent_ids.insert(prevout.txid);
             }
         }
-
-        contexts
+        let items: Vec<Inventory> = parent_ids
+            .into_iter()
+            .map(|txid| {
+                Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(*txid.as_bytes()))
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        if let Err(error) = lease.send(bitcoin_rs_p2p::Message::GetData(items)) {
+            tracing::debug!(
+                peer_addr = %source.addr,
+                %error,
+                "orphan parent getdata not sent"
+            );
+        }
     }
 
     /// Returns the current applied tip height.
     fn applied_height(&self) -> u32 {
-        let _ = self;
-        // The admission height is used for mempool entry ancestor
-        // accounting. The apply path corrects it on block connect.
-        0
+        self.applied_tip.load().as_ref().map_or(0, |tip| tip.height)
     }
+
+    /// Median-time-past of the applied tip for BIP113 finality, or zero
+    /// when no tip is published.
+    fn locktime_cutoff(&self) -> u32 {
+        let Some(tip) = self.applied_tip.load_full() else {
+            return 0;
+        };
+        self.block_tree
+            .read()
+            .median_time_past_at(tip.tip_id, 11)
+            .unwrap_or(0)
+    }
+}
+
+fn resolve_mempool_prevouts(
+    pool: &bitcoin_rs_mempool::Mempool,
+    tx: &Tx,
+) -> HashMap<OutPoint, TxOut> {
+    let mut prevouts = HashMap::new();
+    for input in &tx.inputs {
+        if input.previous_output == OutPoint::default() || input.previous_output.is_null() {
+            continue;
+        }
+        if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
+            && let Ok(vout) = usize::try_from(input.previous_output.vout)
+            && let Some(output) = parent.outputs.get(vout)
+        {
+            prevouts.insert(input.previous_output, output.clone());
+        }
+    }
+    prevouts
 }
 
 fn unix_time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Core's `IsCoinBase`: one input spending the null prevout.
+fn is_coinbase(tx: &Tx) -> bool {
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 #[cfg(test)]
@@ -402,7 +542,10 @@ mod tests {
         }
     }
 
-    /// Builds a tx that spends a known UTXO, passing standardness checks.
+    /// Builds a tx that spends a known UTXO, passing standardness and
+    /// script checks. Empty `scriptSig` plus an `OP_TRUE` prevout satisfy
+    /// `SCRIPT_VERIFY_CLEANSTACK`; the `OP_RETURN` payload pads the
+    /// non-witness size to the 65-byte standardness floor.
     fn spending_tx() -> Tx {
         let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
         Tx {
@@ -412,13 +555,13 @@ mod tests {
                     txid: parent_txid,
                     vout: 0,
                 },
-                script_sig: vec![0x52, 0x02, 0xAA, 0xBB],
+                script_sig: Vec::new(),
                 sequence: 0xFFFF_FFFF,
                 witness: Vec::new(),
             }],
             outputs: vec![TxOut {
                 value: 49_000,
-                script_pubkey: vec![0x6A],
+                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
             }],
             lock_time: 0,
         }
@@ -441,7 +584,7 @@ mod tests {
             },
             TxOut {
                 value: 50_000,
-                script_pubkey: Vec::new(),
+                script_pubkey: vec![0x51],
             },
             false,
             100,
@@ -453,10 +596,13 @@ mod tests {
         TxIngressConsumer {
             utxo,
             transactions,
+            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             mempool_gateway: Arc::clone(gateway),
             mining_control: mining,
             relay,
             tx_admission: Arc::new(TxAdmission::new(Arc::clone(gateway))),
+            applied_tip: Arc::new(ArcSwapOption::empty()),
+            block_tree: Arc::new(RwLock::new(BlockTree::new())),
         }
     }
 
@@ -480,10 +626,13 @@ mod tests {
         TxIngressConsumer {
             utxo,
             transactions,
+            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             mempool_gateway: Arc::clone(gateway),
             mining_control: mining,
             relay,
             tx_admission: Arc::new(TxAdmission::new(Arc::clone(gateway))),
+            applied_tip: Arc::new(ArcSwapOption::empty()),
+            block_tree: Arc::new(RwLock::new(BlockTree::new())),
         }
     }
 
@@ -628,6 +777,104 @@ mod tests {
             mining.publish_count(),
             1,
             "accepted tx must wake mining exactly once"
+        );
+    }
+
+    #[test]
+    fn coinbase_is_rejected_not_orphaned() {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let gateway = MempoolGateway::shared(Arc::clone(&pool));
+        let mining = Arc::new(RecordingMining::new());
+        let consumer = make_consumer(&gateway, mining);
+        let coinbase = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                script_sig: vec![0x00],
+                sequence: 0xFFFF_FFFF,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x6A],
+            }],
+            lock_time: 0,
+        };
+        let txid = coinbase.txid();
+        consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
+        assert_eq!(
+            consumer.tx_admission.orphan_count(),
+            0,
+            "a peer coinbase must not consume orphan quota"
+        );
+        assert!(
+            consumer.tx_admission.is_rejected(Hash256::from(txid)),
+            "a peer coinbase must enter recent-rejects"
+        );
+    }
+
+    #[test]
+    fn non_final_tx_is_rejected_not_admitted() {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        })));
+        let gateway = MempoolGateway::shared(Arc::clone(&pool));
+        let mining = Arc::new(RecordingMining::new());
+        let consumer = make_consumer_with_utxo(&gateway, mining);
+        let mut tx = spending_tx();
+        tx.lock_time = 100;
+        tx.inputs[0].sequence = 0xFFFF_FFFE;
+        let txid = tx.txid();
+        consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
+        assert!(
+            !gateway.read().contains_txid(&txid),
+            "a non-final peer tx must not enter the mempool"
+        );
+        assert!(
+            consumer.tx_admission.is_rejected(Hash256::from(txid)),
+            "a non-final peer tx must enter recent-rejects"
+        );
+    }
+
+    #[test]
+    fn oversized_missing_input_tx_is_rejected_not_orphaned() {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let gateway = MempoolGateway::shared(Arc::clone(&pool));
+        let mining = Arc::new(RecordingMining::new());
+        let consumer = make_consumer(&gateway, mining);
+        let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
+        // Witness counts 1× toward BIP141 weight. A 400_000-byte stack
+        // item puts the body over the 400k standard cap so MissingInputs
+        // cannot consume orphan quota.
+        let tx = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(parent, 0),
+                script_sig: Vec::new(),
+                sequence: 0xFFFF_FFFF,
+                witness: vec![vec![0; 400_000]],
+            }],
+            outputs: vec![TxOut {
+                value: 1_000,
+                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+            }],
+            lock_time: 0,
+        };
+        assert!(
+            tx.weight() > 400_000,
+            "the fixture must exceed MAX_STANDARD_TX_WEIGHT"
+        );
+        let txid = tx.txid();
+        consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
+        assert_eq!(
+            consumer.tx_admission.orphan_count(),
+            0,
+            "a non-standard missing-input body must not consume orphan quota"
+        );
+        assert!(
+            consumer.tx_admission.is_rejected(Hash256::from(txid)),
+            "a non-standard missing-input body must enter recent-rejects"
         );
     }
 }

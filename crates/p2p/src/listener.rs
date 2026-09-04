@@ -21,8 +21,23 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
+type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
 type SyncWakeHandle = Option<Sender<()>>;
 type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
+
+/// Optional node-owned handles layered onto a listener or outbound session.
+///
+/// Chain serving and sync wake stay positional on the P2P-owned entry points.
+/// Transaction inventory and inbound `tx` forwarding live here so those
+/// production paths do not grow another suffix each time a handle is added.
+#[derive(Clone, Default)]
+pub struct ListenerExtras {
+    /// Mempool / orphan / recent-rejects view for the `inv` filter and
+    /// transaction `getdata` serving.
+    pub tx_inventory: TxInventoryHandle,
+    /// Bounded ingress for decoded `tx` bodies from Ready peers.
+    pub inbound_tx: Option<Sender<crate::InboundTx>>,
+}
 
 /// State shared by the listener and every connection thread it spawns.
 ///
@@ -37,6 +52,7 @@ struct ConnectionShared {
     activity: Option<Arc<crate::NetworkActivity>>,
     totals: Option<Arc<crate::TrafficTotals>>,
     chain_query: ChainQueryHandle,
+    tx_inventory: TxInventoryHandle,
     session_cancel: Option<Arc<AtomicBool>>,
     peer_ready: PeerReadyHandle,
 }
@@ -53,6 +69,7 @@ impl ConnectionShared {
             activity: None,
             totals: None,
             chain_query,
+            tx_inventory: None,
             session_cancel: None,
             peer_ready: None,
         }
@@ -68,9 +85,15 @@ impl ConnectionShared {
             activity: Some(Arc::clone(controls.activity())),
             totals: Some(Arc::clone(controls.totals())),
             chain_query,
+            tx_inventory: None,
             session_cancel: None,
             peer_ready: None,
         }
+    }
+
+    fn with_tx_inventory(mut self, tx_inventory: TxInventoryHandle) -> Self {
+        self.tx_inventory = tx_inventory;
+        self
     }
 
     fn with_session_cancel(mut self, session_cancel: Arc<AtomicBool>) -> Self {
@@ -123,6 +146,7 @@ impl ConnectionShared {
 struct InboundSyncSinks {
     headers_tx: Sender<crate::InboundHeaders>,
     blocks_tx: Sender<crate::InboundBlock>,
+    tx_tx: Option<Sender<crate::InboundTx>>,
     wake_tx: SyncWakeHandle,
     session_cancel: Option<Arc<AtomicBool>>,
 }
@@ -136,9 +160,15 @@ impl InboundSyncSinks {
         Self {
             headers_tx,
             blocks_tx,
+            tx_tx: None,
             wake_tx,
             session_cancel: None,
         }
+    }
+
+    fn with_inbound_tx(mut self, tx_tx: Option<Sender<crate::InboundTx>>) -> Self {
+        self.tx_tx = tx_tx;
+        self
     }
 
     fn attach_session_cancel(&mut self, shared: &ConnectionShared) {
@@ -200,6 +230,35 @@ impl InboundSyncSinks {
                     );
                     return;
                 }
+            }
+        }
+    }
+
+    /// Forwards a decoded transaction into the node's ingress channel.
+    ///
+    /// The `tx` sink contract lives in `docs/policies/p2p-compatibility.md`.
+    /// A full channel drops this body so the read loop can still service
+    /// ping, headers, and blocks from this peer.
+    fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
+        let Some(tx_tx) = self.tx_tx.as_ref() else {
+            return;
+        };
+        if self.is_cancelled() {
+            return;
+        }
+        match tx_tx.try_send(crate::InboundTx::new(tx, source)) {
+            Ok(()) => {}
+            Err(crossbeam_channel::TrySendError::Full(_)) => {
+                tracing::debug!(
+                    peer_addr = %source.addr,
+                    "p2p inbound tx channel full; dropping body"
+                );
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                tracing::warn!(
+                    peer_addr = %source.addr,
+                    "p2p inbound tx channel disconnected"
+                );
             }
         }
     }
@@ -496,15 +555,18 @@ pub fn serve_bound_with_session_cancel(
     sync_wake_tx: Option<Sender<()>>,
     session_cancel: Arc<AtomicBool>,
     peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
+    extras: ListenerExtras,
 ) -> Result<(), ListenerError> {
     let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query)
         .with_session_cancel(session_cancel)
-        .with_peer_ready(peer_ready);
+        .with_peer_ready(peer_ready)
+        .with_tx_inventory(extras.tx_inventory);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
     let inbound_sync_sinks =
-        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx);
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx)
+            .with_inbound_tx(extras.inbound_tx);
     accept_connections(
         addr,
         &listener,
@@ -530,10 +592,12 @@ pub fn spawn_outbound_connection_with_session_cancel(
     sync_wake_tx: Option<Sender<()>>,
     session_cancel: Arc<AtomicBool>,
     peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
+    extras: ListenerExtras,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query)
         .with_session_cancel(session_cancel)
-        .with_peer_ready(peer_ready);
+        .with_peer_ready(peer_ready)
+        .with_tx_inventory(extras.tx_inventory);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -541,7 +605,8 @@ pub fn spawn_outbound_connection_with_session_cancel(
         addr,
         magic,
         shared,
-        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx),
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx)
+            .with_inbound_tx(extras.inbound_tx),
     )
 }
 
@@ -921,6 +986,7 @@ fn run_connected_session(
             &lease,
             inbound_sync_sinks,
             shared.chain_query.as_deref(),
+            shared.tx_inventory.as_deref(),
             shared.totals.as_ref(),
         )
     })();
@@ -944,6 +1010,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     lease: &crate::PeerLease,
     inbound_sync_sinks: &InboundSyncSinks,
     chain_query: Option<&dyn crate::dispatch::ChainQuery>,
+    tx_inventory: Option<&dyn crate::dispatch::TxInventory>,
     totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
@@ -990,10 +1057,11 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     command = ?std::mem::discriminant(&message),
                     "p2p message received",
                 );
-                crate::dispatch::dispatch_inbound_with_chain(
+                crate::dispatch::dispatch_inbound_full(
                     peer,
                     &message,
                     chain_query,
+                    tx_inventory,
                     &|| budget.has_block_production_headroom(),
                     &mut |response| {
                         lease.send(response).map_err(|_| {
@@ -1007,6 +1075,9 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     }
                     crate::Message::Block(block) => {
                         inbound_sync_sinks.send_block(lease.source(peer_addr), block, raw);
+                    }
+                    crate::Message::Tx(tx) => {
+                        inbound_sync_sinks.send_tx(lease.source(peer_addr), tx);
                     }
                     crate::Message::Pong(nonce) => {
                         lease.stats().complete_ping(nonce, unix_micros());
@@ -1513,7 +1584,7 @@ mod writer_shutdown_tests {
             crossbeam_channel::unbounded().0,
             None,
         );
-        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None).is_ok());
+        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None).is_ok());
     }
 
     #[test]
@@ -1544,7 +1615,7 @@ mod writer_shutdown_tests {
         );
         peer.state = PeerState::Ready;
 
-        assert!(run_message_loop(&mut peer, addr, &old, &sinks, None, None).is_ok());
+        assert!(run_message_loop(&mut peer, addr, &old, &sinks, None, None, None).is_ok());
         assert!(headers_rx.try_recv().is_err());
         assert!(old.is_cancelled());
         assert!(table.is_current(replacement.source(addr)));
@@ -1586,7 +1657,7 @@ mod writer_shutdown_tests {
             None,
         );
 
-        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None).is_err());
+        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None).is_err());
         assert_eq!(reads.load(Ordering::Relaxed), 2);
     }
 
@@ -1979,7 +2050,7 @@ mod writer_shutdown_tests {
 
         // The Pong response cannot be admitted onto the zero budget, so the
         // saturation policy cancels the lease and ends the loop.
-        let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None);
+        let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None);
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
     }

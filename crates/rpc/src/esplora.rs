@@ -530,9 +530,8 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     let transactions = {
         let pool = ctx.mempool.read();
         let mut ordered = pool
-            .entries
-            .iter()
-            .map(|(_, entry)| (entry.time, entry.txid, Arc::clone(&entry.tx)))
+            .iter_entries()
+            .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
             .collect::<Vec<_>>();
         drop(pool);
         ordered.sort_unstable_by(|left, right| {

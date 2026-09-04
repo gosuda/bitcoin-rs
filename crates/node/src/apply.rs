@@ -901,6 +901,9 @@ pub struct ApplyHandles {
     /// Publishes checkpoints to settle rolled-back disconnect debt after a
     /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint_worker::CheckpointPublisher>>,
+    /// P2P admission policy. Present in production so every chain movement
+    /// can clear recent-rejects and wake orphans; `None` in unit-test sets.
+    pub(crate) tx_admission: Option<Arc<crate::tx_admission::TxAdmission>>,
 }
 
 impl ApplyHandles {
@@ -984,6 +987,7 @@ impl ApplyHandles {
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
             journal: None,
             checkpoint_publisher: None,
+            tx_admission: None,
         }
     }
 
@@ -1384,6 +1388,20 @@ pub(crate) fn disconnect_block_admitted(
     //
     // [`NodeState::write_clean_checkpoint`] clears the marker only after it
     // publishes the rolled-back UTXO set and tip.
+    if let Some(admission) = &handles.tx_admission {
+        admission.invalidate_recent_rejects();
+        // Restored coins can make a previously-missing spend valid. Those
+        // children are indexed under the creating parent, which is already
+        // confirmed and will not publish another `Accepted` wake.
+        let restored_parents: HashSet<_> = undo
+            .restores()
+            .iter()
+            .map(|restored| restored.outpoint.txid)
+            .collect();
+        for parent in restored_parents {
+            admission.enqueue_orphans_waiting_on(parent);
+        }
+    }
     Ok(parent_tip)
 }
 
@@ -2724,6 +2742,14 @@ fn apply_block_admitted<'b>(
             block_txids,
             height,
         );
+        if let Some(admission) = &handles.tx_admission {
+            // Chain movement itself, not a non-empty pool mutation, owns
+            // reject invalidation: an empty sweep still advances the tip.
+            admission.invalidate_recent_rejects();
+            for txid in block_txids {
+                admission.enqueue_orphans_waiting_on(*txid);
+            }
+        }
     }
     let mempool_evict_dur = mempool_evict_started.elapsed();
     metrics::histogram!("node.apply_block.mempool_evict_seconds")
