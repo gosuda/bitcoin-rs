@@ -240,12 +240,6 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid request method",
-        ));
-    }
     let mut header_bytes = request_line.len();
     let mut content_length = None;
     let mut authorization = None;
@@ -289,14 +283,14 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
     }
 
     let content_length = match (method, content_length) {
-        ("GET", length) => length.unwrap_or(0),
-        (_, Some(length)) => length,
-        (_, None) => {
+        ("POST", Some(length)) => length,
+        ("POST", None) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "missing content-length",
             ));
         }
+        (_, length) => length.unwrap_or(0),
     };
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
@@ -617,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_splits_rest_esplora_and_json_rpc() {
+    fn classify_wf02_splits_rest_esplora_and_json_rpc() {
         assert_eq!(
             classify("GET", "/rest/chaininfo.json"),
             HttpRoute::Rest {
@@ -680,6 +674,32 @@ mod tests {
                 path: "/api/v1/tx"
             }
         );
+    }
+
+    #[test]
+    fn unsupported_method_is_404_at_listener() -> std::io::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            serve_connection(
+                stream,
+                &auth,
+                &handler,
+                false,
+                core::time::Duration::from_secs(1),
+            )
+        });
+
+        let mut client = TcpStream::connect(address)?;
+        client.write_all(b"HEAD /api/tx HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+        let mut response = String::new();
+        client.read_to_string(&mut response)?;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+        thread.join().expect("listener thread").expect("serve request");
+        Ok(())
     }
 
     #[test]
