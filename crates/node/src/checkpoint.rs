@@ -1678,7 +1678,7 @@ fn parse_tip(tip: &CheckpointTipV1) -> Result<HeaderCheckpointTip, CheckpointErr
     })
 }
 
-fn network_name(network: Network) -> &'static str {
+pub(crate) fn network_name(network: Network) -> &'static str {
     match network {
         Network::Mainnet => "mainnet",
         Network::Testnet3 => "testnet",

@@ -287,7 +287,7 @@ fn evidence_identity(
             .ok()
             .and_then(|path| sha256_file(&path).ok()),
         features: compiled_features(),
-        network: network_name(config.network).to_owned(),
+        network: crate::checkpoint::network_name(config.network).to_owned(),
         backend: config.storage.backend.as_str().to_owned(),
         dbcache_mb: config.storage.dbcache_mb,
         cache_budget_bytes: cache_budget,
@@ -410,15 +410,6 @@ fn index_lane(config: &NodeConfig) -> String {
     }
 }
 
-fn network_name(network: Network) -> &'static str {
-    match network {
-        Network::Mainnet => "mainnet",
-        Network::Testnet3 => "testnet3",
-        Network::Testnet4 => "testnet4",
-        Network::Signet => "signet",
-        Network::Regtest => "regtest",
-    }
-}
 
 fn script_index_name(mode: ScriptIndexMode) -> &'static str {
     match mode {
