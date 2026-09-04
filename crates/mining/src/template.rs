@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bitcoin_rs_chain::compact_is_met_by;
+use bitcoin_rs_consensus::compute_merkle_root;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, Tx, Txid, Wtxid, encode::double_sha256,
 };
+use hashbrown::HashMap;
 
 use crate::MiningError;
 use crate::coinbase::{WITNESS_RESERVED_VALUE, build_coinbase};
@@ -168,7 +169,10 @@ impl Candidate {
         let mut txs = Vec::with_capacity(self.transactions.len().saturating_add(1));
         txs.push(self.coinbase.clone());
         txs.extend(self.transactions.iter().map(|tx| (*tx.tx).clone()));
-        let merkle_root = merkle_root_from_txids(txs.iter().map(Tx::txid));
+        let merkle_root = merkle_root_from_txids(
+            core::iter::once(self.coinbase.txid())
+                .chain(self.transactions.iter().map(|tx| tx.txid)),
+        );
         Block {
             header: Header {
                 version: self.version,
@@ -269,7 +273,7 @@ fn coinbase_reservation(
         context.height,
         context.network.subsidy_halving_interval(),
         0,
-        payout.to_vec(),
+        payout,
         context.segwit_active.then_some(&dummy_commitment),
     )?;
     let size = u64::try_from(reservation.total_size()).map_err(|_| {
@@ -355,7 +359,7 @@ fn finish_candidate(
         context.height,
         context.network.subsidy_halving_interval(),
         body.fees,
-        payout.to_vec(),
+        payout,
         witness_commitment.as_ref(),
     )?;
     let coinbase_value = coinbase
@@ -414,7 +418,7 @@ fn candidate_transactions(
     snapshot: &MempoolMiningSnapshot,
     ordered: &[usize],
 ) -> Result<Vec<CandidateTransaction>, MiningError> {
-    let mut tx_positions = BTreeMap::<Txid, u32>::new();
+    let mut tx_positions = HashMap::<Txid, u32>::with_capacity(ordered.len());
     for (offset, &index) in ordered.iter().enumerate() {
         let position = u32::try_from(offset.saturating_add(1)).map_err(|_| {
             MiningError::CandidateScalarOverflow {
@@ -443,7 +447,7 @@ fn candidate_transactions(
     Ok(transactions)
 }
 
-fn depends(tx: &Tx, tx_positions: &BTreeMap<Txid, u32>) -> Vec<u32> {
+fn depends(tx: &Tx, tx_positions: &HashMap<Txid, u32>) -> Vec<u32> {
     let mut depends = tx
         .inputs
         .iter()
@@ -454,8 +458,7 @@ fn depends(tx: &Tx, tx_positions: &BTreeMap<Txid, u32>) -> Vec<u32> {
     depends
 }
 
-/// BIP141 witness merkle root: pairwise `SHA256d` fold duplicating the last leaf
-/// on odd levels. The coinbase contributes the all-zero wtxid leaf.
+/// BIP141 witness merkle root. The coinbase contributes the all-zero wtxid leaf.
 fn witness_merkle_root(
     snapshot: &MempoolMiningSnapshot,
     ordered: &[usize],
@@ -466,39 +469,23 @@ fn witness_merkle_root(
     for &index in ordered {
         leaves.push(*snapshot.entries[index].wtxid.as_bytes());
     }
-    merkle_root_from_leaves(leaves)
+    merkle_root_from_leaves(&mut leaves)
 }
 
 fn merkle_root_from_txids(txids: impl IntoIterator<Item = Txid>) -> Hash256 {
-    let leaves = txids
+    let mut leaves = txids
         .into_iter()
         .map(|txid| *txid.as_bytes())
         .collect::<Vec<_>>();
-    merkle_root_from_leaves(leaves).unwrap_or_else(|_| Hash256::from_le_bytes(&[0_u8; 32]))
+    merkle_root_from_leaves(&mut leaves).unwrap_or_else(|_| Hash256::from_le_bytes(&[0_u8; 32]))
 }
 
-fn merkle_root_from_leaves(mut leaves: Vec<[u8; 32]>) -> Result<Hash256, MiningError> {
-    if leaves.is_empty() {
-        return Err(MiningError::CandidateScalarOverflow {
+fn merkle_root_from_leaves(leaves: &mut Vec<[u8; 32]>) -> Result<Hash256, MiningError> {
+    compute_merkle_root(leaves)
+        .map(|bytes| Hash256::from_le_bytes(&bytes))
+        .ok_or(MiningError::CandidateScalarOverflow {
             field: "merkle root",
-        });
-    }
-
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(*double_sha256(&pair).as_byte_array());
-        }
-        leaves = next;
-    }
-
-    Ok(Hash256::from_le_bytes(&leaves[0]))
+        })
 }
 
 fn witness_commitment_hash(witness_merkle_root: &Hash256, reserved: &[u8; 32]) -> Hash256 {
