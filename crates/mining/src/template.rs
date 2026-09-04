@@ -299,7 +299,8 @@ fn exact_order(
         return Err(MiningError::CapacityExhausted { field: "sigops" });
     }
 
-    let mut fees = 0_u64;
+    // Core's generateblock does not pay fees for explicitly ordered transactions.
+      let fees = 0_u64;
     let mut weight = 0_u64;
     let mut size = 0_u64;
     let mut sigops = 0_u64;
