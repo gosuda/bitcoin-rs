@@ -324,6 +324,34 @@ fn bench_fixture(c: &mut Criterion, label: &str, fixture: &Fixture) {
     outpoint.finish();
 }
 
+/// End-to-end caller-observable query flow: resolve history, then resolve the
+/// planted transaction and outpoint from the same position-backed fixture.
+fn end_to_end_resolve(c: &mut Criterion) {
+    let fixture = build_fixture(8, TXS_PER_BLOCK_250K);
+    let Fixture {
+        indexer,
+        source,
+        target,
+        target_txid,
+        target_outpoint,
+        ..
+    } = fixture;
+    c.bench_function("end_to_end/indexed_history_transaction_outpoint", |b| {
+        b.iter(|| {
+            let history = indexer
+                .resolve_script_history(black_box(target), &source)
+                .expect("resolve history");
+            let transaction = indexer
+                .resolve_transaction(black_box(target_txid), &source)
+                .expect("resolve transaction");
+            let value = indexer
+                .resolve_outpoint_value(black_box(target_outpoint), &source)
+                .expect("resolve outpoint");
+            black_box((history, transaction, value));
+        });
+    });
+}
+
 fn history_resolve(c: &mut Criterion) {
     // Height sweep at the ~250 KB block shape: isolates the per-row cost, which
     // is what the position index removes.
@@ -344,6 +372,6 @@ criterion_group! {
     // Criterion default of 100 samples would put a single group in the tens of
     // seconds. 20 is enough to separate arms that differ by more than 1.05x.
     config = Criterion::default().sample_size(20);
-    targets = history_resolve
+    targets = history_resolve, end_to_end_resolve
 }
 criterion_main!(benches);
