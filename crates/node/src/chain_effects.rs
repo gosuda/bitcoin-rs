@@ -80,14 +80,14 @@ impl ChainEffects {
         self.tx_index.is_some() || self.zmq.wants_rawblock()
     }
 
-    /// Pushes the RPC block-log record. Runs before mempool eviction.
+    /// Pushes the RPC block-log record. See `ARCH-07` for effect ordering.
     pub fn record_connected(&self, height: u32, block: &Block) {
         self.blocks
             .write()
             .push(BlockRecord::from_block(height, block));
     }
 
-    /// Hash/raw ZMQ topics; ordering follows `ARCH-07`.
+    /// Emits hash/raw ZMQ topics. See `ARCH-07` for effect ordering.
     pub fn emit_connected(
         &self,
         tip_hash: Hash256,
@@ -114,7 +114,7 @@ impl ChainEffects {
         }
     }
 
-    /// `TxIndex` wake and sequence `C`. Runs after `applied_tip` publication.
+    /// `TxIndex` wake and sequence `C`. See `ARCH-07` for effect ordering.
     pub fn after_connect(&self, hash: Hash256) {
         self.wake_tx_index();
         if self.zmq.wants_notifications() {
@@ -122,7 +122,7 @@ impl ChainEffects {
         }
     }
 
-    /// RPC cache rewind. Runs after the UTXO undo and before tip publication.
+    /// RPC cache rewind. See `ARCH-07` for effect ordering.
     ///
     /// Absence is legitimate: the log starts empty on every boot, and pruning
     /// may have dropped the tail. The hash check stops a pop of a record that
@@ -137,7 +137,7 @@ impl ChainEffects {
         }
     }
 
-    /// `TxIndex` wake and sequence `D`. Runs after `applied_tip` publication.
+    /// `TxIndex` wake and sequence `D`. See `ARCH-07` for effect ordering.
     pub fn after_disconnect(&self, hash: Hash256) {
         self.wake_tx_index();
         if self.zmq.wants_notifications() {
@@ -198,7 +198,7 @@ mod tests {
         }
     }
 
-    /// ARCH-07: verifies the no-op post-commit effects contract.
+    /// ARCH-07 evidence: a no-op effects facade requests no consumer payloads.
     #[test]
     fn noop_asks_for_no_payloads() {
         let effects = ChainEffects::noop();
@@ -208,7 +208,7 @@ mod tests {
         assert!(effects.block_log().read().is_empty());
     }
 
-    /// ARCH-07: verifies post-commit RPC/ZMQ effect ownership and ordering.
+    /// ARCH-07 evidence: post-commit effects own RPC/ZMQ work and ordering.
     #[test]
     fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() {
         let genesis = Network::Regtest.genesis_block();
@@ -242,7 +242,7 @@ mod tests {
         );
     }
 
-    /// ARCH-07: verifies disconnect effects preserve the RPC block-log contract.
+    /// ARCH-07 evidence: disconnect effects preserve an unrelated RPC-log tail.
     #[test]
     fn disconnect_does_not_pop_a_different_tail() {
         let genesis = Network::Regtest.genesis_block();
