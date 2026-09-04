@@ -12,6 +12,7 @@ import argparse
 import base64
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -1970,30 +1971,20 @@ def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
     )
 
 
-def _rehash_copy(path: Path, expected: str, cap: int, field: str) -> None:
-    raw = _read_regular_file(path, cap, field)
-    if hashlib.sha256(raw).hexdigest() != expected:
-        raise ContractError(f"{field} changed after its verified copy")
-
-
 def _open_verified_inode(path: Path, expected: str, cap: int, field: str) -> int:
-    """Return a non-CLOEXEC fd onto the pinned inode.
-
-    The child inherits this descriptor and opens ``/proc/self/fd/<n>``, so a
-    rename of the workspace pathname after this returns cannot change the
-    bytes the child reads. The caller closes the fd after ``Popen``.
-    """
+    """Return a sealed, non-CLOEXEC fd containing the verified file bytes."""
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        source = os.open(path, flags)
     except OSError as error:
         raise ContractError(f"cannot open {field}") from error
+    snapshot = -1
     try:
-        before = os.fstat(descriptor)
+        before = os.fstat(source)
         if not stat.S_ISREG(before.st_mode):
             raise ContractError(f"{field} must be a regular file")
-        raw = _read_fd(descriptor, before.st_size, cap, field)
-        after = os.fstat(descriptor)
+        raw = _read_fd(source, before.st_size, cap, field)
+        after = os.fstat(source)
         identity_before = (
             before.st_dev,
             before.st_ino,
@@ -2012,10 +2003,28 @@ def _open_verified_inode(path: Path, expected: str, cap: int, field: str) -> int
             raise ContractError(f"{field} changed while being read")
         if hashlib.sha256(raw).hexdigest() != expected:
             raise ContractError(f"{field} changed after its verified copy")
-        return descriptor
+        try:
+            snapshot = os.memfd_create(f"verified-{field}", os.MFD_ALLOW_SEALING)
+            written = 0
+            while written < len(raw):
+                written += os.write(snapshot, raw[written:])
+            fcntl.fcntl(
+                snapshot,
+                fcntl.F_ADD_SEALS,
+                fcntl.F_SEAL_WRITE
+                | fcntl.F_SEAL_SHRINK
+                | fcntl.F_SEAL_GROW
+                | fcntl.F_SEAL_SEAL,
+            )
+        except (AttributeError, OSError) as error:
+            raise ContractError(f"cannot create sealed {field}") from error
+        return snapshot
     except Exception:
-        os.close(descriptor)
+        if snapshot >= 0:
+            os.close(snapshot)
         raise
+    finally:
+        os.close(source)
 
 
 def _expand_command(
