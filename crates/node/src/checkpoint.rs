@@ -1286,9 +1286,18 @@ fn load_payloads(
 ) -> Result<RestoredChainstate, CheckpointError> {
     let chain_tx_count = manifest.applied_tip.chain_tx_count;
     let (utxo, coin_stats) = load_payloads_inner(generation_dir, manifest, &headers)?;
-    headers
-        .tree
-        .restore_chain_tx_count(headers.applied_tip_id, chain_tx_count)?;
+    // Restore the scripts-valid marker on the complete applied prefix so
+    // duplicate lookup remains correct for ancestors after a restart.
+    let mut applied_id = Some(headers.applied_tip_id);
+    while let Some(id) = applied_id {
+        let parent = headers
+            .tree
+            .node(id)
+            .map_err(|error| CheckpointError::Header(error.into()))?
+            .parent;
+        headers.tree.restore_chain_tx_count(id, chain_tx_count)?;
+        applied_id = parent;
+    }
     let applied_node = headers
         .tree
         .node(headers.applied_tip_id)
