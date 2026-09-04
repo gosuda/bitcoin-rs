@@ -94,17 +94,35 @@ fn now_seconds() -> u64 {
 /// loop, and the writer thread that owns a cloned socket -- so a counter added
 /// at any one of them would report a fraction of the traffic as though it were
 /// all of it.
+///
+/// Reads are buffered so a kernel delivery that holds more than one message
+/// does not cost a syscall per `read_exact` of the 24-byte header. Large
+/// caller buffers (block payloads) bypass the cache and read into the
+/// destination. The writer-side `try_clone` starts with an empty read cache.
 #[derive(Debug)]
 pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
+    read_buf: Vec<u8>,
+    read_pos: usize,
+    read_end: usize,
 }
+
+/// Sized to hold a max `headers` payload (~162 KiB) plus the next command
+/// header so IBD header sync does not round-trip to the socket per message.
+const INBOUND_READ_BUFFER: usize = 256 * 1024;
 
 impl<S> CountingStream<S> {
     /// Wraps `inner`, counting into `counters`.
     #[must_use]
     pub const fn new(inner: S, counters: Arc<PeerCounters>) -> Self {
-        Self { inner, counters }
+        Self {
+            inner,
+            counters,
+            read_buf: Vec::new(),
+            read_pos: 0,
+            read_end: 0,
+        }
     }
 
     /// The counters this stream feeds.
@@ -127,6 +145,9 @@ impl CountingStream<std::net::TcpStream> {
         Ok(Self {
             inner: self.inner.try_clone()?,
             counters: Arc::clone(&self.counters),
+            read_buf: Vec::new(),
+            read_pos: 0,
+            read_end: 0,
         })
     }
 
@@ -158,9 +179,44 @@ impl CountingStream<std::net::TcpStream> {
     }
 }
 
+impl<S: Read> CountingStream<S> {
+    fn take_leftover(&mut self, buffer: &mut [u8]) -> Option<usize> {
+        if self.read_pos >= self.read_end {
+            return None;
+        }
+        let take = (self.read_end - self.read_pos).min(buffer.len());
+        buffer[..take].copy_from_slice(&self.read_buf[self.read_pos..self.read_pos + take]);
+        self.read_pos += take;
+        Some(take)
+    }
+
+    fn fill_read_buf(&mut self) -> IoResult<()> {
+        if self.read_buf.len() < INBOUND_READ_BUFFER {
+            self.read_buf.resize(INBOUND_READ_BUFFER, 0);
+        }
+        self.read_pos = 0;
+        self.read_end = self.inner.read(&mut self.read_buf)?;
+        Ok(())
+    }
+
+    fn read_buffered(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+        if let Some(take) = self.take_leftover(buffer) {
+            return Ok(take);
+        }
+        if buffer.len() >= INBOUND_READ_BUFFER {
+            return self.inner.read(buffer);
+        }
+        self.fill_read_buf()?;
+        Ok(self.take_leftover(buffer).unwrap_or(0))
+    }
+}
+
 impl<S: Read> Read for CountingStream<S> {
     fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
-        let read = self.inner.read(buffer)?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let read = self.read_buffered(buffer)?;
         self.counters.record_recv(read);
         Ok(read)
     }
@@ -235,6 +291,101 @@ mod tests {
             assert_eq!(counters.bytes_recv(), expected);
         }
         assert_ne!(counters.last_recv(), 0, "a read must stamp the time");
+    }
+
+    /// One kernel delivery can contain the next message. The wrapper must
+    /// keep those leftover bytes instead of asking the socket again.
+    #[test]
+    fn leftover_bytes_do_not_revisit_the_socket() {
+        struct OneShot {
+            remaining: Vec<u8>,
+            reads: u8,
+        }
+        impl Read for OneShot {
+            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+                self.reads = self.reads.saturating_add(1);
+                if self.reads > 1 {
+                    return Err(std::io::Error::other("socket read more than once"));
+                }
+                let take = self.remaining.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&self.remaining[..take]);
+                self.remaining.drain(..take);
+                Ok(take)
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            OneShot {
+                remaining: vec![1, 2, 3, 4, 5],
+                reads: 0,
+            },
+            Arc::clone(&counters),
+        );
+        let mut first = [0_u8; 2];
+        let read = stream
+            .read(&mut first)
+            .unwrap_or_else(|error| panic!("first read failed: {error}"));
+        assert_eq!(read, 2);
+        assert_eq!(first, [1, 2]);
+        let mut second = [0_u8; 3];
+        let read = stream
+            .read(&mut second)
+            .unwrap_or_else(|error| panic!("leftover read failed: {error}"));
+        assert_eq!(read, 3);
+        assert_eq!(second, [3, 4, 5]);
+        assert_eq!(counters.bytes_recv(), 5);
+    }
+
+    /// Two framed pings delivered in one inner read must both decode without
+    /// a second socket read — the IBD headers path between small messages.
+    #[test]
+    fn two_wire_messages_decode_from_one_socket_read() {
+        struct OneShot {
+            remaining: Vec<u8>,
+            reads: u8,
+        }
+        impl Read for OneShot {
+            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+                self.reads = self.reads.saturating_add(1);
+                if self.reads > 1 {
+                    return Err(std::io::Error::other("socket read more than once"));
+                }
+                let take = self.remaining.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&self.remaining[..take]);
+                self.remaining.drain(..take);
+                Ok(take)
+            }
+        }
+
+        let mut frames = Vec::new();
+        crate::wire::write_message(
+            &mut frames,
+            bitcoin::p2p::Magic::BITCOIN,
+            &crate::wire::Message::Ping(1),
+        )
+        .unwrap_or_else(|error| panic!("encode ping 1: {error}"));
+        crate::wire::write_message(
+            &mut frames,
+            bitcoin::p2p::Magic::BITCOIN,
+            &crate::wire::Message::Ping(2),
+        )
+        .unwrap_or_else(|error| panic!("encode ping 2: {error}"));
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            OneShot {
+                remaining: frames,
+                reads: 0,
+            },
+            counters,
+        );
+        let (first, _) = crate::wire::read_message(&mut stream, bitcoin::p2p::Magic::BITCOIN)
+            .unwrap_or_else(|error| panic!("decode ping 1: {error}"));
+        let (second, _) = crate::wire::read_message(&mut stream, bitcoin::p2p::Magic::BITCOIN)
+            .unwrap_or_else(|error| panic!("decode ping 2: {error}"));
+        assert_eq!(first, crate::wire::Message::Ping(1));
+        assert_eq!(second, crate::wire::Message::Ping(2));
     }
 
     /// A read that moves nothing is not activity.
