@@ -1633,7 +1633,7 @@ mod tests {
         bodies: Vec<(u32, BlockHash, Vec<u8>)>,
     }
 
-    impl crate::context::BlockBodySource for MultiBlockSource {
+    impl bitcoin_rs_chain::BlockBodySource for MultiBlockSource {
         fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
             self.bodies
                 .iter()
@@ -1642,7 +1642,7 @@ mod tests {
         }
     }
 
-    impl crate::context::BlockBodySource for SingleBlockSource {
+    impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
         fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
             self.calls
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1903,7 +1903,7 @@ mod tests {
             calls: AtomicUsize,
         }
 
-        impl crate::context::BlockBodySource for SingleBlockSource {
+        impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
             fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 (height == self.height && hash == self.hash).then(|| self.body.clone())
@@ -2749,7 +2749,7 @@ mod tests {
     fn getblockchaininfo_size_on_disk_comes_from_the_block_store() {
         struct SizedStore(u64);
 
-        impl crate::context::BlockBodySource for SizedStore {
+        impl bitcoin_rs_chain::BlockBodySource for SizedStore {
             fn block_body(&self, _height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
                 None
             }

@@ -7,8 +7,10 @@ rebuilds.
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
-- Capability status: worker-owned facts in `crates/node/src/txindex_worker.rs`
-  (`TxIndexCapability`) and RPC projection in `crates/rpc/src/capabilities.rs`
+- Capability status: worker-owned `TxIndexLifecycle` in
+  `crates/node/src/txindex_worker.rs` mapped by `TxIndexCapability` onto the
+  RPC wire types in `crates/rpc/src/capabilities.rs`. There is no parallel
+  status enum.
 
 ## Clauses
 
@@ -43,6 +45,10 @@ Owners:
   routes without advertising Core `txindex` unless `--txindex` is also set.
 - `getindexinfo` reports `synced: true` if and only if the advertised
   capability watermark matches the height and block hash of the active chain tip.
+- `getcapabilities` reports one compiled txindex row. A missing worker is
+  `enabled: false` / `Disabled`; an attached worker supplies the row through
+  `TxIndexCapabilitySource`. Proof: `crates/rpc/src/capabilities.rs` tests
+  `missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`.
 
 `ScriptLive` is not a duplicate coin table. Its empty-valued key is
 `script-hash-prefix || full-outpoint`; the prefix is only a scan accelerator.
@@ -177,3 +183,6 @@ remove another script's output.
   serving by height/hash (`IDX-03`, `RCV-01`).
 - `crates/node/src/apply.rs`:
   `txindex_worker_failure_makes_queries_unavailable_without_blocking_apply`.
+- `crates/rpc/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
+  `attached_source_is_the_worker_row`: `getcapabilities` advertises one
+  txindex row from `txindex_status` (`IDX-02`).
