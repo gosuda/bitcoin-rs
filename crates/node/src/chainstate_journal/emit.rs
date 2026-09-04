@@ -1,7 +1,7 @@
 //! Type-erased journal-writer handle for the apply path.
 //!
 //! [`JournalWriter`] is generic over the storage backend, but
-//! `ApplyHandles` is not (it is a concrete struct shared by every backend).
+//! `Chainstate` is not (it is a concrete struct shared by every backend).
 //! This module is the single owner of that erasure: the apply path holds an
 //! [`SharedJournalWriter`] and never names `S`. The trait mirrors exactly the
 //! operations the apply path may perform (append + batched flush); state

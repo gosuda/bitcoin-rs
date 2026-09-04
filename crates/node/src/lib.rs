@@ -1,14 +1,17 @@
 //! Integration crate for running a synchronous `bitcoin-rs` node.
 //!
 //! The crate owns process-level concerns: layered configuration, storage backend
-//! selection, signal bridging, metrics/tracing setup, crash recovery, and the
-//! central crossbeam-driven event loop that connects the subsystem crates.
+//! selection, signal bridging, metrics/tracing setup, crash recovery, the
+//! chainstate facade that serializes applied-tip mutation, and the central
+//! crossbeam-driven event loop that connects the subsystem crates.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
-/// Block-apply pipeline executed by `NodeState::apply_block` and `BlockSync::tick`.
+/// Authoritative chainstate mutation: connect, disconnect, and window apply.
+///
+/// See `ARCH-07` in `docs/contracts/architecture.md`.
 pub mod apply;
 mod chainstate_journal;
 mod checkpoint;
@@ -64,6 +67,7 @@ mod window_overlay;
 /// ZMQ publisher trait + implementations for the notification subsystem.
 pub mod zmq_publisher;
 
+pub use apply::{ChainTransition, Chainstate, ChainstateSnapshot};
 pub use bitcoin_rs_primitives::Network;
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,

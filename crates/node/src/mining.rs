@@ -30,7 +30,7 @@ use hashbrown::HashMap;
 use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::ApplyError;
-use crate::apply::{self, ApplyHandles};
+use crate::apply::{self, Chainstate};
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
@@ -234,7 +234,7 @@ pub struct MiningCoordinator {
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
     mempool: Arc<RwLock<Mempool>>,
-    apply_handles: ApplyHandles,
+    apply_handles: Chainstate,
     coinbase_script: Vec<u8>,
     shutdown: Arc<AtomicBool>,
     /// Wall clock used for long-poll cooldowns.
@@ -257,7 +257,7 @@ impl MiningCoordinator {
         applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
         mempool: Arc<RwLock<Mempool>>,
-        apply_handles: ApplyHandles,
+        apply_handles: Chainstate,
         coinbase_script: Vec<u8>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
