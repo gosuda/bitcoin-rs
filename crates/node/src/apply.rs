@@ -151,6 +151,11 @@ pub(crate) trait PruneBodyStore: Send + Sync {
     /// The persisted undo record for `height`/`hash`, when this store can
     /// reach one.
     ///
+    /// Successful reads observe committed storage. `None` is terminal (the
+    /// record is unavailable or pruned); storage errors may be retried by the
+    /// worker. Implementations own durability and crash recovery, while callers
+    /// own retry and fail-closed behavior.
+    ///
     /// The default answers nothing: only stores backed by the chainstate
     /// key-value index hold undo rows, and a `ScriptLive`-selecting worker
     /// step fails closed on `None` rather than indexing without its spent-coin
