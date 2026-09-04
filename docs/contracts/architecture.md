@@ -136,15 +136,15 @@ Owners:
 ## Live gaps
 
 - **Node slimming and extraction (#217)**: Peer connection session and lease
-  ownership has moved to `PeerTable` in `crates/p2p` (#215, #217). BIP9/softfork
-  lookups, P2P chain serving, txindex status projection, mempool mutation
-  consumers, and block-body access live with their owner crates (#272).
-  `crates/node` still carries leftover domain mechanics: UTXO undo persistence
-  and disconnect markers (`apply.rs`), the P2P download scheduler (`sync.rs`),
-  and direct backend construction and cache share dispatch (`state.rs`).
-  Relocating those into `crates/utxo`, `crates/storage`, and `crates/p2p`
-  remains tracked under #217 (open). `crates/node` is the composition layer, but
-  is not yet fully slim.
+  ownership has moved to `PeerTable` / `P2pService` in `crates/p2p` (#215,
+  #217, #218). BIP9/softfork lookups, P2P chain serving, txindex status
+  projection, mempool mutation consumers, and block-body access live with their
+  owner crates (#272). `crates/node` still carries leftover domain mechanics:
+  UTXO undo persistence and disconnect markers (`apply.rs`), the P2P download
+  scheduler (`sync.rs`), and direct backend construction and cache share
+  dispatch (`state.rs`). Relocating those into `crates/utxo`, `crates/storage`,
+  and `crates/p2p` remains tracked under #217 (open). `crates/node` is the
+  composition layer, but is not yet fully slim.
 
 ## Proven by
 

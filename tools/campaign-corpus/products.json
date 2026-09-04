@@ -1,0 +1,68 @@
+{
+  "schema": "bitcoin-rs-campaign-corpora-v1",
+  "network": "mainnet",
+  "network_magic": "f9beb4d9",
+  "genesis_hash": "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+  "core_oracle": {
+    "implementation": "Bitcoin Core 31.1",
+    "rpc_method": "gettxoutsetinfo",
+    "hash_type": "muhash",
+    "use_index": true
+  },
+  "validation": {
+    "assume_valid_height": 0
+  },
+  "census_specials": [
+    "p2sh_redeem_spends",
+    "native_witness_v0_spends",
+    "p2sh_wrapped_witness_v0_spends",
+    "bare_multisig_checks",
+    "p2sh_multisig_checks",
+    "native_witness_v0_multisig_checks",
+    "p2sh_wrapped_witness_v0_multisig_checks",
+    "taproot_key_path_spends",
+    "tapscript_spends",
+    "tapscript_schnorr_checks",
+    "tapscript_checksigadd_checks"
+  ],
+  "products": {
+    "C150": {
+      "stop_height": 150000,
+      "stop_hash": "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b",
+      "block_count": 150001,
+      "census": {
+        "context_count": 2868199,
+        "ffi_verify_entries": 2868199,
+        "eval_script_entries": 5736398,
+        "op_checksig": 2868199,
+        "op_checksigverify": 0,
+        "op_checkmultisig": 0,
+        "op_checkmultisigverify": 0,
+        "op_checksigadd": 0,
+        "checkschnorr_entries": 0,
+        "schnorr_verify_calls": 0,
+        "specials": "all_zero"
+      },
+      "state": {
+        "height": 150000,
+        "bestblock": "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b",
+        "txouts": 1127181,
+        "total_amount_sat": 749989998999999,
+        "muhash": "383a0b41ac28ddf6ac91723b41527fa64c0b54451cee5f2c4b3823ef92117116"
+      }
+    },
+    "Cmodern": {
+      "stop_height": 709635,
+      "stop_hash": "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f",
+      "block_count": 709636,
+      "census": {
+        "specials": "all_positive"
+      },
+      "state": {
+        "height": 709635,
+        "bestblock": "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f",
+        "oracle": "core_gettxoutsetinfo_muhash_at_stop"
+      }
+    }
+  }
+}

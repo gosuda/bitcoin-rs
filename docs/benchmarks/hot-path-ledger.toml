@@ -1,0 +1,761 @@
+# bitcoin-rs product hot-path ledger. Owner: docs/contracts/hot-path-attribution.md.
+# Schema is parsed by bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs.
+schema = "bitcoin-rs-hot-path-ledger-v1"
+contract = "docs/contracts/hot-path-attribution.md"
+
+[matrix]
+domains = ["offline", "p2p", "muhash"]
+corpora = ["c150", "cmodern"]
+archs = ["x86_64", "arm64"]
+backends = ["fjall", "rocksdb", "redb"]
+
+[cell_defaults]
+custody = "none"
+residual = "unmeasured"
+residual_blocker = "product-cell comparator and corpus custody (#34, #41, #42)"
+noise_floor = "unobserved"
+
+# ---------------------------------------------------------------------------
+# Interval tree. Exclusive leaves hang off these; they are not addends.
+# ---------------------------------------------------------------------------
+
+[[paths]]
+id = "cell.wall"
+kind = "interval"
+name = "whole-run product wall"
+parent = ""
+concurrency_group = "cell"
+domains = ["offline", "p2p", "muhash"]
+disposition = "blocked"
+evidence = "Primary wall is the comparator interval. No 36-cell custody is in-tree."
+
+[[paths]]
+id = "run.lifecycle"
+kind = "interval"
+name = "process open, apply, checkpoint, shutdown"
+parent = "cell.wall"
+concurrency_group = "lifecycle"
+domains = ["offline", "p2p", "muhash"]
+disposition = "blocked"
+evidence = "Nested under cell.wall. Inclusive histograms cannot fill it."
+
+[[paths]]
+id = "apply.prove_window"
+kind = "interval"
+name = "prove_window inclusive span"
+parent = "run.lifecycle"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+histogram = "node.window.verify_seconds"
+disposition = "blocked"
+evidence = "Encloses parse, overlay, merkle, and script. Not an exclusive leaf."
+
+[[paths]]
+id = "apply.commit"
+kind = "interval"
+name = "per-block commit inclusive span"
+parent = "run.lifecycle"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+histogram = "node.apply_block.total_seconds"
+disposition = "blocked"
+evidence = "Encloses contextual checks, UTXO, undo, body, tip publish. Nested."
+
+# ---------------------------------------------------------------------------
+# Shared apply exclusive leaves
+# ---------------------------------------------------------------------------
+
+[[paths]]
+id = "apply.header_accept"
+kind = "stage"
+name = "header acceptance and contextual softfork/MTP lookup"
+parent = "apply.prove_window"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = [
+  "crates/node/src/apply.rs",
+  "crates/chain/src/header_sync.rs",
+  "crates/chain/src/bip9_cache.rs",
+  "crates/consensus/src/bip9.rs",
+  "crates/consensus/src/bip113.rs",
+]
+histogram = "node.window.context_seconds"
+disposition = "blocked"
+evidence = "No product-safe disable that preserves consensus. Nested histogram only."
+
+[[paths]]
+id = "apply.block_decode"
+kind = "stage"
+name = "block wire decode and transaction parse/plan construction"
+parent = "apply.prove_window"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = ["crates/node/src/apply.rs", "crates/consensus/src/kernel.rs"]
+histogram = "node.window.parse_seconds"
+disposition = "already_bounded"
+evidence = "Issue #16 closed decode as a lever unless fresh CPU attribution reopens it. Diagnostic only until product-cell custody exists."
+
+[[paths]]
+id = "apply.window_overlay"
+kind = "stage"
+name = "window prevout overlay and script-check preparation"
+parent = "apply.prove_window"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = ["crates/node/src/window_overlay.rs", "crates/node/src/apply.rs"]
+histogram = "node.window.prepare_seconds"
+disposition = "already_bounded"
+evidence = "Split apply and window batching already landed. Further marshalling attempts were exhausted on #16."
+
+[[paths]]
+id = "apply.merkle_witness"
+kind = "stage"
+name = "structural, Merkle, and witness validation"
+parent = "apply.prove_window"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = [
+  "crates/consensus/src/verify_block.rs",
+  "crates/consensus/src/sha256d64.rs",
+]
+histogram = "node.apply_block.block_rules_seconds"
+disposition = "blocked"
+evidence = "No 36-cell exclusive residual. x86-64 AVX2 is an architecture lever (#40), not a cell disable-delta. ARM has no candidate."
+
+[[paths]]
+id = "apply.script_verify"
+kind = "stage"
+name = "script execution in the dedicated verification pool"
+parent = "apply.prove_window"
+concurrency_group = "script-pool"
+domains = ["offline", "p2p"]
+seams = ["crates/consensus/src/verify_tx.rs", "crates/node/src/apply.rs"]
+histogram = "node.apply_block.script_verify_seconds"
+disposition = "already_bounded"
+evidence = "Pool width 32 is the measured optimum. Marshalling and prepare micro-optimizations closed. Parallel worker walls must not be summed (concurrency_group script-pool)."
+
+[[paths]]
+id = "apply.contextual_checks"
+kind = "stage"
+name = "contextual consensus checks (PoW, BIP30/34, coinbase maturity, BIP68)"
+parent = "apply.commit"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = [
+  "crates/node/src/apply.rs",
+  "crates/consensus/src/bip30.rs",
+  "crates/consensus/src/bip34.rs",
+  "crates/consensus/src/bip68.rs",
+]
+histogram = "node.apply_block.bip30_bip34_seconds"
+disposition = "blocked"
+evidence = "No product-safe neutralize. Nested under apply.commit."
+
+[[paths]]
+id = "apply.utxo_commit"
+kind = "stage"
+name = "UTXO change construction and sharded commit"
+parent = "apply.commit"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = [
+  "crates/utxo/src/set.rs",
+  "crates/utxo/src/connect.rs",
+  "crates/utxo/src/record.rs",
+  "crates/utxo/src/shard.rs",
+]
+histogram = "node.apply_block.utxo_commit_seconds"
+disposition = "already_bounded"
+evidence = "Fan-out and listener paths closed on #16/#19. Remaining layout headroom was bounded as marginal. In-memory commit, not a backend flush."
+
+[[paths]]
+id = "apply.undo_persist"
+kind = "stage"
+name = "undo encoding and persistence"
+parent = "apply.commit"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = ["crates/utxo/src/undo_codec.rs", "crates/storage/src/undo.rs"]
+histogram = "node.apply_block.undo_persist_seconds"
+disable_delta = "blocked_pending_safe_probe"
+disposition = "blocked"
+evidence = "Suppressing undo weakens reorg-readiness (HPA-06). No product-safe probe."
+
+[[paths]]
+id = "apply.body_persist"
+kind = "stage"
+name = "body serialization, append, and body-index persistence"
+parent = "apply.commit"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = ["crates/storage/src/block_file.rs", "crates/node/src/apply.rs"]
+histogram = "node.apply_block.block_body_persist_seconds"
+disposition = "blocked"
+evidence = "Historical nested persist time is not a product-cell disable-delta. Receipt-time persist remains the ranked candidate; crash-order and body availability stay required."
+
+[[paths]]
+id = "apply.coinstats"
+kind = "stage"
+name = "CoinStats listener finish on apply"
+parent = "apply.commit"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = ["crates/utxo/src/stats.rs", "crates/utxo/src/stats/coin_stats.rs"]
+histogram = "node.apply_block.coin_stats_finish_seconds"
+disposition = "blocked"
+evidence = "Owed derived state. Skipping it weakens checkpoint/RPC commitment."
+
+[[paths]]
+id = "apply.optional_index"
+kind = "stage"
+name = "frozen optional index posture"
+parent = "apply.commit"
+concurrency_group = "index-async"
+domains = ["offline", "p2p"]
+seams = ["crates/node/src/txindex_worker.rs", "crates/index/src/index.rs"]
+disposition = "blocked"
+evidence = "Index posture is part of the product cell, owned with #46. Overlaps apply via index-async. Unmeasured."
+
+[[paths]]
+id = "apply.tip_publish"
+kind = "stage"
+name = "block-tree insert and applied-tip publication"
+parent = "apply.commit"
+concurrency_group = "apply-serial"
+domains = ["offline", "p2p"]
+seams = ["crates/node/src/apply.rs", "crates/chain/src/tree.rs", "crates/node/src/state.rs"]
+histogram = "node.apply_block.block_tree_insert_seconds"
+disposition = "blocked"
+evidence = "Commit-point publication. No product-safe skip."
+
+[[paths]]
+id = "apply.checkpoint"
+kind = "stage"
+name = "clean checkpoint, journal drain, recovery readiness"
+parent = "run.lifecycle"
+concurrency_group = "lifecycle"
+domains = ["offline", "p2p", "muhash"]
+seams = [
+  "crates/node/src/checkpoint.rs",
+  "crates/node/src/checkpoint_worker.rs",
+  "crates/node/src/chainstate_journal.rs",
+]
+disposition = "blocked"
+evidence = "HPA-06 forbids suppressing checkpoint/recovery. MuHash cells include the construction checkpoint that produced the served state."
+
+[[paths]]
+id = "apply.shutdown_reopen"
+kind = "stage"
+name = "shutdown drain and reopen/body/undo/index readiness"
+parent = "run.lifecycle"
+concurrency_group = "lifecycle"
+domains = ["offline", "p2p"]
+seams = ["crates/node/src/shutdown.rs", "crates/node/src/run.rs"]
+timed_region = "domain-defined"
+disposition = "blocked"
+evidence = "Offline timed region ends at durable clean shutdown (#46). Untimed reopen validation stays outside the clock (#44)."
+
+# ---------------------------------------------------------------------------
+# Offline-only. Corpus staging is outside the timed region (#44/#46).
+# ---------------------------------------------------------------------------
+
+[[paths]]
+id = "offline.startup_open"
+kind = "stage"
+name = "process start, storage open, cache split, recovery before apply"
+parent = "run.lifecycle"
+concurrency_group = "lifecycle"
+domains = ["offline"]
+seams = [
+  "crates/node/src/run.rs",
+  "crates/node/src/state.rs",
+  "crates/storage/src/cache_budget.rs",
+]
+disposition = "blocked"
+evidence = "Inside the external process clock. No product-cell custody."
+
+[[paths]]
+id = "offline.corpus_read"
+kind = "stage"
+name = "comparator corpus staging and frame delivery"
+parent = "cell.wall"
+concurrency_group = "harness"
+domains = ["offline"]
+timed_region = "outside"
+seams = ["tools/benchmark-campaign/comp_lanes.py"]
+disposition = "already_bounded"
+evidence = "Outside the timed region by #44/#46. Not a node hot path. The retired mainnet_prefix_replay example is not a seam."
+
+# ---------------------------------------------------------------------------
+# P2P-only
+# ---------------------------------------------------------------------------
+
+[[paths]]
+id = "p2p.socket_io"
+kind = "stage"
+name = "socket read/write"
+parent = "cell.wall"
+concurrency_group = "p2p-io"
+domains = ["p2p"]
+seams = ["crates/p2p/src/connection.rs", "crates/p2p/src/listener.rs"]
+disposition = "blocked"
+evidence = "Controlled by the #35 fixture bandwidth/delay. Overlaps apply. Unmeasured on product cells."
+
+[[paths]]
+id = "p2p.wire"
+kind = "stage"
+name = "Bitcoin wire header, checksum, decode, per-message allocation/copy"
+parent = "cell.wall"
+concurrency_group = "p2p-io"
+domains = ["p2p"]
+seams = ["crates/p2p/src/wire.rs", "crates/p2p/src/peer.rs"]
+disposition = "blocked"
+evidence = "No product-safe skip of checksum/decode. Diagnostic bench: crates/p2p/benches/write_message.rs."
+
+[[paths]]
+id = "p2p.channels"
+kind = "stage"
+name = "inbound/outbound channels and wake coalescing"
+parent = "cell.wall"
+concurrency_group = "p2p-sched"
+domains = ["p2p"]
+seams = ["crates/p2p/src/inbound.rs", "crates/p2p/src/listener.rs", "crates/node/src/event_loop.rs"]
+disposition = "blocked"
+evidence = "Scheduler/backpressure class. Nested under event-loop ticks."
+
+[[paths]]
+id = "p2p.header_sync"
+kind = "stage"
+name = "header acceptance on the P2P path"
+parent = "cell.wall"
+concurrency_group = "p2p-sched"
+domains = ["p2p"]
+seams = ["crates/node/src/sync.rs", "crates/chain/src/header_sync.rs"]
+disposition = "blocked"
+evidence = "Shares apply.header_accept work, different entry. Unmeasured."
+
+[[paths]]
+id = "p2p.request_schedule"
+kind = "stage"
+name = "peer selection, getheaders/getdata construction, queue-to-writer delay"
+parent = "cell.wall"
+concurrency_group = "p2p-sched"
+domains = ["p2p"]
+seams = ["crates/node/src/sync.rs", "crates/p2p/src/download_window.rs", "crates/p2p/src/dispatch.rs"]
+histogram = "node.sync.getdata_batch_size"
+disposition = "blocked"
+evidence = "Count bound binds before the byte budget on small historical blocks (#51). Candidate is count-and-byte window, not a constant bump. Needs a #35 product-cell disable-delta."
+
+[[paths]]
+id = "p2p.stage"
+kind = "stage"
+name = "pending/download-window, out-of-order staging, contiguous-prefix drain"
+parent = "cell.wall"
+concurrency_group = "p2p-stage"
+domains = ["p2p"]
+seams = ["crates/node/src/sync/stage.rs", "crates/p2p/src/download_window.rs"]
+disposition = "blocked"
+evidence = "Staging retains decoded Block and original Bytes (#51). Byte budget undercounts. Raw-first staging is the reversible candidate; decoded-block cache in front of BlockSource was rejected (see levers)."
+
+[[paths]]
+id = "p2p.staller"
+kind = "stage"
+name = "staller, timeout, hedge, retry, cooldown, disconnect"
+parent = "cell.wall"
+concurrency_group = "p2p-sched"
+domains = ["p2p"]
+seams = ["crates/p2p/src/download_window.rs", "crates/node/src/sync.rs"]
+disposition = "blocked"
+evidence = "Required for #35 fixture fidelity. Neutralizing stallers changes the workload."
+
+[[paths]]
+id = "p2p.apply_idle"
+kind = "stage"
+name = "apply idle waiting for blocks"
+parent = "cell.wall"
+concurrency_group = "p2p-overlap"
+domains = ["p2p"]
+seams = ["crates/p2p/src/download_window.rs"]
+histogram = "node.sync.apply_idle_seconds"
+disposition = "blocked"
+evidence = "Overlap with download. Histogram exists; product-cell disable-delta does not."
+
+[[paths]]
+id = "p2p.download_blocked_by_apply"
+kind = "stage"
+name = "download/staging blocked by apply"
+parent = "cell.wall"
+concurrency_group = "p2p-overlap"
+domains = ["p2p"]
+seams = ["crates/p2p/src/download_window.rs"]
+histogram = "node.sync.download_blocked_by_apply_seconds"
+disposition = "blocked"
+evidence = "Complement of p2p.apply_idle. Same overlap group; do not add both to elapsed."
+
+[[paths]]
+id = "p2p.event_loop"
+kind = "stage"
+name = "event-loop wake/tick delay, scheduler idle, apply handoff"
+parent = "cell.wall"
+concurrency_group = "p2p-sched"
+domains = ["p2p"]
+seams = ["crates/node/src/event_loop.rs"]
+histogram = "node.event_loop.tick_seconds"
+disposition = "blocked"
+evidence = "Inclusive tick histogram encloses scheduling, apply, and waits. Nested."
+
+[[paths]]
+id = "p2p.shutdown_reopen"
+kind = "stage"
+name = "P2P shutdown drain and reopen"
+parent = "run.lifecycle"
+concurrency_group = "lifecycle"
+domains = ["p2p"]
+seams = ["crates/node/src/shutdown.rs", "crates/p2p/src/listener.rs"]
+disposition = "blocked"
+evidence = "Lifecycle correctness gate, not a skippable stage."
+
+# ---------------------------------------------------------------------------
+# MuHash RPC exclusive leaves
+# ---------------------------------------------------------------------------
+
+[[paths]]
+id = "muhash.tcp_http"
+kind = "stage"
+name = "TCP accept/auth and HTTP body read"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/rpc/src/server.rs", "crates/rpc/src/auth.rs"]
+disposition = "blocked"
+evidence = "Inside the #41 one-shot exchange. No product-cell custody."
+
+[[paths]]
+id = "muhash.json_dispatch"
+kind = "stage"
+name = "UTF-8/JSON parse and method dispatch"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/rpc/src/server.rs", "crates/rpc/src/handlers/chain.rs"]
+disposition = "blocked"
+evidence = "Fixed request body. Unmeasured share of the one-shot RPC."
+
+[[paths]]
+id = "muhash.stable_view"
+kind = "stage"
+name = "stable-view lock acquisition and hold"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/rpc/src/handlers/chain.rs", "crates/rpc/src/context.rs"]
+disable_delta = "blocked_pending_safe_probe"
+disposition = "blocked"
+evidence = "HPA-06 forbids dropping the stable-view lock."
+
+[[paths]]
+id = "muhash.shard_scan"
+kind = "stage"
+name = "256-shard record traversal and zero-copy output decode"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/utxo/src/set.rs", "crates/utxo/src/record.rs", "crates/utxo/src/stats.rs"]
+disposition = "blocked"
+evidence = "scan_coin_stats over UtxoSetView. Replacing decode with constants is forbidden."
+
+[[paths]]
+id = "muhash.preimage"
+kind = "stage"
+name = "CoinStats preimage formatting"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/utxo/src/stats/coin_stats.rs"]
+disposition = "blocked"
+evidence = "Preimage bytes feed MuHash. No product-safe skip."
+
+[[paths]]
+id = "muhash.element_expand"
+kind = "stage"
+name = "SHA-256 plus ChaCha20 element expansion"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/utxo/src/stats/muhash3072.rs"]
+disposition = "blocked"
+evidence = "Needs #41 disable-delta before it can be an optimize candidate."
+
+[[paths]]
+id = "muhash.modmul"
+kind = "stage"
+name = "3072-bit reduction, multiplication, combine, inversion, finalization"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/utxo/src/stats/muhash3072.rs"]
+disposition = "blocked"
+evidence = "Same as muhash.element_expand. Arithmetic replacement is forbidden."
+
+[[paths]]
+id = "muhash.response"
+kind = "stage"
+name = "response construction, JSON serialization, socket write"
+parent = "cell.wall"
+concurrency_group = "muhash-serial"
+domains = ["muhash"]
+seams = ["crates/rpc/src/handlers/chain.rs", "crates/rpc/src/server.rs"]
+disposition = "blocked"
+evidence = "Inside the #41 exchange through full response receipt."
+
+# ---------------------------------------------------------------------------
+# Cross-cutting classes. Accounted in every applicable cell residual.
+# Not exclusive wall slices.
+# ---------------------------------------------------------------------------
+
+[[paths]]
+id = "class.alloc"
+kind = "class"
+name = "allocation count, bytes, lifetime, fragmentation"
+parent = "cell.wall"
+concurrency_group = "class"
+domains = ["offline", "p2p", "muhash"]
+seams = ["crates/utxo/src/set.rs", "crates/utxo/src/record.rs"]
+disposition = "already_bounded"
+evidence = "UTXO-record arena/pool rejected on churn measurement (docs/benchmarks/utxo-memory.md). mimalloc adopted for production x86-64 Linux (#40). Whole-process allocation gates remain diagnostic until a symmetric collector exists (#44)."
+
+[[paths]]
+id = "class.lock_sched"
+kind = "class"
+name = "lock wait/hold, atomics, queue age/depth, backpressure, runnable/off-CPU/idle"
+parent = "cell.wall"
+concurrency_group = "class"
+domains = ["offline", "p2p", "muhash"]
+seams = ["crates/node/src/event_loop.rs", "crates/node/src/apply.rs", "crates/p2p/src/download_window.rs"]
+disposition = "blocked"
+evidence = "No cell-level scheduler account. p2p.apply_idle / download_blocked_by_apply are the named overlap pair."
+
+[[paths]]
+id = "class.io_syscall"
+kind = "class"
+name = "syscalls, copies, file/network bytes, I/O wait, page-cache"
+parent = "cell.wall"
+concurrency_group = "class"
+domains = ["offline", "p2p", "muhash"]
+seams = ["crates/storage/src/block_file.rs", "crates/p2p/src/connection.rs"]
+disposition = "blocked"
+evidence = "Eligible I/O gates need process-attributed physical bytes (#44). /proc rchar/wchar stay diagnostic."
+
+[[paths]]
+id = "class.backend"
+kind = "class"
+name = "backend WAL, durability, flush, compaction, cache"
+parent = "cell.wall"
+concurrency_group = "class"
+domains = ["offline", "p2p", "muhash"]
+seams = [
+  "crates/storage/src/fjall_impl.rs",
+  "crates/storage/src/rocksdb_impl.rs",
+  "crates/storage/src/redb_impl.rs",
+  "crates/storage/src/cache_budget.rs",
+]
+disposition = "blocked"
+evidence = "dbcache_mb now reaches backends through open_with_cache. Historical RSS attribution that subtracted 450 MiB is rejected. Fresh disable-delta still required per backend."
+
+[[paths]]
+id = "class.microarch"
+kind = "class"
+name = "branch, instruction/data-cache, TLB, vectorization, memory bandwidth"
+parent = "cell.wall"
+concurrency_group = "class"
+domains = ["offline", "p2p", "muhash"]
+seams = ["crates/consensus/src/sha256d64.rs", "crates/utxo/src/stats/muhash3072.rs"]
+disposition = "blocked"
+evidence = "Host counters are diagnostics. SHA-NI and ARM SIMD remain blocked on missing native-host candidates (#38/#40)."
+
+[[paths]]
+id = "class.retained_memory"
+kind = "class"
+name = "retained memory and peak RSS"
+parent = "cell.wall"
+concurrency_group = "class"
+domains = ["offline", "p2p", "muhash"]
+seams = ["crates/utxo/src/set.rs", "crates/node/src/sync/stage.rs"]
+disposition = "blocked"
+evidence = "Quiet-tip UTXO set was 77.4% of RSS at height 412,732. Remaining RSS residual unattributed. IBD-in-flight RSS is not this class (#51)."
+
+# ---------------------------------------------------------------------------
+# Memory cost center (RSS, not wall)
+# ---------------------------------------------------------------------------
+
+[[paths]]
+id = "memory.utxo_set"
+kind = "memory"
+name = "in-memory UTXO set payload, allocation slack, hash-table backing"
+parent = "class.retained_memory"
+concurrency_group = "memory"
+domains = ["offline", "p2p", "muhash"]
+seams = ["crates/utxo/src/record.rs", "crates/utxo/src/set.rs", "crates/utxo/src/compress.rs"]
+disposition = "already_bounded"
+evidence = "v5 directory codec adopted (#40). Quiet measurement 61.2 B/output accounted, 79.2 B/output RSS at height 412,732. docs/benchmarks/utxo-memory.md."
+
+[[paths]]
+id = "memory.staging_dual_body"
+kind = "memory"
+name = "P2P staging retains decoded Block and original Bytes"
+parent = "class.retained_memory"
+concurrency_group = "memory"
+domains = ["p2p"]
+seams = ["crates/node/src/sync/stage.rs"]
+disposition = "blocked"
+evidence = "Same lever as p2p.stage. RSS sampled during IBD cannot attribute the UTXO set (#51)."
+
+[[paths]]
+id = "memory.rss_residual"
+kind = "memory"
+name = "process RSS residual after UTXO set"
+parent = "class.retained_memory"
+concurrency_group = "memory"
+domains = ["offline", "p2p", "muhash"]
+seams = ["crates/storage/src/cache_budget.rs", "crates/utxo/src/stats.rs"]
+disposition = "blocked"
+evidence = "0.64 GiB at the height-412,732 quiet sample. dbcache is now a real knob; the residual has not been remeasured."
+
+# ---------------------------------------------------------------------------
+# Ordered candidates (whole-product impact, dependency, reversibility, risk)
+# ---------------------------------------------------------------------------
+
+[[candidates]]
+rank = 1
+path = "apply.body_persist"
+reason = "Shared by offline and P2P. Historical apply-critical persist. Reversible if crash-order and body availability stay proven."
+
+[[candidates]]
+rank = 2
+path = "apply.merkle_witness"
+reason = "Shared apply. x86-64 AVX2 already has diagnostic custody; production path still scalar. ARM stays blocked. Depends on no consensus change."
+
+[[candidates]]
+rank = 3
+path = "p2p.stage"
+reason = "P2P cells plus RSS guardrail. Raw-first staging is reversible; decoded-block cache is not a substitute."
+
+[[candidates]]
+rank = 4
+path = "p2p.request_schedule"
+reason = "P2P cells. Count-and-byte window after staging memory is honest. Coupled to staller invariants."
+
+[[candidates]]
+rank = 5
+path = "class.backend"
+reason = "All 36 cells. Cache budget is finally a real lever. Needs per-backend disable-delta, not a config claim."
+
+[[candidates]]
+rank = 6
+path = "muhash.element_expand"
+reason = "MuHash cells only. Ranked after apply/P2P because #41 custody does not exist; listed so it is not forgotten."
+
+# ---------------------------------------------------------------------------
+# Levers already decided. Do not re-derive.
+# ---------------------------------------------------------------------------
+
+[[levers]]
+id = "lever.avx2_merkle"
+path = "apply.merkle_witness"
+disposition = "optimize"
+archs = ["x86_64"]
+evidence = "Diagnostic C150 custody adopted AVX2 on x86-64 (#40). Production integration still needs whole-workload remeasurement of every affected x86 cell. Not an ARM lever."
+
+[[levers]]
+id = "lever.utxo_arena"
+path = "class.alloc"
+disposition = "rejected"
+evidence = "Churning twice the live set added 5% RSS and flattened. bumpalo arena rejected (docs/benchmarks/utxo-memory.md, #40)."
+
+[[levers]]
+id = "lever.decoded_block_cache"
+path = "p2p.stage"
+disposition = "rejected"
+evidence = "Hit case 1.027× slower than decode-from-scratch because BlockSource returns an owned Block."
+
+[[levers]]
+id = "lever.phantom_dbcache"
+path = "class.backend"
+disposition = "rejected"
+evidence = "Subtracting 450 MiB from RSS was false when dbcache_mb reached no constructor. The budget is now real; the old residual claim is not."
+
+[[levers]]
+id = "lever.mimalloc"
+path = "class.alloc"
+disposition = "already_bounded"
+evidence = "Adopted for measured x86-64 Linux production (#40). Wall lever, not the CPU-parity explanation."
+
+[[levers]]
+id = "lever.utxo_v5_codec"
+path = "memory.utxo_set"
+disposition = "already_bounded"
+evidence = "Directory layout adopted. 3 ns extra lookup at mainnet average against a 50 ms commit budget."
+
+[[levers]]
+id = "lever.script_pool_width"
+path = "apply.script_verify"
+disposition = "already_bounded"
+evidence = "32 threads is the measured optimum (#16)."
+
+[[levers]]
+id = "lever.sha_ni"
+path = "class.microarch"
+disposition = "blocked"
+archs = ["x86_64"]
+evidence = "No controlled whole-domain candidate on a project measurement host (#40)."
+
+[[levers]]
+id = "lever.arm_simd"
+path = "class.microarch"
+disposition = "blocked"
+archs = ["arm64"]
+evidence = "No ARM candidate/control custody (#38/#40)."
+
+# ---------------------------------------------------------------------------
+# Forbidden probes (HPA-06). Cannot appear as optimize candidates.
+# ---------------------------------------------------------------------------
+
+[[forbidden_probes]]
+id = "probe.assume_valid"
+name = "skip scripts via assume-valid"
+reason = "Weakens consensus."
+
+[[forbidden_probes]]
+id = "probe.skip_merkle_witness"
+name = "skip Merkle or witness checks"
+reason = "Weakens consensus."
+
+[[forbidden_probes]]
+id = "probe.dummy_utxo"
+name = "dummy UTXO mutator"
+reason = "Weakens state commitment."
+
+[[forbidden_probes]]
+id = "probe.suppress_undo_body"
+name = "suppress undo or body writes"
+reason = "Weakens reorg-readiness and body availability."
+
+[[forbidden_probes]]
+id = "probe.weaken_durability"
+name = "change durability or skip fsync/checkpoint"
+reason = "Weakens recovery."
+
+[[forbidden_probes]]
+id = "probe.drop_stable_view"
+name = "remove MuHash stable-view locking"
+reason = "Weakens chain-view identity."
+
+[[forbidden_probes]]
+id = "probe.constant_muhash"
+name = "replace UTXO decode or MuHash arithmetic with constants"
+reason = "Weakens the measured query."
+
+[[forbidden_probes]]
+id = "probe.skip_checkpoint"
+name = "suppress checkpoint, reopen, or recovery work"
+reason = "Weakens the product lifecycle."

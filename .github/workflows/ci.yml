@@ -145,11 +145,11 @@ jobs:
           # audited by the main-only `deny-full` lane in main.yml.
           arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
 
-  # Comparator campaign behavioral tests (tools/benchmark-campaign/). Pure
-  # Python, self-contained -- no bitcoind, no external services. The tests use
-  # typing.TypeIs (Python 3.13+); actions/setup-python downloads the runtime
-  # from GitHub's release hosting, which is a first-party action but
-  # network-dependent.
+  # Comparator campaign behavioral tests and the C150/Cmodern corpus freeze.
+  # Pure Python, self-contained -- no bitcoind, no external services. The
+  # comparator tests use typing.TypeIs (Python 3.13+); actions/setup-python
+  # downloads the runtime from GitHub's release hosting, which is a
+  # first-party action but network-dependent.
   comparator-tests:
     runs-on: ubuntu-latest
     steps:
@@ -160,3 +160,4 @@ jobs:
       - run: |
           cd tools/benchmark-campaign
           for f in test_*.py; do python3 "$f" || exit 1; done
+      - run: python3 tools/campaign-corpus/test_corpus.py

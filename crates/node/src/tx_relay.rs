@@ -44,8 +44,9 @@
 //! self.relay.announce(txid, tx.wtxid(), Some(source.connection_id().get()));
 //! ```
 //!
-//! Wiring that line is out of scope for this file (it edits `tx_ingress.rs`);
-//! the worker and queue here are ready to receive it.
+//! The ingress consumer announces peer-origin accepts with the source
+//! excluded. RPC and reorg accepts announce through
+//! [`crate::mempool_observer::LocalTxRelayObserver`] on the same queue.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

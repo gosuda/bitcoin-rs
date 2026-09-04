@@ -1,13 +1,14 @@
-use bitcoin_rs_primitives::{Block, Tx, Txid, Wtxid, encode::double_sha256};
+use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
-#[cfg(test)]
-use crate::sha256d64::{Avx2Sha256d64, detect_avx2};
-#[cfg(test)]
-use bitcoin_rs_primitives::Hash256;
+use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
 
 /// BIP141 witness commitment output prefix: `OP_RETURN` `OP_PUSHBYTES_36` `commitment_header`.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+
+/// Eight AVX2 lanes hash eight parent pairs, so a tree needs 16 leaves before
+/// the batch kernel can issue work. Smaller trees stay on the spine.
+const AVX2_MERKLE_MIN_LEAVES: usize = sha256d64::LANES * 2;
 
 /// BIP141 maximum block weight in weight units.
 const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
@@ -85,7 +86,7 @@ pub fn verify_block_rules_precomputed(
             return Err(ConsensusError::WitnessCommitment);
         }
     }
-    let weight: u64 = block.txs.iter().map(Tx::weight).sum();
+    let weight = block.weight();
     if weight > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BlockWeight {
             weight,
@@ -98,8 +99,9 @@ pub fn verify_block_rules_precomputed(
 /// Verifies the header Merkle root and rejects mutated Merkle trees.
 ///
 /// `txids` must contain one transaction ID per block transaction in block
-/// order. The slice is borrowed: the reduction streams leaves through an
-/// O(log n) right-spine frontier instead of cloning the IDs.
+/// order. The slice is borrowed. Small trees and hosts without AVX2 reduce
+/// through an O(log n) right-spine frontier; AVX2-capable hosts copy once
+/// when the tree can fill an 8-lane SHA-256d batch.
 ///
 /// # Errors
 ///
@@ -125,7 +127,7 @@ pub fn verify_merkle_root_with_txids(block: &Block, txids: &[Txid]) -> Result<()
 /// Computes the merkle root from caller-supplied transaction IDs and compares
 /// it to the block header. Mutation is intentionally ignored here; the later
 /// consensus path owns the mutation check and its error precedence. The slice
-/// is borrowed and reduced through the same O(log n) right-spine frontier as
+/// is borrowed and reduced through the same production walker as
 /// [`verify_merkle_root_with_txids`].
 #[doc(hidden)]
 pub fn block_merkle_root_matches_txids(block: &Block, txids: &[Txid]) -> bool {
@@ -153,22 +155,35 @@ fn is_coinbase(tx: &Tx) -> bool {
 
 /// Double-SHA256 over `left || right`, the Merkle parent of two nodes.
 fn hash_merkle_pair(left: Txid, right: Txid) -> Txid {
-    let mut pair = [0u8; 64];
-    pair[..32].copy_from_slice(left.as_bytes());
-    pair[32..].copy_from_slice(right.as_bytes());
-    Txid(double_sha256(&pair))
+    Txid(hash_merkle_bytes(left.as_bytes(), right.as_bytes()))
 }
 
-/// Non-destructive twin of [`merkle_root_and_mutation`] over borrowed leaves.
+fn hash_merkle_bytes(left: &[u8; 32], right: &[u8; 32]) -> Hash256 {
+    let mut pair = [0u8; 64];
+    pair[..32].copy_from_slice(left);
+    pair[32..].copy_from_slice(right);
+    double_sha256(&pair)
+}
+
+/// Merkle reduction over borrowed leaves.
 ///
-/// Leaves stream through a right-spine frontier holding at most one pending
-/// node per tree level, so scratch is O(log n) in the leaf count and the
-/// caller's slice is neither cloned nor mutated. Comparing two equal *real*
-/// adjacent nodes at any level flags the tree as mutated; the odd leftover
-/// paired with its duplicate-last copy never does. This observes exactly the
-/// equality events of the in-place reducer: every full sibling pair of the
-/// level-synchronous tree is compared once, self-pairs never.
+/// Trees that cannot fill one AVX2 batch, and hosts without AVX2, stream
+/// leaves through [`merkle_root_spine`]. Trees with at least
+/// [`AVX2_MERKLE_MIN_LEAVES`] on an AVX2 host copy once into the
+/// level-synchronous 8-way reducer. Comparing two equal *real* adjacent nodes
+/// at any level flags the tree as mutated; the odd leftover paired with its
+/// duplicate-last copy never does.
 fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
+    if txids.len() >= AVX2_MERKLE_MIN_LEAVES && detect_avx2().is_some() {
+        let mut hashes = txids.to_vec();
+        return merkle_root_and_mutation(&mut hashes);
+    }
+    merkle_root_spine(txids)
+}
+
+/// Allocation-free scalar walker: one pending node per tree level, so scratch
+/// is O(log n) and the caller's slice is neither cloned nor mutated.
+fn merkle_root_spine(txids: &[Txid]) -> Option<(Txid, bool)> {
     if txids.is_empty() {
         return None;
     }
@@ -218,7 +233,6 @@ fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
     Some((root, mutated))
 }
 
-#[cfg(test)]
 fn merkle_root_and_mutation(hashes: &mut Vec<Txid>) -> Option<(Txid, bool)> {
     if hashes.is_empty() {
         return None;
@@ -235,45 +249,59 @@ fn merkle_root_and_mutation(hashes: &mut Vec<Txid>) -> Option<(Txid, bool)> {
     Some((hashes[0], mutated))
 }
 
-#[cfg(test)]
 fn next_merkle_level(level: &mut Vec<Txid>, kernel: Option<&Avx2Sha256d64>) {
+    fold_parent_level(level, kernel, Txid::as_bytes, Txid::from);
+}
+
+fn next_bytes_level(level: &mut Vec<[u8; 32]>, kernel: Option<&Avx2Sha256d64>) {
+    fold_parent_level(level, kernel, |node| node, Hash256::to_le_bytes);
+}
+
+fn fold_parent_level<T: Copy>(
+    level: &mut Vec<T>,
+    kernel: Option<&Avx2Sha256d64>,
+    as_bytes: impl Fn(&T) -> &[u8; 32],
+    from_hash: impl Fn(Hash256) -> T,
+) {
     let original_len = level.len();
     let new_len = original_len.div_ceil(2);
     let pair_count = original_len / 2;
-
-    if let Some(kernel) = kernel {
-        let mut input = [[0u8; 64]; 8];
-        let mut output = [[0u8; 32]; 8];
-        let mut idx = 0;
-        while idx + 8 <= pair_count {
-            for lane in 0..8 {
-                let left = level[2 * (idx + lane)].as_bytes();
-                let right = level[2 * (idx + lane) + 1].as_bytes();
-                input[lane][0..32].copy_from_slice(left);
-                input[lane][32..64].copy_from_slice(right);
-            }
-            kernel.transform_8way(&input, &mut output);
-            for lane in 0..8 {
-                level[idx + lane] = Txid(Hash256::from_le_bytes(&output[lane]));
-            }
-            idx += 8;
-        }
-    }
-
-    let start = if kernel.is_some() {
-        (pair_count / 8) * 8
-    } else {
-        0
+    let start = match kernel {
+        Some(kernel) => hash_avx2_parent_batches(level, pair_count, kernel, &as_bytes, &from_hash),
+        None => 0,
     };
     for pos in start..new_len {
-        let left = level[2 * pos];
-        let right = level[(2 * pos + 1).min(original_len - 1)];
-        let mut pair = [0u8; 64];
-        pair[..32].copy_from_slice(left.as_bytes());
-        pair[32..].copy_from_slice(right.as_bytes());
-        level[pos] = Txid(double_sha256(&pair));
+        let left = as_bytes(&level[2 * pos]);
+        let right = as_bytes(&level[(2 * pos + 1).min(original_len - 1)]);
+        level[pos] = from_hash(hash_merkle_bytes(left, right));
     }
     level.truncate(new_len);
+}
+
+fn hash_avx2_parent_batches<T: Copy>(
+    level: &mut [T],
+    pair_count: usize,
+    kernel: &Avx2Sha256d64,
+    as_bytes: impl Fn(&T) -> &[u8; 32],
+    from_hash: impl Fn(Hash256) -> T,
+) -> usize {
+    let mut input = [[0u8; 64]; sha256d64::LANES];
+    let mut output = [[0u8; 32]; sha256d64::LANES];
+    let mut idx = 0;
+    while idx + sha256d64::LANES <= pair_count {
+        for lane in 0..sha256d64::LANES {
+            let left = as_bytes(&level[2 * (idx + lane)]);
+            let right = as_bytes(&level[2 * (idx + lane) + 1]);
+            input[lane][..32].copy_from_slice(left);
+            input[lane][32..].copy_from_slice(right);
+        }
+        kernel.transform_8way(&input, &mut output);
+        for lane in 0..sha256d64::LANES {
+            level[idx + lane] = from_hash(Hash256::from_le_bytes(&output[lane]));
+        }
+        idx += sha256d64::LANES;
+    }
+    idx
 }
 
 /// BIP141 witness commitment verification over cached witness IDs.
@@ -345,18 +373,13 @@ fn merkle_root_bytes(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
     if leaves.is_empty() {
         return None;
     }
+    let kernel = if leaves.len() >= AVX2_MERKLE_MIN_LEAVES {
+        detect_avx2()
+    } else {
+        None
+    };
     while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(sha256d(&pair));
-        }
-        *leaves = next;
+        next_bytes_level(leaves, kernel.as_ref());
     }
     Some(leaves[0])
 }
@@ -398,7 +421,8 @@ mod tests {
         BlockRuleContext, WITNESS_COMMITMENT_PREFIX, block_has_witness,
         block_merkle_root_matches_txids, is_coinbase, merkle_root_and_mutation,
         merkle_root_and_mutation_borrowed, merkle_root_and_mutation_scalar, merkle_root_bytes,
-        sha256d, verify_block_rules, verify_block_rules_precomputed, verify_merkle_root_with_txids,
+        merkle_root_spine, sha256d, verify_block_rules, verify_block_rules_precomputed,
+        verify_merkle_root_with_txids,
     };
     use crate::ConsensusError;
 
@@ -701,6 +725,18 @@ mod tests {
     }
 
     #[test]
+    fn witness_byte_fold_matches_txid_fold_across_sizes() {
+        for leaf_count in 1..=33 {
+            let leaves = txids(leaf_count);
+            let mut bytes: Vec<[u8; 32]> = leaves.iter().map(|txid| *txid.as_bytes()).collect();
+            let bytes_root = merkle_root_bytes(&mut bytes);
+            let mut hashes = leaves;
+            let txid_root = merkle_root_and_mutation(&mut hashes).map(|(root, _)| *root.as_bytes());
+            assert_eq!(bytes_root, txid_root, "leaf count {leaf_count}");
+        }
+    }
+
+    #[test]
     fn lane_boundary_pairs_seven_and_eight() {
         for leaf_count in [14, 15, 16, 17, 31, 32, 33] {
             let txids = txids(leaf_count);
@@ -739,10 +775,13 @@ mod tests {
                     }
                 }
                 let mut expected = leaves.clone();
+                let spine = merkle_root_spine(&leaves);
+                let in_place = merkle_root_and_mutation(&mut expected);
+                assert_eq!(spine, in_place, "leaf count {leaf_count} tail {tail}");
                 assert_eq!(
                     merkle_root_and_mutation_borrowed(&leaves),
-                    merkle_root_and_mutation(&mut expected),
-                    "leaf count {leaf_count} tail {tail}"
+                    spine,
+                    "leaf count {leaf_count} tail {tail} production dispatch"
                 );
             }
         }
@@ -760,9 +799,14 @@ mod tests {
             let leaves = vec![txid(0x2b); leaf_count];
             let mut in_place = leaves.clone();
             assert_eq!(
-                merkle_root_and_mutation_borrowed(&leaves),
+                merkle_root_spine(&leaves),
                 merkle_root_and_mutation(&mut in_place),
                 "leaf count {leaf_count}"
+            );
+            assert_eq!(
+                merkle_root_and_mutation_borrowed(&leaves),
+                merkle_root_spine(&leaves),
+                "leaf count {leaf_count} production dispatch"
             );
             let Some((_, mutated)) = merkle_root_and_mutation_borrowed(&leaves) else {
                 panic!("borrowed merkle root over a non-empty leaf set");

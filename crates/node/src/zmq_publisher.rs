@@ -575,6 +575,9 @@ fn is_ipv6_tcp_endpoint(endpoint: &str) -> bool {
 }
 
 /// Publishes committed mempool mutations as Core `sequence` `A`/`R` events.
+///
+/// Install on the [`bitcoin_rs_mempool::MempoolGateway`] observer slot only
+/// when a `--zmq-pub-sequence` endpoint is configured.
 pub(crate) struct MempoolSequenceObserver {
     publisher: std::sync::Arc<dyn ZmqPublisher>,
 }
@@ -960,8 +963,9 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::as_conversions)]
 mod compat_manifest_tests {
-    use super::ZmqTopic;
+    use super::*;
 
     /// The compatibility manifest, embedded rather than read at runtime.
     const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
@@ -1022,6 +1026,284 @@ mod compat_manifest_tests {
                 topic.as_str()
             );
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingPublisher {
+        sequence_bodies: parking_lot::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl core::fmt::Debug for RecordingPublisher {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("RecordingPublisher")
+        }
+    }
+
+    impl ZmqPublisher for RecordingPublisher {
+        fn wants_notifications(&self) -> bool {
+            true
+        }
+        fn wants_rawtx(&self) -> bool {
+            false
+        }
+        fn wants_rawblock(&self) -> bool {
+            false
+        }
+        fn active_notifiers(&self) -> Vec<ZmqNotifier> {
+            Vec::new()
+        }
+        fn publish_hashblock(&self, _hash: Hash256) {}
+        fn publish_hashtx(&self, _txid: Txid) {}
+        fn publish_rawblock(&self, _bytes: &[u8]) {}
+        fn publish_rawtx(&self, _bytes: &[u8]) {}
+        fn publish_sequence(&self, event: SequenceEvent) {
+            self.sequence_bodies.lock().push(sequence_payload(event));
+        }
+    }
+
+    fn sequence_tx(label: u8) -> bitcoin_rs_primitives::Tx {
+        use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+        Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
+                script_sig: Vec::new(),
+                sequence: 0xffff_ffff,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 1_000,
+                script_pubkey: vec![0x51, label],
+            }],
+        }
+    }
+
+    fn sequence_entry(tx: &bitcoin_rs_primitives::Tx) -> bitcoin_rs_mempool::MempoolEntry {
+        bitcoin_rs_mempool::MempoolEntry::new(std::sync::Arc::new(tx.clone()), 100, 1_000, 1, 7)
+    }
+
+    fn expected_sequence_body(txid: &Txid, label: u8, sequence: u64) -> Vec<u8> {
+        let mut body = *txid.as_bytes();
+        body.reverse();
+        let mut expected = body.to_vec();
+        expected.push(label);
+        expected.extend_from_slice(&sequence.to_le_bytes());
+        expected
+    }
+
+    fn wired_sequence_gateway() -> (
+        bitcoin_rs_mempool::MempoolGateway,
+        std::sync::Arc<RecordingPublisher>,
+    ) {
+        use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver};
+        use parking_lot::RwLock;
+        let publisher = std::sync::Arc::new(RecordingPublisher::default());
+        let observer: std::sync::Arc<dyn MempoolObserver> = std::sync::Arc::new(
+            MempoolSequenceObserver::new(std::sync::Arc::clone(&publisher) as _),
+        );
+        let gateway = MempoolGateway::new(
+            std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Some(observer),
+        );
+        (gateway, publisher)
+    }
+
+    #[test]
+    fn admission_publishes_one_a_frame_with_core_payload_bytes() {
+        use bitcoin_rs_mempool::AdmissionOrigin;
+        let (gateway, publisher) = wired_sequence_gateway();
+        let admitted = sequence_tx(1);
+        let txid = admitted.txid();
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&admitted))
+            .expect("in");
+        let bodies = publisher.sequence_bodies.lock();
+        assert_eq!(bodies.len(), 1, "exactly one event for one change");
+        assert_eq!(*bodies[0], expected_sequence_body(&txid, b'A', 1));
+    }
+
+    #[test]
+    fn policy_eviction_publishes_r_frames_in_commit_order() {
+        use bitcoin_rs_mempool::AdmissionOrigin;
+        use bitcoin_rs_primitives::OutPoint;
+        let (gateway, publisher) = wired_sequence_gateway();
+        let parent = sequence_tx(2);
+        let parent_txid = parent.txid();
+        let mut child = sequence_tx(3);
+        child.inputs[0].previous_output = OutPoint::new(parent_txid, 0);
+        let child_txid = child.txid();
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&parent))
+            .expect("parent in");
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&child))
+            .expect("child in");
+        publisher.sequence_bodies.lock().clear();
+        gateway.evict_below_fee_rate(AdmissionOrigin::Rpc, 10_001);
+        let bodies = publisher.sequence_bodies.lock();
+        assert_eq!(
+            *bodies,
+            vec![
+                expected_sequence_body(&parent_txid, b'R', 3),
+                expected_sequence_body(&child_txid, b'R', 4),
+            ],
+            "parent commits before descendant, each with its own sequence"
+        );
+    }
+
+    #[test]
+    fn block_inclusion_suppresses_r_frames() {
+        use bitcoin_rs_mempool::AdmissionOrigin;
+        let (gateway, publisher) = wired_sequence_gateway();
+        let mined = sequence_tx(4);
+        let mined_txid = mined.txid();
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&mined))
+            .expect("in");
+        publisher.sequence_bodies.lock().clear();
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&mined], &[mined_txid], 8);
+        assert!(
+            publisher.sequence_bodies.lock().is_empty(),
+            "Core suppresses `R` on block inclusion; the block `C` event covers it"
+        );
+        assert_eq!(gateway.read().len(), 0, "the pool still moved");
+    }
+
+    #[test]
+    fn policy_eviction_publishes_r_frames_with_contiguous_sequences() {
+        use bitcoin_rs_mempool::{
+            AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits, MempoolObserver,
+        };
+        use parking_lot::RwLock;
+        let publisher = std::sync::Arc::new(RecordingPublisher::default());
+        let observer: std::sync::Arc<dyn MempoolObserver> = std::sync::Arc::new(
+            MempoolSequenceObserver::new(std::sync::Arc::clone(&publisher) as _),
+        );
+        let gateway = MempoolGateway::new(
+            std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                max_total_bytes: 150,
+                ..MempoolLimits::default()
+            }))),
+            Some(observer),
+        );
+        let low = MempoolEntry::new(std::sync::Arc::new(sequence_tx(5)), 100, 100, 1, 7);
+        let high = MempoolEntry::new(std::sync::Arc::new(sequence_tx(6)), 100, 900, 1, 7);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, low)
+            .expect("low in");
+        publisher.sequence_bodies.lock().clear();
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, high)
+            .expect("high in");
+        let bodies = publisher.sequence_bodies.lock();
+        assert_eq!(
+            *bodies,
+            vec![
+                expected_sequence_body(&sequence_tx(6).txid(), b'A', 2),
+                expected_sequence_body(&sequence_tx(5).txid(), b'R', 3),
+            ],
+            "accepted commits first, then its policy eviction"
+        );
+    }
+
+    #[test]
+    fn composite_observer_fans_out_to_sequence_then_mining_wake() {
+        use crate::mining::{MempoolSequenceWake, MiningGenerationSignal};
+        use bitcoin_rs_mempool::{
+            AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,
+            MempoolObserver,
+        };
+        use bitcoin_rs_rpc::context::{
+            BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
+        };
+        use compact_str::CompactString;
+        use parking_lot::{Mutex, RwLock};
+
+        struct RecordingControl {
+            published: Mutex<usize>,
+            published_from: Mutex<Vec<u64>>,
+        }
+
+        fn unavailable() -> MiningControlError {
+            MiningControlError::Unavailable(CompactString::from("not wired in this test"))
+        }
+
+        impl MiningControl for RecordingControl {
+            fn get_block_template(
+                &self,
+                _request: BlockTemplateRequest,
+            ) -> Result<BlockTemplateResult, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn mining_info(
+                &self,
+            ) -> Result<bitcoin_rs_rpc::context::MiningInfo, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn submit_block(
+                &self,
+                _block: bitcoin_rs_primitives::Block,
+            ) -> Result<bitcoin_rs_rpc::context::BlockValidationResult, MiningControlError>
+            {
+                Err(unavailable())
+            }
+
+            fn publish_generation(&self) {
+                *self.published.lock() += 1;
+            }
+        }
+
+        impl MempoolSequenceWake for RecordingControl {
+            fn publish_generation_from(&self, sequence: u64) {
+                self.published_from.lock().push(sequence);
+            }
+        }
+
+        let publisher = std::sync::Arc::new(RecordingPublisher::default());
+        let signal = std::sync::Arc::new(MiningGenerationSignal::new());
+        let control = std::sync::Arc::new(RecordingControl {
+            published: Mutex::new(0),
+            published_from: Mutex::new(Vec::new()),
+        });
+        let control_dyn: std::sync::Arc<dyn MiningControl> = control.clone();
+        let wake_dyn: std::sync::Arc<dyn MempoolSequenceWake> = control.clone();
+        signal.attach(&control_dyn);
+        signal.attach_sequence_wake(&wake_dyn);
+
+        let composite = CompositeObserver::new();
+        composite.add_leg(
+            "sequence",
+            std::sync::Arc::new(MempoolSequenceObserver::new(
+                std::sync::Arc::clone(&publisher) as _,
+            )),
+        );
+        composite.add_leg("mining", std::sync::Arc::clone(&signal) as _);
+        let gateway = MempoolGateway::new(
+            std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Some(std::sync::Arc::new(composite) as std::sync::Arc<dyn MempoolObserver>),
+        );
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&sequence_tx(7)))
+            .expect("the fixture admission must commit");
+        assert_eq!(
+            publisher.sequence_bodies.lock().len(),
+            1,
+            "the sequence leg publishes the admission's A frame"
+        );
+        assert_eq!(
+            *control.published_from.lock(),
+            vec![1],
+            "the mining leg wakes the coordinator with the mutation's sequence"
+        );
+        assert_eq!(
+            *control.published.lock(),
+            0,
+            "the lock-free path is used, not the publish_generation fallback"
+        );
     }
 }
 

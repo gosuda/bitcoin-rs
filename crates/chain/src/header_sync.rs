@@ -1,3 +1,4 @@
+use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::{Hash256, Network};
 
 use pow::{compact_is_met_by, compact_to_target, target_to_compact};
@@ -11,9 +12,6 @@ use crate::{
 /// Maximum number of seconds a header timestamp may lie ahead of the
 /// current system time, per the Bitcoin consensus future-drift bound.
 const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
-
-/// Number of blocks the median-time-past rule spans, per consensus.
-const MEDIAN_TIME_SPAN: usize = 11;
 
 /// Accepts a contiguous batch of headers after proof-of-work validation.
 ///
@@ -102,7 +100,7 @@ pub fn validate_header_timestamp(
         return Ok(());
     };
     let median = tree
-        .median_time_past_at(parent_id, MEDIAN_TIME_SPAN)
+        .median_time_past_at(parent_id, MEDIAN_TIME_PAST_WINDOW)
         .ok_or(ChainError::UnknownNode { id: parent_id })?;
     if header.time <= median {
         return Err(ChainError::TimestampTooEarly {

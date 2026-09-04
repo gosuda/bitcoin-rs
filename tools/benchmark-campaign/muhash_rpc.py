@@ -1,6 +1,12 @@
 #!/usr/bin/env python3.14
 # pyright: strict
-"""Fail-closed external MuHash JSON-RPC comparator: one-shot timed trial + offline triple aggregator."""
+"""Fail-closed external MuHash JSON-RPC comparator.
+
+One-shot timed trial, lifecycle/cache campaign controller, and offline
+triple aggregator. The campaign owns process lifecycle and cache posture;
+the trial client is the only timed RPC speaker; aggregate is the only
+verdict publisher.
+"""
 
 import argparse
 import base64
@@ -11,8 +17,10 @@ import json
 import os
 import re
 import selectors
+import signal
 import socket
 import stat
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -23,6 +31,7 @@ from typing import TypedDict, TypeIs
 
 TRIAL_INPUT_SCHEMA = "muhash-rpc-trial-input-v2"
 AGGREGATE_INPUT_SCHEMA = "muhash-rpc-aggregate-input-v2"
+CAMPAIGN_CONFIG_SCHEMA = "muhash-rpc-campaign-config-v2"
 OBSERVATION_SCHEMA = "muhash-rpc-observation-v2"
 PRE_RECEIPT_SCHEMA = "muhash-rpc-pre-receipt-v2"
 POST_RECEIPT_SCHEMA = "muhash-rpc-post-receipt-v2"
@@ -31,6 +40,24 @@ PAIR_COUNT = 7
 TRIPLE_COUNT = 2 * PAIR_COUNT
 RPC_METHOD = "gettxoutsetinfo"
 RPC_PARAMS: tuple[str, None, bool] = ("muhash", None, False)
+CORE_BACKEND = "coinsdb"
+BITCOIN_RS_BACKENDS = frozenset({"fjall", "rocksdb", "redb"})
+MAX_BINARY_BYTES = 1024 * 1024 * 1024
+MAX_COMMAND_ARGS = 64
+ARM_READY_TIMEOUT_NS = 10_000_000_000
+CHILD_TERMINATE_GRACE_NS = 1_000_000_000
+CHILD_KILL_REAP_NS = 1_000_000_000
+_CAMPAIGN_PLACEHOLDERS = frozenset(
+    {"{binary}", "{data_dir}", "{rpc_port}", "{rpc_bind}", "{cookie}", "{config}"}
+)
+def _cache_action(policy: str) -> str:
+    return {
+        "warm": "warm-untimed-query-done",
+        "process-cold/page-cache-unspecified": "fresh-process-before-observation",
+        "process-cold/page-cache-evicted": "page-cache-evicted",
+    }[policy]
+
+
 CACHE_POLICIES = frozenset(
     {
         "warm",
@@ -464,11 +491,7 @@ def _parse_pre(value: object, field: str = "pre_receipt") -> JsonObject:
     corpus = _parse_corpus(item["corpus"], f"{field}.corpus")
     endpoint = _validate_endpoint(item["endpoint"], f"{field}.endpoint")
     action = _text(item["cache_policy_action"], f"{field}.cache_policy_action")
-    expected_action = {
-        "warm": "warm-untimed-query-done",
-        "process-cold/page-cache-unspecified": "fresh-process-before-observation",
-        "process-cold/page-cache-evicted": "page-cache-evicted",
-    }[policy]
+    expected_action = _cache_action(policy)
     if action != expected_action:
         raise ContractError(f"{field}.cache_policy_action is wrong for {policy}")
     eviction_value = item["eviction_procedure"]
@@ -1514,6 +1537,666 @@ def aggregate(input_path: Path) -> JsonObject:
     return result
 
 
+@dataclass(frozen=True)
+class ArmSpec:
+    kind: str
+    arm_id: str
+    binary: Path
+    binary_sha256: str
+    command: tuple[str, ...]
+    backend: str
+    config: FileRef
+    datadir: Path
+
+
+@dataclass(frozen=True)
+class CampaignConfig:
+    campaign_id: str
+    policy: str
+    corpus: JsonObject
+    expected: JsonObject
+    timeout_seconds: Decimal
+    max_response_bytes: int
+    credential_file: FileRef
+    affinity: str
+    core: ArmSpec
+    candidate: ArmSpec
+    eviction_procedure: FileRef | None
+
+
+def _command(value: object, field: str) -> tuple[str, ...]:
+    items = _array(value, field)
+    if not items or len(items) > MAX_COMMAND_ARGS:
+        raise ContractError(f"{field} must contain 1..{MAX_COMMAND_ARGS} arguments")
+    command = tuple(_text(item, f"{field}[{index}]") for index, item in enumerate(items))
+    if command[0] != "{binary}":
+        raise ContractError(f"{field}[0] must be {{binary}}")
+    if "{config}" not in command:
+        raise ContractError(f"{field} must contain the {{config}} placeholder")
+    for part in command:
+        if "{" in part and part not in _CAMPAIGN_PLACEHOLDERS:
+            raise ContractError(f"{field} contains an unsupported placeholder")
+    return command
+
+
+def _parse_arm(value: object, field: str, kind: str) -> ArmSpec:
+    item = _object(
+        value,
+        field,
+        frozenset(
+            {
+                "arm_id",
+                "binary",
+                "binary_sha256",
+                "command",
+                "backend",
+                "config",
+                "datadir",
+            }
+        ),
+    )
+    backend = _text(item["backend"], f"{field}.backend")
+    allowed = {CORE_BACKEND} if kind == "core" else BITCOIN_RS_BACKENDS
+    if backend not in allowed:
+        raise ContractError(f"{field}.backend must be one of {sorted(allowed)}")
+    return ArmSpec(
+        kind,
+        _text(item["arm_id"], f"{field}.arm_id"),
+        _path(item["binary"], f"{field}.binary"),
+        _hash(item["binary_sha256"], f"{field}.binary_sha256"),
+        _command(item["command"], f"{field}.command"),
+        backend,
+        _file_ref(item["config"], f"{field}.config"),
+        _path(item["datadir"], f"{field}.datadir"),
+    )
+
+
+def _parse_campaign_config(value: object) -> CampaignConfig:
+    item = _object(
+        value,
+        "campaign config",
+        frozenset(
+            {
+                "schema",
+                "campaign_id",
+                "policy",
+                "corpus",
+                "expected",
+                "timeout_seconds",
+                "max_response_bytes",
+                "credential_file",
+                "affinity",
+                "core",
+                "candidate",
+                "eviction_procedure",
+            }
+        ),
+    )
+    if item["schema"] != CAMPAIGN_CONFIG_SCHEMA:
+        raise ContractError(f"campaign config.schema must be {CAMPAIGN_CONFIG_SCHEMA}")
+    policy = _choice(item["policy"], "campaign config.policy", CACHE_POLICIES)
+    timeout = _decimal(
+        item["timeout_seconds"], "campaign config.timeout_seconds", positive=True
+    )
+    if timeout > 300:
+        raise ContractError("campaign config.timeout_seconds must not exceed 300")
+    max_bytes = _uint(
+        item["max_response_bytes"], "campaign config.max_response_bytes", positive=True
+    )
+    if max_bytes > MAX_RESPONSE_BYTES:
+        raise ContractError(
+            f"campaign config.max_response_bytes must not exceed {MAX_RESPONSE_BYTES}"
+        )
+    expected = _object(
+        item["expected"], "campaign config.expected", frozenset({"height", "bestblock"})
+    )
+    eviction_value = item["eviction_procedure"]
+    eviction = (
+        None
+        if eviction_value is None
+        else _file_ref(eviction_value, "campaign config.eviction_procedure")
+    )
+    if (policy == "process-cold/page-cache-evicted") != (eviction is not None):
+        raise ContractError("campaign config.eviction_procedure is wrong for the policy")
+    core = _parse_arm(item["core"], "campaign config.core", "core")
+    candidate = _parse_arm(
+        item["candidate"], "campaign config.candidate", "bitcoin-rs"
+    )
+    if core.arm_id == candidate.arm_id:
+        raise ContractError("campaign arms must have distinct arm_id values")
+    return CampaignConfig(
+        _text(item["campaign_id"], "campaign config.campaign_id"),
+        policy,
+        _parse_corpus(item["corpus"], "campaign config.corpus"),
+        {
+            "height": _uint(expected["height"], "campaign config.expected.height"),
+            "bestblock": _hash(
+                expected["bestblock"], "campaign config.expected.bestblock"
+            ),
+        },
+        timeout,
+        max_bytes,
+        _file_ref(item["credential_file"], "campaign config.credential_file"),
+        _text(item["affinity"], "campaign config.affinity"),
+        core,
+        candidate,
+        eviction,
+    )
+
+
+def _ref_json(reference: FileRef) -> JsonObject:
+    return {
+        "path": str(reference.path),
+        "sha256": reference.sha256,
+        "bytes": reference.size,
+    }
+
+
+def _file_ref_from_path(path: Path, cap: int, field: str) -> FileRef:
+    raw = _read_regular_file(path, cap, field)
+    return FileRef(path, hashlib.sha256(raw).hexdigest(), len(raw))
+
+
+def _write_json(
+    path: Path, record: JsonObject, cap: int = MAX_RECEIPT_BYTES
+) -> FileRef:
+    _write_record(path, record)
+    return _file_ref_from_path(path, cap, str(path))
+
+
+def _allocate_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        if not isinstance(port, int) or port <= 0:
+            raise ContractError("could not allocate a loopback RPC port")
+        return port
+
+
+def _wait_tcp(host: str, port: int, deadline_ns: int, process: subprocess.Popen[bytes] | None = None) -> None:
+    while True:
+        if process is not None and process.poll() is not None:
+            raise ContractError("arm process exited before RPC readiness")
+        remaining = deadline_ns - time.perf_counter_ns()
+        if remaining <= 0:
+            raise ContractError("arm RPC endpoint never became ready")
+        try:
+            with socket.create_connection(
+                (host, port), timeout=min(0.05, remaining / 1_000_000_000)
+            ):
+                return
+        except OSError:
+            time.sleep(0.01)
+
+
+def _read_starttime(pid: int) -> int:
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError as error:
+        raise ContractError("cannot read arm /proc/pid/stat") from error
+    fields = text.rpartition(")")[2].split()
+    if len(fields) < 20:
+        raise ContractError("arm /proc/pid/stat is truncated")
+    try:
+        return int(fields[19])
+    except ValueError as error:
+        raise ContractError("arm /proc/pid/stat is unparsable") from error
+
+
+def _read_proc_faults(pid: int) -> JsonObject:
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError as error:
+        raise ContractError("cannot read arm /proc/pid/stat") from error
+    fields = text.rpartition(")")[2].split()
+    if len(fields) < 10:
+        raise ContractError("arm /proc/pid/stat is truncated")
+    try:
+        return {"minflt": int(fields[7]), "majflt": int(fields[9])}
+    except ValueError as error:
+        raise ContractError("arm /proc/pid/stat is unparsable") from error
+
+
+def _read_proc_io(pid: int) -> JsonObject:
+    try:
+        text = Path(f"/proc/{pid}/io").read_text()
+    except OSError as error:
+        raise ContractError("cannot read arm /proc/pid/io") from error
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        name, separator, raw = line.partition(":")
+        if not separator:
+            continue
+        if name in {"rchar", "read_bytes", "wchar", "write_bytes", "syscr", "syscw"}:
+            try:
+                values[name] = int(raw.strip())
+            except ValueError as error:
+                raise ContractError("arm /proc/pid/io is unparsable") from error
+    required = {"rchar", "read_bytes", "wchar", "write_bytes", "syscr", "syscw"}
+    if set(values) != required:
+        raise ContractError("arm /proc/pid/io is missing counters")
+    return {key: values[key] for key in sorted(required)}
+
+
+def _verify_binary_copy(source: Path, expected: str, destination: Path) -> Path:
+    try:
+        descriptor = os.open(
+            source,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise ContractError("cannot open arm binary") from error
+    digest = hashlib.sha256()
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ContractError("arm binary must be a regular file")
+        if info.st_size > MAX_BINARY_BYTES:
+            raise ContractError("arm binary exceeds the size cap")
+        target_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o500,
+        )
+        try:
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                written = 0
+                while written < len(chunk):
+                    written += os.write(target_fd, chunk[written:])
+            os.fsync(target_fd)
+        finally:
+            os.close(target_fd)
+    except OSError as error:
+        raise ContractError("cannot copy arm binary") from error
+    finally:
+        os.close(descriptor)
+    if digest.hexdigest() != expected:
+        destination.unlink(missing_ok=True)
+        raise ContractError("arm binary SHA-256 does not match its pin")
+    destination.chmod(0o500)
+    return destination
+
+
+def _rehash_binary(path: Path, expected: str) -> None:
+    raw = _read_regular_file(path, MAX_BINARY_BYTES, "arm binary copy")
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ContractError("arm binary changed after its verified copy")
+
+
+def _expand_command(
+    template: tuple[str, ...],
+    *,
+    binary: Path,
+    data_dir: Path,
+    port: int,
+    cookie: Path,
+    config: Path,
+) -> list[str]:
+    replacements = {
+        "{binary}": str(binary),
+        "{data_dir}": str(data_dir),
+        "{rpc_port}": str(port),
+        "{rpc_bind}": "127.0.0.1",
+        "{cookie}": str(cookie),
+        "{config}": str(config),
+    }
+    return [replacements.get(part, part) for part in template]
+
+
+class _ArmProcess:
+    """One owned RPC arm: a single child, one loopback port, one identity."""
+
+    def __init__(
+        self,
+        spec: ArmSpec,
+        binary: Path,
+        cookie: Path,
+        port: int,
+        credentials: tuple[str, str],
+        timeout: Decimal,
+        max_bytes: int,
+        expected_height: int,
+        expected_hash: str,
+    ) -> None:
+        self.spec = spec
+        self.binary = binary
+        self.cookie = cookie
+        self.port = port
+        self.endpoint = f"http://127.0.0.1:{port}/"
+        self._credentials = credentials
+        self._timeout = timeout
+        self._max_bytes = max_bytes
+        self._expected_height = expected_height
+        self._expected_hash = expected_hash
+        self._process: subprocess.Popen[bytes] | None = None
+        self._pid: int | None = None
+        self._starttime: int | None = None
+        self._warmed = False
+
+    def spawn(self) -> None:
+        if self._process is not None:
+            raise ContractError(f"{self.spec.kind} process is already running")
+        self.spec.datadir.mkdir(parents=True, exist_ok=True)
+        _rehash_binary(self.binary, self.spec.binary_sha256)
+        argv = _expand_command(
+            self.spec.command,
+            binary=self.binary,
+            data_dir=self.spec.datadir,
+            port=self.port,
+            cookie=self.cookie,
+            config=self.spec.config.path,
+        )
+        try:
+            self._process = subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as error:
+            raise ContractError(f"cannot spawn {self.spec.kind} process") from error
+        self._pid = self._process.pid
+        _wait_tcp("127.0.0.1", self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS, self._process)
+        self._starttime = _read_starttime(self._pid)
+        self._warmed = False
+
+    def ensure(self, policy: str) -> None:
+        if policy == "warm":
+            if self._process is None:
+                self.spawn()
+                self.warm()
+            return
+        self.terminate()
+        self.spawn()
+
+    def warm(self) -> None:
+        if self._warmed:
+            return
+        _rpc_once(
+            self.endpoint,
+            self._credentials,
+            self._timeout,
+            self._max_bytes,
+            self._expected_height,
+            self._expected_hash,
+        )
+        self._warmed = True
+
+    def identity(self) -> tuple[int, int]:
+        if self._pid is None or self._starttime is None:
+            raise ContractError(f"{self.spec.kind} process has no attested identity")
+        if _read_starttime(self._pid) != self._starttime:
+            raise ContractError(f"{self.spec.kind} process identity changed")
+        return self._pid, self._starttime
+
+    def snapshot(self) -> tuple[JsonObject, JsonObject]:
+        pid, _ = self.identity()
+        return _read_proc_faults(pid), _read_proc_io(pid)
+
+    def terminate(self) -> None:
+        process = self._process
+        if process is None:
+            self._pid = None
+            self._starttime = None
+            self._warmed = False
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=CHILD_TERMINATE_GRACE_NS / 1_000_000_000)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=CHILD_KILL_REAP_NS / 1_000_000_000)
+            except subprocess.TimeoutExpired as error:
+                raise ContractError(
+                    f"{self.spec.kind} process resisted campaign cleanup"
+                ) from error
+        self._process = None
+        self._pid = None
+        self._starttime = None
+        self._warmed = False
+
+
+def _run_eviction(procedure: FileRef) -> JsonObject:
+    _verify_file(procedure, "eviction procedure")
+    started = time.perf_counter_ns()
+    try:
+        completed = subprocess.run(
+            [str(procedure.path)],
+            check=False,
+            capture_output=True,
+            timeout=CHILD_TERMINATE_GRACE_NS / 1_000_000_000,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ContractError("eviction procedure could not be executed") from error
+    if completed.returncode != 0:
+        raise ContractError("eviction procedure did not succeed")
+    return {
+        "procedure_sha256": procedure.sha256,
+        "exit_status": 0,
+        "monotonic_ns": started,
+    }
+
+
+def _delta_map(before: JsonObject, after: JsonObject, keys: tuple[str, ...]) -> JsonObject:
+    result: JsonObject = {}
+    for key in keys:
+        start = before[key]
+        end = after[key]
+        if not isinstance(start, int) or not isinstance(end, int) or end < start:
+            raise ContractError("process counters decreased during the observation")
+        result[key] = end - start
+    return result
+
+
+def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
+    value, _ = _load_json_path(config_path, MAX_INPUT_BYTES, "campaign config")
+    config = _parse_campaign_config(value)
+    corpus = config.corpus
+    corpus_file = corpus["file"]
+    if not isinstance(corpus_file, FileRef):
+        raise ContractError("campaign config.corpus.file is malformed")
+    _verify_file(corpus_file, "campaign config.corpus.file", MAX_RESPONSE_BYTES)
+    if (
+        config.expected["height"] != corpus["height"]
+        or config.expected["bestblock"] != corpus["bestblock"]
+    ):
+        raise ContractError("campaign expected tip does not match the corpus")
+    credentials = _load_credentials(config.credential_file)
+    _verify_file(config.core.config, "core config")
+    _verify_file(config.candidate.config, "candidate config")
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    core_bin = _verify_binary_copy(
+        config.core.binary,
+        config.core.binary_sha256,
+        workspace / "core-node",
+    )
+    candidate_bin = _verify_binary_copy(
+        config.candidate.binary,
+        config.candidate.binary_sha256,
+        workspace / "candidate-node",
+    )
+    expected_height = _uint(config.expected["height"], "campaign expected.height")
+    expected_hash = _hash(config.expected["bestblock"], "campaign expected.bestblock")
+    core_port = _allocate_loopback_port()
+    candidate_port = _allocate_loopback_port()
+    if candidate_port == core_port:
+        raise ContractError("arm RPC ports collided")
+    arms = {
+        "core": _ArmProcess(
+            config.core,
+            core_bin,
+            config.credential_file.path,
+            _allocate_loopback_port(),
+            credentials,
+            config.timeout_seconds,
+            config.max_response_bytes,
+            expected_height,
+            expected_hash,
+        ),
+        "bitcoin-rs": _ArmProcess(
+            config.candidate,
+            candidate_bin,
+            config.credential_file.path,
+            _allocate_loopback_port(),
+            credentials,
+            config.timeout_seconds,
+            config.max_response_bytes,
+            expected_height,
+            expected_hash,
+        ),
+    }
+    executable_refs = {
+        "core": _file_ref_from_path(core_bin, MAX_BINARY_BYTES, "core binary copy"),
+        "bitcoin-rs": _file_ref_from_path(
+            candidate_bin, MAX_BINARY_BYTES, "candidate binary copy"
+        ),
+    }
+    triples: list[JsonObject] = []
+    try:
+        if config.policy == "warm":
+            for arm in arms.values():
+                arm.ensure(config.policy)
+        for index in range(TRIPLE_COUNT):
+            pair = index // 2
+            position = index % 2
+            kind = trial_order(pair)[position]
+            arm = arms[kind]
+            spec = arm.spec
+            eviction_execution: JsonObject | None = None
+            if config.policy == "process-cold/page-cache-evicted":
+                if config.eviction_procedure is None:
+                    raise ContractError("eviction policy is missing its procedure")
+                eviction_execution = _run_eviction(config.eviction_procedure)
+            arm.ensure(config.policy)
+            pid, starttime = arm.identity()
+            proc_stat_before, proc_io_before = arm.snapshot()
+            prefix = f"{index:02d}-{kind}"
+            coordinates: JsonObject = {
+                "campaign_id": config.campaign_id,
+                "policy": config.policy,
+                "pair_index": pair,
+                "position": position,
+                "arm_id": spec.arm_id,
+                "arm_kind": kind,
+            }
+            pre_record: JsonObject = {
+                **coordinates,
+                "schema": PRE_RECEIPT_SCHEMA,
+                "executable": _ref_json(executable_refs[kind]),
+                "config": _ref_json(spec.config),
+                "corpus": {
+                    "identity": corpus["identity"],
+                    "file": _ref_json(corpus_file),
+                    "height": corpus["height"],
+                    "bestblock": corpus["bestblock"],
+                },
+                "backend": spec.backend,
+                "datadir": str(spec.datadir),
+                "endpoint": arm.endpoint,
+                "attested_pid": pid,
+                "attested_starttime": starttime,
+                "affinity": config.affinity,
+                "cache_policy_action": _cache_action(config.policy),
+                "eviction_procedure": (
+                    None
+                    if config.eviction_procedure is None
+                    else _ref_json(config.eviction_procedure)
+                ),
+                "frozen_height": expected_height,
+                "frozen_bestblock": expected_hash,
+                "proc_stat_before": proc_stat_before,
+                "proc_io_before": proc_io_before,
+                "operator_trust_boundary": OPERATOR_TRUST_BOUNDARY,
+            }
+            pre_ref = _write_json(workspace / f"{prefix}-pre.json", pre_record)
+            trial_record: JsonObject = {
+                **coordinates,
+                "schema": TRIAL_INPUT_SCHEMA,
+                "endpoint": arm.endpoint,
+                "credential_file": _ref_json(config.credential_file),
+                "timeout_seconds": config.timeout_seconds,
+                "max_response_bytes": config.max_response_bytes,
+                "corpus": {
+                    "identity": corpus["identity"],
+                    "file": _ref_json(corpus_file),
+                    "height": corpus["height"],
+                    "bestblock": corpus["bestblock"],
+                },
+                "expected": {
+                    "height": expected_height,
+                    "bestblock": expected_hash,
+                },
+                "controller_pre_receipt": _ref_json(pre_ref),
+            }
+            trial_ref = _write_json(workspace / f"{prefix}-trial.json", trial_record)
+            observation = run_trial(trial_ref.path)
+            obs_ref = _write_json(
+                workspace / f"{prefix}-obs.json", observation, MAX_RESPONSE_BYTES
+            )
+            proc_stat_after, proc_io_after = arm.snapshot()
+            post_record: JsonObject = {
+                **coordinates,
+                "schema": POST_RECEIPT_SCHEMA,
+                "pre_receipt_sha256": pre_ref.sha256,
+                "observation_sha256": observation["self_sha256"],
+                "attested_pid": pid,
+                "attested_starttime": starttime,
+                "proc_stat_after": proc_stat_after,
+                "proc_io_after": proc_io_after,
+                "faults_delta": _delta_map(
+                    proc_stat_before, proc_stat_after, ("minflt", "majflt")
+                ),
+                "io_delta": _delta_map(
+                    proc_io_before,
+                    proc_io_after,
+                    ("rchar", "read_bytes", "wchar", "write_bytes"),
+                ),
+                "eviction_execution": eviction_execution,
+            }
+            post_ref = _write_json(workspace / f"{prefix}-post.json", post_record)
+            triples.append(
+                {
+                    "trial_input": _ref_json(trial_ref),
+                    "pre_receipt": _ref_json(pre_ref),
+                    "observation": _ref_json(obs_ref),
+                    "post_receipt": _ref_json(post_ref),
+                }
+            )
+            if config.policy != "warm":
+                arm.terminate()
+    finally:
+        for arm in arms.values():
+            arm.terminate()
+
+    manifest: JsonObject = {
+        "schema": AGGREGATE_INPUT_SCHEMA,
+        "campaign_id": config.campaign_id,
+        "policy": config.policy,
+        "corpus": {
+            "identity": corpus["identity"],
+            "file": _ref_json(corpus_file),
+            "height": corpus["height"],
+            "bestblock": corpus["bestblock"],
+        },
+        "triples": triples,
+    }
+    manifest_ref = _write_json(workspace / "aggregate.json", manifest)
+    return aggregate(manifest_ref.path)
+
+
 def _link_tmpfile(fd: int, dir_fd: int, name: str) -> None:
     # linkat with AT_EMPTY_PATH publishes the anonymous O_TMPFILE inode
     # itself. A pathname-based link would re-resolve a replaceable name
@@ -1710,11 +2393,18 @@ def main(argv: list[str] | None = None) -> int:
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--input", required=True, type=Path)
         subparser.add_argument("--output", required=True, type=Path)
+    campaign = subparsers.add_parser("campaign")
+    campaign.add_argument("--input", required=True, type=Path)
+    campaign.add_argument("--output", required=True, type=Path)
+    campaign.add_argument("--workspace", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        record = (
-            run_trial(args.input) if args.command == "trial" else aggregate(args.input)
-        )
+        if args.command == "trial":
+            record = run_trial(args.input)
+        elif args.command == "aggregate":
+            record = aggregate(args.input)
+        else:
+            record = run_campaign(args.input, args.workspace)
         _write_record(args.output, record)
     except ComparatorError as error:
         return _die(str(error))

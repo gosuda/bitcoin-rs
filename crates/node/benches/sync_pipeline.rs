@@ -451,20 +451,19 @@ fn print_spend_proxy_summary(blocks: &[Block]) {
     );
 }
 
-fn block_source_fixture(max_height: u32) -> HeightBlockSource {
+fn block_source_fixture(max_height: u32) -> BenchBlockSource {
     let block = Network::Regtest.genesis_block();
-    HeightBlockSource {
-        blocks: vec![block; usize::try_from(max_height).expect("height fits usize") + 1],
-    }
+    BenchBlockSource { max_height, block }
 }
 
-struct HeightBlockSource {
-    blocks: Vec<Block>,
+struct BenchBlockSource {
+    max_height: u32,
+    block: Block,
 }
 
-impl BlockSource for HeightBlockSource {
+impl BlockSource for BenchBlockSource {
     fn block_at_height(&self, height: u32) -> Option<Block> {
-        self.blocks.get(usize::try_from(height).ok()?).cloned()
+        (height <= self.max_height).then(|| self.block.clone())
     }
 }
 
