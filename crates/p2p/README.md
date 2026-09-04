@@ -6,8 +6,9 @@ handshaking, inbound dispatch, connection management, and block-download policy.
 Each `Peer` owns one connection's stream and handshake state. Live connections are
 identified by a `ConnectionId`, cleaned up through a `PeerLease`, and tracked with
 ready metadata by the shared `PeerTable`. `P2pService` owns workers and the
-session store; `BlockSync` owns the production download window. The node
-supplies chain queries and coordinates chain application. A connection
+session store. `BlockSync` owns the only production download window; the service
+does not hold a second copy. The node supplies chain queries and coordinates
+chain application. A connection
 negotiates version/verack in `handshake`, then runs the peer finite-state machine
 in `fsm`; `wire` is the protocol codec. The per-connection writer coalesces a ready
 burst of control messages into one `write_messages` writev; blocks and transactions

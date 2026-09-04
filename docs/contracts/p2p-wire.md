@@ -44,7 +44,10 @@ normative; it places them under the
 
 ## Live gaps
 
-- **Peer lifecycle boundary**: Moving the remaining P2P scheduling and lifecycle policy out of `crates/node` is tracked under #217 (open).
+- **Peer lifecycle boundary**: Header-request planning and getdata fan-out
+  still execute in `crates/node` `BlockSync`. Policy types already live in
+  `crates/p2p`. Moving those remaining executor seams is tracked under #217
+  (open). `P2pService` no longer holds a shadow download window.
 
 ## Proven by
 

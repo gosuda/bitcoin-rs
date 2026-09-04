@@ -300,22 +300,6 @@ impl PeerTable {
             })
             .collect()
     }
-
-    /// Selects and disconnects a ready address while holding the table lock
-    /// from selection through removal, so a replacement cannot be chosen.
-    pub fn disconnect_selected_ready(
-        &self,
-        select: impl FnOnce() -> Option<SocketAddr>,
-    ) -> Option<(SocketAddr, PeerSource)> {
-        let mut entries = self.entries.write();
-        let addr = select()?;
-        let entry = entries.get(&addr)?;
-        entry.info.as_ref()?;
-        let source = entry.lease.source(addr);
-        let removed = entries.remove(&addr)?;
-        removed.lease.cancel();
-        Some((addr, source))
-    }
 }
 
 #[cfg(test)]
