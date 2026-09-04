@@ -213,8 +213,8 @@ mod tests {
         let genesis = Network::Regtest.genesis_block();
         let hash = Hash256::from(genesis.block_hash());
         let publisher = Arc::new(RecordingPublisher::default());
-        let effects = ChainEffects::noop()
-            .with_zmq_publisher(Arc::clone(&publisher) as Arc<dyn ZmqPublisher>);
+        let zmq: Arc<dyn ZmqPublisher> = publisher.clone();
+        let effects = ChainEffects::noop().with_zmq_publisher(zmq);
 
         effects.record_connected(0, &genesis);
         assert_eq!(effects.block_log().read().len(), 1);
