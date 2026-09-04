@@ -121,6 +121,10 @@ Owners:
   txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
   TOML parsing. Applied-tip mutation is owned by the chainstate facade
   (`ARCH-07`), not by a public field bag of subsystem handles.
+- `UserConfig::overlay` applies a later layer field-wise: a set field replaces
+  the earlier value; an unset field leaves it. Nested override structs merge
+  the same way, including `ChainstateJournalOverrides`. Proof:
+  `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`.
 
 ### `ARCH-06`: Hierarchy change and exception process
 
@@ -203,3 +207,6 @@ Owners:
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
   owned by `ChainEffects`, not by apply.
+- `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`:
+  later `UserConfig` layers win on set fields, including nested
+  `ChainstateJournalOverrides` (`ARCH-05`).

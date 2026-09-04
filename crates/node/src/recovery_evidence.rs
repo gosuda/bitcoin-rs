@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Maximum file size for any evidence file (4 KiB).
-const MAX_FILE_BYTES: usize = 4096;
+pub(crate) const MAX_FILE_BYTES: usize = 4096;
 
 const WITNESS_FILE: &str = "applied-tip-witness.json";
 const WITNESS_PREV: &str = "applied-tip-witness.json.prev";
@@ -101,6 +101,17 @@ impl AppliedTipWitness {
     fn is_valid_for(&self, expected_format: &str, genesis_hash: &str) -> bool {
         self.format == expected_format && self.genesis_hash == genesis_hash
     }
+}
+
+/// Decodes an applied-tip witness from already-read sidecar bytes.
+pub(crate) fn decode_applied_tip_witness(
+    data: &[u8],
+    genesis_hash: &str,
+) -> Option<AppliedTipWitness> {
+    let witness = AppliedTipWitness::from_json(data)?;
+    witness
+        .is_valid_for(WITNESS_FORMAT, genesis_hash)
+        .then_some(witness)
 }
 
 // ---------------------------------------------------------------------------

@@ -710,15 +710,6 @@ fn record_end(position: BlockFilePosition) -> Option<u64> {
     body_offset(position.offset)?.checked_add(u64::from(position.len))
 }
 
-/// Complete framed record bytes in an already-open block file.
-///
-/// Walks headers without truncating an incomplete tail. The returned length is
-/// the logical payload of this file: every complete `BRSB` frame, and none of
-/// the slack or torn suffix.
-pub fn complete_framed_bytes(file: &mut File) -> Result<u64, StorageError> {
-    Ok(complete_framed_stats(file)?.1)
-}
-
 /// Complete framed record count and byte length in an already-open block file.
 ///
 /// Does not truncate an incomplete tail.

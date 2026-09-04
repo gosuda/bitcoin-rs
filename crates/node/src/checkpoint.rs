@@ -1678,6 +1678,8 @@ fn parse_tip(tip: &CheckpointTipV1) -> Result<HeaderCheckpointTip, CheckpointErr
     })
 }
 
+/// Checkpoint-file network spelling. Core's `testnet` alias names
+/// [`Network::Testnet3`]. Evidence identity uses [`Network::identity_name`].
 fn network_name(network: Network) -> &'static str {
     match network {
         Network::Mainnet => "mainnet",

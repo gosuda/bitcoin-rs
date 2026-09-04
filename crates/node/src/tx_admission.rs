@@ -21,7 +21,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-use bitcoin_rs_mempool::MempoolGateway;
+use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_p2p::{InboundTx, PeerSource, TxInventory};
 use bitcoin_rs_primitives::{Hash256, Tx, Txid, Wtxid};
 use crossbeam_channel::Sender;
@@ -385,6 +385,34 @@ fn unindex_orphan_parents(inner: &mut AdmissionInner, txid: &Txid, tx: &Tx) {
     }
 }
 
+/// Re-queues orphans whose parent was just admitted, from any origin.
+///
+/// Peer, RPC, and reorg accepts all publish `Accepted` here, so waiting
+/// children share one wake path. Block confirmation of a parent that was
+/// never in the pool is handled by the apply path, which sees every
+/// connected txid.
+pub(crate) struct OrphanWakeObserver {
+    admission: Arc<TxAdmission>,
+}
+
+impl OrphanWakeObserver {
+    /// Wakes held children when `admission` sees a newly available parent.
+    #[must_use]
+    pub(crate) fn new(admission: Arc<TxAdmission>) -> Self {
+        Self { admission }
+    }
+}
+
+impl MempoolObserver for OrphanWakeObserver {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        for change in &envelope.result.changes {
+            if matches!(change.outcome, MutationOutcome::Accepted) {
+                self.admission.enqueue_orphans_waiting_on(Txid(change.txid));
+            }
+        }
+    }
+}
+
 /// [`TxInventory`] forwarding to the inherent admission lookups so the p2p
 /// dispatch path can filter inbound `inv` announcements against the orphan
 /// map, recent-rejects cache, and mempool, and serve `getdata` tx bodies.
@@ -724,5 +752,44 @@ mod tests {
             admission.get_tx(txid).is_none(),
             "getdata for a rejected tx must not serve a body"
         );
+    }
+
+    fn mutation_envelope(
+        origin: bitcoin_rs_mempool::AdmissionOrigin,
+        txid: Hash256,
+        outcome: MutationOutcome,
+    ) -> MutationEnvelope {
+        MutationEnvelope {
+            origin,
+            result: bitcoin_rs_mempool::MutationResult {
+                changes: vec![bitcoin_rs_mempool::MutationChange { txid, outcome }],
+                sequence_base: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn orphan_wake_requeues_children_on_parent_accept() {
+        let gateway = empty_gateway();
+        let admission = Arc::new(TxAdmission::new(gateway));
+        let (ingress_tx, ingress_rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundTx>(4);
+        admission.attach_ingress(ingress_tx);
+
+        let child = Arc::new(tx_with_marker(8));
+        let parent = child.inputs[0].previous_output.txid;
+        admission.record_orphan(&child, test_source());
+
+        let observer = OrphanWakeObserver::new(Arc::clone(&admission));
+        observer.on_mutation(&mutation_envelope(
+            bitcoin_rs_mempool::AdmissionOrigin::Rpc,
+            Hash256::from(parent),
+            MutationOutcome::Accepted,
+        ));
+
+        let inbound = ingress_rx
+            .try_recv()
+            .expect("accepted parent must re-queue the waiting child");
+        assert_eq!(inbound.tx.txid(), child.txid());
+        assert_eq!(admission.orphan_count(), 0);
     }
 }

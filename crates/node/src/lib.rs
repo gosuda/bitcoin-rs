@@ -31,8 +31,6 @@ pub mod event_loop;
 pub mod import;
 /// Tracing initialization.
 pub mod logging;
-/// P2P admission and local-relay mempool observer legs.
-mod mempool_observer;
 /// Metrics instrumentation and optional exposition.
 pub mod metrics;
 /// Node-owned mining candidate lifecycle coordinator.

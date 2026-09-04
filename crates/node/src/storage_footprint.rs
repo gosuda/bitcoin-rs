@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -14,13 +15,12 @@ use bitcoin_rs_index::{IndexWatermark, Indexer};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::{
     DataDirAnchor, FootprintError, LogicalLedger, LogicalOwner, PhysicalLedger,
-    PhysicalObservationKind, StorageBackend, clamp_dbcache_bytes, logical_store_owners,
-    split_cache_budget,
+    PhysicalObservationKind, StorageBackend, clamp_dbcache_bytes, dir_has_entries,
+    logical_store_owners, opened_fd_path, split_cache_budget,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
-use crate::Network;
 use crate::config::{NodeConfig, ScriptIndexMode};
 
 /// Default unpruned, no-index mainnet peak budget: `1_000_000_000_000` allocated bytes.
@@ -34,9 +34,9 @@ pub const EVIDENCE_FORMAT: &str = "bitcoin-rs-storage-footprint-v1";
 pub struct MeasureStorageRequest {
     /// Conservative peak allocated bytes from an isolated filesystem or project quota.
     pub high_water_allocated_bytes: Option<u64>,
-    /// Override for the recorded stop height.
+    /// Pinned stop height. Pairing and hash format: `FP-03`.
     pub stop_height: Option<u32>,
-    /// Override for the recorded stop hash (RPC display hex).
+    /// Pinned stop hash. Pairing and hash format: `FP-03`.
     pub stop_hash: Option<String>,
 }
 
@@ -100,6 +100,8 @@ pub struct EvidenceIdentity {
     pub stop_height: u32,
     /// Stop hash in RPC display hex.
     pub stop_hash: String,
+    /// Whether both stop height and hash were supplied together by the caller.
+    pub stop_pinned: bool,
     /// Durable index watermarks, if the `txindex` namespace could be opened.
     pub index_watermarks: IndexWatermarkEvidence,
 }
@@ -212,8 +214,8 @@ pub fn measure_storage_footprint(
             .map_err(|error| io_from_footprint(&error))?;
     }
 
-    let (logical, watermarks) = collect_logical(&anchor, config)?;
-    let identity = evidence_identity(config, request, watermarks);
+    let (logical, watermarks) = collect_logical(&anchor, config.storage.backend)?;
+    let identity = evidence_identity(config, request, watermarks, &anchor)?;
     let budget = budget_evidence(&identity, &physical);
     Ok(StorageFootprintEvidence {
         format: EVIDENCE_FORMAT,
@@ -226,7 +228,7 @@ pub fn measure_storage_footprint(
 
 fn collect_logical(
     anchor: &DataDirAnchor,
-    config: &NodeConfig,
+    backend: StorageBackend,
 ) -> Result<(LogicalLedger, IndexWatermarkEvidence)> {
     let mut logical = LogicalLedger::default();
     logical.push(
@@ -235,10 +237,18 @@ fn collect_logical(
             .map_err(|error| io_from_footprint(&error))?,
     );
 
-    let chainstate_dir = config.data_dir.join("chainstate");
-    if dir_has_entries(&chainstate_dir)? {
-        for owner in scan_store(config.storage.backend, &chainstate_dir, "chainstate")? {
-            logical.push(owner);
+    if let Some(chainstate) = anchor
+        .open_child_dir("chainstate")
+        .map_err(|error| io_from_footprint(&error))?
+    {
+        if dir_has_entries(chainstate.as_fd()).map_err(|error| io_from_footprint(&error))? {
+            let path = opened_fd_path(chainstate.as_fd());
+            // Hold `chainstate` until the backend has opened `/proc/self/fd/N`.
+            let owners = scan_store(backend, &path, "chainstate")?;
+            drop(chainstate);
+            for owner in owners {
+                logical.push(owner);
+            }
         }
     }
 
@@ -247,14 +257,21 @@ fn collect_logical(
         script_history: None,
         script_live: None,
     };
-    let txindex_dir = config.data_dir.join("txindex");
-    if dir_has_entries(&txindex_dir)? {
-        let (owners, found) = scan_store_with_watermarks(config.storage.backend, &txindex_dir)?;
-        for owner in owners {
-            logical.push(owner);
-        }
-        if let Some(found) = found {
-            watermarks = found;
+    if let Some(txindex) = anchor
+        .open_child_dir("txindex")
+        .map_err(|error| io_from_footprint(&error))?
+    {
+        if dir_has_entries(txindex.as_fd()).map_err(|error| io_from_footprint(&error))? {
+            let path = opened_fd_path(txindex.as_fd());
+            // Hold `txindex` until the backend has opened `/proc/self/fd/N`.
+            let (owners, found) = scan_store_with_watermarks(backend, &path)?;
+            drop(txindex);
+            for owner in owners {
+                logical.push(owner);
+            }
+            if let Some(found) = found {
+                watermarks = found;
+            }
         }
     }
     Ok((logical, watermarks))
@@ -264,17 +281,16 @@ fn evidence_identity(
     config: &NodeConfig,
     request: &MeasureStorageRequest,
     watermarks: IndexWatermarkEvidence,
-) -> EvidenceIdentity {
+    anchor: &DataDirAnchor,
+) -> Result<EvidenceIdentity> {
     let indexes_enabled = config.indexes.txindex || config.indexes.script_index.is_enabled();
     let cache_budget = clamp_dbcache_bytes(config.storage.dbcache_mb);
     let shares = split_cache_budget(cache_budget, indexes_enabled);
     let genesis = config.network.genesis_block_hash().to_string_be();
-    let (witness_height, witness_hash) =
-        match crate::recovery_evidence::read_witness(&config.data_dir, &genesis) {
-            Some(witness) => (witness.height, witness.block_hash),
-            None => (0, genesis),
-        };
-    EvidenceIdentity {
+    let (witness_height, witness_hash) = read_witness_from_anchor(anchor, &genesis)?;
+    let (stop_height, stop_hash, stop_pinned) =
+        resolve_stop(request, witness_height, witness_hash)?;
+    Ok(EvidenceIdentity {
         pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
         git_commit: option_env!("GIT_COMMIT").map(ToOwned::to_owned),
         rustc_release: option_env!("RUSTC_RELEASE").map(ToOwned::to_owned),
@@ -287,7 +303,7 @@ fn evidence_identity(
             .ok()
             .and_then(|path| sha256_file(&path).ok()),
         features: compiled_features(),
-        network: network_name(config.network).to_owned(),
+        network: config.network.identity_name().to_owned(),
         backend: config.storage.backend.as_str().to_owned(),
         dbcache_mb: config.storage.dbcache_mb,
         cache_budget_bytes: cache_budget,
@@ -298,23 +314,49 @@ fn evidence_identity(
         script_index: script_index_name(config.indexes.script_index).to_owned(),
         blockfilterindex: false,
         index_lane: index_lane(config),
-        stop_height: request.stop_height.unwrap_or(witness_height),
-        stop_hash: request.stop_hash.clone().unwrap_or(witness_hash),
+        stop_height,
+        stop_hash,
+        stop_pinned,
         index_watermarks: watermarks,
+    })
+}
+
+fn resolve_stop(
+    request: &MeasureStorageRequest,
+    witness_height: u32,
+    witness_hash: String,
+) -> Result<(u32, String, bool)> {
+    match (request.stop_height, request.stop_hash.as_deref()) {
+        (None, None) => Ok((witness_height, witness_hash, false)),
+        (Some(_), None) | (None, Some(_)) => {
+            bail!(
+                "--measure-storage-stop-height and --measure-storage-stop-hash must be supplied together"
+            );
+        }
+        (Some(height), Some(hash)) => {
+            let parsed = Hash256::from_str_be(hash)
+                .with_context(|| format!("invalid --measure-storage-stop-hash {hash:?}"))?;
+            Ok((height, parsed.to_string_be(), true))
+        }
     }
 }
 
-fn dir_has_entries(path: &Path) -> io::Result<bool> {
-    if !path.is_dir() {
-        return Ok(false);
-    }
-    for entry in std::fs::read_dir(path)? {
-        let name = entry?.file_name();
-        if name != "." && name != ".." {
-            return Ok(true);
+fn read_witness_from_anchor(anchor: &DataDirAnchor, genesis: &str) -> Result<(u32, String)> {
+    const CURRENT: &str = "applied-tip-witness.json";
+    const PREV: &str = "applied-tip-witness.json.prev";
+    for name in [CURRENT, PREV] {
+        if let Some(bytes) = anchor
+            .read_child_file(name, crate::recovery_evidence::MAX_FILE_BYTES)
+            .map_err(|error| io_from_footprint(&error))?
+        {
+            if let Some(witness) =
+                crate::recovery_evidence::decode_applied_tip_witness(&bytes, genesis)
+            {
+                return Ok((witness.height, witness.block_hash));
+            }
         }
     }
-    Ok(false)
+    Ok((0, genesis.to_owned()))
 }
 
 impl LogicalEvidence {
@@ -371,14 +413,19 @@ impl PhysicalNamespaceEvidence {
 
 fn budget_evidence(identity: &EvidenceIdentity, physical: &PhysicalLedger) -> BudgetEvidence {
     let applies = is_default_unpruned_mainnet(identity);
+    let over_budget = physical.budget_bytes() > DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES;
+    let conservative_high_water =
+        physical.observation_kind == PhysicalObservationKind::ConservativeHighWater;
     let verdict = if !applies {
         "inapplicable"
-    } else if physical.observation_kind != PhysicalObservationKind::ConservativeHighWater {
-        "snapshot_insufficient"
-    } else if physical.budget_bytes() <= DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES {
-        "pass"
-    } else {
+    } else if over_budget {
         "fail"
+    } else if !conservative_high_water {
+        "snapshot_insufficient"
+    } else if !identity.stop_pinned {
+        "tip_unpinned"
+    } else {
+        "pass"
     };
     BudgetEvidence {
         default_unpruned_limit_bytes: DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES,
@@ -407,16 +454,6 @@ fn index_lane(config: &NodeConfig) -> String {
         (false, ScriptIndexMode::Full) => "scriptindex-full".to_owned(),
         (true, ScriptIndexMode::Utxo) => "txindex+scriptindex-utxo".to_owned(),
         (true, ScriptIndexMode::Full) => "txindex+scriptindex-full".to_owned(),
-    }
-}
-
-fn network_name(network: Network) -> &'static str {
-    match network {
-        Network::Mainnet => "mainnet",
-        Network::Testnet3 => "testnet3",
-        Network::Testnet4 => "testnet4",
-        Network::Signet => "signet",
-        Network::Regtest => "regtest",
     }
 }
 
@@ -596,6 +633,7 @@ pub fn storage_footprint_json(evidence: &StorageFootprintEvidence) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Network;
     use bitcoin_rs_storage::measure_physical_tree;
     use tempfile::tempdir;
 
@@ -637,20 +675,152 @@ mod tests {
         config.p2p.dns_seeds_enabled = false;
         let snapshot =
             measure_physical_tree(dir.path()).map_err(|error| io_from_footprint(&error))?;
+        let genesis = Network::Mainnet.genesis_block_hash().to_string_be();
         let evidence = measure_storage_footprint(
             &config,
             &MeasureStorageRequest {
                 high_water_allocated_bytes: Some(snapshot.allocated_bytes),
                 stop_height: Some(0),
-                stop_hash: None,
+                stop_hash: Some(genesis.clone()),
             },
         )?;
+        assert!(evidence.identity.stop_pinned);
+        assert_eq!(evidence.identity.stop_height, 0);
+        assert_eq!(evidence.identity.stop_hash, genesis);
         assert!(evidence.budget.applies_to_this_record);
         assert_eq!(evidence.budget.verdict, "pass");
         assert_eq!(
             evidence.physical.observation_kind,
             PhysicalObservationKind::ConservativeHighWater.as_str()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unpinned_high_water_is_tip_unpinned_not_pass() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+        let mut config = NodeConfig::default_for_network(Network::Mainnet);
+        config.data_dir = dir.path().to_path_buf();
+        config.p2p.listen.clear();
+        config.p2p.dns_seeds_enabled = false;
+        let snapshot =
+            measure_physical_tree(dir.path()).map_err(|error| io_from_footprint(&error))?;
+        let evidence = measure_storage_footprint(
+            &config,
+            &MeasureStorageRequest {
+                high_water_allocated_bytes: Some(snapshot.allocated_bytes),
+                stop_height: None,
+                stop_hash: None,
+            },
+        )?;
+        assert!(!evidence.identity.stop_pinned);
+        assert!(evidence.budget.applies_to_this_record);
+        assert_eq!(evidence.budget.verdict, "tip_unpinned");
+        Ok(())
+    }
+
+    #[test]
+    fn stop_height_without_hash_is_rejected() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+        let mut config = NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = dir.path().to_path_buf();
+        config.p2p.listen.clear();
+        let error = match measure_storage_footprint(
+            &config,
+            &MeasureStorageRequest {
+                stop_height: Some(0),
+                stop_hash: None,
+                ..MeasureStorageRequest::default()
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => bail!("expected paired-stop rejection"),
+        };
+        assert!(
+            error.to_string().contains("must be supplied together"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stop_hash_without_height_is_rejected() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+        let mut config = NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = dir.path().to_path_buf();
+        config.p2p.listen.clear();
+        let genesis = Network::Regtest.genesis_block_hash().to_string_be();
+        let error = match measure_storage_footprint(
+            &config,
+            &MeasureStorageRequest {
+                stop_height: None,
+                stop_hash: Some(genesis),
+                ..MeasureStorageRequest::default()
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => bail!("expected paired-stop rejection"),
+        };
+        assert!(
+            error.to_string().contains("must be supplied together"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_stop_hash_is_rejected() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+        let mut config = NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = dir.path().to_path_buf();
+        config.p2p.listen.clear();
+        let error = match measure_storage_footprint(
+            &config,
+            &MeasureStorageRequest {
+                stop_height: Some(0),
+                stop_hash: Some("zz".to_owned()),
+                ..MeasureStorageRequest::default()
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => bail!("expected hash parse rejection"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("invalid --measure-storage-stop-hash"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    fn witness_json(genesis: &str, height: u32) -> String {
+        format!(
+            "{{\"format\":\"1\",\"genesis_hash\":\"{genesis}\",\"writer_epoch\":1,\"height\":{height},\"block_hash\":\"{genesis}\",\"time\":1}}"
+        )
+    }
+
+    #[test]
+    fn oversized_current_witness_falls_back_to_prev() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+        let genesis = Network::Regtest.genesis_block_hash().to_string_be();
+        let prev = witness_json(&genesis, 3);
+        let mut current = " ".repeat(crate::recovery_evidence::MAX_FILE_BYTES + 1);
+        current.push_str(&witness_json(&genesis, 9));
+        std::fs::write(dir.path().join("applied-tip-witness.json"), current)?;
+        std::fs::write(dir.path().join("applied-tip-witness.json.prev"), prev)?;
+        let mut config = NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = dir.path().to_path_buf();
+        config.p2p.listen.clear();
+        let evidence = measure_storage_footprint(&config, &MeasureStorageRequest::default())?;
+        assert!(!evidence.identity.stop_pinned);
+        assert_eq!(evidence.identity.stop_height, 3);
+        assert_eq!(evidence.identity.stop_hash, genesis);
         Ok(())
     }
 
@@ -698,7 +868,7 @@ mod tests {
                     DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES.saturating_add(1),
                 ),
                 stop_height: Some(0),
-                stop_hash: None,
+                stop_hash: Some(Network::Mainnet.genesis_block_hash().to_string_be()),
             },
         )?;
         assert!(evidence.budget.applies_to_this_record);
