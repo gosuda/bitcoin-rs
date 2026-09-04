@@ -62,7 +62,6 @@ const DAEMON_SIGNAL_WAIT_SECS: u64 = 3_600;
 
 #[cfg(test)]
 type PeerTable = Arc<bitcoin_rs_p2p::PeerTable>;
-type P2pChainQuery = Arc<dyn bitcoin_rs_p2p::ChainQuery>;
 #[cfg(test)]
 type OutboundConnectionHandle =
     std::thread::JoinHandle<core::result::Result<(), bitcoin_rs_p2p::PeerError>>;
@@ -809,7 +808,7 @@ pub(crate) fn start_node(
     let banned = state.banned_subnets();
     let network_active = state.network_active();
     let block_body_source = state.block_body_source();
-    let p2p_chain_query: P2pChainQuery = Arc::new(
+    let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
         bitcoin_rs_p2p::ActiveChainQuery::new(state.block_tree())
             .with_block_body_source(Arc::clone(&block_body_source)),
     );
@@ -850,7 +849,7 @@ pub(crate) fn start_node(
     )?;
     if let Err(error) = state.mempool_gateway().attach_observer_leg(
         "tx-relay",
-        Arc::new(crate::mempool_observer::LocalTxRelayObserver::new(
+        Arc::new(crate::tx_relay::LocalTxRelayObserver::new(
             ingress.queue.clone(),
         )),
     ) {

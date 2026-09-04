@@ -29,7 +29,7 @@
 
 use bitcoin_rs_mempool::{FeeRate, MempoolStats, MutationResult};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network, Tx, Txid, deserialize};
-use bitcoin_rs_rpc::context::CapabilitySnapshot;
+use bitcoin_rs_rpc::capabilities::CapabilitySnapshot;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;

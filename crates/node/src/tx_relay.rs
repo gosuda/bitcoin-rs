@@ -46,12 +46,13 @@
 //!
 //! The ingress consumer announces peer-origin accepts with the source
 //! excluded. RPC and reorg accepts announce through
-//! [`crate::mempool_observer::LocalTxRelayObserver`] on the same queue.
+//! [`LocalTxRelayObserver`] on the same queue.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use bitcoin_rs_mempool::{AdmissionOrigin, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_p2p::Message;
 use bitcoin_rs_primitives::{Txid, Wtxid};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -144,6 +145,45 @@ impl TxRelayQueue {
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+/// Announces locally-injected accepted transactions (`sendrawtransaction`,
+/// reorg re-admission) to every connected peer.
+///
+/// Peer-origin accepts are announced by the ingress consumer, which is the
+/// only place that still has the delivering connection id in scope at the
+/// moment of evaluation. This observer covers the origins that have no
+/// source peer to exclude.
+pub(crate) struct LocalTxRelayObserver {
+    relay: TxRelayQueue,
+}
+
+impl LocalTxRelayObserver {
+    /// Relays accepted local mutations through `relay`.
+    #[must_use]
+    pub(crate) fn new(relay: TxRelayQueue) -> Self {
+        Self { relay }
+    }
+}
+
+impl MempoolObserver for LocalTxRelayObserver {
+    fn on_mutation(&self, envelope: &MutationEnvelope) {
+        if !matches!(
+            envelope.origin,
+            AdmissionOrigin::Rpc | AdmissionOrigin::Reorg
+        ) {
+            return;
+        }
+        for change in &envelope.result.changes {
+            if !matches!(change.outcome, MutationOutcome::Accepted) {
+                continue;
+            }
+            let txid = Txid(change.txid);
+            // The mutation record carries txid only; the current `inv` path
+            // announces by txid, so the wtxid field is unused by the sink.
+            self.relay.announce(txid, Wtxid(change.txid), None);
+        }
     }
 }
 
@@ -550,5 +590,66 @@ mod tests {
         assert_eq!(req.txid, dummy_txid(1));
         assert_eq!(req.wtxid, dummy_wtxid(2));
         assert_eq!(req.source, Some(id));
+    }
+
+    fn mutation_envelope(
+        origin: AdmissionOrigin,
+        txid: Hash256,
+        outcome: MutationOutcome,
+    ) -> MutationEnvelope {
+        MutationEnvelope {
+            origin,
+            result: bitcoin_rs_mempool::MutationResult {
+                changes: vec![bitcoin_rs_mempool::MutationChange { txid, outcome }],
+                sequence_base: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn local_tx_relay_announces_rpc_and_reorg_accepts_only() {
+        use bitcoin_rs_mempool::PeerToken;
+
+        let (queue, rx) = TxRelayQueue::new(8);
+        let observer = LocalTxRelayObserver::new(queue);
+        let txid_hash = Hash256::from_le_bytes(&[9; 32]);
+
+        observer.on_mutation(&mutation_envelope(
+            AdmissionOrigin::Peer(PeerToken {
+                addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+                connection_id: 7,
+            }),
+            txid_hash,
+            MutationOutcome::Accepted,
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "peer-origin accepts are announced by the ingress consumer"
+        );
+
+        observer.on_mutation(&mutation_envelope(
+            AdmissionOrigin::Rpc,
+            txid_hash,
+            MutationOutcome::Removed(bitcoin_rs_mempool::RemovalReason::PolicyEviction),
+        ));
+        assert!(rx.try_recv().is_err(), "removals must not announce");
+
+        observer.on_mutation(&mutation_envelope(
+            AdmissionOrigin::Rpc,
+            txid_hash,
+            MutationOutcome::Accepted,
+        ));
+        let announced = rx.try_recv().expect("RPC accept must announce");
+        assert_eq!(announced.txid, Txid(txid_hash));
+        assert_eq!(announced.wtxid, Wtxid(txid_hash));
+        assert_eq!(announced.source, None);
+
+        observer.on_mutation(&mutation_envelope(
+            AdmissionOrigin::Reorg,
+            txid_hash,
+            MutationOutcome::Accepted,
+        ));
+        let announced = rx.try_recv().expect("reorg accept must announce");
+        assert_eq!(announced.source, None);
     }
 }

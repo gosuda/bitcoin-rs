@@ -7,10 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use bitcoin_rs_node::{
-    IndexOverrides, Network, ObservabilityOverrides, P2pOverrides, RpcOverrides, StorageOverrides,
-    UserConfig, ValidationOverrides,
-};
+use bitcoin_rs_node::{Network, UserConfig};
 
 /// Parses `path` into one user-config layer for `network`.
 pub fn load_file(path: &Path, network: Network) -> Result<UserConfig> {
@@ -45,7 +42,7 @@ fn parse_for_network(text: &str, network: Network) -> UserConfig {
         }
     }
 
-    overlay(&mut global, &selected);
+    global.overlay(&selected);
     global
 }
 
@@ -70,96 +67,6 @@ fn apply_core_key(layer: &mut UserConfig, key: &str, value: &str) {
             }
         }
         _ => {}
-    }
-}
-
-fn overlay(base: &mut UserConfig, other: &UserConfig) {
-    if other.network.is_some() {
-        base.network = other.network;
-    }
-    if other.data_dir.is_some() {
-        base.data_dir.clone_from(&other.data_dir);
-    }
-    overlay_storage(&mut base.storage, &other.storage);
-    overlay_p2p(&mut base.p2p, &other.p2p);
-    overlay_rpc(&mut base.rpc, &other.rpc);
-    overlay_indexes(&mut base.indexes, &other.indexes);
-    overlay_observability(&mut base.observability, &other.observability);
-    if other.notifications.is_some() {
-        base.notifications.clone_from(&other.notifications);
-    }
-    if other.chainstate_journal.is_some() {
-        base.chainstate_journal = other.chainstate_journal;
-    }
-    overlay_validation(&mut base.validation, &other.validation);
-}
-
-fn overlay_storage(base: &mut StorageOverrides, other: &StorageOverrides) {
-    if other.backend.is_some() {
-        base.backend = other.backend;
-    }
-    if other.dbcache_mb.is_some() {
-        base.dbcache_mb = other.dbcache_mb;
-    }
-    if other.prune_target_mb.is_some() {
-        base.prune_target_mb = other.prune_target_mb;
-    }
-}
-
-fn overlay_p2p(base: &mut P2pOverrides, other: &P2pOverrides) {
-    if other.magic.is_some() {
-        base.magic = other.magic;
-    }
-    if other.listen.is_some() {
-        base.listen.clone_from(&other.listen);
-    }
-    if other.dns_seeds.is_some() {
-        base.dns_seeds = other.dns_seeds;
-    }
-    if other.connect.is_some() {
-        base.connect.clone_from(&other.connect);
-    }
-}
-
-fn overlay_rpc(base: &mut RpcOverrides, other: &RpcOverrides) {
-    if other.bind.is_some() {
-        base.bind = other.bind;
-    }
-    if other.rest.is_some() {
-        base.rest = other.rest;
-    }
-    if other.user.is_some() {
-        base.user.clone_from(&other.user);
-    }
-    if other.password.is_some() {
-        base.password.clone_from(&other.password);
-    }
-    if other.cookie.is_some() {
-        base.cookie.clone_from(&other.cookie);
-    }
-}
-
-fn overlay_indexes(base: &mut IndexOverrides, other: &IndexOverrides) {
-    if other.txindex.is_some() {
-        base.txindex = other.txindex;
-    }
-    if other.script_index.is_some() {
-        base.script_index = other.script_index;
-    }
-}
-
-fn overlay_observability(base: &mut ObservabilityOverrides, other: &ObservabilityOverrides) {
-    if other.log_level.is_some() {
-        base.log_level.clone_from(&other.log_level);
-    }
-    if other.metrics_bind.is_some() {
-        base.metrics_bind = other.metrics_bind;
-    }
-}
-
-fn overlay_validation(base: &mut ValidationOverrides, other: &ValidationOverrides) {
-    if other.assume_valid_height.is_some() {
-        base.assume_valid_height = other.assume_valid_height;
     }
 }
 
