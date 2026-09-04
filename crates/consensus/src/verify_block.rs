@@ -336,7 +336,8 @@ pub fn check_witness_malleation(
 /// `SegWit` with witness data) use this as a boolean. Full consensus uses
 /// [`check_witness_malleation`].
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
-    check_witness_malleation(block, true, wtxids).is_ok()
+    witness_commitment_bytes(block).is_some()
+        && check_witness_malleation(block, true, wtxids).is_ok()
 }
 
 fn witness_commitment_bytes(block: &Block) -> Option<&[u8]> {

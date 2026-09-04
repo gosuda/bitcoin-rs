@@ -587,6 +587,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     Ok(())
 }
 
+// CONTRACT: API-15
 #[test]
 fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -609,6 +610,7 @@ fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
     Ok(())
 }
 
+// CONTRACT: API-15
 #[test]
 fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -627,6 +629,7 @@ fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
     Ok(())
 }
 
+// CONTRACT: API-17
 #[test]
 fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -660,6 +663,7 @@ fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyh
     Ok(())
 }
 
+// CONTRACT: API-17
 #[test]
 fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -697,6 +701,7 @@ fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result
     Ok(())
 }
 
+// CONTRACT: API-17
 #[test]
 fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -1189,6 +1194,7 @@ fn propose_block(
     }
 }
 
+// CONTRACT: API-14
 #[test]
 fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -1203,6 +1209,7 @@ fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
     Ok(())
 }
 
+// CONTRACT: API-14
 #[test]
 fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
@@ -1231,6 +1238,7 @@ fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     Ok(())
 }
 
+// CONTRACT: API-14
 #[test]
 fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
