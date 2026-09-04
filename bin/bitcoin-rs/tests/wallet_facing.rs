@@ -91,13 +91,19 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         fees.get("6").and_then(Value::as_f64).is_some(),
         "fee estimates must include the 6-block target wallets use: {fees}"
     );
+    assert_prefixed_chain_view(&client, &height, &tip_hash, &genesis_hash)?;
 
     client.wait_for_scriptindex(&address)?;
     assert_script_activity(&client, &address, &p2wpkh)?;
 
     let spend_hex = spend_first_anyone_can_spend(&client, &p2wpkh)?;
-    let broadcast = client.esplora_post("/tx", spend_hex.as_bytes())?;
-    assert_eq!(broadcast.status, 200, "POST /tx: {}", broadcast.text());
+    let broadcast = client.esplora_post("/api/v1/tx", spend_hex.as_bytes())?;
+    assert_eq!(
+        broadcast.status,
+        200,
+        "POST /api/v1/tx: {}",
+        broadcast.text()
+    );
     let txid = broadcast.text();
     assert_eq!(
         txid.trim().len(),
@@ -113,6 +119,12 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
             .and_then(Value::as_bool),
         Some(false),
         "broadcast transaction must be visible as unconfirmed: {mempool_tx}"
+    );
+    let tx_status = client.esplora_json(&format!("/tx/{}/status", txid.trim()))?;
+    assert_eq!(
+        tx_status.get("confirmed").and_then(Value::as_bool),
+        Some(false),
+        "GET /tx/{{id}}/status must report unconfirmed: {tx_status}"
     );
     Ok(())
 }
@@ -418,6 +430,44 @@ impl Client {
 
 fn p2wpkh_script() -> ScriptBuf {
     ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]))
+}
+
+fn assert_prefixed_chain_view(
+    client: &Client,
+    height: &str,
+    tip_hash: &str,
+    genesis_hash: &str,
+) -> TestResult {
+    let prefixed_height = client.esplora_text("/api/v1/block-height/0")?;
+    assert_eq!(
+        prefixed_height.trim(),
+        genesis_hash.trim(),
+        "GET /api/v1/block-height/0 must alias GET /block-height/0"
+    );
+    let prefixed_tip = client.esplora_text("/api/blocks/tip/hash")?;
+    assert_eq!(
+        prefixed_tip.trim(),
+        tip_hash.trim(),
+        "GET /api/blocks/tip/hash must alias GET /blocks/tip/hash"
+    );
+    let prefixed_tip_height = client.esplora_text("/api/v1/blocks/tip/height")?;
+    assert_eq!(
+        prefixed_tip_height.trim(),
+        height.trim(),
+        "GET /api/v1/blocks/tip/height must alias GET /blocks/tip/height"
+    );
+    let header = client.esplora_text(&format!("/block/{}/header", tip_hash.trim()))?;
+    assert_eq!(
+        header.trim().len(),
+        160,
+        "GET /block/{{hash}}/header must return 80-byte header hex: {header}"
+    );
+    let prefixed_fees = client.esplora_json("/api/v1/fee-estimates")?;
+    assert!(
+        prefixed_fees.get("6").and_then(Value::as_f64).is_some(),
+        "GET /api/v1/fee-estimates must alias GET /fee-estimates: {prefixed_fees}"
+    );
+    Ok(())
 }
 
 fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) -> TestResult {
