@@ -1,17 +1,17 @@
 # bitcoin-rs-script
 
-Script verification for the portable posture, plus the sigop counters and
-signature-hash caching that surround script execution.
+Native script verification for every consensus spend class, plus the sigop
+counters that surround execution.
 
 `Interpreter::execute` and `Interpreter::execute_with_prevouts` run one script
 spend under a `VerifyFlags` set (parseable from Core test-vector flag strings
-via `VerifyFlags::from_core_names`): the local BIP341 path verifies Taproot
-key-path spends in full — multi-input spends require the complete ordered
-prevout set — while the portable non-taproot path accepts only bare `OP_TRUE`
-spends; every other script class requires the kernel production path. Around
-the interpreter sit `sigops` (signature-operation counting), `sighash_cache`
-(the signature-hash cache wrapper), and `opcodes` (opcode re-exports and a
-local opcode newtype). Failures surface as `ScriptError`.
+via `VerifyFlags::from_core_names`). The opcode evaluator covers legacy and
+P2SH, SegWit v0 uses BIP143 sighashes, and Taproot key-path and script-path
+spends go through local BIP341/BIP342 verification. Multi-input Taproot
+spends require the complete ordered prevout set. Around the interpreter sit
+`sigops` (signature-operation counting) and the signature checker. Failures
+surface as `ScriptError`. Core's `script_tests`, `tx_valid`, and `tx_invalid`
+vectors pin zero native mismatches in `tests/core_vectors.rs`.
 
 ## Features
 

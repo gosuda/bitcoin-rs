@@ -113,7 +113,11 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 Key rules:
 - No reverse dependencies: lower layers never depend on higher layers.
 - Storage isolation: storage backends remain behind `crates/storage`. `crates/rpc` consumes node-level capabilities, never storage engines directly.
-- Consensus authority: the native Rust validation engine in `crates/consensus` is the production default. `libbitcoinkernel` serves as an opt-in differential verification oracle.
+- Consensus authority: the native Rust interpreter in `crates/script` verifies
+  every consensus spend class. `libbitcoinkernel` is an opt-in differential
+  oracle behind `--features kernel`. The `kernel` feature remains the default
+  in `bitcoin-rs-consensus` and `bitcoin-rs-node` until the #213 measurement
+  gate flips those crates.
 
 ## Commit and PR conventions
 
