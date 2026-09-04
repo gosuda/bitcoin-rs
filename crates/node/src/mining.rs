@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
 use bitcoin_rs_mempool::{Mempool, MempoolObserver, MutationEnvelope};
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
@@ -693,7 +693,12 @@ impl MiningCoordinator {
         let last_candidate = self.state.lock().last_candidate;
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
-            estimate_network_hashps(&tree, tip.as_deref(), 120, -1, self.network)
+            estimate_network_hashps(
+                &tree,
+                tip.as_ref().map(|snapshot| snapshot.tip_id),
+                120,
+                self.network,
+            )
         };
         Ok(MiningInfo {
             blocks,
@@ -859,6 +864,39 @@ mod apply_error_tests {
     }
 }
 
+fn hashps_missing_height() -> MiningControlError {
+    MiningControlError::InvalidRequest(CompactString::from(
+        "Block does not exist at specified height",
+    ))
+}
+
+/// Resolves the `getnetworkhashps` start node from one tip snapshot.
+///
+/// This is the sole height-resolution owner for that RPC. `None` is an empty
+/// chain (rate `0.0`). An explicit height that is absent from that snapshot is
+/// Core's invalid-parameter error, not a zero rate.
+// CONTRACT: docs/contracts/external-api.md#API-05
+fn resolve_hash_ps_start(
+    tree: &BlockTree,
+    tip: Option<&TipSnapshot>,
+    height: i64,
+) -> Result<Option<NodeId>, MiningControlError> {
+    let tip_height = tip.map_or(-1, |snapshot| i64::from(snapshot.height));
+    if height < -1 || height > tip_height {
+        return Err(hashps_missing_height());
+    }
+    let Some(tip) = tip else {
+        return Ok(None);
+    };
+    if height < 0 {
+        return Ok(Some(tip.tip_id));
+    }
+    let requested = u32::try_from(height).map_err(|_| hashps_missing_height())?;
+    tree.node_at_height_from(tip.tip_id, requested)
+        .map(Some)
+        .ok_or_else(hashps_missing_height)
+}
+
 fn hash_ps_at(
     tree: &BlockTree,
     tip: Option<&TipSnapshot>,
@@ -866,48 +904,22 @@ fn hash_ps_at(
     height: i64,
     network: Network,
 ) -> Result<f64, MiningControlError> {
-    let tip_height = tip.map_or(-1, |snapshot| i64::from(snapshot.height));
-    if height < -1 || height > tip_height {
-        return Err(MiningControlError::InvalidRequest(CompactString::from(
-            "Block does not exist at specified height",
-        )));
-    }
-    if height >= 0 {
-        let requested = u32::try_from(height).map_err(|_| {
-            MiningControlError::InvalidRequest(CompactString::from(
-                "Block does not exist at specified height",
-            ))
-        })?;
-        let resolved = tip.and_then(|tip| tree.node_at_height_from(tip.tip_id, requested));
-        if resolved.is_none() {
-            return Err(MiningControlError::InvalidRequest(CompactString::from(
-                "Block does not exist at specified height",
-            )));
-        }
-    }
-    Ok(estimate_network_hashps(tree, tip, lookup, height, network))
+    let start = resolve_hash_ps_start(tree, tip, height)?;
+    Ok(estimate_network_hashps(tree, start, lookup, network))
 }
 
+/// Estimates hashes/s over `lookup` blocks ending at an already-resolved start.
+///
+/// Height validation lives in [`resolve_hash_ps_start`]. A missing start or
+/// unwalkable window is a zero rate so `getmininginfo` can stay best-effort.
 fn estimate_network_hashps(
     tree: &BlockTree,
-    tip: Option<&TipSnapshot>,
+    start_id: Option<NodeId>,
     lookup: i64,
-    height: i64,
     network: Network,
 ) -> f64 {
-    let Some(tip) = tip else {
+    let Some(start_id) = start_id else {
         return 0.0;
-    };
-    let start_id = if height < 0 {
-        tip.tip_id
-    } else {
-        let Ok(requested) = u32::try_from(height) else {
-            return 0.0;
-        };
-        let Some(id) = tree.node_at_height_from(tip.tip_id, requested) else {
-            return 0.0;
-        };
-        id
     };
     let Ok(start_node) = tree.node(start_id) else {
         return 0.0;
@@ -1172,7 +1184,7 @@ mod network_hashps_oracle_tests {
                 .unwrap_or_else(|| panic!("missing height {height}"))
         };
         let expected = core_getnetworkhashps(tree, start_id, lookup, network);
-        let got = estimate_network_hashps(tree, Some(tip), lookup, height, network);
+        let got = estimate_network_hashps(tree, Some(start_id), lookup, network);
         assert!(
             (got - expected).abs() < 1e-9,
             "lookup={lookup} height={height}: got {got}, Core oracle {expected}"
@@ -1204,15 +1216,19 @@ mod network_hashps_oracle_tests {
         assert_matches_core(&tree, &tip, -1, -1, network);
         assert_matches_core(&tree, &tip, 120, -1, network);
 
-        let genesis = estimate_network_hashps(&tree, Some(&tip), 120, 0, network);
+        let genesis_id = tree
+            .node_at_height_from(tip.tip_id, 0)
+            .unwrap_or_else(|| panic!("genesis height is on the tip"));
+        let genesis = estimate_network_hashps(&tree, Some(genesis_id), 120, network);
         assert!(
             genesis.abs() < f64::EPSILON,
             "Core returns 0 at genesis, got {genesis}"
         );
 
         let retarget_lookup = i64::from(tip.height) % i64::from(network.retarget_interval()) + 1;
-        let via_minus_one = estimate_network_hashps(&tree, Some(&tip), -1, -1, network);
-        let via_explicit = estimate_network_hashps(&tree, Some(&tip), retarget_lookup, -1, network);
+        let via_minus_one = estimate_network_hashps(&tree, Some(tip.tip_id), -1, network);
+        let via_explicit =
+            estimate_network_hashps(&tree, Some(tip.tip_id), retarget_lookup, network);
         assert!(
             (via_minus_one - via_explicit).abs() < 1e-9,
             "-1 lookback must equal height % interval + 1 ({retarget_lookup})"
@@ -1220,6 +1236,7 @@ mod network_hashps_oracle_tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-05
     fn hash_ps_at_rejects_a_height_the_tip_cannot_resolve() {
         let mut tree = BlockTree::new();
         let genesis = append(&mut tree, BlockHash::default(), 1_000_000);

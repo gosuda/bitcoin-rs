@@ -1,8 +1,8 @@
 # External API contract (pointer)
 
-The external-API contract is declared in code, not prose. This page adds
-nothing normative; it places the owners under the
-[contracts precedence rule](README.md).
+`API-01`–`API-04` place owners under the
+[contracts precedence rule](README.md). `API-05` is the additional
+normative clause for `getnetworkhashps` snapshot consistency.
 
 ## Clauses
 
@@ -44,6 +44,25 @@ nothing normative; it places the owners under the
 - Statistical and script index queries are bounded by `QueryBudget` to prevent
   memory exhaustion.
 
+### `API-05`: `getnetworkhashps` snapshot and invalid-height behavior
+
+- **Owner**: `MiningCoordinator::network_hash_ps` in `crates/node/src/mining.rs`.
+  Height resolution has one owner: `resolve_hash_ps_start`.
+- The method takes the block-tree read lock, then loads one applied-tip
+  snapshot. Height checks and the hash-rate walk use that snapshot and that
+  locked tree, not a second tip load.
+- `nblocks` (`lookup`) must be a positive count or `-1` (since the last
+  difficulty retarget). Otherwise the RPC is Core `-8`
+  (`RpcError::InvalidParameter`) with
+  `"Invalid nblocks. Must be a positive number or -1."`
+- `height` must be `-1` (the snapshot tip) or an existing applied-chain height
+  on that snapshot. Heights below `-1`, above the snapshot tip, or in range
+  but unwalkable from that tip, are Core `-8` with
+  `"Block does not exist at specified height"`, not a zero hash-rate.
+- An empty chain with `height == -1` estimates `0.0`.
+- `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
+  does not use this RPC height-validation error path.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -61,3 +80,7 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `zmq_rows_are_valid_core_topics`
   - `every_unimplemented_rpc_row_answers_method_not_found`
   - `generated_reference_matches_checked_in`
+- `API-05`:
+  - `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`
+  - `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows`
+  - `crates/rpc/src/handlers/mining.rs` test `getnetworkhashps_projects_control_invalid_request_as_invalid_parameter`
