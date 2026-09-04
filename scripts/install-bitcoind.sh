@@ -34,27 +34,23 @@ esac
 
 log() { printf '[install-bitcoind] %s\n' "$*" >&2; }
 
-if [[ -x "${BITCOIND}" ]]; then
-  log "already installed at ${BITCOIND}"
-else
-  log "downloading ${TARBALL_URL}"
-  WORKDIR="$(mktemp -d /tmp/bitcoind-install.XXXXXX)"
-  trap 'rm -rf -- "${WORKDIR:?}"' EXIT
-  curl -fsSL --retry 4 --retry-delay 4 -o "${WORKDIR}/${TARBALL}" "${TARBALL_URL}"
-  got="$(sha256sum -- "${WORKDIR}/${TARBALL}" | awk '{ print $1 }')"
-  if [[ "${got}" != "${TARBALL_SHA256}" ]]; then
-    log "ABORT: tarball sha256 ${got} != ${TARBALL_SHA256}"
-    exit 1
-  fi
-  mkdir -p "${PREFIX}"
-  tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
-  mkdir -p "${PREFIX}/bin"
-  install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoind" "${BITCOIND}"
-  if [[ -f "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" ]]; then
-    install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" "${PREFIX}/bin/bitcoin-cli"
-  fi
-  log "installed ${BITCOIND}"
+log "downloading ${TARBALL_URL}"
+WORKDIR="$(mktemp -d /tmp/bitcoind-install.XXXXXX)"
+trap 'rm -rf -- "${WORKDIR:?}"' EXIT
+curl -fsSL --retry 4 --retry-delay 4 -o "${WORKDIR}/${TARBALL}" "${TARBALL_URL}"
+got="$(sha256sum -- "${WORKDIR}/${TARBALL}" | awk '{ print $1 }')"
+if [[ "${got}" != "${TARBALL_SHA256}" ]]; then
+  log "ABORT: tarball sha256 ${got} != ${TARBALL_SHA256}"
+  exit 1
 fi
+mkdir -p "${PREFIX}"
+tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
+mkdir -p "${PREFIX}/bin"
+install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoind" "${BITCOIND}"
+if [[ -f "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" ]]; then
+  install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" "${PREFIX}/bin/bitcoin-cli"
+fi
+log "installed ${BITCOIND}"
 
 case "${MODE}" in
   print-path) printf '%s\n' "${BITCOIND}" ;;
