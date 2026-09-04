@@ -179,3 +179,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo test -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+
+  # Main-only (issue #174 / CORE-02): a running Bitcoin Core 31.1 node vs
+  # bitcoin-rs on regtest. Complements kernel-oracle (in-process C++ engine)
+  # with observable P2P sync and chain-identity RPCs.
+  core-differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Install pinned bitcoind 31.1
+        run: scripts/install-bitcoind.sh --print-path
+      - name: Build bitcoin-rs (quickstart, portable)
+        run: |
+          cargo build -p bitcoin-rs --profile quickstart \
+            --no-default-features --features fjall,zmq
+      - name: Core vs bitcoin-rs P2P and chain-identity differential
+        run: |
+          scripts/run-p2p-core-interop.sh \
+            --bitcoind-command "$(scripts/install-bitcoind.sh --print-path)" \
+            --bitcoin-rs-command target/quickstart/bitcoin-rs \
+            --blocks 101 \
+            --catchup-blocks 5

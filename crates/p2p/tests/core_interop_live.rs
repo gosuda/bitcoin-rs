@@ -1,13 +1,13 @@
-//! Live Bitcoin Core P2P interop verifier — the env-gated cut lane.
+//! Live Bitcoin Core differential verifier — the env-gated cut lane.
 //!
 //! NOT part of the default suite: requires a real `bitcoind` driven by
 //! `scripts/run-p2p-core-interop.sh`, which starts Bitcoin Core (regtest),
-//! brings up a bitcoin-rs node, syncs them over the P2P v1 transport, mines
-//! extra blocks after the initial sync, and writes an evidence JSON.
+//! brings up a bitcoin-rs node, syncs them over the P2P v1 transport, diffs
+//! observable chain-identity RPCs, and writes an evidence JSON.
 //!
 //! Run via:
 //! ```text
-//! scripts/run-p2p-core-interop.sh --bitcoind-command bitcoind
+//! scripts/run-p2p-core-interop.sh --bitcoind-command "$(scripts/install-bitcoind.sh)"
 //! ```
 //! or directly with `--ignored --nocapture` after setting
 //! `P2P_CORE_INTEROP_EVIDENCE=<path to evidence json>`.
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use bitcoin_rs_primitives::USER_AGENT;
 
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";
-const SCHEMA: &str = "bitcoin-rs-p2p-core-interop-v1";
+const SCHEMA: &str = "bitcoin-rs-core-differential-v1";
 
 fn main_error(message: impl std::fmt::Display) -> Box<dyn std::error::Error> {
     Box::<std::io::Error>::new(std::io::Error::other(message.to_string())).into()
@@ -155,6 +155,40 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), Box<dyn std::e
     assert_eq!(
         rs_height, catchup_to,
         "bitcoin-rs followed Core's post-handshake blocks over P2P"
+    );
+
+    let chain = evidence
+        .get("chain")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| main_error("evidence missing `chain`"))?;
+    assert_eq!(chain, "regtest", "differential runs on regtest");
+    let core_tip = evidence
+        .get("bestblockhash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| main_error("evidence missing `bestblockhash`"))?;
+    let rs_tip = evidence
+        .get("bitcoin_rs_bestblockhash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| main_error("evidence missing `bitcoin_rs_bestblockhash`"))?;
+    assert_eq!(
+        core_tip, rs_tip,
+        "getbestblockhash must match after P2P catch-up"
+    );
+    let core_blocks = evidence
+        .get("core_blocks")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| main_error("evidence missing `core_blocks`"))?;
+    let rs_blocks = evidence
+        .get("bitcoin_rs_blocks")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| main_error("evidence missing `bitcoin_rs_blocks`"))?;
+    assert_eq!(
+        core_blocks, rs_blocks,
+        "getblockchaininfo.blocks must match after P2P catch-up"
+    );
+    assert_eq!(
+        rs_blocks, rs_height,
+        "getblockchaininfo.blocks must match getblockcount"
     );
     Ok(())
 }
