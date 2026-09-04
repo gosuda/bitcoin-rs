@@ -196,7 +196,7 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 | Validation engine | Native Rust interpreter (default binary); `libbitcoinkernel` with `--features kernel` and as the consensus/node library default |
 | Kernel feature | Off in default binary build; on in `crates/consensus` and `crates/node` library defaults |
 | Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
-| Multi-peer download | On (8 outbound peers, 128-block window) |
+| Multi-peer download | On (8 outbound peers, 256-block window) |
 | Transaction index | Off |
 | Script index | Off |
 | Pruning | Off |
