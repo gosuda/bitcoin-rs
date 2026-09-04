@@ -35,11 +35,6 @@ env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Feature set for the full dependency-graph deny check: all four storage
-  # backends plus the bitcoinkernel script-verification engine. cargo-deny
-  # resolves metadata without compiling, so checking the full graph costs no
-  # C++ toolchain here.
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,mdbx,kernel"
 
 jobs:
   fmt:
@@ -49,16 +44,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: ./scripts/ci-pr.sh fmt
 
   deny:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-deny
         with:
-          rust-version: "1.95.0"
-          arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
+          tool: cargo-deny
+      - run: ./scripts/ci-pr.sh deny
 
   rust:
     runs-on: ubuntu-latest
@@ -68,21 +64,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # One kernel-free compile graph. consensus and node default to `kernel`
-      # (C++ libbitcoinkernel); exclude them from the workspace pass and
-      # lint/test their pure-Rust surfaces separately. Clippy runs first so a
-      # lint failure does not wait for the test suite.
-      - run: |
-          cargo clippy --workspace --all-targets \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
-            -- -D warnings
-          cargo clippy -p bitcoin-rs-consensus \
-            --no-default-features --all-targets -- -D warnings
-          cargo clippy -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq --all-targets -- -D warnings
-      - run: |
-          cargo test --workspace --no-fail-fast \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-          cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
-          cargo test -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq --no-fail-fast
+      # One kernel-free compile graph. Clippy runs first so a lint failure
+      # does not wait for the test suite. Commands live in scripts/ci-pr.sh.
+      - run: ./scripts/ci-pr.sh clippy
+      - run: ./scripts/ci-pr.sh test

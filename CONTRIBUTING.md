@@ -23,37 +23,16 @@ cargo install --locked cargo-deny
 ## Quick verification (PR gate)
 
 Pull requests run a fast pure-Rust gate configured in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml): `fmt` and `deny` in
-parallel, then one `rust` job that runs `clippy` and workspace tests on a
-single compile graph. No C++ toolchain, no benches, no backend matrix.
-Run these locally before submitting:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml). The commands are owned
+by [`scripts/ci-pr.sh`](scripts/ci-pr.sh): `fmt` and `deny` in parallel, then
+one `rust` job that runs `clippy` and workspace tests on a single compile
+graph. No C++ toolchain, no benches, no backend matrix.
 
 ```sh
-# 1. Format check
-cargo fmt --all -- --check
-
-# 2. Clippy on all targets, kernel-free
-# consensus and node default to `kernel` (C++ libbitcoinkernel); exclude them
-# from the workspace pass and lint their pure-Rust surfaces separately.
-cargo clippy --workspace --all-targets \
-  --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
-  -- -D warnings
-cargo clippy -p bitcoin-rs-consensus \
-  --no-default-features --all-targets -- -D warnings
-cargo clippy -p bitcoin-rs-node \
-  --no-default-features --features fjall,zmq --all-targets -- -D warnings
-
-# 3. Workspace unit and integration tests (pure-Rust defaults)
-cargo test --workspace --no-fail-fast \
-  --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
-cargo test -p bitcoin-rs-node \
-  --no-default-features --features fjall,zmq --no-fail-fast
-
-# 4. Dependency, license, and duplicate-version audits
-cargo deny check --workspace --no-default-features \
-  --features rocksdb,fjall,redb,mdbx,kernel
+./scripts/ci-pr.sh all
 ```
+
+Subcommands: `fmt`, `clippy`, `test`, `deny`.
 
 ## Deep CI lanes (main workflow)
 
@@ -87,7 +66,8 @@ cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
 cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
 
 # Run differential kernel parity verification (requires kernel feature)
-cargo test -p bitcoin-rs --test g03_kernel_parity --features kernel -- --ignored --nocapture
+cargo test -p bitcoin-rs-consensus --features kernel \
+  --test kernel_block_parity --test kernel_vector_parity -- --nocapture
 ```
 
 ### Benchmark compilation check

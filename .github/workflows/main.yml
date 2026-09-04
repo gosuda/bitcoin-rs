@@ -154,16 +154,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
       - run: cargo hack check --each-feature --no-dev-deps -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
 
-  # Full-feature dependency audit: the PR gate's deny job checks the full
-  # graph (all backends + kernel); this lane is a confirmation on `main`.
-  deny-full:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
-        with:
-          rust-version: "1.95.0"
-          arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
   # Kernel oracle differential: with `--features kernel`, replay the committed
   # fixture corpus through libbitcoinkernel AND the Rust path and hard-fail on
   # verdict disagreement. The parity tests cover:
