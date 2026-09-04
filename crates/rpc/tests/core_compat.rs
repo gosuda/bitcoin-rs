@@ -391,6 +391,10 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     assert_eq!(template.size_limit, 4_000_000);
     assert_eq!(template.weight_limit, 4_000_000);
     assert_eq!(template.coinbase_value, 0);
+    assert_eq!(
+        template.coinbase_aux.get("flags").map(String::as_str),
+        Some("")
+    );
     assert!(template.transactions.is_empty());
     assert!(template.rules.is_empty());
     assert!(template.version_bits_available.is_empty());

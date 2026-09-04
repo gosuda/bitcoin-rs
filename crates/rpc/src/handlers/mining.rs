@@ -593,7 +593,10 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
         version_bits_required: i64::from(template.version_bits_required),
         previous_block_hash: candidate.previous_block_hash.to_string_be(),
         transactions: render_template_transactions(&candidate.transactions),
-        coinbase_aux: std::collections::BTreeMap::new(),
+        coinbase_aux: {
+            // Core `HexStr(COINBASE_FLAGS)`. v31's flags bytes are empty.
+            std::collections::BTreeMap::from([("flags".to_owned(), String::new())])
+        },
         coinbase_value: i64_saturated(candidate.coinbase_value),
         long_poll_id: Some(candidate.template_id.as_str().to_owned()),
         target: compact_target_hex(candidate.bits),
@@ -1030,6 +1033,14 @@ mod tests {
         assert_eq!(
             first.get("coinbasevalue").and_then(JsonValueTrait::as_u64),
             Some(5_000_000_000)
+        );
+        assert_eq!(
+            first
+                .get("coinbaseaux")
+                .and_then(JsonContainerTrait::as_object)
+                .and_then(|aux| aux.get("flags"))
+                .and_then(JsonValueTrait::as_str),
+            Some("")
         );
         let rules = first
             .get("rules")

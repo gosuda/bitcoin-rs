@@ -10,7 +10,7 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 witness fill. `API-14` is Core v31 `submitblock` / GBT proposal duplicate
 vocabulary. `API-15` is BIP22 reject-reason mapping. `API-16` is GBT
 `vbrequired` always 0. `API-17` is Core `CheckWitnessMalleation`
-reject reasons.
+reject reasons. `API-18` is GBT `coinbaseaux.flags`.
 
 ## Clauses
 
@@ -230,6 +230,13 @@ reject reasons.
 - `bip22_reject_reason` maps the consensus variants; consensus Display
   remains log text.
 
+### `API-18`: GBT `coinbaseaux.flags` is empty hex
+
+- **Owner**: `render_block_template` in `crates/rpc/src/handlers/mining.rs`.
+- Core v31 emits `coinbaseaux: { "flags": HexStr(COINBASE_FLAGS) }`. The
+  flags bytes are empty, so the hex string is `""`. An empty object is not
+  the Core shape.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -327,3 +334,7 @@ owned by [wallet-facing.md](wallet-facing.md).
     `proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size`,
     `proposal_witness_without_commitment_is_unexpected_witness`,
     `proposal_wrong_witness_commitment_is_bad_witness_merkle_match`
+- `API-18`:
+  - `crates/rpc/src/handlers/mining.rs` test
+    `getblocktemplate_renders_candidate_and_reuses_control_result`
+  - `crates/rpc/tests/core_compat.rs` test `mining_responses_deserialize_into_pinned_types`
