@@ -19,9 +19,6 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use crate::connection::{PeerLifecycle, PeerSource};
-use crate::download_window::{
-    DownloadWindow, FanoutCandidate, SyncBudget, configure_request_mode, statically_fanout_eligible,
-};
 use crate::listener::ListenerError;
 
 const DEFAULT_OUTBOUND_TARGET: usize = 8;
@@ -57,9 +54,6 @@ pub struct P2pServiceConfig {
     pub outbound_queue_limit: usize,
     /// Inbound block queue capacity.
     pub inbound_block_queue_limit: usize,
-    /// Budget for the service-held download window. Production scheduling
-    /// uses `BlockSync`'s window.
-    pub download_budget: SyncBudget,
 }
 
 impl Default for P2pServiceConfig {
@@ -75,7 +69,6 @@ impl Default for P2pServiceConfig {
             outbound_peer_target: DEFAULT_OUTBOUND_TARGET,
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
-            download_budget: crate::default_sync_budget(),
         }
     }
 }
@@ -146,9 +139,6 @@ pub struct P2pService {
     inbound_headers_rx: Arc<Mutex<Receiver<crate::InboundHeaders>>>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
-    /// Service-held window. Production `BlockSync` owns a separate window
-    /// and does not call [`Self::select_download_peers`].
-    download_window: Arc<Mutex<DownloadWindow>>,
     workers: Mutex<Option<Workers>>,
     /// Per-start cancellation observed by listener and connection threads.
     /// A failed start leaves this token asserted; the next start installs a
@@ -169,7 +159,6 @@ impl P2pService {
     /// Creates an unstarted P2P service and allocates all P2P-owned state.
     #[must_use]
     pub fn new(config: P2pServiceConfig, shutdown: Arc<AtomicBool>) -> Self {
-        let download_budget = config.download_budget;
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
         let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
         let (inbound_blocks_tx, inbound_blocks_rx) =
@@ -189,7 +178,6 @@ impl P2pService {
             inbound_headers_rx: Arc::new(Mutex::new(inbound_headers_rx)),
             inbound_blocks_tx,
             inbound_blocks_rx: Arc::new(Mutex::new(inbound_blocks_rx)),
-            download_window: Arc::new(Mutex::new(DownloadWindow::new(download_budget))),
             workers: Mutex::new(None),
         }
     }
@@ -207,13 +195,7 @@ impl P2pService {
     ) -> Result<(), P2pServiceError> {
         let chain_query = chain_query.cloned();
         let sync_wake_tx = sync_wake_tx.cloned();
-        let scheduler_window = Arc::clone(&self.download_window);
         let peer_ready = peer_ready.clone();
-        let peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync> =
-            Arc::new(move |source: crate::PeerSource| {
-                scheduler_window.lock().forget_peer(source.addr);
-                peer_ready(source);
-            });
         let mut slot = self.workers.lock();
         if slot.is_some() {
             return Err(P2pServiceError::AlreadyStarted);
@@ -645,52 +627,6 @@ impl P2pService {
         self.lifecycle.disconnect_source(source)
     }
 
-    /// Selects source-bearing peers from the service-held download window.
-    ///
-    /// Production `BlockSync` owns a separate window and does not call this
-    /// helper. The lifecycle snapshot and this window are still read in
-    /// lifecycle-before-window order so a future caller cannot invert locks.
-    #[must_use]
-    pub fn select_download_peers(&self, our_height: u32, now: Instant) -> crate::SyncPeerSelection {
-        // Keep lifecycle-before-window ordering consistent with staller
-        // eviction. Taking the window first and then snapshotting lifecycle
-        // state would permit a lock inversion.
-        let ready_peers = self.lifecycle.ready_peers();
-        let mut window = self.download_window.lock();
-        let candidates: Vec<FanoutCandidate> = ready_peers
-            .iter()
-            .filter_map(|peer| {
-                let height = u32::try_from(peer.info.start_height).ok()?;
-                (height > our_height).then_some(FanoutCandidate {
-                    peer: crate::SyncPeer {
-                        addr: peer.source.addr,
-                        start_height: peer.info.start_height,
-                    },
-                    fanout_eligible: statically_fanout_eligible(&peer.info)
-                        && !window.peer_has_expired_pending(peer.source.addr, now)
-                        && !window.peer_in_staller_cooldown(peer.source.addr, now),
-                    soft_blocked: window.peer_has_expired_pending(peer.source.addr, now)
-                        || window.peer_in_staller_cooldown(peer.source.addr, now),
-                })
-            })
-            .collect();
-        let preferred = configure_request_mode(&mut window, &candidates, now);
-        crate::SyncPeerSelection {
-            header_peer: preferred.or_else(|| {
-                candidates
-                    .iter()
-                    .max_by_key(|candidate| candidate.peer.start_height)
-                    .map(|candidate| candidate.peer)
-            }),
-            request_peers: candidates
-                .iter()
-                .filter(|candidate| !candidate.soft_blocked)
-                .map(|candidate| candidate.peer)
-                .collect(),
-            probe_peers: candidates.iter().map(|candidate| candidate.peer).collect(),
-        }
-    }
-
     /// Returns the highest ready peer that can extend `our_height`.
     #[must_use]
     pub fn best_header_peer(&self, our_height: u32) -> Option<crate::SyncPeer> {
@@ -715,57 +651,6 @@ impl P2pService {
             })
     }
 
-    /// Selects ready witness peers for a one-shot cold-front hedge.
-    #[must_use]
-    pub fn cold_front_hedge_peers(
-        &self,
-        owner: SocketAddr,
-        front_height: u32,
-        now: Instant,
-    ) -> Vec<crate::SyncPeer> {
-        let candidates = self
-            .lifecycle
-            .ready_peers()
-            .into_iter()
-            .filter(|peer| {
-                peer.source.addr != owner
-                    && statically_fanout_eligible(&peer.info)
-                    && u32::try_from(peer.info.start_height)
-                        .is_ok_and(|height| height >= front_height)
-            })
-            .map(|peer| crate::SyncPeer {
-                addr: peer.source.addr,
-                start_height: peer.info.start_height,
-            });
-        let window = self.download_window.lock();
-        candidates
-            .filter(|peer| {
-                !window.peer_has_expired_pending(peer.addr, now)
-                    && !window.peer_in_staller_cooldown(peer.addr, now)
-            })
-            .collect()
-    }
-
-    /// Releases scheduler assignments for connections no longer live.
-    pub fn release_disconnected_download_peers(&self) {
-        let live = self.lifecycle.live_addresses();
-        self.download_window
-            .lock()
-            .release_disconnected_peers(|peer| live.contains(peer));
-    }
-
-    /// Selects and disconnects a window owner without re-resolving its address
-    /// after a same-address replacement can have registered.
-    pub fn select_and_disconnect_download_peer(
-        &self,
-        select: impl FnOnce(&mut DownloadWindow) -> Option<SocketAddr>,
-    ) -> Option<(SocketAddr, PeerSource)> {
-        self.lifecycle.disconnect_selected_ready(|| {
-            let mut window = self.download_window.lock();
-            select(&mut window)
-        })
-    }
-
     /// Returns a cloned inbound headers receiver for the node sync coordinator.
     #[must_use]
     pub fn inbound_headers_receiver(&self) -> Arc<Mutex<Receiver<crate::InboundHeaders>>> {
@@ -788,16 +673,6 @@ impl P2pService {
     #[must_use]
     pub fn inbound_blocks_sender(&self) -> Sender<crate::InboundBlock> {
         self.inbound_blocks_tx.clone()
-    }
-
-    /// Runs a download-window operation under the P2P owner's lock.
-    pub fn with_download_window<R>(&self, operation: impl FnOnce(&mut DownloadWindow) -> R) -> R {
-        operation(&mut self.download_window.lock())
-    }
-
-    /// Replaces the P2P-owned download budget.
-    pub fn install_download_budget(&self, budget: SyncBudget) {
-        self.with_download_window(|window| *window = DownloadWindow::new(budget));
     }
 }
 

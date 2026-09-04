@@ -190,9 +190,11 @@ Owners:
   while the `ChainTransition` is still held; `Chainstate` does not hold
   them. `crates/node` still carries leftover
   domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
-  the P2P download scheduler (`sync.rs`), and direct backend construction and
-  cache share dispatch (`state.rs`). Relocating those into `crates/utxo`,
-  `crates/storage`, and `crates/p2p` remains tracked under #217 (open). A
+  the P2P download scheduler (`sync.rs` driving `p2p::DownloadWindow`), and
+  direct backend construction and cache share dispatch (`state.rs`).
+  `P2pService` no longer holds a second download window. Relocating leftover
+  node mechanics into `crates/utxo`, `crates/storage`, and `crates/p2p`
+  remains tracked under #217 (open). A
   dedicated `crates/chainstate` waits until journal, checkpoint, and
   `ChainEventPublisher` also leave node. `crates/node` is the composition
   layer, but is not yet fully slim.
