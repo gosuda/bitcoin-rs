@@ -721,75 +721,81 @@ mod tests {
     }
 
     #[test]
-    fn stop_height_without_hash_is_rejected() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n").expect("schema");
+    fn stop_height_without_hash_is_rejected() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
         let mut config = NodeConfig::default_for_network(Network::Regtest);
         config.data_dir = dir.path().to_path_buf();
         config.p2p.listen.clear();
-        let error = measure_storage_footprint(
+        let error = match measure_storage_footprint(
             &config,
             &MeasureStorageRequest {
                 stop_height: Some(0),
                 stop_hash: None,
                 ..MeasureStorageRequest::default()
             },
-        )
-        .err()
-        .expect("expected paired-stop rejection");
+        ) {
+            Err(error) => error,
+            Ok(_) => bail!("expected paired-stop rejection"),
+        };
         assert!(
             error.to_string().contains("must be supplied together"),
             "{error}"
         );
+        Ok(())
     }
 
     #[test]
-    fn stop_hash_without_height_is_rejected() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n").expect("schema");
+    fn stop_hash_without_height_is_rejected() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
         let mut config = NodeConfig::default_for_network(Network::Regtest);
         config.data_dir = dir.path().to_path_buf();
         config.p2p.listen.clear();
         let genesis = Network::Regtest.genesis_block_hash().to_string_be();
-        let error = measure_storage_footprint(
+        let error = match measure_storage_footprint(
             &config,
             &MeasureStorageRequest {
                 stop_height: None,
                 stop_hash: Some(genesis),
                 ..MeasureStorageRequest::default()
             },
-        )
-        .err()
-        .expect("expected paired-stop rejection");
+        ) {
+            Err(error) => error,
+            Ok(_) => bail!("expected paired-stop rejection"),
+        };
         assert!(
             error.to_string().contains("must be supplied together"),
             "{error}"
         );
+        Ok(())
     }
 
     #[test]
-    fn invalid_stop_hash_is_rejected() {
-        let dir = tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n").expect("schema");
+    fn invalid_stop_hash_is_rejected() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
         let mut config = NodeConfig::default_for_network(Network::Regtest);
         config.data_dir = dir.path().to_path_buf();
         config.p2p.listen.clear();
-        let error = measure_storage_footprint(
+        let error = match measure_storage_footprint(
             &config,
             &MeasureStorageRequest {
                 stop_height: Some(0),
                 stop_hash: Some("zz".to_owned()),
                 ..MeasureStorageRequest::default()
             },
-        )
-        .err()
-        .expect("expected hash parse rejection");
+        ) {
+            Err(error) => error,
+            Ok(_) => bail!("expected hash parse rejection"),
+        };
         assert!(
             error
                 .to_string()
                 .contains("invalid --measure-storage-stop-hash"),
             "{error}"
         );
+        Ok(())
     }
 
     #[test]

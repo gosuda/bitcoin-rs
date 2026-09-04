@@ -477,10 +477,7 @@ fn walk_dir(
     names.sort_unstable();
     for name in names {
         let child_rel = join_rel(rel, &name);
-        let listed = match rfs::statat(dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(error) => return Err(error.into()),
-        };
+        let listed = rfs::statat(dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)?;
         match FileType::from_raw_mode(listed.st_mode) {
             FileType::Symlink => {
                 return Err(FootprintError::Symlink { path: child_rel });
@@ -592,7 +589,7 @@ fn file_kind_name(kind: FileType) -> &'static str {
         FileType::Symlink => "symlink",
         FileType::Directory => "directory",
         FileType::RegularFile => "file",
-        _ => "other",
+        FileType::Unknown => "other",
     }
 }
 
@@ -764,10 +761,7 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
     names.sort_unstable();
     for name in names {
         let child_rel = format!("{}/{name}", crate::BLOCK_FILE_DIRECTORY);
-        let listed = match rfs::statat(blocks.as_fd(), name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(error) => return Err(error.into()),
-        };
+        let listed = rfs::statat(blocks.as_fd(), name.as_str(), AtFlags::SYMLINK_NOFOLLOW)?;
         match FileType::from_raw_mode(listed.st_mode) {
             FileType::RegularFile => {}
             FileType::Symlink => {
