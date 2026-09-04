@@ -395,7 +395,11 @@ pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
     if segwit {
         for input in &mut inputs {
             let item_count = read_compact(reader)?;
-            let mut witness = Vec::with_capacity(bounded_capacity(item_count, reader.len(), 1));
+            // Each witness item needs at least one encoded byte, but also a Vec slot;
+              // avoid reserving one slot per byte of attacker-controlled input.
+              let capacity = bounded_capacity(item_count, reader.len(), 1)
+                  .min(reader.len() / (1 + std::mem::size_of::<Vec<u8>>()));
+              let mut witness = Vec::with_capacity(capacity);
             for _ in 0..item_count {
                 let len = read_compact(reader)?;
                 let needed = usize::try_from(len).unwrap_or(usize::MAX);
@@ -630,8 +634,9 @@ mod tests {
         Ok(())
     }
 
+    // BIP144 defines the marker/flag and witness serialization whose size is checked here.
     #[test]
-    fn analytic_tx_size_matches_encoded_length_with_witness() {
+    fn bip144_analytic_tx_size_matches_encoded_length_with_witness() {
         use crate::{OutPoint, Tx, TxIn, TxOut, Txid};
 
         let tx = Tx {
