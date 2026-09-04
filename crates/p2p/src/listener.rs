@@ -1133,11 +1133,81 @@ fn spawn_connection_writer(
         })
 }
 
+/// Drains ready control messages behind `first` into one writev burst.
+///
+/// A bulk payload is never coalesced: it returns as a leftover so the writer
+/// emits it as its own frame after the control burst (or immediately when it
+/// is `first`).
+fn collect_write_burst(
+    first: crate::Message,
+    outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
+) -> (Vec<crate::Message>, Option<crate::Message>) {
+    if first.is_bulk_payload() {
+        return (vec![first], None);
+    }
+    let mut burst = Vec::with_capacity(crate::wire::MAX_WRITE_BURST);
+    burst.push(first);
+    while burst.len() < crate::wire::MAX_WRITE_BURST {
+        match outbound_rx.try_recv() {
+            Ok(next) if next.is_bulk_payload() => return (burst, Some(next)),
+            Ok(next) => burst.push(next),
+            Err(_) => break,
+        }
+    }
+    (burst, None)
+}
+
+fn account_written(
+    sizes: &[usize],
+    stats: &Arc<crate::PeerStats>,
+    totals: Option<&Arc<crate::TrafficTotals>>,
+    budget: &Arc<crate::connection::OutboundBudget>,
+) {
+    for &bytes in sizes {
+        stats.record_sent(u64::try_from(bytes).unwrap_or(u64::MAX));
+        stats.record_msg_sent();
+        if let Some(totals) = totals {
+            totals.record_sent(u64::try_from(bytes).unwrap_or(u64::MAX));
+        }
+        budget.release(bytes);
+    }
+}
+
+/// Writes `first` and any immediately ready follow-up control messages.
+///
+/// Returns `false` when a write fails so the caller can exit the writer loop.
+fn write_ready_burst(
+    first: crate::Message,
+    outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
+    writer: &mut dyn std::io::Write,
+    magic: Magic,
+    stats: &Arc<crate::PeerStats>,
+    totals: Option<&Arc<crate::TrafficTotals>>,
+    budget: &Arc<crate::connection::OutboundBudget>,
+) -> bool {
+    let mut pending = Some(first);
+    while let Some(head) = pending.take() {
+        let (burst, leftover) = collect_write_burst(head, outbound_rx);
+        match crate::wire::write_messages(writer, magic, &burst) {
+            Ok(sizes) => {
+                account_written(&sizes, stats, totals, budget);
+                pending = leftover;
+            }
+            Err(error) => {
+                tracing::debug!(%error, "p2p writer thread exiting");
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Writer loop body shared by the spawned writer thread and deterministic
-/// tests: receives one message or the close signal, writes it, and releases
-/// the admitted full wire byte count after a successful write. Exits on the
-/// close signal, sender drop, or write error — never by polling. On a write
-/// error the budget is deliberately not released (the connection is dying).
+/// tests: receives one message or the close signal, coalesces a ready burst
+/// of control messages into one writev, and releases the admitted full wire
+/// byte count after a successful burst. Exits on the close signal, sender
+/// drop, or write error — never by polling. On a write error the budget is
+/// deliberately not released (the connection is dying).
 fn run_writer_loop(
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
     mut close_rx: crossbeam_channel::Receiver<()>,
@@ -1150,20 +1220,17 @@ fn run_writer_loop(
     loop {
         crossbeam_channel::select! {
             recv(outbound_rx) -> message => {
-                let Ok(message) = message else { break };
-                match crate::wire::write_message(writer, magic, &message) {
-                    Ok(bytes) => {
-                        stats.record_sent(u64::try_from(bytes).unwrap_or(u64::MAX));
-                        stats.record_msg_sent();
-                        if let Some(totals) = totals {
-                            totals.record_sent(u64::try_from(bytes).unwrap_or(u64::MAX));
-                        }
-                        budget.release(bytes);
-                    }
-                    Err(error) => {
-                        tracing::debug!(%error, "p2p writer thread exiting");
-                        break;
-                    }
+                let Ok(first) = message else { break };
+                if !write_ready_burst(
+                    first,
+                    outbound_rx,
+                    writer,
+                    magic,
+                    stats,
+                    totals,
+                    budget,
+                ) {
+                    break;
                 }
             }
             recv(close_rx) -> signal => {
@@ -1464,8 +1531,8 @@ mod writer_shutdown_tests {
     use parking_lot::RwLock;
 
     use super::{
-        ConnectionShared, InboundSyncSinks, run_connected_session, run_message_loop,
-        run_writer_loop, spawn_connection_writer,
+        ConnectionShared, InboundSyncSinks, collect_write_burst, run_connected_session,
+        run_message_loop, run_writer_loop, spawn_connection_writer,
     };
     use crate::connection::OutboundBudget;
     use crate::peer::{Peer, PeerState};
@@ -1850,16 +1917,16 @@ mod writer_shutdown_tests {
             let _ = done_tx.send(());
         });
 
-        // Two full frames are written and released; the third blocks the
-        // writer mid-`write_all`, exactly where `shutdown(Both)` would find
-        // it in production.
+        // Five pings are queued as one control burst. Two full frames (64 B)
+        // succeed; the third header exceeds the remaining budget and the
+        // burst fails as a unit, so nothing is released.
         blocked_rx
             .recv_timeout(FAILSAFE)
             .expect("writer must exhaust its byte budget");
         assert_eq!(
             lease.budget_handle().pending(),
-            (3, 3 * frame),
-            "two written frames release; three remain charged"
+            (5, 5 * frame),
+            "a failed burst releases nothing"
         );
 
         // The close signal alone cannot interrupt a mid-`write_all` writer;
@@ -1872,7 +1939,7 @@ mod writer_shutdown_tests {
         worker.join().expect("worker join");
 
         // The write-error path deliberately releases nothing.
-        assert_eq!(lease.budget_handle().pending(), (3, 3 * frame));
+        assert_eq!(lease.budget_handle().pending(), (5, 5 * frame));
     }
 
     #[test]
@@ -2055,6 +2122,39 @@ mod writer_shutdown_tests {
         let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None);
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
+    }
+
+    #[test]
+    fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(crate::Message::Pong(1)).expect("pong");
+        tx.send(crate::Message::Block(
+            bitcoin_rs_primitives::Block::default(),
+        ))
+        .expect("block");
+        tx.send(crate::Message::Ping(2))
+            .expect("later ping stays queued");
+
+        let (burst, leftover) = collect_write_burst(crate::Message::Ping(0), &rx);
+        assert_eq!(
+            burst,
+            vec![crate::Message::Ping(0), crate::Message::Pong(1)]
+        );
+        assert!(matches!(leftover, Some(crate::Message::Block(_))));
+        assert!(matches!(rx.try_recv(), Ok(crate::Message::Ping(2))));
+    }
+
+    #[test]
+    fn collect_write_burst_emits_a_bulk_payload_alone() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(crate::Message::Ping(1)).expect("ping");
+        let (burst, leftover) = collect_write_burst(
+            crate::Message::Block(bitcoin_rs_primitives::Block::default()),
+            &rx,
+        );
+        assert_eq!(burst.len(), 1);
+        assert!(leftover.is_none());
+        assert!(matches!(rx.try_recv(), Ok(crate::Message::Ping(1))));
     }
 }
 
