@@ -74,7 +74,7 @@ Skipping script-signature verification for blocks at or below a trusted height w
 The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`). Script verification is skipped at or below it only after the active header chain is shown to contain this exact hash; sub-anchor header tips and diverged chains verify fully.
 
 ### Optimized default posture
-The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 128, 16 in-flight per peer), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles only `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
+The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 128, 16 in-flight per peer), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
 
 ### Node network selection
 `BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. See `docs/solutions/architecture-patterns/network-selection-keeps-p2p-identity-atomic.md`.
@@ -91,9 +91,10 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 ## Consensus validation
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), the production consensus default. It is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. Default builds need `cmake` and `libboost-dev`.
-### Rust interpreter (portable posture)
-The pure-Rust script path under `--no-default-features`. It fully verifies the Taproot key path; its non-Taproot path is a stub accepting only a bare `OP_TRUE` spend, and it has no Taproot script-path support. Retained for differential testing and lightweight non-production environments; a mainnet sync stops at the first real spend.
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Whether the native path also becomes the library and image default is the #213 measurement gate.
+
+### Native Rust interpreter
+The pure-Rust script path used when `kernel` is off (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context.
 
 ### One-shot kernel block parse
 Parsing each block exactly once with `bitcoinkernel::Block::new` (`KernelBlock`, `crates/consensus/src/kernel.rs`) and reusing that parse downstream for txids and the transaction objects script preparation borrows via `TransactionRef`. Price a replacement by everything it subsumes, not by the line item that motivated it.
