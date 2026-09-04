@@ -14,8 +14,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
-use bitcoin_rs_mempool::Mempool;
-use bitcoin_rs_mempool::{MempoolObserver, MutationEnvelope};
+use bitcoin_rs_mempool::{Mempool, MempoolObserver, MutationEnvelope};
 use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningChainContext, TemplateId, assemble_candidate,
 };

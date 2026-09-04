@@ -84,6 +84,5 @@ pub use txindex_worker::TxIndexRuntime;
 #[cfg(feature = "zmq")]
 pub use zmq_publisher::SocketZmqPublisher;
 pub use zmq_publisher::{
-    MempoolSequenceObserver, NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher,
-    ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
+    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
 };

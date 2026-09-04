@@ -53,7 +53,7 @@ use bitcoin::{
     absolute, opcodes, script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-use bitcoin_rs_index::BlockSource as _;
+use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
     BlockSync, Network, NoOpZmqPublisher, NodeConfig, TxIndexRuntime,
@@ -459,7 +459,7 @@ struct BenchBlockSource {
     block: Block,
 }
 
-impl bitcoin_rs_index::BlockSource for BenchBlockSource {
+impl BlockSource for BenchBlockSource {
     fn block_at_height(&self, height: u32) -> Option<Block> {
         (height <= self.max_height).then(|| self.block.clone())
     }
