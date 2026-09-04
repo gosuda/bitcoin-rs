@@ -23,6 +23,9 @@ out of tree.
 
 ### `WF-02`: Operations a wallet actually issues
 
+Esplora lives at `/api` on the JSON-RPC listener. That directory is the
+electrs/mempool.space base URL. Relative routes below are appended to it.
+
 - Chain tip: `GET /blocks/tip/height`, `GET /blocks/tip/hash`.
 - Checkpoint hashes: `GET /block-height/{h}` (BDK walks this while
   building its chain).
@@ -34,11 +37,13 @@ out of tree.
   index covers the applied tip.
 - Broadcast: `POST /tx` (hex body), which dispatches `sendrawtransaction`
   through the same admission owner as JSON-RPC.
-- `/api/…` and `/api/v1/…` are a closed public alias of the same routes.
-  Wallets that copy a mempool.space base URL (`…/api`) must not 404 on
-  `/block-height`. The alias does not expose `/internal/*` or
-  `/block-template`. A request in this namespace never falls through to
-  JSON-RPC.
+- `/api` is a closed namespace: a request in it never falls through to
+  JSON-RPC. Unprefixed electrs paths on this listener 404 so JSON-RPC
+  keeps `/`. `/api/v1` is Mempool's API on the explorer port, not an
+  Esplora alias here.
+- `/internal/*` and `/block-template` are mempool-backend helpers under
+  the same `/api` base (`ESPLORA_REST_API_URL=http://node:8332/api`).
+  Explorer nginx 404s those paths on the public port.
 
 ### `WF-03`: Proof is a public-HTTP consumer
 
@@ -51,21 +56,20 @@ out of tree.
   proof source, including aliases and fully qualified paths. The test
   depends on rust-bitcoin and speaks only HTTP. It funds a regtest chain
   through `getblocktemplate` / `submitblock` (this node has no `generate*`
-  RPC), then issues the BDK/esplora-client dialect — tip, block height
-  (including `/api/v1/block-height/{h}`), headers, scripthash UTXOs/history,
-  fee estimates, and `POST /api/v1/tx` — the same operations
+  RPC), then issues the BDK/esplora-client dialect against `/api` — tip,
+  block height, headers, scripthash UTXOs/history, fee estimates, and
+  `POST /api/tx` — the same operations
   [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw -u`)
   sends against any Esplora URL.
-- Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>`
-  (or `http://<rpc-bind>/api`) against a node started with
-  `--network regtest --scriptindex`. Failures of that run are
-  public-interface defects, not reasons to patch a wallet into this
-  repository.
+- Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>/api`
+  against a node started with `--network regtest --scriptindex`. Failures
+  of that run are public-interface defects, not reasons to patch a wallet
+  into this repository.
 
 ## Proven by
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
-- `crates/rpc/src/esplora.rs` tests `mempool_space_api_prefixes_alias_the_root_esplora_surface` and `public_api_prefix_is_a_closed_esplora_namespace`
+- `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix` and `api_is_the_closed_esplora_and_backend_namespace`
 - `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
 
 ## Vocabulary

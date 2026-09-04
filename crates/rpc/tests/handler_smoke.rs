@@ -354,7 +354,7 @@ fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), Box<dy
 }
 
 #[test]
-fn gettxoutsetinfo_rejects_trailing_parameters() -> Result<(), Box<dyn std::error::Error>> {
+fn gettxoutsetinfo_rejects_trailing_parameters() {
     // Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
@@ -362,7 +362,6 @@ fn gettxoutsetinfo_rejects_trailing_parameters() -> Result<(), Box<dyn std::erro
         .dispatch("gettxoutsetinfo", &json!(["muhash", null, false, true]))
         .expect_err("trailing parameters must be refused");
     assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
-    Ok(())
 }
 
 #[test]
