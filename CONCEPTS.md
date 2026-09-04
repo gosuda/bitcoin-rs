@@ -100,7 +100,8 @@ A peer holding up the apply frontier by failing to deliver a frontier block it w
 helpers. Ready snapshots carry `PeerSource`, and identity-checked table
 methods are what authorize a mutation. Address equality alone never does.
 `BlockSync` owns the production download window and may call those table
-methods directly. See `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
+methods directly. `P2pService` does not hold a second window. See
+`docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
 
 ### assumevalid
 Skipping script-signature verification for blocks at or below a trusted height while performing every other consensus check. Mainnet defaults to the hash-pinned anchor below; other networks default to height 0. `--assume-valid-height 0` requests full verification; a custom nonzero height skips without hash gating.
