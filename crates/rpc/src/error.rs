@@ -48,6 +48,12 @@ pub enum RpcError {
     /// stopped by a caller-configured guard rather than by consensus or policy.
     #[error("{0}")]
     TxVerifyError(String),
+    /// Bitcoin Core `RPC_CLIENT_NOT_CONNECTED` (-9).
+    #[error("{0}")]
+    ClientNotConnected(String),
+    /// Bitcoin Core `RPC_CLIENT_IN_INITIAL_DOWNLOAD` (-10).
+    #[error("{0}")]
+    ClientInInitialDownload(String),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -74,6 +80,10 @@ impl RpcError {
     pub const CORE_VERIFY_REJECTED: i64 = -26;
     /// Bitcoin Core general submission-error code, `RPC_VERIFY_ERROR`.
     pub const CORE_VERIFY_ERROR: i64 = -25;
+    /// Bitcoin Core `RPC_CLIENT_NOT_CONNECTED`.
+    pub const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
+    /// Bitcoin Core `RPC_CLIENT_IN_INITIAL_DOWNLOAD`.
+    pub const CORE_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
 
     /// Builds the policy-disabled error for methods unavailable by configuration.
     #[must_use]
@@ -94,6 +104,8 @@ impl RpcError {
             Self::TxRejected(_) => Self::CORE_VERIFY_REJECTED,
             Self::TxVerifyError(_) => Self::CORE_VERIFY_ERROR,
             Self::InvalidParameter(_) => Self::CORE_INVALID_PARAMETER,
+            Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
+            Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
             Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
         }
     }

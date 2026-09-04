@@ -59,6 +59,9 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     let request = parse_block_template_request(params)?;
+    if matches!(request.mode, BlockTemplateMode::Template) {
+        ensure_template_ready(ctx)?;
+    }
     let client_rules = request.rules.clone();
     match control.get_block_template(request) {
         Ok(BlockTemplateResult::Template(template)) => {
@@ -455,6 +458,28 @@ fn ensure_client_supports_mandatory_rules(
     Ok(())
 }
 
+/// Core refuses template assembly on mainnet while disconnected or still in IBD.
+/// Proposal mode skips these gates. Test chains (`Network != Mainnet`) skip them.
+fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
+    if ctx.chain_network != bitcoin_rs_primitives::Network::Mainnet {
+        return Ok(());
+    }
+    if ctx.peer_table.is_empty() {
+        return Err(RpcError::ClientNotConnected(
+            "bitcoin-rs is not connected!".to_owned(),
+        ));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if ctx.is_initial_block_download(now) {
+        return Err(RpcError::ClientInInitialDownload(
+            "bitcoin-rs is in initial sync and waiting for blocks...".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn rule_is_mandatory(rule: &str) -> bool {
     matches!(rule, "segwit" | "signet")
 }
@@ -808,7 +833,9 @@ mod tests {
     }
 
     fn ctx_with_control(control: Arc<dyn MiningControl>) -> Arc<Context> {
-        Arc::new(Context::new().with_mining_control(control))
+        let mut ctx = Context::new();
+        ctx.chain_network = Network::Regtest;
+        Arc::new(ctx.with_mining_control(control))
     }
 
     fn sample_block() -> Block {
@@ -849,6 +876,63 @@ mod tests {
             error,
             RpcError::MethodDisabled("mining is unavailable")
         ));
+    }
+
+    fn register_dummy_peer(ctx: &Context) {
+        let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::Message>(1);
+        ctx.peer_table.register(
+            "127.0.0.1:8333"
+                .parse()
+                .unwrap_or_else(|error| panic!("dummy peer addr: {error}")),
+            bitcoin_rs_p2p::PeerLease::new(tx),
+        );
+    }
+
+    #[test]
+    fn getblocktemplate_rejects_mainnet_without_peers() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = Arc::new(Context::new().with_mining_control(control));
+        assert_eq!(ctx.chain_network, Network::Mainnet);
+        let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .expect_err("mainnet without peers must fail");
+        assert!(matches!(error, RpcError::ClientNotConnected(_)));
+        assert_eq!(error.code(), RpcError::CORE_CLIENT_NOT_CONNECTED);
+        assert_eq!(error.to_string(), "bitcoin-rs is not connected!");
+    }
+
+    #[test]
+    fn getblocktemplate_rejects_mainnet_during_ibd() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = Context::new().with_mining_control(control);
+        register_dummy_peer(&ctx);
+        let ctx = Arc::new(ctx);
+        let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
+            .expect_err("mainnet IBD must fail");
+        assert!(matches!(error, RpcError::ClientInInitialDownload(_)));
+        assert_eq!(error.code(), RpcError::CORE_CLIENT_IN_INITIAL_DOWNLOAD);
+        assert_eq!(
+            error.to_string(),
+            "bitcoin-rs is in initial sync and waiting for blocks..."
+        );
+    }
+
+    #[test]
+    fn getblocktemplate_proposal_skips_mainnet_connection_gates() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.proposal.lock() = BlockValidationResult::Accepted;
+        let ctx = Arc::new(Context::new().with_mining_control(control));
+        let genesis = sample_block();
+        let hex = to_lower_hex(&consensus_bytes(&genesis));
+        let result = getblocktemplate(
+            &ctx,
+            &json!([{
+                "mode": "proposal",
+                "capabilities": ["proposal"],
+                "data": hex,
+            }]),
+        )
+        .unwrap_or_else(|err| panic!("proposal on disconnected mainnet failed: {err}"));
+        assert!(result.is_null());
     }
 
     #[test]
@@ -1459,7 +1543,7 @@ mod tests {
         );
     }
 
-    const MAINNET_ADDRESS: &str = "1111111111111111111114oLvT2";
+    const REGTEST_ADDRESS: &str = "bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5";
 
     fn sample_raw_tx() -> Tx {
         Tx {
@@ -1483,7 +1567,7 @@ mod tests {
     fn generatetoaddress_projects_solved_hashes() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control);
-        let result = generatetoaddress(&ctx, &json!([2, MAINNET_ADDRESS]))
+        let result = generatetoaddress(&ctx, &json!([2, REGTEST_ADDRESS]))
             .unwrap_or_else(|err| panic!("generatetoaddress failed: {err}"));
         let hashes = result
             .as_array()
@@ -1497,7 +1581,7 @@ mod tests {
     fn generatetoaddress_rejects_script_hex_and_descriptors() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control);
-        for payout in ["51", &format!("addr({MAINNET_ADDRESS})")] {
+        for payout in ["51", &format!("addr({REGTEST_ADDRESS})")] {
             let error = generatetoaddress(&ctx, &json!([1, payout]))
                 .err()
                 .unwrap_or_else(|| panic!("`{payout}` must not be an address"));
@@ -1509,8 +1593,8 @@ mod tests {
     #[test]
     fn generateblock_projects_hash_object() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
-        let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, []]))
+        let ctx = ctx_with_control(control.clone());
+        let result = generateblock(&ctx, &json!([REGTEST_ADDRESS, []]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
             result
@@ -1528,12 +1612,12 @@ mod tests {
         assert!(request.submit);
     }
 
-    /// API-05: generateblock accepts addr() without a checksum.
+    /// API-05: generateblock accepts `addr()` without a checksum.
     #[test]
     fn generateblock_accepts_addr_descriptor() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
-        let result = generateblock(&ctx, &json!([format!("addr({MAINNET_ADDRESS})"), []]))
+        let ctx = ctx_with_control(control.clone());
+        let result = generateblock(&ctx, &json!([format!("addr({REGTEST_ADDRESS})"), []]))
             .unwrap_or_else(|err| panic!("addr() descriptor must be accepted: {err}"));
         assert!(
             result
@@ -1549,8 +1633,8 @@ mod tests {
         assert_eq!(
             request.payout,
             payout_script_from_address(
-                MAINNET_ADDRESS,
-                bitcoin::Network::Bitcoin,
+                REGTEST_ADDRESS,
+                bitcoin::Network::Regtest,
                 "Invalid address or key",
             )
             .unwrap_or_else(|err| panic!("fixture address must decode: {err}"))
@@ -1561,8 +1645,8 @@ mod tests {
     #[test]
     fn generateblock_without_submit_includes_hex() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
-        let result = generateblock(&ctx, &json!([MAINNET_ADDRESS, [], false]))
+        let ctx = ctx_with_control(control.clone());
+        let result = generateblock(&ctx, &json!([REGTEST_ADDRESS, [], false]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         assert!(
             result
@@ -1587,11 +1671,11 @@ mod tests {
     fn generateblock_requires_transactions_array() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control);
-        let missing = generateblock(&ctx, &json!([MAINNET_ADDRESS]))
+        let missing = generateblock(&ctx, &json!([REGTEST_ADDRESS]))
             .err()
             .unwrap_or_else(|| panic!("omitted transactions must fail"));
         assert_eq!(missing.code(), RpcError::INVALID_PARAMS);
-        let null = generateblock(&ctx, &json!([MAINNET_ADDRESS, Value::new_null()]))
+        let null = generateblock(&ctx, &json!([REGTEST_ADDRESS, Value::new_null()]))
             .err()
             .unwrap_or_else(|| panic!("null transactions must fail"));
         assert_eq!(null.code(), RpcError::INVALID_PARAMS);
@@ -1605,11 +1689,11 @@ mod tests {
     #[test]
     fn generateblock_keeps_raw_transactions() {
         let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(Arc::clone(&control) as Arc<dyn MiningControl>);
+        let ctx = ctx_with_control(control.clone());
         let tx = sample_raw_tx();
         let raw_hex = to_lower_hex(&consensus_bytes(&tx));
         let txid = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));
-        generateblock(&ctx, &json!([MAINNET_ADDRESS, [txid.to_string(), raw_hex]]))
+        generateblock(&ctx, &json!([REGTEST_ADDRESS, [txid.to_string(), raw_hex]]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         let request = control
             .last_generate
@@ -1627,7 +1711,7 @@ mod tests {
     fn generateblock_rejects_trailing_parameters() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control);
-        let extra = generateblock(&ctx, &json!([MAINNET_ADDRESS, [], true, "unexpected"]))
+        let extra = generateblock(&ctx, &json!([REGTEST_ADDRESS, [], true, "unexpected"]))
             .err()
             .unwrap_or_else(|| panic!("trailing generateblock arguments must fail"));
         assert!(matches!(
@@ -1641,7 +1725,7 @@ mod tests {
     fn generateblock_rejects_invalid_supplied_checksums() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control);
-        let descriptor = format!("addr({MAINNET_ADDRESS})");
+        let descriptor = format!("addr({REGTEST_ADDRESS})");
         let checksum = descriptor_checksum(&descriptor)
             .unwrap_or_else(|| panic!("fixture descriptor must have a checksum"));
         generateblock(&ctx, &json!([format!("{descriptor}#{checksum}"), []]))
