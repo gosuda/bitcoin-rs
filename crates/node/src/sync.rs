@@ -3347,7 +3347,7 @@ mod tests {
         sync.tick();
 
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::PENDING_BUDGET.div_ceil(super::MIN_PEERS_FOR_FANOUT);
+        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
         for (idx, rx) in rxs.iter().enumerate() {
             let Message::GetData(inventory) = rx.try_recv()? else {
                 return Err(
@@ -3701,7 +3701,7 @@ mod tests {
             "a timed-out peer must not immediately reacquire the same block stripe"
         );
 
-        let cap = super::PENDING_BUDGET.div_ceil(super::MIN_PEERS_FOR_FANOUT);
+        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
         for (idx, rx) in rxs.iter().enumerate() {
             let Message::GetData(inventory) = rx.try_recv()? else {
                 return Err(std::io::Error::other("expected getdata for eligible peer").into());
@@ -7119,7 +7119,7 @@ mod tests {
         }
         sync.tick();
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::PENDING_BUDGET.div_ceil(super::MIN_PEERS_FOR_FANOUT);
+        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
         for (idx, receiver) in receivers.iter().enumerate() {
             let Message::GetData(inventory) = receiver.try_recv()? else {
                 return Err(std::io::Error::other("expected fanout getdata").into());
@@ -7144,7 +7144,7 @@ mod tests {
     fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
     -> Result<(), Box<dyn std::error::Error>> {
         const PEER_COUNT: usize = 9;
-        const SELECTED_PEERS: usize = super::PENDING_BUDGET / super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        const SELECTED_PEERS: usize = super::MIN_PEERS_FOR_FANOUT;
         let (sync, peers, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         install_budget(&sync, super::default_sync_budget());

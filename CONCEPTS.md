@@ -109,7 +109,7 @@ Skipping script-signature verification for blocks at or below a trusted height w
 The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`). Script verification is skipped at or below it only after the active header chain is shown to contain this exact hash; sub-anchor header tips and diverged chains verify fully.
 
 ### Optimized default posture
-The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 128, 16 in-flight per peer), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
+The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 256, 16 in-flight per peer once fan-out engages), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
 
 ### Node network selection
 `BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. See `docs/solutions/architecture-patterns/network-selection-keeps-p2p-identity-atomic.md`.

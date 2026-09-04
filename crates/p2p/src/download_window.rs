@@ -22,11 +22,16 @@ use crate::PeerInfo;
 /// Time after which a pending getdata is considered stuck and re-requestable.
 pub const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
-pub const PENDING_BUDGET: usize = 128;
+///
+/// 256 is the measured single-peer IBD depth: a bounded 0–150,000 daemon
+/// run at this window was 1.52× the 128-block control. Fan-out still stripes
+/// at [`MAX_BLOCKS_IN_TRANSIT_PER_PEER`] once [`MIN_PEERS_FOR_FANOUT`] eligible
+/// peers exist, so a full outbound set does not deepen per-peer pipelines.
+pub const PENDING_BUDGET: usize = 256;
 /// Time after which a received out-of-order block is discarded.
 pub const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of received blocks waiting for their predecessor.
-pub const RECEIVED_BLOCK_BUDGET: usize = 128;
+pub const RECEIVED_BLOCK_BUDGET: usize = 256;
 /// Mainnet-oriented block-size estimate for sizing the in-flight request window.
 pub const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 /// Maximum estimated bytes in the in-flight request window.
@@ -51,7 +56,7 @@ pub const MAX_SERIALIZED_BLOCK_SIZE: usize = 4_000_000;
 // count below the arming fraction and byte-shaped wedges would stop arming at
 // production budgets, degrading to the 60s pending-timeout fallback. Rebalance
 // both constants together; this assertion turns silent drift into a build
-// failure. (Margin today: 128 * 2 MiB >= 64 * 4 MB, ~4.6%.)
+// failure. (Margin at 256: 256 * 2 MiB >= 128 * 4_000_000, ~4.9%.)
 const _: () = assert!(
     RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_SERIALIZED_BLOCK_SIZE,
     "staged byte budget must admit half the staged count window at max block size"
@@ -76,13 +81,15 @@ pub const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 /// by a live-tested and reverted attempt (commit 5608279, recoverable from
 /// git history).
 pub const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
-/// Minimum peer population that can fill the 128-block window at Core's
-/// 16-block per-peer floor.
+/// Minimum eligible peers before fan-out stripes.
 ///
-/// Below this count, one healthy peer's deep sequential pipeline beats
-/// fragmented stripes on real mainnet peers; the bounded cold-front hedge
-/// handles a silent owner without under-filling.
-pub const MIN_PEERS_FOR_FANOUT: usize = PENDING_BUDGET / MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+/// Matches the default outbound target. Below this count, one healthy peer's
+/// deep sequential pipeline fills [`PENDING_BUDGET`]. At the threshold, each
+/// peer is capped at [`MAX_BLOCKS_IN_TRANSIT_PER_PEER`] so a full outbound set
+/// does not reproduce the recorded head-of-line collapse. Do not scale this
+/// with [`PENDING_BUDGET`]: `PENDING_BUDGET / 16` would be 16, and fan-out
+/// would never engage at the 8-outbound default.
+pub const MIN_PEERS_FOR_FANOUT: usize = 8;
 /// Initial window-blocked stalling threshold.
 ///
 /// Mirrors Bitcoin Core's `BLOCK_STALLING_TIMEOUT_DEFAULT` (2s,
@@ -115,6 +122,10 @@ pub const STALLER_COOLDOWN: Duration = BLOCK_STALLING_TIMEOUT_MAX;
 // byte-budget pair needs no twin assertion: `RECEIVED_BLOCK_BYTE_BUDGET` is
 // `PENDING_BYTE_BUDGET` by definition.
 const _: () = assert!(PENDING_BUDGET == RECEIVED_BLOCK_BUDGET);
+const _: () = assert!(
+    MIN_PEERS_FOR_FANOUT * MAX_BLOCKS_IN_TRANSIT_PER_PEER <= PENDING_BUDGET,
+    "fan-out at the outbound target must not exceed the download window"
+);
 
 /// Maximum number of block inventory entries we request per tick.
 ///

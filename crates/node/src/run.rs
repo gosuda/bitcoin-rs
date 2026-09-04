@@ -1558,7 +1558,8 @@ mod tests {
         let (dial_tx, dial_rx) = crossbeam_channel::unbounded();
         let seeds = signet_seeds();
         let mut recently_queued = hashbrown::HashMap::new();
-        let needed = crate::sync::MIN_PEERS_FOR_FANOUT - live_outbound_peer_count(&peer_table); // 5
+        let live = live_outbound_peer_count(&peer_table);
+        let needed = crate::sync::MIN_PEERS_FOR_FANOUT - live;
 
         let queued = drain_dns_peer_deficit(
             &OverlapResolver,
@@ -1571,9 +1572,9 @@ mod tests {
             needed,
         );
 
-        assert_eq!(queued, 5, "should queue exactly the deficit");
+        assert_eq!(queued, needed, "should queue exactly the deficit");
         let dialed: Vec<SocketAddr> = dial_rx.try_iter().collect();
-        assert_eq!(dialed.len(), 5);
+        assert_eq!(dialed.len(), needed);
         // None of the dialed addresses must overlap with the already-live set.
         for port in 10_000_u16..10_003 {
             let addr = SocketAddr::from(([127, 0, 0, 1], port));

@@ -618,13 +618,14 @@ impl SyncFixture {
     fn new_reverse_scan_overflow(tx_index_mode: TxIndexMode) -> Self {
         let mut fixture =
             Self::new_with_block_count(tx_index_mode, 0, SYNC_REVERSE_SCAN_OVERFLOW_BODY_BLOCKS);
-        // The bench stages 128 received blocks and still needs to request the
-        // full 128-block pending window, so the received-block budget must
-        // cover both the staged blocks and the new requests.
-        fixture.sync.install_budget(SyncBudget {
-            max_received_blocks: 256,
-            ..default_sync_budget()
-        });
+        // The bench stages 128 received blocks and still needs to request a
+        // full pending window, so the received-block budget must cover both
+        // the staged blocks and the new requests.
+        let mut budget = default_sync_budget();
+        budget.max_received_blocks = budget
+            .max_pending_blocks
+            .saturating_add(SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_BLOCKS);
+        fixture.sync.install_budget(budget);
         let first_index = SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_START_HEIGHT.saturating_sub(1);
         let last_index = first_index.saturating_add(SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_BLOCKS);
         for block in fixture

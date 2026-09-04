@@ -52,9 +52,9 @@ pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
 // than they drain — an OOM vector. A full channel applies TCP backpressure to
 // the sending peer's listener thread; `tick` drains independently and holds no
 // lock a listener needs, so the bound cannot deadlock. Sized well above the
-// in-flight request window (`PENDING_BUDGET` = 128) so honest delivery, which
+// in-flight request window (`PENDING_BUDGET` = 256) so honest delivery, which
 // wakes the drain on every block, is never throttled.
-pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 256;
+pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 // Bounds chain-event hints between the block-apply commit path and
 // reconciliation consumers (#77). Hints are wake-ups, never data: a consumer
 // that misses one recovers by reconciling `ChainSnapshot` against its own
