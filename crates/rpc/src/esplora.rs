@@ -17,11 +17,11 @@ mod model;
 mod projection;
 mod public;
 
-use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
+use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::Response;
 
-use self::http::{bad, internal, not_found, query_error, unavailable};
+use self::http::not_found;
 use self::projection::Projection;
 
 /// Which Esplora directory a request landed in.
