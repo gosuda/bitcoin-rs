@@ -97,6 +97,11 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     ensure_at_most_params(params, 2)?;
+    if let Some(dummy) = params_array(params)?.get(1) {
+        if !dummy.is_null() && dummy.as_str().is_none() {
+            return Err(RpcError::InvalidType("parameter must be string"));
+        }
+    }
     let hex = required_str(params, 0, "block hex is required")?;
     let block = decode_submitted_block(hex)?;
     match control.submit_block(block) {
@@ -107,8 +112,7 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 
 fn decode_submitted_block(hex: &str) -> Result<Block, RpcError> {
     let bytes = from_hex(hex).map_err(|()| block_decode_failed())?;
-    // Core `DecodeHexBlk` unserializes a witness block and ignores leftover
-    // bytes, so extra hex after a complete block is accepted.
+    // See the API-11 contract for DecodeHexBlk compatibility behavior.
     let mut reader: &[u8] = &bytes;
     <Block as ConsensusDecode>::consensus_decode(&mut reader).map_err(|_| block_decode_failed())
 }
@@ -1267,6 +1271,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-11
     fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
         let missing = Arc::new(Context::new());
         let error = submitblock(&missing, &json!(["00"]))
@@ -1287,6 +1292,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-11
     fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
