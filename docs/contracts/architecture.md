@@ -152,6 +152,10 @@ Owners:
   take the transition lock and cannot mutate chainstate. `ChainEventPublisher`
   cells remain a separate coherent snapshot of the applied tip for index
   consumers (`EVT-01`).
+- `Chainstate::validate_block` dry-runs the apply path's pre-write consensus
+  gates under `lock_transition`. It does not take mempool generation and does
+  not persist. BIP22 proposal omits proof-of-work; every other pre-write gate
+  is the same function commit runs. Owner: `crates/node/src/apply.rs`.
 - Authoritative apply still lives in `crates/node` because it composes chain,
   consensus, utxo, and storage. `Chainstate` does not hold or import RPC,
   ZMQ, TxIndex, mining, or P2P admission types. Apply publishes the tip and
@@ -202,9 +206,12 @@ Owners:
   - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
     operator-tier backend feature flags.
 - `crates/node/src/apply.rs` tests `snapshot_reads_applied_tip_without_taking_a_transition`,
-  `chain_transition_connect_and_finish_publish_the_new_tip`: the facade
-  copies published tips without reserving generation, and connect/finish
-  through `ChainTransition` is the mutation path.
+- `crates/node/src/apply.rs` tests `snapshot_reads_applied_tip_without_taking_a_transition`,
+  `chain_transition_connect_and_finish_publish_the_new_tip`,
+  `proposal_rejects_excess_coinbase_without_persisting`,
+  `proposal_omits_proof_of_work`: the facade copies published tips without
+  reserving generation, connect/finish through `ChainTransition` is the
+  mutation path, and BIP22 proposal reuses the apply gates without persistence.
 - `crates/node/src/apply.rs` tests `apply_block_publishes_rawtx_bytes_in_block_order`,
   `connected_sequence_event_observes_the_published_applied_tip`,
   `connect_and_disconnect_wake_the_mining_generation`,

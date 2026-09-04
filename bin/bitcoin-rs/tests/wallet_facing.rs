@@ -65,19 +65,19 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     }
     client.mine(Coinbase::P2wpkh(&p2wpkh))?;
 
-    let height = client.esplora_text("/blocks/tip/height")?;
+    let height = client.esplora_text("/api/blocks/tip/height")?;
     assert_eq!(
         height.trim(),
         COINBASE_MATURITY.saturating_add(1).to_string(),
         "tip height after genesis + {} mined blocks",
         COINBASE_MATURITY.saturating_add(1)
     );
-    let tip_hash = client.esplora_text("/blocks/tip/hash")?;
-    let genesis_hash = client.esplora_text("/block-height/0")?;
+    let tip_hash = client.esplora_text("/api/blocks/tip/hash")?;
+    let genesis_hash = client.esplora_text("/api/block-height/0")?;
     assert_eq!(
         genesis_hash.trim(),
         genesis_block(Network::Regtest).block_hash().to_string(),
-        "GET /block-height/0 must return the regtest genesis hash"
+        "GET /api/block-height/0 must return the regtest genesis hash"
     );
     assert_ne!(
         tip_hash.trim(),
@@ -85,24 +85,19 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         "tip must have moved past genesis"
     );
 
-    let fees = client.esplora_json("/fee-estimates")?;
+    let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
         fees.get("6").and_then(Value::as_f64).is_some(),
         "fee estimates must include the 6-block target wallets use: {fees}"
     );
-    assert_prefixed_chain_view(&client, &height, &tip_hash, &genesis_hash)?;
+    assert_esplora_namespace(&client, &height, &tip_hash, &genesis_hash)?;
 
     client.wait_for_scriptindex(&address)?;
     assert_script_activity(&client, &address, &p2wpkh)?;
 
     let spend_hex = spend_first_anyone_can_spend(&client, &p2wpkh)?;
-    let broadcast = client.esplora_post("/api/v1/tx", spend_hex.as_bytes())?;
-    assert_eq!(
-        broadcast.status,
-        200,
-        "POST /api/v1/tx: {}",
-        broadcast.text()
-    );
+    let broadcast = client.esplora_post("/api/tx", spend_hex.as_bytes())?;
+    assert_eq!(broadcast.status, 200, "POST /api/tx: {}", broadcast.text());
     let txid = broadcast.text();
     assert_eq!(
         txid.trim().len(),
@@ -110,7 +105,7 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         "broadcast must return a txid: {txid}"
     );
 
-    let mempool_tx = client.esplora_json(&format!("/tx/{}", txid.trim()))?;
+    let mempool_tx = client.esplora_json(&format!("/api/tx/{}", txid.trim()))?;
     assert_eq!(
         mempool_tx
             .get("status")
@@ -119,11 +114,11 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         Some(false),
         "broadcast transaction must be visible as unconfirmed: {mempool_tx}"
     );
-    let tx_status = client.esplora_json(&format!("/tx/{}/status", txid.trim()))?;
+    let tx_status = client.esplora_json(&format!("/api/tx/{}/status", txid.trim()))?;
     assert_eq!(
         tx_status.get("confirmed").and_then(Value::as_bool),
         Some(false),
-        "GET /tx/{{id}}/status must report unconfirmed: {tx_status}"
+        "GET /api/tx/{{id}}/status must report unconfirmed: {tx_status}"
     );
     Ok(())
 }
@@ -508,7 +503,7 @@ impl Client {
     }
 
     fn wait_for_scriptindex(&self, address: &str) -> TestResult {
-        let path = format!("/address/{address}/utxo");
+        let path = format!("/api/address/{address}/utxo");
         let deadline = Instant::now() + INDEX_TIMEOUT;
         loop {
             let response = self.esplora_get(&path)?;
@@ -604,67 +599,82 @@ fn p2wpkh_script() -> ScriptBuf {
     ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]))
 }
 
-fn assert_prefixed_chain_view(
+fn assert_esplora_namespace(
     client: &Client,
     height: &str,
     tip_hash: &str,
     genesis_hash: &str,
 ) -> TestResult {
-    let prefixed_height = client.esplora_text("/api/v1/block-height/0")?;
+    let unprefixed = client.esplora_get("/blocks/tip/height")?;
     assert_eq!(
-        prefixed_height.trim(),
-        genesis_hash.trim(),
-        "GET /api/v1/block-height/0 must alias GET /block-height/0"
+        unprefixed.status,
+        404,
+        "unprefixed GET /blocks/tip/height must 404: {}",
+        unprefixed.text()
     );
-    let prefixed_tip = client.esplora_text("/api/blocks/tip/hash")?;
+    let mempool_v1 = client.esplora_get("/api/v1/block-height/0")?;
     assert_eq!(
-        prefixed_tip.trim(),
-        tip_hash.trim(),
-        "GET /api/blocks/tip/hash must alias GET /blocks/tip/hash"
+        mempool_v1.status,
+        404,
+        "GET /api/v1/block-height/0 is Mempool's prefix, not Esplora: {}",
+        mempool_v1.text()
     );
-    let prefixed_tip_height = client.esplora_text("/api/v1/blocks/tip/height")?;
     assert_eq!(
-        prefixed_tip_height.trim(),
-        height.trim(),
-        "GET /api/v1/blocks/tip/height must alias GET /blocks/tip/height"
+        client.esplora_text("/api/blocks/tip/hash")?.trim(),
+        tip_hash.trim()
     );
-    let header = client.esplora_text(&format!("/block/{}/header", tip_hash.trim()))?;
+    assert_eq!(
+        client.esplora_text("/api/blocks/tip/height")?.trim(),
+        height.trim()
+    );
+    assert_eq!(
+        client.esplora_text("/api/block-height/0")?.trim(),
+        genesis_hash.trim()
+    );
+    let header = client.esplora_text(&format!("/api/block/{}/header", tip_hash.trim()))?;
     assert_eq!(
         header.trim().len(),
         160,
-        "GET /block/{{hash}}/header must return 80-byte header hex: {header}"
+        "GET /api/block/{{hash}}/header must return 80-byte header hex: {header}"
     );
-    let prefixed_fees = client.esplora_json("/api/v1/fee-estimates")?;
+    let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
-        prefixed_fees.get("6").and_then(Value::as_f64).is_some(),
-        "GET /api/v1/fee-estimates must alias GET /fee-estimates: {prefixed_fees}"
+        fees.get("6").and_then(Value::as_f64).is_some(),
+        "GET /api/fee-estimates must include the 6-block target: {fees}"
     );
 
-    let leaked = client.esplora_post("/api/v1/not-esplora", b"{}")?;
+    let leaked = client.esplora_post("/api/not-esplora", b"{}")?;
     assert_eq!(
         leaked.status,
         404,
-        "POST under /api/v1 must stay Esplora (404), not fall through to JSON-RPC (401): {}",
+        "POST under /api must stay Esplora (404), not fall through to JSON-RPC (401): {}",
         leaked.text()
+    );
+    let unprefixed_tx = client.esplora_post("/tx", b"00")?;
+    assert_eq!(
+        unprefixed_tx.status,
+        401,
+        "unprefixed POST /tx must be JSON-RPC (401 without auth), not Esplora: {}",
+        unprefixed_tx.text()
     );
     let backend = client.esplora_get("/api/internal/mempool/txs")?;
     assert_eq!(
         backend.status,
-        404,
-        "GET /api/internal/* must not alias the mempool-backend listener: {}",
+        200,
+        "GET /api/internal/* is the mempool-backend path on the node listener: {}",
         backend.text()
     );
     Ok(())
 }
 
 fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) -> TestResult {
-    let summary = client.esplora_json(&format!("/address/{address}"))?;
+    let summary = client.esplora_json(&format!("/api/address/{address}"))?;
     assert!(
         summary.get("chain_stats").is_some(),
         "address summary must include chain_stats: {summary}"
     );
 
-    let address_utxos = client.esplora_json(&format!("/address/{address}/utxo"))?;
+    let address_utxos = client.esplora_json(&format!("/api/address/{address}/utxo"))?;
     let utxos = address_utxos
         .as_array()
         .ok_or("address UTXO response must be a JSON array")?;
@@ -673,7 +683,7 @@ fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) ->
         "P2WPKH coinbase must be visible on /address/{{addr}}/utxo: {address_utxos}"
     );
 
-    let history = client.esplora_json(&format!("/address/{address}/txs"))?;
+    let history = client.esplora_json(&format!("/api/address/{address}/txs"))?;
     assert!(
         history
             .as_array()
@@ -682,17 +692,17 @@ fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) ->
     );
 
     let script_hash = sha256::Hash::hash(script.as_bytes()).to_string();
-    let twin = client.esplora_json(&format!("/scripthash/{script_hash}"))?;
+    let twin = client.esplora_json(&format!("/api/scripthash/{script_hash}"))?;
     assert!(
         twin.get("chain_stats").is_some(),
         "scripthash summary must include chain_stats: {twin}"
     );
-    let twin_utxos = client.esplora_json(&format!("/scripthash/{script_hash}/utxo"))?;
+    let twin_utxos = client.esplora_json(&format!("/api/scripthash/{script_hash}/utxo"))?;
     assert_eq!(
         twin_utxos, address_utxos,
         "scripthash UTXOs must match the address twin"
     );
-    let twin_history = client.esplora_json(&format!("/scripthash/{script_hash}/txs"))?;
+    let twin_history = client.esplora_json(&format!("/api/scripthash/{script_hash}/txs"))?;
     assert!(
         twin_history
             .as_array()
@@ -706,10 +716,10 @@ fn spend_first_anyone_can_spend(client: &Client, payout: &ScriptBuf) -> TestResu
     // Height-1 coinbase is anyone-can-spend (`OP_TRUE`). The default binary's
     // portable interpreter verifies that class; it does not verify P2WPKH, and
     // the node holds no keys. A wallet would sign here. Broadcast still goes
-    // through the public `POST /tx` path, paying a standard P2WPKH so policy
+    // through the public `POST /api/tx` path, paying a standard P2WPKH so policy
     // accepts the output.
-    let block_hash = client.esplora_text("/block-height/1")?;
-    let txid_hex = client.esplora_text(&format!("/block/{}/txid/0", block_hash.trim()))?;
+    let block_hash = client.esplora_text("/api/block-height/1")?;
+    let txid_hex = client.esplora_text(&format!("/api/block/{}/txid/0", block_hash.trim()))?;
     let txid: Txid = txid_hex.trim().parse()?;
     let spend = Transaction {
         version: TxVersion::TWO,

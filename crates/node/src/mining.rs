@@ -762,7 +762,9 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
         ApplyError::TargetAboveLimit | ApplyError::NbitsNonRetargetMismatch { .. } => {
             BlockValidationResult::Rejected(CompactString::from("bad-diffbits"))
         }
-        ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
+        ApplyError::BlockOutputsExceedInputs
+        | ApplyError::BlockValueOverflow
+        | ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { .. }) => {
             BlockValidationResult::Rejected(CompactString::from("bad-cb-amount"))
         }
         ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
@@ -782,6 +784,19 @@ mod apply_error_tests {
         assert!(matches!(
             map_apply_error(ApplyError::JournalBackpressure("test pressure".to_owned())),
             BlockValidationResult::Inconclusive
+        ));
+    }
+
+    #[test]
+    fn coinbase_amount_is_bad_cb_amount() {
+        assert!(matches!(
+            map_apply_error(ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::CoinbaseAmount {
+                    paid: 1,
+                    allowed: 0,
+                }
+            )),
+            BlockValidationResult::Rejected(reason) if reason == "bad-cb-amount"
         ));
     }
 }

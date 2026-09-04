@@ -144,6 +144,17 @@ fn mined_child_labeled(prev: BlockHash, label: i64) -> anyhow::Result<Block> {
     Ok(block)
 }
 
+fn excess_coinbase_child(prev: BlockHash) -> anyhow::Result<Block> {
+    let mut block = mined_child(prev)?;
+    let Some(output) = block.txs.first_mut().and_then(|tx| tx.outputs.first_mut()) else {
+        panic!("coinbase has no output");
+    };
+    output.value = output.value.saturating_add(1);
+    block.header.merkle_root = block_merkle_root(&block);
+    mine_block_to_regtest_target(&mut block)?;
+    Ok(block)
+}
+
 fn mine_block_to_regtest_target(block: &mut Block) -> anyhow::Result<()> {
     while !pow_met(block.header.bits, &block.block_hash()) {
         block.header.nonce = block
@@ -415,10 +426,49 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
         long_poll_id: None,
     })?;
     match result {
-        BlockTemplateResult::Proposal(
-            BlockValidationResult::Accepted | BlockValidationResult::Rejected(_),
-        ) => {}
-        other => panic!("expected proposal result, got {other:?}"),
+        BlockTemplateResult::Proposal(BlockValidationResult::Accepted) => {}
+        other => panic!("valid proposal must be accepted, got {other:?}"),
+    }
+
+    let after = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after proposal"));
+    assert_eq!(before.hash, after.hash);
+    assert_eq!(before_seq, state.mempool().read().sequence_number());
+    assert_eq!(before_blocks, state.blocks().read().len());
+    Ok(())
+}
+
+#[test]
+fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let before = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing before proposal"));
+    let before_seq = state.mempool().read().sequence_number();
+    let before_blocks = state.blocks().read().len();
+
+    let genesis = Network::Regtest.genesis_block();
+    let child = excess_coinbase_child(genesis.block_hash())?;
+    let result = mining.get_block_template(BlockTemplateRequest {
+        mode: BlockTemplateMode::Proposal(child),
+        capabilities: Vec::new(),
+        rules: Vec::new(),
+        long_poll_id: None,
+    })?;
+    match result {
+        BlockTemplateResult::Proposal(BlockValidationResult::Rejected(reason)) => {
+            assert!(
+                reason.contains("bad-cb-amount"),
+                "unexpected rejection reason: {reason}"
+            );
+        }
+        other => panic!("expected bad-cb-amount proposal rejection, got {other:?}"),
     }
 
     let after = state

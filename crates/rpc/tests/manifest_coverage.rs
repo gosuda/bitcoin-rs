@@ -139,7 +139,7 @@ fn esplora_extension_row_resolves_to_the_router() {
         .find(|entry| entry.name == "esplora/*")
         .unwrap_or_else(|| panic!("esplora/* extension row missing from MANIFEST"));
     assert_eq!(row.status, Status::Extension);
-    let response = bitcoin_rs_rpc::esplora::route(&handler(), "/mempool", "");
+    let response = bitcoin_rs_rpc::esplora::route(&handler(), "/api/mempool", "");
     assert_eq!(
         response.status, 200,
         "esplora router must serve the row it declares"

@@ -859,6 +859,22 @@ pub struct DisconnectOutcome {
     pub restored_parents: Vec<Txid>,
 }
 
+/// Connect intent. See `ARCH-07` in `docs/contracts/architecture.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplyIntent {
+    Commit,
+    /// See `ARCH-07` in `docs/contracts/architecture.md`.
+    Propose,
+}
+
+/// Outcome of [`apply_block_admitted`] once intent is known.
+enum ApplyFinish {
+    /// Commit path: the new applied tip, already published.
+    Committed(ConnectOutcome),
+    /// See `ARCH-07` in `docs/contracts/architecture.md`.
+    Proposed,
+}
+
 /// Coherent read of header tip, applied tip, and chain-tx count.
 ///
 /// Produced by [`Chainstate::snapshot`]. Applied tip and `chain_tx_count` are
@@ -993,7 +1009,7 @@ impl<'a> ChainTransition<'a> {
     /// Consensus refusal happens before the first write. See the type-level
     /// persistence notes for the commit point and retry rules.
     pub fn connect(&self, block: &Block) -> core::result::Result<ConnectOutcome, ApplyError> {
-        apply_block_admitted(
+        apply_committed_block_admitted(
             self.chainstate,
             block,
             None,
@@ -1023,7 +1039,7 @@ impl<'a> ChainTransition<'a> {
         block: &Block,
         serialized: bytes::Bytes,
     ) -> core::result::Result<ConnectOutcome, ApplyError> {
-        apply_block_admitted(
+        apply_committed_block_admitted(
             self.chainstate,
             block,
             Some(serialized),
@@ -1270,14 +1286,22 @@ impl Chainstate {
         result
     }
 
-    /// Returns after consensus gates that precede the first write, without
-    /// persisting the block. BIP22 proposal mode omits proof-of-work.
+    /// See `ARCH-07` in `docs/contracts/architecture.md`.
     pub fn validate_block(&self, block: &Block) -> core::result::Result<(), ApplyError> {
         let _lock = self.lock_transition()?;
-        let block_hash = block.block_hash().0;
-        let prev_hash = block.header.prev_blockhash.0;
-        let _ = applied_predecessor(self, block_hash, prev_hash)?;
-        Ok(())
+        match apply_block_admitted(
+            self,
+            block,
+            None,
+            None,
+            BlockProvenance::Network,
+            ApplyIntent::Propose,
+        )? {
+            ApplyFinish::Proposed => Ok(()),
+            ApplyFinish::Committed(_) => {
+                unreachable!("propose intent does not persist")
+            }
+        }
     }
 
     /// Builds a chainstate facade for tests and composition that do not go
@@ -1772,8 +1796,7 @@ pub fn apply_block(
     Ok(handles.apply_block(block)?.tip)
 }
 
-/// Returns after consensus gates that precede the first write, without
-/// persisting the block. BIP22 proposal mode omits proof-of-work.
+/// See [`Chainstate::validate_block`].
 pub fn validate_block(handles: &Chainstate, block: &Block) -> core::result::Result<(), ApplyError> {
     handles.validate_block(block)
 }
@@ -1796,7 +1819,7 @@ pub(crate) fn apply_block_with_serialized_admitted(
     serialized: bytes::Bytes,
     proof: &ChainChangeProof<'_>,
 ) -> core::result::Result<ConnectOutcome, ApplyError> {
-    apply_block_admitted(
+    apply_committed_block_admitted(
         handles,
         block,
         Some(serialized),
@@ -1916,7 +1939,7 @@ fn apply_window_admitted(
     let mut proven = prove_window(handles, blocks, serialized).into_iter();
     let mut committed = Vec::with_capacity(blocks.len());
     for (block, raw) in blocks.iter().zip(serialized) {
-        match apply_block_admitted(
+        match apply_committed_block_admitted(
             handles,
             block,
             Some(raw.clone()),
@@ -2524,7 +2547,7 @@ fn apply_block_inner(
     provenance: BlockProvenance,
 ) -> core::result::Result<ConnectOutcome, ApplyError> {
     let transition = handles.begin_transition()?;
-    let result = apply_block_admitted(
+    let result = apply_committed_block_admitted(
         handles,
         block,
         provided_serialized,
@@ -2538,19 +2561,9 @@ fn apply_block_inner(
     result
 }
 
-/// The apply itself, with the admission permit and the transition lock held.
-///
-/// Callers MUST hold both. `handles.chain_transition` is what serializes this
-/// against another connect or a disconnect; the admission permit only keeps a
-/// checkpoint close from cutting across it.
-///
-/// Split from [`apply_block_inner`] so a window can take both once across its
-/// preparation and all of its ordered commits. Re-entering per block would be
-/// two read guards on the same lock, which deadlocks against a shutdown waiting
-/// on the write side, and would leave gaps in which another applier could move
-/// the chain out from under prepared state.
-#[allow(clippy::too_many_lines)]
-fn apply_block_admitted<'b>(
+/// Commit path: requires a [`ChainChangeProof`] so connect cannot run without
+/// holding admission, the transition lock, and mempool generation.
+fn apply_committed_block_admitted<'b>(
     handles: &Chainstate,
     block: &'b Block,
     provided_serialized: Option<bytes::Bytes>,
@@ -2558,11 +2571,44 @@ fn apply_block_admitted<'b>(
     provenance: BlockProvenance,
     _proof: &ChainChangeProof<'_>,
 ) -> core::result::Result<ConnectOutcome, ApplyError> {
+    match apply_block_admitted(
+        handles,
+        block,
+        provided_serialized,
+        proven,
+        provenance,
+        ApplyIntent::Commit,
+    )? {
+        ApplyFinish::Committed(outcome) => Ok(outcome),
+        ApplyFinish::Proposed => unreachable!("commit intent returns a committed tip"),
+    }
+}
+
+/// Shared connect body for [`ApplyIntent::Commit`] and [`ApplyIntent::Propose`].
+///
+/// See `ARCH-07` in `docs/contracts/architecture.md`.
+///
+/// Split from [`apply_block_inner`] so a window can take both locks once across
+/// its preparation and all of its ordered commits. Re-entering per block would
+/// be two read guards on the same lock, which deadlocks against a shutdown
+/// waiting on the write side, and would leave gaps in which another applier
+/// could move the chain out from under prepared state.
+#[allow(clippy::too_many_lines)]
+fn apply_block_admitted<'b>(
+    handles: &Chainstate,
+    block: &'b Block,
+    provided_serialized: Option<bytes::Bytes>,
+    proven: Option<ProvenApply<'b>>,
+    provenance: BlockProvenance,
+    intent: ApplyIntent,
+) -> core::result::Result<ApplyFinish, ApplyError> {
     let total_started = quanta::Instant::now();
     let block_hash = block.block_hash().0;
     let prev_hash = block.header.prev_blockhash.0;
     let (prior, height) = applied_predecessor(handles, block_hash, prev_hash)?;
-    if let Some(journal) = &handles.journal {
+    if intent == ApplyIntent::Commit
+        && let Some(journal) = &handles.journal
+    {
         let maintenance = {
             let mut journal = journal.lock();
             journal.prepare_for_apply()
@@ -2588,7 +2634,7 @@ fn apply_block_admitted<'b>(
     let pow_self_dur = pow_self_started.elapsed();
     metrics::histogram!("node.apply_block.pow_self_consistency_seconds")
         .record(pow_self_dur.as_secs_f64());
-    if pow_self_result.is_err() {
+    if intent == ApplyIntent::Commit && pow_self_result.is_err() {
         return Err(ApplyError::ProofOfWork { hash: block_hash });
     }
 
@@ -2805,6 +2851,10 @@ fn apply_block_admitted<'b>(
         )?;
     }
 
+    if intent == ApplyIntent::Propose {
+        return Ok(ApplyFinish::Proposed);
+    }
+
     // Persist undo before the block body, the index, and the UTXO commit. All
     // three are derived state for a block that is about to apply; if the undo
     // record cannot be written the block must not apply at all, and leaving
@@ -3017,14 +3067,14 @@ fn apply_block_admitted<'b>(
         advance_chain_tx_count(handles, height, tx_count_delta_for(block));
     }
     let (txids, raw_txs) = scratch.into_payloads();
-    Ok(ConnectOutcome {
+    Ok(ApplyFinish::Committed(ConnectOutcome {
         tip,
         height,
         hash: block_hash,
         txids,
         block_bytes,
         raw_txs,
-    })
+    }))
 }
 
 /// Decodes a compact `bits` encoding into a 256-bit target with Core
@@ -6256,6 +6306,15 @@ mod consensus_rule_tests {
         extra: Vec<Tx>,
         coinbase_value: u64,
     ) -> Result<TipSnapshot, ApplyError> {
+        let (handles, block) = height_one_prepared(extra, coinbase_value)?;
+        apply_block(&handles, &block)
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn height_one_prepared(
+        extra: Vec<Tx>,
+        coinbase_value: u64,
+    ) -> Result<(Chainstate, Block), ApplyError> {
         let funded = OutPoint::new(fixture_txid(0x71), 0);
         // Height 0 so the seeded coin is mature, and non-coinbase so maturity
         // does not apply to it at all.
@@ -6285,7 +6344,90 @@ mod consensus_rule_tests {
         while !compact_is_met_by(block.header.bits, block.header.compute_hash().0) {
             block.header.nonce = block.header.nonce.wrapping_add(1);
         }
-        apply_block(&handles, &block)
+        Ok((handles, block))
+    }
+
+    /// Proposal must run the same pre-write gates commit runs, including the
+    /// coinbase-amount check, and must not persist or publish a tip.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn proposal_rejects_excess_coinbase_without_persisting()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let subsidy =
+            bitcoin_rs_consensus::block_subsidy(1, Network::Regtest.subsidy_halving_interval());
+        let (handles, over) = height_one_prepared(vec![], subsidy + 1)?;
+        let over_hash = Hash256::from(over.block_hash());
+        let tip_before = handles
+            .applied_tip
+            .load_full()
+            .unwrap_or_else(|| panic!("genesis tip missing before proposal"));
+        let utxo_before = handles.utxo.len();
+
+        let over_result = validate_block(&handles, &over);
+        assert!(
+            matches!(
+                &over_result,
+                Err(ApplyError::Consensus(
+                    bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { paid, allowed }
+                )) if *paid == subsidy + 1 && *allowed == subsidy
+            ),
+            "proposal must refuse an over-subsidy coinbase, got {over_result:?}"
+        );
+        assert_eq!(
+            handles
+                .applied_tip
+                .load_full()
+                .as_deref()
+                .map(|tip| tip.hash),
+            Some(tip_before.hash),
+            "a refused proposal must not move the applied tip"
+        );
+        assert_eq!(handles.utxo.len(), utxo_before);
+        assert!(
+            handles.undo_store.load_undo(1, over_hash)?.is_none(),
+            "a refused proposal must not write an undo record"
+        );
+
+        let (handles, exact) = height_one_prepared(vec![], subsidy)?;
+        let exact_hash = Hash256::from(exact.block_hash());
+        validate_block(&handles, &exact)?;
+        assert_eq!(
+            handles
+                .applied_tip
+                .load_full()
+                .as_deref()
+                .map(|tip| tip.hash),
+            Some(Hash256::from(Network::Regtest.genesis_block().block_hash())),
+            "an accepted proposal must not publish a new applied tip"
+        );
+        assert!(
+            handles.undo_store.load_undo(1, exact_hash)?.is_none(),
+            "an accepted proposal must not persist undo"
+        );
+        Ok(())
+    }
+
+    /// BIP22 proposal omits the self-consistency `PoW` check that commit enforces.
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn proposal_omits_proof_of_work() -> Result<(), Box<dyn std::error::Error>> {
+        let subsidy =
+            bitcoin_rs_consensus::block_subsidy(1, Network::Regtest.subsidy_halving_interval());
+        let (handles, mut block) = height_one_prepared(vec![], subsidy)?;
+        while compact_is_met_by(block.header.bits, block.header.compute_hash().0) {
+            block.header.nonce = block
+                .header
+                .nonce
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("test block nonce exhausted"))?;
+        }
+        validate_block(&handles, &block)?;
+        let commit = apply_block(&handles, &block);
+        assert!(
+            matches!(commit, Err(ApplyError::ProofOfWork { .. })),
+            "commit must still refuse unsolved PoW, got {commit:?}"
+        );
+        Ok(())
     }
 
     /// Timestamp rules must hold on the apply path, not only in header sync.
@@ -6511,7 +6653,7 @@ mod consensus_rule_tests {
             let transition = handles.lock_transition()?;
             let guard = handles.mempool_gateway.begin_chain_change()?;
             let chain_proof = ChainChangeProof::new(transition, guard);
-            let Err(error) = apply_block_admitted(
+            let Err(error) = apply_committed_block_admitted(
                 &handles,
                 &block,
                 Some(raw),
@@ -6688,7 +6830,7 @@ mod consensus_rule_tests {
         let transition = handles.lock_transition()?;
         let guard = handles.mempool_gateway.begin_chain_change()?;
         let proof = ChainChangeProof::new(transition, guard);
-        let outcome = apply_block_admitted(
+        let outcome = apply_committed_block_admitted(
             &handles,
             &block,
             Some(raw),
