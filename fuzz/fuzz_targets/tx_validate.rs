@@ -12,6 +12,11 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, deserialize as native_deserialize};
 
+const SYNTHETIC_OUTPOINT: OutPoint = OutPoint {
+    txid: Default::default(),
+    vout: 0,
+};
+
 /// Prevouts for every input in `tx`, so consensus and mempool checks run
 /// past missing-input rejection.
 struct SpendingView<'a> {
@@ -45,13 +50,19 @@ fn validate_native(tx: Tx) {
     let view = SpendingView {
         coin: TxOut {
             value: 50_000_000,
-            script_pubkey: vec![0x51],
+            // A v0 witness program makes non-empty witness stacks exercise
+            // witness validation rather than the legacy script path.
+            script_pubkey: vec![0x00, 0x20]
+                .into_iter()
+                .chain([0u8; 32])
+                .collect(),
         },
         tx: tx.as_ref(),
     };
-    let _ = verify_transaction_non_script(&tx, &view, 800_001, 1_700_000_000);
+    let context = accept_context();
+    let _ = verify_transaction_non_script(&tx, &view, context.height, context.locktime_cutoff);
     let pool = Mempool::new(MempoolLimits::default());
-    let _ = check_acceptance(&pool, &tx, &view, &accept_context());
+    let _ = check_acceptance(&pool, &tx, &view, &context);
 }
 
 /// rust-bitcoin parses tx/witness; bitcoin-rs runs consensus and mempool.
@@ -71,7 +82,7 @@ fn validate_tx(data: &[u8]) {
     let tx = Tx {
         version: 2,
         inputs: vec![bitcoin_rs_primitives::TxIn {
-            previous_output: OutPoint::default(),
+            previous_output: SYNTHETIC_OUTPOINT,
             script_sig: Vec::new(),
             sequence: u32::MAX,
             witness: stack,
