@@ -97,6 +97,11 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     ensure_at_most_params(params, 2)?;
+    if let Some(dummy) = params_array(params)?.get(1) {
+        if !dummy.is_null() && dummy.as_str().is_none() {
+            return Err(RpcError::InvalidType("parameter must be a string"));
+        }
+    }
     let hex = required_str(params, 0, "block hex is required")?;
     let block = decode_submitted_block(hex)?;
     match control.submit_block(block) {
@@ -1287,6 +1292,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-11
     fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
