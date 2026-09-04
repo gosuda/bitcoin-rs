@@ -829,13 +829,11 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
     for layer in layers {
         config.apply_layer(layer);
     }
-    let mut payout_address = None;
+    let mut mining = MiningOverrides::default();
     for layer in layers {
-        if let Some(address) = layer.mining.payout_address.as_deref() {
-            payout_address = Some(address);
-        }
+        mining.overlay(&layer.mining);
     }
-    if let Some(address) = payout_address {
+    if let Some(address) = mining.payout_address.as_deref() {
         config.mining.payout_script = decode_payout_script(config.network, address)?;
     }
     config.validate()?;
