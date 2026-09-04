@@ -7,6 +7,8 @@ pub mod addrv2;
 pub mod banlist;
 /// Active-chain `getheaders` / `getdata` serving.
 pub mod chain_query;
+/// Bitcoin Core P2P compatibility inventory: pinned reference and command set.
+pub mod compat;
 /// Per-connection identity and cancellation.
 pub mod connection;
 /// Per-connection traffic counters.
@@ -41,6 +43,7 @@ pub mod wire;
 pub mod wtxid;
 
 pub use chain_query::ActiveChainQuery;
+pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
 pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerStats, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
