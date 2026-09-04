@@ -48,7 +48,7 @@ fn estimate_feerate_sat_per_kvb(ctx: &Context, conf_target: u64) -> u64 {
     threshold.max(DEFAULT_MIN_FEERATE_SAT_PER_KVB)
 }
 
-fn sat_per_kvb_to_btc_per_kvb(sat: u64) -> f64 {
+pub(crate) fn sat_per_kvb_to_btc(sat: u64) -> f64 {
     f64::from(u32::try_from(sat).unwrap_or(u32::MAX)) / 100_000_000.0_f64
 }
 
@@ -127,7 +127,7 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
     let rate_sat_per_kvb = estimate_feerate_sat_per_kvb(ctx, conf_target);
-    let feerate = sat_per_kvb_to_btc_per_kvb(rate_sat_per_kvb);
+    let feerate = sat_per_kvb_to_btc(rate_sat_per_kvb);
     Ok(json!({
         "feerate": feerate,
         "blocks": conf_target
@@ -137,7 +137,7 @@ pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Val
 pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
     let rate_sat_per_kvb = estimate_feerate_sat_per_kvb(ctx, conf_target);
-    let feerate = sat_per_kvb_to_btc_per_kvb(rate_sat_per_kvb);
+    let feerate = sat_per_kvb_to_btc(rate_sat_per_kvb);
     Ok(json!({
         "short": {"feerate": feerate, "decay": 0.962, "scale": 1},
         "medium": {"feerate": feerate, "decay": 0.962, "scale": 1},
