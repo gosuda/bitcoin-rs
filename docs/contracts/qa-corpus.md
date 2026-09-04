@@ -14,7 +14,7 @@ nothing normative; it places the document under the
 - **Owner**: `fuzz/CORPUS_PROVENANCE.md` owns fuzz seed provenance (seeds
   imported from `rust-bitcoin/qa-assets`, CC0-1.0, minimized with `cargo fuzz cmin`).
 - **Scope**: seeds under `fuzz/corpus/` feeding fuzz targets
-  `fuzz/fuzz_targets/p2p_message.rs`, `block_decode.rs`, `tx_decode.rs`, and
+  `fuzz/fuzz_targets/p2p_message.rs`, `block_validate.rs`, `tx_validate.rs`, and
   `script_eval.rs`.
 - Provenance rows must be updated in the same commit as any corpus re-import via
   `scripts/import-qa-assets.sh`.
