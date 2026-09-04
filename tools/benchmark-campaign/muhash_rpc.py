@@ -48,8 +48,16 @@ ARM_READY_TIMEOUT_NS = 10_000_000_000
 CHILD_TERMINATE_GRACE_NS = 1_000_000_000
 CHILD_KILL_REAP_NS = 1_000_000_000
 _CAMPAIGN_PLACEHOLDERS = frozenset(
-    {"{binary}", "{data_dir}", "{rpc_port}", "{rpc_bind}", "{cookie}"}
+    {"{binary}", "{data_dir}", "{rpc_port}", "{rpc_bind}", "{cookie}", "{config}"}
 )
+def _cache_action(policy: str) -> str:
+    return {
+        "warm": "warm-untimed-query-done",
+        "process-cold/page-cache-unspecified": "fresh-process-before-observation",
+        "process-cold/page-cache-evicted": "page-cache-evicted",
+    }[policy]
+
+
 CACHE_POLICIES = frozenset(
     {
         "warm",
@@ -483,11 +491,7 @@ def _parse_pre(value: object, field: str = "pre_receipt") -> JsonObject:
     corpus = _parse_corpus(item["corpus"], f"{field}.corpus")
     endpoint = _validate_endpoint(item["endpoint"], f"{field}.endpoint")
     action = _text(item["cache_policy_action"], f"{field}.cache_policy_action")
-    expected_action = {
-        "warm": "warm-untimed-query-done",
-        "process-cold/page-cache-unspecified": "fresh-process-before-observation",
-        "process-cold/page-cache-evicted": "page-cache-evicted",
-    }[policy]
+    expected_action = _cache_action(policy)
     if action != expected_action:
         raise ContractError(f"{field}.cache_policy_action is wrong for {policy}")
     eviction_value = item["eviction_procedure"]
@@ -1567,6 +1571,8 @@ def _command(value: object, field: str) -> tuple[str, ...]:
     command = tuple(_text(item, f"{field}[{index}]") for index, item in enumerate(items))
     if command[0] != "{binary}":
         raise ContractError(f"{field}[0] must be {{binary}}")
+    if "{config}" not in command:
+        raise ContractError(f"{field} must contain the {{config}} placeholder")
     for part in command:
         if "{" in part and part not in _CAMPAIGN_PLACEHOLDERS:
             raise ContractError(f"{field} contains an unsupported placeholder")
@@ -1678,14 +1684,6 @@ def _parse_campaign_config(value: object) -> CampaignConfig:
     )
 
 
-def _cache_action(policy: str) -> str:
-    return {
-        "warm": "warm-untimed-query-done",
-        "process-cold/page-cache-unspecified": "fresh-process-before-observation",
-        "process-cold/page-cache-evicted": "page-cache-evicted",
-    }[policy]
-
-
 def _ref_json(reference: FileRef) -> JsonObject:
     return {
         "path": str(reference.path),
@@ -1715,8 +1713,10 @@ def _allocate_loopback_port() -> int:
         return port
 
 
-def _wait_tcp(host: str, port: int, deadline_ns: int) -> None:
+def _wait_tcp(host: str, port: int, deadline_ns: int, process: subprocess.Popen[bytes] | None = None) -> None:
     while True:
+        if process is not None and process.poll() is not None:
+            raise ContractError("arm process exited before RPC readiness")
         remaining = deadline_ns - time.perf_counter_ns()
         if remaining <= 0:
             raise ContractError("arm RPC endpoint never became ready")
@@ -1834,6 +1834,7 @@ def _expand_command(
     data_dir: Path,
     port: int,
     cookie: Path,
+    config: Path,
 ) -> list[str]:
     replacements = {
         "{binary}": str(binary),
@@ -1841,6 +1842,7 @@ def _expand_command(
         "{rpc_port}": str(port),
         "{rpc_bind}": "127.0.0.1",
         "{cookie}": str(cookie),
+        "{config}": str(config),
     }
     return [replacements.get(part, part) for part in template]
 
@@ -1886,6 +1888,7 @@ class _ArmProcess:
             data_dir=self.spec.datadir,
             port=self.port,
             cookie=self.cookie,
+            config=self.spec.config.path,
         )
         try:
             self._process = subprocess.Popen(
@@ -1898,7 +1901,7 @@ class _ArmProcess:
         except OSError as error:
             raise ContractError(f"cannot spawn {self.spec.kind} process") from error
         self._pid = self._process.pid
-        _wait_tcp("127.0.0.1", self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS)
+        _wait_tcp("127.0.0.1", self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS, self._process)
         self._starttime = _read_starttime(self._pid)
         self._warmed = False
 
@@ -2027,6 +2030,10 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
     )
     expected_height = _uint(config.expected["height"], "campaign expected.height")
     expected_hash = _hash(config.expected["bestblock"], "campaign expected.bestblock")
+    core_port = _allocate_loopback_port()
+    candidate_port = _allocate_loopback_port()
+    if candidate_port == core_port:
+        raise ContractError("arm RPC ports collided")
     arms = {
         "core": _ArmProcess(
             config.core,
