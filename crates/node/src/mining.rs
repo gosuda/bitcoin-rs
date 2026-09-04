@@ -656,7 +656,7 @@ impl MiningCoordinator {
     /// Core `generateblock` `TestBlockValidity` before `GenerateBlock`.
     ///
     /// `ApplyIntent::Propose` already skips hash-meets-target. This path does
-    /// not use [`Self::propose`], which owns GBT LookupBlockIndex duplicate
+    /// not use [`Self::propose`], which owns GBT `LookupBlockIndex` duplicate
     /// vocabulary (`API-14`/`API-21`).
     /// CONTRACT: docs/contracts/external-api.md#API-27
     fn test_generateblock_validity(&self, block: &Block) -> Result<(), MiningControlError> {
@@ -1096,7 +1096,7 @@ fn bip22_chain_reason(error: &ChainError) -> CompactString {
 /// Core `JSONRPCError(RPC_VERIFY_ERROR, "TestBlockValidity failed: %s")`.
 ///
 /// Shutdown and journal backpressure stay operational; they are not wrapped
-/// as TestBlockValidity. CONTRACT: docs/contracts/external-api.md#API-27
+/// as `TestBlockValidity`. CONTRACT: docs/contracts/external-api.md#API-27
 fn test_block_validity_error(error: ApplyError) -> MiningControlError {
     match error {
         ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
