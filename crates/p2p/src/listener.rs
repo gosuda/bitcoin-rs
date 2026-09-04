@@ -1193,6 +1193,11 @@ fn write_ready_burst(
                 account_written(&sizes, stats, totals, budget);
                 pending = leftover;
             }
+            Err(crate::wire::PeerError::BurstIo { error, completed, .. }) => {
+                account_written(&completed, stats, totals, budget);
+                tracing::debug!(%error, completed, "p2p writer thread exiting");
+                return false;
+            }
             Err(error) => {
                 tracing::debug!(%error, "p2p writer thread exiting");
                 return false;
@@ -2125,6 +2130,7 @@ mod writer_shutdown_tests {
     }
 
     #[test]
+    /// Proves P2P-03 control coalescing and bulk-message isolation.
     fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
         let (tx, rx) = crossbeam_channel::unbounded();
         tx.send(crate::Message::Pong(1)).expect("pong");
@@ -2145,6 +2151,7 @@ mod writer_shutdown_tests {
     }
 
     #[test]
+    /// Proves P2P-03 bulk-message isolation.
     fn collect_write_burst_emits_a_bulk_payload_alone() {
         let (tx, rx) = crossbeam_channel::unbounded();
         tx.send(crate::Message::Ping(1)).expect("ping");

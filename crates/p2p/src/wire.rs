@@ -178,7 +178,8 @@ impl Message {
     pub const fn is_bulk_payload(&self) -> bool {
         matches!(
             self,
-            Self::Tx(_)
+            Self::Unknown { .. }
+                | Self::Tx(_)
                 | Self::Block(_)
                 | Self::Headers(_)
                 | Self::MerkleBlock(_)
@@ -243,6 +244,13 @@ pub enum PeerError {
     /// I/O failed while reading or writing the transport.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// I/O failed after this many bytes of a vectored burst were written.
+    #[error("io error after {written} bytes: {error}")]
+    BurstIo {
+        error: std::io::Error,
+        written: usize,
+        completed: Vec<usize>,
+    },
     /// Consensus payload encoding or decoding failed.
     #[error("bitcoin consensus encoding error: {0}")]
     Encode(#[from] encode::Error),
@@ -359,8 +367,33 @@ pub fn write_messages<W: Write + ?Sized>(
         slices.push(IoSlice::new(header));
         slices.push(IoSlice::new(payload));
     }
-    write_all_vectored(writer, &mut slices)?;
+    if let Err((error, written)) = write_all_vectored_progress(writer, &mut slices) {
+        let mut complete = 0;
+        let mut offset = 0;
+        while complete < sizes.len() && offset + sizes[complete] <= written {
+            offset += sizes[complete];
+            complete += 1;
+        }
+        return Err(PeerError::BurstIo { error, written, completed: sizes[..complete].to_vec() });
+    }
     Ok(sizes)
+}
+
+/// Writes a burst while retaining the byte count if the transport fails.
+fn write_all_vectored_progress<W: Write + ?Sized>(
+    writer: &mut W,
+    mut slices: &mut [IoSlice<'_>],
+) -> Result<(), (std::io::Error, usize)> {
+    let mut written_total = 0;
+    while !slices.is_empty() {
+        match writer.write_vectored(slices) {
+            Ok(0) => return Err((std::io::Error::new(std::io::ErrorKind::WriteZero, "failed to write whole message"), written_total)),
+            Ok(written) => { written_total += written; IoSlice::advance_slices(&mut slices, written); }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err((error, written_total)),
+        }
+    }
+    Ok(())
 }
 
 /// Writes every byte in `slices` with `write_vectored`, advancing through
@@ -859,6 +892,7 @@ mod tests {
     }
 
     #[test]
+    /// Proves P2P-01 framing equivalence for burst encoding.
     fn write_messages_matches_sequential_write_message() -> Result<(), PeerError> {
         let messages = [
             super::Message::Ping(1),
