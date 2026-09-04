@@ -92,7 +92,7 @@ impl TomlFile {
                     .map(|value| {
                         ScriptIndexMode::parse(value).ok_or_else(|| {
                             anyhow::anyhow!(
-                                "invalid scriptindex value `{value}`: expected `full` or a boolean"
+                                "invalid scriptindex value `{value}`: expected `utxo`, `full`, or a boolean"
                             )
                         })
                     })

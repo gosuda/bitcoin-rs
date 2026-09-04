@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use bitcoin_rs_primitives::{Block, OutPoint, Tx, Txid, encode, varint};
+use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, encode, varint};
 use bitcoin_rs_storage::{
     ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit, StorageError, WriteBatch, WriteCondition,
 };
@@ -51,6 +51,13 @@ pub enum IndexError {
         /// Actual key length observed in storage.
         len: usize,
     },
+    /// A `ScriptLive` row had a non-empty value even though the row format is
+    /// key-only.
+    #[error("invalid ScriptLive row value length {len}")]
+    InvalidLiveRowValue {
+        /// Actual value length observed in storage.
+        len: usize,
+    },
     /// The `TxIndex` format version is not supported.
     #[error("unsupported TxIndex format version {version}")]
     UnsupportedTxIndexFormatVersion {
@@ -97,6 +104,29 @@ pub enum IndexError {
     /// A prepared transition cannot mix with legacy buffered rows.
     #[error("cannot write prepared TxIndex mutations with buffered legacy rows")]
     PendingLegacyRows,
+    /// A capability set containing `ScriptLive` was prepared through a path
+    /// that carries no spent-coin script source. Live deletes need the spent
+    /// coin's exact script (#225), and a prevout-only block parse cannot
+    /// produce it.
+    #[error("ScriptLive preparation requires a spent-coin script source")]
+    MissingSpentScripts,
+    /// The spent-coin source could not resolve an external input's script.
+    /// Failing closed here is deliberate: a missing anchor means the Live view
+    /// would silently keep a spent output alive.
+    #[error("no spent-coin script for outpoint {txid:02x?}:{vout} in block at height {height}")]
+    MissingSpentCoin {
+        /// Spent transaction id (little-endian bytes).
+        txid: [u8; 32],
+        /// Spent output index.
+        vout: u32,
+        /// Height of the spending block.
+        height: u32,
+    },
+    /// `seed_script_live` was asked to seed over an existing live watermark.
+    /// Seeding assumes a fresh (or reset) capability; overwriting a live view
+    /// in place is how partial states become queryable.
+    #[error("ScriptLive is already seeded; reset the capability first")]
+    LiveAlreadySeeded,
     /// `TxIndex` tables exist but the format-version key is missing.
     #[error("TxIndex tables are present without a versioned watermark")]
     LegacyCursorlessIndex,
@@ -134,6 +164,7 @@ const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
 const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
+const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 /// Monotonic revision shared by every ordinary index mutation.
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 /// Permanent versioned capability-reset state (`0x00, b'R'`). Absent only
@@ -279,7 +310,7 @@ fn parse_reset_state(bytes: &[u8]) -> Result<ResetState, IndexError> {
     }
 }
 
-/// Captures the reset state, ordinary revision, and both watermarks from one
+/// Captures the reset state, ordinary revision, and all capability watermarks from one
 /// point-in-time snapshot. Pending reset claims are cooperatively completed
 /// only after the snapshot has been released.
 fn capture_write_fence<S: KvStore>(
@@ -292,6 +323,7 @@ fn capture_write_fence<S: KvStore>(
     let observed_tx_lookup = snapshot.get(ColumnFamily::UtxoMeta, TX_LOOKUP_WATERMARK_KEY)?;
     let observed_script_history =
         snapshot.get(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY)?;
+    let observed_script_live = snapshot.get(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY)?;
     drop(snapshot);
 
     let state = match observed_reset.as_deref() {
@@ -328,6 +360,10 @@ fn capture_write_fence<S: KvStore>(
                 .map(IndexWatermark::from_bytes)
                 .transpose()?,
             script_history: observed_script_history
+                .as_deref()
+                .map(IndexWatermark::from_bytes)
+                .transpose()?,
+            script_live: observed_script_live
                 .as_deref()
                 .map(IndexWatermark::from_bytes)
                 .transpose()?,
@@ -500,8 +536,8 @@ fn watermark_condition<'a>(
     }
 }
 
-/// Applies one ordinary batch under the coherent fence. Four exact conditions
-/// fence the batch: reset state, ordinary revision, and both watermark rows.
+/// Applies one ordinary batch under the coherent fence. Five exact conditions
+/// fence the batch: reset state, ordinary revision, and all watermark rows.
 /// The commit also inserts the next revision. A lost race with an unchanged
 /// reset returns [`IndexError::StaleIndexState`]. A moved reset cooperatively
 /// completes the pending exact claim and returns [`IndexError::ResetInProgress`].
@@ -530,11 +566,16 @@ fn commit_ordinary<S: KvStore>(
         .watermarks
         .script_history
         .map(|watermark| watermark.to_bytes());
+    let script_live = fence
+        .watermarks
+        .script_live
+        .map(|watermark| watermark.to_bytes());
     let conditions = [
         reset_condition(&fence.state),
         revision_condition(fence.revision, &revision_bytes),
         watermark_condition(tx_lookup.as_ref(), TX_LOOKUP_WATERMARK_KEY),
         watermark_condition(script_history.as_ref(), SCRIPT_HISTORY_WATERMARK_KEY),
+        watermark_condition(script_live.as_ref(), SCRIPT_LIVE_WATERMARK_KEY),
     ];
     if store.write_durable_if(&conditions, batch)? {
         return Ok(());
@@ -676,6 +717,9 @@ fn acquire_capability_reset<S: KvStore>(
                 &INDEX_FORMAT_VERSION.to_le_bytes(),
             );
         }
+        if capabilities.script_live {
+            batch.delete(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY);
+        }
         batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
         if store.write_durable_if(&conditions, batch)? {
             return Ok(Some(work));
@@ -706,6 +750,9 @@ fn resume_capability_reset<S: KvStore>(
             column_families.push(ColumnFamily::Funding);
             column_families.push(ColumnFamily::Spending);
         }
+        if capabilities.script_live {
+            column_families.push(ColumnFamily::ScriptLive);
+        }
         let unselected_cursor_remains = (!capabilities.tx_lookup
             && store
                 .get(ColumnFamily::UtxoMeta, TX_LOOKUP_WATERMARK_KEY)?
@@ -713,6 +760,10 @@ fn resume_capability_reset<S: KvStore>(
             || (!capabilities.script_history
                 && store
                     .get(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY)?
+                    .is_some())
+            || (!capabilities.script_live
+                && store
+                    .get(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY)?
                     .is_some());
         if !unselected_cursor_remains {
             column_families.push(ColumnFamily::BlockHeaders);
@@ -780,6 +831,7 @@ const fn watermark_key(capability: IndexCapability) -> &'static [u8] {
     match capability {
         IndexCapability::TxLookup => TX_LOOKUP_WATERMARK_KEY,
         IndexCapability::ScriptHistory => SCRIPT_HISTORY_WATERMARK_KEY,
+        IndexCapability::ScriptLive => SCRIPT_LIVE_WATERMARK_KEY,
     }
 }
 
@@ -815,6 +867,10 @@ pub enum IndexCapability {
     TxLookup,
     /// `ScriptIndex` scripthash funding and spending rows.
     ScriptHistory,
+    /// `ScriptIndex` live-output rows: one row per currently unspent outpoint,
+    /// filed under its script (#225). Rebuildable from the authoritative UTXO
+    /// set alone, unlike history.
+    ScriptLive,
 }
 
 /// Capabilities included in one prepared index transition.
@@ -824,6 +880,8 @@ pub struct IndexCapabilities {
     pub tx_lookup: bool,
     /// Build `ScriptIndex` funding and spending rows.
     pub script_history: bool,
+    /// Build `ScriptIndex` live-output rows.
+    pub script_live: bool,
 }
 
 impl IndexCapabilities {
@@ -831,21 +889,40 @@ impl IndexCapabilities {
     pub const NONE: Self = Self {
         tx_lookup: false,
         script_history: false,
+        script_live: false,
     };
     /// Transaction lookup only.
     pub const TX_LOOKUP: Self = Self {
         tx_lookup: true,
         script_history: false,
+        script_live: false,
     };
     /// `ScriptIndex` history only.
     pub const SCRIPT_HISTORY: Self = Self {
         tx_lookup: false,
         script_history: true,
+        script_live: false,
     };
-    /// Both capabilities.
+    /// `ScriptIndex` live outputs only.
+    pub const SCRIPT_LIVE: Self = Self {
+        tx_lookup: false,
+        script_history: false,
+        script_live: true,
+    };
+    /// Every index capability, including the compact live view.
     pub const ALL: Self = Self {
         tx_lookup: true,
         script_history: true,
+        script_live: true,
+    };
+    /// Every capability derivable from a block body alone.
+    ///
+    /// Anchorless paths use this, because `ScriptLive` cannot be prepared
+    /// without a spent-coin script source.
+    pub const HISTORICAL: Self = Self {
+        tx_lookup: true,
+        script_history: true,
+        script_live: false,
     };
 
     /// Returns whether `capability` is selected.
@@ -853,25 +930,31 @@ impl IndexCapabilities {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup,
             IndexCapability::ScriptHistory => self.script_history,
+            IndexCapability::ScriptLive => self.script_live,
         }
     }
 
     /// Returns whether no capability is selected.
     pub const fn is_empty(self) -> bool {
-        !self.tx_lookup && !self.script_history
+        !self.tx_lookup && !self.script_history && !self.script_live
     }
 
     fn to_mask(self) -> u8 {
-        u8::from(self.tx_lookup) | (u8::from(self.script_history) << 1)
+        u8::from(self.tx_lookup)
+            | (u8::from(self.script_history) << 1)
+            | (u8::from(self.script_live) << 2)
     }
 
     fn from_mask(mask: u8) -> Result<Self, IndexError> {
-        if mask == 0 || mask & !0b11 != 0 {
+        // A pre-#225 marker never carries bit 2, and reading one with the bit
+        // absent is exactly right: the store had no live rows to reset.
+        if mask == 0 || mask & !0b111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }
         Ok(Self {
-            tx_lookup: mask & 0b01 != 0,
-            script_history: mask & 0b10 != 0,
+            tx_lookup: mask & 0b001 != 0,
+            script_history: mask & 0b010 != 0,
+            script_live: mask & 0b100 != 0,
         })
     }
 }
@@ -883,6 +966,9 @@ pub struct IndexWatermarks {
     pub tx_lookup: Option<IndexWatermark>,
     /// `ScriptIndex` history cursor.
     pub script_history: Option<IndexWatermark>,
+    /// `ScriptIndex` live-output cursor. Independent of history by design:
+    /// a ready live view stays queryable while history backfills (#225).
+    pub script_live: Option<IndexWatermark>,
 }
 
 impl IndexWatermarks {
@@ -891,6 +977,7 @@ impl IndexWatermarks {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup,
             IndexCapability::ScriptHistory => self.script_history,
+            IndexCapability::ScriptLive => self.script_live,
         }
     }
 }
@@ -924,10 +1011,7 @@ impl IndexWatermark {
         snapshot: &dyn KvSnapshot,
         capability: IndexCapability,
     ) -> Result<Option<Self>, IndexError> {
-        let key = match capability {
-            IndexCapability::TxLookup => TX_LOOKUP_WATERMARK_KEY,
-            IndexCapability::ScriptHistory => SCRIPT_HISTORY_WATERMARK_KEY,
-        };
+        let key = watermark_key(capability);
         snapshot
             .get(ColumnFamily::UtxoMeta, key)?
             .as_deref()
@@ -935,6 +1019,55 @@ impl IndexWatermark {
             .transpose()
     }
 }
+
+/// Source of exact scripts for coins an incoming block spends.
+///
+/// A block body carries only each input's previous outpoint; the spent coin's
+/// `script_pubkey` lives in authoritative UTXO state, and on disconnect in the
+/// block's undo record. #225 requires Live deletes to be anchored to that
+/// authoritative script, so preparation of a `ScriptLive` transition takes one
+/// of these instead of guessing from the parse.
+pub trait SpentCoinScripts {
+    /// The exact `script_pubkey` bytes of the coin `txid:vout`, if known.
+    ///
+    /// `txid` is in little-endian byte order, as serialized in the input.
+    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]>;
+}
+
+/// The anchorless source: answers nothing.
+///
+/// Used by the legacy prepare path, which refuses `ScriptLive` outright rather
+/// than producing a Live transition with unanchored deletes.
+pub struct NoSpentScripts;
+
+impl SpentCoinScripts for NoSpentScripts {
+    fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {
+        None
+    }
+}
+
+/// One ordered live-view mutation produced by a block.
+///
+/// Order is semantic, unlike every other pending row family: a later block in
+/// the same committed batch may delete a key an earlier block inserted, so
+/// these are applied first-to-last with the last operation per key winning.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LiveOp {
+    /// The block created this currently-unspent output.
+    Insert(crate::types::ScriptLiveRow),
+    /// The block spent this previously-live output.
+    Delete(crate::types::ScriptLiveRow),
+}
+
+/// Upper bound on a `script_pubkey` admitted into the authoritative UTXO set.
+///
+/// Mirrors `bitcoin_rs_consensus::MAX_SCRIPT_SIZE` as applied by the node's
+/// `build_utxo_changes`: outputs with `is_op_return()` or a script longer than
+/// this never enter the UTXO set, so they must never enter the Live view
+/// either -- #225 requires the spendability predicate to match authoritative
+/// UTXO admission exactly. Duplicated as a literal because this crate does not
+/// depend on the consensus crate; the node crate asserts the two are equal.
+pub const MAX_LIVE_SCRIPT_SIZE: usize = 10_000;
 
 /// Hard limits for one prepared forward write.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1075,6 +1208,8 @@ pub struct IndexRowCounts {
     pub spending: usize,
     /// Header rows written to [`ColumnFamily::BlockHeaders`].
     pub headers: usize,
+    /// Live-output mutations applied to [`ColumnFamily::ScriptLive`].
+    pub live: usize,
 }
 
 /// Electrs-shaped block indexer backed by a workspace [`KvStore`].
@@ -1131,11 +1266,12 @@ impl<S: KvStore> Indexer<S> {
             .transpose()
     }
 
-    /// Loads both independently durable capability watermarks.
+    /// Loads all independently durable capability watermarks.
     pub fn watermarks(&self) -> Result<IndexWatermarks, IndexError> {
         Ok(IndexWatermarks {
             tx_lookup: self.capability_watermark(IndexCapability::TxLookup)?,
             script_history: self.capability_watermark(IndexCapability::ScriptHistory)?,
+            script_live: self.capability_watermark(IndexCapability::ScriptLive)?,
         })
     }
 
@@ -1160,6 +1296,41 @@ impl<S: KvStore> Indexer<S> {
         let prefix = ScriptHashRow::scan_prefix(scripthash);
         let iter = self.store.iter_prefix(ColumnFamily::Funding, &prefix)?;
         collect_prefix_rows(iter)
+    }
+
+    /// Iterates live-output rows for `scripthash`.
+    ///
+    /// Returns the outpoint locators currently filed under the scripthash's
+    /// 8-byte scan prefix, decoded from [`ColumnFamily::ScriptLive`]. The
+    /// prefix is lossy exactly like `Funding`'s: two scripts may share it, so
+    /// callers MUST resolve each outpoint against authoritative UTXO state and
+    /// exact-check the resolved coin's full `script_pubkey` before serving it
+    /// (#225). This scan is read-only by contract -- live deletion is always a
+    /// whole-key point delete, never a prefix-range operation.
+    pub fn iter_live_outpoints(
+        &self,
+        scripthash: crate::ScriptHash,
+    ) -> Result<Vec<OutPoint>, IndexError> {
+        let snapshot = self.store.snapshot()?;
+        if snapshot
+            .get(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY)?
+            .is_none()
+        {
+            return Ok(Vec::new());
+        }
+        let prefix = ScriptHashRow::scan_prefix(scripthash);
+        let iter = snapshot.iter_prefix(ColumnFamily::ScriptLive, &prefix)?;
+        let mut outpoints = Vec::new();
+        for row in iter {
+            let (key, value) = row?;
+            if !value.is_empty() {
+                return Err(IndexError::InvalidLiveRowValue { len: value.len() });
+            }
+            let row = crate::types::ScriptLiveRow::from_db_row(&key)
+                .ok_or(IndexError::InvalidWatermark)?;
+            outpoints.push(row.outpoint());
+        }
+        Ok(outpoints)
     }
 
     /// Resolves confirmed script-history entries for `scripthash` via `source`.
@@ -1825,7 +1996,7 @@ impl<S: KvStore> Indexer<S> {
     fn flush(&mut self) -> Result<IndexRowCounts, IndexError> {
         self.pending_rows.sort();
         let counts = self.pending_rows.counts();
-        if counts.txids + counts.funding + counts.spending + counts.headers == 0 {
+        if counts.txids + counts.funding + counts.spending + counts.headers + counts.live == 0 {
             return Ok(counts);
         }
         let fence = match self.fence.take() {
@@ -1857,6 +2028,7 @@ impl<S: KvStore> Indexer<S> {
         for row in &self.pending_rows.header_rows {
             batch.put(ColumnFamily::BlockHeaders, row, &[]);
         }
+        apply_live_ops(&mut batch, &self.pending_rows.live_ops, false);
         if let Err(error) = commit_ordinary(self.store.as_ref(), self.generation, &fence, batch) {
             if matches!(
                 error,
@@ -1898,6 +2070,7 @@ fn pending_rows_for_block_with_header(
     height: u32,
     txids: TxidSource<'_>,
     capabilities: IndexCapabilities,
+    spent_scripts: &dyn SpentCoinScripts,
 ) -> Result<
     (
         PendingRows,
@@ -1908,7 +2081,7 @@ fn pending_rows_for_block_with_header(
 > {
     let mut rows = PendingRows::default();
     let mut header = None;
-    let txid_count = {
+    let (txid_count, live_created, live_spent) = {
         let mut visitor = IndexBlockVisitor {
             rows: &mut rows,
             header: &mut header,
@@ -1919,10 +2092,13 @@ fn pending_rows_for_block_with_header(
             block,
             pending_funding: Vec::new(),
             pending_spending: Vec::new(),
+            pending_live: Vec::new(),
+            live_created: Vec::new(),
+            live_spent: Vec::new(),
             capabilities,
         };
         match bsl::Block::visit(block, &mut visitor) {
-            Ok(_) => visitor.txid_count,
+            Ok(_) => (visitor.txid_count, visitor.live_created, visitor.live_spent),
             Err(bitcoin_slices::Error::VisitBreak) => {
                 if let Some(len) = visitor.invalid_header_len {
                     return Err(IndexError::InvalidHeaderLength { len });
@@ -1932,6 +2108,9 @@ fn pending_rows_for_block_with_header(
             Err(error) => return Err(IndexError::BlockParse(error)),
         }
     };
+    if capabilities.script_live {
+        push_live_ops(&mut rows, live_created, live_spent, height, spent_scripts)?;
+    }
     Ok((rows, txid_count, header))
 }
 
@@ -1940,9 +2119,76 @@ fn pending_rows_for_block(
     height: u32,
     txids: TxidSource<'_>,
 ) -> Result<(PendingRows, usize), IndexError> {
-    let (rows, txid_count, _) =
-        pending_rows_for_block_with_header(block, height, txids, IndexCapabilities::ALL)?;
+    let (rows, txid_count, _) = pending_rows_for_block_with_header(
+        block,
+        height,
+        txids,
+        IndexCapabilities::HISTORICAL,
+        &NoSpentScripts,
+    )?;
     Ok((rows, txid_count))
+}
+
+/// Turns a block's created and spent outputs into ordered live mutations.
+///
+/// Outputs created and spent within the same block cancel before the spent-coin
+/// anchor is consulted: those outputs never entered the committed UTXO set.
+/// Every surviving spend must resolve its exact script through the authoritative
+/// anchor, otherwise preparation fails closed rather than leaving a stale live
+/// row behind.
+fn push_live_ops(
+    rows: &mut PendingRows,
+    created: Vec<([u8; 32], u32, Option<ScriptHash>)>,
+    spent: Vec<([u8; 32], u32)>,
+    height: u32,
+    spent_scripts: &dyn SpentCoinScripts,
+) -> Result<(), IndexError> {
+    let created_keys: hashbrown::HashSet<([u8; 32], u32)> = created
+        .iter()
+        .map(|(txid, vout, _)| (*txid, *vout))
+        .collect();
+    let mut cancelled = hashbrown::HashSet::new();
+    let mut deletes = Vec::new();
+    for (txid, vout) in spent {
+        if created_keys.contains(&(txid, vout)) {
+            cancelled.insert((txid, vout));
+            continue;
+        }
+        let script = spent_scripts
+            .script_bytes(&txid, vout)
+            .ok_or(IndexError::MissingSpentCoin { txid, vout, height })?;
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), vout);
+        deletes.push(LiveOp::Delete(crate::types::ScriptLiveRow::new(
+            ScriptHash::from_script_bytes(script),
+            &outpoint,
+        )));
+    }
+    for (txid, vout, scripthash) in created {
+        if cancelled.contains(&(txid, vout)) {
+            continue;
+        }
+        let Some(scripthash) = scripthash else {
+            continue;
+        };
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), vout);
+        // At a BIP30 exception height the output outpoint can already be
+        // live. The undo record carries that replaced coin as a restore, so
+        // use the same anchor to remove its old script row before publishing
+        // the new one. The inverse operation restores the old row on rollback.
+        if let Some(old_script) = spent_scripts.script_bytes(&txid, vout) {
+            rows.live_ops
+                .push(LiveOp::Delete(crate::types::ScriptLiveRow::new(
+                    ScriptHash::from_script_bytes(old_script),
+                    &outpoint,
+                )));
+        }
+        rows.live_ops
+            .push(LiveOp::Insert(crate::types::ScriptLiveRow::new(
+                scripthash, &outpoint,
+            )));
+    }
+    rows.live_ops.extend(deletes);
+    Ok(())
 }
 
 fn pending_rows_for_decoded_block(
@@ -2022,6 +2268,10 @@ struct PendingRows {
     funding_rows: Vec<PositionedRow>,
     spending_rows: Vec<PositionedRow>,
     header_rows: Vec<[u8; crate::types::HEADER_ROW_SIZE]>,
+    /// Ordered live-view mutations. Never sorted: unlike the append-only
+    /// families above, this one mixes puts and deletes, and a later block's
+    /// delete of an earlier block's insert must stay later.
+    live_ops: Vec<LiveOp>,
 }
 
 /// Counts distinct row keys in a sorted `PositionedRow` slice.
@@ -2082,6 +2332,7 @@ impl PendingRows {
             funding: distinct_row_count(&self.funding_rows),
             spending: distinct_row_count(&self.spending_rows),
             headers: self.header_rows.len(),
+            live: self.live_ops.len(),
         }
     }
     fn append(&mut self, other: Self) {
@@ -2089,11 +2340,12 @@ impl PendingRows {
         self.funding_rows.extend(other.funding_rows);
         self.spending_rows.extend(other.spending_rows);
         self.header_rows.extend(other.header_rows);
+        self.live_ops.extend(other.live_ops);
     }
 
     fn total(&self) -> usize {
         let counts = self.counts();
-        counts.txids + counts.funding + counts.spending + counts.headers
+        counts.txids + counts.funding + counts.spending + counts.headers + counts.live
     }
 
     fn is_empty(&self) -> bool {
@@ -2122,10 +2374,48 @@ impl PendingRows {
             .len()
             .checked_mul(crate::types::HEADER_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
+        let live_bytes = self
+            .live_ops
+            .len()
+            .checked_mul(crate::types::SCRIPT_LIVE_ROW_SIZE)
+            .ok_or(IndexError::MutationSizeOverflow)?;
         prefix_bytes
             .checked_add(position_bytes)
             .and_then(|s| s.checked_add(header_bytes))
+            .and_then(|s| s.checked_add(live_bytes))
             .ok_or(IndexError::MutationSizeOverflow)
+    }
+}
+
+/// Applies ordered live mutations to `batch`, last operation per key winning.
+///
+/// Coalescing in memory rather than relying on the backend's write-batch
+/// ordering keeps the semantics backend-independent: after this, each key
+/// appears in the batch at most once. `invert` swaps inserts and deletes,
+/// which is exactly a block's live rollback; inverted ops are applied in
+/// reverse order so the coalescing rule stays "the chronologically last
+/// forward operation decides".
+fn apply_live_ops<B: WriteBatch>(batch: &mut B, ops: &[LiveOp], invert: bool) {
+    let mut last: hashbrown::HashMap<[u8; crate::types::SCRIPT_LIVE_ROW_SIZE], bool> =
+        hashbrown::HashMap::new();
+    let ordered: Box<dyn Iterator<Item = &LiveOp>> = if invert {
+        Box::new(ops.iter().rev())
+    } else {
+        Box::new(ops.iter())
+    };
+    for op in ordered {
+        let (row, insert) = match op {
+            LiveOp::Insert(row) => (row, !invert),
+            LiveOp::Delete(row) => (row, invert),
+        };
+        last.insert(*row.as_bytes(), insert);
+    }
+    for (key, insert) in last {
+        if insert {
+            batch.put(ColumnFamily::ScriptLive, &key, &[]);
+        } else {
+            batch.delete(ColumnFamily::ScriptLive, &key);
+        }
     }
 }
 
@@ -2154,6 +2444,7 @@ fn put_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows) {
     for row in &rows.header_rows {
         batch.put(ColumnFamily::BlockHeaders, row, &[]);
     }
+    apply_live_ops(batch, &rows.live_ops, false);
 }
 
 fn put_selected_watermarks<B: WriteBatch>(
@@ -2161,7 +2452,11 @@ fn put_selected_watermarks<B: WriteBatch>(
     capabilities: IndexCapabilities,
     watermark: Option<IndexWatermark>,
 ) {
-    for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
+    for capability in [
+        IndexCapability::TxLookup,
+        IndexCapability::ScriptHistory,
+        IndexCapability::ScriptLive,
+    ] {
         if !capabilities.contains(capability) {
             continue;
         }
@@ -2178,18 +2473,28 @@ fn selected_watermark(
     watermarks: IndexWatermarks,
     capabilities: IndexCapabilities,
 ) -> Result<Option<IndexWatermark>, IndexError> {
-    match (capabilities.tx_lookup, capabilities.script_history) {
-        (true, false) => Ok(watermarks.tx_lookup),
-        (false, true) => Ok(watermarks.script_history),
-        (true, true) if watermarks.tx_lookup == watermarks.script_history => {
-            Ok(watermarks.tx_lookup)
+    let mut selected: Option<Option<IndexWatermark>> = None;
+    for capability in [
+        IndexCapability::TxLookup,
+        IndexCapability::ScriptHistory,
+        IndexCapability::ScriptLive,
+    ] {
+        if !capabilities.contains(capability) {
+            continue;
         }
-        (true, true) => Err(IndexError::WatermarkMismatch {
-            expected: watermarks.tx_lookup,
-            actual: watermarks.script_history,
-        }),
-        (false, false) => Err(IndexError::NonContiguousPrepared { watermark: None }),
+        let cursor = watermarks.get(capability);
+        match selected {
+            None => selected = Some(cursor),
+            Some(first) if first == cursor => {}
+            Some(first) => {
+                return Err(IndexError::WatermarkMismatch {
+                    expected: first,
+                    actual: cursor,
+                });
+            }
+        }
     }
+    selected.ok_or(IndexError::NonContiguousPrepared { watermark: None })
 }
 
 fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_identity: bool) {
@@ -2202,6 +2507,9 @@ fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_i
     for_each_row_group(&rows.spending_rows, |row, _positions| {
         batch.delete(ColumnFamily::Spending, row.as_bytes());
     });
+    // The live rollback is the inverse authoritative transition (#225):
+    // outputs the block created leave the view, outputs it spent return.
+    apply_live_ops(batch, &rows.live_ops, true);
     if delete_shared_identity {
         for row in &rows.header_rows {
             batch.delete(ColumnFamily::BlockHeaders, row);
@@ -2227,6 +2535,18 @@ struct IndexBlockVisitor<'a> {
     /// order.
     pending_funding: Vec<crate::types::HashPrefix>,
     pending_spending: Vec<HashPrefixRow>,
+    /// Outputs of the transaction currently being parsed, as `(vout,
+    /// optional scripthash)`. `None` means the output is not admitted to the
+    /// UTXO set (`OP_RETURN` or oversize), but it still participates in
+    /// same-block cancellation. Buffered for the same reason as
+    /// `pending_funding`, and additionally because the txid is unknown until
+    /// `visit_transaction`.
+    pending_live: Vec<(u32, Option<ScriptHash>)>,
+    /// Outputs this block created, pre-cancellation. The option preserves
+    /// same-block cancellation for outputs that never enter UTXO state.
+    live_created: Vec<([u8; 32], u32, Option<ScriptHash>)>,
+    /// Full previous outpoints this block spends, pre-cancellation.
+    live_spent: Vec<([u8; 32], u32)>,
     capabilities: IndexCapabilities,
 }
 
@@ -2288,6 +2608,14 @@ impl Visitor for IndexBlockVisitor<'_> {
                 .spending_rows
                 .push(PositionedRow { row, position });
         }
+        if !self.pending_live.is_empty() {
+            let txid = tx.txid_sha2();
+            let mut txid_bytes = [0_u8; 32];
+            txid_bytes.copy_from_slice(txid.as_slice());
+            for (vout, scripthash) in self.pending_live.drain(..) {
+                self.live_created.push((txid_bytes, vout, scripthash));
+            }
+        }
         if !self.capabilities.tx_lookup {
             self.txid_count += 1;
             return ControlFlow::Continue(());
@@ -2326,28 +2654,44 @@ impl Visitor for IndexBlockVisitor<'_> {
     }
 
     fn visit_tx_in(&mut self, _vin: usize, tx_in: &bsl::TxIn<'_>) -> ControlFlow<()> {
-        if !self.capabilities.script_history {
+        let prevout = tx_in.prevout();
+        if is_null_prevout(prevout) {
             return ControlFlow::Continue(());
         }
-        let prevout = tx_in.prevout();
-        if !is_null_prevout(prevout) {
+        if self.capabilities.script_history {
             self.pending_spending.push(SpendingPrefixRow::row_parts(
                 prevout.txid(),
                 prevout.vout(),
                 self.height_bytes,
             ));
         }
+        if self.capabilities.script_live {
+            let mut txid = [0_u8; 32];
+            txid.copy_from_slice(prevout.txid());
+            self.live_spent.push((txid, prevout.vout()));
+        }
         ControlFlow::Continue(())
     }
 
-    fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut<'_>) -> ControlFlow<()> {
-        if !self.capabilities.script_history {
-            return ControlFlow::Continue(());
-        }
+    fn visit_tx_out(&mut self, vout: usize, tx_out: &bsl::TxOut<'_>) -> ControlFlow<()> {
         let script = tx_out.script_pubkey();
-        if !is_op_return_script(script) {
+        if self.capabilities.script_history && !is_op_return_script(script) {
             self.pending_funding
                 .push(ScriptHash::from_script_bytes(script).prefix());
+        }
+        // The live predicate is UTXO admission, not the history predicate:
+        // `build_utxo_changes` skips `is_op_return()` and oversized scripts,
+        // and the genesis coinbase never enters the UTXO set at all. History
+        // deliberately keeps oversized-script outputs (they are historical
+        // activity); Live must not, or it would carry locators no
+        // authoritative lookup can resolve.
+        if self.capabilities.script_live
+            && self.height_bytes != [0_u8; crate::types::HEIGHT_SIZE]
+            && let Ok(vout) = u32::try_from(vout)
+        {
+            let scripthash = (!is_op_return_script(script) && script.len() <= MAX_LIVE_SCRIPT_SIZE)
+                .then(|| ScriptHash::from_script_bytes(script));
+            self.pending_live.push((vout, scripthash));
         }
         ControlFlow::Continue(())
     }
@@ -2546,6 +2890,17 @@ pub struct TxIndexScan {
     pub complete: bool,
 }
 
+/// Result of one bounded `ScriptLive` prefix scan.
+#[derive(Debug)]
+pub struct ScriptLiveScan {
+    /// Parsed live-output locator rows.
+    pub rows: Vec<crate::ScriptLiveRow>,
+    /// Encoded key and value bytes returned by storage.
+    pub encoded_bytes: usize,
+    /// Whether storage returned the complete matching prefix.
+    pub complete: bool,
+}
+
 /// Point-in-time, typed view of durable `TxIndex` rows.
 pub trait TxIndexSnapshot: Send + Sync {
     /// Loads the transaction lookup watermark from this snapshot.
@@ -2576,6 +2931,15 @@ pub trait TxIndexSnapshot: Send + Sync {
         outpoint: &OutPoint,
         limit: PrefixScanLimit,
     ) -> Result<TxIndexScan, IndexError>;
+    /// Scans compact live-output locator rows for `scripthash`.
+    fn live_rows(
+        &self,
+        scripthash: ScriptHash,
+        limit: PrefixScanLimit,
+    ) -> Result<ScriptLiveScan, IndexError> {
+        let _ = (scripthash, limit);
+        Err(IndexError::UnsupportedRollback)
+    }
 }
 
 struct StoreTxIndexSnapshot<'a> {
@@ -2657,6 +3021,36 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
             limit,
         )
     }
+
+    fn live_rows(
+        &self,
+        scripthash: ScriptHash,
+        limit: PrefixScanLimit,
+    ) -> Result<ScriptLiveScan, IndexError> {
+        let scan = self.snapshot.scan_prefix_bounded(
+            ColumnFamily::ScriptLive,
+            &ScriptHashRow::scan_prefix(scripthash),
+            limit,
+        )?;
+        let encoded_bytes = scan.rows.iter().fold(0_usize, |total, (key, value)| {
+            total.saturating_add(key.len()).saturating_add(value.len())
+        });
+        let mut rows = Vec::with_capacity(scan.rows.len());
+        for (key, value) in scan.rows {
+            if !value.is_empty() {
+                return Err(IndexError::InvalidLiveRowValue { len: value.len() });
+            }
+            rows.push(
+                crate::ScriptLiveRow::from_db_row(&key)
+                    .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?,
+            );
+        }
+        Ok(ScriptLiveScan {
+            rows,
+            encoded_bytes,
+            complete: scan.complete,
+        })
+    }
 }
 
 /// Read-only `TxIndex` interface.
@@ -2683,6 +3077,11 @@ pub struct IndexWriter<S: KvStore> {
 }
 
 impl<S: KvStore> IndexWriter<S> {
+    /// Read access to the owned indexer, for queries beside the write path.
+    pub fn indexer(&self) -> &Indexer<S> {
+        &self.indexer
+    }
+
     /// Opens a writer over `store`, rejecting unversioned index tables.
     ///
     /// Format 3 (Spending keys without positions) is upgraded in place by
@@ -2738,7 +3137,7 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     /// Captures one coherent fence with the exact reset state, ordinary revision,
-    /// and both capability watermarks from a single snapshot. It returns the
+    /// and all capability watermarks from a single snapshot. It returns the
     /// fence with the watermarks it carries. A reset that
     /// begins or completes in the read window therefore returns
     /// [`IndexError::ResetInProgress`]; callers must discard derived
@@ -2756,9 +3155,107 @@ impl<S: KvStore> IndexWriter<S> {
         resume_capability_reset(store, generation, IndexCapabilities::ALL.to_mask())
     }
 
-    /// Marks selected derived rows unavailable, deletes them in bounded
-    /// batches, and leaves their durable cursors empty so the worker can
-    /// rebuild from genesis.
+    /// Seeds the live view from a producer of compact locators.
+    ///
+    /// `produce` emits every live `(outpoint, scripthash)` at `seed_tip`.
+    /// Rows are written in bounded deferred batches. Failure ownership
+    /// follows `IDX-07` in `docs/contracts/indexing.md`:
+    /// - [`IndexError::Storage`] is retryable only after the caller resets
+    ///   `ScriptLive`; this method does not compensate a partial seed.
+    /// - [`IndexError::LiveAlreadySeeded`] is not retryable for the same
+    ///   watermark; reset first if a new seed is required.
+    /// - Any other [`IndexError`] is fatal for this call and uses the same
+    ///   caller-owned reset/rebuild rule.
+    ///
+    /// A missing live watermark with leftover rows is treated as an
+    /// interrupted seed: `ScriptLive` is reset before any new row is
+    /// written so a later watermark cannot advertise a stale view.
+    pub fn seed_script_live_stream<F>(
+        &mut self,
+        mut produce: F,
+        seed_tip: IndexWatermark,
+    ) -> Result<usize, IndexError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(OutPoint, crate::ScriptHash) -> Result<(), IndexError>,
+        ) -> Result<(), IndexError>,
+    {
+        const SEED_BATCH_ROWS: usize = 4_096;
+        self.ensure_prepared_ready()?;
+        if self
+            .indexer
+            .capability_watermark(IndexCapability::ScriptLive)?
+            .is_some()
+        {
+            return Err(IndexError::LiveAlreadySeeded);
+        }
+        // An interrupted seed leaves rows without a ready watermark. Clear
+        // them before writing so this publication cannot mix leftover
+        // locators from a previous attempt.
+        self.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
+        let mut written = 0;
+        let mut batch = self.indexer.store.new_batch();
+        // Version the store before publishing deferred seed rows.
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        let mut in_batch = 0;
+        let mut add = |outpoint, scripthash| -> Result<(), IndexError> {
+            let row = crate::types::ScriptLiveRow::new(scripthash, &outpoint);
+            batch.put(ColumnFamily::ScriptLive, row.as_bytes(), &[]);
+            written += 1;
+            in_batch += 1;
+            if in_batch >= SEED_BATCH_ROWS {
+                let next = self.indexer.store.new_batch();
+                let old = std::mem::replace(&mut batch, next);
+                self.indexer.store.write_deferred(old)?;
+                in_batch = 0;
+            }
+            Ok(())
+        };
+        produce(&mut add)?;
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            SCRIPT_LIVE_WATERMARK_KEY,
+            &seed_tip.to_bytes(),
+        );
+        self.indexer.store.write_durable(batch)?;
+        Ok(written)
+    }
+
+    /// Seeds `ScriptLive` from an iterator of compact locators.
+    ///
+    /// Delegates to [`Self::seed_script_live_stream`] so deferred write
+    /// failures and watermark publication have one owner.
+    pub fn seed_script_live<I>(
+        &mut self,
+        coins: I,
+        seed_tip: IndexWatermark,
+    ) -> Result<usize, IndexError>
+    where
+        I: IntoIterator<Item = (OutPoint, crate::ScriptHash)>,
+    {
+        let mut coins = coins.into_iter();
+        self.seed_script_live_stream(
+            |emit| {
+                for (outpoint, scripthash) in coins.by_ref() {
+                    emit(outpoint, scripthash)?;
+                }
+                Ok(())
+            },
+            seed_tip,
+        )
+    }
+
+    /// Marks selected derived rows unavailable, deletes them in bounded batches,
+    /// and leaves their durable cursors empty so the worker can rebuild from genesis.
     ///
     /// The claim and cursor deletion land atomically before row deletion, and
     /// completion CASes the exact claim to the next idle version.
@@ -2782,7 +3279,7 @@ impl<S: KvStore> IndexWriter<S> {
         hash: [u8; 32],
         body: &[u8],
     ) -> Result<PreparedBlock, IndexError> {
-        self.prepare_block_for(IndexCapabilities::ALL, height, hash, body)
+        self.prepare_block_for(IndexCapabilities::HISTORICAL, height, hash, body)
     }
 
     /// Derives capability-selected row mutations from one serialized block scan.
@@ -2793,13 +3290,34 @@ impl<S: KvStore> IndexWriter<S> {
         hash: [u8; 32],
         body: &[u8],
     ) -> Result<PreparedBlock, IndexError> {
+        if capabilities.script_live {
+            return Err(IndexError::MissingSpentScripts);
+        }
+        self.prepare_block_with_spent_scripts(capabilities, height, hash, body, &NoSpentScripts)
+    }
+
+    /// [`Self::prepare_block_for`] with the spent-coin script source
+    /// `ScriptLive` preparation requires (#225).
+    pub fn prepare_block_with_spent_scripts(
+        &self,
+        capabilities: IndexCapabilities,
+        height: u32,
+        hash: [u8; 32],
+        body: &[u8],
+        spent_scripts: &dyn SpentCoinScripts,
+    ) -> Result<PreparedBlock, IndexError> {
         if capabilities.is_empty() {
             return Err(IndexError::NonContiguousPrepared {
                 watermark: self.watermark()?,
             });
         }
-        let (mut rows, _txid_count, header) =
-            pending_rows_for_block_with_header(body, height, TxidSource::Compute, capabilities)?;
+        let (mut rows, _txid_count, header) = pending_rows_for_block_with_header(
+            body,
+            height,
+            TxidSource::Compute,
+            capabilities,
+            spent_scripts,
+        )?;
         let header = header.ok_or(IndexError::InvalidHeaderLength { len: 0 })?;
         let actual_hash = encode::double_sha256(header.as_slice()).to_le_bytes();
         if actual_hash != hash {
@@ -2929,7 +3447,7 @@ impl<S: KvStore> IndexWriter<S> {
         let (fence, _) = self.fenced_watermarks()?;
         self.commit_rollback_one_for_with_cursor(
             fence,
-            IndexCapabilities::ALL,
+            IndexCapabilities::HISTORICAL,
             prev,
             body,
             ConsumerCursorUpdate::Clear,
@@ -2944,6 +3462,9 @@ impl<S: KvStore> IndexWriter<S> {
         prev: Option<IndexWatermark>,
         body: &[u8],
     ) -> Result<(), IndexError> {
+        if capabilities.script_live {
+            return Err(IndexError::MissingSpentScripts);
+        }
         let (fence, _) = self.fenced_watermarks()?;
         self.commit_rollback_one_for_with_cursor(
             fence,
@@ -2951,6 +3472,27 @@ impl<S: KvStore> IndexWriter<S> {
             prev,
             body,
             ConsumerCursorUpdate::Clear,
+        )
+    }
+
+    /// Rolls back a selected transition using authoritative spent-coin
+    /// scripts. `ScriptLive` uses this anchor to restore rows for outputs that
+    /// the disconnected block had spent.
+    pub fn commit_rollback_one_with_spent_scripts(
+        &mut self,
+        capabilities: IndexCapabilities,
+        prev: Option<IndexWatermark>,
+        body: &[u8],
+        spent_scripts: &dyn SpentCoinScripts,
+    ) -> Result<(), IndexError> {
+        let (fence, _) = self.fenced_watermarks()?;
+        self.commit_rollback_one_for_with_cursor_with_spent_scripts(
+            fence,
+            capabilities,
+            prev,
+            body,
+            ConsumerCursorUpdate::Clear,
+            spent_scripts,
         )
     }
 
@@ -2964,10 +3506,40 @@ impl<S: KvStore> IndexWriter<S> {
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
     ) -> Result<(), IndexError> {
+        if capabilities.script_live {
+            return Err(IndexError::MissingSpentScripts);
+        }
+        self.commit_rollback_one_for_with_cursor_with_spent_scripts(
+            fence,
+            capabilities,
+            prev,
+            body,
+            cursor,
+            &NoSpentScripts,
+        )
+    }
+
+    /// Atomically rolls back one block with the exact scripts of its spent
+    /// coins. This is the anchored variant used when `ScriptLive` is selected.
+    pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
+        &mut self,
+        fence: IndexWriteFence,
+        capabilities: IndexCapabilities,
+        prev: Option<IndexWatermark>,
+        body: &[u8],
+        cursor: ConsumerCursorUpdate<'_>,
+        spent_scripts: &dyn SpentCoinScripts,
+    ) -> Result<(), IndexError> {
         self.ensure_prepared_ready()?;
         let current = selected_watermark(fence.watermarks, capabilities)?
             .ok_or(IndexError::NonContiguousPrepared { watermark: None })?;
-        let prepared = self.prepare_block_for(capabilities, current.height, current.hash, body)?;
+        let prepared = self.prepare_block_with_spent_scripts(
+            capabilities,
+            current.height,
+            current.hash,
+            body,
+            spent_scripts,
+        )?;
         if let Some(prev) = &prev {
             let expected_prev_height =
                 current
@@ -3021,6 +3593,11 @@ impl<S: KvStore> IndexWriter<S> {
                 && fence
                     .watermarks
                     .script_history
+                    .is_some_and(|watermark| watermark.height >= current.height))
+            || (!capabilities.script_live
+                && fence
+                    .watermarks
+                    .script_live
                     .is_some_and(|watermark| watermark.height >= current.height));
         delete_rows(&mut store_batch, &prepared.rows, !unselected_keeps_identity);
         store_batch.put(
@@ -3060,8 +3637,8 @@ impl<S: KvStore> IndexWriter<S> {
             .get(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY)?)
     }
 
-    /// Publishes the opaque consumer cursor under four exact conditions from the
-    /// captured fence: reset state, ordinary revision, and both watermark rows.
+    /// Publishes the opaque consumer cursor under five exact conditions from the
+    /// captured fence: reset state, ordinary revision, and all watermark rows.
     /// The commit atomically advances the ordinary revision.
     ///
     /// A lost race with an unchanged reset returns
@@ -3110,6 +3687,7 @@ fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {
         ColumnFamily::Funding,
         ColumnFamily::Spending,
         ColumnFamily::BlockHeaders,
+        ColumnFamily::ScriptLive,
     ] {
         let mut iter = store.iter_prefix(cf, &[])?;
         if let Some(entry) = iter.next() {

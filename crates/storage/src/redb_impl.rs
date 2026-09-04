@@ -10,6 +10,8 @@ use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCo
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 type FixedTable<const N: usize> = TableDefinition<'static, &'static [u8; N], ()>;
 type TxIndexValueTable = TableDefinition<'static, &'static [u8; 12], &'static [u8]>;
+/// `ScriptLive` key width: `prefix(8) || txid(32) || vout(4)`.
+const SCRIPT_LIVE_KEY_LEN: usize = 44;
 
 const TXINDEX_TX_CONFIRMED: FixedTable<12> = TableDefinition::new("txindex_v1_tx_confirmed");
 const TXINDEX_TX_CONFIRMED_VALUES: TxIndexValueTable =
@@ -20,8 +22,6 @@ const TXINDEX_SPENDING: FixedTable<12> = TableDefinition::new("txindex_v1_spendi
 const TXINDEX_SPENDING_VALUES: TxIndexValueTable =
     TableDefinition::new("txindex_v1_spending_values");
 const TXINDEX_BLOCK_HEADERS: FixedTable<80> = TableDefinition::new("txindex_v1_block_headers");
-/// `ScriptLive` key width: `prefix(8) || txid(32) || vout(4)`.
-const SCRIPT_LIVE_KEY_LEN: usize = 44;
 const TXINDEX_SCRIPT_LIVE: FixedTable<SCRIPT_LIVE_KEY_LEN> =
     TableDefinition::new("txindex_v1_script_live");
 const TXINDEX_META: ByteTable = TableDefinition::new("txindex_v1_meta");

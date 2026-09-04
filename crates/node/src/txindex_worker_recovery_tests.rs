@@ -187,13 +187,15 @@ impl Harness {
             block_tree: Arc::clone(&fixture.tree),
             body_store: Some(body_store),
             batch_limits: DEFAULT_BATCH_LIMITS,
-            enabled: IndexCapabilities::ALL,
+            enabled: IndexCapabilities::HISTORICAL,
             chain_events: detached_chain_publisher(),
             reporter,
             wake_rx,
             quiet_period: Duration::ZERO,
             batch_delay: Duration::ZERO,
             rollback_rebuild_cutover,
+            utxo: None,
+            chain_transition: None,
         };
         Self {
             _index_dir: index_dir,
@@ -336,7 +338,7 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     assert!(!matches!(first, ReconcileAction::CaughtUp));
     assert_eq!(
         h.runtime.phase(),
-        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::ALL, ReconcileLeg::Rebuilding)
+        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Rebuilding)
     );
     let watermarks = h.watermarks();
     assert!(
@@ -367,7 +369,10 @@ fn tip_change_during_rebuild_converges_on_new_tip() {
     let b3 = f.tip(f.b[2]);
     h.set_tip(&b3);
     h.worker.reconcile_once(&mut pending).expect("reset pass");
-    assert_eq!(h.runtime.phase().rebuilding(), IndexCapabilities::ALL);
+    assert_eq!(
+        h.runtime.phase().rebuilding(),
+        IndexCapabilities::HISTORICAL
+    );
 
     // Canonical chain returns to A while the rebuild toward B is underway.
     h.set_tip(&a3);
@@ -392,7 +397,10 @@ fn missing_disconnected_body_routes_rewind_to_rebuild() {
     let b2 = f.tip(f.b[1]);
     h.set_tip(&b2);
     h.worker.reconcile_once(&mut pending).expect("reset pass");
-    assert_eq!(h.runtime.phase().rebuilding(), IndexCapabilities::ALL);
+    assert_eq!(
+        h.runtime.phase().rebuilding(),
+        IndexCapabilities::HISTORICAL
+    );
     h.settle(&mut pending);
     h.assert_at(&b2);
 }
@@ -419,7 +427,7 @@ fn selective_rebuild_leg_survives_sibling_rollback() {
 
     // tx_lookup is three blocks off B (beyond cutover 1): rebuild.
     // script_history is one block off B (within cutover): rewind.
-    h.worker.enabled = IndexCapabilities::ALL;
+    h.worker.enabled = IndexCapabilities::HISTORICAL;
     let b3 = f.tip(f.b[2]);
     h.set_tip(&b3);
     let first = h.worker.reconcile_once(&mut pending).expect("reset pass");

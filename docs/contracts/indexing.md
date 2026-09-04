@@ -19,9 +19,14 @@ Owners:
   Core-compatible transaction identifier lookup rows (`TxidRow`) and outpoint
   value positions.
 - CLI `--scriptindex` / `--script-index` (env `BITCOIN_RS_SCRIPTINDEX`,
-  configuration `scriptindex=1`) enables the `ScriptHistory` capability. This
-  builds generic scripthash funding rows (`ScriptHashRow`), spending rows
-  (`SpendingPrefixRow`), and outpoint spender records.
+  configuration `scriptindex=1`) selects `full` and enables the
+  `ScriptHistory` capability. This builds generic scripthash funding rows
+  (`ScriptHashRow`), spending rows (`SpendingPrefixRow`), and outpoint spender
+  records.
+- `scriptindex=utxo` enables only the compact `ScriptLive` view for script
+  activity; `scriptindex=full` enables both `ScriptLive` and `ScriptHistory`.
+  The historical boolean spellings (`true`, `1`, `yes`) continue to mean
+  `full`, and (`false`, `0`, `no`) mean disabled. There is no history-only mode.
 - Enabling either `--txindex` or `--scriptindex` spawns exactly one node-owned
   `TxIndexRuntime` worker thread. Enabling both permits both capability row
   families to share a single block-body parse and atomic forward commit batch
@@ -32,11 +37,18 @@ Owners:
 - Only explicit `--txindex` advertises the Core `txindex` capability in RPC
   `getindexinfo` and enables historical `getrawtransaction` verbose and raw
   lookups across all confirmed blocks.
-- `--scriptindex` provides generic script history, unspent output, and spender
-  queries for Esplora and RPC routes without advertising Core `txindex` unless
-  `--txindex` is also set.
+- `--scriptindex=utxo` provides only unspent-output queries; `--scriptindex`
+  with its historical boolean spelling or `full` additionally provides generic
+  script history and spender queries. These modes support Esplora and RPC
+  routes without advertising Core `txindex` unless `--txindex` is also set.
 - `getindexinfo` reports `synced: true` if and only if the advertised
   capability watermark matches the height and block hash of the active chain tip.
+
+`ScriptLive` is not a duplicate coin table. Its empty-valued key is
+`script-hash-prefix || full-outpoint`; the prefix is only a scan accelerator.
+Readers resolve each locator against the authoritative UTXO set and exact-check
+the full script. Deletes are exact point deletes, so a prefix collision cannot
+remove another script's output.
 
 ### `IDX-03`: Query gating and snapshot consistency
 
@@ -53,6 +65,13 @@ Owners:
   the query engine refuses the request with `TxQueryError::Retry` or
   `TxQueryError::Unavailable`. Stale, unconfirmed, or torn rows are never
   returned to callers.
+- `unspent_outputs` consumes the `ScriptLive` watermark only. It holds the
+  chain-transition authority while taking the index snapshot and checking the
+  live watermark against the applied tip. Locator resolution uses one stable
+  UTXO view after that lock is released; a tip or revision change during
+  resolution is `Retry`. A missing locator after an unchanged tip is
+  unavailable; a compact-prefix collision is filtered by the exact script
+  check.
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 
@@ -77,6 +96,11 @@ Owners:
     forward.
   - If the watermark is on an abandoned branch, the worker rolls back to the
     common ancestor and connects forward to the active tip.
+- `NodeState::open` restores the authenticated checkpoint and, when enabled,
+  replays the journal's committed suffix (`docs/chainstate-recovery.md`) before
+  `NodeState::start_index_workers()` spawns worker threads
+  (`crates/node/src/run.rs`), so index workers reconcile against a restored
+  active chainstate.
 
 ### `IDX-06`: Reorganization rollback and forward reconciliation
 
@@ -87,10 +111,19 @@ Owners:
   - Height-keyed rows (transaction position rows) are removed using per-block
     watermark identity records to delete exactly the rows contributed by each
     disconnected block from the tip down to the common ancestor.
+  - When the rollback depth (watermark height minus common ancestor height)
+    exceeds `txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100 000 blocks),
+    the worker routes to `reset_capabilities` and backfills forward instead of
+    executing a long block-by-block rollback
+    (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
 - **Connect walk**:
   - The worker loads bodies from `PruneBodyStore`, constructs bounded forward
     batches (`PreparedBatchLimits`), and commits row mutations and updated
     watermarks in a single atomic store batch per block or block chunk.
+  - Live deletes are anchored by the block's authoritative undo scripts;
+    same-block create/spend pairs cancel before the anchor is consulted.
+    Live inserts use the same admission predicate as the UTXO set, including
+    OP_RETURN, oversize-script, and genesis exclusions.
 - If a rival reorg or tip extension occurs while a forward batch is being
   prepared, the atomic commit detects the watermark divergence, discards the
   stale prepared batch, and re-plans from the new active tip on the next pass.
@@ -101,6 +134,13 @@ Owners:
   branch block pruned before rollback completed), the worker resets the
   affected capability watermark and initiates a fresh rebuild from the active
   chain.
+- A missing or unreadable undo record is fatal only for `ScriptLive`. The
+  worker resets that capability and reseeds from the authoritative UTXO view;
+  `TxLookup` and `ScriptHistory` continue their body-only rollback.
+- When `ScriptLive` has no watermark after restoration or reset, the worker
+  rebuilds it by scanning one stable authoritative UTXO view. Rows are written
+  before the live watermark is durably stamped; without that watermark partial
+  rows are never queryable.
 - Index workers execute in supervised threads under `catch_unwind`. A fatal
   storage failure or panic marks the worker as failed (`publish_failed`) and
   stops the worker. Block validation, UTXO commits, and chainstate progress

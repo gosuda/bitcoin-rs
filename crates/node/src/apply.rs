@@ -148,6 +148,22 @@ pub(crate) trait PruneBodyStore: Send + Sync {
         Ok(Box::new(DirectPruneBodyReader { store: self }))
     }
 
+    /// The persisted undo record for `height`/`hash`, when this store can
+    /// reach one.
+    ///
+    /// The default answers nothing: only stores backed by the chainstate
+    /// key-value index hold undo rows, and a `ScriptLive`-selecting worker
+    /// step fails closed on `None` rather than indexing without its spent-coin
+    /// anchor (#225).
+    fn undo_record(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let _ = (height, hash);
+        Ok(None)
+    }
+
     /// Loads `len` body bytes starting `offset` bytes into the serialized block.
     ///
     /// Defaults to `Ok(None)`, meaning "this store cannot slice"; callers fall
@@ -323,6 +339,17 @@ impl<S: KvStore> FlatFilePruneBodyStore<S> {
 }
 
 impl<S: KvStore> PruneBodyStore for FlatFilePruneBodyStore<S> {
+    fn undo_record(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.index.get(
+            bitcoin_rs_storage::ColumnFamily::UndoData,
+            &bitcoin_rs_storage::pruning::block_undo_key(height, hash),
+        )
+    }
+
     fn disk_usage(&self) -> Option<u64> {
         Some(self.files.disk_usage())
     }
@@ -871,6 +898,9 @@ pub struct ApplyHandles {
     /// as a checkpoint-only node. The writer is single-owner (the apply path);
     /// the `Mutex` only makes the shared handle exclusive.
     pub(crate) journal: Option<crate::chainstate_journal::SharedJournalWriter>,
+    /// Publishes checkpoints to settle rolled-back disconnect debt after a
+    /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
+    pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint_worker::CheckpointPublisher>>,
 }
 
 impl ApplyHandles {
@@ -953,6 +983,7 @@ impl ApplyHandles {
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
             journal: None,
+            checkpoint_publisher: None,
         }
     }
 
@@ -4630,6 +4661,22 @@ mod consensus_rule_tests {
         ));
     }
 
+    /// The live script-index predicate is this function's admission rule.
+    ///
+    /// `bitcoin-rs-index` cannot depend on the consensus crate, so it carries
+    /// the script-size bound as its own literal. #225 requires the two
+    /// predicates to match exactly -- a divergence means the live view carries
+    /// locators no authoritative lookup can resolve, or drops coins that
+    /// exist -- and this assertion is where the duplication is held together.
+    #[test]
+    fn script_live_size_bound_matches_utxo_admission() {
+        assert_eq!(
+            bitcoin_rs_index::MAX_LIVE_SCRIPT_SIZE,
+            bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
+            "the index's live predicate drifted from UTXO admission"
+        );
+    }
+
     #[test]
     fn build_utxo_changes_excludes_op_return_outputs() -> Result<(), Box<dyn std::error::Error>> {
         let mut coinbase = coinbase_transaction(0x6f);
@@ -7427,7 +7474,7 @@ mod consensus_rule_tests {
             Arc::clone(&handles.block_tree),
             None,
             crate::txindex_worker::DEFAULT_BATCH_LIMITS,
-            bitcoin_rs_index::IndexCapabilities::ALL,
+            bitcoin_rs_index::IndexCapabilities::HISTORICAL,
             Arc::new(crate::state::ChainEventPublisher::detached(0).0),
             crate::txindex_worker::test_recovery_reporter(evidence_dir.path()).0,
             u32::MAX,
@@ -7470,6 +7517,8 @@ mod consensus_rule_tests {
             crate::block_source::NodeBlockSource::new(Arc::clone(&handles.blocks)),
             Arc::clone(&handles.block_tree),
             Arc::clone(&handles.applied_tip),
+            None,
+            None,
             None,
         );
         let query_result =

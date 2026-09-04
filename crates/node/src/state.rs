@@ -1352,12 +1352,14 @@ impl fmt::Display for CompiledStorageFeatures {
 
 fn tx_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
     bitcoin_rs_index::IndexCapabilities {
-        // ScriptIndex-backed Esplora responses need exact historical
-        // transactions to render prevouts and calculate fees. This is an
-        // internal dependency; `tx_index_query` below still exposes it to Core
-        // RPCs only for an explicit --txindex configuration.
-        tx_lookup: config.indexes.txindex || config.indexes.script_index.is_enabled(),
+        // Full ScriptIndex-backed Esplora responses need exact historical
+        // transactions to render prevouts and calculate fees. `utxo` owns
+        // only the compact live-output view and must not pay for TxLookup.
+        // `tx_index_query` still exposes TxLookup to Core RPCs only for an
+        // explicit --txindex configuration.
+        tx_lookup: config.indexes.txindex || config.indexes.script_index.keeps_history(),
         script_history: config.indexes.script_index.keeps_history(),
+        script_live: config.indexes.script_index.is_enabled(),
     }
 }
 
@@ -1404,6 +1406,8 @@ fn build_tx_index_open_spec(
         enabled,
         rollback_rebuild_cutover: crate::txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
+        utxo: None,
+        chain_transition: None,
     }))
 }
 
@@ -1716,10 +1720,13 @@ impl NodeState {
             ChainEventPublisher::new(epoch, initial_snapshot);
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
+        let chain_transition = Arc::new(parking_lot::Mutex::new(()));
         let tx_index_open_spec = build_tx_index_open_spec(&config, txindex_cache_bytes, epoch)?;
         let (tx_index_runtime, tx_index_spawn, tx_index_lifecycle, tx_index_adapter) =
             match tx_index_open_spec {
-                Some(spec) => {
+                Some(mut spec) => {
+                    spec.utxo = Some(Arc::clone(&utxo));
+                    spec.chain_transition = Some(Arc::clone(&chain_transition));
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                     let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
                     let body_source: Arc<dyn bitcoin_rs_rpc::context::BlockBodySource> =
@@ -1756,6 +1763,7 @@ impl NodeState {
                 tx_lifecycle: tx_index_lifecycle.clone(),
                 tx_runtime: tx_index_runtime.clone(),
                 txindex_enabled: crate::capabilities::txindex_enabled(&config),
+                index_capabilities: tx_index_capabilities(&config),
             },
         ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
@@ -1823,7 +1831,7 @@ impl NodeState {
                 Arc::new(observer),
             )
         };
-        let apply_handles = crate::apply::ApplyHandles {
+        let mut apply_handles = crate::apply::ApplyHandles {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
@@ -1843,25 +1851,45 @@ impl NodeState {
             undo_store,
             admission: Arc::new(crate::apply::ApplyAdmission::new()),
             shutdown: Arc::clone(&shutdown),
-            chain_transition: Arc::new(parking_lot::Mutex::new(())),
+            chain_transition,
             assume_valid_height: config.validation.assume_valid_height,
             assume_valid_gate: Arc::new(crate::apply::AssumeValidGate::new(
                 config.network,
                 config.validation.assume_valid_height,
             )),
             journal,
+            checkpoint_publisher: None,
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
+        // A restored checkpoint is durable at its own height by definition, so
+        // start there rather than at zero, which would refuse all undo pruning.
+        let durable_tip_height = Arc::new(AtomicU32::new(
+            applied_tip.load().as_ref().map_or(0, |tip| tip.height),
+        ));
+        apply_handles.checkpoint_publisher =
+            Some(Arc::new(crate::checkpoint_worker::CheckpointPublisher {
+                admission: Arc::clone(&apply_handles.admission),
+                undo_store: Arc::clone(&apply_handles.undo_store),
+                block_body_store: Arc::clone(&block_body_store),
+                applied_tip: Arc::clone(&applied_tip),
+                checkpoint_data_dir: crate::checkpoint_fs::open_data_dir(&config.data_dir)
+                    .with_context(|| format!("open data_dir {}", config.data_dir.display()))?,
+                network: config.network,
+                genesis_hash: config.network.genesis_block_hash(),
+                block_tree: Arc::clone(&block_tree),
+                utxo: Arc::clone(&utxo),
+                coin_stats: Arc::clone(&coin_stats),
+                chain_tx_count: Arc::clone(&chain_tx_count),
+                journal: apply_handles.journal.clone(),
+                data_dir: config.data_dir.clone(),
+                chain_events: Arc::clone(&chain_events),
+                durable_tip_height: Arc::clone(&durable_tip_height),
+            }));
         let sync = Arc::new(crate::BlockSync::new(
             apply_handles.clone(),
             Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
-        ));
-        // A restored checkpoint is durable at its own height by definition, so
-        // start there rather than at zero, which would refuse all undo pruning.
-        let durable_tip_height = Arc::new(AtomicU32::new(
-            applied_tip.load().as_ref().map_or(0, |tip| tip.height),
         ));
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.prune_service(
@@ -2441,11 +2469,45 @@ impl Drop for NodeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin_rs_index::IndexCapabilities;
     use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
         Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, consensus_bytes,
     };
     use bitcoin_rs_rpc::context::BlockRecord;
+
+    #[test]
+    fn script_index_capabilities_match_the_storage_contract() {
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.indexes.txindex = false;
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        assert_eq!(tx_index_capabilities(&config), IndexCapabilities::NONE);
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
+        assert_eq!(
+            tx_index_capabilities(&config),
+            IndexCapabilities::SCRIPT_LIVE,
+            "utxo mode owns only the compact live-output view"
+        );
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Full;
+        assert_eq!(tx_index_capabilities(&config), IndexCapabilities::ALL);
+
+        config.indexes.txindex = true;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        assert_eq!(tx_index_capabilities(&config), IndexCapabilities::TX_LOOKUP);
+
+        config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
+        assert_eq!(
+            tx_index_capabilities(&config),
+            IndexCapabilities {
+                tx_lookup: true,
+                script_history: false,
+                script_live: true,
+            }
+        );
+    }
 
     fn publish_applied_tip_height(state: &NodeState, height: u32) {
         let mut hash = [0_u8; 32];
@@ -2642,17 +2704,16 @@ mod tests {
     /// Opens a node in each accepted `scriptindex` mode and asserts the
     /// concrete answer for `unspent_outputs`, rather than only the `full` path.
     ///
-    /// This is the guard that the two accepted modes give distinct, concrete
-    /// answers instead of both degrading to `Retry`.
+    /// `utxo` must be independently usable while historical rows are absent;
+    /// this test pins that both enabled modes converge to a concrete answer.
     #[test]
     fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<()> {
         use bitcoin_rs_index::ScriptHash;
         use bitcoin_rs_rpc::context::TxQueryError;
 
-        // Genesis is applied in each case so the index worker has at least one
-        // block to index. Without it the worker never publishes a
-        // `ScriptHistory` watermark and every mode retries forever, which would
-        // make both cases indistinguishable.
+        // Genesis is applied in each case so the index worker has a published
+        // chain tip to anchor. The disabled case has no adapter; the enabled
+        // modes must publish their own capability watermarks independently.
         let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 
         // `disabled`: no script index at all, so no query adapter is handed
@@ -2670,6 +2731,38 @@ mod tests {
             "disabled must not hand out a script-index query adapter"
         );
         drop(state);
+
+        // `utxo`: the compact live-output view is independently usable while
+        // historical script rows are not maintained.
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p.listen.clear();
+        config.indexes.txindex = false;
+        config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
+        let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
+        let Some(query) = state.script_index_query() else {
+            panic!("utxo mode must hand out a script-index query adapter")
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match query.unspent_outputs(scripthash) {
+                Ok(records) => {
+                    assert!(records.is_empty(), "an unfunded script has no outputs");
+                    break;
+                }
+                Err(TxQueryError::Retry | TxQueryError::Unavailable(_)) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "utxo mode must converge on the live view"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("unexpected script-index error: {error}"),
+            }
+        }
 
         // `full`: the accepted mode. It converges on a concrete answer — an
         // empty set for an unfunded script — rather than retrying forever.
@@ -4114,6 +4207,180 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("node");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir.clone();
+        config.p2p.listen.clear();
+        // Journal rewind disarms disconnect markers itself. These tests own the
+        // checkpoint-settlement path that remains when the journal cannot.
+        config.chainstate_journal.enabled = false;
+        let state = NodeState::open(config, None)?;
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        state.apply_block(&genesis)?;
+        let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+        state.apply_block(&block_one)?;
+        state.publish_checkpoint()?;
+
+        let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+        let block_two = mined_regtest_child_at(block_one.block_hash(), genesis.header.time + 2, 2)?;
+        state.apply_block(&block_two)?;
+
+        crate::reorg::invalidate_block(
+            &state.apply_handles(),
+            Hash256::from(block_two.block_hash()),
+        )?;
+
+        assert!(
+            state
+                .apply_handles()
+                .undo_store
+                .load_disconnect_marker()?
+                .is_none()
+        );
+        let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+        assert!(current_after > current_before);
+        assert_eq!(state.durable_tip_height.load(Ordering::Acquire), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn invalidate_block_settlement_failure_is_not_success() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("node");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir;
+        config.p2p.listen.clear();
+        config.chainstate_journal.enabled = false;
+        let state = NodeState::open(config.clone(), None)?;
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        state.apply_block(&genesis)?;
+        let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+        state.apply_block(&block_one)?;
+        state.publish_checkpoint()?;
+
+        let block_two = mined_regtest_child_at(block_one.block_hash(), genesis.header.time + 2, 2)?;
+        state.apply_block(&block_two)?;
+
+        crate::checkpoint::inject_next_checkpoint_failpoint(
+            crate::checkpoint::CheckpointFailpoint::ManifestWrite,
+        );
+        let result = crate::reorg::invalidate_block(
+            &state.apply_handles(),
+            Hash256::from(block_two.block_hash()),
+        );
+        let Err(crate::reorg::ReorgError::CheckpointSettlement(_)) = result else {
+            anyhow::bail!("expected CheckpointSettlement, got {result:?}");
+        };
+
+        let marker = state
+            .apply_handles()
+            .undo_store
+            .load_disconnect_marker()?
+            .ok_or_else(|| anyhow::anyhow!("settlement failure cleared the disconnect marker"))?;
+        assert_eq!(
+            marker.phase,
+            bitcoin_rs_storage::DisconnectPhase::RolledBack
+        );
+
+        drop(state);
+        let error = match NodeState::open(config, None) {
+            Ok(_) => anyhow::bail!("node reopened with unsettled RolledBack debt"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("did not reach a clean checkpoint"),
+            "startup refusal omitted the checkpoint debt: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("node");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir.clone();
+        config.p2p.listen.clear();
+        config.chainstate_journal.enabled = false;
+        let state = NodeState::open(config, None)?;
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        state.apply_block(&genesis)?;
+        let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+        state.apply_block(&block_one)?;
+        state.publish_checkpoint()?;
+
+        let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+
+        let genesis_id = state
+            .block_tree
+            .read()
+            .lookup(Hash256::from(genesis.block_hash()))
+            .ok_or_else(|| anyhow::anyhow!("missing genesis node"))?;
+        let mut parent = genesis_id;
+        let mut previous_hash = genesis.block_hash();
+        let mut fork_bodies = HashMap::new();
+        for height in 1..=2 {
+            let block =
+                mined_regtest_child_at(previous_hash, genesis.header.time + 10 + height, height)?;
+            let node_id = state.block_tree.write().insert_node(
+                Some(parent),
+                block.header,
+                bitcoin_rs_chain::node::NodeStatus::HeaderValid,
+            )?;
+            fork_bodies.insert(
+                Hash256::from(block.block_hash()),
+                (block.clone(), bytes::Bytes::from(consensus_bytes(&block))),
+            );
+            parent = node_id;
+            previous_hash = block.block_hash();
+        }
+
+        let handles = state.apply_handles();
+        crate::reorg::switch_to_branch(
+            &handles,
+            parent,
+            |hash| fork_bodies.get(&hash).cloned(),
+            |_| {},
+        )?;
+
+        assert!(
+            state
+                .apply_handles()
+                .undo_store
+                .load_disconnect_marker()?
+                .is_none()
+        );
+        let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+            data_dir.join("chainstate-checkpoints/CURRENT"),
+        )?)?
+        .get("generation")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+        assert!(current_after > current_before);
+        assert_eq!(state.durable_tip_height.load(Ordering::Acquire), 2);
+        Ok(())
+    }
+
+    #[test]
     fn publish_checkpoint_refuses_when_no_applied_tip() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -4563,12 +4830,23 @@ mod tests {
     }
 
     fn mined_regtest_child(prev_blockhash: BlockHash) -> anyhow::Result<Block> {
+        mined_regtest_child_at(prev_blockhash, 1_296_688_603, 1)
+    }
+
+    fn mined_regtest_child_at(
+        prev_blockhash: BlockHash,
+        time: u32,
+        height: u32,
+    ) -> anyhow::Result<Block> {
+        let mut script_sig = vec![8];
+        script_sig.extend_from_slice(&height.to_le_bytes());
+        script_sig.extend_from_slice(&time.to_le_bytes());
         let coinbase = Tx {
             version: 2,
             lock_time: 0,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![1, 1],
+                script_sig,
                 sequence: u32::MAX,
                 witness: Vec::new(),
             }],
@@ -4582,7 +4860,7 @@ mod tests {
                 version: 1,
                 prev_blockhash,
                 merkle_root: Hash256::default(),
-                time: 1_296_688_603,
+                time,
                 bits: 0x207f_ffff,
                 nonce: 0,
             },

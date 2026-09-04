@@ -174,6 +174,22 @@ impl CheckpointPublisher {
         result
     }
 
+    /// Publishes a checkpoint when a `RolledBack` disconnect marker is present.
+    ///
+    /// Returns `Ok(false)` when there is no marker, or when the marker is
+    /// `InFlight` (a torn rollback must not be made durable). `Ok(true)` means
+    /// a checkpoint was published and the marker was disarmed.
+    pub(crate) fn settle_disconnect_debt(&self) -> core::result::Result<bool, CheckpointError> {
+        let Some(marker) = self.undo_store.load_disconnect_marker()? else {
+            return Ok(false);
+        };
+        if marker.phase == crate::apply::DisconnectPhase::InFlight {
+            return Ok(false);
+        }
+        self.publish()?;
+        Ok(true)
+    }
+
     fn tip_prev_hash(&self, tip: &TipSnapshot) -> core::result::Result<Hash256, CheckpointError> {
         let tree = self.block_tree.read();
         let node = tree.node(tip.tip_id).map_err(|error| {

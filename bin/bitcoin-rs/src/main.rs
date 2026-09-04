@@ -101,6 +101,18 @@ mod tests {
     }
 
     #[test]
+    fn environment_parses_script_index_utxo() {
+        let config = super::load(
+            ["bitcoin-rs"],
+            std::iter::once(("BITCOIN_RS_SCRIPTINDEX", "utxo"))
+                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+        )
+        .unwrap_or_else(|error| panic!("valid environment configuration: {error}"));
+
+        assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
+    }
+
+    #[test]
     fn toml_groups_zmq_topics_by_endpoint() {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
         let path = dir.path().join("node.toml");
@@ -194,6 +206,18 @@ hwm = 5000
     }
 
     #[test]
+    fn cli_scriptindex_utxo_enables_live_only_index() {
+        let config = super::load(
+            ["bitcoin-rs", "--txindex=false", "--scriptindex=utxo"],
+            std::iter::empty(),
+        )
+        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+
+        assert!(!config.indexes.txindex);
+        assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
+    }
+
+    #[test]
     fn cli_parses_socket_and_peer_lists() {
         let config = super::load(
             [
@@ -269,11 +293,11 @@ hwm = 5000
         let path = dir.path().join("node.toml");
         std::fs::write(
             &path,
-            r#"
+            r"
 [chainstate_journal]
 enabled = true
 blocks = 100
-"#,
+",
         )
         .unwrap_or_else(|error| panic!("write toml: {error}"));
 
@@ -283,8 +307,7 @@ blocks = 100
                 "--config",
                 path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
             ],
-            [("BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", "200")]
-                .into_iter()
+            std::iter::once(("BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", "200"))
                 .map(|(key, value)| (OsString::from(key), OsString::from(value))),
         )
         .unwrap_or_else(|error| panic!("valid journal configuration: {error}"));
