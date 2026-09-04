@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_rpc::context::BlockLog;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,6 +31,8 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> TxIndexOpenSpec {
         enabled: IndexCapabilities::default(),
         rollback_rebuild_cutover: 0,
         canonical_data_root: dir.to_path_buf(),
+        utxo: None,
+        chain_transition: None,
     }
 }
 
@@ -396,6 +398,7 @@ fn async_index_open_preserves_backend() {
             8 * 1024 * 1024,
             DEFAULT_BATCH_LIMITS,
             1,
+            Duration::ZERO,
         );
         assert!(
             result.is_ok(),
@@ -414,6 +417,7 @@ fn async_index_open_preserves_backend() {
             8 * 1024 * 1024,
             REDB_BATCH_LIMITS,
             1,
+            Duration::ZERO,
         );
         assert!(
             result.is_ok(),
@@ -432,6 +436,7 @@ fn async_index_open_preserves_backend() {
             8 * 1024 * 1024,
             ROCKSDB_BATCH_LIMITS,
             1,
+            Duration::ZERO,
         );
         assert!(
             result.is_ok(),
@@ -450,6 +455,7 @@ fn async_index_open_preserves_backend() {
             8 * 1024 * 1024,
             DEFAULT_BATCH_LIMITS,
             1,
+            Duration::ZERO,
         );
         assert!(
             result.is_ok(),
@@ -613,21 +619,17 @@ fn open_timeout_publishes_error_not_infinite_spin() {
     // Simulate a stuck open: the helper thread will sleep 10 seconds before
     // even attempting the store open. The timeout is set to 1 second, so the
     // deadline fires while the helper is still sleeping.
-    OPEN_DELAY_SECS.store(10, Ordering::Relaxed);
-    OPEN_TIMEOUT_OVERRIDE_SECS.store(1, Ordering::Relaxed);
-
     let result = open_tx_index_with_timeout(
         bitcoin_rs_storage::StorageBackend::Fjall,
         &dir.path().join("txindex"),
         8 * 1024 * 1024,
         DEFAULT_BATCH_LIMITS,
         1,
+        Duration::from_secs(10),
+        Duration::from_secs(1),
         &shutdown,
     );
 
-    // Restore overrides immediately so other tests are not affected.
-    OPEN_DELAY_SECS.store(0, Ordering::Relaxed);
-    OPEN_TIMEOUT_OVERRIDE_SECS.store(0, Ordering::Relaxed);
     let Err(TxIndexWorkerError::OpenTimeout { secs }) = result else {
         panic!("expected OpenTimeout, got a different error variant");
     };

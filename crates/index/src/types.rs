@@ -225,11 +225,16 @@ pub const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 4;
 
 /// One live-output row: a currently unspent outpoint filed under its script.
 ///
-/// The key is `prefix(8) || txid(32, little-endian) || vout(4, little-endian)`
-/// and the value is empty. This is #225's full-outpoint baseline locator:
-/// the 8-byte prefix is lossy like [`ScriptHashRow`]'s prefix, but the
-/// outpoint half is complete, so two scripts colliding on the prefix can never
-/// collide on a whole key. That makes point deletes collision-safe.
+/// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian as
+/// rust-bitcoin serializes it) || vout(4, little-endian)` -- and the value is
+/// empty. This is #225's full-outpoint baseline locator: the 8-byte prefix is
+/// lossy exactly like `Funding`'s (readers exact-check the resolved coin's
+/// `script_pubkey`), but the outpoint half is complete, so two scripts that
+/// collide on the prefix can never collide on a whole key. That is what makes
+/// a **point delete collision-safe**: removing a spent output deletes one
+/// exact key and cannot touch a colliding script's rows. Prefix-range scans
+/// over this family are read-only by contract; a delete is always a whole-key
+/// point delete.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(C)]
 pub struct ScriptLiveRow {
@@ -237,7 +242,7 @@ pub struct ScriptLiveRow {
 }
 
 impl ScriptLiveRow {
-    /// Builds the row for `outpoint` under `scripthash`.
+    /// Builds the row for `outpoint` held by a script hashing to `scripthash`.
     pub fn new(scripthash: ScriptHash, outpoint: &OutPoint) -> Self {
         let mut key = [0_u8; SCRIPT_LIVE_ROW_SIZE];
         key[..HASH_PREFIX_LEN].copy_from_slice(&ScriptHashRow::scan_prefix(scripthash));
@@ -257,7 +262,8 @@ impl ScriptLiveRow {
         &self.key
     }
 
-    /// The outpoint this row locates, for resolution against authoritative state.
+    /// The outpoint this row locates, for resolution against authoritative
+    /// UTXO state.
     pub fn outpoint(&self) -> OutPoint {
         let mut txid = [0_u8; 32];
         txid.copy_from_slice(&self.key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + 32]);

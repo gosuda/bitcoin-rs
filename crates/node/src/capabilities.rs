@@ -31,6 +31,9 @@ pub(crate) struct CapabilityInputs {
     pub tx_runtime: Option<Arc<TxIndexRuntime>>,
     /// Whether the Core `--txindex` surface or its script-index dependency is enabled.
     pub txindex_enabled: bool,
+    /// Exact index families this node maintains. Progress and Ready use this
+    /// set so `scriptindex=utxo` is not judged against a missing `TxLookup` watermark.
+    pub index_capabilities: IndexCapabilities,
 }
 
 /// Node-owned provider for the concrete RPC capability report.
@@ -52,7 +55,7 @@ impl NodeCapabilities {
     fn txindex_status(inputs: &CapabilityInputs) -> CapabilityStatus {
         let state = match (&inputs.tx_lifecycle, &inputs.tx_runtime) {
             (Some(lifecycle), Some(runtime)) if inputs.txindex_enabled => {
-                Self::worker_state(&lifecycle.load(), runtime)
+                Self::worker_state(&lifecycle.load(), runtime, inputs.index_capabilities)
             }
             _ => CapabilityState::Disabled,
         };
@@ -64,7 +67,11 @@ impl NodeCapabilities {
         }
     }
 
-    fn worker_state(lifecycle: &TxIndexLifecycle, runtime: &TxIndexRuntime) -> CapabilityState {
+    fn worker_state(
+        lifecycle: &TxIndexLifecycle,
+        runtime: &TxIndexRuntime,
+        enabled: IndexCapabilities,
+    ) -> CapabilityState {
         if let Some(message) = runtime.failure_message() {
             return CapabilityState::Failed {
                 reason: message.to_string(),
@@ -99,7 +106,7 @@ impl NodeCapabilities {
                 },
             };
         }
-        match Self::progress(engine, IndexCapabilities::TX_LOOKUP) {
+        match Self::progress(engine, enabled) {
             Ok(progress) if progress.synced => CapabilityState::Ready,
             Ok(progress) => CapabilityState::CatchingUp {
                 processed_height: progress.processed_height,

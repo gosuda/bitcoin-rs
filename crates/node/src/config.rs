@@ -171,11 +171,17 @@ pub struct NotificationConfig {
 /// The boolean spellings remain behaviorally compatible: `--scriptindex`,
 /// `--scriptindex=true`, and `BITCOIN_RS_SCRIPTINDEX=true` all mean
 /// [`Self::Full`], and `false` means [`Self::Disabled`].
+///
+/// [`Self::Utxo`] maintains only the durable compact live-output view.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ScriptIndexMode {
     /// No `ScriptIndex` capability is maintained.
     #[default]
     Disabled,
+    /// Maintain only the compact live-output view.
+    ///
+    /// Maintains the durable compact live-output view without historical rows.
+    Utxo,
     /// Maintain both the live-output view and historical script activity.
     Full,
 }
@@ -200,6 +206,7 @@ impl ScriptIndexMode {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "utxo" => Some(Self::Utxo),
             // `true` is the historical boolean spelling and must keep meaning
             // `full`; it is a separate pattern for that readability, not a
             // distinct outcome.

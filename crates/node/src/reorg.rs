@@ -19,6 +19,25 @@ use hashbrown::{HashMap, HashSet};
 use crate::apply::ApplyHandles;
 use crate::{ApplyError, DisconnectError};
 
+/// Settles a rolled-back disconnect marker once the reorg owner has released
+/// its chain-transition proof.
+///
+/// A successful chainstate-journal rewind already disarms the marker, in which
+/// case this is a no-op. Publication runs only when `RolledBack` debt remains.
+fn settle_disconnect_debt(handles: &ApplyHandles) -> core::result::Result<(), ReorgError> {
+    let Some(publisher) = &handles.checkpoint_publisher else {
+        return Ok(());
+    };
+    match publisher.settle_disconnect_debt() {
+        Ok(true) => {
+            tracing::info!("published checkpoint after branch switch");
+            Ok(())
+        }
+        Ok(false) => Ok(()),
+        Err(error) => Err(ReorgError::CheckpointSettlement(anyhow::Error::new(error))),
+    }
+}
+
 /// Maximum number of disconnect-side block bodies held in memory at once
 /// during the streaming execution pass.
 ///
@@ -122,7 +141,6 @@ pub fn invalidate_block(
                     &connect[..progress.connected],
                     &mut no_staged_body,
                 );
-                let _ = proof.finish();
             }
             Err(_) => reconsider_disconnected_transactions(
                 handles,
@@ -131,6 +149,18 @@ pub fn invalidate_block(
                 &connect[..progress.connected],
                 &mut no_staged_body,
             ),
+        }
+        if matches!(&outcome, Ok(())) {
+            let _ = proof.finish();
+        } else {
+            drop(proof);
+        }
+        let settle_debt = !matches!(&outcome, Err(ReorgError::Fatal(_)));
+        if settle_debt {
+            if let Err(settlement) = settle_disconnect_debt(handles) {
+                outcome?;
+                return Err(settlement);
+            }
         }
         return outcome;
     }
@@ -299,6 +329,12 @@ pub enum ReorgError {
     /// refuses rather than serving it.
     #[error("reorg left the chainstate inconsistent: {0}")]
     Fatal(#[source] Box<DisconnectError>),
+    /// A nonfatal reorg completed, but the rolled-back state could not be
+    /// checkpointed. The chain is coherent at the reached tip and the
+    /// disconnect marker remains `RolledBack`; a restart will refuse the data
+    /// directory until a later checkpoint publishes this state.
+    #[error("disconnect left a checkpoint debt the node could not settle: {0}")]
+    CheckpointSettlement(#[source] anyhow::Error),
 }
 
 /// Switches the applied chain to `target`.
@@ -390,8 +426,18 @@ where
         for body in &connect[..progress.connected] {
             connected_body(body.hash);
         }
+        if matches!(&outcome, Ok(())) {
+            let _ = proof.finish();
+        } else {
+            drop(proof);
+        }
+        if !matches!(&outcome, Err(ReorgError::Fatal(_))) {
+            if let Err(settlement) = settle_disconnect_debt(handles) {
+                outcome?;
+                return Err(settlement);
+            }
+        }
         outcome?;
-        let _ = proof.finish();
         if let Some((hash, height)) = missing_connect {
             return Err(ReorgError::MissingBody { hash, height });
         }

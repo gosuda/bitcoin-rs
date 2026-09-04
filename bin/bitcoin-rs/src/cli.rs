@@ -110,8 +110,9 @@ fn parse_storage_backend(value: &str) -> std::result::Result<StorageBackend, Str
 }
 
 fn parse_script_index(value: &str) -> std::result::Result<ScriptIndexMode, String> {
-    ScriptIndexMode::parse(value)
-        .ok_or_else(|| format!("invalid scriptindex value `{value}`: expected `full` or a boolean"))
+    ScriptIndexMode::parse(value).ok_or_else(|| {
+        format!("invalid scriptindex value `{value}`: expected `utxo`, `full`, or a boolean")
+    })
 }
 
 pub(crate) fn parse_bool(value: &str) -> Result<bool> {

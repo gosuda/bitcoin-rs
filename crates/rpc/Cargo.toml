@@ -40,7 +40,7 @@ sha2.workspace = true
 corepc-types.workspace = true
 
 [dev-dependencies]
-bitcoin-rs-node = { workspace = true, features = ["fjall"] }
+bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
 toml.workspace = true
