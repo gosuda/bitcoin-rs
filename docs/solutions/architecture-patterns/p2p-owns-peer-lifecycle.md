@@ -34,7 +34,8 @@ operation cannot publish, send to, or cancel a replacement.
 - Address equality does not establish connection identity.
 - Registering a replacement immediately hides the predecessor's ready metadata.
 - Scheduler state is reset only after the current lease publishes ready
-  metadata. A stale predecessor must not notify.
+  metadata. A stale predecessor must not notify, and `BlockSync::on_peer_ready`
+  ignores a `PeerSource` that is no longer current.
 - Handshake metadata is published only for the current lease.
 - The node starts one `P2pService`. RPC applies the same network-activity
   transition (`apply_network_active`) on the shared flag and `PeerTable`.

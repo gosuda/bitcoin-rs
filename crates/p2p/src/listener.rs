@@ -89,13 +89,12 @@ impl ConnectionShared {
         }
     }
 
-    /// Publish handshake info only for the currently registered lease, then
-    /// notify `BlockSync`. `publish_info` is the identity-checked Ready
-    /// transition; a stale predecessor must not clear the replacement's
-    /// address-scoped download or header state.
+    /// Publish ready metadata, then notify only while this lease is current.
     ///
-    /// The table lock is not held across notify: `BlockSync` takes
-    /// `download_window` / `pending_getheaders`, the opposite order of `tick`.
+    /// The table lock is not held across notify: `BlockSync` takes the
+    /// download window after checking identity, matching `tick`. Publication
+    /// and stale-predecessor rules live in
+    /// `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
     fn publish_info_and_notify_ready(
         &self,
         peer_addr: SocketAddr,
@@ -103,7 +102,9 @@ impl ConnectionShared {
         info: crate::PeerInfo,
     ) -> bool {
         let source = lease.source(peer_addr);
-        if self.peer_table.publish_info(peer_addr, lease, info) {
+        if self.peer_table.publish_info(peer_addr, lease, info)
+            && self.peer_table.is_current(source)
+        {
             self.notify_peer_ready(source);
             true
         } else {
