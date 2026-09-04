@@ -35,10 +35,14 @@ out of tree.
 
 ### `WF-03`: Proof is a public-HTTP consumer
 
-- In-tree fixtures that import node internals do not prove this contract.
+- In-tree fixtures that import `NodeState`, `UtxoSet`, index types, or
+  other node crates do not prove this contract.
 - Proof: `bin/bitcoin-rs/tests/wallet_facing.rs` spawns the `bitcoin-rs`
-  binary and speaks only HTTP. It submits genesis and mined blocks through
-  `submitblock`, then scans, fee-estimates, and broadcasts the way
+  binary and talks to it as an external process. The test depends on
+  rust-bitcoin, not on `bitcoin-rs-node` / primitives, and speaks only
+  HTTP. It funds a regtest chain through `getblocktemplate` /
+  `submitblock` (this node has no `generate*` RPC), then scans,
+  fee-estimates, and broadcasts the way
   [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw -u`)
   does against any Esplora URL.
 - Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>`
