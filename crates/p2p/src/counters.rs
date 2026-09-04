@@ -170,6 +170,7 @@ impl<S: Read> Read for CountingStream<S> {
         self.counters.record_recv(read);
         Ok(read)
     }
+
 }
 
 impl<S: Write> Write for CountingStream<S> {
@@ -184,6 +185,7 @@ impl<S: Write> Write for CountingStream<S> {
         self.counters.record_sent(written);
         Ok(written)
     }
+
 
     fn flush(&mut self) -> IoResult<()> {
         self.inner.flush()
@@ -303,9 +305,10 @@ mod tests {
         let _accepted = accepting.join();
     }
 
-    /// `write_message` uses `write_vectored`. The default `Write` impl only
-    /// forwards the first slice through `write`, which would split the
-    /// header/payload coalescing this wrapper exists to preserve.
+    /// Contract `P2P-03`: `write_message` uses one `write_vectored` call for
+    /// the header and payload, and counting records every accepted byte.
+    /// The default `Write` impl only forwards the first slice through `write`,
+    /// which would split the coalescing this wrapper exists to preserve.
     #[test]
     fn a_vectored_write_counts_every_slice_in_one_inner_call() {
         struct RecordingWriter {

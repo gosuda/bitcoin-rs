@@ -44,6 +44,7 @@ mod tests {
         (client, server)
     }
 
+    /// Contract `P2P-03` requires the peer socket policy on both directions.
     #[test]
     fn configure_peer_stream_disables_nagle_on_both_halves() {
         let (client, server) = loopback_pair();

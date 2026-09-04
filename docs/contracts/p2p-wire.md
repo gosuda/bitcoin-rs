@@ -33,6 +33,13 @@ normative; it places them under the
 - The node-side synchronization coordinator consumes peer lifecycle events
   without duplicating connection replacement or cancellation rules.
 
+### `P2P-03`: Peer socket policy and vectored writes
+
+- Peer sockets are configured with `TCP_NODELAY`, blocking I/O, and the
+  documented handshake/read timeouts on both inbound and outbound streams.
+- Message writes use one vectored write for the header and payload, and the
+  byte counter records all bytes accepted by that write.
+
 ## Live gaps
 
 - **Peer lifecycle boundary**: Moving the remaining P2P scheduling and lifecycle policy out of `crates/node` is tracked under #217 (open).
