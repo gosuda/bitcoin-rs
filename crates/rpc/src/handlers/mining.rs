@@ -29,6 +29,8 @@ const NONCE_RANGE: &str = "00000000ffffffff";
 const GBT_REQUIRE_SEGWIT: &str =
     r#"getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})"#;
 const GBT_REQUIRE_SIGNET: &str = r#"getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})"#;
+const PRIORITISE_DUMMY_ERROR: &str =
+    "Priority is no longer supported, dummy argument to prioritisetransaction must be 0.";
 
 fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
     fn nibble(byte: u8) -> Result<u8, ()> {
@@ -151,14 +153,26 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
     let txid = Txid::from_str(txid_str)
         .map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))?;
     let array = params_array(params)?;
-    // params: [txid, dummy_or_fee_delta_priority_field, fee_delta]
-    // Bitcoin Core's API has the deprecated `priority_delta` middle param (now
-    // a dummy `0`) and a real `fee_delta` final param. Accept whichever order.
+    // Core reads `fee_delta` from params[2] before rejecting a non-zero dummy.
     let fee_delta = array
         .get(2)
         .and_then(JsonValueTrait::as_i64)
-        .or_else(|| array.get(1).and_then(JsonValueTrait::as_i64))
-        .ok_or(RpcError::InvalidParams("fee_delta is required"))?;
+        .ok_or(RpcError::InvalidType("parameter must be an integer"))?;
+    if let Some(dummy) = array.get(1)
+        && !dummy.is_null()
+    {
+        // Core `MaybeArg<double>`: JSON 0 and 0.0 are both zero.
+        let value = dummy
+            .as_f64()
+            .or_else(|| dummy.as_i64().map(|n| n as f64))
+            .or_else(|| dummy.as_u64().map(|n| n as f64))
+            .ok_or(RpcError::InvalidType("dummy must be a number"))?;
+        if value != 0.0 {
+            return Err(RpcError::InvalidParameter(
+                PRIORITISE_DUMMY_ERROR.to_owned(),
+            ));
+        }
+    }
     ctx.mempool
         .prioritise(txid, fee_delta)
         .map_err(|_| RpcError::InvalidParams("fee delta would overflow"))?;
@@ -1501,12 +1515,37 @@ mod tests {
         let result = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500]))
             .unwrap_or_else(|err| panic!("prioritisetransaction failed: {err}"));
         assert_eq!(result.as_bool(), Some(true));
+        prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0.0, 0]))
+            .unwrap_or_else(|err| panic!("zero dummy float must be accepted: {err}"));
+        prioritisetransaction(&ctx, &json!([txid_hex.as_str(), null, 0]))
+            .unwrap_or_else(|err| panic!("null dummy must be accepted: {err}"));
         let pool = ctx.mempool.read();
         let entry = pool
             .entry_by_txid(&txid)
             .expect("entry remains after prioritise");
         assert_eq!(entry.fee_delta, 500);
         assert_eq!(entry.fee, 1_000);
+    }
+
+    #[test]
+    fn prioritisetransaction_rejects_nonzero_dummy_like_core() {
+        let ctx = Arc::new(Context::new());
+        let txid = "11".repeat(32);
+        let error = prioritisetransaction(&ctx, &json!([txid.as_str(), 1, 500]))
+            .expect_err("nonzero dummy must fail");
+        assert!(matches!(error, RpcError::InvalidParameter(_)));
+        assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(error.to_string(), PRIORITISE_DUMMY_ERROR);
+    }
+
+    #[test]
+    fn prioritisetransaction_requires_fee_delta_as_third_parameter() {
+        let ctx = Arc::new(Context::new());
+        let txid = "11".repeat(32);
+        let error = prioritisetransaction(&ctx, &json!([txid.as_str(), 500]))
+            .expect_err("two-arg form must not treat dummy as fee_delta");
+        assert!(matches!(error, RpcError::InvalidType(_)));
+        assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
     }
 
     #[test]

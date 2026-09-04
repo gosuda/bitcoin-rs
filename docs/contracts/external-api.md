@@ -10,7 +10,8 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 witness fill. `API-14` is Core v31 `submitblock` / GBT proposal duplicate
 vocabulary. `API-15` is BIP22 reject-reason mapping. `API-16` is GBT
 `vbrequired` always 0. `API-17` is Core `CheckWitnessMalleation`
-reject reasons. `API-18` is GBT `coinbaseaux.flags`.
+reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
+`prioritisetransaction` dummy/`fee_delta` arity.
 
 ## Clauses
 
@@ -237,6 +238,15 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`.
   flags bytes are empty, so the hex string is `""`. An empty object is not
   the Core shape.
 
+### `API-19`: `prioritisetransaction` dummy and `fee_delta`
+
+- **Owner**: `prioritisetransaction` in `crates/rpc/src/handlers/mining.rs`.
+- Core reads `fee_delta` from params[2] (`getInt<int64_t>`). The deprecated
+  dummy (params[1]) must be omitted, null, or numeric zero; any other value
+  is `-8` `Priority is no longer supported, dummy argument to
+  prioritisetransaction must be 0.`
+- Two-argument calls do not treat params[1] as `fee_delta`.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -338,3 +348,8 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/rpc/src/handlers/mining.rs` test
     `getblocktemplate_renders_candidate_and_reuses_control_result`
   - `crates/rpc/tests/core_compat.rs` test `mining_responses_deserialize_into_pinned_types`
+- `API-19`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `prioritisetransaction_calls_mempool_prioritise_directly`,
+    `prioritisetransaction_rejects_nonzero_dummy_like_core`,
+    `prioritisetransaction_requires_fee_delta_as_third_parameter`
