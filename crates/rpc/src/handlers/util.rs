@@ -489,11 +489,14 @@ impl core::fmt::Display for DescriptorError {
 fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, DescriptorError> {
     if let Some(key) = parse_combo(text)? {
         let (public, private) = combo_key_forms(key)?;
-        ensure_combo_key_network(&public, network)?;
+        let multipath_expansion = Vec::new();
+        let is_range = public.contains('*');
+        
         return Ok(DescriptorInfo {
             canonical: format!("combo({public})"),
+              multipath_expansion,
             multipath_expansion: Vec::new(),
-            is_range: public.contains('*'),
+            is_range,
             is_solvable: true,
             has_private_keys: private,
         });
@@ -730,7 +733,7 @@ impl Unspendable {
                     DescriptorError::Parse(
                         "Descriptor does not have a corresponding address".to_owned(),
                     )
-                }),
+                }
         }
     }
 }
