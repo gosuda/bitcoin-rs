@@ -97,6 +97,7 @@ impl RpcServer {
     }
 
     fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
+        stream.set_nodelay(true)?;
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {

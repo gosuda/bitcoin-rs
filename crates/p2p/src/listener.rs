@@ -20,6 +20,29 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
 /// Stream read timeout used while polling handshake and message reads.
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Socket options shared by inbound and outbound sessions.
+///
+/// `TCP_NODELAY` is required so small latency-sensitive messages (version,
+/// ping/pong, inv, getheaders, getdata) are not delayed by Nagle coalescing
+/// with delayed ACK. Timeouts keep handshake and message-loop reads
+/// cancellable.
+fn configure_session_socket(
+    stream: &TcpStream,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<(), crate::wire::PeerError> {
+    stream
+        .set_nodelay(true)
+        .map_err(crate::wire::PeerError::Io)?;
+    stream
+        .set_read_timeout(Some(read_timeout))
+        .map_err(crate::wire::PeerError::Io)?;
+    stream
+        .set_write_timeout(Some(write_timeout))
+        .map_err(crate::wire::PeerError::Io)?;
+    Ok(())
+}
+
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
 type SyncWakeHandle = Option<Sender<()>>;
@@ -681,12 +704,7 @@ fn run_outbound_connection(
 
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
-        .map_err(crate::wire::PeerError::Io)?;
+    configure_session_socket(&stream, STREAM_POLL_INTERVAL, HANDSHAKE_READ_TIMEOUT)?;
     if shared.is_session_cancelled() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
@@ -830,12 +848,7 @@ fn run_handshake(
     stream
         .set_nonblocking(false)
         .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
-        .map_err(crate::wire::PeerError::Io)?;
+    configure_session_socket(&stream, STREAM_POLL_INTERVAL, HANDSHAKE_READ_TIMEOUT)?;
 
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
@@ -1283,6 +1296,38 @@ mod sync_wake_tests {
 
 #[cfg(test)]
 static ACCEPT_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod session_socket_tests {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+
+    use super::{HANDSHAKE_READ_TIMEOUT, STREAM_POLL_INTERVAL, configure_session_socket};
+
+    #[test]
+    fn session_sockets_disable_nagle() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+
+        configure_session_socket(&client, STREAM_POLL_INTERVAL, HANDSHAKE_READ_TIMEOUT)
+            .expect("configure client");
+        configure_session_socket(&server, STREAM_POLL_INTERVAL, HANDSHAKE_READ_TIMEOUT)
+            .expect("configure server");
+
+        assert!(client.nodelay().expect("client nodelay"));
+        assert!(server.nodelay().expect("server nodelay"));
+        assert_eq!(
+            client.read_timeout().expect("client read timeout"),
+            Some(STREAM_POLL_INTERVAL)
+        );
+        assert_eq!(
+            server.write_timeout().expect("server write timeout"),
+            Some(HANDSHAKE_READ_TIMEOUT)
+        );
+    }
+}
 
 #[cfg(test)]
 static WRITER_SETUP_FAIL: AtomicBool = AtomicBool::new(false);
