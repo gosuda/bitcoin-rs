@@ -10,6 +10,17 @@ signing, import, and fee-bump methods are absent. Key-free descriptor helpers,
 `scantxoutset`, `combinepsbt`, and `finalizepsbt` remain node RPCs so an external
 signer can drive a PSBT workflow without giving key custody to the node.
 
+### Watch-only mining payout
+An operator-configured address whose `scriptPubKey` is the candidate coinbase
+payout. The node decodes it at config resolve time and never holds keys. Empty
+configuration keeps transport-only GBT assembly: miners supply their own
+coinbase.
+
+### Mining generation
+The `(applied_tip_hash, mempool_sequence)` key that identifies one block
+template. The node-owned coordinator is the single cache and long-poll waiter
+for that key. RPC does not keep a second template cache.
+
 ### Wallet-facing public surface
 What an external wallet is allowed to call: native Esplora HTTP at `/api`
 on the JSON-RPC listener (tip, fees, block-height checkpoints,
@@ -47,9 +58,11 @@ tip-first before connects on the replacement branch.
 
 ### Post-commit chain effects
 Derived work that follows a committed connect or disconnect: RPC `BlockLog`,
-ZMQ projections, and TxIndex wake. Owned by `ChainEffects`. It cannot fail or
-delay the authoritative transition. Index recovery still uses
-`ChainEventPublisher` hints (`EVT-02`); this is not a second event log.
+ZMQ projections, TxIndex wake, mining generation, and P2P admission. Owned by
+`ChainFollowers` / `ChainEffects`. Dispatched after the tip is published,
+while the chain transition is still held. It cannot fail the authoritative
+transition. Index recovery still uses `ChainEventPublisher` hints (`EVT-02`);
+this is not a second event log.
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
@@ -251,9 +264,6 @@ A key that says which producer wrote a row, not merely where it is. Funding, spe
 Index row values carry transaction byte positions without a block tag. The reader validates the whole position list (nonempty, strictly increasing, unique, in-bounds, no overflow), reads each range from the canonical `(height, full hash)` body, and exact-checks the decoded txid or scripthash. If any position fails it discards every tentative result for that row and scans the full block — never skipping one position and keeping the rest.
 
 ## Storage
-
-### Datadir schema marker
-`CURRENT_SCHEMA` at the datadir root is the sole persistent-format authority, written and synced before any checkpoint or KV store opens. Rules and the startup table live in `docs/policies/db-migration.md`. `Cold` means no committed checkpoint; `CURRENT` is the only checkpoint commit point and an invalid referenced generation is corruption with no legacy fallback. The node never deletes or converts state.
 
 ### UTXO snapshot read contract
 The node accepts only complete native version-4 snapshots: exact magic and version, validated v4 records, the declared record count, a 384-byte MuHash trailer, and end-of-file. Versions 2 and 3 fail startup with a remove-and-resync instruction; there is no legacy reader.

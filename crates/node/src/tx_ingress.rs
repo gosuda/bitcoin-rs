@@ -24,8 +24,8 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MempoolGateway, PeerToken,
     standardness::{PackageTxContext, is_standard_tx},
 };
+use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid};
-use bitcoin_rs_rpc::context::MiningControl;
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
@@ -488,21 +488,28 @@ mod tests {
     impl MiningControl for RecordingMining {
         fn get_block_template(
             &self,
-            _request: bitcoin_rs_rpc::context::BlockTemplateRequest,
-        ) -> Result<
-            bitcoin_rs_rpc::context::BlockTemplateResult,
-            bitcoin_rs_rpc::context::MiningControlError,
-        > {
-            Err(bitcoin_rs_rpc::context::MiningControlError::Failed(
+            _request: bitcoin_rs_mining::BlockTemplateRequest,
+        ) -> Result<bitcoin_rs_mining::BlockTemplateResult, bitcoin_rs_mining::MiningControlError>
+        {
+            Err(bitcoin_rs_mining::MiningControlError::Failed(
                 "not implemented".to_owned().into(),
             ))
         }
 
         fn mining_info(
             &self,
-        ) -> Result<bitcoin_rs_rpc::context::MiningInfo, bitcoin_rs_rpc::context::MiningControlError>
-        {
-            Err(bitcoin_rs_rpc::context::MiningControlError::Failed(
+        ) -> Result<bitcoin_rs_mining::MiningInfo, bitcoin_rs_mining::MiningControlError> {
+            Err(bitcoin_rs_mining::MiningControlError::Failed(
+                "not implemented".to_owned().into(),
+            ))
+        }
+
+        fn network_hash_ps(
+            &self,
+            _lookup: i64,
+            _height: i64,
+        ) -> Result<f64, bitcoin_rs_mining::MiningControlError> {
+            Err(bitcoin_rs_mining::MiningControlError::Failed(
                 "not implemented".to_owned().into(),
             ))
         }
@@ -510,11 +517,9 @@ mod tests {
         fn submit_block(
             &self,
             _block: Block,
-        ) -> Result<
-            bitcoin_rs_rpc::context::BlockValidationResult,
-            bitcoin_rs_rpc::context::MiningControlError,
-        > {
-            Err(bitcoin_rs_rpc::context::MiningControlError::Failed(
+        ) -> Result<bitcoin_rs_mining::BlockValidationResult, bitcoin_rs_mining::MiningControlError>
+        {
+            Err(bitcoin_rs_mining::MiningControlError::Failed(
                 "not implemented".to_owned().into(),
             ))
         }

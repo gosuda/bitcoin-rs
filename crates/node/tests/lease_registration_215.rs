@@ -37,11 +37,11 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         coin_stats,
         mempool,
         gateway,
-        Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
         Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
     );
     BlockSync::new(
         handles,
+        bitcoin_rs_node::ChainFollowers::noop(),
         peer_table,
         Arc::new(Mutex::new(headers_rx)),
         Arc::new(Mutex::new(blocks_rx)),

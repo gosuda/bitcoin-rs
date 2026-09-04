@@ -334,6 +334,7 @@ dependencies = [
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
+ "compact_str",
  "proptest",
  "thiserror",
 ]

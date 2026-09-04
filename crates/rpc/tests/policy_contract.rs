@@ -1852,11 +1852,12 @@ const REORG_SPEND_FEE_SATS: u64 = 10_000;
 /// Routes `invalidateblock` through the production reorg path.
 struct NodeInvalidator {
     handles: bitcoin_rs_node::apply::Chainstate,
+    followers: bitcoin_rs_node::ChainFollowers,
 }
 
 impl ChainControl for NodeInvalidator {
     fn invalidate_block(&self, hash: Hash256) -> core::result::Result<(), ChainControlError> {
-        invalidate_block(&self.handles, hash).map_err(|error| match error {
+        invalidate_block(&self.handles, &self.followers, hash).map_err(|error| match error {
             ReorgError::UnknownBlock(_) => ChainControlError::UnknownBlock,
             ReorgError::CannotInvalidateGenesis => ChainControlError::Genesis,
             other => ChainControlError::Failed(other.to_string()),
@@ -2083,6 +2084,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
         })
         .with_chain_control(Arc::new(NodeInvalidator {
             handles: state.apply_handles(),
+            followers: state.chain_followers(),
         })),
     ))
 }

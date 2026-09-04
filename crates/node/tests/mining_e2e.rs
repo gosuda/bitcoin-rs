@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
+use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
@@ -17,8 +18,8 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::{
-    ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningControl,
-    MiningHandles, NetworkHandles,
+    ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
+    NetworkHandles,
 };
 use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::Mutex;
@@ -377,7 +378,8 @@ fn mining_handler(state: &NodeState) -> Handler {
         state.block_tree(),
         state.mempool(),
         state.apply_handles(),
-        Vec::new(),
+        state.chain_followers(),
+        state.config().mining.payout_script.clone(),
         state.shutdown(),
     )
     .with_mempool_update_wait(Duration::ZERO);
@@ -627,8 +629,12 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
     );
     let mined_hash = Hash256::from(block.block_hash());
 
-    bitcoin_rs_node::reorg::invalidate_block(&state.apply_handles(), mined_hash)
-        .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
+    bitcoin_rs_node::reorg::invalidate_block(
+        &state.apply_handles(),
+        &state.chain_followers(),
+        mined_hash,
+    )
+    .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
 
     let tip = current_tip(&state)?;
     assert_eq!(tip.height, SEED_BLOCKS, "the mined block must roll back");
@@ -709,8 +715,12 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     let mined_hash = Hash256::from(block.block_hash());
-    bitcoin_rs_node::reorg::invalidate_block(&state.apply_handles(), mined_hash)
-        .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
+    bitcoin_rs_node::reorg::invalidate_block(
+        &state.apply_handles(),
+        &state.chain_followers(),
+        mined_hash,
+    )
+    .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
 
     let tip = current_tip(&state)?;
     assert_eq!(tip.height, SEED_BLOCKS, "the mined block must roll back");
@@ -754,8 +764,12 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     let mined_hash = Hash256::from(block.block_hash());
-    bitcoin_rs_node::reorg::invalidate_block(&state.apply_handles(), mined_hash)
-        .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
+    bitcoin_rs_node::reorg::invalidate_block(
+        &state.apply_handles(),
+        &state.chain_followers(),
+        mined_hash,
+    )
+    .map_err(|error| anyhow::anyhow!("invalidateblock failed: {error}"))?;
 
     let tip = current_tip(&state)?;
     assert_eq!(tip.height, SEED_BLOCKS, "the mined block must roll back");

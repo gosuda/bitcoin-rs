@@ -1,5 +1,7 @@
 //! Resolver tests for grouped node configuration layers.
 
+use std::str::FromStr as _;
+
 use anyhow::Result;
 use bitcoin_rs_node::zmq_publisher::ZmqTopic;
 use bitcoin_rs_node::{
@@ -385,4 +387,44 @@ fn chainstate_journal_rejects_invalid_values() {
         ..Default::default()
     };
     assert!(resolve(&[&retention_below_rotation]).is_err());
+}
+
+#[test]
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
+fn mining_payout_address_decodes_after_all_layers() -> Result<()> {
+    use bitcoin_rs_node::MiningOverrides;
+
+    const ADDRESS: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+    let network = UserConfig {
+        network: Some(NetworkSelection::Regtest),
+        ..Default::default()
+    };
+    let payout = UserConfig {
+        mining: MiningOverrides {
+            payout_address: Some(ADDRESS.to_owned()),
+        },
+        ..Default::default()
+    };
+    let config = resolve(&[&network, &payout])?;
+    let expected = bitcoin::Address::from_str(ADDRESS)?
+        .require_network(bitcoin::Network::Regtest)?
+        .script_pubkey()
+        .as_bytes()
+        .to_vec();
+    assert_eq!(config.mining.payout_script, expected);
+    Ok(())
+}
+
+#[test]
+fn mining_payout_address_must_match_the_resolved_network() {
+    use bitcoin_rs_node::MiningOverrides;
+
+    let layer = UserConfig {
+        network: Some(NetworkSelection::Regtest),
+        mining: MiningOverrides {
+            payout_address: Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_owned()),
+        },
+        ..Default::default()
+    };
+    assert!(resolve(&[&layer]).is_err());
 }

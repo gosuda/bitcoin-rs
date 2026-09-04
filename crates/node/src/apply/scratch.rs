@@ -85,8 +85,14 @@ impl ApplyScratch {
         &self.txids
     }
 
+    #[cfg(test)]
     pub(super) fn raw_txs(&self) -> Option<&[Vec<u8>]> {
         self.raw_txs.as_deref()
+    }
+
+    /// Takes the derived-consumer payloads out of scratch after the UTXO commit.
+    pub(super) fn into_payloads(self) -> (Vec<Txid>, Option<Vec<Vec<u8>>>) {
+        (self.txids, self.raw_txs)
     }
 
     pub(super) fn same_block_spent(&self) -> Option<&SameBlockSpentSet> {
