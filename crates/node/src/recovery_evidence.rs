@@ -103,6 +103,17 @@ impl AppliedTipWitness {
     }
 }
 
+/// Decodes an applied-tip witness from already-read sidecar bytes.
+pub(crate) fn decode_applied_tip_witness(
+    data: &[u8],
+    genesis_hash: &str,
+) -> Option<AppliedTipWitness> {
+    let witness = AppliedTipWitness::from_json(data)?;
+    witness
+        .is_valid_for(WITNESS_FORMAT, genesis_hash)
+        .then_some(witness)
+}
+
 // ---------------------------------------------------------------------------
 // Event marker codec
 // ---------------------------------------------------------------------------

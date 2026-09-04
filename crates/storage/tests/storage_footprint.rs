@@ -1,5 +1,7 @@
 //! Custody-grade storage-footprint collector: logical and physical ledgers.
 
+#![cfg(unix)]
+
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::symlink;
@@ -248,6 +250,32 @@ fn logical_flat_files_count_complete_frames_only() {
         physical.data_directory_allocated_bytes(),
         physical.allocated_bytes,
         "the budget figure is the physical total, not a mix with framed bytes"
+    );
+}
+
+#[test]
+fn fifo_is_rejected_without_blocking() {
+    let dir = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    let dirfd = rustix::fs::open(
+        dir.path(),
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap_or_else(|error| panic!("open: {error}"));
+    rustix::fs::mkfifoat(
+        &dirfd,
+        "pipe",
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap_or_else(|error| panic!("mkfifoat: {error}"));
+    drop(dirfd);
+
+    let error = measure_physical_tree(dir.path())
+        .err()
+        .unwrap_or_else(|| panic!("expected fifo rejection"));
+    assert!(
+        matches!(error, FootprintError::UnsupportedEntry { kind: "fifo", .. }),
+        "got {error:?}"
     );
 }
 
