@@ -956,8 +956,10 @@ mod tests {
         assert_eq!(root_six, root_dup);
     }
 
+    // Bitcoin Core reference: `BlockMerkleRoot` in consensus/merkle.cpp, whose
+    // duplicate-the-last-pair fold is the authoritative wire-level behavior.
     #[test]
-    fn compute_merkle_root_matches_the_txid_walker() {
+    fn compute_merkle_root_matches_bitcoin_core_txid_walker_contract() {
         assert_eq!(compute_merkle_root(&mut Vec::new()), None);
 
         let one = *txid(1).as_bytes();
