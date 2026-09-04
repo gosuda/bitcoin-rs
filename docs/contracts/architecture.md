@@ -61,8 +61,10 @@ Owners:
     `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
     `bitcoin-rs-mining`. Domain services and capability runtimes.
     `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
-    block index records, undo storage, and UTXO snapshots. `mining` sits in
-    Layer 2 because it depends on `mempool` for candidate selection.
+    block index records, undo storage, and UTXO snapshots. `chain` also
+    depends on `consensus` for BIP9 parameters and the BIP113 locktime
+    cutoff. `mining` sits in Layer 2 because it depends on `mempool` for
+    candidate selection and `chain` for candidate header/work/time context.
   - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
     handlers.
   - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`. Daemon assembly,
@@ -134,14 +136,15 @@ Owners:
 ## Live gaps
 
 - **Node slimming and extraction (#217)**: Peer connection session and lease
-  ownership has moved to `PeerTable` in `crates/p2p` (#215, #217), and orphaned
-  node corpus tooling (`corpus.rs`) was dropped. `crates/node` still carries
-  legacy domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
-  the P2P download scheduler (`sync.rs`), and direct backend construction and
-  cache share dispatch (`state.rs`). Relocating these domain-owned mechanics into
-  `crates/utxo`, `crates/storage`, `crates/p2p`, and dedicated tooling crates
-  remains tracked under #217 (open). `crates/node` is the composition layer, but
-  is not yet fully slim.
+  ownership has moved to `PeerTable` / `P2pService` in `crates/p2p` (#215,
+  #217, #218). BIP9/softfork lookups, P2P chain serving, txindex status
+  projection, mempool mutation consumers, and block-body access live with their
+  owner crates (#272). `crates/node` still carries leftover domain mechanics:
+  UTXO undo persistence and disconnect markers (`apply.rs`), the P2P download
+  scheduler (`sync.rs`), and direct backend construction and cache share
+  dispatch (`state.rs`). Relocating those into `crates/utxo`, `crates/storage`,
+  and `crates/p2p` remains tracked under #217 (open). `crates/node` is the
+  composition layer, but is not yet fully slim.
 
 ## Proven by
 

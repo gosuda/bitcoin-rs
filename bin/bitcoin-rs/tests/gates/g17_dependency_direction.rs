@@ -21,7 +21,8 @@
 //! Notes that keep this model honest rather than aspirational:
 //! - `chain` and `utxo` depend on `storage` (undo records, snapshots), so they
 //!   sit in the services layer, not core.
-//! - `mining` depends on `mempool`; both live in services.
+//! - `mining` depends on `mempool` and `chain`; all three live in services.
+//! - `chain` depends on `consensus` for BIP9 parameters and the BIP113 cutoff.
 //! - `rpc` may consume node capabilities (`index`, `mining`, `mempool`,
 //!   `chain`, `utxo`, `p2p`) but never `node` or the binary, and never names a
 //!   storage backend.

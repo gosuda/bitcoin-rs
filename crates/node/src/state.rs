@@ -6,12 +6,12 @@
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::context::{
-    BlockBodyMetadata, BlockBodySource, BlockLog, NetworkState, PruneResult, PruneService,
-    PruneServiceError, PruneStatus, ZmqNotification,
+    BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
+    ZmqNotification,
 };
 #[cfg(any(
     not(feature = "rocksdb"),
@@ -1454,7 +1454,7 @@ pub struct NodeState {
     tx_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>>>,
     /// Stable query adapter for txindex/script-index, constructed before open.
     tx_index_adapter: Option<Arc<crate::txindex_worker::TxIndexQueryAdapter>>,
-    /// Live txindex status for the RPC `getcapabilities` projection.
+    /// Live txindex facts for the RPC `getcapabilities` projection.
     txindex_status: Arc<crate::txindex_worker::TxIndexCapability>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
@@ -1746,7 +1746,7 @@ impl NodeState {
                     spec.chain_transition = Some(Arc::clone(&chain_transition));
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                     let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
-                    let body_source: Arc<dyn bitcoin_rs_rpc::context::BlockBodySource> =
+                    let body_source: Arc<dyn BlockBodySource> =
                         Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
                     let block_source =
                         crate::txindex_worker::IndexBlockSource::new(Arc::clone(&blocks))
@@ -1820,32 +1820,30 @@ impl NodeState {
         // path and the gateway can fire it before `run` builds the
         // coordinator; the coordinator attaches itself once constructed.
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
-        // One node-owned gateway: every admission (RPC sendrawtransaction,
-        // embedded broadcast, reorg re-admission, block-connect eviction)
-        // mutates through this instance, so publication order equals commit
-        // order process-wide. The sequence observer rides along only when a
-        // `--zmq-pub-sequence` endpoint is configured; the mining
-        // generation wake always does.
+        // One gateway per pool. Mempool owns fan-out: mining occupies the
+        // observer slot, and ZMQ sequence (or a test observer) attaches as an
+        // extra named leg. Admission/relay legs attach after construction.
         let mempool_gateway = {
-            let composite = bitcoin_rs_mempool::CompositeObserver::new();
             let publisher = Arc::clone(&zmq_publisher);
-            if publisher.wants_notifications() {
-                composite.add_leg(
-                    "sequence",
-                    Arc::new(crate::zmq_publisher::MempoolSequenceObserver::new(
-                        publisher,
-                    )),
-                );
-            } else if let Some(observer) = mempool_observer.cloned() {
-                composite.add_leg("test", observer);
-            }
             let cloned_mining = Arc::clone(&mining_generation);
             let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
-            composite.add_leg("mining", mining_leg);
-            bitcoin_rs_mempool::MempoolGateway::shared_with(
-                Arc::clone(&mempool),
-                Arc::new(composite),
-            )
+            let gateway =
+                bitcoin_rs_mempool::MempoolGateway::shared_with(Arc::clone(&mempool), mining_leg);
+            if publisher.wants_notifications() {
+                gateway
+                    .attach_observer_leg(
+                        "sequence",
+                        Arc::new(crate::zmq_publisher::MempoolSequenceObserver::new(
+                            publisher,
+                        )),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+            } else if let Some(observer) = mempool_observer.cloned() {
+                gateway
+                    .attach_observer_leg("test", observer)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            gateway
         };
         let tx_admission = Arc::new(crate::tx_admission::TxAdmission::new(Arc::clone(
             &mempool_gateway,
