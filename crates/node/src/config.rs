@@ -369,6 +369,12 @@ impl NodeConfig {
         T: Into<OsString> + Clone,
     {
         let cli = UserConfig::parse_from_or_exit(args);
+        if let Some(path) = cli.bitcoin_conf_path() {
+            bail!(
+                "--bitcoin-conf ({}) must be loaded by the process-input adapter",
+                path.display()
+            );
+        }
         let env = UserConfig::from_process_env()?;
         Self::from_user_layers(
             cli.config_path()
