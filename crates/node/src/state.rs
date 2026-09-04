@@ -2384,6 +2384,7 @@ mod tests {
     };
     use bitcoin_rs_rpc::context::BlockRecord;
 
+    /// CONTRACT: IDX-01 — mode-to-capability mapping.
     #[test]
     fn script_index_capabilities_match_the_storage_contract() {
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
