@@ -15,7 +15,7 @@ normative; it places the policy under the
 - **Owner**: `docs/policies/p2p-compatibility.md` owns the P2P wire specification,
   pinning Bitcoin Core 31.1.
 - **Scope**: `crates/p2p` wire, handshake, protocol FSM, and message policy; the
-  chain-serving adapter `crates/node/src/p2p_chain.rs`; and node network flags.
+  chain-serving query `crates/p2p/src/chain_query.rs`; and node network flags.
 - Message framing, 36-command envelope decoder, service flags, network magic,
   and reject-or-ignore semantics follow the policy document.
 

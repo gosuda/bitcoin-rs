@@ -4,9 +4,8 @@ The single mutation gateway in front of the mempool, the records it emits,
 and the ZMQ `sequence` mapping built on them. Owners: `MempoolGateway` in
 `crates/mempool/src/gateway.rs`; `MutationResult`/`MutationOutcome`/
 `RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` in
-`crates/mempool/src/mutation.rs`; the node-side observer
-in `crates/node/src/mempool_observer.rs`; payload encoding in
-`crates/node/src/zmq_publisher.rs`.
+`crates/mempool/src/mutation.rs`; the node-side sequence observer
+in `crates/node/src/zmq_publisher.rs`.
 
 ## Clauses
 
@@ -52,9 +51,8 @@ in `crates/node/src/mempool_observer.rs`; payload encoding in
   wake threads the last change's sequence into
   `MempoolSequenceWake::publish_generation_from`, which builds the
   generation key from `applied_tip` plus that sequence and never touches
-  the mempool read lock (`crates/node/src/mining.rs`); the node observer
-  routes every mutation through it (`crates/node/src/mempool_observer.rs`,
-  `NodeMutationObserver::on_mutation`).
+  the mempool read lock (`crates/node/src/mining.rs`); `node` attaches that
+  mining observer and the ZMQ sequence observer as `CompositeObserver` legs.
 
 ### `MPL-02`: Atomic mutation records and sequence assignment
 
@@ -126,12 +124,11 @@ in `crates/node/src/mempool_observer.rs`; payload encoding in
   `stable_generation_is_even_after_disconnect`.
 - `crates/rpc/src/handlers/tx.rs` (inline tests):
   admission retry rebuilds context after a transient rejection.
-- `crates/node/src/mempool_observer.rs`:
+- `crates/node/src/zmq_publisher.rs`:
   `admission_publishes_one_a_frame_with_core_payload_bytes`,
   `policy_eviction_publishes_r_frames_in_commit_order`,
   `block_inclusion_suppresses_r_frames`,
-  `policy_eviction_publishes_r_frames_with_contiguous_sequences`.
-- `crates/node/src/zmq_publisher.rs`:
+  `policy_eviction_publishes_r_frames_with_contiguous_sequences`,
   `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`,
   `sequence_event_payload_uses_core_hash_orientation_and_label`.
 - `crates/node/src/mining.rs`:

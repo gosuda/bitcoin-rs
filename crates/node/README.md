@@ -9,10 +9,9 @@ subsystem crates.
 drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `apply` block-apply pipeline;
 `BlockSync` orchestrates block download; `reorg` switches the applied chain from one
-branch to another. Adapters expose node state to the rest of the system —
-`UtxoSetView` for consensus transaction checks, `NodeBlockSource` bridging in-memory
-block records to the index crate's block source, `NodeP2pChainQuery` for server-side
-P2P responders, and `BlockTreeContext` for BIP9 deployment state. Notifications leave
+branch to another. Owning crates expose the domain surfaces `node` wires:
+chain BIP9/softfork lookups, P2P `ActiveChainQuery`, mining candidate context,
+and the txindex worker's private block-source bridge. Notifications leave
 through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPublisher`
 / `NoOpZmqPublisher` implementations and the `TxIndexRuntime` worker; `signal` and
 `shutdown` bridge process signals into graceful shutdown.
