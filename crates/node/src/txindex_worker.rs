@@ -1028,8 +1028,11 @@ fn open_and_run(
         Arc::clone(block_tree),
         Arc::clone(applied_tip),
         body_source.clone(),
-        spec.utxo.clone(),
-        spec.chain_transition.clone(),
+        QueryEngineLive {
+            utxo: spec.utxo.clone(),
+            chain_transition: spec.chain_transition.clone(),
+            enabled: spec.enabled,
+        },
     ));
 
     // Publish the complete engine atomically; readiness is proven per query.
@@ -1663,6 +1666,20 @@ fn selected_watermark(
     }
 }
 
+fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
+    let mut names = Vec::new();
+    if capabilities.tx_lookup {
+        names.push("tx_lookup");
+    }
+    if capabilities.script_history {
+        names.push("script_history");
+    }
+    if capabilities.script_live {
+        names.push("script_live");
+    }
+    (!names.is_empty()).then(|| names.join(","))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BatchWait {
     Woken,
@@ -1862,14 +1879,14 @@ impl Worker {
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, TxIndexWorkerError> {
         let (target, fence, watermarks) = self.capture_target_watermarks()?;
-
-        // A restored chainstate is authoritative at its published tip. If a
-        // live watermark is absent (fresh store or an interrupted selective
-        // reset), seed from one stable UTXO view and stamp that capability
-        // only after all rows have been written. The next pass then resumes
-        // normal block-by-block reconciliation for any remaining gap.
-        if self.enabled.script_live && watermarks.script_live.is_none() && target.is_some() {
-            self.seed_live_from_utxo()?;
+        let leftover = self.enabled.leftover(watermarks);
+        if !leftover.is_empty() {
+            // `full` → `utxo` (and dropping internal TxLookup when explicit
+            // `txindex` is off) must reset only the families that are no
+            // longer configured. Live stays queryable through that demotion.
+            self.writer
+                .reset_capabilities(leftover)
+                .map_err(TxIndexWorkerError::Index)?;
             return Ok(ReconcileAction::Progressed);
         }
 
@@ -1899,6 +1916,7 @@ impl Worker {
                     cutover = self.rollback_rebuild_cutover,
                     tx_lookup = capabilities.tx_lookup,
                     script_history = capabilities.script_history,
+                    script_live = capabilities.script_live,
                     "stale index watermark exceeds the rollback cutover; rebuilding selected capabilities"
                 );
                 (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
@@ -1937,6 +1955,7 @@ impl Worker {
                         error = %error,
                         tx_lookup = capabilities.tx_lookup,
                         script_history = capabilities.script_history,
+                        script_live = capabilities.script_live,
                         "index cursor cannot be rolled back; rebuilding selected capabilities"
                     );
                     (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
@@ -1958,6 +1977,13 @@ impl Worker {
         let Some(target) = target else {
             return Ok(ReconcileAction::CaughtUp);
         };
+        // Live has no watermark after restoration, an interrupted seed, or a
+        // same-pass `reset_for_rebuild`. Seed from one stable UTXO view
+        // before `forward_selection` would replay it from genesis (`IDX-07`).
+        if self.enabled.script_live && watermarks.script_live.is_none() {
+            self.seed_live_from_utxo()?;
+            return Ok(ReconcileAction::Progressed);
+        }
         let Some((capabilities, watermark)) = self.forward_selection(watermarks, &target) else {
             return Ok(ReconcileAction::CaughtUp);
         };
@@ -1989,14 +2015,9 @@ impl Worker {
             (target, utxo.lock_stable_view())
         };
 
-        // A missing watermark is also the recovery state after a crash
-        // between deferred seed batches and the final durable watermark. The
-        // reset removes every partial row before this seed can stamp a new
-        // watermark, so an absent watermark never becomes a valid view over
-        // stale rows.
-        self.writer
-            .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-            .map_err(TxIndexWorkerError::Index)?;
+        // `seed_script_live_stream` owns leftover-row reset: an interrupted
+        // seed is rows without a watermark, and the stream clears that
+        // family before any new locator is committed.
         let written = self
             .writer
             .seed_script_live_stream(
@@ -2048,18 +2069,15 @@ impl Worker {
         watermark: IndexWatermark,
         target: &TipSnapshot,
     ) -> Result<(), TxIndexWorkerError> {
-        let capability = match (capabilities.tx_lookup, capabilities.script_history) {
-            (true, true) => "tx_lookup,script_history",
-            (true, false) => "tx_lookup",
-            (false, true) => "script_history",
-            (false, false) => return Ok(()),
+        let Some(capability) = index_ahead_capability_label(capabilities) else {
+            return Ok(());
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         self.reporter
             .report_index_ahead(
-                capability,
+                &capability,
                 watermark.height,
                 target.height,
                 &target.hash.to_string_be(),
@@ -2924,6 +2942,14 @@ impl QueryBudget {
     }
 }
 
+/// Authoritative Live query sources: capability selection, the UTXO set, and
+/// the chain-transition lock Live composition requires.
+pub(crate) struct QueryEngineLive {
+    pub(crate) utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    pub(crate) chain_transition: Option<Arc<Mutex<()>>>,
+    pub(crate) enabled: IndexCapabilities,
+}
+
 /// Node-owned, snapshot-gated transaction-index query engine.
 ///
 /// Implements `bitcoin_rs_rpc::context::TxIndexQuery` and [`ScriptIndexQuery`] as the
@@ -2941,6 +2967,7 @@ pub(crate) struct TxIndexQueryEngine {
     body_source: Option<Arc<dyn BlockBodySource>>,
     utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
     chain_transition: Option<Arc<Mutex<()>>>,
+    enabled: IndexCapabilities,
 }
 
 impl core::fmt::Debug for TxIndexQueryEngine {
@@ -2959,8 +2986,7 @@ impl TxIndexQueryEngine {
         block_tree: Arc<RwLock<BlockTree>>,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         body_source: Option<Arc<dyn BlockBodySource>>,
-        utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
-        chain_transition: Option<Arc<Mutex<()>>>,
+        live: QueryEngineLive,
     ) -> Self {
         Self {
             runtime,
@@ -2969,8 +2995,9 @@ impl TxIndexQueryEngine {
             block_tree,
             applied_tip,
             body_source,
-            utxo,
-            chain_transition,
+            utxo: live.utxo,
+            chain_transition: live.chain_transition,
+            enabled: live.enabled,
         }
     }
 
@@ -2988,6 +3015,21 @@ impl TxIndexQueryEngine {
         Ok(())
     }
 
+    fn require_enabled(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
+        if required.tx_lookup && !self.enabled.tx_lookup {
+            return Err(TxQueryError::Unavailable("txindex is disabled".into()));
+        }
+        if required.script_history && !self.enabled.script_history {
+            return Err(TxQueryError::Unavailable(
+                "script history is disabled".into(),
+            ));
+        }
+        if required.script_live && !self.enabled.script_live {
+            return Err(TxQueryError::Unavailable("script live is disabled".into()));
+        }
+        Ok(())
+    }
+
     fn with_snapshot<F, T>(&self, required: IndexCapabilities, f: F) -> Result<T, TxQueryError>
     where
         F: for<'s> FnOnce(
@@ -2997,55 +3039,61 @@ impl TxIndexQueryEngine {
         ) -> Result<T, TxQueryError>,
     {
         self.query_health()?;
+        self.require_enabled(required)?;
 
-        // Live queries hold chain-transition only long enough to pin the
-        // applied tip and take a watermark-checked index snapshot. History
-        // and tx lookup never take it. Locator resolution and block reads
-        // run after the lock is released; a moved tip or revision is Retry.
-        let (tip_before, revision_before, snapshot) = {
-            let _chain_transition = if required.script_live {
+        // Live answers compose the index snapshot, the authoritative UTXO set,
+        // and the applied tip. Apply mutates UTXO before publishing that tip,
+        // so a before/after tip comparison cannot exclude that window. Hold
+        // chain-transition across watermark check, locator scan, and UTXO
+        // resolution. History and tx lookup never take it.
+        let _chain_transition = if required.script_live {
+            Some(
                 self.chain_transition
                     .as_ref()
-                    .map(|transition| transition.lock())
-            } else {
-                None
-            };
-
-            let tip_before = self
-                .applied_tip
-                .load()
-                .as_ref()
-                .cloned()
-                .ok_or(TxQueryError::Retry)?;
-            let revision_before = self.runtime.revision();
-
-            let reader: &dyn IndexReader = self.reader.as_ref();
-            let snapshot = reader
-                .snapshot()
-                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-
-            for capability in [
-                IndexCapability::TxLookup,
-                IndexCapability::ScriptHistory,
-                IndexCapability::ScriptLive,
-            ] {
-                if !required.contains(capability) {
-                    continue;
-                }
-                let watermark = snapshot
-                    .capability_watermark(capability)
-                    .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-                let Some(watermark) = watermark else {
-                    return Err(TxQueryError::Retry);
-                };
-                if watermark.height != tip_before.height
-                    || watermark.hash != *tip_before.hash.as_byte_array()
-                {
-                    return Err(TxQueryError::Retry);
-                }
-            }
-            (tip_before, revision_before, snapshot)
+                    .ok_or_else(|| {
+                        TxQueryError::Unavailable(
+                            "chain transition authority missing for ScriptLive".into(),
+                        )
+                    })?
+                    .lock(),
+            )
+        } else {
+            None
         };
+
+        let tip_before = self
+            .applied_tip
+            .load()
+            .as_ref()
+            .cloned()
+            .ok_or(TxQueryError::Retry)?;
+        let revision_before = self.runtime.revision();
+
+        let reader: &dyn IndexReader = self.reader.as_ref();
+        let snapshot = reader
+            .snapshot()
+            .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+
+        for capability in [
+            IndexCapability::TxLookup,
+            IndexCapability::ScriptHistory,
+            IndexCapability::ScriptLive,
+        ] {
+            if !required.contains(capability) {
+                continue;
+            }
+            let watermark = snapshot
+                .capability_watermark(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+            let Some(watermark) = watermark else {
+                return Err(TxQueryError::Retry);
+            };
+            if watermark.height != tip_before.height
+                || watermark.hash != *tip_before.hash.as_byte_array()
+            {
+                return Err(TxQueryError::Retry);
+            }
+        }
 
         let mut budget = QueryBudget::new();
         let result = f(snapshot.as_ref(), &tip_before, &mut budget);

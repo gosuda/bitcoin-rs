@@ -172,15 +172,13 @@ pub struct NotificationConfig {
 /// `--scriptindex=true`, and `BITCOIN_RS_SCRIPTINDEX=true` all mean
 /// [`Self::Full`], and `false` means [`Self::Disabled`].
 ///
-/// [`Self::Utxo`] maintains only the durable compact live-output view.
+/// [`Self::Utxo`] is the live-only selection; see `IDX-01`.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ScriptIndexMode {
     /// No `ScriptIndex` capability is maintained.
     #[default]
     Disabled,
-    /// Maintain only the compact live-output view.
-    ///
-    /// Maintains the durable compact live-output view without historical rows.
+    /// Compact live-output view only (`IDX-01`).
     Utxo,
     /// Maintain both the live-output view and historical script activity.
     Full,

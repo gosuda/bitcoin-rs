@@ -193,6 +193,7 @@ hwm = 5000
         assert!(!config.p2p.dns_seeds_enabled);
     }
 
+    /// IDX-01: `--scriptindex` without a value means `full`.
     #[test]
     fn cli_scriptindex_flag_enables_full_index() {
         let config = super::load(
@@ -205,6 +206,7 @@ hwm = 5000
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
     }
 
+    /// IDX-01: `--scriptindex=utxo` enables ScriptLive only.
     #[test]
     fn cli_scriptindex_utxo_enables_live_only_index() {
         let config = super::load(

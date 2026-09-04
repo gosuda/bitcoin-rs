@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
-use bitcoin_rs_index::{HashPrefixRow, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow, TxidRow};
+use bitcoin_rs_index::{
+    HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow, TxidRow,
+};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     encode::double_sha256,
@@ -13,6 +15,7 @@ use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
 
 use super::*;
+use parking_lot::Mutex;
 
 #[derive(Clone)]
 struct ScanResponse {
@@ -26,6 +29,7 @@ struct QuerySnapshot {
     script_history_watermark: ScriptHistoryWatermark,
     scans: Vec<ScanResponse>,
     aba: Option<Arc<AbaMutation>>,
+    chain_transition: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Copy)]
@@ -134,6 +138,10 @@ impl TxIndexSnapshot for QuerySnapshot {
         scripthash: ScriptHash,
         _limit: PrefixScanLimit,
     ) -> Result<bitcoin_rs_index::ScriptLiveScan, IndexError> {
+        assert!(
+            self.chain_transition.try_lock().is_none(),
+            "ScriptLive scan must run under chain-transition authority"
+        );
         if let Some(aba) = &self.aba {
             aba.trigger_on(
                 ColumnFamily::ScriptLive,
@@ -249,20 +257,43 @@ impl BlockBodySource for SingleBlockBody {
 
 impl QueryFixture {
     fn new(config: FixtureConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_script_history_watermark(config, ScriptHistoryWatermark::MatchTx, None)
+        Self::new_with_script_history_watermark(
+            config,
+            ScriptHistoryWatermark::MatchTx,
+            None,
+            IndexCapabilities::ALL,
+        )
     }
 
     fn new_with_utxo(
         config: FixtureConfig,
         utxo: Arc<UtxoSet>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_script_history_watermark(config, ScriptHistoryWatermark::MatchTx, Some(utxo))
+        Self::new_with_script_history_watermark(
+            config,
+            ScriptHistoryWatermark::MatchTx,
+            Some(utxo),
+            IndexCapabilities::ALL,
+        )
+    }
+
+    fn new_live_only(
+        config: FixtureConfig,
+        utxo: Option<Arc<UtxoSet>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_script_history_watermark(
+            config,
+            ScriptHistoryWatermark::Override(None),
+            utxo,
+            IndexCapabilities::SCRIPT_LIVE,
+        )
     }
 
     fn new_with_script_history_watermark(
         config: FixtureConfig,
         script_history_watermark: ScriptHistoryWatermark,
         utxo: Option<Arc<UtxoSet>>,
+        enabled: IndexCapabilities,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let tip_id = tree.insert_header(config.block.header, NodeStatus::HeaderValid)?;
@@ -277,6 +308,7 @@ impl QueryFixture {
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let home = Arc::new(tip.clone());
         applied_tip.store(Some(Arc::clone(&home)));
+        let chain_transition = Arc::new(Mutex::new(()));
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
@@ -304,6 +336,7 @@ impl QueryFixture {
                 script_history_watermark,
                 scans: config.scans,
                 aba,
+                chain_transition: Arc::clone(&chain_transition),
             },
         });
         let records = if config.retain_body {
@@ -336,8 +369,11 @@ impl QueryFixture {
             tree,
             applied_tip,
             body_source,
-            utxo,
-            Some(Arc::new(Mutex::new(()))),
+            QueryEngineLive {
+                utxo,
+                chain_transition: Some(chain_transition),
+                enabled,
+            },
         );
         Ok(Self { engine, body })
     }
@@ -365,6 +401,7 @@ fn tx_queries_can_be_ready_while_script_history_is_backfilling()
         },
         ScriptHistoryWatermark::Override(None),
         None,
+        IndexCapabilities::ALL,
     )?;
 
     assert!(TxIndexQuery::transaction(&fixture.engine, &txid)?.is_none());
@@ -376,6 +413,39 @@ fn tx_queries_can_be_ready_while_script_history_is_backfilling()
     ));
     Ok(())
 }
+
+/// IDX-01 / IDX-03: configured-off History is `Unavailable`, not a lagging `Retry`.
+#[test]
+fn utxo_mode_history_is_disabled_not_backfilling() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let fixture = QueryFixture::new_live_only(
+        FixtureConfig {
+            block,
+            retain_body: true,
+            scans: Vec::new(),
+            aba_trigger: None,
+            watermark: None,
+        },
+        None,
+    )?;
+
+    let error = match fixture
+        .engine
+        .history_snapshot(ScriptHash::from_script_bytes(&[]))
+    {
+        Err(error) => error,
+        Ok(_) => panic!("utxo mode must not serve history"),
+    };
+    assert!(
+        matches!(
+            &error,
+            TxQueryError::Unavailable(reason) if reason.contains("script history is disabled")
+        ),
+        "history in utxo mode must be a configured-mode unavailability, got {error:?}"
+    );
+    Ok(())
+}
+
 fn scan_response(
     cf: ColumnFamily,
     prefix: impl Into<Vec<u8>>,

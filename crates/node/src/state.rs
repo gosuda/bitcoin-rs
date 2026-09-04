@@ -2450,6 +2450,7 @@ mod tests {
     };
     use bitcoin_rs_rpc::context::BlockRecord;
 
+    /// IDX-01: scriptindex mode selects ScriptLive and/or ScriptHistory.
     #[test]
     fn script_index_capabilities_match_the_storage_contract() {
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -2725,6 +2726,15 @@ mod tests {
             match query.unspent_outputs(scripthash) {
                 Ok(records) => {
                     assert!(records.is_empty(), "an unfunded script has no outputs");
+                    match query.history_snapshot(scripthash) {
+                        Err(TxQueryError::Unavailable(reason)) => {
+                            assert!(
+                                reason.contains("script history is disabled"),
+                                "utxo history must be disabled, not lagging: {reason}"
+                            );
+                        }
+                        other => panic!("utxo mode must fail history as disabled, got {other:?}"),
+                    }
                     break;
                 }
                 Err(TxQueryError::Retry | TxQueryError::Unavailable(_)) => {
