@@ -242,6 +242,7 @@ fn scriptindex_cli_flag_enables_the_index() -> Result<()> {
     Ok(())
 }
 
+/// CONTRACT: IDX-01 — `scriptindex=utxo` enables only ScriptLive.
 #[test]
 fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
     let config = NodeConfig::from_layered_sources(
