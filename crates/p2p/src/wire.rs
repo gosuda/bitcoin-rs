@@ -24,7 +24,7 @@ pub const PROTOCOL_VERSION: u32 = 70_016;
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
 /// Maximum control messages coalesced into one vectored write.
-pub const MAX_WRITE_BURST: usize = 16;
+pub const MAX_WRITE_BURST: usize = 8;
 /// Maximum number of headers accepted in one `headers` message.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 /// Maximum block locator hashes accepted in one locator-based request.

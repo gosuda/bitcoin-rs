@@ -61,7 +61,9 @@ impl RpcServer {
     pub fn serve(self) -> io::Result<()> {
         let active = Arc::new(Mutex::new(0_usize));
         for stream in self.listener.incoming() {
-            self.handle_accept(&active, stream?)?;
+            if let Err(error) = self.handle_accept(&active, stream?) {
+                debug!(%error, "rpc connection setup failed");
+            }
         }
         Ok(())
     }
@@ -85,7 +87,9 @@ impl RpcServer {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
                     stream.set_nonblocking(false)?;
-                    self.handle_accept(&active, stream)?;
+                    if let Err(error) = self.handle_accept(&active, stream) {
+                        debug!(%error, "rpc connection setup failed");
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(POLL_INTERVAL);
