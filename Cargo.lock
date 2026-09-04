@@ -228,16 +228,14 @@ name = "bitcoin-rs"
 version = "0.4.0"
 dependencies = [
  "anyhow",
- "bitcoin-rs-consensus",
+ "bitcoin",
  "bitcoin-rs-node",
- "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "clap",
  "mimalloc",
  "parking_lot",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "toml 1.1.5+spec-1.1.0",
 ]

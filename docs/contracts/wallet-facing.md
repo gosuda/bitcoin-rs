@@ -39,13 +39,18 @@ out of tree.
 
 ### `WF-03`: Proof is a public-HTTP consumer
 
-- In-tree fixtures that import node internals do not prove this contract.
-- Proof: `bin/bitcoin-rs/tests/wallet_facing.rs` spawns the `bitcoin-rs`
-  binary and speaks only HTTP. It submits genesis and mined blocks through
-  `submitblock`, then issues the BDK/esplora-client dialect — tip, block
-  height (including `/api/v1/block-height/{h}`), headers, scripthash
-  UTXOs/history, fee estimates, and `POST /api/v1/tx` — the same
-  operations [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet)
+- In-tree fixtures that import `NodeState`, `UtxoSet`, index types, or
+  other node crates do not prove this contract.
+- Proof: `bin/bitcoin-rs/tests/wallet_facing.rs` lives in the binary
+  package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`. The package `[lib]`
+  is process-input adapters (`bitcoin.conf`); the test source does not
+  import that lib, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or index
+  types. It depends on rust-bitcoin and speaks only HTTP. It funds a
+  regtest chain through `getblocktemplate` / `submitblock` (this node
+  has no `generate*` RPC), then issues the BDK/esplora-client dialect —
+  tip, block height (including `/api/v1/block-height/{h}`), headers,
+  scripthash UTXOs/history, fee estimates, and `POST /api/v1/tx` — the
+  same operations [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet)
   (`btcw -u`) sends against any Esplora URL.
 - Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>`
   (or `http://<rpc-bind>/api`) against a node started with
