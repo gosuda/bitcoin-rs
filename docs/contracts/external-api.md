@@ -268,11 +268,14 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
   body that was fully connected and later reorged. `chain_tx_count != 0`
   is written by `record_applied_tx_count` after a successful apply and is
   not cleared on disconnect. Header-only nodes stay 0.
+- Checkpoint restore writes `chain_tx_count` only on the applied tip.
+  Applied-chain membership is the restore fallback so ancestors whose
+  count is still 0 stay `duplicate`.
 - `NodeStatus::Active` and `Stale` are header-chain displacement,
   including a `submitheader` tip, and are not the scripts-valid test.
-- `submitblock` uses the same test for Core `!new_block` (body already
-  stored). A stale scripts-valid resubmit is `duplicate`, not
-  `inconclusive-not-best-prevblk`.
+- `submitblock` uses the same scripts-valid test. A stale scripts-valid
+  resubmit is `duplicate`, not `inconclusive-not-best-prevblk`. Core
+  `BLOCK_HAVE_DATA` after prune is not modeled separately.
 
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
@@ -389,4 +392,5 @@ owned by [wallet-facing.md](wallet-facing.md).
 - `API-21`:
   - `crates/node/tests/mining.rs` tests
     `proposal_of_a_disconnected_scripts_valid_block_is_duplicate`,
-    `submit_of_a_disconnected_scripts_valid_block_is_duplicate`
+    `submit_of_a_disconnected_scripts_valid_block_is_duplicate`,
+    `applied_ancestor_with_unset_chain_tx_count_is_duplicate`
