@@ -352,8 +352,8 @@ impl Mempool {
 
         let ancestors = self.ancestor_ids_for_tx(&entry.tx);
         self.check_ancestor_limits(&ancestors, &entry)?;
-        self.check_descendant_limits_excluding(&ancestors, excluded)?;
-        self.check_cluster_limits(&entry, excluded)?;
+          self.check_descendant_limits_excluding(&ancestors, excluded)?;
+                self.check_cluster_limits(&entry, excluded)?;
 
         if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
             return Err(MempoolError::TooManyEntries);
@@ -1597,10 +1597,10 @@ impl Mempool {
     ) -> Result<(), PolicyError> {
         let ancestors = self.ancestor_ids_for_tx(tx);
         self.check_ancestor_count_and_size(&ancestors, vsize)?;
+          self.check_descendant_limits_excluding(&ancestors, excluded)?;
           let entry = MempoolEntry::new(Arc::new(tx.clone()), vsize, 0, 0, 0);
-          self.check_cluster_limits(&entry, excluded)?;
-        self.check_descendant_limits_excluding(&ancestors, excluded)?;
-        Ok(())
+                    self.check_cluster_limits(&entry, excluded)?;
+                Ok(())
     }
 
     fn entry_mut(&mut self, id: EntryId) -> Option<&mut MempoolEntry> {
