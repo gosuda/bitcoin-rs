@@ -3,9 +3,10 @@
 //!
 //! This is the executable proof of `docs/contracts/wallet-facing.md`. It
 //! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
-//! The package has no `[lib]`; this test does not import `bitcoin-rs-node`,
-//! `NodeState`, `UtxoSet`, or index types. The named out-of-repo consumer
-//! is `gosuda/bitcoin-wallet` (`btcw -u`).
+//! The package `[lib]` is process-input adapters (`bitcoin.conf`); this
+//! test does not import it, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or
+//! index types. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
+//! (`btcw -u`).
 
 #![allow(missing_docs)]
 

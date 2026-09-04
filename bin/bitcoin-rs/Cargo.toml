@@ -33,6 +33,7 @@ parking_lot.workspace = true
 serde_json.workspace = true
 tempfile = ">=3.20.0, <4"
 bitcoin.workspace = true
+
 [features]
 default = ["fjall", "redb", "zmq"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]
