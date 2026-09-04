@@ -122,11 +122,10 @@ impl ChainEffects {
         }
     }
 
-    /// RPC cache rewind. See `ARCH-07` for effect ordering.
+    /// Pops the RPC cache if the tail hash matches this block. See `ARCH-07`.
     ///
-    /// Absence is legitimate: the log starts empty on every boot, and pruning
-    /// may have dropped the tail. The hash check stops a pop of a record that
-    /// is not this block.
+    /// The log starts empty on boot and pruning may drop the tail. Matching
+    /// the hash stops a pop of a record that is not this block.
     pub fn before_disconnect(&self, hash: Hash256) {
         let mut blocks = self.blocks.write();
         if blocks
@@ -198,7 +197,7 @@ mod tests {
         }
     }
 
-    /// ARCH-07 evidence: a no-op effects facade requests no consumer payloads.
+    /// `ARCH-07`: a no-op consumer set asks for no derived payloads.
     #[test]
     fn noop_asks_for_no_payloads() {
         let effects = ChainEffects::noop();
@@ -208,7 +207,7 @@ mod tests {
         assert!(effects.block_log().read().is_empty());
     }
 
-    /// ARCH-07 evidence: post-commit effects own RPC/ZMQ work and ordering.
+    /// `ARCH-07`: connect then disconnect rewinds the RPC log and emits ZMQ in order.
     #[test]
     fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() {
         let genesis = Network::Regtest.genesis_block();
@@ -242,7 +241,7 @@ mod tests {
         );
     }
 
-    /// ARCH-07 evidence: disconnect effects preserve an unrelated RPC-log tail.
+    /// `ARCH-07`: disconnect does not pop a `BlockLog` tail that is not this block.
     #[test]
     fn disconnect_does_not_pop_a_different_tail() {
         let genesis = Network::Regtest.genesis_block();

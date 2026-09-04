@@ -193,7 +193,7 @@ Owners:
   `chain_transition_connect_and_finish_publish_the_new_tip`: the facade
   copies published tips without reserving generation, and connect/finish
   through `ChainTransition` is the mutation path.
-- `crates/node/src/chain_effects.rs` tests
+- `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
   owned by `ChainEffects`, not by apply.
