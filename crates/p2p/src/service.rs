@@ -203,6 +203,7 @@ impl P2pService {
         chain_query: Option<&Arc<dyn crate::ChainQuery + 'static>>,
         sync_wake_tx: Option<&Sender<()>>,
         peer_ready: &Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
+        extras: crate::listener::ListenerExtras,
     ) -> Result<(), P2pServiceError> {
         let chain_query = chain_query.cloned();
         let sync_wake_tx = sync_wake_tx.cloned();
@@ -241,6 +242,7 @@ impl P2pService {
             let sync_wake_tx = sync_wake_tx.clone();
             let session_cancel = Arc::clone(&session_cancel);
             let peer_ready = Arc::clone(&peer_ready);
+            let extras = extras.clone();
             let magic = self.config.magic;
             let handle = match thread::Builder::new()
                 .name(format!("bitcoin-rs-p2p-{listener_addr}"))
@@ -259,6 +261,7 @@ impl P2pService {
                         sync_wake_tx,
                         session_cancel,
                         peer_ready,
+                        extras,
                     )
                 }) {
                 Ok(handle) => handle,
@@ -275,6 +278,7 @@ impl P2pService {
             sync_wake_tx,
             Arc::clone(&session_cancel),
             Arc::clone(&peer_ready),
+            extras,
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -321,6 +325,7 @@ impl P2pService {
         sync_wake_tx: Option<Sender<()>>,
         session_cancel: Arc<AtomicBool>,
         peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
+        extras: crate::listener::ListenerExtras,
     ) -> Result<JoinHandle<()>, io::Error> {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let lifecycle = Arc::clone(&self.lifecycle);
@@ -371,6 +376,7 @@ impl P2pService {
                         sync_wake_tx.clone(),
                         Arc::clone(&session_cancel),
                         Arc::clone(&peer_ready),
+                        extras.clone(),
                     );
                     active.insert(addr);
                     handles.push((addr, handle));
@@ -1044,7 +1050,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         let error = service
-            .start(None, None, &idle_ready())
+            .start(None, None, &idle_ready(), crate::listener::ListenerExtras::default())
             .expect_err("occupied listen addr must fail start");
         assert!(
             matches!(error, P2pServiceError::Listener(ListenerError::Bind { .. })),
@@ -1064,7 +1070,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         service
-            .start(None, None, &idle_ready())
+            .start(None, None, &idle_ready(), crate::listener::ListenerExtras::default())
             .expect("empty listen set starts");
         service.shutdown();
         service.join().expect("clean join");
