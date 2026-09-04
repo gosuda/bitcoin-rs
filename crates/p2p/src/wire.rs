@@ -178,7 +178,7 @@ impl Message {
     pub const fn is_bulk_payload(&self) -> bool {
         matches!(
             self,
-            Self::Tx(_)
+            Self::Unknown { .. } | Self::Tx(_)
                 | Self::Block(_)
                 | Self::Headers(_)
                 | Self::MerkleBlock(_)
@@ -859,7 +859,8 @@ mod tests {
     }
 
     #[test]
-    fn write_messages_matches_sequential_write_message() -> Result<(), PeerError> {
+    /// P2P-01: coalescing preserves the byte-identical v1 frame sequence.
+      fn write_messages_matches_sequential_write_message() -> Result<(), PeerError> {
         let messages = [
             super::Message::Ping(1),
             super::Message::Pong(1),
