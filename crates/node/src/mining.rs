@@ -29,6 +29,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::ApplyError;
 use crate::apply::{self, Chainstate};
+use crate::chain_effects::ChainFollowers;
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
@@ -233,6 +234,7 @@ pub struct MiningCoordinator {
     block_tree: Arc<RwLock<BlockTree>>,
     mempool: Arc<RwLock<Mempool>>,
     apply_handles: Chainstate,
+    followers: ChainFollowers,
     coinbase_script: Vec<u8>,
     shutdown: Arc<AtomicBool>,
     /// Wall clock used for long-poll cooldowns.
@@ -256,6 +258,7 @@ impl MiningCoordinator {
         block_tree: Arc<RwLock<BlockTree>>,
         mempool: Arc<RwLock<Mempool>>,
         apply_handles: Chainstate,
+        followers: ChainFollowers,
         coinbase_script: Vec<u8>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
@@ -265,6 +268,7 @@ impl MiningCoordinator {
             block_tree,
             mempool,
             apply_handles,
+            followers,
             coinbase_script,
             shutdown,
             clock: Arc::new(Instant::now),
@@ -638,8 +642,9 @@ impl MiningCoordinator {
             }
         }
 
-        match apply::apply_block(&self.apply_handles, block) {
-            Ok(tip) => {
+        match self.followers.apply_connect(&self.apply_handles, block) {
+            Ok(outcome) => {
+                let tip = outcome.tip;
                 let visible = self.applied_tip.load_full().ok_or_else(|| {
                     MiningControlError::Failed(CompactString::from(
                         "applied tip missing after accepted submission",
@@ -650,7 +655,6 @@ impl MiningCoordinator {
                         "applied tip was not published before submit_block returned",
                     )));
                 }
-                self.publish_generation();
                 Ok(BlockValidationResult::Accepted)
             }
             Err(error) => Ok(map_apply_error(error)),

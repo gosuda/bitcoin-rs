@@ -69,6 +69,7 @@ type OutboundConnectionHandle =
 #[derive(Clone)]
 struct RpcChainControl {
     handles: crate::apply::Chainstate,
+    followers: crate::chain_effects::ChainFollowers,
 }
 
 impl bitcoin_rs_rpc::context::ChainControl for RpcChainControl {
@@ -76,14 +77,16 @@ impl bitcoin_rs_rpc::context::ChainControl for RpcChainControl {
         &self,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> core::result::Result<(), bitcoin_rs_rpc::context::ChainControlError> {
-        crate::reorg::invalidate_block(&self.handles, hash).map_err(|error| match error {
-            crate::reorg::ReorgError::UnknownBlock(_) => {
-                bitcoin_rs_rpc::context::ChainControlError::UnknownBlock
+        crate::reorg::invalidate_block(&self.handles, &self.followers, hash).map_err(|error| {
+            match error {
+                crate::reorg::ReorgError::UnknownBlock(_) => {
+                    bitcoin_rs_rpc::context::ChainControlError::UnknownBlock
+                }
+                crate::reorg::ReorgError::CannotInvalidateGenesis => {
+                    bitcoin_rs_rpc::context::ChainControlError::Genesis
+                }
+                other => bitcoin_rs_rpc::context::ChainControlError::Failed(other.to_string()),
             }
-            crate::reorg::ReorgError::CannotInvalidateGenesis => {
-                bitcoin_rs_rpc::context::ChainControlError::Genesis
-            }
-            other => bitcoin_rs_rpc::context::ChainControlError::Failed(other.to_string()),
         })
     }
 }
@@ -823,6 +826,7 @@ pub(crate) fn start_node(
             state.block_tree(),
             state.mempool(),
             state.apply_handles(),
+            state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
         ));
@@ -899,6 +903,7 @@ pub(crate) fn start_node(
     }
     rpc_context = rpc_context.with_chain_control(Arc::new(RpcChainControl {
         handles: state.apply_handles(),
+        followers: state.chain_followers(),
     }));
     rpc_context = rpc_context.with_zmq_notifications(state.active_zmq_notifications());
     rpc_context = rpc_context.with_debug_log_path(state.data_dir().join("debug.log"));
