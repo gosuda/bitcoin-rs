@@ -40,9 +40,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 use bitcoin_rs_script::script::push_int;
 // seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
