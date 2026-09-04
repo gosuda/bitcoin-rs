@@ -472,7 +472,7 @@ impl BlockSync {
         }
 
         let now = Instant::now();
-        let dropped = self.planner.lock().stager_mut().prune_expired(now);
+        let dropped = self.planner.lock().prune_expired(now);
         let pruned = !dropped.is_empty();
         if pruned {
             let tree = self.handles.block_tree.read();
