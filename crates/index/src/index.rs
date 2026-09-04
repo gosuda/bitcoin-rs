@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, encode, varint};
+use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, encode};
 use bitcoin_rs_storage::{
     ColumnFamily, KvSnapshot, KvStore, PrefixScanLimit, StorageError, WriteBatch, WriteCondition,
 };
@@ -101,9 +101,6 @@ pub enum IndexError {
         /// Watermark found in the store.
         actual: Option<IndexWatermark>,
     },
-    /// A prepared transition cannot mix with legacy buffered rows.
-    #[error("cannot write prepared TxIndex mutations with buffered legacy rows")]
-    PendingLegacyRows,
     /// A capability set containing `ScriptLive` was prepared through a path
     /// that carries no spent-coin script source. Live deletes need the spent
     /// coin's exact script (#225), and a prevout-only block parse cannot
@@ -1117,6 +1114,11 @@ impl PreparedBlock {
             hash: self.hash,
         }
     }
+
+    /// Row-family counts retained by this prepared block.
+    pub fn row_counts(&self) -> IndexRowCounts {
+        self.rows.counts()
+    }
 }
 
 /// Prepared blocks admitted to one bounded atomic forward write.
@@ -1211,7 +1213,7 @@ impl PreparedBatch {
     }
 }
 
-/// Counts of rows written by a confirmed block ingest.
+/// Counts of rows written by a confirmed prepared commit.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct IndexRowCounts {
     /// Transaction-id index rows written to [`ColumnFamily::TxConfirmed`].
@@ -1227,16 +1229,12 @@ pub struct IndexRowCounts {
 }
 
 /// Electrs-shaped block indexer backed by a workspace [`KvStore`].
+///
+/// Reads and format/watermark queries live here. Durable row mutation is
+/// owned exclusively by [`IndexWriter`].
 pub struct Indexer<S: KvStore> {
     store: std::sync::Arc<S>,
     last_counts: IndexRowCounts,
-    pending_rows: PendingRows,
-    batch_depth: u32,
-    /// Reset-state observation covering every buffered row, captured before
-    /// the first store read that produced them and held until they flush.
-    fence: Option<IndexWriteFence>,
-    /// Process generation fencing this indexer's reset adoption work.
-    generation: u64,
 }
 
 impl<S: KvStore> Indexer<S> {
@@ -1245,10 +1243,6 @@ impl<S: KvStore> Indexer<S> {
         Self {
             store,
             last_counts: IndexRowCounts::default(),
-            pending_rows: PendingRows::default(),
-            batch_depth: 0,
-            fence: None,
-            generation: 0,
         }
     }
 
@@ -1257,7 +1251,7 @@ impl<S: KvStore> Indexer<S> {
         &self.store
     }
 
-    /// Returns the row counts from the last successful ingest.
+    /// Returns the row counts from the last successful prepared commit.
     pub const fn last_counts(&self) -> IndexRowCounts {
         self.last_counts
     }
@@ -1795,294 +1789,11 @@ impl<S: KvStore> Indexer<S> {
         let mut rows = self.store.iter_prefix(ColumnFamily::BlockHeaders, &[])?;
         Ok(rows.next().transpose()?.is_some())
     }
-
-    const FLUSH_THRESHOLD_ROWS: usize = 500_000;
-
-    /// Walks one serialized block once with `bitcoin_slices` and writes electrs-shaped rows.
-    pub fn ingest_block(
-        &mut self,
-        block: &[u8],
-        height: u32,
-    ) -> Result<IndexRowCounts, IndexError> {
-        let (rows, _txid_count) = pending_rows_for_block(block, height, TxidSource::Compute)?;
-        self.ingest_rows(rows)
-    }
-
-    /// Walks one serialized block and reuses caller-supplied transaction IDs after validation.
-    ///
-    /// Falls back to hashing transactions from `block` for any missing or mismatched entry,
-    /// preserving `ingest_block` semantics for mismatched input.
-    pub fn ingest_block_with_txids(
-        &mut self,
-        block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        let (rows, txid_count) =
-            pending_rows_for_block(block, height, TxidSource::Validate(txids))?;
-        if txids.len() != txid_count {
-            return self.ingest_block(block, height);
-        }
-        self.ingest_rows(rows)
-    }
-
-    /// Walks one serialized block using caller-verified transaction IDs.
-    ///
-    /// This preserves [`Self::ingest_block_with_txids`] for untrusted callers while allowing
-    /// block-apply code to avoid hashing transactions a second time after it has already built
-    /// txids from the same block.
-    pub fn ingest_block_with_verified_txids(
-        &mut self,
-        block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        let (rows, txid_count) = pending_rows_for_block(block, height, TxidSource::Trusted(txids))?;
-        if txids.len() != txid_count {
-            return self.ingest_block(block, height);
-        }
-        self.ingest_rows(rows)
-    }
-
-    /// Walks one decoded block using caller-verified transaction IDs.
-    ///
-    /// The serialized block is retained only as the safe fallback path when the caller-provided
-    /// transaction-id count does not match the decoded block. Normal callers must pass the
-    /// consensus serialization of `block` as `serialized_block`.
-    pub fn ingest_decoded_block_with_verified_txids(
-        &mut self,
-        block: &Block,
-        serialized_block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        if txids.len() != block.txs.len() {
-            return self.ingest_block_with_verified_txids(serialized_block, height, txids);
-        }
-        let rows = pending_rows_for_decoded_block(block, height, txids)?;
-        self.ingest_rows(rows)
-    }
-
-    /// Deletes every index row that ingesting `block` at `height` would have written.
-    ///
-    /// Derives the same txid, funding, spending, and header row keys as
-    /// [`Self::ingest_decoded_block_with_verified_txids`] by reusing the shared
-    /// row-construction code, then issues all deletions in a single atomic
-    /// [`KvStore::write`] batch. Either the entire block's rows are removed or
-    /// the method returns `Err` having deleted nothing observable.
-    ///
-    /// Deleting a row that is already absent is not an error: the indexer may
-    /// have been enabled after `block` was applied, so its rows may never have
-    /// existed. The returned [`IndexRowCounts`] reflects the rows targeted for
-    /// deletion (the same counts a matching ingest would have written), which
-    /// may be zero on a repeat call or when the block was never indexed.
-    ///
-    /// Any buffered rows are flushed first. Deletion writes straight to the
-    /// store, so unflushed rows for the block being disconnected would survive
-    /// in `pending_rows` and a later [`Self::end_batch`] would resurrect the
-    /// very block just rolled back. Flushing first also keeps the all-or-
-    /// nothing property: a failing flush returns `Err` before anything is
-    /// deleted.
-    pub fn rollback_block(
-        &mut self,
-        block: &Block,
-        height: u32,
-    ) -> Result<IndexRowCounts, IndexError> {
-        // Buffered rows must reach the store before the deletes, or a later
-        // end_batch would write back the block being disconnected.
-        self.flush()?;
-        let fence = capture_write_fence(self.store.as_ref(), self.generation)?;
-        let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
-        self.rollback_block_inner(block, height, &txids, &fence)
-    }
-
-    /// Same as [`Self::rollback_block`] but reuses caller-verified transaction
-    /// IDs, avoiding a second pass of `compute_txid` when the caller has
-    /// already computed them for merkle verification.
-    ///
-    /// Falls back to [`Self::rollback_block`] when the supplied txid count
-    /// does not match the block's transaction count, preserving semantics for
-    /// mismatched input.
-    pub fn rollback_block_with_verified_txids(
-        &mut self,
-        block: &Block,
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        self.flush()?;
-        if txids.len() != block.txs.len() {
-            return self.rollback_block(block, height);
-        }
-        let fence = capture_write_fence(self.store.as_ref(), self.generation)?;
-        self.rollback_block_inner(block, height, txids, &fence)
-    }
-
-    fn rollback_block_inner(
-        &self,
-        block: &Block,
-        height: u32,
-        txids: &[Txid],
-        fence: &IndexWriteFence,
-    ) -> Result<IndexRowCounts, IndexError> {
-        let mut rows = pending_rows_for_decoded_block(block, height, txids)?;
-        rows.sort();
-        let counts = rows.counts();
-
-        // Only delete if this block's header row is still there.
-        //
-        // Funding, spending, and txid keys are an 8-byte prefix plus the
-        // height, carrying no block identity, so a replacement block at the
-        // same height that shares any data — the same output script is enough —
-        // derives the same keys. Rolling this block back a second time, after
-        // the replacement was indexed, would delete the replacement's rows and
-        // leave ScriptIndex missing active-chain history.
-        //
-        // The header row is the identity: its key is the 80-byte serialized
-        // header, and the block hash is the double-SHA256 of exactly those
-        // bytes, so no two blocks share one. Its absence means this block is
-        // already rolled back and the keys now belong to whatever replaced it.
-        // Rekeying the other three families would carry block identity
-        // directly, but it would break the electrs-compatible layout and force
-        // a reindex, which is a far larger change than the bug warrants.
-        // A read failure is propagated, not treated as absence: silently
-        // reporting a clean rollback because storage was unreachable would
-        // leave the caller believing the block is gone.
-        let identity_present = match rows.header_rows.first() {
-            Some(header) => self
-                .store
-                .get(ColumnFamily::BlockHeaders, header)?
-                .is_some(),
-            None => false,
-        };
-        if !identity_present {
-            ensure_fence_live(self.store.as_ref(), self.generation, fence)?;
-        }
-        if !identity_present {
-            debug!(
-                height,
-                "rollback skipped: block header row absent, rows belong to another block"
-            );
-            return Ok(counts);
-        }
-
-        let mut batch = self.store.new_batch();
-        // Rollback deletes by key only. Positions live in the value, so they
-        // disappear with the row and need no separate handling.
-        for_each_row_group(&rows.txid_rows, |row, _positions| {
-            batch.delete(ColumnFamily::TxConfirmed, row.as_bytes());
-        });
-        for_each_row_group(&rows.funding_rows, |row, _positions| {
-            batch.delete(ColumnFamily::Funding, row.as_bytes());
-        });
-        for_each_row_group(&rows.spending_rows, |row, _positions| {
-            batch.delete(ColumnFamily::Spending, row.as_bytes());
-        });
-        for row in &rows.header_rows {
-            batch.delete(ColumnFamily::BlockHeaders, row);
-        }
-        commit_ordinary(self.store.as_ref(), self.generation, fence, batch)?;
-        debug!(
-            txids = counts.txids,
-            funding = counts.funding,
-            spending = counts.spending,
-            headers = counts.headers,
-            "rolled back block"
-        );
-        Ok(counts)
-    }
-
-    fn ingest_rows(&mut self, mut rows: PendingRows) -> Result<IndexRowCounts, IndexError> {
-        // Dedup before counting: a block can generate the same funding or
-        // spending row twice, and only one copy is ever written. Counting the
-        // raw rows would report more rows than the store receives.
-        if self.fence.is_none() {
-            self.fence = Some(capture_write_fence(self.store.as_ref(), self.generation)?);
-        }
-        rows.sort();
-        let block_counts = rows.counts();
-        self.pending_rows.append(rows);
-        if self.batch_depth == 0 || self.pending_rows.total() >= Self::FLUSH_THRESHOLD_ROWS {
-            self.flush()?;
-        }
-        Ok(block_counts)
-    }
-
-    fn flush(&mut self) -> Result<IndexRowCounts, IndexError> {
-        self.pending_rows.sort();
-        let counts = self.pending_rows.counts();
-        if counts.txids + counts.funding + counts.spending + counts.headers + counts.live == 0 {
-            return Ok(counts);
-        }
-        let fence = match self.fence.take() {
-            Some(fence) => fence,
-            None => capture_write_fence(self.store.as_ref(), self.generation)?,
-        };
-        let mut batch = self.store.new_batch();
-        for_each_row_group(&self.pending_rows.txid_rows, |row, positions| {
-            batch.put(
-                ColumnFamily::TxConfirmed,
-                row.as_bytes(),
-                &crate::types::TxPositionValue::encode(positions),
-            );
-        });
-        for_each_row_group(&self.pending_rows.funding_rows, |row, positions| {
-            batch.put(
-                ColumnFamily::Funding,
-                row.as_bytes(),
-                &crate::types::TxPositionValue::encode(positions),
-            );
-        });
-        for_each_row_group(&self.pending_rows.spending_rows, |row, positions| {
-            batch.put(
-                ColumnFamily::Spending,
-                row.as_bytes(),
-                &crate::types::TxPositionValue::encode(positions),
-            );
-        });
-        for row in &self.pending_rows.header_rows {
-            batch.put(ColumnFamily::BlockHeaders, row, &[]);
-        }
-        apply_live_ops(&mut batch, &self.pending_rows.live_ops, false);
-        if let Err(error) = commit_ordinary(self.store.as_ref(), self.generation, &fence, batch) {
-            if matches!(
-                error,
-                IndexError::ResetInProgress | IndexError::StaleIndexState
-            ) {
-                self.pending_rows = PendingRows::default();
-            }
-            return Err(error);
-        }
-        self.last_counts = counts;
-        self.pending_rows = PendingRows::default();
-        debug!(
-            txids = counts.txids,
-            funding = counts.funding,
-            spending = counts.spending,
-            headers = counts.headers,
-            "indexed batch"
-        );
-        Ok(counts)
-    }
-
-    /// Disables per-block flushing so multiple ingests can be written in one batch.
-    pub fn begin_batch(&mut self) {
-        self.batch_depth = self.batch_depth.saturating_add(1);
-    }
-
-    /// Re-enables per-block flushing and flushes any accumulated rows.
-    pub fn end_batch(&mut self) -> Result<(), IndexError> {
-        self.batch_depth = self.batch_depth.saturating_sub(1);
-        if self.batch_depth == 0 {
-            self.flush()?;
-        }
-        Ok(())
-    }
 }
 
 fn pending_rows_for_block_with_header(
     block: &[u8],
     height: u32,
-    txids: TxidSource<'_>,
     capabilities: IndexCapabilities,
     spent_scripts: &dyn SpentCoinScripts,
 ) -> Result<
@@ -2100,7 +1811,6 @@ fn pending_rows_for_block_with_header(
             rows: &mut rows,
             header: &mut header,
             height_bytes: height.to_le_bytes(),
-            txids,
             txid_count: 0,
             invalid_header_len: None,
             block,
@@ -2126,21 +1836,6 @@ fn pending_rows_for_block_with_header(
         push_live_ops(&mut rows, live_created, live_spent, height, spent_scripts)?;
     }
     Ok((rows, txid_count, header))
-}
-
-fn pending_rows_for_block(
-    block: &[u8],
-    height: u32,
-    txids: TxidSource<'_>,
-) -> Result<(PendingRows, usize), IndexError> {
-    let (rows, txid_count, _) = pending_rows_for_block_with_header(
-        block,
-        height,
-        txids,
-        IndexCapabilities::HISTORICAL,
-        &NoSpentScripts,
-    )?;
-    Ok((rows, txid_count))
 }
 
 /// Turns a block's created and spent outputs into ordered live mutations.
@@ -2203,68 +1898,6 @@ fn push_live_ops(
     }
     rows.live_ops.extend(deletes);
     Ok(())
-}
-
-fn pending_rows_for_decoded_block(
-    block: &Block,
-    height: u32,
-    txids: &[Txid],
-) -> Result<PendingRows, IndexError> {
-    let mut rows = PendingRows::default();
-    let header_bytes = encode::consensus_bytes(&block.header);
-    let Some(header) = HeaderRow::from_header_bytes(&header_bytes) else {
-        return Err(IndexError::InvalidHeaderLength {
-            len: header_bytes.len(),
-        });
-    };
-    rows.header_rows.push(header.to_db_row());
-
-    // Byte offsets are derived arithmetically rather than by re-serializing: a
-    // serialized block is `header || varint(tx_count) || tx...`, so the first
-    // transaction starts after the header and the count, and each subsequent one
-    // starts a `total_size()` further on. `both_ingest_paths_write_identical_row_values`
-    // pins this against the byte offsets the zero-copy path measures directly.
-    let prologue = crate::types::HEADER_ROW_SIZE
-        + varint::encode(u64::try_from(block.txs.len()).unwrap_or(u64::MAX)).len();
-    let mut offset = u32::try_from(prologue).map_err(|_| IndexError::UnaddressablePosition {
-        offset: u64::try_from(prologue).unwrap_or(u64::MAX),
-    })?;
-
-    for (tx, txid) in block.txs.iter().zip(txids) {
-        let byte_len =
-            u32::try_from(tx.total_size()).map_err(|_| IndexError::UnaddressablePosition {
-                offset: u64::from(offset),
-            })?;
-        let position = crate::types::TxPosition::new(offset, byte_len);
-        offset = offset
-            .checked_add(byte_len)
-            .ok_or_else(|| IndexError::UnaddressablePosition {
-                offset: u64::from(offset),
-            })?;
-
-        rows.txid_rows.push(PositionedRow {
-            row: TxidRow::row(txid, height),
-            position,
-        });
-        for tx_in in &tx.inputs {
-            if !is_null_outpoint(&tx_in.previous_output) {
-                rows.spending_rows.push(PositionedRow {
-                    row: SpendingPrefixRow::row(&tx_in.previous_output, height),
-                    position,
-                });
-            }
-        }
-        for tx_out in &tx.outputs {
-            if !is_op_return_script(&tx_out.script_pubkey) {
-                let scripthash = ScriptHash::new(&tx_out.script_pubkey);
-                rows.funding_rows.push(PositionedRow {
-                    row: ScriptHashRow::row(scripthash, height),
-                    position,
-                });
-            }
-        }
-    }
-    Ok(rows)
 }
 
 /// One index row together with the transaction byte range that produced it.
@@ -2360,10 +1993,6 @@ impl PendingRows {
     fn total(&self) -> usize {
         let counts = self.counts();
         counts.txids + counts.funding + counts.spending + counts.headers + counts.live
-    }
-
-    fn is_empty(&self) -> bool {
-        self.total() == 0
     }
 
     fn encoded_bytes(&self) -> Result<usize, IndexError> {
@@ -2535,7 +2164,6 @@ struct IndexBlockVisitor<'a> {
     rows: &'a mut PendingRows,
     header: &'a mut Option<[u8; crate::types::HEADER_ROW_SIZE]>,
     height_bytes: [u8; crate::types::HEIGHT_SIZE],
-    txids: TxidSource<'a>,
     txid_count: usize,
     invalid_header_len: Option<usize>,
     /// The serialized block being visited, used as the base for byte offsets.
@@ -2622,45 +2250,16 @@ impl Visitor for IndexBlockVisitor<'_> {
                 .spending_rows
                 .push(PositionedRow { row, position });
         }
-        if !self.pending_live.is_empty() {
-            let txid = tx.txid_sha2();
+        let txid =
+            (self.capabilities.tx_lookup || !self.pending_live.is_empty()).then(|| tx.txid_sha2());
+        if let Some(hash) = txid {
             let mut txid_bytes = [0_u8; 32];
-            txid_bytes.copy_from_slice(txid.as_slice());
+            txid_bytes.copy_from_slice(hash.as_slice());
             for (vout, scripthash) in self.pending_live.drain(..) {
                 self.live_created.push((txid_bytes, vout, scripthash));
             }
-        }
-        if !self.capabilities.tx_lookup {
-            self.txid_count += 1;
-            return ControlFlow::Continue(());
-        }
-        match self.txids {
-            TxidSource::Compute => {
-                let txid = tx.txid_sha2();
-                self.push_txid_row(txid.as_slice(), position);
-            }
-            TxidSource::Validate(txids) => {
-                if let Some(txid) = txids.get(self.txid_count) {
-                    let computed = tx.txid_sha2();
-                    let txid_bytes: &[u8] = txid.as_bytes();
-                    if txid_bytes == computed.as_slice() {
-                        self.push_txid_row(txid_bytes, position);
-                    } else {
-                        self.push_txid_row(computed.as_slice(), position);
-                    }
-                } else {
-                    let txid = tx.txid_sha2();
-                    self.push_txid_row(txid.as_slice(), position);
-                }
-            }
-            TxidSource::Trusted(txids) => {
-                if let Some(txid) = txids.get(self.txid_count) {
-                    let txid_bytes: &[u8] = txid.as_bytes();
-                    self.push_txid_row(txid_bytes, position);
-                } else {
-                    let txid = tx.txid_sha2();
-                    self.push_txid_row(txid.as_slice(), position);
-                }
+            if self.capabilities.tx_lookup {
+                self.push_txid_row(hash.as_slice(), position);
             }
         }
         self.txid_count += 1;
@@ -2715,20 +2314,9 @@ fn is_null_prevout(prevout: &bsl::OutPoint<'_>) -> bool {
     prevout.vout() == u32::MAX && prevout.txid().iter().all(|byte| *byte == 0)
 }
 
-fn is_null_outpoint(outpoint: &OutPoint) -> bool {
-    outpoint.vout == u32::MAX && outpoint.txid.as_bytes().iter().all(|&byte| byte == 0)
-}
-
 #[inline]
 fn is_op_return_script(script: &[u8]) -> bool {
     matches!(script.first(), Some(0x6a))
-}
-
-#[derive(Clone, Copy)]
-enum TxidSource<'a> {
-    Compute,
-    Validate(&'a [Txid]),
-    Trusted(&'a [Txid]),
 }
 
 /// Reads and decodes the single transaction a position names.
@@ -3145,6 +2733,11 @@ impl<S: KvStore> IndexWriter<S> {
         self.indexer.watermark()
     }
 
+    /// Returns the row counts from the last successful prepared commit.
+    pub const fn last_counts(&self) -> IndexRowCounts {
+        self.indexer.last_counts()
+    }
+
     /// Loads both independently durable capability watermarks.
     pub fn watermarks(&self) -> Result<IndexWatermarks, IndexError> {
         self.indexer.watermarks()
@@ -3197,7 +2790,6 @@ impl<S: KvStore> IndexWriter<S> {
         ) -> Result<(), IndexError>,
     {
         const SEED_BATCH_ROWS: usize = 4_096;
-        self.ensure_prepared_ready()?;
         let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         if existing.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
@@ -3287,7 +2879,6 @@ impl<S: KvStore> IndexWriter<S> {
     /// completion CASes the exact claim to the next idle version.
     /// `open` resumes an interrupted reset before exposing the writer again.
     pub fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        self.ensure_prepared_ready()?;
         if capabilities.is_empty() {
             return Err(IndexError::InvalidResetMarker);
         }
@@ -3337,13 +2928,8 @@ impl<S: KvStore> IndexWriter<S> {
                 watermark: self.watermark()?,
             });
         }
-        let (mut rows, _txid_count, header) = pending_rows_for_block_with_header(
-            body,
-            height,
-            TxidSource::Compute,
-            capabilities,
-            spent_scripts,
-        )?;
+        let (mut rows, _txid_count, header) =
+            pending_rows_for_block_with_header(body, height, capabilities, spent_scripts)?;
         let header = header.ok_or(IndexError::InvalidHeaderLength { len: 0 })?;
         let actual_hash = encode::double_sha256(header.as_slice()).to_le_bytes();
         if actual_hash != hash {
@@ -3369,6 +2955,31 @@ impl<S: KvStore> IndexWriter<S> {
         })
     }
 
+    /// Commits one serialized block through the prepared-write owner.
+    ///
+    /// Production catch-up uses [`Self::prepare_block_with_spent_scripts`] plus
+    /// [`PreparedBatch`] to bound multi-block writes. This is the same owner
+    /// for a single block: tests and benches must not grow a second ingest path.
+    pub fn commit_block(&mut self, height: u32, body: &[u8]) -> Result<IndexWatermark, IndexError> {
+        let header = body.get(..crate::types::HEADER_ROW_SIZE).ok_or_else(|| {
+            IndexError::InvalidHeaderLength {
+                len: body.len().min(crate::types::HEADER_ROW_SIZE),
+            }
+        })?;
+        let hash = encode::double_sha256(header).to_le_bytes();
+        let prepared = self.prepare_block(height, hash, body)?;
+        let mut batch = PreparedBatch::new(PreparedBatchLimits {
+            max_rows: usize::MAX,
+            max_bytes: usize::MAX,
+        });
+        if let Err(_block) = batch.try_push(prepared) {
+            return Err(IndexError::NonContiguousPrepared {
+                watermark: self.watermark()?,
+            });
+        }
+        self.commit_forward(batch)
+    }
+
     /// Atomically connects a bounded batch and advances the durable watermark.
     ///
     /// Captures its own fence before any store-dependent derivation and keeps
@@ -3386,7 +2997,6 @@ impl<S: KvStore> IndexWriter<S> {
         batch: PreparedBatch,
         cursor: ConsumerCursorUpdate<'_>,
     ) -> Result<IndexWatermark, IndexError> {
-        self.ensure_prepared_ready()?;
         if batch.is_empty() {
             return Err(IndexError::NonContiguousPrepared {
                 watermark: fence.watermarks.tx_lookup,
@@ -3556,7 +3166,6 @@ impl<S: KvStore> IndexWriter<S> {
         cursor: ConsumerCursorUpdate<'_>,
         spent_scripts: &dyn SpentCoinScripts,
     ) -> Result<(), IndexError> {
-        self.ensure_prepared_ready()?;
         let current = selected_watermark(fence.watermarks, capabilities)?
             .ok_or(IndexError::NonContiguousPrepared { watermark: None })?;
         let prepared = self.prepare_block_with_spent_scripts(
@@ -3675,7 +3284,6 @@ impl<S: KvStore> IndexWriter<S> {
         fence: IndexWriteFence,
         cursor: &[u8],
     ) -> Result<(), IndexError> {
-        self.ensure_prepared_ready()?;
         let mut store_batch = self.indexer.store.new_batch();
         store_batch.put(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY, cursor);
         commit_ordinary(
@@ -3689,13 +3297,6 @@ impl<S: KvStore> IndexWriter<S> {
     /// Forces all completed writes to durable storage.
     pub fn flush(&self) -> Result<(), IndexError> {
         self.indexer.store.flush().map_err(IndexError::Storage)
-    }
-
-    fn ensure_prepared_ready(&self) -> Result<(), IndexError> {
-        if self.indexer.batch_depth != 0 || !self.indexer.pending_rows.is_empty() {
-            return Err(IndexError::PendingLegacyRows);
-        }
-        Ok(())
     }
 }
 
@@ -3722,131 +3323,6 @@ fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {
         }
     }
     Ok(false)
-}
-
-/// Storage-agnostic block-ingest interface.
-///
-/// Use this trait when consumers must hold the indexer behind a trait
-/// object (e.g. when the storage backend is selected at runtime).
-pub trait IndexerLike: Send + Sync {
-    /// Walks `block` once and writes index rows. See `Indexer::ingest_block`.
-    fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError>;
-
-    /// Reports the row-value format. See [`Indexer::ensure_format_version`].
-    ///
-    /// Defaults to [`IndexFormat::Current`] for the in-memory and stub indexers
-    /// used in tests, which have no persisted rows and therefore no legacy ones.
-    /// A store-backed implementation must override this.
-    fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
-        Ok(IndexFormat::Current)
-    }
-
-    /// Walks `block` once and writes index rows, reusing precomputed transaction IDs when supported.
-    ///
-    /// The default implementation preserves existing implementations by ignoring `txids` and
-    /// delegating to [`IndexerLike::ingest_block`].
-    fn ingest_block_with_txids(
-        &mut self,
-        block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        let _ = txids;
-        self.ingest_block(block, height)
-    }
-
-    /// Walks `block` once and writes index rows, trusting caller-verified transaction IDs when
-    /// supported.
-    ///
-    /// The default implementation preserves existing implementations by validating through
-    /// [`IndexerLike::ingest_block_with_txids`].
-    fn ingest_block_with_verified_txids(
-        &mut self,
-        block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        self.ingest_block_with_txids(block, height, txids)
-    }
-
-    /// Walks a decoded block and writes rows, trusting caller-verified transaction IDs when
-    /// supported.
-    ///
-    /// The default implementation preserves existing implementations by validating through
-    /// [`IndexerLike::ingest_block_with_verified_txids`].
-    fn ingest_decoded_block_with_verified_txids(
-        &mut self,
-        block: &Block,
-        serialized_block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        let _ = block;
-        self.ingest_block_with_verified_txids(serialized_block, height, txids)
-    }
-
-    /// Deletes every index row that ingesting `block` at `height` would have written.
-    ///
-    /// The inverse of the ingest methods above. The default returns
-    /// [`IndexError::UnsupportedRollback`] rather than succeeding: an
-    /// implementation that silently reports a successful rollback while
-    /// deleting nothing would let the node advance its tip believing the index
-    /// is consistent, and `ScriptIndex` queries would then serve transactions
-    /// that are no longer in the chain. Failing loudly is the only safe
-    /// default. Concrete indexers that persist rows override this.
-    fn rollback_block(&mut self, block: &Block, height: u32) -> Result<IndexRowCounts, IndexError> {
-        let _ = (block, height);
-        Err(IndexError::UnsupportedRollback)
-    }
-
-    /// Same as [`IndexerLike::rollback_block`] but reuses caller-verified
-    /// transaction IDs when supported.
-    ///
-    /// The default implementation preserves existing implementations by
-    /// ignoring `txids` and delegating to [`IndexerLike::rollback_block`].
-    fn rollback_block_with_verified_txids(
-        &mut self,
-        block: &Block,
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        let _ = txids;
-        self.rollback_block(block, height)
-    }
-
-    /// Begins a batch of block ingests; rows are not flushed until [`IndexerLike::end_batch`].
-    fn begin_batch(&mut self) {}
-
-    /// Ends a batch of block ingests, flushing any accumulated rows.
-    fn end_batch(&mut self) -> Result<(), IndexError> {
-        Ok(())
-    }
-
-    /// Resolves a confirmed transaction by txid via `source`.
-    ///
-    /// Default implementations may return `Ok(None)` when the concrete indexer
-    /// does not support transaction lookup.
-    fn resolve_transaction(
-        &self,
-        txid: Txid,
-        source: &dyn BlockSource,
-    ) -> Result<Option<Tx>, IndexError> {
-        let _ = (txid, source);
-        Ok(None)
-    }
-
-    /// Resolves the satoshi value of the transaction output at `outpoint` via
-    /// `source`. Returns `Ok(None)` when the transaction is not indexed or the
-    /// `vout` is out of range.
-    ///
-    /// Composes `resolve_transaction(outpoint.txid, source)` and reads the
-    /// `output[vout].value.to_sat()`. Building block for real fee derivation
-    /// in transaction-broadcast and prevout-value lookups.
-    fn resolve_outpoint_value(
-        &self,
-        outpoint: OutPoint,
-        source: &dyn BlockSource,
-    ) -> Result<Option<u64>, IndexError>;
 }
 
 /// Metadata key marking which row-value format an index was written with.
@@ -3918,81 +3394,6 @@ pub trait BlockSource {
     }
 }
 
-impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
-    fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError> {
-        Self::ingest_block(self, block, height)
-    }
-
-    fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
-        Self::ensure_format_version(self)
-    }
-
-    fn ingest_block_with_txids(
-        &mut self,
-        block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        Self::ingest_block_with_txids(self, block, height, txids)
-    }
-
-    fn ingest_block_with_verified_txids(
-        &mut self,
-        block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        Self::ingest_block_with_verified_txids(self, block, height, txids)
-    }
-
-    fn ingest_decoded_block_with_verified_txids(
-        &mut self,
-        block: &Block,
-        serialized_block: &[u8],
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        Self::ingest_decoded_block_with_verified_txids(self, block, serialized_block, height, txids)
-    }
-
-    fn rollback_block(&mut self, block: &Block, height: u32) -> Result<IndexRowCounts, IndexError> {
-        Self::rollback_block(self, block, height)
-    }
-
-    fn rollback_block_with_verified_txids(
-        &mut self,
-        block: &Block,
-        height: u32,
-        txids: &[Txid],
-    ) -> Result<IndexRowCounts, IndexError> {
-        Self::rollback_block_with_verified_txids(self, block, height, txids)
-    }
-
-    fn begin_batch(&mut self) {
-        Self::begin_batch(self);
-    }
-
-    fn end_batch(&mut self) -> Result<(), IndexError> {
-        Self::end_batch(self)
-    }
-
-    fn resolve_transaction(
-        &self,
-        txid: Txid,
-        source: &dyn BlockSource,
-    ) -> Result<Option<Tx>, IndexError> {
-        Self::resolve_transaction(self, txid, source)
-    }
-
-    fn resolve_outpoint_value(
-        &self,
-        outpoint: OutPoint,
-        source: &dyn BlockSource,
-    ) -> Result<Option<u64>, IndexError> {
-        Self::resolve_outpoint_value(self, outpoint, source)
-    }
-}
-
 #[cfg(all(test, feature = "rocksdb"))]
 mod tests {
     use std::sync::Arc;
@@ -4001,12 +3402,11 @@ mod tests {
         Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
         consensus_bytes,
     };
-    use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore};
+    use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, WriteBatch};
 
-    use super::{BlockSource, Indexer, is_op_return_script};
+    use super::{BlockSource, IndexError, IndexWriter, Indexer, is_op_return_script};
     use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, SpendingPrefixRow, TxidRow};
 
-    const HEIGHT: u32 = 42;
     type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
     #[test]
@@ -4021,14 +3421,14 @@ mod tests {
     fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
         let script = vec![0x51, 0x01];
         let tx = tx(spent_outpoint(1, 0), script.clone());
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block(vec![tx])), HEIGHT)?;
+        writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
 
         let scripthash = ScriptHash::from_script_bytes(&script);
         assert_eq!(
-            indexer.iter_funding_rows(scripthash)?,
-            vec![ScriptHashRow::row(scripthash, HEIGHT)]
+            writer.indexer().iter_funding_rows(scripthash)?,
+            vec![ScriptHashRow::row(scripthash, 0)]
         );
         Ok(())
     }
@@ -4046,13 +3446,11 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let script = vec![0x51, 0x01];
         let scripthash = ScriptHash::from_script_bytes(&script);
-        let (_dir, mut indexer) = indexer()?;
-
-        let tx_at_1 = tx(spent_outpoint(1, 0), script.clone());
-        let tx_at_256 = tx(spent_outpoint(2, 0), script);
-        indexer.ingest_block(&consensus_bytes(&block(vec![tx_at_1])), 1)?;
-        indexer.ingest_block(&consensus_bytes(&block(vec![tx_at_256])), 256)?;
-        indexer.flush()?;
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(RocksDbStore::open(dir.path())?);
+        put_funding_row(&store, scripthash, 1)?;
+        put_funding_row(&store, scripthash, 256)?;
+        let indexer = Indexer::new(store);
 
         let rows = indexer.iter_funding_rows(scripthash)?;
         assert_eq!(rows.len(), 2, "two heights funded the same script");
@@ -4084,13 +3482,13 @@ mod tests {
     fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
         let outpoint = spent_outpoint(2, 3);
         let tx = tx(outpoint, vec![0x51, 0x02]);
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block(vec![tx])), HEIGHT)?;
+        writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
 
         assert_eq!(
-            indexer.iter_spending_rows(&outpoint)?,
-            vec![SpendingPrefixRow::row(&outpoint, HEIGHT)]
+            writer.indexer().iter_spending_rows(&outpoint)?,
+            vec![SpendingPrefixRow::row(&outpoint, 0)]
         );
         Ok(())
     }
@@ -4099,90 +3497,12 @@ mod tests {
     fn iter_txid_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
         let tx = tx(spent_outpoint(4, 5), vec![0x51, 0x03]);
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block(vec![tx])), HEIGHT)?;
+        writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
 
-        let rows = indexer.iter_txid_rows(&txid)?;
-        assert!(rows.contains(&TxidRow::row(&txid, HEIGHT)));
-        Ok(())
-    }
-
-    #[test]
-    fn decoded_verified_txid_ingest_matches_serialized_ingest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let coinbase = tx(OutPoint::new(Txid::default(), u32::MAX), vec![0x51, 0x04]);
-        let spender = Tx {
-            version: 2,
-            lock_time: 0,
-            inputs: vec![TxIn {
-                previous_output: spent_outpoint(9, 1),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
-            }],
-            outputs: vec![
-                TxOut {
-                    value: 5_000,
-                    script_pubkey: vec![0x51, 0x05],
-                },
-                TxOut {
-                    value: 0,
-                    script_pubkey: vec![0x6a, 0x01, 0x00],
-                },
-            ],
-        };
-        let block = block(vec![coinbase, spender]);
-        let block_bytes = consensus_bytes(&block);
-        let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-        let (_serialized_dir, mut serialized_indexer) = indexer()?;
-        let (_decoded_dir, mut decoded_indexer) = indexer()?;
-
-        let serialized_counts =
-            serialized_indexer.ingest_block_with_verified_txids(&block_bytes, HEIGHT, &txids)?;
-        let decoded_counts = decoded_indexer.ingest_decoded_block_with_verified_txids(
-            &block,
-            &block_bytes,
-            HEIGHT,
-            &txids,
-        )?;
-
-        assert_eq!(decoded_counts, serialized_counts);
-        assert_eq!(
-            stored_rows(&decoded_indexer)?,
-            stored_rows(&serialized_indexer)?
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn decoded_verified_txid_ingest_mismatch_falls_back_to_serialized_ingest()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let decoded_block = block(vec![tx(
-            OutPoint::new(Txid::default(), u32::MAX),
-            vec![0x51, 0x08],
-        )]);
-        let serialized_block = block(vec![
-            tx(OutPoint::new(Txid::default(), u32::MAX), vec![0x51, 0x06]),
-            tx(spent_outpoint(10, 0), vec![0x51, 0x07]),
-        ]);
-        let serialized_block_bytes = consensus_bytes(&serialized_block);
-        let (_serialized_dir, mut serialized_indexer) = indexer()?;
-        let (_decoded_dir, mut decoded_indexer) = indexer()?;
-
-        let serialized_counts = serialized_indexer.ingest_block(&serialized_block_bytes, HEIGHT)?;
-        let decoded_counts = decoded_indexer.ingest_decoded_block_with_verified_txids(
-            &decoded_block,
-            &serialized_block_bytes,
-            HEIGHT,
-            &[],
-        )?;
-
-        assert_eq!(decoded_counts, serialized_counts);
-        assert_eq!(
-            stored_rows(&decoded_indexer)?,
-            stored_rows(&serialized_indexer)?
-        );
+        let rows = writer.indexer().iter_txid_rows(&txid)?;
+        assert!(rows.contains(&TxidRow::row(&txid, 0)));
         Ok(())
     }
 
@@ -4198,15 +3518,17 @@ mod tests {
         };
         let scripthash = ScriptHash::from_script_bytes(&output.script_pubkey);
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 0,
         };
-        let entries = indexer.resolve_script_history(scripthash, &source)?;
+        let entries = writer
+            .indexer()
+            .resolve_script_history(scripthash, &source)?;
 
         assert_eq!(entries, vec![ScriptHistoryEntry::confirmed(txid, 0)]);
         Ok(())
@@ -4224,15 +3546,17 @@ mod tests {
         let scripthash = ScriptHash::from_script_bytes(&output.script_pubkey);
         let txid = tx.txid();
         let value = output.value;
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 0,
         };
-        let outputs = indexer.resolve_unspent_outputs(scripthash, &source)?;
+        let outputs = writer
+            .indexer()
+            .resolve_unspent_outputs(scripthash, &source)?;
 
         assert_eq!(outputs, vec![(txid, 0, value)]);
         Ok(())
@@ -4247,15 +3571,15 @@ mod tests {
         };
         let coinbase = tx.clone();
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 0,
         };
-        let resolved = indexer.resolve_transaction(txid, &source)?;
+        let resolved = writer.indexer().resolve_transaction(txid, &source)?;
 
         assert_eq!(resolved, Some(coinbase));
         Ok(())
@@ -4269,15 +3593,15 @@ mod tests {
             return Err(std::io::Error::other("genesis block has no transactions").into());
         };
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 1,
         };
-        let resolved = indexer.resolve_transaction(txid, &source)?;
+        let resolved = writer.indexer().resolve_transaction(txid, &source)?;
 
         assert_eq!(resolved, None);
         Ok(())
@@ -4292,15 +3616,15 @@ mod tests {
         };
         let coinbase = tx.clone();
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 0,
         };
-        let resolved = indexer.resolve_tx_with_height(txid, &source)?;
+        let resolved = writer.indexer().resolve_tx_with_height(txid, &source)?;
 
         assert_eq!(resolved, Some((coinbase, 0)));
         Ok(())
@@ -4309,14 +3633,17 @@ mod tests {
     #[test]
     fn resolve_tx_with_height_returns_none_for_unknown_txid()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (_dir, indexer) = indexer()?;
+        let (_dir, writer) = writer()?;
         let txid = Txid(Hash256::from_le_bytes(&[0xff; 32]));
         let source = FakeSource {
             block: Network::Regtest.genesis_block(),
             target_height: 0,
         };
 
-        assert_eq!(indexer.resolve_tx_with_height(txid, &source)?, None);
+        assert_eq!(
+            writer.indexer().resolve_tx_with_height(txid, &source)?,
+            None
+        );
         Ok(())
     }
 
@@ -4328,41 +3655,41 @@ mod tests {
             return Err(std::io::Error::other("genesis block has no transactions").into());
         };
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 0,
         };
         let outpoint = OutPoint { txid, vout: 0 };
-        let value = indexer.resolve_outpoint_value(outpoint, &source)?;
+        let value = writer.indexer().resolve_outpoint_value(outpoint, &source)?;
 
         assert_eq!(value, Some(5_000_000_000));
         Ok(())
     }
 
     #[test]
-    fn resolve_outpoint_value_via_indexerlike_dyn_source() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn resolve_outpoint_value_via_dyn_block_source() -> Result<(), Box<dyn std::error::Error>> {
         let block = Network::Regtest.genesis_block();
         let Some(tx) = block.txs.first() else {
             return Err(std::io::Error::other("genesis block has no transactions").into());
         };
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 0,
         };
-        let dyn_indexer: &dyn super::IndexerLike = &indexer;
         let dyn_source: &dyn super::BlockSource = &source;
         let outpoint = OutPoint { txid, vout: 0 };
-        let value = dyn_indexer.resolve_outpoint_value(outpoint, dyn_source)?;
+        let value = writer
+            .indexer()
+            .resolve_outpoint_value(outpoint, dyn_source)?;
 
         assert_eq!(value, Some(5_000_000_000));
         Ok(())
@@ -4376,9 +3703,9 @@ mod tests {
             return Err(std::io::Error::other("genesis block has no transactions").into());
         };
         let txid = tx.txid();
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
@@ -4386,14 +3713,17 @@ mod tests {
         };
         let outpoint = OutPoint { txid, vout: 99 };
 
-        assert_eq!(indexer.resolve_outpoint_value(outpoint, &source)?, None);
+        assert_eq!(
+            writer.indexer().resolve_outpoint_value(outpoint, &source)?,
+            None
+        );
         Ok(())
     }
 
     #[test]
     fn resolve_outpoint_value_returns_none_for_unknown_txid()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (_dir, indexer) = indexer()?;
+        let (_dir, writer) = writer()?;
         let outpoint = OutPoint {
             txid: Txid(Hash256::from_le_bytes(&[0xff; 32])),
             vout: 0,
@@ -4403,7 +3733,10 @@ mod tests {
             target_height: 0,
         };
 
-        assert_eq!(indexer.resolve_outpoint_value(outpoint, &source)?, None);
+        assert_eq!(
+            writer.indexer().resolve_outpoint_value(outpoint, &source)?,
+            None
+        );
         Ok(())
     }
 
@@ -4420,15 +3753,17 @@ mod tests {
         let scripthash = ScriptHash::from_script_bytes(&output.script_pubkey);
         let txid = tx.txid();
         let value = output.value;
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
 
-        indexer.ingest_block(&consensus_bytes(&block), 0)?;
+        writer.commit_block(0, &consensus_bytes(&block))?;
 
         let source = FakeSource {
             block,
             target_height: 0,
         };
-        let outputs = indexer.resolve_unspent_outputs_with_height(scripthash, &source)?;
+        let outputs = writer
+            .indexer()
+            .resolve_unspent_outputs_with_height(scripthash, &source)?;
 
         assert_eq!(outputs, vec![(txid, 0, value, 0)]);
         Ok(())
@@ -4458,19 +3793,19 @@ mod tests {
     }
 
     #[test]
-    fn rollback_removes_every_row_a_matching_ingest_wrote() -> Result<(), Box<dyn std::error::Error>>
+    fn rollback_removes_every_row_a_matching_commit_wrote() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
         let candidate = rollback_fixture_block();
-        let before = stored_rows(&indexer)?;
+        let body = consensus_bytes(&candidate);
+        let before = stored_rows(writer.indexer())?;
 
-        let written = indexer.ingest_block(&consensus_bytes(&candidate), HEIGHT)?;
-        let after_ingest = stored_rows(&indexer)?;
+        writer.commit_block(0, &body)?;
+        let after_commit = stored_rows(writer.indexer())?;
         assert!(
-            after_ingest.len() > before.len(),
+            after_commit.len() > before.len(),
             "fixture must write rows to be a meaningful rollback test"
         );
-        // All four column families must be exercised, or the test proves little.
         for cf in [
             ColumnFamily::TxConfirmed,
             ColumnFamily::Funding,
@@ -4478,107 +3813,58 @@ mod tests {
             ColumnFamily::BlockHeaders,
         ] {
             assert!(
-                after_ingest.iter().any(|(family, _)| *family == cf),
+                after_commit.iter().any(|(family, _)| *family == cf),
                 "fixture wrote no rows to {cf:?}"
             );
         }
 
-        let removed = indexer.rollback_block(&candidate, HEIGHT)?;
-        assert_eq!(removed.txids, written.txids);
-        assert_eq!(removed.funding, written.funding);
-        assert_eq!(removed.spending, written.spending);
-        assert_eq!(removed.headers, written.headers);
+        writer.commit_rollback_one(None, &body)?;
         assert_eq!(
-            stored_rows(&indexer)?,
+            stored_rows(writer.indexer())?,
             before,
-            "rollback must restore the pre-ingest row set exactly"
+            "rollback must restore the pre-commit row set exactly"
         );
         Ok(())
     }
 
     #[test]
-    fn last_counts_remains_ingest_after_rollback() -> Result<(), Box<dyn std::error::Error>> {
-        let (_dir, mut indexer) = indexer()?;
-        let old = rollback_fixture_block();
-        let old_written = indexer.ingest_block(&consensus_bytes(&old), HEIGHT)?;
-        let _ = indexer.rollback_block(&old, HEIGHT)?;
-
-        // A replacement at the same height with a different shape so its
-        // ingest counts differ from the old block's rollback counts.
-        let replacement = block(vec![
-            tx(OutPoint::new(Txid::default(), u32::MAX), vec![0x51]),
-            tx(OutPoint::new(Txid::default(), u32::MAX), vec![0x52]),
-        ]);
-        let replacement_written = indexer.ingest_block(&consensus_bytes(&replacement), HEIGHT)?;
-        assert_ne!(
-            replacement_written, old_written,
-            "replacement counts must differ from the old block's counts"
-        );
-
-        // Re-rolling the already-gone old block returns its original counts
-        // but must not overwrite the last successful ingest counts.
-        let old_again = indexer.rollback_block(&old, HEIGHT)?;
-        assert_eq!(old_again, old_written);
-        assert_eq!(
-            indexer.last_counts(),
-            replacement_written,
-            "last_counts must stay the last ingest counts, not the rollback counts"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rollback_of_a_never_indexed_block_is_not_an_error() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let (_dir, mut indexer) = indexer()?;
+    fn rollback_without_a_watermark_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, mut writer) = writer()?;
         let candidate = rollback_fixture_block();
+        let body = consensus_bytes(&candidate);
 
-        // An indexer enabled after the block was applied never wrote its rows.
-        indexer.rollback_block(&candidate, HEIGHT)?;
-        assert!(stored_rows(&indexer)?.is_empty());
+        assert!(matches!(
+            writer.commit_rollback_one(None, &body),
+            Err(IndexError::NonContiguousPrepared { watermark: None })
+        ));
+        assert!(stored_rows(writer.indexer())?.is_empty());
         Ok(())
     }
 
     #[test]
-    fn repeated_rollback_is_not_an_error() -> Result<(), Box<dyn std::error::Error>> {
-        let (_dir, mut indexer) = indexer()?;
-        let candidate = rollback_fixture_block();
-        indexer.ingest_block(&consensus_bytes(&candidate), HEIGHT)?;
-
-        indexer.rollback_block(&candidate, HEIGHT)?;
-        let after_first = stored_rows(&indexer)?;
-        indexer.rollback_block(&candidate, HEIGHT)?;
-        assert_eq!(
-            stored_rows(&indexer)?,
-            after_first,
-            "a second rollback must be observationally inert"
-        );
-        Ok(())
-    }
-
-    /// Regression: rollback writes deletions straight to the store, so rows
-    /// still buffered in `pending_rows` used to survive it and a later
-    /// `end_batch` resurrected the disconnected block.
-    #[test]
-    fn rollback_inside_an_open_batch_is_not_undone_by_end_batch()
+    fn a_second_rollback_is_rejected_once_the_watermark_is_gone()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
         let candidate = rollback_fixture_block();
+        let body = consensus_bytes(&candidate);
+        writer.commit_block(0, &body)?;
+        writer.commit_rollback_one(None, &body)?;
+        let after_first = stored_rows(writer.indexer())?;
 
-        indexer.begin_batch();
-        indexer.ingest_block(&consensus_bytes(&candidate), HEIGHT)?;
-        indexer.rollback_block(&candidate, HEIGHT)?;
-        indexer.end_batch()?;
-
-        assert!(
-            stored_rows(&indexer)?.is_empty(),
-            "end_batch must not write back rows for a rolled-back block"
+        assert!(matches!(
+            writer.commit_rollback_one(None, &body),
+            Err(IndexError::NonContiguousPrepared { watermark: None })
+        ));
+        assert_eq!(
+            stored_rows(writer.indexer())?,
+            after_first,
+            "a rejected second rollback must be observationally inert"
         );
         Ok(())
     }
 
     /// Delegates reads to a real store but fails every write API, so the
-    /// all-or-nothing claim on `rollback_block` is exercised through its
+    /// all-or-nothing claim on `commit_rollback_one` is exercised through its
     /// current conditional durable path.
     struct FailingWriteStore(RocksDbStore);
 
@@ -4637,13 +3923,12 @@ mod tests {
     fn rollback_deletes_nothing_when_the_write_fails() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let candidate = rollback_fixture_block();
+        let body = consensus_bytes(&candidate);
 
-        // Populate through a normal indexer, then reopen behind the failing
-        // store so the rows exist but no write can land.
         {
             let store = Arc::new(RocksDbStore::open(dir.path())?);
-            let mut indexer = Indexer::new(store);
-            indexer.ingest_block(&consensus_bytes(&candidate), HEIGHT)?;
+            let mut writer = IndexWriter::open(store, 1)?;
+            writer.commit_block(0, &body)?;
         }
         let store = Arc::new(RocksDbStore::open(dir.path())?);
         let before = stored_rows(&Indexer::new(Arc::clone(&store)))?;
@@ -4651,10 +3936,10 @@ mod tests {
         drop(store);
 
         let failing = Arc::new(FailingWriteStore(RocksDbStore::open(dir.path())?));
-        let mut indexer = Indexer::new(Arc::clone(&failing));
-        let outcome = indexer.rollback_block(&candidate, HEIGHT);
+        let mut writer = IndexWriter::open(Arc::clone(&failing), 1)?;
+        let outcome = writer.commit_rollback_one(None, &body);
         assert!(outcome.is_err(), "a failing write must surface as an error");
-        drop(indexer);
+        drop(writer);
         drop(failing);
 
         let reopened = Indexer::new(Arc::new(RocksDbStore::open(dir.path())?));
@@ -4666,64 +3951,17 @@ mod tests {
         Ok(())
     }
 
-    /// An indexer that persists nothing and does not override the rollback
-    /// default. It must refuse rather than report a successful no-op, or the
-    /// node would advance its tip believing a stale index is consistent.
-    struct RollbackUnawareIndexer;
-
-    impl super::IndexerLike for RollbackUnawareIndexer {
-        fn ingest_block(
-            &mut self,
-            _block: &[u8],
-            _height: u32,
-        ) -> Result<super::IndexRowCounts, super::IndexError> {
-            Ok(super::IndexRowCounts::default())
-        }
-
-        fn resolve_transaction(
-            &self,
-            _txid: Txid,
-            _source: &dyn BlockSource,
-        ) -> Result<Option<Tx>, super::IndexError> {
-            Ok(None)
-        }
-
-        fn resolve_outpoint_value(
-            &self,
-            _outpoint: OutPoint,
-            _source: &dyn BlockSource,
-        ) -> Result<Option<u64>, super::IndexError> {
-            Ok(None)
-        }
-    }
-
-    #[test]
-    fn the_rollback_default_refuses_rather_than_silently_succeeding() {
-        let mut indexer = RollbackUnawareIndexer;
-        let candidate = rollback_fixture_block();
-        assert!(matches!(
-            super::IndexerLike::rollback_block(&mut indexer, &candidate, HEIGHT),
-            Err(super::IndexError::UnsupportedRollback)
-        ));
-    }
-
-    /// A repeated rollback must not delete a replacement block's rows.
+    /// A rollback of a replaced tip must not delete the replacement's rows.
     ///
-    /// Funding, spending, and txid keys are an 8-byte prefix plus the height
-    /// and carry no block identity, so a replacement at the same height that
-    /// shares an output script derives the same keys. Without the header-row
-    /// identity check, rolling the old block back twice deleted the
-    /// replacement's history.
+    /// `commit_rollback_one` checks the current watermark hash against the
+    /// serialized body, so a stale body's identity cannot satisfy the tip
+    /// and the replacement's prefix-colliding history stays put.
     #[test]
-    fn a_repeated_rollback_leaves_a_replacement_blocks_rows_alone()
+    fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (_dir, mut indexer) = indexer()?;
+        let (_dir, mut writer) = writer()?;
         let shared_script = vec![0x51];
 
-        // Two different blocks at the same height that both pay the same
-        // script, so their funding rows collide.
-        // The shared `block` fixture pins a zero merkle root, so the nonce is
-        // what distinguishes these two headers.
         let mut old_block = block(vec![tx(
             OutPoint::new(Txid(Hash256::from_le_bytes(&[0xa1; 32])), 0),
             shared_script.clone(),
@@ -4740,33 +3978,51 @@ mod tests {
             "the two blocks must differ, or there is nothing to confuse"
         );
 
-        indexer.ingest_block(&consensus_bytes(&old_block), HEIGHT)?;
-        indexer.rollback_block(&old_block, HEIGHT)?;
-        indexer.ingest_block(&consensus_bytes(&replacement), HEIGHT)?;
-        indexer.flush()?;
-        let after_replacement = stored_rows(&indexer)?;
+        let old_body = consensus_bytes(&old_block);
+        writer.commit_block(0, &old_body)?;
+        writer.commit_rollback_one(None, &old_body)?;
+        writer.commit_block(0, &consensus_bytes(&replacement))?;
+        writer.flush()?;
+        let after_replacement = stored_rows(writer.indexer())?;
         assert!(
             !after_replacement.is_empty(),
             "the replacement must have written rows"
         );
 
-        // Roll the OLD block back again. It is already gone; its keys now
-        // belong to the replacement.
-        indexer.rollback_block(&old_block, HEIGHT)?;
-        indexer.flush()?;
+        assert!(
+            writer.commit_rollback_one(None, &old_body).is_err(),
+            "rolling back the old body against the replacement watermark must fail"
+        );
+        writer.flush()?;
 
         assert_eq!(
-            stored_rows(&indexer)?,
+            stored_rows(writer.indexer())?,
             after_replacement,
-            "a repeated rollback must not touch the replacement's rows"
+            "a stale rollback body must not touch the replacement's rows"
         );
         Ok(())
     }
 
-    fn indexer() -> Result<(tempfile::TempDir, Indexer<RocksDbStore>), Box<dyn std::error::Error>> {
+    fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), Box<dyn std::error::Error>>
+    {
         let dir = tempfile::tempdir()?;
         let store = Arc::new(RocksDbStore::open(dir.path())?);
-        Ok((dir, Indexer::new(store)))
+        Ok((dir, IndexWriter::open(store, 1)?))
+    }
+
+    fn put_funding_row(
+        store: &RocksDbStore,
+        scripthash: ScriptHash,
+        height: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut batch = store.new_batch();
+        batch.put(
+            ColumnFamily::Funding,
+            &ScriptHashRow::row(scripthash, height).to_db_row(),
+            &[],
+        );
+        store.write(batch)?;
+        Ok(())
     }
 
     fn stored_rows(
