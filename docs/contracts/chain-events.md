@@ -90,7 +90,7 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
 ## Live gaps
 
 - **Cross-crate lifecycle boundary**: Slimming `crates/node` orchestration and shifting domain-owned mechanics to their respective crates is tracked under #217 (open).
-- **Crash/reorg recovery invariants**: Explicit system-level convergence rules across chainstate checkpoints, block data, and secondary indexes are tracked under #209 (open). The recovery-meta sidecar protocol (`crates/node/src/crash_recovery.rs`) and the recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) are proven by G11; full-stack `kill -9` convergence with real block-body re-application is not yet exercised by the gate.
+- **Full-stack crash convergence**: System-level convergence rules across chainstate checkpoints, block data, and secondary indexes are normative in [recovery.md](recovery.md). Chainstate restart uses the authenticated checkpoint plus the redo-only journal contract in `docs/chainstate-recovery.md`; `crates/node/tests/crash_recovery.rs` exercises process `SIGKILL` boundaries, journal replay, reorg rewind/fallback, and upgrade compatibility. The retired recovery-meta sidecar is neither authoritative nor read, while the recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) remains proven by G11. End-to-end convergence spanning real block-body and secondary-index replay remains a live gap.
 
 ## Proven by
 
@@ -99,13 +99,10 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `record_drops_hints_when_channel_full`,
   `active_chain_snapshot_starts_at_genesis_on_fresh_node`,
   `active_chain_snapshot_anchors_at_restored_tip_after_restart`.
-- `crates/node/src/txindex_worker_reconcile_tests.rs`:
-  `forward_commit_overlapping_tip_extension_repairs_on_next_pass`,
-  `forward_commit_overlapping_rival_reorg_repairs_on_next_pass`,
-  `snapshot_identity_changes_reconcile_from_the_cursor_position`,
-  `missing_disconnected_body_resets_and_rebuilds_selected_capabilities`,
-  `stale_script_index_reset_preserves_ready_tx_lookup_then_rebuilds`,
-  `consumer_cursor_round_trips_bytes`.
+- `crates/node/src/txindex_worker_recovery_tests.rs`:
+  `shallow_reorg_rewinds_to_common_ancestor_then_replays`,
+  `tip_change_during_rebuild_converges_on_new_tip`,
+  `missing_disconnected_body_routes_rewind_to_rebuild`.
 - `crates/node/src/apply.rs`:
   `a_clean_disconnect_leaves_no_in_flight_marker`,
   `chain_change_proof_finish_restores_even_generation`,
@@ -113,11 +110,6 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `stable_generation_is_even_after_disconnect`.
 - `crates/node/src/state.rs`:
   `checkpoint_refuses_inflight_disconnect_and_preserves_state`.
-- `crates/node/tests/crash_recovery.rs` (G11):
-  `recovery_replays_from_last_committed_height_to_tip`,
-  `recovery_meta_write_leaves_readable_sidecar_without_tmp`,
-  `torn_meta_after_crash_is_refused`,
-  `stale_tmp_after_crash_does_not_corrupt_recovery`.
 - `crates/node/src/recovery_evidence.rs` tests (G11):
   `witness_round_trips_and_falls_back_to_prev`,
   `foreign_genesis_current_cannot_displace_valid_prev`,

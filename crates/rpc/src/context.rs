@@ -892,6 +892,21 @@ pub enum CapabilityState {
         /// Applied-chain height the capability is approaching.
         target_height: u32,
     },
+    /// The capability is deleting rows on a branch the applied chain
+    /// abandoned, block by block, down to the common ancestor.
+    RollingBack {
+        /// Height of the watermark being rewound.
+        from_height: u32,
+        /// Height of the last block shared with the applied chain.
+        to_height: u32,
+    },
+    /// The capability was reset and is rebuilding from genesis.
+    Rebuilding {
+        /// Height the rebuild has reached.
+        processed_height: u32,
+        /// Applied-chain height the rebuild is approaching.
+        target_height: u32,
+    },
     /// The capability failed and cannot currently provide complete answers.
     Failed {
         /// Failure description.
@@ -1562,9 +1577,10 @@ impl Context {
     /// interval, so no concurrent admission can invalidate the verdict
     /// before it lands.
     ///
-    /// The pool and transaction-cache fast paths here remain best-effort
-    /// pre-checks for the "already known" no-op; the authoritative
-    /// already-known re-check runs inside the locked evaluation.
+    /// Membership follows `POL-01` Duplicate submission in
+    /// `docs/policies/mempool-policy.md`. The pool read is a best-effort
+    /// pre-check; the locked evaluation is authoritative. The RPC lookup
+    /// cache is not membership.
     ///
     /// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap,
     /// matching `sendrawtransaction`'s `maxfeerate=0` behavior.
@@ -1573,12 +1589,16 @@ impl Context {
     ///
     /// Returns the policy rejection verbatim (Core rejection strings) or
     /// the failure verbatim; nothing is inserted when this fails.
+    // Owned `Tx` is the public call form (`admit_transaction(tx, None)`).
+    // Admission only borrows; the value parameter is the compatibility contract.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn admit_transaction(
         &self,
         tx: Tx,
         max_feerate_sat_per_kvb: Option<u64>,
     ) -> Result<MutationResult, String> {
-        crate::handlers::tx::admit_transaction(self, tx, max_feerate_sat_per_kvb)
+        crate::handlers::tx::admit_transaction(self, &tx, max_feerate_sat_per_kvb)
+            .map_err(crate::handlers::tx::AdmissionFailure::into_string)
     }
 
     /// Returns the current tip height, or zero before initial sync publishes one.

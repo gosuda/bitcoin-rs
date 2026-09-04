@@ -10,8 +10,8 @@ transaction becomes a `MempoolEntry` addressed by its slab-index `EntryId`.
 `insert_entry` enforces the `MempoolLimits` (including min-relay fee) and reports
 violations as `PolicyError` or `MempoolError`; `enforce_size_limit` delegates to
 `evict_lowest_fee_packages` over the `ParetoFront` ancestor-aware priority ordering;
-`prioritise` adjusts an entry's effective fee, and `remove_entry_and_descendants` /
-`evict_below_fee_rate` handle removal. `MempoolStats` supplies the aggregate counters
+`prioritise` adjusts an entry's effective fee, and `evict_below_fee_rate` /
+`remove_for_block` handle removal. `MempoolStats` supplies the aggregate counters
 behind `getmempoolinfo` and Esplora fee estimates. The `rbf` module plans
 replacements as a `ReplacementCandidate` and `ReplacementPlan`, `standardness` holds
 the relay policy, and `orphan` parks transactions whose parents are still missing.

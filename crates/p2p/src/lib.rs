@@ -5,8 +5,10 @@
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
-/// Per-connection identity and cancellation.
 pub mod connection;
+/// Per-connection identity and cancellation.
+/// Per-connection traffic counters.
+pub mod counters;
 /// Inbound message dispatcher.
 pub mod dispatch;
 /// Block download window, peer-assignment, stall, and scheduling policy.
@@ -35,6 +37,7 @@ pub mod wire;
 pub mod wtxid;
 
 pub use connection::{ConnectionId, PeerLease, PeerSource, PeerStats};
+pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use listener::spawn_outbound_connection;

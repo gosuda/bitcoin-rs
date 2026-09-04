@@ -20,14 +20,13 @@ pub mod bitcoin_conf_compat;
 pub mod block_source;
 /// RPC status for concrete node-owned capabilities.
 mod capabilities;
+mod chainstate_journal;
 mod checkpoint;
 mod checkpoint_fs;
 /// Periodic chainstate checkpoint publication during sync.
 mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
-/// Startup crash recovery.
-pub mod crash_recovery;
 /// Typed in-process node lifecycle: the embedding surface over the same
 /// service graph the daemon wires.
 pub mod embed;
@@ -79,7 +78,9 @@ pub mod zmq_publisher;
 
 pub use bitcoin_rs_primitives::Network;
 pub use block_source::NodeBlockSource;
-pub use config::{Auth, NodeConfig, RuntimeInputs, ScriptIndexMode, UserConfig};
+pub use config::{
+    Auth, NodeConfig, NotificationConfig, RuntimeInputs, ScriptIndexMode, UserConfig,
+};
 pub use embed::{Node, NodeError, SyncProgress};
 pub use mining::{GenerationKey, MiningCoordinator};
 pub use p2p_chain::NodeP2pChainQuery;
@@ -90,4 +91,6 @@ pub use txindex_worker::TxIndexRuntime;
 pub use utxo_view::UtxoSetView;
 #[cfg(feature = "zmq")]
 pub use zmq_publisher::SocketZmqPublisher;
-pub use zmq_publisher::{NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqPublisher};
+pub use zmq_publisher::{
+    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
+};

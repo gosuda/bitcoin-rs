@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_removal_publishes_r_frames_in_commit_order() {
+    fn policy_eviction_publishes_r_frames_in_commit_order() {
         let (gateway, publisher) = wired_gateway();
         let parent = tx(2);
         let parent_txid = parent.txid();
@@ -230,7 +230,7 @@ mod tests {
             .expect("child in");
         publisher.sequence_bodies.lock().clear();
 
-        gateway.remove_by_txid(AdmissionOrigin::Rpc, &parent_txid);
+        gateway.evict_below_fee_rate(AdmissionOrigin::Rpc, 10_001);
 
         let bodies = publisher.sequence_bodies.lock();
         assert_eq!(

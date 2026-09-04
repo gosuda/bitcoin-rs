@@ -427,6 +427,34 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
     typed_to_sonic(&v31::VerifyTxOutProof(result))
 }
 
+/// Failure from the one shared admission operation.
+///
+/// `sendrawtransaction` and [`crate::context::Context::admit_transaction`]
+/// map this into their respective envelopes.
+pub(crate) enum AdmissionFailure {
+    /// Mempool or standardness policy refused the transaction.
+    Policy(AcceptanceRejectReason),
+    /// Consensus verification failed.
+    Consensus,
+    /// Generation or mempool tokens kept changing across the retry budget.
+    RetryExhausted,
+}
+
+impl AdmissionFailure {
+    const RETRY_EXHAUSTED: &'static str =
+        "admission retry exhausted: chain or mempool changed during submission";
+
+    /// Maps this failure to the string envelope used by
+    /// [`crate::context::Context::admit_transaction`].
+    pub(crate) fn into_string(self) -> String {
+        match self {
+            Self::Policy(reason) => reason.to_string(),
+            Self::Consensus => "consensus-verification-failed".to_owned(),
+            Self::RetryExhausted => Self::RETRY_EXHAUSTED.to_owned(),
+        }
+    }
+}
+
 /// Admits one transaction through the R4 generation-revalidated gateway.
 ///
 /// This is the shared typed admission operation: `sendrawtransaction` and
@@ -437,28 +465,22 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
 /// or mempool mutation between capture and commit returns a transient
 /// error and the loop retries with fresh facts.
 ///
-/// An already-known transaction succeeds with an empty [`MutationResult`],
-/// matching Core's `sendrawtransaction` already-known success.
+/// Membership follows `POL-01` Duplicate submission in
+/// `docs/policies/mempool-policy.md`. The RPC lookup cache is not membership.
 ///
 /// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap, matching
 /// `sendrawtransaction`'s `maxfeerate=0` behavior.
 ///
 /// # Errors
 ///
-/// Returns the policy rejection string (Core rejection strings) or the
-/// failure verbatim; nothing is inserted when this fails.
+/// Returns a structured [`AdmissionFailure`] so each surface can map the
+/// same verdict into its own envelope; nothing is inserted when this fails.
 pub(crate) fn admit_transaction(
     ctx: &Context,
-    tx: Tx,
+    tx: &Tx,
     max_feerate_sat_per_kvb: Option<u64>,
-) -> Result<MutationResult, String> {
+) -> Result<MutationResult, AdmissionFailure> {
     let txid = tx.txid();
-
-    // A tx already confirmed in the chain is always "known" — no
-    // generation or mempool guard needed.
-    if ctx.transactions.read().contains_key(&txid) {
-        return Ok(MutationResult::empty());
-    }
 
     // Bounded retry: each attempt reads a fresh stable generation, captures
     // the exact mempool sequence under a read guard, resolves UTXO data
@@ -473,7 +495,7 @@ pub(crate) fn admit_transaction(
             continue; // chain change active or failed — retry
         };
 
-        // Under one gateway read guard: already-known lookup, capture exact
+        // Under one gateway read guard: already-in-pool lookup, capture exact
         // sequence, snapshot policy, resolve mempool-dependent context.
         let (sequence, _policy, mempool_prevouts) = {
             let pool = ctx.mempool.read();
@@ -482,13 +504,13 @@ pub(crate) fn admit_transaction(
             }
             let sequence = pool.sequence_number();
             let policy = pool.policy_snapshot();
-            let mempool_prevouts = resolve_mempool_prevouts(&pool, &tx);
+            let mempool_prevouts = resolve_mempool_prevouts(&pool, tx);
             (sequence, policy, mempool_prevouts)
         };
 
         // Without a pool guard: resolve UTXO data and combine with the
         // mempool-dependent prevouts captured above.
-        let (context, prevouts) = resolve_full_context(ctx, &tx, &mempool_prevouts);
+        let (context, prevouts) = resolve_full_context(ctx, tx, &mempool_prevouts);
         let locktime_cutoff = ctx
             .median_time_past_for_hash(ctx.applied_hash())
             .unwrap_or(0);
@@ -508,26 +530,24 @@ pub(crate) fn admit_transaction(
 
         match ctx.mempool.admit_transaction(request) {
             Ok(AdmitOutcome::Committed(result)) => {
-                let _ = ctx.add_transaction(tx);
                 return Ok(result);
             }
             Ok(AdmitOutcome::AlreadyKnown) => {
                 // The exact transaction was added between our read-guard
-                // check and the write-guard commit. Return normal success
-                // without a second add_transaction.
+                // check and the write-guard commit.
                 return Ok(MutationResult::empty());
             }
             Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => continue,
             Err(AdmitError::Policy(reason)) => {
-                return Err(reason.to_string());
+                return Err(AdmissionFailure::Policy(reason));
             }
             Err(AdmitError::Consensus) => {
-                return Err("consensus-verification-failed".to_owned());
+                return Err(AdmissionFailure::Consensus);
             }
         }
     }
 
-    Err("admission retry exhausted: chain or mempool changed during submission".to_owned())
+    Err(AdmissionFailure::RetryExhausted)
 }
 
 /// Fee rate above which `sendrawtransaction` refuses by default, in sat/kvB.
@@ -543,84 +563,16 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     let tx = decode_tx(raw)?;
     let txid = tx.txid();
 
-    // A tx already confirmed in the chain is always "known" — no
-    // generation or mempool guard needed.
-    if ctx.transactions.read().contains_key(&txid) {
-        return typed_to_sonic(&v31::SendRawTransaction(txid.to_string()));
+    match admit_transaction(ctx, &tx, max_feerate) {
+        Ok(_) => typed_to_sonic(&v31::SendRawTransaction(txid.to_string())),
+        Err(AdmissionFailure::Policy(reason)) => Err(reject_reason_to_rpc_error(reason)),
+        Err(AdmissionFailure::Consensus) => Err(RpcError::TxRejected(
+            "consensus-verification-failed".to_owned(),
+        )),
+        Err(AdmissionFailure::RetryExhausted) => Err(RpcError::Internal(
+            AdmissionFailure::RETRY_EXHAUSTED.to_owned(),
+        )),
     }
-
-    // Bounded retry: each attempt reads a fresh stable generation, captures
-    // the exact mempool sequence under a read guard, resolves UTXO data
-    // without the guard, then calls admit_transaction with both tokens. A
-    // chain change or mempool mutation between capture and commit returns a
-    // transient error and the loop retries with fresh facts — it never
-    // re-uses a captured even generation.
-    #[allow(clippy::items_after_statements)]
-    const MAX_ADMISSION_RETRIES: usize = 4;
-    for _ in 0..MAX_ADMISSION_RETRIES {
-        let Some(generation) = ctx.mempool.stable_generation() else {
-            continue; // chain change active or failed — retry
-        };
-
-        // Under one gateway read guard: already-known lookup, capture exact
-        // sequence, snapshot policy, resolve mempool-dependent context.
-        let (sequence, _policy, mempool_prevouts) = {
-            let pool = ctx.mempool.read();
-            if pool.contains_txid(&txid) {
-                return typed_to_sonic(&v31::SendRawTransaction(txid.to_string()));
-            }
-            let sequence = pool.sequence_number();
-            let policy = pool.policy_snapshot();
-            let mempool_prevouts = resolve_mempool_prevouts(&pool, &tx);
-            (sequence, policy, mempool_prevouts)
-        };
-
-        // Without a pool guard: resolve UTXO data and combine with the
-        // mempool-dependent prevouts captured above.
-        let (context, prevouts) = resolve_full_context(ctx, &tx, &mempool_prevouts);
-        let locktime_cutoff = ctx
-            .median_time_past_for_hash(ctx.applied_hash())
-            .unwrap_or(0);
-
-        let request = AdmissionRequest {
-            tx: Arc::new(tx.clone()),
-            context,
-            prevouts,
-            locktime_cutoff,
-            max_feerate_sat_per_kvb: max_feerate,
-            time: unix_time_secs(),
-            height: ctx.applied_height(),
-            origin: AdmissionOrigin::Rpc,
-            expected_generation: generation,
-            expected_sequence: sequence,
-        };
-
-        match ctx.mempool.admit_transaction(request) {
-            Ok(AdmitOutcome::Committed(_)) => {
-                let _ = ctx.add_transaction(tx);
-                return typed_to_sonic(&v31::SendRawTransaction(txid.to_string()));
-            }
-            Ok(AdmitOutcome::AlreadyKnown) => {
-                // The exact transaction was added between our read-guard
-                // check and the write-guard commit. Return normal txid
-                // success without a second add_transaction.
-                return typed_to_sonic(&v31::SendRawTransaction(txid.to_string()));
-            }
-            Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => continue,
-            Err(AdmitError::Policy(reason)) => {
-                return Err(reject_reason_to_rpc_error(reason));
-            }
-            Err(AdmitError::Consensus) => {
-                return Err(RpcError::TxRejected(
-                    "consensus-verification-failed".to_owned(),
-                ));
-            }
-        }
-    }
-
-    Err(RpcError::Internal(
-        "admission retry exhausted: chain or mempool changed during submission".to_owned(),
-    ))
 }
 
 pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -2451,7 +2403,7 @@ mod acceptance_tests {
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
-    use super::{sendrawtransaction, testmempoolaccept};
+    use super::{getrawtransaction, sendrawtransaction, testmempoolaccept};
     use crate::context::Context;
     use crate::error::RpcError;
 
@@ -2693,6 +2645,63 @@ mod acceptance_tests {
 
         assert_eq!(first.as_str(), second.as_str());
         assert_eq!(ctx.mempool.read().len(), 1, "it must not be inserted twice");
+    }
+
+    /// An RBF-evicted transaction is no longer known.
+    ///
+    /// Admission used to copy every accepted tx into the RPC lookup cache and
+    /// treat a cache hit as already-known success. After a replacement swept
+    /// the original out of the pool, resubmitting it still returned the txid
+    /// and `getrawtransaction` still served the body — a wallet retry would
+    /// believe the old transaction was pending.
+    #[test]
+    fn sendrawtransaction_does_not_treat_an_evicted_tx_as_already_known() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+
+        let mut original = spending_tx(1, 90_000);
+        original.inputs[0].sequence = 0xFFFF_FFFD;
+        let original_hex = hex_of(&original);
+        let original_txid = original.txid();
+        let params = json!([original_hex]);
+
+        let Ok(_) = sendrawtransaction(&ctx, &params) else {
+            panic!("the RBF-signaling original must be accepted");
+        };
+        assert!(
+            ctx.mempool.read().contains_txid(&original_txid),
+            "the original must enter the pool"
+        );
+
+        // Same confirmed input, larger fee. BIP125 rules 3/4/6 all clear.
+        let replacement = spending_tx(1, 80_000);
+        let Ok(_) = sendrawtransaction(&ctx, &json!([hex_of(&replacement)])) else {
+            panic!("the higher-fee replacement must be accepted");
+        };
+        assert!(
+            !ctx.mempool.read().contains_txid(&original_txid),
+            "the original must be swept by the replacement"
+        );
+        assert!(
+            ctx.mempool.read().contains_txid(&replacement.txid()),
+            "the replacement must occupy the pool"
+        );
+
+        let resent = sendrawtransaction(&ctx, &params);
+        assert!(
+            resent.is_err(),
+            "resubmitting the evicted original must re-evaluate, not succeed as already-known: {resent:?}"
+        );
+        assert!(
+            !ctx.mempool.read().contains_txid(&original_txid),
+            "the evicted original must still be absent after the failed retry"
+        );
+
+        let lookup = getrawtransaction(&ctx, &json!([original_txid.to_string()]));
+        assert!(
+            matches!(lookup, Err(RpcError::NotFound(_))),
+            "getrawtransaction must not serve an evicted body from the lookup cache: {lookup:?}"
+        );
     }
 
     /// The verdict must come from the acceptance checks.

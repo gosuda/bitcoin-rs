@@ -41,7 +41,8 @@ fn stale_generation_rcu_is_a_noop() {
 
     // Attempt to publish Failed via the generation-checked rcu. Since the
     // generation is revoked, the snapshot must stay Opening.
-    publish_failed_if_current(&lifecycle, &generation_tok, "should not publish");
+    let runtime = TxIndexRuntime::new(crossbeam_channel::bounded(1).0);
+    fail_worker(&runtime, &lifecycle, &generation_tok, "should not publish");
     let snapshot = lifecycle.load();
     assert!(
         matches!(**snapshot, TxIndexLifecycle::Opening),
@@ -50,7 +51,7 @@ fn stale_generation_rcu_is_a_noop() {
 
     // A non-revoked generation publishes normally.
     let gen2 = Generation::new(2);
-    publish_failed_if_current(&lifecycle, &gen2, "should publish");
+    fail_worker(&runtime, &lifecycle, &gen2, "should publish");
     let snapshot = lifecycle.load();
     assert!(
         matches!(**snapshot, TxIndexLifecycle::Failed(_)),

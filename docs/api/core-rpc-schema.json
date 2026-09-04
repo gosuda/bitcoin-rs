@@ -1,0 +1,2537 @@
+{
+  "provenance": {
+    "core_version": "31.99.0",
+    "extracted_from": "RPCResult declarations in the Core source tree",
+    "sources": [
+      {
+        "file": "src/rpc/blockchain.cpp",
+        "methods": 30
+      },
+      {
+        "file": "src/rpc/external_signer.cpp",
+        "methods": 1
+      },
+      {
+        "file": "src/rpc/fees.cpp",
+        "methods": 2
+      },
+      {
+        "file": "src/rpc/mempool.cpp",
+        "methods": 16
+      },
+      {
+        "file": "src/rpc/mining.cpp",
+        "methods": 10
+      },
+      {
+        "file": "src/rpc/net.cpp",
+        "methods": 19
+      },
+      {
+        "file": "src/rpc/node.cpp",
+        "methods": 6
+      },
+      {
+        "file": "src/rpc/output_script.cpp",
+        "methods": 4
+      },
+      {
+        "file": "src/rpc/rawtransaction.cpp",
+        "methods": 12
+      },
+      {
+        "file": "src/rpc/server.cpp",
+        "methods": 4
+      },
+      {
+        "file": "src/rpc/signmessage.cpp",
+        "methods": 2
+      },
+      {
+        "file": "src/rpc/txoutproof.cpp",
+        "methods": 2
+      }
+    ],
+    "note": "Top-level result shape only: nested object and array fields are not claimed, because this extractor cannot verify them. Regenerate with tools/core-rpc-schema/extract.py."
+  },
+  "methods": {
+    "abortprivatebroadcast": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "ARR",
+          "name": "removed_transactions",
+          "optional": false
+        }
+      ]
+    },
+    "addconnection": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "address",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "connection_type",
+          "optional": false
+        }
+      ]
+    },
+    "addnode": {
+      "type": "NONE"
+    },
+    "addpeeraddress": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "BOOL",
+          "name": "success",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "error",
+          "optional": true
+        }
+      ]
+    },
+    "clearbanned": {
+      "type": "NONE"
+    },
+    "combinepsbt": {
+      "type": "STR"
+    },
+    "combinerawtransaction": {
+      "type": "STR"
+    },
+    "converttopsbt": {
+      "type": "STR"
+    },
+    "createmultisig": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "address",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "redeemScript",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "descriptor",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "warnings",
+          "optional": true
+        }
+      ]
+    },
+    "createpsbt": {
+      "type": "STR"
+    },
+    "createrawtransaction": {
+      "type": "STR_HEX"
+    },
+    "decodepsbt": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "tx",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "global_xpubs",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "psbt_version",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "proprietary",
+          "optional": false
+        },
+        {
+          "type": "OBJ_DYN",
+          "name": "unknown",
+          "optional": false
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "fee",
+          "optional": true
+        }
+      ]
+    },
+    "decoderawtransaction": {
+      "type": "OBJ"
+    },
+    "decodescript": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "asm",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "desc",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "type",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "address",
+          "optional": true
+        },
+        {
+          "type": "STR",
+          "name": "p2sh",
+          "optional": true
+        },
+        {
+          "type": "OBJ",
+          "name": "segwit",
+          "optional": true
+        }
+      ]
+    },
+    "deriveaddresses": {
+      "variants": [
+        {
+          "type": "ARR",
+          "when": "for single derivation descriptors",
+          "fields": [
+            {
+              "type": "STR",
+              "name": "address",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "ARR",
+          "when": "for multipath descriptors",
+          "fields": [
+            {
+              "type": "ARR",
+              "name": "",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "descriptorprocesspsbt": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "psbt",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "complete",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "hex",
+          "optional": true
+        }
+      ]
+    },
+    "disconnectnode": {
+      "type": "NONE"
+    },
+    "dumptxoutset": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "coins_written",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "base_hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "base_height",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "path",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "txoutset_hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "nchaintx",
+          "optional": false
+        }
+      ]
+    },
+    "echoipc": {
+      "type": "STR"
+    },
+    "enumeratesigners": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "ARR",
+          "name": "signers",
+          "optional": false
+        }
+      ]
+    },
+    "estimaterawfee": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "short",
+          "optional": true
+        },
+        {
+          "type": "OBJ",
+          "name": "medium",
+          "optional": true
+        },
+        {
+          "type": "OBJ",
+          "name": "long",
+          "optional": true
+        }
+      ]
+    },
+    "estimatesmartfee": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "feerate",
+          "optional": true
+        },
+        {
+          "type": "ARR",
+          "name": "errors",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "blocks",
+          "optional": false
+        }
+      ]
+    },
+    "exportasmap": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "path",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "bytes_written",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "file_hash",
+          "optional": false
+        }
+      ]
+    },
+    "finalizepsbt": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "psbt",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "hex",
+          "optional": true
+        },
+        {
+          "type": "BOOL",
+          "name": "complete",
+          "optional": false
+        }
+      ]
+    },
+    "generateblock": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "hash",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "hex",
+          "optional": true
+        }
+      ]
+    },
+    "generatetoaddress": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "generatetodescriptor": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "getaddednodeinfo": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "getaddrmaninfo": {
+      "type": "OBJ_DYN",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "network",
+          "optional": false
+        }
+      ]
+    },
+    "getbestblockhash": {
+      "type": "STR_HEX"
+    },
+    "getblock": {
+      "variants": [
+        {
+          "type": "STR_HEX",
+          "when": "for verbosity = 0"
+        },
+        {
+          "type": "OBJ",
+          "when": "for verbosity = 1",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "hash",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "confirmations",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "size",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "strippedsize",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "weight",
+              "optional": false
+            },
+            {
+              "type": "OBJ",
+              "name": "coinbase_tx",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "height",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "version",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "versionHex",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "merkleroot",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "tx",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "time",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "mediantime",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nonce",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "bits",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "target",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "difficulty",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "chainwork",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nTx",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "previousblockhash",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "nextblockhash",
+              "optional": true
+            }
+          ]
+        },
+        {
+          "type": "OBJ",
+          "when": "for verbosity = 2",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "hash",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "confirmations",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "size",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "strippedsize",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "weight",
+              "optional": false
+            },
+            {
+              "type": "OBJ",
+              "name": "coinbase_tx",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "height",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "version",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "versionHex",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "merkleroot",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "tx",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "time",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "mediantime",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nonce",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "bits",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "target",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "difficulty",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "chainwork",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nTx",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "previousblockhash",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "nextblockhash",
+              "optional": true
+            }
+          ]
+        },
+        {
+          "type": "OBJ",
+          "when": "for verbosity = 3",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "hash",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "confirmations",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "size",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "strippedsize",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "weight",
+              "optional": false
+            },
+            {
+              "type": "OBJ",
+              "name": "coinbase_tx",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "height",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "version",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "versionHex",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "merkleroot",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "tx",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "time",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "mediantime",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nonce",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "bits",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "target",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "difficulty",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "chainwork",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nTx",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "previousblockhash",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "nextblockhash",
+              "optional": true
+            }
+          ]
+        }
+      ]
+    },
+    "getblockchaininfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "chain",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "blocks",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "headers",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "bestblockhash",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "bits",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "target",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "difficulty",
+          "optional": false
+        },
+        {
+          "type": "NUM_TIME",
+          "name": "time",
+          "optional": false
+        },
+        {
+          "type": "NUM_TIME",
+          "name": "mediantime",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "verificationprogress",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "initialblockdownload",
+          "optional": false
+        },
+        {
+          "type": "OBJ",
+          "name": "backgroundvalidation",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "chainwork",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "size_on_disk",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "pruned",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "pruneheight",
+          "optional": true
+        },
+        {
+          "type": "BOOL",
+          "name": "automatic_pruning",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "prune_target_size",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "signet_challenge",
+          "optional": true
+        },
+        {
+          "type": "STR",
+          "name": "warnings",
+          "optional": false
+        }
+      ]
+    },
+    "getblockcount": {
+      "type": "NUM"
+    },
+    "getblockfilter": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "filter",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "header",
+          "optional": false
+        }
+      ]
+    },
+    "getblockfrompeer": {
+      "type": "OBJ"
+    },
+    "getblockhash": {
+      "type": "STR_HEX"
+    },
+    "getblockheader": {
+      "variants": [
+        {
+          "type": "OBJ",
+          "when": "for verbose = true",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "hash",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "confirmations",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "height",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "version",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "versionHex",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "merkleroot",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "time",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "mediantime",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nonce",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "bits",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "target",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "difficulty",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "chainwork",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "nTx",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "previousblockhash",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "nextblockhash",
+              "optional": true
+            }
+          ]
+        },
+        {
+          "type": "STR_HEX",
+          "when": "for verbose=false"
+        }
+      ]
+    },
+    "getblockstats": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "avgfee",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "avgfeerate",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "avgtxsize",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "blockhash",
+          "optional": true
+        },
+        {
+          "type": "ARR_FIXED",
+          "name": "feerate_percentiles",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "height",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "ins",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "maxfee",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "maxfeerate",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "maxtxsize",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "medianfee",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "mediantime",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "mediantxsize",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "minfee",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "minfeerate",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "mintxsize",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "outs",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "subsidy",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "swtotal_size",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "swtotal_weight",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "swtxs",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "time",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "total_out",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "total_size",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "total_weight",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "totalfee",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "txs",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "utxo_increase",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "utxo_size_inc",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "utxo_increase_actual",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "utxo_size_inc_actual",
+          "optional": true
+        }
+      ]
+    },
+    "getblocktemplate": {
+      "variants": [
+        {
+          "type": "NONE",
+          "when": "If the proposal was accepted with mode=='proposal'"
+        },
+        {
+          "type": "STR",
+          "when": "If the proposal was not accepted with mode=='proposal'"
+        },
+        {
+          "type": "OBJ",
+          "when": "Otherwise",
+          "fields": [
+            {
+              "type": "NUM",
+              "name": "version",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "rules",
+              "optional": false
+            },
+            {
+              "type": "OBJ_DYN",
+              "name": "vbavailable",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "capabilities",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "vbrequired",
+              "optional": false
+            },
+            {
+              "type": "STR",
+              "name": "previousblockhash",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "transactions",
+              "optional": false
+            },
+            {
+              "type": "OBJ_DYN",
+              "name": "coinbaseaux",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "coinbasevalue",
+              "optional": false
+            },
+            {
+              "type": "STR",
+              "name": "longpollid",
+              "optional": false
+            },
+            {
+              "type": "STR",
+              "name": "target",
+              "optional": false
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "mintime",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "mutable",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "noncerange",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "sigoplimit",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "sizelimit",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "weightlimit",
+              "optional": true
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "curtime",
+              "optional": false
+            },
+            {
+              "type": "STR",
+              "name": "bits",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "height",
+              "optional": false
+            },
+            {
+              "type": "STR_HEX",
+              "name": "signet_challenge",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "default_witness_commitment",
+              "optional": true
+            }
+          ]
+        }
+      ]
+    },
+    "getchainstates": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "headers",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "chainstates",
+          "optional": false
+        }
+      ]
+    },
+    "getchaintips": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "getchaintxstats": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM_TIME",
+          "name": "time",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "txcount",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "window_final_block_hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "window_final_block_height",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "window_block_count",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "window_interval",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "window_tx_count",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "txrate",
+          "optional": true
+        }
+      ]
+    },
+    "getconnectioncount": {
+      "type": "NUM"
+    },
+    "getdeploymentinfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "height",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "script_flags",
+          "optional": false
+        },
+        {
+          "type": "OBJ_DYN",
+          "name": "deployments",
+          "optional": false
+        }
+      ]
+    },
+    "getdescriptoractivity": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "ARR",
+          "name": "activity",
+          "optional": false
+        }
+      ]
+    },
+    "getdescriptorinfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "descriptor",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "multipath_expansion",
+          "optional": true
+        },
+        {
+          "type": "STR",
+          "name": "checksum",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "isrange",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "issolvable",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "hasprivatekeys",
+          "optional": false
+        }
+      ]
+    },
+    "getdifficulty": {
+      "type": "NUM"
+    },
+    "getindexinfo": {
+      "type": "OBJ_DYN",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "name",
+          "optional": false
+        }
+      ]
+    },
+    "getmemoryinfo": {
+      "variants": [
+        {
+          "type": "OBJ",
+          "when": "mode \\\"stats\\\"",
+          "fields": [
+            {
+              "type": "OBJ",
+              "name": "locked",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "STR",
+          "when": "mode \\\"mallocinfo\\\""
+        }
+      ]
+    },
+    "getmempoolancestors": {
+      "variants": [
+        {
+          "type": "ARR",
+          "when": "for verbose = false",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "OBJ_DYN",
+          "when": "for verbose = true",
+          "fields": [
+            {
+              "type": "OBJ",
+              "name": "transactionid",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "getmempoolcluster": {
+      "type": "OBJ"
+    },
+    "getmempooldescendants": {
+      "variants": [
+        {
+          "type": "ARR",
+          "when": "for verbose = false",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "OBJ_DYN",
+          "when": "for verbose = true",
+          "fields": [
+            {
+              "type": "OBJ",
+              "name": "transactionid",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "getmempoolentry": {
+      "type": "OBJ"
+    },
+    "getmempoolfeeratediagram": {
+      "type": "ARR",
+      "when": "mempool chunks",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "getmempoolinfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "BOOL",
+          "name": "loaded",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "size",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "bytes",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "usage",
+          "optional": false
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "total_fee",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "maxmempool",
+          "optional": false
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "mempoolminfee",
+          "optional": false
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "minrelaytxfee",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "incrementalrelayfee",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "unbroadcastcount",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "permitbaremultisig",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "maxdatacarriersize",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "limitclustercount",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "limitclustersize",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "optimal",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "fullrbf",
+          "optional": true
+        }
+      ]
+    },
+    "getmininginfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "blocks",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "currentblockweight",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "currentblocktx",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "bits",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "difficulty",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "target",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "networkhashps",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "pooledtx",
+          "optional": false
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "blockmintxfee",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "chain",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "signet_challenge",
+          "optional": true
+        },
+        {
+          "type": "OBJ",
+          "name": "next",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "warnings",
+          "optional": false
+        }
+      ]
+    },
+    "getnettotals": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "totalbytesrecv",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "totalbytessent",
+          "optional": false
+        },
+        {
+          "type": "NUM_TIME",
+          "name": "timemillis",
+          "optional": false
+        },
+        {
+          "type": "OBJ",
+          "name": "uploadtarget",
+          "optional": false
+        }
+      ]
+    },
+    "getnetworkhashps": {
+      "type": "NUM"
+    },
+    "getnetworkinfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "version",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "subversion",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "protocolversion",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "localservices",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "localservicesnames",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "localrelay",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "timeoffset",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "connections",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "connections_in",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "connections_out",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "networkactive",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "networks",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "relayfee",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "incrementalfee",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "localaddresses",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "warnings",
+          "optional": false
+        }
+      ]
+    },
+    "getnodeaddresses": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "getorphantxs": {
+      "variants": [
+        {
+          "type": "ARR",
+          "when": "for verbose = 0",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "txid",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "ARR",
+          "when": "for verbose = 1",
+          "fields": [
+            {
+              "type": "OBJ",
+              "name": "",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "ARR",
+          "when": "for verbose = 2",
+          "fields": [
+            {
+              "type": "OBJ",
+              "name": "",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "getpeerinfo": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "getprioritisedtransactions": {
+      "type": "OBJ_DYN",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "<transactionid>",
+          "optional": false
+        }
+      ]
+    },
+    "getprivatebroadcastinfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "ARR",
+          "name": "transactions",
+          "optional": false
+        }
+      ]
+    },
+    "getrawaddrman": {
+      "type": "OBJ_DYN",
+      "fields": [
+        {
+          "type": "OBJ_DYN",
+          "name": "table",
+          "optional": false
+        }
+      ]
+    },
+    "getrawmempool": {
+      "variants": [
+        {
+          "type": "ARR",
+          "when": "for verbose = false",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "OBJ_DYN",
+          "when": "for verbose = true",
+          "fields": [
+            {
+              "type": "OBJ",
+              "name": "transactionid",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "OBJ",
+          "when": "for verbose = false and mempool_sequence = true",
+          "fields": [
+            {
+              "type": "ARR",
+              "name": "txids",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "mempool_sequence",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "getrawtransaction": {
+      "variants": [
+        {
+          "type": "STR",
+          "when": "if verbosity is not set or set to 0"
+        },
+        {
+          "type": "OBJ",
+          "when": "if verbosity is set to 1",
+          "fields": [
+            {
+              "type": "BOOL",
+              "name": "in_active_chain",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "blockhash",
+              "optional": true
+            },
+            {
+              "type": "NUM",
+              "name": "confirmations",
+              "optional": true
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "blocktime",
+              "optional": true
+            },
+            {
+              "type": "NUM",
+              "name": "time",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "hex",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "OBJ",
+          "when": "for verbosity = 2",
+          "fields": [
+            {
+              "type": "BOOL",
+              "name": "in_active_chain",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "blockhash",
+              "optional": true
+            },
+            {
+              "type": "NUM",
+              "name": "confirmations",
+              "optional": true
+            },
+            {
+              "type": "NUM_TIME",
+              "name": "blocktime",
+              "optional": true
+            },
+            {
+              "type": "NUM",
+              "name": "time",
+              "optional": true
+            },
+            {
+              "type": "STR_HEX",
+              "name": "hex",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "fee",
+              "optional": true
+            },
+            {
+              "type": "ARR",
+              "name": "vin",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "getrpcinfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "ARR",
+          "name": "active_commands",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "logpath",
+          "optional": false
+        }
+      ]
+    },
+    "gettxout": {
+      "variants": [
+        {
+          "type": "NONE",
+          "when": "If the UTXO was not found"
+        },
+        {
+          "type": "OBJ",
+          "when": "Otherwise",
+          "fields": [
+            {
+              "type": "STR_HEX",
+              "name": "bestblock",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "confirmations",
+              "optional": false
+            },
+            {
+              "type": "STR_AMOUNT",
+              "name": "value",
+              "optional": false
+            },
+            {
+              "type": "OBJ",
+              "name": "scriptPubKey",
+              "optional": false
+            },
+            {
+              "type": "BOOL",
+              "name": "coinbase",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "gettxoutproof": {
+      "type": "STR"
+    },
+    "gettxoutsetinfo": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "height",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "bestblock",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "txouts",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "bogosize",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "hash_serialized_3",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "muhash",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "transactions",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "disk_size",
+          "optional": true
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "total_amount",
+          "optional": false
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "total_unspendable_amount",
+          "optional": true
+        },
+        {
+          "type": "OBJ",
+          "name": "block_info",
+          "optional": true
+        }
+      ]
+    },
+    "gettxspendingprevout": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "help": {
+      "variants": [
+        {
+          "type": "STR"
+        },
+        {
+          "type": "ANY"
+        }
+      ]
+    },
+    "importmempool": {
+      "type": "OBJ"
+    },
+    "invalidateblock": {
+      "type": "NONE"
+    },
+    "listbanned": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "loadtxoutset": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "NUM",
+          "name": "coins_loaded",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "tip_hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "base_height",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "path",
+          "optional": false
+        }
+      ]
+    },
+    "logging": {
+      "type": "OBJ_DYN",
+      "fields": [
+        {
+          "type": "BOOL",
+          "name": "category",
+          "optional": false
+        }
+      ]
+    },
+    "mockscheduler": {
+      "type": "NONE"
+    },
+    "ping": {
+      "type": "NONE"
+    },
+    "preciousblock": {
+      "type": "NONE"
+    },
+    "prioritisetransaction": {
+      "type": "BOOL"
+    },
+    "pruneblockchain": {
+      "type": "NUM"
+    },
+    "reconsiderblock": {
+      "type": "NONE"
+    },
+    "savemempool": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "filename",
+          "optional": false
+        }
+      ]
+    },
+    "scanblocks": {
+      "variants": [
+        {
+          "type": "OBJ",
+          "when": "When action=='start'; only returns after scan completes",
+          "fields": [
+            {
+              "type": "NUM",
+              "name": "from_height",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "to_height",
+              "optional": false
+            },
+            {
+              "type": "ARR",
+              "name": "relevant_blocks",
+              "optional": false
+            },
+            {
+              "type": "BOOL",
+              "name": "completed",
+              "optional": false
+            }
+          ]
+        },
+        {
+          "type": "OBJ",
+          "when": "when action=='status' and a scan is currently in progress",
+          "fields": [
+            {
+              "type": "NUM",
+              "name": "progress",
+              "optional": false
+            },
+            {
+              "type": "NUM",
+              "name": "current_height",
+              "optional": false
+            }
+          ]
+        }
+      ]
+    },
+    "scantxoutset": {
+      "type": "OBJ",
+      "when": "when action=='start'; only returns after scan completes",
+      "fields": [
+        {
+          "type": "BOOL",
+          "name": "success",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "txouts",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "height",
+          "optional": false
+        },
+        {
+          "type": "STR_HEX",
+          "name": "bestblock",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "unspents",
+          "optional": false
+        },
+        {
+          "type": "STR_AMOUNT",
+          "name": "total_amount",
+          "optional": false
+        }
+      ]
+    },
+    "sendmsgtopeer": {
+      "type": "OBJ"
+    },
+    "sendrawtransaction": {
+      "type": "STR_HEX"
+    },
+    "setban": {
+      "type": "NONE"
+    },
+    "setmocktime": {
+      "type": "NONE"
+    },
+    "setnetworkactive": {
+      "type": "BOOL"
+    },
+    "signmessagewithprivkey": {
+      "type": "STR"
+    },
+    "signrawtransactionwithkey": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "hex",
+          "optional": false
+        },
+        {
+          "type": "BOOL",
+          "name": "complete",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "errors",
+          "optional": true
+        }
+      ]
+    },
+    "stop": {
+      "type": "STR"
+    },
+    "submitblock": {
+      "variants": [
+        {
+          "type": "NONE",
+          "when": "If the block was accepted"
+        },
+        {
+          "type": "STR",
+          "when": "Otherwise"
+        }
+      ]
+    },
+    "submitheader": {
+      "type": "NONE"
+    },
+    "submitpackage": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR",
+          "name": "package_msg",
+          "optional": false
+        },
+        {
+          "type": "OBJ_DYN",
+          "name": "tx-results",
+          "optional": false
+        },
+        {
+          "type": "ARR",
+          "name": "replaced-transactions",
+          "optional": true
+        }
+      ]
+    },
+    "syncwithvalidationinterfacequeue": {
+      "type": "NONE"
+    },
+    "testmempoolaccept": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "OBJ",
+          "name": "",
+          "optional": false
+        }
+      ]
+    },
+    "uptime": {
+      "type": "NUM"
+    },
+    "validateaddress": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "BOOL",
+          "name": "isvalid",
+          "optional": false
+        },
+        {
+          "type": "STR",
+          "name": "address",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "scriptPubKey",
+          "optional": true
+        },
+        {
+          "type": "BOOL",
+          "name": "isscript",
+          "optional": true
+        },
+        {
+          "type": "BOOL",
+          "name": "iswitness",
+          "optional": true
+        },
+        {
+          "type": "NUM",
+          "name": "witness_version",
+          "optional": true
+        },
+        {
+          "type": "STR_HEX",
+          "name": "witness_program",
+          "optional": true
+        },
+        {
+          "type": "STR",
+          "name": "error",
+          "optional": true
+        },
+        {
+          "type": "ARR",
+          "name": "error_locations",
+          "optional": true
+        }
+      ]
+    },
+    "verifychain": {
+      "type": "BOOL"
+    },
+    "verifymessage": {
+      "type": "BOOL"
+    },
+    "verifytxoutproof": {
+      "type": "ARR",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "txid",
+          "optional": false
+        }
+      ]
+    },
+    "waitforblock": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "height",
+          "optional": false
+        }
+      ]
+    },
+    "waitforblockheight": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "height",
+          "optional": false
+        }
+      ]
+    },
+    "waitfornewblock": {
+      "type": "OBJ",
+      "fields": [
+        {
+          "type": "STR_HEX",
+          "name": "hash",
+          "optional": false
+        },
+        {
+          "type": "NUM",
+          "name": "height",
+          "optional": false
+        }
+      ]
+    }
+  }
+}

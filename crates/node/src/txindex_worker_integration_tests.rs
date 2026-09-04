@@ -104,6 +104,7 @@ fn worker_open_panic_publishes_failed() {
         inputs.block_source,
         None,
         Arc::clone(&inputs.chain_events),
+        test_recovery_reporter(dir.path()).0,
         Arc::clone(&inputs.shutdown),
         inputs.wake_rx,
     )
@@ -156,6 +157,7 @@ fn spawn_failure_publishes_failed_synchronously() {
         inputs.block_source,
         None,
         Arc::clone(&inputs.chain_events),
+        test_recovery_reporter(dir.path()).0,
         Arc::clone(&inputs.shutdown),
         inputs.wake_rx,
     )
@@ -200,6 +202,7 @@ fn blocked_open_drop_detaches_within_deadline() {
         inputs.block_source,
         None,
         Arc::clone(&inputs.chain_events),
+        test_recovery_reporter(dir.path()).0,
         Arc::clone(&inputs.shutdown),
         inputs.wake_rx,
     )
@@ -260,6 +263,7 @@ fn late_open_cannot_publish_after_revocation() {
         inputs.block_source,
         None,
         Arc::clone(&inputs.chain_events),
+        test_recovery_reporter(dir.path()).0,
         Arc::clone(&inputs.shutdown),
         inputs.wake_rx,
     )
@@ -496,6 +500,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
         inputs.block_source,
         None,
         Arc::clone(&inputs.chain_events),
+        test_recovery_reporter(dir.path()).0,
         Arc::clone(&inputs.shutdown),
         inputs.wake_rx,
     )

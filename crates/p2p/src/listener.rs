@@ -428,6 +428,11 @@ fn run_outbound_connection(
     shared.peer_table.register(addr, lease.clone());
 
     let nonce = generate_nonce(addr);
+    // Wrapped before the handshake, so the bytes it spends are counted too.
+    let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    let stream = crate::CountingStream::new(stream, counters);
+    let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
+    let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, magic);
     let handshake_deadline = Instant::now() + HANDSHAKE_READ_TIMEOUT;
     if let Err(error) = run_outbound_handshake(
@@ -456,7 +461,14 @@ fn run_outbound_connection(
     };
     let handshake_now = SystemTime::now();
     let conn_time = unix_secs(handshake_now);
-    let info = crate::PeerInfo::outbound_from_version(addr, remote_version, conn_time);
+    let info = crate::PeerInfo::outbound_from_version(
+        addr,
+        addr_bind,
+        remote_version,
+        conn_time,
+        peer.version_received_time.unwrap_or(conn_time),
+        counters,
+    );
     lease
         .stats()
         .set_time_offset(remote_version.timestamp - unix_secs_i64(handshake_now));
@@ -547,6 +559,12 @@ fn run_handshake(
         .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
         .map_err(crate::wire::PeerError::Io)?;
 
+    // Wrapped before the handshake, so the bytes it spends are counted too.
+    let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    let stream = crate::CountingStream::new(stream, counters);
+    let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
+    let counters = std::sync::Arc::clone(stream.counters());
+
     // Register the connection before the handshake so live-connection
     // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
@@ -582,7 +600,14 @@ fn run_handshake(
     };
     let handshake_now = SystemTime::now();
     let conn_time = unix_secs(handshake_now);
-    let info = crate::PeerInfo::inbound_from_version(peer_addr, remote_version, conn_time);
+    let info = crate::PeerInfo::inbound_from_version(
+        peer_addr,
+        addr_bind,
+        remote_version,
+        conn_time,
+        peer.version_received_time.unwrap_or(conn_time),
+        counters,
+    );
     lease
         .stats()
         .set_time_offset(remote_version.timestamp - unix_secs_i64(handshake_now));
@@ -609,7 +634,7 @@ fn run_handshake(
 /// shutdown unblocks a writer blocked mid-`write_all`. Connection threads
 /// are intentionally not joined by outer listener shutdown.
 fn run_connected_session(
-    peer: &mut Peer<TcpStream>,
+    peer: &mut Peer<crate::CountingStream<TcpStream>>,
     peer_addr: SocketAddr,
     magic: Magic,
     shared: &ConnectionShared,
@@ -788,7 +813,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
 /// lease close signal, when every sender drops, or on write failure. Every exit
 /// shuts down the socket so the reader half cannot outlive a failed writer.
 fn spawn_connection_writer(
-    mut stream: TcpStream,
+    mut stream: crate::CountingStream<TcpStream>,
     magic: Magic,
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
     close_rx: crossbeam_channel::Receiver<()>,
@@ -1065,6 +1090,9 @@ mod writer_setup_cleanup_tests {
             start_height: 0,
             conn_time,
             inbound: false,
+            addr_bind: addr,
+            time_offset: 0,
+            counters: Arc::new(crate::PeerCounters::default()),
         }
     }
 
@@ -1106,7 +1134,9 @@ mod writer_setup_cleanup_tests {
         // Inject writer setup failure.
         WRITER_SETUP_FAIL.store(true, Ordering::Relaxed);
 
-        let mut peer = Peer::new(client, Magic::BITCOIN);
+        let counters = std::sync::Arc::new(crate::PeerCounters::default());
+        let stream = crate::CountingStream::new(client, counters);
+        let mut peer = Peer::new(stream, Magic::BITCOIN);
         let info = peer_info(peer_addr, 0);
         let result = run_connected_session(
             &mut peer,
@@ -1176,6 +1206,9 @@ mod writer_shutdown_tests {
             start_height,
             conn_time: 0,
             inbound: false,
+            addr_bind: addr,
+            time_offset: 0,
+            counters: std::sync::Arc::new(crate::PeerCounters::default()),
         }
     }
 
@@ -1419,7 +1452,10 @@ mod writer_shutdown_tests {
     #[test]
     fn cancel_wakes_writer_blocked_on_empty_queue_with_live_senders() {
         let (_client, server, peer_addr) = loopback_pair();
-        let writer_stream = server.try_clone().expect("try_clone");
+        let writer_stream = crate::CountingStream::new(
+            server.try_clone().expect("try_clone"),
+            std::sync::Arc::new(crate::PeerCounters::default()),
+        );
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);
         let lease_probe = lease.clone();
@@ -1580,7 +1616,7 @@ mod writer_shutdown_tests {
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);
         let writer = spawn_connection_writer(
-            server,
+            crate::CountingStream::new(server, std::sync::Arc::new(crate::PeerCounters::default())),
             Magic::BITCOIN,
             outbound_rx,
             lease.close_signal(),
@@ -1625,6 +1661,9 @@ mod writer_shutdown_tests {
             start_height: 0,
             conn_time: 0,
             inbound: false,
+            addr_bind: peer_addr,
+            time_offset: 0,
+            counters: std::sync::Arc::new(crate::PeerCounters::default()),
         };
         let sinks = InboundSyncSinks {
             headers_tx: crossbeam_channel::unbounded().0,
@@ -1634,7 +1673,13 @@ mod writer_shutdown_tests {
 
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let worker = std::thread::spawn(move || {
-            let mut peer = Peer::new(server, Magic::BITCOIN);
+            let mut peer = Peer::new(
+                crate::CountingStream::new(
+                    server,
+                    std::sync::Arc::new(crate::PeerCounters::default()),
+                ),
+                Magic::BITCOIN,
+            );
             let result = run_connected_session(
                 &mut peer,
                 peer_addr,

@@ -73,6 +73,8 @@ pub struct Peer<S> {
     pub magic: Magic,
     /// Last remote version message.
     pub remote_version: Option<VersionMessage>,
+    /// Local Unix timestamp when the remote Version message was received.
+    pub version_received_time: Option<u64>,
     /// Whether a remote verack has been received.
     pub received_verack: bool,
     /// Local view of negotiated feature flags.
@@ -94,6 +96,7 @@ impl<S> Peer<S> {
             receiver,
             magic,
             remote_version: None,
+            version_received_time: None,
             received_verack: false,
             capabilities: PeerCapabilities::default(),
             compact_blocks: CompactBlockNegotiation::default(),
@@ -1037,6 +1040,9 @@ mod tests {
                 start_height: 0,
                 conn_time: 0,
                 inbound: false,
+                addr_bind: addr,
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
             },
         );
         assert!(controls.disconnect_node(&addr));
@@ -1119,6 +1125,9 @@ mod tests {
                 start_height: 1,
                 conn_time: 10,
                 inbound: false,
+                addr_bind: connected,
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
             },
         );
         controls

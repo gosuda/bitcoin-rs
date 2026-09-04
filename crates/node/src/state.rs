@@ -1,8 +1,8 @@
 //! Shared node state aggregating subsystem handles.
 //!
 //! V1 keeps this deliberately minimal: it owns the resolved [`NodeConfig`], the
-//! data-directory path, the open chainstate storage backend, and the replay log
-//! used by [`crate::crash_recovery`]. Subsystem wiring (chain / utxo / mempool
+//! data-directory path, and the open chainstate storage backend. Subsystem
+//! wiring (chain / utxo / mempool
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
 use arc_swap::ArcSwapOption;
@@ -349,6 +349,12 @@ pub enum ApplyError {
     /// not disconnect it, so the block must not be applied.
     #[error("undo persistence: {0}")]
     UndoPersistence(#[source] bitcoin_rs_storage::StorageError),
+    /// Journal durability or retention cannot recover within configured bounds.
+    ///
+    /// Refused before this block mutates chainstate; retry is safe after the
+    /// journal flushes or a checkpoint compacts retained segments.
+    #[error("chainstate journal backpressure stopped block apply: {0}")]
+    JournalBackpressure(String),
     /// A spent output had no resolved prevout, so the undo record would be
     /// unable to restore it.
     #[error("undo record cannot restore spent output {txid}:{vout}")]
@@ -676,6 +682,23 @@ impl NodeStorage {
         }
     }
 
+    fn journal_writer(
+        &self,
+        dir: cap_std::fs::Dir,
+        bootstrap: JournalBootstrap,
+    ) -> Result<crate::chainstate_journal::SharedJournalWriter> {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(feature = "fjall")]
+            Self::Fjall(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(feature = "redb")]
+            Self::Redb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+            #[cfg(feature = "mdbx")]
+            Self::Mdbx(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
+        }
+    }
+
     #[cfg(test)]
     fn stored_prune_body(
         &self,
@@ -729,6 +752,47 @@ impl NodeStorage {
             _ => match *self {},
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct JournalBootstrap {
+    open_existing: bool,
+    base_generation: u64,
+    height: u32,
+    block_hash: [u8; 32],
+    prev_hash: [u8; 32],
+    chain_tx_count: u64,
+    config: crate::config::ChainstateJournalConfig,
+}
+
+fn build_journal_writer<S: KvStore + 'static>(
+    dir: cap_std::fs::Dir,
+    store: Arc<S>,
+    bootstrap: JournalBootstrap,
+) -> Result<crate::chainstate_journal::SharedJournalWriter> {
+    let mut writer = if bootstrap.open_existing {
+        crate::chainstate_journal::JournalWriter::open(dir, store)?
+    } else {
+        crate::chainstate_journal::JournalWriter::initialize(
+            dir,
+            store,
+            bootstrap.base_generation,
+            (0, 0),
+            bootstrap.height,
+            bootstrap.block_hash,
+            bootstrap.prev_hash,
+            bootstrap.chain_tx_count,
+        )?
+    };
+    writer.configure(
+        bootstrap.config.blocks,
+        Duration::from_secs(bootstrap.config.seconds),
+        bootstrap.config.rotate_mib,
+        bootstrap.config.max_journal_mib,
+        bootstrap.config.max_lag_blocks,
+        Duration::from_secs(bootstrap.config.max_lag_seconds),
+    )?;
+    Ok(crate::chainstate_journal::shared_journal_writer(writer))
 }
 
 struct StoredBlockBodySource {
@@ -810,6 +874,262 @@ const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
 pub(crate) enum ResumeSource {
     Cold,
     Checkpoint,
+    Journal,
+}
+
+pub(crate) const CHAINSTATE_JOURNAL_DIR: &str = crate::chainstate_journal::JOURNAL_DIR_NAME;
+
+fn requires_full_revalidation(data_dir: &Path) -> bool {
+    data_dir
+        .join(CHAINSTATE_JOURNAL_DIR)
+        .join(crate::chainstate_journal::FULL_REVALIDATION_MARKER)
+        .is_file()
+}
+
+struct InitialChainstate {
+    utxo: UtxoSet,
+    coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    tree: bitcoin_rs_chain::BlockTree,
+    applied_tip: Option<TipSnapshot>,
+    chain_tx_count: u64,
+    resume_source: ResumeSource,
+    journal_bootstrap: Option<JournalBootstrap>,
+}
+
+fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
+    let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+    std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
+    crate::checkpoint_fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
+}
+
+fn open_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
+    let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
+    std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
+    crate::checkpoint_fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
+}
+
+fn checkpoint_bootstrap(
+    restored: &crate::checkpoint::RestoredChainstate,
+    config: crate::config::ChainstateJournalConfig,
+    open_existing: bool,
+) -> Result<JournalBootstrap> {
+    let node = restored.tree.node(restored.applied_tip.tip_id)?;
+    let prev_hash = match node.parent {
+        Some(parent) => restored.tree.node(parent)?.hash.to_le_bytes(),
+        None => [0_u8; 32],
+    };
+    Ok(JournalBootstrap {
+        open_existing,
+        base_generation: restored.generation,
+        height: restored.applied_tip.height,
+        block_hash: restored.applied_tip.hash.to_le_bytes(),
+        prev_hash,
+        chain_tx_count: restored.chain_tx_count,
+        config,
+    })
+}
+
+fn restored_initial(
+    restored: crate::checkpoint::RestoredChainstate,
+    config: crate::config::ChainstateJournalConfig,
+    open_existing: bool,
+    resume_source: ResumeSource,
+) -> Result<InitialChainstate> {
+    let journal_bootstrap = config
+        .enabled
+        .then(|| checkpoint_bootstrap(&restored, config, open_existing))
+        .transpose()?;
+    Ok(InitialChainstate {
+        utxo: restored.utxo,
+        coin_stats: restored.coin_stats,
+        tree: restored.tree,
+        applied_tip: Some(restored.applied_tip),
+        chain_tx_count: restored.chain_tx_count,
+        resume_source,
+        journal_bootstrap,
+    })
+}
+
+fn cold_initial_chainstate(
+    config: &NodeConfig,
+    journal_config: crate::config::ChainstateJournalConfig,
+    reset_journal: bool,
+) -> Result<InitialChainstate> {
+    if journal_config.enabled && reset_journal {
+        drop(reset_journal_dir(&config.data_dir)?);
+    }
+    Ok(InitialChainstate {
+        utxo: UtxoSet::new(),
+        coin_stats: bitcoin_rs_utxo::stats::CoinStats::default(),
+        tree: bitcoin_rs_chain::BlockTree::new(),
+        applied_tip: None,
+        chain_tx_count: 0,
+        resume_source: ResumeSource::Cold,
+        journal_bootstrap: journal_config.enabled.then_some(JournalBootstrap {
+            open_existing: false,
+            base_generation: 0,
+            height: 0,
+            block_hash: config.network.genesis_block_hash().to_le_bytes(),
+            prev_hash: [0_u8; 32],
+            chain_tx_count: 1,
+            config: journal_config,
+        }),
+    })
+}
+
+fn prepare_initial_chainstate(
+    checkpoint_load: crate::checkpoint::CheckpointLoad,
+    checkpoint_data_dir: &cap_std::fs::Dir,
+    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    config: &NodeConfig,
+) -> Result<InitialChainstate> {
+    let journal_config = config.chainstate_journal;
+    if requires_full_revalidation(&config.data_dir) {
+        metrics::counter!(
+            "node.chainstate_journal.fallback_total",
+            "reason" => "full_revalidation_marker"
+        )
+        .increment(1);
+        tracing::warn!(
+            restore_source = "cold",
+            reason = "fork_below_checkpoint_base",
+            "chainstate restore requires full validation"
+        );
+        return cold_initial_chainstate(config, journal_config, false);
+    }
+    let crate::checkpoint::CheckpointLoad::Complete(restored) = checkpoint_load else {
+        if journal_config.enabled {
+            metrics::counter!(
+                "node.chainstate_journal.fallback_total",
+                "reason" => "no_checkpoint"
+            )
+            .increment(1);
+        }
+        tracing::info!(
+            restore_source = "cold",
+            reason = "no_complete_checkpoint",
+            "chainstate restore selected"
+        );
+        return cold_initial_chainstate(config, journal_config, true);
+    };
+    let restored = *restored;
+    if !journal_config.enabled {
+        tracing::info!(
+            restore_source = "checkpoint",
+            height = restored.applied_tip.height,
+            hash = %restored.applied_tip.hash,
+            chain_tx_count = restored.chain_tx_count,
+            reason = "journal_disabled",
+            "chainstate restore selected"
+        );
+        return restored_initial(restored, journal_config, false, ResumeSource::Checkpoint);
+    }
+
+    replay_checkpoint_journal(
+        restored,
+        checkpoint_data_dir,
+        checkpoint_config,
+        config,
+        journal_config,
+    )
+}
+
+fn replay_checkpoint_journal(
+    restored: crate::checkpoint::RestoredChainstate,
+    checkpoint_data_dir: &cap_std::fs::Dir,
+    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    config: &NodeConfig,
+    journal_config: crate::config::ChainstateJournalConfig,
+) -> Result<InitialChainstate> {
+    let base_generation = restored.generation;
+    let base_height = restored.applied_tip.height;
+    let journal_dir = open_journal_dir(&config.data_dir)?;
+    let replay_started = std::time::Instant::now();
+    let replay = crate::chainstate_journal::replay_from_journal(
+        &journal_dir,
+        base_generation,
+        restored.tree,
+        restored.utxo,
+        restored.coin_stats,
+        restored.applied_tip,
+        restored.chain_tx_count,
+    );
+    let replay_seconds = replay_started.elapsed().as_secs_f64();
+    metrics::histogram!("node.chainstate_journal.replay_seconds").record(replay_seconds);
+    drop(journal_dir);
+    match replay {
+        crate::chainstate_journal::ReplayOutcome::Replayed(replayed) => {
+            let replayed_records = replayed.applied_tip.height.saturating_sub(base_height);
+            let (restore_source, resume_source) = if replayed_records == 0 {
+                ("checkpoint", ResumeSource::Checkpoint)
+            } else {
+                ("journal", ResumeSource::Journal)
+            };
+            tracing::info!(
+                restore_source,
+                checkpoint_generation = base_generation,
+                checkpoint_height = base_height,
+                height = replayed.applied_tip.height,
+                hash = %replayed.applied_tip.hash,
+                replayed_records,
+                chain_tx_count = replayed.chain_tx_count,
+                replay_seconds,
+                "chainstate restore selected"
+            );
+            let bootstrap = JournalBootstrap {
+                open_existing: true,
+                base_generation,
+                height: replayed.applied_tip.height,
+                block_hash: replayed.applied_tip.hash.to_le_bytes(),
+                prev_hash: [0_u8; 32],
+                chain_tx_count: replayed.chain_tx_count,
+                config: journal_config,
+            };
+            Ok(InitialChainstate {
+                utxo: replayed.utxo,
+                coin_stats: replayed.coin_stats,
+                tree: replayed.tree,
+                applied_tip: Some(replayed.applied_tip),
+                chain_tx_count: replayed.chain_tx_count,
+                resume_source,
+                journal_bootstrap: Some(bootstrap),
+            })
+        }
+        crate::chainstate_journal::ReplayOutcome::Fallback(error) => {
+            let reason = error.reason();
+            metrics::counter!(
+                "node.chainstate_journal.fallback_total",
+                "reason" => reason
+            )
+            .increment(1);
+            if error.is_checksum_failure() {
+                metrics::counter!("node.chainstate_journal.checksum_failures_total").increment(1);
+            }
+            tracing::warn!(
+                restore_source = "checkpoint",
+                checkpoint_generation = base_generation,
+                checkpoint_height = base_height,
+                reason,
+                %error,
+                replay_seconds,
+                "chainstate journal rejected; checkpoint recovery selected"
+            );
+            drop(reset_journal_dir(&config.data_dir)?);
+            let reloaded = crate::checkpoint::load_checkpoint_from_dir(
+                checkpoint_data_dir,
+                checkpoint_config,
+            )?;
+            let crate::checkpoint::CheckpointLoad::Complete(reloaded) = reloaded else {
+                bail!("checkpoint disappeared while recovering from journal fallback");
+            };
+            restored_initial(*reloaded, journal_config, false, ResumeSource::Checkpoint)
+        }
+    }
 }
 
 fn load_pruneheight<S: KvStore>(store: &S) -> Result<Option<u32>> {
@@ -1057,6 +1377,7 @@ struct TxIndexSpawn {
     block_source: crate::NodeBlockSource,
     body_source: Arc<dyn BlockBodySource>,
     wake_rx: Receiver<()>,
+    recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
 }
 
 /// Aggregate handle to a running node.
@@ -1068,7 +1389,6 @@ pub struct NodeState {
     durable_tip_height: Arc<AtomicU32>,
     config: NodeConfig,
     data_dir: PathBuf,
-    checkpoint_data_dir: cap_std::fs::Dir,
     #[cfg(test)]
     resume_source: ResumeSource,
     storage: NodeStorage,
@@ -1114,7 +1434,6 @@ pub struct NodeState {
     chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
     apply_handles: crate::apply::ApplyHandles,
     sync: Arc<crate::BlockSync>,
-    replayed: Mutex<Vec<u32>>,
     /// Process-wide rollback-evidence warning snapshot (`ArcSwap`).
     warning_store: Arc<crate::recovery_evidence::WarningStore>,
 }
@@ -1171,86 +1490,90 @@ impl NodeState {
             .load_disconnect_marker()
             .map_err(anyhow::Error::new)?
         {
-            // Names directories rather than a `-reindex` option, because this
-            // node has no reindex. An instruction the operator cannot follow is
-            // worse than none.
-            //
-            // Remove the authoritative views. The marker covers a disconnect
-            // that did not reach a clean UTXO-and-tip checkpoint. TxIndex rows
-            // are derived state outside this marker, but a retained TxIndex
-            // watermark can stall rollback because wiping the chainstate
-            // removes the body positions the index refers to. Include the txindex
-            // path so the operator action is complete.
-            bail!(
-                "refusing to start: a disconnect of block {hash} at height {height} did not \
-                 reach a clean checkpoint, so the UTXO set and chain tip cannot be trusted \
-                 together. The node cannot repair this in place. Remove or quarantine \
-                 {chainstate}, {checkpoints}, and {txindex}, then resync.",
-                hash = marker.hash,
-                height = marker.height,
-                chainstate = config.data_dir.join("chainstate").display(),
-                checkpoints = config.data_dir.join("chainstate-checkpoints").display(),
-                txindex = config.data_dir.join("txindex").display(),
-            );
+            let force_full_revalidation = requires_full_revalidation(&config.data_dir);
+            if marker.phase == crate::apply::DisconnectPhase::RolledBack && force_full_revalidation
+            {
+                undo_store.disarm_disconnect().map_err(anyhow::Error::new)?;
+                tracing::warn!(
+                    height = marker.height,
+                    hash = %marker.hash,
+                    "accepting completed deep reorg; full chain validation is required"
+                );
+            } else {
+                // Names directories rather than a `-reindex` option, because this
+                // node has no reindex. An instruction the operator cannot follow is
+                // worse than none.
+                //
+                // Remove the authoritative views. The marker covers a disconnect
+                // that did not reach a clean UTXO-and-tip checkpoint. TxIndex rows
+                // are derived state outside this marker, but a retained TxIndex
+                // watermark can stall rollback because wiping the chainstate
+                // removes the body positions the index refers to. Include the txindex
+                // path so the operator action is complete.
+                bail!(
+                    "refusing to start: a disconnect of block {hash} at height {height} did not \
+                     reach a clean checkpoint, so the UTXO set and chain tip cannot be trusted \
+                     together. The node cannot repair this in place. Remove or quarantine \
+                     {chainstate}, {checkpoints}, and {txindex}, then resync.",
+                    hash = marker.hash,
+                    height = marker.height,
+                    chainstate = config.data_dir.join("chainstate").display(),
+                    checkpoints = config.data_dir.join("chainstate-checkpoints").display(),
+                    txindex = config.data_dir.join("txindex").display(),
+                );
+            }
         }
         let block_files =
             Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
         let block_body_store = storage.block_body_store(Arc::clone(&block_files));
 
-        let zmq_publications = config.zmq_publications();
-        let active_zmq_notifications: Vec<_> = zmq_publications
+        let zmq_endpoints = config.zmq_endpoints();
+        let active_zmq_notifications: Vec<_> = zmq_endpoints
             .iter()
-            .map(|publication| {
-                ZmqNotification::new(
-                    publication.topic.notifier_type(),
-                    publication.endpoint.clone(),
-                    publication.hwm,
-                )
+            .flat_map(|endpoint| {
+                endpoint.topics.iter().map(|topic| {
+                    ZmqNotification::new(
+                        topic.notifier_type(),
+                        endpoint.endpoint.clone(),
+                        endpoint.effective_hwm(),
+                    )
+                })
             })
             .collect();
         #[cfg(feature = "zmq")]
-        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_publications.is_empty() {
+        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_endpoints.is_empty() {
             Arc::new(crate::NoOpZmqPublisher)
         } else {
-            Arc::new(crate::SocketZmqPublisher::bind(&zmq_publications)?)
+            Arc::new(crate::SocketZmqPublisher::bind(zmq_endpoints)?)
         };
         #[cfg(not(feature = "zmq"))]
         let zmq_publisher: Arc<dyn crate::ZmqPublisher> = {
-            let _ = &zmq_publications;
+            let _ = &zmq_endpoints;
             Arc::new(crate::NoOpZmqPublisher)
         };
-        let (
-            utxo_set,
-            initial_coin_stats,
-            block_tree_value,
-            restored_applied_tip,
-            restored_chain_tx_count,
+        let InitialChainstate {
+            utxo: mut utxo_set,
+            coin_stats: initial_coin_stats,
+            tree: block_tree_value,
+            applied_tip: restored_applied_tip,
+            chain_tx_count: restored_chain_tx_count,
             resume_source,
-        ) = match checkpoint_load {
-            crate::checkpoint::CheckpointLoad::Cold => (
-                bitcoin_rs_utxo::UtxoSet::new(),
-                bitcoin_rs_utxo::stats::CoinStats::default(),
-                bitcoin_rs_chain::BlockTree::new(),
-                None,
-                0,
-                ResumeSource::Cold,
-            ),
-            crate::checkpoint::CheckpointLoad::Complete(restored) => {
-                tracing::info!(
-                    height = restored.applied_tip.height,
-                    hash = %restored.applied_tip.hash,
-                    "restored chainstate checkpoint"
-                );
-                (
-                    restored.utxo,
-                    restored.coin_stats,
-                    restored.tree,
-                    Some(restored.applied_tip),
-                    restored.chain_tx_count,
-                    ResumeSource::Checkpoint,
-                )
-            }
-        };
+            journal_bootstrap,
+        } = prepare_initial_chainstate(
+            checkpoint_load,
+            &checkpoint_data_dir,
+            checkpoint_config,
+            &config,
+        )?;
+        if resume_source == ResumeSource::Checkpoint {
+            tracing::info!(
+                height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height),
+                hash = %restored_applied_tip
+                    .as_ref()
+                    .map_or_else(|| config.network.genesis_block_hash(), |tip| tip.hash),
+                "restored chainstate checkpoint"
+            );
+        }
         // A2: Create the process-wide rollback-evidence warning store before
         // any detection or worker spawn. One ArcSwap holds the complete
         // immutable snapshot; getblockchaininfo loads one per request.
@@ -1261,6 +1584,16 @@ impl NodeState {
         // valid format/bounds, matching genesis, older writer epoch, and
         // strictly greater witness height than the restored tip.
         let genesis_hex = config.network.genesis_block_hash().to_string_be();
+        // One reporter routes every rollback fact of this process — the
+        // checkpoint fallback detected here and the index-ahead rewinds the
+        // txindex worker detects later — through the same warning store and
+        // event marker.
+        let recovery_reporter = Arc::new(crate::recovery_evidence::RecoveryReporter::new(
+            Arc::clone(&warning_store),
+            config.data_dir.clone(),
+            genesis_hex.clone(),
+            epoch,
+        ));
         let restored_height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height);
         let restored_hash = restored_applied_tip
             .as_ref()
@@ -1275,17 +1608,12 @@ impl NodeState {
                 &genesis_hex,
                 restored_height,
             ) {
-                let reporter = crate::recovery_evidence::RecoveryReporter::new(
-                    Arc::clone(&warning_store),
-                    config.data_dir.clone(),
-                    genesis_hex.clone(),
-                    epoch,
-                );
                 let source = match resume_source {
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
+                    ResumeSource::Journal => "journal",
                 };
-                reporter
+                recovery_reporter
                     .report_checkpoint_fallback(
                         witness_height,
                         restored_height,
@@ -1305,10 +1633,9 @@ impl NodeState {
                         gap,
                         threshold = STALE_RESTORE_ERROR_THRESHOLD,
                         "stale checkpoint restore: chainstate is {gap} blocks behind \
-                         the last durable applied-tip witness — the node is proceeding \
-                         with a valid but far-behind tip; crash recovery will replay \
-                         the gap from stored bodies when present, otherwise the sync \
-                         layer must re-fetch it"
+                         the last durable applied-tip witness — no committed journal \
+                         suffix covers the gap, so the node is proceeding with a valid \
+                         but far-behind tip and the sync layer must re-fetch it"
                     );
                 }
             }
@@ -1326,6 +1653,13 @@ impl NodeState {
         };
         let coin_stats_listener =
             bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
+        utxo_set.set_listener(Box::new(coin_stats_listener.clone()));
+        let journal = match journal_bootstrap {
+            Some(bootstrap) => {
+                Some(storage.journal_writer(open_journal_dir(&config.data_dir)?, bootstrap)?)
+            }
+            None => None,
+        };
         let utxo = Arc::new(utxo_set);
         let coin_stats = Arc::new(coin_stats_listener);
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
@@ -1371,6 +1705,7 @@ impl NodeState {
                             block_source,
                             body_source,
                             wake_rx,
+                            recovery_reporter: Arc::clone(&recovery_reporter),
                         }),
                         Some(lifecycle),
                         Some(adapter),
@@ -1380,11 +1715,7 @@ impl NodeState {
             };
         let capabilities = Arc::new(crate::capabilities::NodeCapabilities::new(
             crate::capabilities::CapabilityInputs {
-                applied_tip: Arc::clone(&applied_tip),
-                tx_query: tx_index_adapter.as_ref().map(|adapter| {
-                    let query: Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery> = adapter.clone();
-                    query
-                }),
+                tx_lifecycle: tx_index_lifecycle.clone(),
                 tx_runtime: tx_index_runtime.clone(),
                 txindex_enabled: crate::capabilities::txindex_enabled(&config),
             },
@@ -1462,7 +1793,7 @@ impl NodeState {
                 config.network,
                 config.assume_valid_height,
             )),
-            recovery_meta_path: Some(config.data_dir.join(crate::crash_recovery::META_FILENAME)),
+            journal,
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
         let sync = Arc::new(crate::BlockSync::new(
@@ -1501,7 +1832,6 @@ impl NodeState {
             durable_tip_height,
             config,
             data_dir,
-            checkpoint_data_dir,
             #[cfg(test)]
             resume_source,
             storage,
@@ -1540,7 +1870,6 @@ impl NodeState {
             chain_event_hints_rx,
             apply_handles,
             sync,
-            replayed: Mutex::new(Vec::new()),
             warning_store,
         })
     }
@@ -1570,10 +1899,10 @@ impl NodeState {
     /// internal to the crate.
     pub fn publish_checkpoint(&self) -> Result<u64> {
         match self.write_clean_checkpoint()? {
-            crate::checkpoint::CheckpointWrite::Published { generation } => Ok(generation),
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
                 bail!("checkpoint refused: no applied tip to publish")
             }
+            crate::checkpoint::CheckpointWrite::Published { generation } => Ok(generation),
         }
     }
 
@@ -1602,6 +1931,7 @@ impl NodeState {
             utxo: Arc::clone(&self.utxo),
             coin_stats: Arc::clone(&self.coin_stats),
             chain_tx_count: Arc::clone(&self.chain_tx_count),
+            journal: self.apply_handles.journal.clone(),
             data_dir: self.data_dir.clone(),
             chain_events: Arc::clone(&self.chain_events),
             durable_tip_height: Arc::clone(&self.durable_tip_height),
@@ -1635,64 +1965,7 @@ impl NodeState {
         &self,
     ) -> core::result::Result<crate::checkpoint::CheckpointWrite, crate::checkpoint::CheckpointError>
     {
-        let _exclusive_apply = self.apply_handles.admission.close();
-        if let Some(marker) = self.apply_handles.undo_store.load_disconnect_marker()?
-            && marker.phase == crate::apply::DisconnectPhase::InFlight
-        {
-            return Err(crate::checkpoint::CheckpointError::DisconnectInFlight {
-                hash: marker.hash,
-                height: marker.height,
-            });
-        }
-        // A checkpoint may name this tip only after body files then index rows sync.
-        self.block_body_store.sync()?;
-        let applied_tip = self.applied_tip.load_full();
-        let written = crate::checkpoint::write_checkpoint_from_dir(
-            &self.checkpoint_data_dir,
-            crate::checkpoint::HeaderCheckpointConfig {
-                network: self.config.network,
-                genesis: self.config.network.genesis_block_hash(),
-            },
-            &self.block_tree,
-            &self.utxo,
-            &self.coin_stats,
-            applied_tip.as_deref(),
-            self.chain_tx_count
-                .load(core::sync::atomic::Ordering::Relaxed),
-        )?;
-        // A2: Only after `CheckpointWrite::Published` and root fsync, write
-        // the applied-tip witness for the same captured tip. A witness failure
-        // is not swallowed: return a typed checkpoint error.
-        if let crate::checkpoint::CheckpointWrite::Published { .. } = written {
-            if let Some(tip) = applied_tip.as_ref() {
-                let genesis_hex = self.config.network.genesis_block_hash().to_string_be();
-                let witness = crate::recovery_evidence::AppliedTipWitness::new(
-                    genesis_hex,
-                    self.chain_events.epoch(),
-                    tip.height,
-                    tip.hash.to_string_be(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_secs()),
-                );
-                crate::recovery_evidence::write_witness(&self.data_dir, &witness)
-                    .map_err(|e| crate::checkpoint::CheckpointError::Invalid(e.to_string()))?;
-            }
-        }
-        // Remove the marker only after this checkpoint publishes the matching
-        // UTXO set and applied tip. TxIndex is outside the authoritative
-        // disconnect transaction and recovers from its own atomic capability watermarks.
-        self.apply_handles
-            .undo_store
-            .disarm_disconnect()
-            .map_err(crate::checkpoint::CheckpointError::from)?;
-        // Everything up to this tip is now recoverable, so undo records below it
-        // may be pruned. Published after the write, never before.
-        self.durable_tip_height.store(
-            applied_tip.as_ref().map_or(0, |tip| tip.height),
-            Ordering::Release,
-        );
-        Ok(written)
+        self.checkpoint_publisher()?.publish()
     }
 
     /// Returns the configured storage backend that was opened.
@@ -1775,6 +2048,7 @@ impl NodeState {
             spawn.block_source,
             Some(spawn.body_source),
             Arc::clone(&self.chain_events),
+            spawn.recovery_reporter,
             Arc::clone(&self.apply_handles.shutdown),
             spawn.wake_rx,
         )
@@ -1985,30 +2259,6 @@ impl NodeState {
         Arc::clone(&self.sync)
     }
 
-    /// Heights walked by the most recent crash-recovery replay.
-    #[must_use]
-    pub fn replayed_heights(&self) -> Vec<u32> {
-        self.replayed.lock().clone()
-    }
-
-    /// Records a height in the in-memory replay log.
-    pub(crate) fn push_replayed(&self, height: u32) {
-        self.replayed.lock().push(height);
-    }
-
-    /// Test helper: writes the recovery metadata as if a block at `height`
-    /// had just been fully committed. Real block commits flow through the
-    /// `crates/utxo` listener; this helper exists so crash-recovery tests
-    /// can simulate a chain without bringing up the full subsystem stack.
-    pub fn record_synthetic_block_for_recovery(&self, height: u32) -> Result<()> {
-        let meta = crate::crash_recovery::Meta {
-            height,
-            last_committed_height: height,
-            tip_hash_hex: None,
-        };
-        crate::crash_recovery::write_meta(self, &meta)
-    }
-
     /// Returns the process-wide shutdown signal shared by all runtime workers.
     #[must_use]
     pub fn shutdown(&self) -> Arc<AtomicBool> {
@@ -2121,6 +2371,21 @@ mod tests {
             chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
             hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&hash),
         })));
+    }
+
+    #[test]
+    fn full_revalidation_marker_is_sticky_when_journal_is_disabled() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.chainstate_journal.enabled = false;
+        let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
+        let marker = journal_dir.join(crate::chainstate_journal::FULL_REVALIDATION_MARKER);
+        std::fs::create_dir_all(&journal_dir)?;
+        std::fs::write(&marker, b"force full validation\n")?;
+
+        assert!(requires_full_revalidation(&config.data_dir));
+        Ok(())
     }
 
     #[test]
@@ -2483,14 +2748,24 @@ mod tests {
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
-        config.zmqpubhashblock = vec!["inproc://state-zmq-pubhashblock".to_owned()];
-        config.zmqpubhashtx = vec!["inproc://state-zmq-pubhashtx".to_owned()];
-        config.zmqpubrawblock = vec!["inproc://state-zmq-pubrawblock".to_owned()];
-        config.zmqpubrawtx = vec!["inproc://state-zmq-pubrawtx".to_owned()];
-        config.zmqpubhashblockhwm = Some(17);
-        config.zmqpubhashtxhwm = Some(18);
-        config.zmqpubrawblockhwm = Some(19);
-        config.zmqpubrawtxhwm = Some(20);
+        config.notifications.zmq = vec![
+            crate::zmq_publisher::ZmqEndpointConfig {
+                endpoint: "inproc://state-zmq-block".to_owned(),
+                topics: vec![
+                    crate::zmq_publisher::ZmqTopic::HashBlock,
+                    crate::zmq_publisher::ZmqTopic::RawBlock,
+                ],
+                hwm: Some(17),
+            },
+            crate::zmq_publisher::ZmqEndpointConfig {
+                endpoint: "inproc://state-zmq-tx".to_owned(),
+                topics: vec![
+                    crate::zmq_publisher::ZmqTopic::HashTx,
+                    crate::zmq_publisher::ZmqTopic::RawTx,
+                ],
+                hwm: Some(20),
+            },
+        ];
         let state = NodeState::open(config, None)?;
 
         let notifications = state.active_zmq_notifications();
@@ -2504,9 +2779,9 @@ mod tests {
             .collect();
         assert_eq!(
             notification_types,
-            ["pubhashblock", "pubhashtx", "pubrawblock", "pubrawtx"]
+            ["pubhashblock", "pubrawblock", "pubhashtx", "pubrawtx"]
         );
-        assert_eq!(hwms, [17, 18, 19, 20]);
+        assert_eq!(hwms, [17, 17, 20, 20]);
         Ok(())
     }
 
@@ -3512,9 +3787,9 @@ mod tests {
             bitcoin_rs_utxo::stats::scan_coin_stats(view, next_tip.height, true)
         })?;
         rescanned.tx_count = listener_after_apply.tx_count;
-        assert_ne!(
+        assert_eq!(
             listener_after_apply.total_amount, rescanned.total_amount,
-            "default resume must not receive rolling UTXO notifications"
+            "checkpoint resume must keep rolling CoinStats attached to UTXO commits"
         );
         resumed.write_clean_checkpoint()?;
 
@@ -3595,12 +3870,60 @@ mod tests {
             bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
         })?;
         scanned.tx_count = rolling.tx_count;
-        // Rolling per-coin accumulation is off by design (89f1dac5): the live
-        // listener tracks height and tx count only, and totals come from the
-        // on-demand scan. This mirrors clean_checkpoint's assertion below.
-        assert_ne!(
+        // The listener is attached only after checkpoint/journal restoration,
+        // then tracks subsequent live UTXO mutations without double-counting
+        // the restored snapshot.
+        assert_eq!(
             rolling.total_amount, scanned.total_amount,
-            "default resume must not receive rolling UTXO notifications"
+            "restored state must receive subsequent rolling UTXO notifications"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
+        fn stable_hash(
+            view: &bitcoin_rs_utxo::UtxoSetView<'_>,
+        ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+            view.hash_serialized_3()
+        }
+
+        let dir = tempfile::tempdir()?;
+        let data_dir = dir.path().join("journal-resume");
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = data_dir;
+        config.p2p_listen.clear();
+        config.chainstate_journal.blocks = 1;
+
+        let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+        let first = NodeState::open(config.clone(), None)?;
+        first.apply_block(&genesis)?;
+        first.write_clean_checkpoint()?;
+        drop(first);
+
+        // The first reopen discards the pre-checkpoint journal generation and
+        // initializes one whose authenticated base is the published checkpoint.
+        let base = NodeState::open(config.clone(), None)?;
+        assert_eq!(base.resume_source(), ResumeSource::Checkpoint);
+        let child = mined_regtest_child(genesis.block_hash())?;
+        let expected_tip = base.apply_block(&child)?;
+        let expected_utxo = base.utxo().with_stable_view(stable_hash)?;
+        let expected_stats = base.coin_stats().snapshot();
+        let expected_tx_count = base.chain_tx_count_handle().load(Ordering::Relaxed);
+        drop(base);
+
+        let resumed = NodeState::open(config, None)?;
+        assert_eq!(resumed.resume_source(), ResumeSource::Journal);
+        let resumed_tip = resumed
+            .applied_tip()
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("journal replay did not publish a tip"))?;
+        assert_eq!(resumed_tip.as_ref(), &expected_tip);
+        assert_eq!(resumed.utxo().with_stable_view(stable_hash)?, expected_utxo);
+        assert_eq!(resumed.coin_stats().snapshot(), expected_stats);
+        assert_eq!(
+            resumed.chain_tx_count_handle().load(Ordering::Relaxed),
+            expected_tx_count
         );
         Ok(())
     }
@@ -4120,7 +4443,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn non_regular_epoch_lock_refuses_start() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

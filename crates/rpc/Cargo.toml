@@ -43,5 +43,6 @@ corepc-types.workspace = true
 bitcoin-rs-node = { workspace = true, features = ["fjall"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
+toml.workspace = true
 tempfile = ">=3.20.0, <4"
 rustix.workspace = true

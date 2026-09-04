@@ -5,21 +5,24 @@
 //! small trait so notification failures cannot affect block connection.
 
 #[cfg(feature = "zmq")]
-use crate::config::ZmqPublication;
-#[cfg(feature = "zmq")]
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(not(feature = "zmq"))]
+use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
 #[cfg(feature = "zmq")]
 use core::fmt;
 #[cfg(feature = "zmq")]
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 #[cfg(feature = "zmq")]
 use parking_lot::Mutex;
+use serde::Deserialize;
+use std::collections::HashSet as StdHashSet;
 #[cfg(feature = "zmq")]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// ZMQ PUB notification topic.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash)]
+#[serde(rename_all = "lowercase")]
 pub enum ZmqTopic {
     /// Block hash notification.
     HashBlock,
@@ -31,6 +34,67 @@ pub enum ZmqTopic {
     RawTx,
     /// Block sequence notification.
     Sequence,
+}
+
+/// Default outbound queue limit for one ZMQ PUB endpoint.
+pub const DEFAULT_ZMQ_HWM: u32 = 1_000;
+
+/// Configuration for one ZMQ PUB socket.
+///
+/// Topics sharing an endpoint necessarily share its socket-level HWM.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ZmqEndpointConfig {
+    /// ZMQ endpoint to bind.
+    pub endpoint: String,
+    /// Notification topics published through this endpoint.
+    pub topics: Vec<ZmqTopic>,
+    /// Optional override for the publisher-owned queue limit.
+    #[serde(default)]
+    pub hwm: Option<u32>,
+}
+
+impl ZmqEndpointConfig {
+    /// Returns the socket HWM after applying the publisher default.
+    #[must_use]
+    pub fn effective_hwm(&self) -> u32 {
+        self.hwm.unwrap_or(DEFAULT_ZMQ_HWM)
+    }
+}
+
+/// Validates grouped ZMQ configuration before it reaches a runtime boundary.
+pub fn validate_endpoint_configs(configs: &[ZmqEndpointConfig]) -> Result<()> {
+    let mut endpoints = StdHashSet::new();
+    for config in configs {
+        ensure!(
+            !config.endpoint.trim().is_empty(),
+            "ZMQ endpoint must not be empty"
+        );
+        ensure!(
+            !config.topics.is_empty(),
+            "ZMQ endpoint {} must have at least one topic",
+            config.endpoint
+        );
+        ensure!(
+            endpoints.insert(&config.endpoint),
+            "duplicate ZMQ endpoint: {}",
+            config.endpoint
+        );
+        ensure!(
+            i32::try_from(config.effective_hwm()).is_ok(),
+            "ZMQ HWM exceeds libzmq's signed SNDHWM range: {}",
+            config.effective_hwm()
+        );
+        let mut topics = StdHashSet::new();
+        for topic in &config.topics {
+            ensure!(
+                topics.insert(topic),
+                "duplicate ZMQ topic on endpoint: {}",
+                config.endpoint
+            );
+        }
+    }
+    Ok(())
 }
 
 impl ZmqTopic {
@@ -291,16 +355,32 @@ impl fmt::Debug for SocketZmqPublisher {
 
 #[cfg(feature = "zmq")]
 impl SocketZmqPublisher {
-    /// Binds one PUB socket per unique endpoint in `publications`.
+    /// Binds one PUB socket per endpoint group.
     ///
-    /// Exact `(topic, endpoint)` pairs are recorded once so layered duplicate
-    /// config cannot double-publish or double-report the same notifier, while
-    /// distinct topics sharing an endpoint remain separate.
-    pub fn bind(publications: &[ZmqPublication]) -> Result<Self> {
+    /// Duplicate endpoint groups are rejected because one endpoint identifies
+    /// one owned socket and one HWM. Duplicate topics inside a group are
+    /// recorded once.
+    pub fn bind(endpoint_configs: &[ZmqEndpointConfig]) -> Result<Self> {
+        let deduped_configs: Vec<ZmqEndpointConfig> = endpoint_configs
+            .iter()
+            .map(|config| {
+                let mut seen = StdHashSet::new();
+                ZmqEndpointConfig {
+                    endpoint: config.endpoint.clone(),
+                    topics: config
+                        .topics
+                        .iter()
+                        .filter(|&&topic| seen.insert(topic))
+                        .copied()
+                        .collect(),
+                    hwm: config.hwm,
+                }
+            })
+            .collect();
+        validate_endpoint_configs(&deduped_configs)?;
         let context = zmq::Context::new();
         let mut endpoints = Vec::new();
-        let mut endpoint_indices = HashMap::<String, usize>::new();
-        let mut endpoint_hwms = HashMap::<String, u32>::new();
+        let mut bound_endpoints = HashSet::<String>::new();
         let mut hashblock_endpoints = Vec::new();
         let mut hashtx_endpoints = Vec::new();
         let mut rawblock_endpoints = Vec::new();
@@ -309,69 +389,49 @@ impl SocketZmqPublisher {
         let mut notifiers = Vec::new();
         let mut seen_notifiers = HashSet::<(ZmqTopic, String)>::new();
 
-        for publication in publications {
-            if let Some(existing_hwm) = endpoint_hwms.get(&publication.endpoint) {
-                if *existing_hwm != publication.hwm {
-                    bail!(
-                        "conflicting ZMQ HWM for endpoint {}: {} vs {}",
-                        publication.endpoint,
-                        existing_hwm,
-                        publication.hwm
-                    );
-                }
-            } else {
-                endpoint_hwms.insert(publication.endpoint.clone(), publication.hwm);
+        for endpoint_config in &deduped_configs {
+            if !bound_endpoints.insert(endpoint_config.endpoint.clone()) {
+                bail!("duplicate ZMQ endpoint {}", endpoint_config.endpoint);
             }
-
-            let endpoint_index = if let Some(index) = endpoint_indices.get(&publication.endpoint) {
-                *index
-            } else {
-                let socket = context.socket(zmq::PUB).context("create ZMQ PUB socket")?;
-                let hwm = i32::try_from(publication.hwm).context("ZMQ HWM exceeds i32")?;
-                socket.set_sndhwm(hwm).with_context(|| {
-                    format!("set ZMQ SNDHWM for endpoint {}", publication.endpoint)
+            let hwm = endpoint_config.effective_hwm();
+            let socket = context.socket(zmq::PUB).context("create ZMQ PUB socket")?;
+            socket
+                .set_sndhwm(i32::try_from(hwm).context("ZMQ HWM exceeds i32")?)
+                .with_context(|| {
+                    format!("set ZMQ SNDHWM for endpoint {}", endpoint_config.endpoint)
                 })?;
-                socket.set_linger(0).with_context(|| {
-                    format!("set ZMQ LINGER for endpoint {}", publication.endpoint)
+            socket.set_linger(0).with_context(|| {
+                format!("set ZMQ LINGER for endpoint {}", endpoint_config.endpoint)
+            })?;
+            if is_ipv6_tcp_endpoint(&endpoint_config.endpoint) {
+                socket.set_ipv6(true).with_context(|| {
+                    format!("set ZMQ IPv6 for endpoint {}", endpoint_config.endpoint)
                 })?;
-                if is_ipv6_tcp_endpoint(&publication.endpoint) {
-                    socket.set_ipv6(true).with_context(|| {
-                        format!("set ZMQ IPv6 for endpoint {}", publication.endpoint)
-                    })?;
-                }
-                socket
-                    .bind(&publication.endpoint)
-                    .with_context(|| format!("bind ZMQ PUB endpoint {}", publication.endpoint))?;
-                let index = endpoints.len();
-                endpoints.push(EndpointSocket {
-                    endpoint: publication.endpoint.clone(),
-                    socket: Mutex::new(socket),
-                });
-                endpoint_indices.insert(publication.endpoint.clone(), index);
-                index
-            };
-
-            // Recorded in publication order so enumeration mirrors Core's
-            // notifier creation order; the facts are read live from the bound
-            // publisher, never from pre-bind configuration elsewhere.
-            // Exact `(topic, endpoint)` duplicates are skipped so layered
-            // config cannot invent a second identical notifier or publish path.
-            if !seen_notifiers.insert((publication.topic, publication.endpoint.clone())) {
-                continue;
             }
-
-            notifiers.push(ZmqNotifier {
-                topic: publication.topic,
-                endpoint: publication.endpoint.clone(),
-                hwm: publication.hwm,
+            socket
+                .bind(&endpoint_config.endpoint)
+                .with_context(|| format!("bind ZMQ PUB endpoint {}", endpoint_config.endpoint))?;
+            let endpoint_index = endpoints.len();
+            endpoints.push(EndpointSocket {
+                endpoint: endpoint_config.endpoint.clone(),
+                socket: Mutex::new(socket),
             });
-
-            match publication.topic {
-                ZmqTopic::HashBlock => hashblock_endpoints.push(endpoint_index),
-                ZmqTopic::HashTx => hashtx_endpoints.push(endpoint_index),
-                ZmqTopic::RawBlock => rawblock_endpoints.push(endpoint_index),
-                ZmqTopic::RawTx => rawtx_endpoints.push(endpoint_index),
-                ZmqTopic::Sequence => sequence_endpoints.push(endpoint_index),
+            for &topic in &endpoint_config.topics {
+                if !seen_notifiers.insert((topic, endpoint_config.endpoint.clone())) {
+                    continue;
+                }
+                notifiers.push(ZmqNotifier {
+                    topic,
+                    endpoint: endpoint_config.endpoint.clone(),
+                    hwm,
+                });
+                match topic {
+                    ZmqTopic::HashBlock => hashblock_endpoints.push(endpoint_index),
+                    ZmqTopic::HashTx => hashtx_endpoints.push(endpoint_index),
+                    ZmqTopic::RawBlock => rawblock_endpoints.push(endpoint_index),
+                    ZmqTopic::RawTx => rawtx_endpoints.push(endpoint_index),
+                    ZmqTopic::Sequence => sequence_endpoints.push(endpoint_index),
+                }
             }
         }
 
@@ -523,6 +583,14 @@ mod tests {
     #[cfg(feature = "zmq")]
     use std::time::{Duration, Instant};
 
+    fn endpoint(endpoint: impl Into<String>, topics: Vec<ZmqTopic>, hwm: u32) -> ZmqEndpointConfig {
+        ZmqEndpointConfig {
+            endpoint: endpoint.into(),
+            topics,
+            hwm: Some(hwm),
+        }
+    }
+
     #[test]
     fn noop_publisher_methods_are_callable() {
         let publisher = NoOpZmqPublisher;
@@ -620,19 +688,11 @@ mod tests {
 
     #[cfg(feature = "zmq")]
     #[test]
-    fn socket_publisher_rejects_conflicting_hwm_for_same_endpoint() {
+    fn socket_publisher_rejects_duplicate_endpoint_groups() {
         let endpoint = "inproc://bitcoin-rs-zmq-conflict".to_owned();
         let publications = vec![
-            ZmqPublication {
-                topic: ZmqTopic::HashBlock,
-                endpoint: endpoint.clone(),
-                hwm: 1,
-            },
-            ZmqPublication {
-                topic: ZmqTopic::RawBlock,
-                endpoint,
-                hwm: 2,
-            },
+            self::endpoint(endpoint.clone(), vec![ZmqTopic::HashBlock], 1),
+            self::endpoint(endpoint, vec![ZmqTopic::RawBlock], 2),
         ];
 
         assert!(SocketZmqPublisher::bind(&publications).is_err());
@@ -641,29 +701,29 @@ mod tests {
     #[cfg(feature = "zmq")]
     #[test]
     fn socket_publisher_reports_rawtx_interest_from_configured_topics() -> anyhow::Result<()> {
-        let without_rawtx = SocketZmqPublisher::bind(&[ZmqPublication {
-            topic: ZmqTopic::HashBlock,
-            endpoint: "inproc://bitcoin-rs-zmq-hashblock-only".to_owned(),
-            hwm: 1,
-        }])?;
+        let without_rawtx = SocketZmqPublisher::bind(&[endpoint(
+            "inproc://bitcoin-rs-zmq-hashblock-only",
+            vec![ZmqTopic::HashBlock],
+            1,
+        )])?;
         assert!(without_rawtx.wants_notifications());
         assert!(!without_rawtx.wants_rawtx());
         assert!(!without_rawtx.wants_rawblock());
 
-        let with_rawtx = SocketZmqPublisher::bind(&[ZmqPublication {
-            topic: ZmqTopic::RawTx,
-            endpoint: "inproc://bitcoin-rs-zmq-rawtx".to_owned(),
-            hwm: 1,
-        }])?;
+        let with_rawtx = SocketZmqPublisher::bind(&[endpoint(
+            "inproc://bitcoin-rs-zmq-rawtx",
+            vec![ZmqTopic::RawTx],
+            1,
+        )])?;
         assert!(with_rawtx.wants_notifications());
         assert!(with_rawtx.wants_rawtx());
         assert!(!with_rawtx.wants_rawblock());
 
-        let with_rawblock = SocketZmqPublisher::bind(&[ZmqPublication {
-            topic: ZmqTopic::RawBlock,
-            endpoint: "inproc://bitcoin-rs-zmq-rawblock".to_owned(),
-            hwm: 1,
-        }])?;
+        let with_rawblock = SocketZmqPublisher::bind(&[endpoint(
+            "inproc://bitcoin-rs-zmq-rawblock",
+            vec![ZmqTopic::RawBlock],
+            1,
+        )])?;
         assert!(with_rawblock.wants_notifications());
         assert!(!with_rawblock.wants_rawtx());
         assert!(with_rawblock.wants_rawblock());
@@ -676,11 +736,11 @@ mod tests {
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("hashblock.sock");
         let endpoint = format!("ipc://{}", socket_path.display());
-        let publications = vec![ZmqPublication {
-            topic: ZmqTopic::HashBlock,
-            endpoint: endpoint.clone(),
-            hwm: 10,
-        }];
+        let publications = vec![self::endpoint(
+            endpoint.clone(),
+            vec![ZmqTopic::HashBlock],
+            10,
+        )];
         let publisher = SocketZmqPublisher::bind(&publications)?;
         let context = zmq::Context::new();
         let subscriber = context.socket(zmq::SUB)?;
@@ -715,11 +775,11 @@ mod tests {
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("sequence.sock");
         let endpoint = format!("ipc://{}", socket_path.display());
-        let publisher = SocketZmqPublisher::bind(&[ZmqPublication {
-            topic: ZmqTopic::Sequence,
-            endpoint: endpoint.clone(),
-            hwm: 10,
-        }])?;
+        let publisher = SocketZmqPublisher::bind(&[self::endpoint(
+            endpoint.clone(),
+            vec![ZmqTopic::Sequence],
+            10,
+        )])?;
         let context = zmq::Context::new();
         let subscriber = context.socket(zmq::SUB)?;
         subscriber.set_subscribe(b"sequence")?;
@@ -763,21 +823,12 @@ mod tests {
         let shared = "inproc://bitcoin-rs-zmq-enumerate-shared".to_owned();
         let dedicated = "inproc://bitcoin-rs-zmq-enumerate-dedicated".to_owned();
         let publisher = SocketZmqPublisher::bind(&[
-            ZmqPublication {
-                topic: ZmqTopic::HashBlock,
-                endpoint: shared.clone(),
-                hwm: 5,
-            },
-            ZmqPublication {
-                topic: ZmqTopic::RawTx,
-                endpoint: shared.clone(),
-                hwm: 5,
-            },
-            ZmqPublication {
-                topic: ZmqTopic::Sequence,
-                endpoint: dedicated.clone(),
-                hwm: 9,
-            },
+            endpoint(
+                shared.clone(),
+                vec![ZmqTopic::HashBlock, ZmqTopic::RawTx],
+                5,
+            ),
+            endpoint(dedicated.clone(), vec![ZmqTopic::Sequence], 9),
         ])?;
 
         // Read through the trait object — the path RPC consumers take — so the
@@ -828,29 +879,12 @@ mod tests {
         let shared = "inproc://bitcoin-rs-zmq-dedupe-shared".to_owned();
         let other = "inproc://bitcoin-rs-zmq-dedupe-other".to_owned();
         let publisher = SocketZmqPublisher::bind(&[
-            ZmqPublication {
-                topic: ZmqTopic::HashBlock,
-                endpoint: shared.clone(),
-                hwm: 5,
-            },
-            // Layered duplicate of the exact (topic, endpoint) pair.
-            ZmqPublication {
-                topic: ZmqTopic::HashBlock,
-                endpoint: shared.clone(),
-                hwm: 5,
-            },
-            // Distinct topic on the same endpoint must remain separate.
-            ZmqPublication {
-                topic: ZmqTopic::RawTx,
-                endpoint: shared.clone(),
-                hwm: 5,
-            },
-            // Same topic on a different endpoint remains separate.
-            ZmqPublication {
-                topic: ZmqTopic::HashBlock,
-                endpoint: other.clone(),
-                hwm: 5,
-            },
+            endpoint(
+                shared.clone(),
+                vec![ZmqTopic::HashBlock, ZmqTopic::HashBlock, ZmqTopic::RawTx],
+                5,
+            ),
+            endpoint(other.clone(), vec![ZmqTopic::HashBlock], 5),
         ])?;
 
         let publisher: Arc<dyn ZmqPublisher> = Arc::new(publisher);
@@ -876,5 +910,71 @@ mod tests {
             "exact (topic, endpoint) duplicates collapse; distinct topics/endpoints remain"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod compat_manifest_tests {
+    use super::ZmqTopic;
+
+    /// The compatibility manifest, embedded rather than read at runtime.
+    const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
+
+    /// Every topic this publisher publishes carries a compatibility claim.
+    ///
+    /// The RPC crate checks the manifest against a restated list, because it
+    /// does not depend on this crate and cannot see [`ZmqTopic`]. This is the
+    /// half that closes that gap: the names here are the ones that go on the
+    /// wire, and a topic added without a manifest entry is an undeclared
+    /// surface — which is exactly what the manifest exists to make impossible.
+    ///
+    /// Both the wire topic and the `getzmqnotifications` notifier name are
+    /// checked. They differ by Core's `pub` prefix, and a client discovers a
+    /// topic through the second in order to subscribe to the first, so a
+    /// manifest that got either wrong would send it to the wrong socket.
+    #[test]
+    fn zmq_topic_names_match_the_compatibility_manifest() {
+        let table: toml::Table = toml::from_str(MANIFEST_TOML)
+            .unwrap_or_else(|err| panic!("the compatibility manifest must parse: {err}"));
+        let Some(entries) = table.get("zmq").and_then(toml::Value::as_array) else {
+            panic!("the manifest must carry a `zmq` array");
+        };
+
+        let published = [
+            ZmqTopic::HashBlock,
+            ZmqTopic::HashTx,
+            ZmqTopic::RawBlock,
+            ZmqTopic::RawTx,
+            ZmqTopic::Sequence,
+        ];
+        assert_eq!(
+            entries.len(),
+            published.len(),
+            "the manifest lists {} ZMQ topics and the publisher has {}",
+            entries.len(),
+            published.len()
+        );
+
+        for topic in published {
+            let Some(entry) = entries.iter().find(|entry| {
+                entry
+                    .get("topic")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|listed| listed == topic.as_str())
+            }) else {
+                panic!(
+                    "`{}` is published but carries no compatibility claim",
+                    topic.as_str()
+                );
+            };
+            assert_eq!(
+                entry.get("notifier").and_then(toml::Value::as_str),
+                Some(topic.notifier_type()),
+                "the manifest's notifier name for `{}` is not the one \
+                 `getzmqnotifications` reports, so a client would subscribe \
+                 to the wrong socket",
+                topic.as_str()
+            );
+        }
     }
 }

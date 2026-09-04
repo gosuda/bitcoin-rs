@@ -32,7 +32,7 @@ The Core-compatible `pubsequence` ZMQ stream: each event carries the block hash,
 one label (`C` connect, `D` disconnect), and a topic-local little-endian `u32`
 counter. Reorg disconnects are emitted tip-first before connects on the
 replacement branch. Mempool `A`/`R` events are deliberately omitted until the
-mempool has per-transaction sequence assignment and explicit removal reasons.
+mempool has per-transaction sequence assignment and reason-carrying removals.
 
 ### Embedded node
 The typed in-process surface (`bitcoin_rs_node::Node`) over the same
@@ -104,6 +104,21 @@ means preserving value and operation order, not forcing JSON text to match. See
 
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change. See `docs/solutions/logic-errors/exclude-provably-unspendable-utxos.md`.
+
+### Notification configuration
+
+Node configuration groups external notification adapters below
+`NotificationConfig`. ZMQ configuration follows the socket ownership boundary:
+one endpoint group contains its endpoint, all topics published by that socket,
+and an optional socket HWM override. Topics that share an endpoint therefore
+cannot claim different HWM values. The ZMQ publisher owns the default HWM of
+1,000; configuration mentions HWM only when an endpoint needs an operational
+override.
+
+The supported file form is `[[notifications.zmq]]` with `endpoint`, `topics`,
+and optional `hwm`. The former topic-specific `zmqpub*` endpoint and HWM fields
+are not part of node configuration, including CLI, environment, TOML, and
+`bitcoin.conf` adapters.
 
 ## Block apply
 ### Window script batching

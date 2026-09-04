@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_mining::{Candidate, TemplateId};
-use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Tx, TxIn, Txid};
+use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Tx, TxIn, Txid, client_version};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::{
     BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Context,
@@ -105,12 +105,12 @@ fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     assert!(info.loaded);
     assert_eq!(info.size, 0);
     // Policy fields project the enforced MempoolPolicySnapshot defaults:
-    // bare multisig permitted, the 83-byte nulldata budget, and the enforced
-    // ancestor-package bounds under the recorded cluster deviation.
+    // bare multisig permitted, the 83-byte nulldata budget, and the cluster
+    // limits admission enforces.
     assert!(info.permit_bare_multisig);
     assert!(info.optimal);
     assert_eq!(info.max_data_carrier_size, 83);
-    assert_eq!(info.limit_cluster_count, 25);
+    assert_eq!(info.limit_cluster_count, 64);
     assert_eq!(info.limit_cluster_size, 101_000);
     assert_eq!(info.max_mempool, 300_000_000);
     // fullrbf reports the real replacement policy: BIP125 rule 1 signaling
@@ -146,7 +146,10 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
 
     let network: corepc_types::v31::GetNetworkInfo =
         typed(&handler.dispatch("getnetworkinfo", &json!([]))?)?;
-    assert_eq!(network.version, 10000);
+    assert_eq!(
+        network.version,
+        usize::try_from(client_version()).unwrap_or(usize::MAX)
+    );
     assert_eq!(network.protocol_version, 70016);
     assert_eq!(network.connections, 0);
     assert_eq!(network.networks.len(), 3);

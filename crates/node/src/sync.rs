@@ -24,6 +24,9 @@ use parking_lot::Mutex;
 use smallvec::SmallVec;
 
 use self::stage::{BlockStager, DrainedBlock, StagedBlock};
+pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
+pub use bitcoin_rs_p2p::download_window::SyncBudget;
+pub use bitcoin_rs_p2p::download_window::default_sync_budget;
 #[allow(unused_imports)]
 use bitcoin_rs_p2p::download_window::{
     BLOCK_STALLING_TIMEOUT, BLOCK_STALLING_TIMEOUT_MAX, DownloadWindow, FanoutCandidate,
@@ -33,7 +36,6 @@ use bitcoin_rs_p2p::download_window::{
     RECEIVED_BLOCK_TIMEOUT, STALLER_COOLDOWN, SyncPeer, SyncPeerSelection, configure_request_mode,
     statically_fanout_eligible,
 };
-pub use bitcoin_rs_p2p::download_window::{MIN_PEERS_FOR_FANOUT, SyncBudget, default_sync_budget};
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
@@ -6680,6 +6682,9 @@ mod tests {
             start_height,
             conn_time: 0,
             inbound: true,
+            addr_bind: addr,
+            time_offset: 0,
+            counters: alloc::sync::Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         }
     }
 
@@ -6688,6 +6693,9 @@ mod tests {
             // SERVICE_WITNESS (1 << 3) | NODE_NETWORK (1): native peer flags.
             services: 0b1001,
             inbound: false,
+            addr_bind: addr,
+            time_offset: 0,
+            counters: std::sync::Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
             ..synthetic_peer(addr, start_height)
         }
     }

@@ -61,6 +61,9 @@ fn info(addr: SocketAddr) -> PeerInfo {
         user_agent: String::from("/test/"),
         start_height: 0,
         conn_time: 0,
+        addr_bind: addr,
+        time_offset: 0,
+        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
         inbound: true,
     }
 }

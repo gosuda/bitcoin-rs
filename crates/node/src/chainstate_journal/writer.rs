@@ -1,0 +1,2023 @@
+//! Journal writer: the single owner of journal segment files, the durable
+//! cursor, and `head.json`.
+//!
+//! Ownership and commit point: the codec (`record.rs`) turns records into
+//! bytes; this writer is the *only* component that appends those bytes to
+//! segments and advances the durable head marker. `head.json` is the journal's
+//! commit point — nothing below it (a torn tail) is acknowledged at boot, and
+//! nothing above it is claimed without the full §2.3 dependency order.
+//!
+//! Durability: appends are buffered in memory and in the page cache; the
+//! durability boundary advances in one serialized step — (1) storage flush
+//! (`KvStore::flush()`, which makes the deferred undo rows durable), (2) log
+//! fsync, (3) atomic `head.json` publish (tmp + rename + directory fsync).
+//! The order matters: undo is the sole inverse transition for reorg, so its
+//! durability must precede the head that claims the height.
+//!
+//! Recovery: a crash before the boundary leaves "record present, head older"
+//! (a torn tail, ignored); a crash after the boundary leaves a valid head.
+//! A partial append is truncated back to the last known-good cursor and the
+//! writer fails closed before the next block mutation. Restart recovery then
+//! permits the missed height to be applied and journaled again.
+//!
+//! Failure classification: append/boundary failures are never consensus-fatal
+//! (the journal only accelerates recovery); callers see [`JournalWriterError`]
+//! and apply §2.3's degraded-mode policy. Loading a corrupt journal at boot
+//! fails closed (handled by replay, later task).
+
+use std::io::{Read, Write};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use bitcoin_rs_storage::KvStore;
+use thiserror::Error;
+
+use super::record::{FRAME_HEADER_LEN, JournalRecord, decode_record, encode_record};
+
+/// Magic prefix of `head.json` payload bytes (versioned container, crc32c).
+const HEAD_MAGIC: [u8; 4] = *b"JRNH";
+/// Current `head.json` format version.
+const HEAD_VERSION: u8 = 1;
+/// Maximum serialized `head.json` size accepted on load.
+const MAX_HEAD_BYTES: u64 = 4 * 1024;
+/// Maximum serialized segment name length sanity bound.
+const SEGMENT_NAME_MAX: usize = 32;
+pub(crate) const FULL_REVALIDATION_MARKER: &str = "full-revalidation";
+/// Directory name under the node data dir that owns journal files and the
+/// sticky full-revalidation marker.
+pub(crate) const JOURNAL_DIR_NAME: &str = "chainstate-journal";
+
+/// Removes the sticky full-revalidation marker after a replacement checkpoint
+/// has reached its `CURRENT` commit point.
+///
+/// Ownership: the journal directory owns this file. Startup treats presence as
+/// authoritative independently of `chainstate_journal.enabled`. This helper is
+/// the only remover; journal compaction uses the same unlink-and-directory-sync
+/// sequence against an already-open journal directory.
+///
+/// Commit point: `unlink(full-revalidation)` followed by `fsync` of the journal
+/// directory. The replacement checkpoint's `CURRENT` rename and root sync is a
+/// prior, independent commit point. This helper does not publish checkpoints
+/// and does not roll `CURRENT` back if removal fails.
+///
+/// Durability / crash:
+/// - crash before unlink: the marker remains; every restart stays on cold
+///   validation and refuses the stale pre-reorg checkpoint
+/// - crash after unlink, before directory sync: a power loss may make the
+///   marker visible again; boot stays on cold validation until a later
+///   successful clear
+/// - crash after directory sync: the marker is gone; boot may restore the
+///   published replacement checkpoint
+///
+/// Failure classification: a missing journal directory or marker is success
+/// (already clear). Open, unlink, and directory-sync errors are I/O
+/// ([`JournalWriterError::Io`]). They are not consensus-fatal. The already
+/// published checkpoint remains durable; only marker retirement is unfinished.
+///
+/// Retry owner: the checkpoint worker. Callers must propagate the error so the
+/// worker's next tick retries publication (and therefore this clear). Do not
+/// treat a published checkpoint as finished while this returns `Err`.
+pub(crate) fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), JournalWriterError> {
+    let path = data_dir.join(JOURNAL_DIR_NAME);
+    let dir = match crate::checkpoint_fs::open_data_dir(&path) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    clear_full_revalidation_marker(&dir)
+}
+
+fn clear_full_revalidation_marker(dir: &cap_std::fs::Dir) -> Result<(), JournalWriterError> {
+    match dir.remove_file(FULL_REVALIDATION_MARKER) {
+        Ok(()) => crate::checkpoint_fs::sync_dir(dir).map_err(JournalWriterError::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Zero-padded 10-digit generation: lexicographic order equals numeric order.
+const SEGMENT_GEN_WIDTH: usize = 10;
+
+/// Public-to-crate wrapper for the boot replay's segment window reader.
+pub(crate) fn segment_name_pub(generation: u64) -> String {
+    segment_name(generation)
+}
+
+fn segment_name(generation: u64) -> String {
+    format!("segment-{generation:0SEGMENT_GEN_WIDTH$}.log")
+}
+
+/// Public-to-crate wrapper for the boot replay's segment window reader.
+pub(crate) fn parse_segment_name_pub(name: &str) -> Option<u64> {
+    parse_segment_name(name)
+}
+
+fn parse_segment_name(name: &str) -> Option<u64> {
+    let raw = name.strip_prefix("segment-")?.strip_suffix(".log")?;
+    if raw.is_empty() || raw.len() > SEGMENT_NAME_MAX || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse().ok()
+}
+
+/// §2.6 crash-injection boundaries (reuse of the `CheckpointFailpoint` style).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JournalWriterFailpoint {
+    /// Injected just before the buffered record bytes hit the segment file.
+    SegmentAppend,
+    /// Injected after a prefix of a record reaches the segment file.
+    SegmentAppendPartial,
+    /// Injected just before the segment file is fsynced at the boundary.
+    SegmentSync,
+    /// Injected just before `head.json.tmp` is written.
+    HeadTempWrite,
+    /// Injected just before `head.json.tmp` is fsynced.
+    HeadTempSync,
+    /// Injected just before `head.json.tmp` is renamed onto `head.json`.
+    HeadRename,
+    /// Injected just before the journal directory is fsynced after the rename.
+    HeadDirSync,
+    /// Injected just before the storage-dependency flush at the boundary.
+    StorageFlush,
+    /// Injected after a rewind head publishes but before tail truncation.
+    RewindTruncate,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum JournalWriterError {
+    /// Underlying filesystem error (segment append, sync, rename, ...).
+    #[error("chainstate journal writer io error: {0}")]
+    Io(#[from] std::io::Error),
+    /// The storage flush dependency failed at a durability boundary.
+    #[error("chainstate journal storage flush failed: {0}")]
+    StorageFlush(String),
+    /// Appends are not accepted in the writer's current state.
+    #[error("chainstate journal writer is not open for appends: {state}")]
+    NotOpen { state: &'static str },
+    /// A record was appended whose height does not continue the journal.
+    #[error("chainstate journal append out of order: got {got}, expected {expected}")]
+    OutOfOrder { got: u32, expected: u32 },
+    /// A live block advanced after its journal append failed. Further applies
+    /// must stop until restart recovery discards the partial tail.
+    #[error("chainstate journal has an untracked append gap at height {height}")]
+    AppendGap { height: u32 },
+    /// `head.json` is missing, unreadable, or fails its checksum.
+    #[error("chainstate journal head marker is unreadable: {0}")]
+    HeadUnreadable(String),
+    /// The active segment does not match the durable cursor it claims.
+    #[error("chainstate journal cursor mismatch: {0}")]
+    CursorMismatch(String),
+    /// Retained segment bytes reached the configured compaction budget.
+    #[error("chainstate journal size {bytes} bytes reached configured limit {limit} bytes")]
+    RetentionLimit { bytes: u64, limit: u64 },
+    /// A reorg crossed below the checkpoint base this journal presupposes.
+    #[error("journal fork height {fork_height} is below checkpoint base {base_height}")]
+    ForkBelowBase { fork_height: u32, base_height: u32 },
+}
+
+/// Durable head marker payload (`head.json`, plan §2.1).
+///
+/// Serialized as: `HEAD_MAGIC | version u8 | crc32c(payload) | payload`,
+/// where payload is a JSON object. The checksum covers the payload so a torn
+/// rename or a bit flip fails closed at load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HeadMarker {
+    /// Checkpoint generation this journal extends.
+    pub(crate) base_generation: u64,
+    /// Applied-tip height of the checkpoint base.
+    pub(crate) base_height: u32,
+    /// Applied-tip hash of the checkpoint base.
+    pub(crate) base_hash: [u8; 32],
+    /// Cumulative transaction count through the checkpoint base.
+    pub(crate) base_chain_tx_count: u64,
+    /// Oldest RETAINED segment generation (the base cursor).
+    pub(crate) start_gen: u64,
+    /// Byte offset within the oldest retained segment's active record window.
+    pub(crate) start_offset: u64,
+    /// Generation of the segment holding the durable frontier.
+    pub(crate) journal_gen: u64,
+    /// Byte offset of the durable frontier inside `journal_gen`'s segment.
+    pub(crate) offset: u64,
+    /// Height of the last durably journaled block.
+    pub(crate) height: u32,
+    /// Hash of the last durably journaled block (32 raw bytes).
+    pub(crate) block_hash: [u8; 32],
+    /// Hash of its predecessor (32 raw bytes).
+    pub(crate) prev_hash: [u8; 32],
+    /// Cumulative transaction count through the head tip.
+    pub(crate) chain_tx_count: u64,
+    /// Number of records retained from `(start_gen, start_offset)` through head.
+    pub(crate) record_count: u64,
+}
+
+impl HeadMarker {
+    fn crc32c(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0_u32.wrapping_sub(crc & 1);
+                crc = (crc >> 1) ^ (0x82f6_3b78 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>, JournalWriterError> {
+        let payload = serde_json::to_vec(self).map_err(|error| {
+            JournalWriterError::HeadUnreadable(format!("marker serialization failed: {error}"))
+        })?;
+        let checksum = Self::crc32c(&payload);
+        let mut bytes = Vec::with_capacity(payload.len() + 9);
+        bytes.extend_from_slice(&HEAD_MAGIC);
+        bytes.push(HEAD_VERSION);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        Ok(bytes)
+    }
+
+    pub(crate) fn deserialize(bytes: &[u8]) -> Result<Self, JournalWriterError> {
+        if bytes.len() < 9 {
+            return Err(JournalWriterError::HeadUnreadable(
+                "marker shorter than its frame header".to_owned(),
+            ));
+        }
+        if bytes[..4] != HEAD_MAGIC {
+            return Err(JournalWriterError::HeadUnreadable(
+                "marker magic mismatch".to_owned(),
+            ));
+        }
+        if bytes[4] != HEAD_VERSION {
+            return Err(JournalWriterError::HeadUnreadable(format!(
+                "marker version {} not supported",
+                bytes[4]
+            )));
+        }
+        let expected = u32::from_le_bytes(bytes[5..9].try_into().map_err(|_| {
+            JournalWriterError::HeadUnreadable("marker frame header is short".to_owned())
+        })?);
+        let payload = &bytes[9..];
+        let found = Self::crc32c(payload);
+        if found != expected {
+            return Err(JournalWriterError::HeadUnreadable(format!(
+                "marker checksum mismatch: expected {expected:#010x}, found {found:#010x}"
+            )));
+        }
+        serde_json::from_slice(payload)
+            .map_err(|error| JournalWriterError::HeadUnreadable(error.to_string()))
+    }
+}
+
+/// Cursor of the durable frontier: which segment and byte offset are covered
+/// by the published `head.json`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DurableCursor {
+    generation: u64,
+    offset: u64,
+    height: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ForkCursor {
+    generation: u64,
+    offset: u64,
+    record_count: u64,
+    chain_tx_count: u64,
+    block_hash: [u8; 32],
+}
+
+/// Lightweight metadata for a record already written to the active segment.
+/// The encoded payload has a single in-memory owner during `append`; batching
+/// retains only the cursor fields needed to publish a later durability head.
+#[derive(Clone, Copy)]
+struct PendingRecordMeta {
+    end_offset: u64,
+    height: u32,
+    block_hash: [u8; 32],
+    prev_hash: [u8; 32],
+    block_tx_count: u64,
+}
+
+/// Lifecycle of the single-owner writer (plan §2.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriterState {
+    /// Accepting appends.
+    Open,
+    /// Publication in progress: appends rejected; log frozen at a durable head.
+    Frozen,
+    /// Compaction ran; appends still blocked until `resume`.
+    Compacted,
+}
+
+/// The journal writer. One owner per node: the apply path appends; the
+/// publication primitive freezes/compacts/resumes.
+pub(crate) struct JournalWriter<S: KvStore> {
+    dir: cap_std::fs::Dir,
+    store: std::sync::Arc<S>,
+    /// Checkpoint generation this writer extends.
+    base_generation: u64,
+    /// Applied-tip height of the checkpoint base.
+    base_height: u32,
+    /// Applied-tip hash of the checkpoint base.
+    base_hash: [u8; 32],
+    /// Cumulative transaction count through the checkpoint base.
+    base_chain_tx_count: u64,
+    /// Lightweight cursors for records written since the last boundary.
+    pending_records: Vec<PendingRecordMeta>,
+    /// Byte offset of the end of the active segment file.
+    segment_offset: u64,
+    /// Generation of the active segment.
+    segment_gen: u64,
+    /// Oldest retained (generation, offset) — the base cursor.
+    start: (u64, u64),
+    /// Durable frontier published via `head.json`.
+    durable: DurableCursor,
+    /// Cumulative transaction count covered by `durable`.
+    durable_chain_tx_count: u64,
+    /// Height expected by the next `append`.
+    next_height: u32,
+    /// Cumulative `chain_tx_count` through the next append.
+    chain_tx_count: u64,
+    /// Total retained records (from the base cursor through the durable head).
+    record_count: u64,
+    /// Buffered byte threshold that forces a boundary (approximate; bytes).
+    rotate_bytes: u64,
+    /// Blocks-per-boundary default.
+    batch_blocks: u32,
+    /// Seconds-per-boundary default.
+    batch_seconds: Duration,
+    /// Total retained segment-byte budget.
+    max_journal_bytes: u64,
+    /// Maximum pending block count before pre-apply backpressure.
+    max_lag_blocks: u32,
+    /// Maximum pending age before pre-apply backpressure.
+    max_lag_seconds: Duration,
+    /// Last boundary instant, for the time-based trigger.
+    last_boundary: Instant,
+    /// Hash of the durable head block (from the last boundary record).
+    durable_block_hash: [u8; 32],
+    /// Hash of its predecessor.
+    durable_prev_hash: [u8; 32],
+    /// First live height whose append did not complete. Once set, the writer
+    /// fails closed before any later block mutation; restart recovery truncates
+    /// the active segment to the durable cursor and creates a fresh writer.
+    append_gap_height: Option<u32>,
+    /// A durability boundary failed after all record bytes were tracked. The
+    /// next pre-apply check must retry that boundary regardless of configured
+    /// lag thresholds before permitting another chainstate mutation.
+    durability_retry_required: bool,
+    state: WriterState,
+    failpoint: Option<JournalWriterFailpoint>,
+}
+
+impl<S: KvStore> JournalWriter<S> {
+    /// Opens (or creates) the journal directory and restores the durable
+    /// cursor from `head.json`.
+    ///
+    /// Recovery rules (plan §2.3): a torn tail beyond the head is ignored
+    /// (the active segment is truncated back to the head cursor); a missing
+    /// `head.json` with no segments is a fresh journal.
+    pub(crate) fn open(
+        dir: cap_std::fs::Dir,
+        store: std::sync::Arc<S>,
+    ) -> Result<Self, JournalWriterError> {
+        let head_bytes = read_head_bytes(&dir)?;
+        let head = match head_bytes {
+            Some(bytes) => HeadMarker::deserialize(&bytes)?,
+            None => {
+                return Err(JournalWriterError::HeadUnreadable(
+                    "fresh journal requires an explicit initialize call".to_owned(),
+                ));
+            }
+        };
+        Self::restore(dir, store, head)
+    }
+
+    /// Creates a fresh journal at the given base cursor.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn initialize(
+        dir: cap_std::fs::Dir,
+        store: std::sync::Arc<S>,
+        base_generation: u64,
+        start: (u64, u64),
+        height: u32,
+        block_hash: [u8; 32],
+        prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<Self, JournalWriterError> {
+        let head = HeadMarker {
+            base_generation,
+            base_height: height,
+            base_hash: block_hash,
+            base_chain_tx_count: chain_tx_count,
+            start_gen: start.0,
+            start_offset: start.1,
+            journal_gen: start.0,
+            offset: start.1,
+            height,
+            block_hash,
+            prev_hash,
+            chain_tx_count,
+            record_count: 0,
+        };
+        let writer = Self::restore(dir, store, head)?;
+        writer.publish_head_now()?;
+        Ok(writer)
+    }
+
+    fn restore(
+        dir: cap_std::fs::Dir,
+        store: std::sync::Arc<S>,
+        head: HeadMarker,
+    ) -> Result<Self, JournalWriterError> {
+        let defaults = crate::config::ChainstateJournalConfig::default();
+        let mut writer = Self {
+            dir,
+            store,
+            base_generation: head.base_generation,
+            base_height: head.base_height,
+            base_hash: head.base_hash,
+            base_chain_tx_count: head.base_chain_tx_count,
+            pending_records: Vec::new(),
+            segment_offset: head.offset,
+            segment_gen: head.journal_gen,
+            start: (head.start_gen, head.start_offset),
+            durable: DurableCursor {
+                generation: head.journal_gen,
+                offset: head.offset,
+                height: head.height,
+            },
+            durable_chain_tx_count: head.chain_tx_count,
+            next_height: head.height.checked_add(1).ok_or_else(|| {
+                JournalWriterError::HeadUnreadable("head height overflow".to_owned())
+            })?,
+            chain_tx_count: head.chain_tx_count,
+            record_count: head.record_count,
+            durable_block_hash: head.block_hash,
+            durable_prev_hash: head.prev_hash,
+            rotate_bytes: defaults.rotate_mib * 1024 * 1024,
+            batch_blocks: defaults.blocks,
+            batch_seconds: Duration::from_secs(defaults.seconds),
+            max_journal_bytes: defaults.max_journal_mib * 1024 * 1024,
+            max_lag_blocks: defaults.max_lag_blocks,
+            max_lag_seconds: Duration::from_secs(defaults.max_lag_seconds),
+            last_boundary: Instant::now(),
+            append_gap_height: None,
+            durability_retry_required: false,
+            state: WriterState::Open,
+            failpoint: None,
+        };
+        writer.recover_active_segment()?;
+        metrics::gauge!("node.chainstate_journal.append_gap").set(0.0);
+        Ok(writer)
+    }
+
+    /// Truncates the active segment to the durable cursor (torn tail ignored).
+    fn recover_active_segment(&mut self) -> Result<(), JournalWriterError> {
+        let name = segment_name(self.segment_gen);
+        let file = match self.dir.open_with(
+            &name,
+            cap_std::fs::OpenOptions::new().write(true).read(true),
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // No active segment: the head is the last boundary; a fresh
+                // segment is created lazily on the first append.
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let length = file.metadata()?.len();
+        if length > self.durable.offset {
+            // Torn tail beyond the durable head: truncate to the cursor.
+            file.set_len(self.durable.offset)?;
+            file.sync_all()?;
+        }
+        self.segment_offset = self.durable.offset;
+        Ok(())
+    }
+
+    /// Current lifecycle state.
+    pub(crate) fn state(&self) -> WriterState {
+        self.state
+    }
+
+    /// Applies the resolved runtime batching and segment-rotation policy.
+    pub(crate) fn configure(
+        &mut self,
+        batch_blocks: u32,
+        batch_seconds: Duration,
+        rotate_mib: u64,
+        max_journal_mib: u64,
+        max_lag_blocks: u32,
+        max_lag_seconds: Duration,
+    ) -> Result<(), JournalWriterError> {
+        if batch_blocks == 0
+            || batch_seconds.is_zero()
+            || rotate_mib == 0
+            || max_journal_mib == 0
+            || max_lag_blocks == 0
+            || max_lag_seconds.is_zero()
+        {
+            return Err(JournalWriterError::CursorMismatch(
+                "journal runtime limits must be non-zero".to_owned(),
+            ));
+        }
+        self.batch_blocks = batch_blocks;
+        self.batch_seconds = batch_seconds;
+        self.rotate_bytes = rotate_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("journal rotation size overflow".to_owned())
+        })?;
+        self.max_journal_bytes = max_journal_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("journal retention size overflow".to_owned())
+        })?;
+        self.max_lag_blocks = max_lag_blocks;
+        self.max_lag_seconds = max_lag_seconds;
+        Ok(())
+    }
+
+    /// Applies time/lag/retention maintenance before the next block mutates
+    /// chainstate. A failed durability retry stops that apply before any write.
+    pub(crate) fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
+        self.ensure_appendable()?;
+        if self.durability_retry_required {
+            self.advance_durability()?;
+        }
+        self.flush_due()?;
+        let lag = self
+            .next_height
+            .saturating_sub(1)
+            .saturating_sub(self.durable.height);
+        if lag >= self.max_lag_blocks
+            || (!self.pending_records.is_empty()
+                && self.last_boundary.elapsed() >= self.max_lag_seconds)
+        {
+            self.advance_durability()?;
+        }
+        let bytes = self.journal_size_bytes()?;
+        if bytes >= self.max_journal_bytes {
+            return Err(JournalWriterError::RetentionLimit {
+                bytes,
+                limit: self.max_journal_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Flushes an idle pending batch once its configured time boundary elapses.
+    pub(crate) fn flush_due(&mut self) -> Result<(), JournalWriterError> {
+        if self.state == WriterState::Open
+            && !self.pending_records.is_empty()
+            && self.last_boundary.elapsed() >= self.batch_seconds
+        {
+            self.advance_durability()?;
+        }
+        Ok(())
+    }
+
+    /// Whether segment retention requires an immediate checkpoint compaction.
+    pub(crate) fn requires_compaction(&self) -> Result<bool, JournalWriterError> {
+        Ok(self.journal_size_bytes()? >= self.max_journal_bytes)
+    }
+
+    fn ensure_open(&self) -> Result<(), JournalWriterError> {
+        match self.state {
+            WriterState::Open => Ok(()),
+            WriterState::Frozen => Err(JournalWriterError::NotOpen { state: "frozen" }),
+            WriterState::Compacted => Err(JournalWriterError::NotOpen { state: "compacted" }),
+        }
+    }
+
+    fn ensure_appendable(&self) -> Result<(), JournalWriterError> {
+        self.ensure_open()?;
+        if let Some(height) = self.append_gap_height {
+            return Err(JournalWriterError::AppendGap { height });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn mark_append_gap(&mut self, height: u32) {
+        self.append_gap_height.get_or_insert(height);
+        metrics::gauge!("node.chainstate_journal.append_gap").set(1.0);
+        self.record_lag_metrics();
+    }
+
+    /// Durable head marker, for the boot path and metrics.
+    pub(crate) fn head(&self) -> HeadMarker {
+        HeadMarker {
+            base_generation: self.base_generation,
+            base_height: self.base_height,
+            base_hash: self.base_hash,
+            base_chain_tx_count: self.base_chain_tx_count,
+            start_gen: self.start.0,
+            start_offset: self.start.1,
+            journal_gen: self.durable.generation,
+            offset: self.durable.offset,
+            height: self.durable.height,
+            block_hash: self.durable_block_hash,
+            prev_hash: self.durable_prev_hash,
+            chain_tx_count: self.durable_chain_tx_count,
+            record_count: self.record_count,
+        }
+    }
+
+    /// Buffers one record. Idempotent per height: re-appending a record whose
+    /// height equals the last appended height is rejected as a duplicate via
+    /// the strict ordering rule (callers replay whole records after a crash).
+    pub(crate) fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError> {
+        self.ensure_appendable()?;
+        if record.height != self.next_height {
+            return self.fail_append(
+                record.height,
+                JournalWriterError::OutOfOrder {
+                    got: record.height,
+                    expected: self.next_height,
+                },
+            );
+        }
+
+        let next_frontier = self.next_append_frontier(record);
+        let (next_height, next_chain_tx_count) = match next_frontier {
+            Ok(frontier) => frontier,
+            Err(error) => return self.fail_append(record.height, error),
+        };
+        let bytes = encode_record(record);
+        let next_offset = self.append_record_bytes(record.height, &bytes)?;
+
+        self.segment_offset = next_offset;
+        self.pending_records.push(PendingRecordMeta {
+            end_offset: next_offset,
+            height: record.height,
+            block_hash: record.block_hash,
+            prev_hash: record.prev_hash,
+            block_tx_count: record.block_tx_count,
+        });
+        self.next_height = next_height;
+        self.chain_tx_count = next_chain_tx_count;
+
+        if self.pending_records.len()
+            >= usize::try_from(self.batch_blocks).map_err(|_| {
+                JournalWriterError::CursorMismatch("batch blocks overflow".to_owned())
+            })?
+            || self.last_boundary.elapsed() >= self.batch_seconds
+        {
+            self.advance_durability()?;
+        }
+        self.record_lag_metrics();
+        Ok(())
+    }
+
+    fn next_append_frontier(
+        &self,
+        record: &JournalRecord,
+    ) -> Result<(u32, u64), JournalWriterError> {
+        let next_height = self
+            .next_height
+            .checked_add(1)
+            .ok_or_else(|| JournalWriterError::CursorMismatch("height overflow".to_owned()))?;
+        let next_chain_tx_count = self
+            .chain_tx_count
+            .checked_add(record.block_tx_count)
+            .ok_or_else(|| {
+                JournalWriterError::CursorMismatch("chain_tx_count overflow".to_owned())
+            })?;
+        Ok((next_height, next_chain_tx_count))
+    }
+
+    fn append_record_bytes(
+        &mut self,
+        height: u32,
+        bytes: &[u8],
+    ) -> Result<u64, JournalWriterError> {
+        if let Err(error) = self.maybe_rotate() {
+            return self.fail_append(height, error);
+        }
+        if let Err(error) = self.fail_segment_append() {
+            return self.fail_append(height, error);
+        }
+
+        let bytes_len = match u64::try_from(bytes.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                return self.fail_append(
+                    height,
+                    JournalWriterError::CursorMismatch("record byte length overflow".to_owned()),
+                );
+            }
+        };
+        let known_good_offset = self.segment_offset;
+        let Some(next_offset) = known_good_offset.checked_add(bytes_len) else {
+            return self.fail_append(
+                height,
+                JournalWriterError::CursorMismatch("segment offset overflow".to_owned()),
+            );
+        };
+        let name = segment_name(self.segment_gen);
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.append(true).create(true);
+        let mut file = match self.dir.open_with(&name, &options) {
+            Ok(file) => file,
+            Err(error) => return self.fail_append(height, error.into()),
+        };
+        let write_result = if self.failpoint == Some(JournalWriterFailpoint::SegmentAppendPartial) {
+            let prefix_len = (bytes.len() / 2).max(1);
+            file.write_all(&bytes[..prefix_len]).and_then(|()| {
+                Err(std::io::Error::other(
+                    "injected chainstate journal partial append failure",
+                ))
+            })
+        } else {
+            file.write_all(bytes)
+        };
+        if let Err(append_error) = write_result {
+            let rollback_result = file
+                .set_len(known_good_offset)
+                .and_then(|()| file.sync_all());
+            if let Err(rollback_error) = rollback_result {
+                return self.fail_append(
+                    height,
+                    JournalWriterError::CursorMismatch(format!(
+                        "append at height {height} failed ({append_error}); partial-tail rollback failed: {rollback_error}"
+                    )),
+                );
+            }
+            return self.fail_append(height, append_error.into());
+        }
+        Ok(next_offset)
+    }
+
+    fn fail_append<T>(
+        &mut self,
+        height: u32,
+        error: JournalWriterError,
+    ) -> Result<T, JournalWriterError> {
+        self.mark_append_gap(height);
+        Err(error)
+    }
+
+    /// §2.3 durability boundary, in one serialized step:
+    /// 1. storage flush (deferred undo rows become durable),
+    /// 2. log fsync,
+    /// 3. atomic `head.json` publish.
+    ///
+    /// `target` is the record index (exclusive) in `pending_records` that the
+    /// boundary covers.
+    fn advance_durability(&mut self) -> Result<(), JournalWriterError> {
+        self.advance_durability_upto(self.pending_records.len())
+    }
+
+    /// Publishes `head.json` without advancing the cursor (used at
+    /// initialization and by `freeze`).
+    fn publish_head_now(&self) -> Result<(), JournalWriterError> {
+        let marker = self.head();
+        self.write_head_atomic(&marker)
+    }
+
+    fn write_head_atomic(&self, marker: &HeadMarker) -> Result<(), JournalWriterError> {
+        self.fail_head_temp_write()?;
+        {
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.write(true).create(true);
+            let mut tmp = self.dir.open_with("head.json.tmp", &options)?;
+            tmp.set_len(0)?;
+            tmp.write_all(&marker.serialize()?)?;
+            self.fail_head_temp_sync()?;
+            tmp.sync_all()?;
+        }
+        self.fail_head_rename()?;
+        self.dir.rename("head.json.tmp", &self.dir, "head.json")?;
+        self.fail_head_dir_sync()?;
+        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        self.record_size_metric();
+        Ok(())
+    }
+
+    /// Flushes buffered records up to and including `height` (plan §2.5's
+    /// `flush_to`). No-op when the height is already durable; errors when the
+    /// height is beyond the buffered frontier.
+    pub(crate) fn flush_to(&mut self, height: u32) -> Result<(), JournalWriterError> {
+        if height <= self.durable.height {
+            return Ok(());
+        }
+        let Some(index) = self
+            .pending_records
+            .iter()
+            .rposition(|record| record.height == height)
+        else {
+            return Err(JournalWriterError::CursorMismatch(format!(
+                "height {height} is not buffered"
+            )));
+        };
+        self.advance_durability_upto(index + 1)
+    }
+
+    /// Boundary over the first `target` buffered records.
+    fn advance_durability_upto(&mut self, target: usize) -> Result<(), JournalWriterError> {
+        let result = self.try_advance_durability_upto(target);
+        self.durability_retry_required = result.is_err();
+        result
+    }
+
+    fn try_advance_durability_upto(&mut self, target: usize) -> Result<(), JournalWriterError> {
+        if self.pending_records.is_empty() || target == 0 {
+            return Ok(());
+        }
+        let last = self.pending_records[target - 1];
+        let target_offset = last.end_offset;
+        let target_chain_tx_count = self.pending_records[..target].iter().try_fold(
+            self.durable_chain_tx_count,
+            |count, record| {
+                count.checked_add(record.block_tx_count).ok_or_else(|| {
+                    JournalWriterError::CursorMismatch(
+                        "chain transaction count overflow".to_owned(),
+                    )
+                })
+            },
+        )?;
+
+        self.fail_storage_flush()?;
+        let flush_started = Instant::now();
+        let flush_result = self
+            .store
+            .flush()
+            .map_err(|error| JournalWriterError::StorageFlush(error.to_string()));
+        metrics::histogram!("node.chainstate_journal.storage_flush_seconds")
+            .record(flush_started.elapsed().as_secs_f64());
+        flush_result?;
+
+        self.fail_segment_sync()?;
+        let name = segment_name(self.segment_gen);
+        let file = self
+            .dir
+            .open_with(&name, cap_std::fs::OpenOptions::new().write(true))?;
+        file.sync_all()?;
+
+        let marker = HeadMarker {
+            base_generation: self.base_generation,
+            base_height: self.base_height,
+            base_hash: self.base_hash,
+            base_chain_tx_count: self.base_chain_tx_count,
+            start_gen: self.start.0,
+            start_offset: self.start.1,
+            journal_gen: self.segment_gen,
+            offset: target_offset,
+            height: last.height,
+            block_hash: last.block_hash,
+            prev_hash: last.prev_hash,
+            chain_tx_count: target_chain_tx_count,
+            record_count: self.record_count
+                + u64::try_from(target).map_err(|_| {
+                    JournalWriterError::CursorMismatch("record count overflow".to_owned())
+                })?,
+        };
+        self.write_head_atomic(&marker)?;
+
+        self.durable = DurableCursor {
+            generation: self.segment_gen,
+            offset: target_offset,
+            height: last.height,
+        };
+        self.durable_block_hash = last.block_hash;
+        self.durable_prev_hash = last.prev_hash;
+        self.durable_chain_tx_count = target_chain_tx_count;
+        self.record_count += u64::try_from(target)
+            .map_err(|_| JournalWriterError::CursorMismatch("record count overflow".to_owned()))?;
+        self.pending_records.drain(..target);
+        self.last_boundary = Instant::now();
+        self.record_lag_metrics();
+        Ok(())
+    }
+
+    fn record_lag_metrics(&self) {
+        let latest_height = self
+            .append_gap_height
+            .unwrap_or_else(|| self.next_height.saturating_sub(1));
+        let lag = latest_height.saturating_sub(self.durable.height);
+        metrics::gauge!("node.chainstate_journal.lag_blocks").set(f64::from(lag));
+        metrics::gauge!("node.chainstate_journal.head_height").set(f64::from(self.durable.height));
+    }
+
+    fn record_size_metric(&self) {
+        let Ok(bytes) = self.journal_size_bytes() else {
+            return;
+        };
+        let kib = u32::try_from(bytes / 1024).unwrap_or(u32::MAX);
+        metrics::gauge!("node.chainstate_journal.size_mib").set(f64::from(kib) / 1024.0);
+    }
+
+    fn journal_size_bytes(&self) -> Result<u64, JournalWriterError> {
+        self.dir.entries()?.try_fold(0_u64, |total, entry| {
+            let entry = entry?;
+            if parse_segment_name(entry.file_name().to_string_lossy().as_ref()).is_none() {
+                return Ok(total);
+            }
+            total.checked_add(entry.metadata()?.len()).ok_or_else(|| {
+                JournalWriterError::CursorMismatch("journal segment size overflow".to_owned())
+            })
+        })
+    }
+
+    /// Durably moves the journal frontier to a canonical fork point and
+    /// invalidates every old-branch record above it.
+    pub(crate) fn rewind_to(
+        &mut self,
+        fork_height: u32,
+        fork_hash: [u8; 32],
+        fork_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError> {
+        self.ensure_appendable()?;
+        if fork_height < self.base_height {
+            self.invalidate_generation()?;
+            return Err(JournalWriterError::ForkBelowBase {
+                fork_height,
+                base_height: self.base_height,
+            });
+        }
+        if fork_height > self.durable.height {
+            let target = self
+                .pending_records
+                .iter()
+                .position(|record| record.height == fork_height)
+                .ok_or_else(|| {
+                    JournalWriterError::CursorMismatch(format!(
+                        "fork height {fork_height} is outside the journal frontier"
+                    ))
+                })?;
+            self.advance_durability_upto(target + 1)?;
+        }
+        let cursor = if fork_height == self.durable.height {
+            ForkCursor {
+                generation: self.durable.generation,
+                offset: self.durable.offset,
+                record_count: self.record_count,
+                chain_tx_count: self.durable_chain_tx_count,
+                block_hash: self.durable_block_hash,
+            }
+        } else {
+            self.committed_cursor_at(fork_height)?
+        };
+        if cursor.block_hash != fork_hash || cursor.chain_tx_count != chain_tx_count {
+            return Err(JournalWriterError::CursorMismatch(format!(
+                "fork identity mismatch at height {fork_height}"
+            )));
+        }
+
+        let marker = HeadMarker {
+            base_generation: self.base_generation,
+            base_height: self.base_height,
+            base_hash: self.base_hash,
+            base_chain_tx_count: self.base_chain_tx_count,
+            start_gen: self.start.0,
+            start_offset: self.start.1,
+            journal_gen: cursor.generation,
+            offset: cursor.offset,
+            height: fork_height,
+            block_hash: fork_hash,
+            prev_hash: fork_prev_hash,
+            chain_tx_count,
+            record_count: cursor.record_count,
+        };
+        // The atomic head rewrite is the logical invalidation point. Physical
+        // truncation follows; a crash between them leaves only an ignored tail.
+        self.write_head_atomic(&marker)?;
+        if let Err(error) = self.truncate_after(cursor) {
+            self.mark_append_gap(fork_height.saturating_add(1));
+            return Err(error);
+        }
+
+        self.segment_gen = cursor.generation;
+        self.segment_offset = cursor.offset;
+        self.durable = DurableCursor {
+            generation: cursor.generation,
+            offset: cursor.offset,
+            height: fork_height,
+        };
+        self.durable_block_hash = fork_hash;
+        self.durable_prev_hash = fork_prev_hash;
+        self.durable_chain_tx_count = chain_tx_count;
+        self.chain_tx_count = chain_tx_count;
+        self.record_count = cursor.record_count;
+        self.next_height = fork_height
+            .checked_add(1)
+            .ok_or_else(|| JournalWriterError::CursorMismatch("fork height overflow".to_owned()))?;
+        self.pending_records.clear();
+        self.last_boundary = Instant::now();
+        Ok(())
+    }
+
+    fn committed_cursor_at(&self, target_height: u32) -> Result<ForkCursor, JournalWriterError> {
+        if target_height == self.base_height {
+            return Ok(ForkCursor {
+                generation: self.start.0,
+                offset: self.start.1,
+                record_count: 0,
+                chain_tx_count: self.base_chain_tx_count,
+                block_hash: self.base_hash,
+            });
+        }
+        let mut record_count = 0_u64;
+        let mut chain_tx_count = self.base_chain_tx_count;
+        for generation in self.start.0..=self.durable.generation {
+            let name = segment_name(generation);
+            let mut file = self.dir.open(&name)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let start = if generation == self.start.0 {
+                self.start.1
+            } else {
+                0
+            };
+            let end = if generation == self.durable.generation {
+                self.durable.offset
+            } else {
+                u64::try_from(bytes.len()).map_err(|_| {
+                    JournalWriterError::CursorMismatch("segment size overflow".to_owned())
+                })?
+            };
+            if let Some(cursor) = scan_fork_cursor(
+                &bytes,
+                generation,
+                start,
+                end,
+                target_height,
+                &mut record_count,
+                &mut chain_tx_count,
+            )? {
+                return Ok(cursor);
+            }
+        }
+        Err(JournalWriterError::CursorMismatch(format!(
+            "fork height {target_height} is absent from the committed journal"
+        )))
+    }
+
+    fn truncate_after(&self, cursor: ForkCursor) -> Result<(), JournalWriterError> {
+        self.fail_rewind_truncate()?;
+        let name = segment_name(cursor.generation);
+        match self
+            .dir
+            .open_with(&name, cap_std::fs::OpenOptions::new().write(true))
+        {
+            Ok(file) => {
+                file.set_len(cursor.offset)?;
+                file.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && cursor.offset == 0 => {}
+            Err(error) => return Err(error.into()),
+        }
+        let names: Vec<String> = self
+            .dir
+            .entries()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                parse_segment_name(name).is_some_and(|generation| generation > cursor.generation)
+            })
+            .collect();
+        for name in names {
+            self.dir.remove_file(name)?;
+        }
+        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        Ok(())
+    }
+
+    fn invalidate_generation(&mut self) -> Result<(), JournalWriterError> {
+        let names: Vec<String> = self
+            .dir
+            .entries()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                name == "head.json" || name == "head.json.tmp" || parse_segment_name(name).is_some()
+            })
+            .collect();
+        for name in names {
+            self.dir.remove_file(name)?;
+        }
+        self.dir.write(
+            FULL_REVALIDATION_MARKER,
+            b"journal fork crossed below checkpoint base\n",
+        )?;
+        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        self.state = WriterState::Frozen;
+        Ok(())
+    }
+
+    /// §2.5 freeze: stop accepting appends; make the log durable up to the
+    /// last buffered record; publish the final head. Called by the publication
+    /// primitive with admission already closed.
+    pub(crate) fn freeze(&mut self) -> Result<(), JournalWriterError> {
+        self.ensure_appendable()?;
+        self.state = WriterState::Frozen;
+        match self.advance_durability() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.state = WriterState::Open;
+                Err(error)
+            }
+        }
+    }
+
+    /// §2.5 compact: rebase the empty post-publication journal on the newly
+    /// installed checkpoint and delete every superseded segment.
+    pub(crate) fn compact_to_checkpoint(
+        &mut self,
+        checkpoint_generation: u64,
+        tip_height: u32,
+        tip_hash: [u8; 32],
+        tip_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError> {
+        if self.state != WriterState::Frozen {
+            return Err(JournalWriterError::NotOpen {
+                state: match self.state {
+                    WriterState::Open => "not frozen",
+                    WriterState::Compacted => "already compacted",
+                    WriterState::Frozen => unreachable!("guarded above"),
+                },
+            });
+        }
+        if self.durable.height != tip_height
+            || self.durable_block_hash != tip_hash
+            || self.durable_chain_tx_count != chain_tx_count
+        {
+            return Err(JournalWriterError::CursorMismatch(format!(
+                "checkpoint tip {tip_height} does not match frozen journal head {}",
+                self.durable.height
+            )));
+        }
+        let new_segment_gen = self.segment_gen.checked_add(1).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("segment generation overflow".to_owned())
+        })?;
+        let marker = HeadMarker {
+            base_generation: checkpoint_generation,
+            base_height: tip_height,
+            base_hash: tip_hash,
+            base_chain_tx_count: chain_tx_count,
+            start_gen: new_segment_gen,
+            start_offset: 0,
+            journal_gen: new_segment_gen,
+            offset: 0,
+            height: tip_height,
+            block_hash: tip_hash,
+            prev_hash: tip_prev_hash,
+            chain_tx_count,
+            record_count: 0,
+        };
+        self.write_head_atomic(&marker)?;
+
+        // The new head is now the logical commit point. Update in-memory state
+        // before best-effort physical cleanup so `resume` cannot republish the
+        // superseded base if cleanup reports an error.
+        self.base_generation = checkpoint_generation;
+        self.base_height = tip_height;
+        self.base_hash = tip_hash;
+        self.base_chain_tx_count = chain_tx_count;
+        self.start = (new_segment_gen, 0);
+        self.segment_gen = new_segment_gen;
+        self.segment_offset = 0;
+        self.durable = DurableCursor {
+            generation: new_segment_gen,
+            offset: 0,
+            height: tip_height,
+        };
+        self.durable_block_hash = tip_hash;
+        self.durable_prev_hash = tip_prev_hash;
+        self.durable_chain_tx_count = chain_tx_count;
+        self.chain_tx_count = chain_tx_count;
+        self.record_count = 0;
+        self.next_height = tip_height.checked_add(1).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("checkpoint height overflow".to_owned())
+        })?;
+        self.pending_records.clear();
+        self.state = WriterState::Compacted;
+
+        let entries: Vec<String> = self
+            .dir
+            .entries()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| parse_segment_name(name).is_some())
+            .collect();
+        for name in entries {
+            self.dir.remove_file(name)?;
+        }
+        clear_full_revalidation_marker(&self.dir)?;
+        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        Ok(())
+    }
+
+    /// §2.5 resume: reopen appends against the (possibly new) base.
+    pub(crate) fn resume(&mut self) -> Result<(), JournalWriterError> {
+        if self.state == WriterState::Open {
+            return Err(JournalWriterError::NotOpen {
+                state: "already open",
+            });
+        }
+        // Publish the (possibly unchanged) head with the new base cursor. The
+        // durable cursor was already committed by freeze/compaction, so a
+        // redundant republish failure must not strand the runtime as Frozen.
+        let publish_result = self.publish_head_now();
+        self.state = WriterState::Open;
+        self.last_boundary = Instant::now();
+        publish_result
+    }
+
+    /// Rotates the active segment when it crosses the size threshold.
+    fn maybe_rotate(&mut self) -> Result<(), JournalWriterError> {
+        if self.segment_offset < self.rotate_bytes {
+            return Ok(());
+        }
+        // Close the current segment durably: the boundary covers buffered
+        // records, then the next append starts a new generation.
+        self.advance_durability()?;
+        let previous_gen = self.segment_gen;
+        let previous_offset = self.segment_offset;
+        let previous_durable = self.durable;
+        let next_gen = previous_gen
+            .checked_add(1)
+            .ok_or_else(|| JournalWriterError::CursorMismatch("generation overflow".to_owned()))?;
+        // A head may name a zero-offset generation only after the directory
+        // entry itself is durable. Reuse after a pre-head crash truncates the
+        // uncommitted generation before publishing it again.
+        let name = segment_name(next_gen);
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        let file = self.dir.open_with(&name, &options)?;
+        file.sync_all()?;
+        crate::checkpoint_fs::sync_dir(&self.dir)?;
+
+        self.segment_gen = next_gen;
+        self.segment_offset = 0;
+        self.durable = DurableCursor {
+            generation: next_gen,
+            offset: 0,
+            height: previous_durable.height,
+        };
+        if let Err(error) = self.publish_head_now() {
+            self.segment_gen = previous_gen;
+            self.segment_offset = previous_offset;
+            self.durable = previous_durable;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    // --- failpoint plumbing (mirrors checkpoint.rs) ---
+
+    fn fail_segment_append(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::SegmentAppend)
+    }
+
+    fn fail_segment_sync(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::SegmentSync)
+    }
+
+    fn fail_storage_flush(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::StorageFlush)
+    }
+
+    fn fail_rewind_truncate(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::RewindTruncate)
+    }
+
+    fn fail_head_temp_write(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::HeadTempWrite)
+    }
+
+    fn fail_head_temp_sync(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::HeadTempSync)
+    }
+
+    fn fail_head_rename(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::HeadRename)
+    }
+
+    fn fail_head_dir_sync(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::HeadDirSync)
+    }
+
+    fn failpoint(&self, boundary: JournalWriterFailpoint) -> Result<(), JournalWriterError> {
+        if self.failpoint == Some(boundary) {
+            return Err(std::io::Error::from_raw_os_error(28).into());
+        }
+        Ok(())
+    }
+
+    /// Arms the next failpoint (test-only; mirrors checkpoint.rs's injector).
+    #[cfg(test)]
+    pub(crate) fn inject_failpoint(&mut self, failpoint: JournalWriterFailpoint) {
+        self.failpoint = Some(failpoint);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_fork_cursor(
+    bytes: &[u8],
+    generation: u64,
+    start: u64,
+    end: u64,
+    target_height: u32,
+    record_count: &mut u64,
+    chain_tx_count: &mut u64,
+) -> Result<Option<ForkCursor>, JournalWriterError> {
+    const FRAME_HEADER_U64: u64 = 4 + 1 + 4;
+    if end > u64::try_from(bytes.len()).unwrap_or(u64::MAX) || start > end {
+        return Err(JournalWriterError::CursorMismatch(format!(
+            "segment {generation} committed window is outside the file"
+        )));
+    }
+    let mut offset = start;
+    while offset < end {
+        if offset + FRAME_HEADER_U64 > end {
+            return Err(JournalWriterError::CursorMismatch(format!(
+                "segment {generation} has a truncated frame header"
+            )));
+        }
+        let index = usize::try_from(offset)
+            .map_err(|_| JournalWriterError::CursorMismatch("frame offset overflow".to_owned()))?;
+        let payload_len = u32::from_le_bytes(
+            bytes[index + 5..index + FRAME_HEADER_LEN]
+                .try_into()
+                .map_err(|_| {
+                    JournalWriterError::CursorMismatch("frame length is malformed".to_owned())
+                })?,
+        );
+        let frame_len = FRAME_HEADER_U64 + u64::from(payload_len) + 4;
+        let next = offset
+            .checked_add(frame_len)
+            .ok_or_else(|| JournalWriterError::CursorMismatch("frame end overflow".to_owned()))?;
+        if next > end {
+            return Err(JournalWriterError::CursorMismatch(format!(
+                "segment {generation} has a truncated committed frame"
+            )));
+        }
+        let next_index = usize::try_from(next)
+            .map_err(|_| JournalWriterError::CursorMismatch("frame end overflow".to_owned()))?;
+        let record = decode_record(&bytes[index..next_index]).map_err(|error| {
+            JournalWriterError::CursorMismatch(format!(
+                "segment {generation} contains an invalid record: {error}"
+            ))
+        })?;
+        *record_count = record_count.checked_add(1).ok_or_else(|| {
+            JournalWriterError::CursorMismatch("record count overflow".to_owned())
+        })?;
+        *chain_tx_count = chain_tx_count
+            .checked_add(record.block_tx_count)
+            .ok_or_else(|| {
+                JournalWriterError::CursorMismatch("chain transaction count overflow".to_owned())
+            })?;
+        if record.height == target_height {
+            return Ok(Some(ForkCursor {
+                generation,
+                offset: next,
+                record_count: *record_count,
+                chain_tx_count: *chain_tx_count,
+                block_hash: record.block_hash,
+            }));
+        }
+        if record.height > target_height {
+            break;
+        }
+        offset = next;
+    }
+    Ok(None)
+}
+
+/// Journal-directory helpers shared by writer and boot replay (later task).
+///
+/// `head.json` is bounded by [`MAX_HEAD_BYTES`].
+pub(crate) fn read_head_bytes(
+    dir: &cap_std::fs::Dir,
+) -> Result<Option<Vec<u8>>, JournalWriterError> {
+    match dir.open("head.json") {
+        Ok(mut file) => {
+            let length = file.metadata()?.len();
+            if length > MAX_HEAD_BYTES {
+                return Err(JournalWriterError::HeadUnreadable(format!(
+                    "head marker {length} bytes exceeds {MAX_HEAD_BYTES}"
+                )));
+            }
+            let capacity = usize::try_from(length).map_err(|_| {
+                JournalWriterError::HeadUnreadable("head marker is too large".to_owned())
+            })?;
+            let mut bytes = Vec::with_capacity(capacity);
+            std::io::Read::read_to_end(&mut file, &mut bytes)?;
+            Ok(Some(bytes))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use bitcoin_rs_storage::{
+        ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
+    };
+    use cap_std::ambient_authority;
+    use parking_lot::Mutex;
+
+    use super::*;
+    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+
+    use crate::chainstate_journal::record::{Coin, Mutation};
+
+    type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+    #[test]
+    fn clear_full_revalidation_marker_unlinks_then_treats_absence_as_success() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let journal_dir = dir.path().join(JOURNAL_DIR_NAME);
+        let marker = journal_dir.join(FULL_REVALIDATION_MARKER);
+        std::fs::create_dir_all(&journal_dir)?;
+        std::fs::write(&marker, b"journal fork crossed below checkpoint base\n")?;
+
+        clear_full_revalidation_marker_at(dir.path())?;
+        assert!(!marker.exists());
+        clear_full_revalidation_marker_at(dir.path())?;
+        Ok(())
+    }
+
+    /// Counts `flush()` calls and can fail them, proving the §2.3 order:
+    /// the head marker must never advance without a counted flush.
+    struct CountingStore {
+        flushes: AtomicU64,
+        fail_flush: Mutex<bool>,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                flushes: AtomicU64::new(0),
+                fail_flush: Mutex::new(false),
+            }
+        }
+
+        fn flush_count(&self) -> u64 {
+            self.flushes.load(Ordering::SeqCst)
+        }
+
+        fn set_fail_flush(&self, fail: bool) {
+            *self.fail_flush.lock() = fail;
+        }
+    }
+
+    impl KvStore for CountingStore {
+        type WriteBatch = NoopBatch;
+
+        fn get(&self, _cf: ColumnFamily, _key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(None)
+        }
+
+        fn iter_prefix<'a>(
+            &'a self,
+            _cf: ColumnFamily,
+            _prefix: &[u8],
+        ) -> Result<KvIter<'a>, StorageError> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn new_batch(&self) -> Self::WriteBatch {
+            NoopBatch
+        }
+
+        fn write(&self, _batch: Self::WriteBatch) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        fn write_durable_if(
+            &self,
+            _conditions: &[WriteCondition<'_>],
+            _batch: Self::WriteBatch,
+        ) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+
+        fn flush(&self) -> Result<(), StorageError> {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            if *self.fail_flush.lock() {
+                return Err(StorageError::InvalidOperation("injected flush failure"));
+            }
+            Ok(())
+        }
+
+        fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
+            unreachable!("unused in writer tests")
+        }
+    }
+
+    struct NoopBatch;
+
+    impl WriteBatch for NoopBatch {
+        fn put(&mut self, _cf: ColumnFamily, _key: &[u8], _value: &[u8]) {}
+        fn delete(&mut self, _cf: ColumnFamily, _key: &[u8]) {}
+        fn delete_range(&mut self, _cf: ColumnFamily, _start: &[u8], _end: &[u8]) {}
+    }
+
+    fn temp_dir(tag: &str) -> TestResult<cap_std::fs::Dir> {
+        let path =
+            std::env::temp_dir().join(format!("journal-writer-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path)?;
+        Ok(cap_std::fs::Dir::open_ambient_dir(
+            &path,
+            ambient_authority(),
+        )?)
+    }
+
+    fn sample_record(height: u32) -> JournalRecord {
+        JournalRecord {
+            height,
+            block_hash: [u8::try_from(height).unwrap_or(9); 32],
+            prev_hash: [u8::try_from(height.wrapping_sub(1)).unwrap_or(8); 32],
+            block_tx_count: 3,
+            coin_stats_height_delta: 1,
+            raw_header: [0; 80],
+            mutations: vec![
+                Mutation::Create {
+                    coin: Coin {
+                        outpoint: OutPoint::new(
+                            Txid(Hash256::from_le_bytes(
+                                &[u8::try_from(height).unwrap_or(9); 32],
+                            )),
+                            height,
+                        ),
+                        txout: TxOut {
+                            value: u64::from(height),
+                            script_pubkey: vec![0x51],
+                        },
+                        height,
+                        coinbase: true,
+                    },
+                },
+                Mutation::Spend {
+                    coin: Coin {
+                        outpoint: OutPoint::new(
+                            Txid(Hash256::from_le_bytes(
+                                &[u8::try_from(height.wrapping_sub(1)).unwrap_or(8); 32],
+                            )),
+                            height.wrapping_sub(1),
+                        ),
+                        txout: TxOut {
+                            value: u64::from(height),
+                            script_pubkey: vec![0x51],
+                        },
+                        height: height.wrapping_sub(1),
+                        coinbase: false,
+                    },
+                },
+            ],
+        }
+    }
+
+    fn open_fresh(
+        tag: &str,
+        store: Arc<CountingStore>,
+    ) -> TestResult<JournalWriter<CountingStore>> {
+        let dir = temp_dir(tag)?;
+        Ok(JournalWriter::initialize(
+            dir,
+            store,
+            0,
+            (0, 0),
+            0,
+            [1; 32],
+            [0; 32],
+            0,
+        )?)
+    }
+
+    #[test]
+    fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
+        let writer = open_fresh("config-defaults", Arc::new(CountingStore::new()))?;
+        let defaults = crate::config::ChainstateJournalConfig::default();
+
+        assert_eq!(writer.batch_blocks, defaults.blocks);
+        assert_eq!(writer.batch_seconds, Duration::from_secs(defaults.seconds));
+        assert_eq!(writer.rotate_bytes, defaults.rotate_mib * 1024 * 1024);
+        assert_eq!(
+            writer.max_journal_bytes,
+            defaults.max_journal_mib * 1024 * 1024
+        );
+        assert_eq!(writer.max_lag_blocks, defaults.max_lag_blocks);
+        assert_eq!(
+            writer.max_lag_seconds,
+            Duration::from_secs(defaults.max_lag_seconds)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn head_never_advances_without_counted_storage_flush() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("flush-order", Arc::clone(&store))?;
+        let flushes_at_open = store.flush_count();
+
+        // Fail the storage dependency: append still succeeds (buffered), but
+        // the automatic boundary must not publish a head.
+        store.set_fail_flush(true);
+        writer.append(&sample_record(1))?;
+        store.set_fail_flush(false);
+
+        // Force the boundary now: flush counted, head publishable.
+        writer.flush_to(1)?;
+        assert_eq!(store.flush_count(), flushes_at_open + 1);
+        assert_eq!(writer.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let dir;
+        {
+            let mut writer = open_fresh("torn-tail", Arc::clone(&store))?;
+            writer.append(&sample_record(1))?;
+            writer.flush_to(1)?;
+            dir = writer.dir.try_clone()?;
+            // Simulate a torn append after the head: raw bytes past the cursor.
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.append(true).create(true);
+            let mut file = dir.open_with(segment_name(writer.segment_gen), &options)?;
+            file.write_all(&[0xde, 0xad, 0xbe, 0xef])?;
+            file.sync_all()?;
+        }
+        // Reopen: the torn tail must be truncated away without error.
+        let writer = JournalWriter::open(dir, store)?;
+        assert_eq!(writer.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn partial_append_truncates_and_retries_idempotently() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let dir;
+        let record = sample_record(1);
+        {
+            let mut writer = open_fresh("idempotent", Arc::clone(&store))?;
+            // Buffer record 1 but crash before any boundary (drop = crash).
+            writer.append(&record)?;
+            dir = writer.dir.try_clone()?;
+        }
+        // After the crash, record 1 may have reached the page cache but was
+        // never covered by a durable head. Reopening truncates to the head
+        // cursor; the caller replays record 1 into the same place.
+        let mut writer = JournalWriter::open(dir, Arc::clone(&store))?;
+        writer.append(&record)?;
+        writer.flush_to(1)?;
+        assert_eq!(writer.head().height, 1);
+        assert_eq!(writer.head().record_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("append-gap", store)?;
+        writer.inject_failpoint(JournalWriterFailpoint::SegmentAppend);
+
+        assert!(writer.append(&sample_record(1)).is_err());
+        writer.failpoint = None;
+
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::AppendGap { height: 1 })
+        ));
+        assert!(matches!(
+            writer.append(&sample_record(2)),
+            Err(JournalWriterError::AppendGap { height: 1 })
+        ));
+        assert_eq!(writer.head().height, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn out_of_order_append_blocks_the_next_apply() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("out-of-order-gap", store)?;
+
+        assert!(matches!(
+            writer.append(&sample_record(2)),
+            Err(JournalWriterError::OutOfOrder {
+                got: 2,
+                expected: 1
+            })
+        ));
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::AppendGap { height: 2 })
+        ));
+        assert!(matches!(
+            writer.append(&sample_record(1)),
+            Err(JournalWriterError::AppendGap { height: 2 })
+        ));
+        assert_eq!(writer.head().height, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn partial_append_rolls_back_tail_and_restart_can_retry() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let dir;
+        {
+            let mut writer = open_fresh("partial-append-gap", Arc::clone(&store))?;
+            writer.inject_failpoint(JournalWriterFailpoint::SegmentAppendPartial);
+
+            assert!(writer.append(&sample_record(1)).is_err());
+            let segment = writer.dir.open(segment_name(writer.segment_gen))?;
+            assert_eq!(segment.metadata()?.len(), writer.segment_offset);
+            assert_eq!(writer.segment_offset, writer.head().offset);
+            assert!(matches!(
+                writer.prepare_for_apply(),
+                Err(JournalWriterError::AppendGap { height: 1 })
+            ));
+            dir = writer.dir.try_clone()?;
+        }
+
+        let mut reopened = JournalWriter::open(dir, store)?;
+        reopened.append(&sample_record(1))?;
+        reopened.flush_to(1)?;
+        assert_eq!(reopened.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_rewind_truncation_blocks_appends_until_restart() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let dir;
+        {
+            let mut writer = open_fresh("rewind-truncate-gap", Arc::clone(&store))?;
+            writer.append(&sample_record(1))?;
+            writer.append(&sample_record(2))?;
+            writer.flush_to(2)?;
+            writer.inject_failpoint(JournalWriterFailpoint::RewindTruncate);
+
+            assert!(writer.rewind_to(1, [1; 32], [0; 32], 3).is_err());
+            writer.failpoint = None;
+            let persisted = HeadMarker::deserialize(&writer.dir.read("head.json")?)?;
+            assert_eq!(persisted.height, 1);
+            assert!(matches!(
+                writer.prepare_for_apply(),
+                Err(JournalWriterError::AppendGap { height: 2 })
+            ));
+            assert!(matches!(
+                writer.append(&sample_record(2)),
+                Err(JournalWriterError::AppendGap { height: 2 })
+            ));
+            dir = writer.dir.try_clone()?;
+        }
+
+        let mut reopened = JournalWriter::open(dir, store)?;
+        reopened.append(&sample_record(2))?;
+        reopened.flush_to(2)?;
+        assert_eq!(reopened.head().height, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_keeps_cursor_invariants() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("rotation", Arc::clone(&store))?;
+        // Rotate exactly once, before the second append.
+        let first = sample_record(1);
+        writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+        writer.append(&first)?;
+        writer.append(&sample_record(2))?;
+        assert_eq!(writer.segment_gen, 1, "rotation bumped the generation");
+        // head must stay valid across the rotation.
+        writer.flush_to(2)?;
+        assert_eq!(writer.head().height, 2);
+        assert_eq!(writer.head().journal_gen, 1);
+        // Zero-padded naming: lexicographic == numeric.
+        let names: Vec<String> = (0..3).map(segment_name).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "zero-padded segments sort numerically");
+        Ok(())
+    }
+
+    #[test]
+    fn failpoints_fire_documented_errors() -> TestResult {
+        for boundary in [
+            JournalWriterFailpoint::SegmentAppend,
+            JournalWriterFailpoint::SegmentAppendPartial,
+            JournalWriterFailpoint::StorageFlush,
+            JournalWriterFailpoint::SegmentSync,
+            JournalWriterFailpoint::HeadTempWrite,
+            JournalWriterFailpoint::HeadTempSync,
+            JournalWriterFailpoint::HeadRename,
+            JournalWriterFailpoint::HeadDirSync,
+        ] {
+            let store = Arc::new(CountingStore::new());
+            let mut writer = open_fresh("failpoints", Arc::clone(&store))?;
+            writer.inject_failpoint(boundary);
+            // Append failpoints fire immediately; durability failures fire only
+            // when the explicit batch boundary is advanced.
+            let append_result = writer.append(&sample_record(1));
+            let result = if matches!(
+                boundary,
+                JournalWriterFailpoint::SegmentAppend
+                    | JournalWriterFailpoint::SegmentAppendPartial
+            ) {
+                append_result
+            } else {
+                append_result?;
+                writer.flush_to(1)
+            };
+            assert!(result.is_err(), "{boundary:?} did not fire");
+            // ...and head.json must still reflect height 0 (no advancement).
+            assert_eq!(writer.head().height, 0, "{boundary:?} advanced the head");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("freeze", Arc::clone(&store))?;
+        writer.append(&sample_record(1))?;
+        writer.freeze()?;
+        assert_eq!(writer.state(), WriterState::Frozen);
+        let Err(error) = writer.append(&sample_record(2)) else {
+            return Err("frozen writer accepted an append".into());
+        };
+        assert!(matches!(error, JournalWriterError::NotOpen { .. }));
+        writer.compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3)?;
+        writer.resume()?;
+        assert_eq!(writer.state(), WriterState::Open);
+        writer.append(&sample_record(2))?;
+        Ok(())
+    }
+
+    #[test]
+    fn configured_lag_limits_retry_persistent_flush_failures() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("lag-backpressure", Arc::clone(&store))?;
+        writer.configure(
+            1,
+            Duration::from_secs(10),
+            1,
+            10,
+            1,
+            Duration::from_secs(10),
+        )?;
+        store.set_fail_flush(true);
+        assert!(matches!(
+            writer.append(&sample_record(1)),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert_eq!(writer.head().height, 0);
+
+        store.set_fail_flush(false);
+        writer.prepare_for_apply()?;
+        assert_eq!(writer.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_boundary_retries_before_next_apply_below_lag_limit() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("boundary-retry", Arc::clone(&store))?;
+        writer.configure(1, Duration::from_mins(1), 1, 10, 10, Duration::from_mins(1))?;
+        store.set_fail_flush(true);
+        assert!(matches!(
+            writer.append(&sample_record(1)),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert_eq!(writer.head().height, 0);
+
+        store.set_fail_flush(false);
+        writer.prepare_for_apply()?;
+        assert_eq!(
+            writer.head().height,
+            1,
+            "the failed automatic boundary must be retried before another apply"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn configured_lag_time_forces_pre_apply_durability() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("lag-time", store)?;
+        writer.configure(
+            10,
+            Duration::from_secs(10),
+            1,
+            10,
+            10,
+            Duration::from_secs(1),
+        )?;
+        writer.append(&sample_record(1))?;
+        writer.last_boundary = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .ok_or("test instant underflow")?;
+        writer.prepare_for_apply()?;
+        assert_eq!(writer.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("retention", store)?;
+        writer.configure(
+            10,
+            Duration::from_secs(10),
+            1,
+            1,
+            10,
+            Duration::from_secs(10),
+        )?;
+        let name = segment_name(writer.segment_gen);
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create(true);
+        writer.dir.open_with(name, &options)?.set_len(1024 * 1024)?;
+        assert!(writer.requires_compaction()?);
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::RetentionLimit { .. })
+        ));
+
+        writer.freeze()?;
+        writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0)?;
+        writer.resume()?;
+        assert!(!writer.requires_compaction()?);
+        writer.prepare_for_apply()?;
+        Ok(())
+    }
+
+    #[test]
+    fn freeze_failures_restore_open_state_for_retry() -> TestResult {
+        for boundary in [
+            JournalWriterFailpoint::StorageFlush,
+            JournalWriterFailpoint::SegmentSync,
+            JournalWriterFailpoint::HeadTempWrite,
+            JournalWriterFailpoint::HeadTempSync,
+            JournalWriterFailpoint::HeadRename,
+            JournalWriterFailpoint::HeadDirSync,
+        ] {
+            let store = Arc::new(CountingStore::new());
+            let mut writer = open_fresh("freeze-retry", store)?;
+            writer.append(&sample_record(1))?;
+            writer.inject_failpoint(boundary);
+            assert!(writer.freeze().is_err(), "{boundary:?} did not fail");
+            assert_eq!(writer.state(), WriterState::Open);
+            writer.failpoint = None;
+            writer.append(&sample_record(2))?;
+            writer.freeze()?;
+            assert_eq!(writer.head().height, 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_failure_does_not_strand_frozen_writer() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("resume-retry", store)?;
+        writer.append(&sample_record(1))?;
+        writer.freeze()?;
+        writer.inject_failpoint(JournalWriterFailpoint::HeadTempWrite);
+        assert!(writer.resume().is_err());
+        assert_eq!(writer.state(), WriterState::Open);
+        writer.failpoint = None;
+        writer.append(&sample_record(2))?;
+        writer.freeze()?;
+        assert_eq!(writer.head().height, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn rotation_head_never_names_a_missing_segment() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let dir;
+        {
+            let mut writer = open_fresh("rotation-crash", Arc::clone(&store))?;
+            let first = sample_record(1);
+            writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+            writer.append(&first)?;
+            writer.flush_to(1)?;
+            writer.inject_failpoint(JournalWriterFailpoint::HeadTempWrite);
+            assert!(writer.append(&sample_record(2)).is_err());
+            dir = writer.dir.try_clone()?;
+        }
+
+        let mut reopened = JournalWriter::open(dir, store)?;
+        assert_eq!(reopened.head().journal_gen, 0);
+        assert_eq!(reopened.head().height, 1);
+        reopened.append(&sample_record(2))?;
+        reopened.flush_to(2)?;
+        assert_eq!(reopened.head().height, 2);
+        Ok(())
+    }
+}

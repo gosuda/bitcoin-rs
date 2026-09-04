@@ -49,8 +49,15 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         full_rbf: policy.full_rbf,
         permit_bare_multisig: policy.permit_bare_multisig,
         max_data_carrier_size: policy.max_data_carrier_size(),
-        limit_cluster_count: i64::from(policy.max_ancestor_count),
-        limit_cluster_size: i64_saturated(policy.max_ancestor_size_vbytes),
+        // Cluster limits the snapshot owns. These are not the ancestor
+        // caps: Core 31 deprecated `-limitancestorcount` /
+        // `-limitdescendantcount` and replaced them with cluster limits,
+        // keeping the old pair only for wallet coin selection, so the two
+        // describe different policies -- and `max_ancestor_size` happening
+        // to equal `101_000` as well is a coincidence of value, not of
+        // meaning.
+        limit_cluster_count: i64::from(policy.cluster_count),
+        limit_cluster_size: i64_saturated(policy.cluster_size_vbytes),
         optimal: policy.optimal,
     })
 }
@@ -281,6 +288,75 @@ mod tests {
         );
     }
 
+    /// `limitclustercount` / `limitclustersize` are read from the pool, not
+    /// restated in the handler.
+    ///
+    /// Asserted by changing the configured limits and requiring the response
+    /// to follow. Checking only the defaults would pass just as well against
+    /// two constants written into this file, which is the failure this guards:
+    /// the fields must describe policy the pool enforces, and a handler that
+    /// reports numbers of its own describes nothing.
+    #[test]
+    fn getmempoolinfo_cluster_limits_follow_the_pool_rather_than_a_constant() {
+        let ctx = Arc::new(Context::new());
+        {
+            let mut pool = ctx.mempool.pool().write();
+            *pool = bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits {
+                cluster_count: 7,
+                cluster_size_vbytes: 4_242,
+                ..bitcoin_rs_mempool::MempoolLimits::default()
+            });
+        }
+
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolinfo", &json!([]))
+            .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
+
+        assert_eq!(
+            result
+                .get("limitclustercount")
+                .and_then(JsonValueTrait::as_i64),
+            Some(7),
+            "limitclustercount must follow the pool: {result:?}"
+        );
+        assert_eq!(
+            result
+                .get("limitclustersize")
+                .and_then(JsonValueTrait::as_i64),
+            Some(4_242),
+            "limitclustersize must follow the pool: {result:?}"
+        );
+    }
+
+    /// The defaults a fresh pool reports are Bitcoin Core's, so a client
+    /// reading them against Core sees the same numbers.
+    #[test]
+    fn getmempoolinfo_defaults_to_cores_cluster_limits() {
+        let ctx = Arc::new(Context::new());
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let result = handler
+            .dispatch("getmempoolinfo", &json!([]))
+            .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
+
+        // Core `policy.h`: DEFAULT_CLUSTER_LIMIT{64},
+        // DEFAULT_CLUSTER_SIZE_LIMIT_KVB{101} expressed in vbytes.
+        assert_eq!(
+            result
+                .get("limitclustercount")
+                .and_then(JsonValueTrait::as_i64),
+            Some(64),
+            "{result:?}"
+        );
+        assert_eq!(
+            result
+                .get("limitclustersize")
+                .and_then(JsonValueTrait::as_i64),
+            Some(101_000),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn getmempoolinfo_minrelaytxfee_reflects_custom_mempool_floor() {
         let ctx = Arc::new(Context::new());
@@ -358,8 +434,8 @@ mod tests {
             .dispatch("getmempoolinfo", &json!([]))
             .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
         // The enforced defaults: bare multisig permitted, the 83-byte
-        // nulldata budget, the ancestor-package bounds under the recorded
-        // cluster deviation, and the eviction-floor increment.
+        // nulldata budget, the cluster limits admission enforces, and the
+        // eviction-floor increment.
         assert_eq!(
             result
                 .get("permitbaremultisig")
@@ -376,7 +452,7 @@ mod tests {
             result
                 .get("limitclustercount")
                 .and_then(JsonValueTrait::as_i64),
-            Some(25)
+            Some(64)
         );
         assert_eq!(
             result
@@ -410,14 +486,14 @@ mod tests {
         // `policy_contract.rs` reconfigures floors mid-test: the per-guard
         // derivation must quote them on the next call, never a stale
         // composition-time copy.
-        ctx.mempool.pool().write().limits.max_ancestors = 7;
-        ctx.mempool.pool().write().limits.max_ancestor_size = 42_000;
+        ctx.mempool.pool().write().limits.cluster_count = 7;
+        ctx.mempool.pool().write().limits.cluster_size_vbytes = 42_000;
         let handler = crate::Handler::new(Arc::clone(&ctx));
         let result = handler
             .dispatch("getmempoolinfo", &json!([]))
             .unwrap_or_else(|err| panic!("getmempoolinfo failed: {err}"));
-        // The cluster fields project the configured ancestor-package bounds;
-        // unrelated defaults stay untouched.
+        // The cluster fields follow the configured cluster limits; unrelated
+        // defaults stay untouched.
         assert_eq!(
             result
                 .get("limitclustercount")

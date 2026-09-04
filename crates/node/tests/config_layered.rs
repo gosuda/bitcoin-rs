@@ -260,84 +260,89 @@ fn scriptindex_environment_enables_the_index() -> Result<()> {
 }
 
 #[test]
-fn zmq_layers_parse_precedence_and_publication_order() -> Result<()> {
+fn zmq_toml_groups_topics_by_endpoint_and_uses_publisher_default_hwm() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let toml_path = temp.path().join("node.toml");
-    let bitcoin_conf_path = temp.path().join("bitcoin.conf");
 
     fs::write(
         &toml_path,
         r#"
-zmqpubhashblock = ["tcp://127.0.0.1:28332", "tcp://127.0.0.1:28333"]
-zmqpubhashblockhwm = 9
-zmqpubsequence = ["tcp://127.0.0.1:28338"]
-zmqpubsequencehwm = 13
+[[notifications.zmq]]
+endpoint = "tcp://127.0.0.1:28332"
+topics = ["hashblock", "rawblock", "sequence"]
+
+[[notifications.zmq]]
+endpoint = "tcp://127.0.0.1:28333"
+topics = ["hashtx", "rawtx"]
+hwm = 5000
 "#,
     )?;
-    fs::write(
-        &bitcoin_conf_path,
-        r"
--zmqpubhashblock=tcp://127.0.0.1:18332
--zmqpubhashblockhwm=3
-",
-    )?;
 
-    let env: [EnvPair; 2] = [
-        (
-            "BITCOIN_RS_ZMQPUBRAWTX",
-            "tcp://127.0.0.1:28334,tcp://127.0.0.1:28335",
-        ),
-        ("BITCOIN_RS_ZMQPUBRAWTXHWM", "11"),
-    ];
     let config = NodeConfig::from_layered_sources(
         Some(&toml_path),
-        Some(&bitcoin_conf_path),
-        env,
-        [
-            "bitcoin-rs-node",
-            "--zmqpubhashtx",
-            "tcp://127.0.0.1:28336",
-            "--zmqpubrawtx",
-            "tcp://127.0.0.1:28337",
-            "--zmqpubrawtxhwm",
-            "12",
-            "--zmqpubsequence",
-            "tcp://127.0.0.1:28339",
-            "--zmqpubsequencehwm",
-            "14",
-        ],
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node"],
     )?;
 
-    let publications = config.zmq_publications();
-    let topics: Vec<_> = publications
-        .iter()
-        .map(|publication| publication.topic.as_str())
-        .collect();
-    let endpoints: Vec<_> = publications
-        .iter()
-        .map(|publication| publication.endpoint.as_str())
-        .collect();
-    let hwms: Vec<_> = publications
-        .iter()
-        .map(|publication| publication.hwm)
-        .collect();
-
+    let endpoints = config.zmq_endpoints();
+    assert_eq!(endpoints.len(), 2);
+    assert_eq!(endpoints[0].endpoint, "tcp://127.0.0.1:28332");
     assert_eq!(
-        topics,
-        ["hashblock", "hashblock", "hashtx", "rawtx", "sequence"]
+        endpoints[0]
+            .topics
+            .iter()
+            .map(|topic| topic.as_str())
+            .collect::<Vec<_>>(),
+        ["hashblock", "rawblock", "sequence"]
     );
-    assert_eq!(
-        endpoints,
-        [
-            "tcp://127.0.0.1:28332",
-            "tcp://127.0.0.1:28333",
-            "tcp://127.0.0.1:28336",
-            "tcp://127.0.0.1:28337",
-            "tcp://127.0.0.1:28339",
-        ]
-    );
-    assert_eq!(hwms, [9, 9, 1_000, 12, 14]);
+    assert_eq!(endpoints[0].hwm, None);
+    assert_eq!(endpoints[0].effective_hwm(), 1_000);
+    assert_eq!(endpoints[1].endpoint, "tcp://127.0.0.1:28333");
+    assert_eq!(endpoints[1].effective_hwm(), 5_000);
     Ok(())
+}
+
+#[test]
+fn legacy_flat_zmq_toml_is_rejected() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let toml_path = temp.path().join("node.toml");
+    fs::write(&toml_path, r#"zmqpubhashblock = ["tcp://127.0.0.1:28332"]"#)?;
+
+    let error = NodeConfig::from_layered_sources(
+        Some(&toml_path),
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node"],
+    )
+    .err()
+    .ok_or_else(|| anyhow::anyhow!("legacy flat ZMQ keys must not be silently accepted"))?;
+    assert!(error.to_string().contains("failed to parse TOML config"));
+    Ok(())
+}
+
+#[test]
+fn zmq_endpoint_groups_reject_duplicate_socket_and_topic_ownership() {
+    use bitcoin_rs_node::{ZmqEndpointConfig, ZmqTopic};
+
+    let mut config = NodeConfig::default();
+    config.notifications.zmq = vec![
+        ZmqEndpointConfig {
+            endpoint: "tcp://127.0.0.1:28332".to_owned(),
+            topics: vec![ZmqTopic::HashBlock],
+            hwm: None,
+        },
+        ZmqEndpointConfig {
+            endpoint: "tcp://127.0.0.1:28332".to_owned(),
+            topics: vec![ZmqTopic::RawBlock],
+            hwm: Some(5_000),
+        },
+    ];
+    assert!(config.validate().is_err());
+
+    config.notifications.zmq.truncate(1);
+    config.notifications.zmq[0].topics.push(ZmqTopic::HashBlock);
+    assert!(config.validate().is_err());
 }
 
 #[test]

@@ -64,16 +64,6 @@ fn apply_key(layer: &mut UserConfig, key: &str, value: &str) {
                 layer.dbcache_mb = Some(dbcache_mb);
             }
         }
-        "zmqpubhashblock" => push_endpoint(&mut layer.zmqpubhashblock, value),
-        "zmqpubhashtx" => push_endpoint(&mut layer.zmqpubhashtx, value),
-        "zmqpubrawblock" => push_endpoint(&mut layer.zmqpubrawblock, value),
-        "zmqpubrawtx" => push_endpoint(&mut layer.zmqpubrawtx, value),
-        "zmqpubsequence" => push_endpoint(&mut layer.zmqpubsequence, value),
-        "zmqpubhashblockhwm" => layer.zmqpubhashblockhwm = value.parse().ok(),
-        "zmqpubhashtxhwm" => layer.zmqpubhashtxhwm = value.parse().ok(),
-        "zmqpubrawblockhwm" => layer.zmqpubrawblockhwm = value.parse().ok(),
-        "zmqpubrawtxhwm" => layer.zmqpubrawtxhwm = value.parse().ok(),
-        "zmqpubsequencehwm" => layer.zmqpubsequencehwm = value.parse().ok(),
         _ => {}
     }
     if layer.rpc_user.is_some() || layer.rpc_password.is_some() {
@@ -92,10 +82,6 @@ fn parse_core_bool(value: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
-}
-
-fn push_endpoint(slot: &mut Option<Vec<String>>, value: &str) {
-    slot.get_or_insert_with(Vec::new).push(value.to_owned());
 }
 
 fn parse_section(line: &str) -> Option<&str> {
@@ -182,36 +168,6 @@ impl UserConfigMerge for UserConfig {
         }
         if other.metrics_bind.is_some() {
             self.metrics_bind = other.metrics_bind;
-        }
-        if other.zmqpubhashblock.is_some() {
-            self.zmqpubhashblock.clone_from(&other.zmqpubhashblock);
-        }
-        if other.zmqpubhashtx.is_some() {
-            self.zmqpubhashtx.clone_from(&other.zmqpubhashtx);
-        }
-        if other.zmqpubrawblock.is_some() {
-            self.zmqpubrawblock.clone_from(&other.zmqpubrawblock);
-        }
-        if other.zmqpubrawtx.is_some() {
-            self.zmqpubrawtx.clone_from(&other.zmqpubrawtx);
-        }
-        if other.zmqpubsequence.is_some() {
-            self.zmqpubsequence.clone_from(&other.zmqpubsequence);
-        }
-        if other.zmqpubhashblockhwm.is_some() {
-            self.zmqpubhashblockhwm = other.zmqpubhashblockhwm;
-        }
-        if other.zmqpubhashtxhwm.is_some() {
-            self.zmqpubhashtxhwm = other.zmqpubhashtxhwm;
-        }
-        if other.zmqpubrawblockhwm.is_some() {
-            self.zmqpubrawblockhwm = other.zmqpubrawblockhwm;
-        }
-        if other.zmqpubrawtxhwm.is_some() {
-            self.zmqpubrawtxhwm = other.zmqpubrawtxhwm;
-        }
-        if other.zmqpubsequencehwm.is_some() {
-            self.zmqpubsequencehwm = other.zmqpubsequencehwm;
         }
     }
 }
