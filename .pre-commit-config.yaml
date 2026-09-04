@@ -11,33 +11,21 @@ fail_fast: true
 repos:
   - repo: local
     hooks:
-      - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo +1.95.0 fmt --all -- --check
+      - id: ci-pr-fmt
+        name: PR gate fmt
+        entry: ./scripts/ci-pr.sh fmt
         language: unsupported
         pass_filenames: false
         always_run: true
-      - id: cargo-clippy-full-node
-        name: cargo clippy (full node)
-        entry: cargo +1.95.0 clippy -p bitcoin-rs --all-targets --no-default-features --features rocksdb,fjall,redb,mdbx,kernel,zmq -- -D warnings
+      - id: ci-pr-clippy
+        name: PR gate clippy
+        entry: ./scripts/ci-pr.sh clippy
         language: unsupported
         pass_filenames: false
         always_run: true
-      - id: cargo-clippy-node-tests
-        name: cargo clippy (node test targets)
-        entry: cargo +1.95.0 clippy -p bitcoin-rs-node --all-targets -- -D warnings
-        language: unsupported
-        pass_filenames: false
-        always_run: true
-      - id: cargo-test-workspace
-        name: cargo test (workspace)
-        entry: cargo +1.95.0 test --workspace --no-fail-fast
-        language: unsupported
-        pass_filenames: false
-        always_run: true
-      - id: cargo-test-full-node
-        name: cargo test (full node)
-        entry: cargo +1.95.0 test -p bitcoin-rs --no-fail-fast --no-default-features --features rocksdb,fjall,redb,mdbx,kernel,zmq
+      - id: ci-pr-test
+        name: PR gate test
+        entry: ./scripts/ci-pr.sh test
         language: unsupported
         pass_filenames: false
         always_run: true
