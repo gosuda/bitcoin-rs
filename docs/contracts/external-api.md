@@ -6,6 +6,7 @@ path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
 BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 `API-08` is mainnet template operational gates. `API-09` is `submitheader`.
 `API-10` is GBT client-rule negotiation. `API-11` is `submitblock` decode.
+`API-12` is GBT proposal request parsing.
 
 ## Clauses
 
@@ -152,6 +153,17 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 - A second dummy argument is accepted and ignored (BIP22). A third argument
   is JSON-RPC `-32602`.
 
+### `API-12`: GBT proposal request parsing
+
+- **Owner**: `parse_block_template_request` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Unknown or non-string `mode` is Core `-8` (`Invalid mode`).
+- Proposal mode does not require the client to list the `proposal`
+  capability. Missing `data` is Core `-3`
+  (`Missing data String key for proposal`). Decode uses
+  `decode_submitted_block` (`API-11`): `-22` `Block decode failed`, leftover
+  bytes ignored.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -215,3 +227,7 @@ owned by [wallet-facing.md](wallet-facing.md).
 - `API-11`:
   - `crates/rpc/src/handlers/mining.rs` tests `submitblock_requires_mining_control_and_rejects_garbage_encoding`,
     `submitblock_ignores_bip22_dummy_and_trailing_bytes`
+- `API-12`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_invalid_mode`,
+    `getblocktemplate_proposal_decode_matches_core`,
+    `getblocktemplate_proposal_skips_client_rule_negotiation`
