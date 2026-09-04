@@ -352,4 +352,6 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/rpc/src/handlers/mining.rs` tests
     `prioritisetransaction_calls_mempool_prioritise_directly`,
     `prioritisetransaction_rejects_nonzero_dummy_like_core`,
-    `prioritisetransaction_requires_fee_delta_as_third_parameter`
+    `prioritisetransaction_requires_fee_delta_as_third_parameter`,
+      inline regression coverage for extra parameters and named fee_delta
+    - Execution evidence: `cargo test -p bitcoin-rs-rpc prioritisetransaction` passes (run locally).
