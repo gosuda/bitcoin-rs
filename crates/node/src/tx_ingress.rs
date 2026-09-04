@@ -543,8 +543,8 @@ mod tests {
     }
 
     /// Builds a tx that spends a known UTXO, passing standardness and
-    /// script checks. Empty `scriptSig` plus an OP_TRUE prevout satisfy
-    /// `SCRIPT_VERIFY_CLEANSTACK`; the OP_RETURN payload pads the
+    /// script checks. Empty `scriptSig` plus an `OP_TRUE` prevout satisfy
+    /// `SCRIPT_VERIFY_CLEANSTACK`; the `OP_RETURN` payload pads the
     /// non-witness size to the 65-byte standardness floor.
     fn spending_tx() -> Tx {
         let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
