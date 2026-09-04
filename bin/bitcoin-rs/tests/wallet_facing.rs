@@ -384,6 +384,10 @@ impl Client {
 }
 
 fn spend_first_anyone_can_spend(client: &Client) -> TestResult<String> {
+    // Height-1 coinbase is anyone-can-spend (`OP_TRUE`), the one script class
+    // the portable interpreter verifies. The node holds no keys; a wallet
+    // would sign here. Broadcast still goes through the public `POST /tx`
+    // path, paying a standard P2WPKH so policy accepts the output.
     let block_hash = client.esplora_text("/block-height/1")?;
     let txid_hex = client.esplora_text(&format!("/block/{}/txid/0", block_hash.trim()))?;
     let txid: Txid = txid_hex.trim().parse()?;
@@ -397,7 +401,7 @@ fn spend_first_anyone_can_spend(client: &Client) -> TestResult<String> {
         }],
         outputs: vec![TxOut {
             value: REGTEST_SUBSIDY_SATS.saturating_sub(FEE_SATS),
-            script_pubkey: OP_TRUE.to_vec(),
+            script_pubkey: P2WPKH_SCRIPT.to_vec(),
         }],
         lock_time: 0,
     };
