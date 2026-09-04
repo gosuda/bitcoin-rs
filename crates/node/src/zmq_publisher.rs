@@ -4,7 +4,9 @@
 //! via ZMQ for client subscribers. `bitcoin-rs` keeps the apply path behind a
 //! small trait so notification failures cannot affect block connection.
 
-use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(feature = "zmq")]
+use anyhow::{Context as _, bail};
+use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
 #[cfg(feature = "zmq")]
 use core::fmt;
