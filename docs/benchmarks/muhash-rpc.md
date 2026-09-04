@@ -186,6 +186,14 @@ python3.14 tools/benchmark-campaign/muhash_rpc.py trial \
   --input /bench/trial-input.json --output /bench/obs.json
 ```
 
+Run a full lifecycle-owned campaign (spawns both arms, applies the declared
+cache policy, writes the 14 receipt triples, and publishes the result):
+
+```text
+python3.14 tools/benchmark-campaign/muhash_rpc.py campaign \
+  --input /bench/campaign.json --workspace /bench/work --output /bench/result.json
+```
+
 Aggregate a complete campaign:
 
 ```text
@@ -196,7 +204,18 @@ python3.14 tools/benchmark-campaign/muhash_rpc.py aggregate \
 The trial input is a strict `muhash-rpc-trial-input-v2` object (unknown or
 missing keys rejected) carrying the coordinates, endpoint, credential file
 reference, timeout, response cap, corpus, expected frozen tip, and the
-controller pre-receipt reference. The aggregate manifest is a strict
+controller pre-receipt reference. The campaign config is a strict
+`muhash-rpc-campaign-config-v2` object that binds one Core arm (`backend` is
+always `coinsdb`) to one bitcoin-rs arm (`backend` is exactly one of
+`fjall`, `rocksdb`, or `redb`), the single cache policy, the corpus, and the
+pinned binaries and commands. `{binary}` is copied and re-hashed before every
+spawn; `{rpc_bind}`, `{rpc_port}`, `{data_dir}`, and `{cookie}` are the only
+other placeholders. The controller owns process lifecycle and `/proc` fault
+and I/O snapshots, writes each pre-receipt/trial/observation/post-receipt
+triple, and then hands the same 14 triples to `aggregate`. A second backend
+is a second campaign and a second result file.
+
+The aggregate manifest is a strict
 `muhash-rpc-aggregate-input-v2` object carrying the campaign, the single
 policy, the corpus, and the 14 triple references in schedule order; each
 triple pins its trial input, pre-receipt, observation, and post-receipt
@@ -225,10 +244,11 @@ record whose final durability check did not run.
 ## Status
 
 The protocol contract above is implemented and covered by local fixture
-tests. The live evidence is not: no unmodified-daemon smoke has confirmed
+tests, including a lifecycle-owned campaign against fixture RPC daemons for
+every bitcoin-rs backend (`fjall`, `rocksdb`, `redb`) paired with a Core
+arm. The live evidence is not: no unmodified-daemon smoke has confirmed
 that both Bitcoin Core 31.1 and the bitcoin-rs RPC server accept the exact
-triplet, and no frozen-tip corpus with real pre-receipt/observation/
-post-receipt triples has been run through the seven-pair campaign. Any
-future comparative claim must come from executing that campaign and
-publishing its result file; until then this document records a controller,
-not a measurement.
+triplet against a frozen-tip corpus. Any future comparative claim must come
+from executing that campaign against unmodified daemons and publishing its
+result file; until then this document records a controller, not a
+measurement.
