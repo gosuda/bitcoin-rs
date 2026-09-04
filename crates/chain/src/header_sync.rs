@@ -136,6 +136,42 @@ fn validate_empty_tree_root(
     })
 }
 
+/// Returns the compact target the block after `parent_id` must carry.
+///
+/// Bitcoin Core's `GetNextWorkRequired`. Split out of [`validate_header_nbits`]
+/// so block-template assembly can ask the same question a validator asks:
+/// `getblocktemplate` has to tell a miner which `nBits` to mine against, and
+/// deriving that anywhere else would be a second implementation of the
+/// difficulty rules to drift from this one.
+///
+/// `candidate_time` is the timestamp the candidate block would carry. It only
+/// matters on networks with the minimum-difficulty rule, where a block far
+/// enough after its parent may reset to the proof-of-work limit.
+///
+/// # Errors
+///
+/// Returns [`ChainError`] if `parent_id` is unknown or its height is at the
+/// maximum.
+pub fn expected_next_bits(
+    network: Network,
+    tree: &BlockTree,
+    parent_id: NodeId,
+    candidate_time: u32,
+) -> Result<CompactTarget, ChainError> {
+    let parent = tree.node(parent_id)?;
+    let height = parent
+        .height
+        .checked_add(1)
+        .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
+    let retarget_interval = network.retarget_interval();
+    let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
+    if is_retarget {
+        expected_retarget_bits(network, tree, parent_id, height, retarget_interval)
+    } else {
+        expected_non_retarget_bits(network, tree, parent_id, candidate_time, retarget_interval)
+    }
+}
+
 /// Validates a candidate header's compact target against the contextual network difficulty rules.
 pub fn validate_header_nbits(
     tree: &BlockTree,
@@ -148,13 +184,7 @@ pub fn validate_header_nbits(
         .height
         .checked_add(1)
         .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
-    let retarget_interval = network.retarget_interval();
-    let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
-    let expected = if is_retarget {
-        expected_retarget_bits(network, tree, parent_id, height, retarget_interval)?
-    } else {
-        expected_non_retarget_bits(network, tree, parent_id, header, retarget_interval)?
-    };
+    let expected = expected_next_bits(network, tree, parent_id, header.time)?;
     compare_expected_bits(header, height, expected)
 }
 
@@ -207,7 +237,7 @@ fn expected_non_retarget_bits(
     network: Network,
     tree: &BlockTree,
     parent_id: NodeId,
-    header: &BlockHeader,
+    candidate_time: u32,
     retarget_interval: u32,
 ) -> Result<CompactTarget, ChainError> {
     let parent = tree.node(parent_id)?;
@@ -219,7 +249,7 @@ fn expected_non_retarget_bits(
         .header
         .time
         .saturating_add(network.target_spacing_seconds().saturating_mul(2));
-    if header.time > min_difficulty_time {
+    if candidate_time > min_difficulty_time {
         return Ok(pow_limit_bits(network));
     }
 

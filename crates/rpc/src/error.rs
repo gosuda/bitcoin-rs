@@ -36,6 +36,12 @@ pub enum RpcError {
     /// [`RpcError::InvalidParams`], which is the JSON-RPC shape error.
     #[error("{0}")]
     InvalidParameter(String),
+    /// The node has no peers.
+    #[error("{0}")]
+    ClientNotConnected(&'static str),
+    /// The node is still catching up with the chain.
+    #[error("{0}")]
+    ClientInInitialDownload(&'static str),
     /// A transaction was refused before the network's rules were consulted.
     ///
     /// Bitcoin Core's `RPC_VERIFY_ERROR` (-25), which it uses for submissions
@@ -66,6 +72,10 @@ impl RpcError {
     pub const CORE_INVALID_PARAMETER: i64 = -8;
     /// Bitcoin Core transaction-rejected code, `RPC_VERIFY_REJECTED`.
     pub const CORE_VERIFY_REJECTED: i64 = -26;
+    /// Bitcoin Core no-peers code, `RPC_CLIENT_NOT_CONNECTED`.
+    pub const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
+    /// Bitcoin Core still-syncing code, `RPC_CLIENT_IN_INITIAL_DOWNLOAD`.
+    pub const CORE_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
     /// Bitcoin Core general submission-error code, `RPC_VERIFY_ERROR`.
     pub const CORE_VERIFY_ERROR: i64 = -25;
 
@@ -86,8 +96,10 @@ impl RpcError {
             Self::InvalidType(_) => Self::CORE_INVALID_TYPE,
             Self::NotFound(_) => Self::CORE_NOT_FOUND,
             Self::TxRejected(_) => Self::CORE_VERIFY_REJECTED,
-            Self::TxVerifyError(_) => Self::CORE_VERIFY_ERROR,
             Self::InvalidParameter(_) => Self::CORE_INVALID_PARAMETER,
+            Self::TxVerifyError(_) => Self::CORE_VERIFY_ERROR,
+            Self::ClientNotConnected(_) => Self::CORE_CLIENT_NOT_CONNECTED,
+            Self::ClientInInitialDownload(_) => Self::CORE_CLIENT_IN_INITIAL_DOWNLOAD,
             Self::MethodDisabled(_) | Self::Internal(_) => Self::INTERNAL_ERROR,
         }
     }
