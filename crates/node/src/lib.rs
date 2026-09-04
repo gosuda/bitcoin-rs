@@ -13,6 +13,8 @@ extern crate alloc;
 ///
 /// See `ARCH-07` in `docs/contracts/architecture.md`.
 pub mod apply;
+/// Derived post-commit consumers of a committed chain transition.
+pub mod chain_effects;
 mod chainstate_journal;
 mod checkpoint;
 mod checkpoint_fs;
@@ -69,6 +71,7 @@ pub mod zmq_publisher;
 
 pub use apply::{ChainTransition, Chainstate, ChainstateSnapshot};
 pub use bitcoin_rs_primitives::Network;
+pub use chain_effects::ChainEffects;
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
     NetworkSelection, NodeConfig, NotificationConfig, ObservabilityConfig, ObservabilityOverrides,
