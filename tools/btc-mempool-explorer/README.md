@@ -11,8 +11,8 @@ other `/api/` path to electrs. This example mounts `nginx-mempool.conf` to keep
 bitcoin-rs on `:8332/api/`. That prefix is public electrs (the wallet-facing
 tree). The Mempool backend uses `ESPLORA_REST_API_URL=http://node:8332/esplora`,
 the same electrs routes plus `/internal` and `/block-template`. JSON-RPC keeps
-the listener root. nginx still 404s `/api/internal` and `/api/block-template`
-on the public explorer port.
+the listener root. The public explorer port proxies `/api/` as-is; it does not
+need a denylist, because those helpers are not on `/api`.
 
 The Mempool project has a frontend, backend, and MariaDB dependency, so this
 stack contains those three services plus `bitcoin-rs`. The frontend is the only
