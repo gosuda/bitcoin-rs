@@ -149,26 +149,30 @@ Owners:
   cells remain a separate coherent snapshot of the applied tip for index
   consumers (`EVT-01`).
 - Authoritative apply still lives in `crates/node` because it composes chain,
-  consensus, utxo, and storage. Optional consumers (RPC `BlockLog`, ZMQ,
-  TxIndex wake) remain wired here until #77's committed-event consumers own
-  them. Do not push cross-store ordering into `utxo` or `storage`.
+  consensus, utxo, and storage. It does not import RPC, ZMQ, or TxIndex
+  types. `ChainEffects` owns those post-commit consumers and is invoked around
+  the existing commit point: RPC `BlockLog` and hash/raw ZMQ topics before
+  `applied_tip` publication (hash/raw after mempool eviction), TxIndex wake
+  and sequence `C`/`D` after publication. Consumer failure cannot invalidate
+  chainstate. Issue #77 owns the durable event journal; this is dependency
+  direction, not a second event contract. Do not push cross-store ordering
+  into `utxo` or `storage`.
 
 ## Live gaps
 
 - **Node slimming and extraction (#217)**: Peer connection session and lease
-- **Node slimming and extraction (#217)**: Peer connection session and lease
   ownership has moved to `PeerTable` / `P2pService` in `crates/p2p` (#215,
   #217, #218). BIP9/softfork lookups, P2P chain serving, txindex status
   projection, mempool mutation consumers, and block-body access live with their
-  owner crates (#272). Applied-tip mutation now goes through the `Chainstate`
-  / `ChainTransition` facade (`ARCH-07`). `crates/node` still carries leftover
+  owner crates (#272). Applied-tip mutation goes through the `Chainstate`
+  / `ChainTransition` facade (`ARCH-07`). Post-commit RPC/ZMQ/index wiring
+  lives in `ChainEffects`, not in apply. `crates/node` still carries leftover
   domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
-  the P2P download scheduler (`sync.rs`), direct backend construction and cache
-  share dispatch (`state.rs`), and post-commit RPC/ZMQ/index wiring inside
-  apply. Relocating those into `crates/utxo`, `crates/storage`, and `crates/p2p`
-  remains tracked under #217 (open). A dedicated `crates/chainstate` waits
-  until the facade is dependency-acyclic. `crates/node` is the composition
-  layer, but is not yet fully slim.
+  the P2P download scheduler (`sync.rs`), and direct backend construction and
+  cache share dispatch (`state.rs`). Relocating those into `crates/utxo`,
+  `crates/storage`, and `crates/p2p` remains tracked under #217 (open). A
+  dedicated `crates/chainstate` waits until the facade is dependency-acyclic.
+  `crates/node` is the composition layer, but is not yet fully slim.
 
 ## Proven by
 
@@ -189,3 +193,7 @@ Owners:
   `chain_transition_connect_and_finish_publish_the_new_tip`: the facade
   copies published tips without reserving generation, and connect/finish
   through `ChainTransition` is the mutation path.
+- `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
+  `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
+  `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
+  owned by `ChainEffects`, not by apply.

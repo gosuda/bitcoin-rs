@@ -1866,13 +1866,14 @@ impl NodeState {
             block_tree: Arc::clone(&block_tree),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
-            tx_index_runtime: tx_index_runtime.clone(),
             mempool: Arc::clone(&mempool),
             mempool_gateway: Arc::clone(&mempool_gateway),
             mining_generation: Arc::clone(&mining_generation),
-            blocks: Arc::clone(&blocks),
-            transactions: Arc::clone(&transactions),
-            zmq_publisher: Arc::clone(&zmq_publisher),
+            effects: crate::chain_effects::ChainEffects::new(
+                Arc::clone(&blocks),
+                Arc::clone(&zmq_publisher),
+                tx_index_runtime.clone(),
+            ),
             chain_events: Arc::clone(&chain_events),
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
@@ -2741,7 +2742,7 @@ mod tests {
         let mut state = NodeState::open(config, None)?;
         state.start_index_workers()?;
 
-        assert!(state.apply_handles().tx_index_runtime.is_some());
+        assert!(state.apply_handles().effects.tx_index().is_some());
         assert!(state.tx_index_query().is_none());
         assert!(state.esplora_tx_index_query().is_some());
         assert!(state.script_index_query().is_some());
@@ -3152,14 +3153,14 @@ mod tests {
         config.p2p.listen.clear();
         config.indexes.txindex = false;
         let state = NodeState::open(config, None)?;
-        assert!(state.apply_handles().tx_index_runtime.is_none());
+        assert!(state.apply_handles().effects.tx_index().is_none());
 
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("with-txindex");
         config.p2p.listen.clear();
         config.indexes.txindex = true;
         let state = NodeState::open(config, None)?;
-        assert!(state.apply_handles().tx_index_runtime.is_some());
+        assert!(state.apply_handles().effects.tx_index().is_some());
         Ok(())
     }
 
