@@ -135,7 +135,7 @@ declare_rows! {
     "clearbanned", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(network::clearbanned);
     "setnetworkactive", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(network::setnetworkactive);
     "getnodeaddresses", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(network::getnodeaddresses);
-    "getblocktemplate", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Pinned v17 template contract; BIP23 submitold/workid extras are not emitted.", "0.4.0", Some(mining::getblocktemplate);
+    "getblocktemplate", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "BIP22/BIP23 template: submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll.", "0.4.0", Some(mining::getblocktemplate);
     "getmininginfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator.", "0.4.0", Some(mining::getmininginfo);
     "submitblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::submitblock);
     "prioritisetransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::prioritisetransaction);

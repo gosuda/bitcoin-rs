@@ -105,9 +105,12 @@ pub struct BlockTemplate {
     /// Candidate fields the solver may mutate.
     pub mutable: Vec<TemplateMutation>,
     /// Whether work derived from the request's prior generation remains valid.
+    ///
+    /// Present after a long-poll wait. `true` means the previous template's
+    /// parent is still the applied tip (BIP23 `submitold`).
     pub submit_old: Option<bool>,
-    /// Opaque server work identity when the producer requires one on submission.
-    pub work_id: Option<CompactString>,
+    /// Signet challenge, present only on signet.
+    pub signet: Option<SignetMiningInfo>,
 }
 
 /// BIP22 validation vocabulary shared by proposal and solved-block submission.
