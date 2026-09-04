@@ -1233,7 +1233,7 @@ mod tests {
         }
     }
 
-    // API-05: generatetoaddress pays a network-valid address and returns n hashes.
+    /// API-05: generatetoaddress pays a network-valid address and returns n hashes.
     #[test]
     fn generatetoaddress_projects_solved_hashes() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1247,7 +1247,7 @@ mod tests {
         assert!(hashes.iter().all(|hash| hash.as_str().is_some()));
     }
 
-    // API-05: generatetoaddress rejects raw script hex and descriptors.
+    /// API-05: generatetoaddress rejects raw script hex and descriptors.
     #[test]
     fn generatetoaddress_rejects_script_hex_and_descriptors() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1260,7 +1260,7 @@ mod tests {
         }
     }
 
-    // API-05: generateblock output is an address or descriptor; empty txs is coinbase-only.
+    /// API-05: generateblock output is an address or descriptor; empty txs is coinbase-only.
     #[test]
     fn generateblock_projects_hash_object() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1283,7 +1283,7 @@ mod tests {
         assert!(request.submit);
     }
 
-    // API-05: generateblock accepts addr() without a checksum.
+    /// API-05: generateblock accepts addr() without a checksum.
     #[test]
     fn generateblock_accepts_addr_descriptor() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1312,7 +1312,7 @@ mod tests {
         );
     }
 
-    // API-05: generateblock submit=false returns solved hex without persisting.
+    /// API-05: generateblock submit=false returns solved hex without persisting.
     #[test]
     fn generateblock_without_submit_includes_hex() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1337,7 +1337,7 @@ mod tests {
         assert!(!request.submit);
     }
 
-    // API-05: generateblock requires the transactions array; null is not an empty list.
+    /// API-05: generateblock requires the transactions array; null is not an empty list.
     #[test]
     fn generateblock_requires_transactions_array() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1356,7 +1356,7 @@ mod tests {
         assert_eq!(hex.code(), RpcError::CORE_NOT_FOUND);
     }
 
-    // API-05: 64-character hex is a mempool txid; longer hex is a raw transaction.
+    /// API-05: 64-character hex is a mempool txid; longer hex is a raw transaction.
     #[test]
     fn generateblock_keeps_raw_transactions() {
         let control = FakeMiningControl::with_template(sample_template());

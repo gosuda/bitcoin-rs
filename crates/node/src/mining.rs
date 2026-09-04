@@ -582,6 +582,16 @@ impl MiningCoordinator {
         .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
     }
 
+    /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).
+    ///
+    /// Each submitted block is applied through `apply::apply_block` before the
+    /// next iteration; that is the commit point (`ARCH-07`). Failure after *N*
+    /// accepted submissions leaves those *N* blocks durable at the applied tip.
+    /// `submit = false` dry-validates through `apply::validate_block` and does
+    /// not persist. The result vector grows one block at a time, so `count` cannot
+    /// force a large allocation up front. Callers own retry after inspecting the
+    /// tip. [`MiningControlError::InvalidRequest`] is not retriable without
+    /// changing the request; `Unavailable` and `Failed` may be retried.
     fn generate_blocks(
         &self,
         request: &GenerateRequest,
@@ -827,6 +837,7 @@ impl MiningControl for MiningCoordinator {
         &self,
         request: GenerateRequest,
     ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        // API-05: one owner for assemble → solve → optional persist.
         self.generate_blocks(&request)
     }
 

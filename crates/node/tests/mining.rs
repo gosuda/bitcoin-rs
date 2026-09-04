@@ -993,10 +993,10 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-05: `MiningControl::generate` submits each solved block through the
+/// apply path before assembling the next; the last hash is the new tip.
 #[test]
 fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
-    // API-05: MiningControl::generate submits each solved block through the
-    // apply path before assembling the next; the last hash is the new tip.
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
@@ -1021,9 +1021,9 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-05: a 64-character generateblock entry must already be in the mempool.
 #[test]
 fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
-    // API-05: a 64-character generateblock entry must already be in the mempool.
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
@@ -1041,10 +1041,10 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-05: decoded generateblock hex is included without mempool lookup;
+/// consensus validation still runs when submit is false.
 #[test]
 fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<()> {
-    // API-05: decoded generateblock hex is included without mempool lookup;
-    // consensus validation still runs when submit is false.
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
@@ -1090,9 +1090,9 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-05: submit=false dry-validates through the apply gates and does not persist.
 #[test]
 fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
-    // API-05: submit=false dry-validates through the apply gates and does not persist.
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);

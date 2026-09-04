@@ -352,9 +352,9 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// API-05: `Candidate::solve` searches nonces until the compact target is met.
 #[test]
 fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
-    // API-05: Candidate::solve searches nonces until the compact target is met.
     let mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
@@ -386,9 +386,9 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// API-05: generateblock keeps listed order and does not add those fees to the coinbase.
 #[test]
 fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
-    // API-05: generateblock keeps listed order and does not add those fees to the coinbase.
     let mut mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
