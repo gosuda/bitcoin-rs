@@ -152,53 +152,49 @@ fn serve_connection(
             }
         };
         let keep_alive = request.keep_alive;
-
-        if request.method == "GET" {
-            let (path, query) = split_path_query(&request.path);
-            // Routing contract: `docs/contracts/wallet-facing.md` WF-02.
-            let response = if path.starts_with("/rest/") {
-                crate::rest::route(handler.context(), path, query, rest_enabled)
-            } else {
-                crate::esplora::route(handler, path, query)
-            };
-            write_response(reader.get_mut(), &response, keep_alive)?;
-            if !keep_alive {
-                return Ok(());
+        match classify(&request.method, &request.path) {
+            HttpRoute::Rest { path, query } => {
+                let response = crate::rest::route(handler.context(), path, query, rest_enabled);
+                write_response(reader.get_mut(), &response, keep_alive)?;
             }
-            continue;
-        }
-
-        let (path, _query) = split_path_query(&request.path);
-        if let Some(response) = crate::esplora::route_post(handler, path, &request.body) {
-            write_response(reader.get_mut(), &response, keep_alive)?;
-            if !keep_alive {
-                return Ok(());
+            HttpRoute::EsploraGet { path, query } => {
+                let response = crate::esplora::route(handler, path, query);
+                write_response(reader.get_mut(), &response, keep_alive)?;
             }
-            continue;
-        }
-
-        if !auth.validate_header(request.authorization.as_deref()) {
-            write_status(
-                reader.get_mut(),
-                401,
-                "Unauthorized",
-                b"unauthorized",
-                false,
-            )?;
-            return Ok(());
-        }
-
-        let response = handle_json(handler, &request.body);
-        if let Some(body) = response.body.as_ref() {
-            write_json(
-                reader.get_mut(),
-                response.status,
-                response.reason,
-                body,
-                keep_alive,
-            )?;
-        } else {
-            write_status(reader.get_mut(), 204, "No Content", b"", keep_alive)?;
+            HttpRoute::EsploraPost { path } => {
+                match crate::esplora::route_post(handler, path, &request.body) {
+                    Some(response) => {
+                        write_response(reader.get_mut(), &response, keep_alive)?;
+                    }
+                    None => {
+                        write_status(reader.get_mut(), 404, "Not Found", b"not found", keep_alive)?;
+                    }
+                }
+            }
+            HttpRoute::JsonRpc => {
+                if !auth.validate_header(request.authorization.as_deref()) {
+                    write_status(
+                        reader.get_mut(),
+                        401,
+                        "Unauthorized",
+                        b"unauthorized",
+                        false,
+                    )?;
+                    return Ok(());
+                }
+                let response = handle_json(handler, &request.body);
+                if let Some(body) = response.body.as_ref() {
+                    write_json(
+                        reader.get_mut(),
+                        response.status,
+                        response.reason,
+                        body,
+                        keep_alive,
+                    )?;
+                } else {
+                    write_status(reader.get_mut(), 204, "No Content", b"", keep_alive)?;
+                }
+            }
         }
         if !keep_alive {
             return Ok(());
@@ -523,6 +519,26 @@ fn split_path_query(path: &str) -> (&str, &str) {
         .map_or((path, ""), |(path, query)| (path, query))
 }
 
+/// Listener directories. JSON-RPC owns `/`; Esplora owns `/api` and `/esplora`;
+/// Core REST owns `/rest/`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpRoute<'a> {
+    Rest { path: &'a str, query: &'a str },
+    EsploraGet { path: &'a str, query: &'a str },
+    EsploraPost { path: &'a str },
+    JsonRpc,
+}
+
+fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
+    let (path, query) = split_path_query(raw_path);
+    match method {
+        "GET" if path.starts_with("/rest/") => HttpRoute::Rest { path, query },
+        "GET" => HttpRoute::EsploraGet { path, query },
+        _ if crate::esplora::namespace(path).is_some() => HttpRoute::EsploraPost { path },
+        _ => HttpRoute::JsonRpc,
+    }
+}
+
 fn write_response(
     stream: &mut TcpStream,
     response: &crate::rest::Response,
@@ -579,6 +595,50 @@ mod tests {
         assert_eq!(
             split_path_query("/rest/chaininfo.json"),
             ("/rest/chaininfo.json", "")
+        );
+    }
+
+    #[test]
+    fn classify_splits_rest_esplora_and_json_rpc() {
+        assert_eq!(
+            classify("GET", "/rest/chaininfo.json"),
+            HttpRoute::Rest {
+                path: "/rest/chaininfo.json",
+                query: ""
+            }
+        );
+        assert_eq!(
+            classify("GET", "/api/blocks/tip/height"),
+            HttpRoute::EsploraGet {
+                path: "/api/blocks/tip/height",
+                query: ""
+            }
+        );
+        assert_eq!(
+            classify("GET", "/esplora/internal/mempool/txs?max_txs=1"),
+            HttpRoute::EsploraGet {
+                path: "/esplora/internal/mempool/txs",
+                query: "max_txs=1"
+            }
+        );
+        assert_eq!(
+            classify("POST", "/api/tx"),
+            HttpRoute::EsploraPost { path: "/api/tx" }
+        );
+        assert_eq!(
+            classify("POST", "/esplora/internal/txs"),
+            HttpRoute::EsploraPost {
+                path: "/esplora/internal/txs"
+            }
+        );
+        assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
+        assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
+        assert_eq!(
+            classify("GET", "/blocks/tip/height"),
+            HttpRoute::EsploraGet {
+                path: "/blocks/tip/height",
+                query: ""
+            }
         );
     }
 
