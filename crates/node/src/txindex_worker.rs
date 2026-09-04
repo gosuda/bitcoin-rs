@@ -32,7 +32,9 @@ use bitcoin_rs_index::{
 };
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, Txid, deserialize};
-use bitcoin_rs_rpc::capabilities::{TxIndexStatus, TxIndexStatusSource};
+use bitcoin_rs_rpc::capabilities::{
+    CapabilityState, CapabilityStatus, TXINDEX_CAPABILITY, TxIndexCapabilitySource,
+};
 use bitcoin_rs_rpc::context::{
     BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
     SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
@@ -3768,17 +3770,17 @@ impl TxIndexCapability {
         lifecycle: &TxIndexLifecycle,
         runtime: &TxIndexRuntime,
         enabled: IndexCapabilities,
-    ) -> TxIndexStatus {
+    ) -> CapabilityState {
         if let Some(message) = runtime.failure_message() {
-            return TxIndexStatus::Failed {
+            return CapabilityState::Failed {
                 reason: message.to_string(),
             };
         }
         let engine = match lifecycle {
-            TxIndexLifecycle::Opening => return TxIndexStatus::Opening,
-            TxIndexLifecycle::ShutdownAbandoned => return TxIndexStatus::ShutdownAbandoned,
+            TxIndexLifecycle::Opening => return CapabilityState::Opening,
+            TxIndexLifecycle::ShutdownAbandoned => return CapabilityState::ShutdownAbandoned,
             TxIndexLifecycle::Failed(reason) => {
-                return TxIndexStatus::Failed {
+                return CapabilityState::Failed {
                     reason: reason.to_string(),
                 };
             }
@@ -3786,7 +3788,7 @@ impl TxIndexCapability {
         };
         let phase = runtime.phase();
         if let Some((from_height, to_height)) = phase.rolling_back() {
-            return TxIndexStatus::RollingBack {
+            return CapabilityState::RollingBack {
                 from_height,
                 to_height,
             };
@@ -3794,22 +3796,22 @@ impl TxIndexCapability {
         let rebuilding = phase.rebuilding();
         if rebuilding != IndexCapabilities::NONE {
             return match Self::progress(engine, rebuilding) {
-                Ok(progress) => TxIndexStatus::Rebuilding {
+                Ok(progress) => CapabilityState::Rebuilding {
                     processed_height: progress.processed_height,
                     target_height: progress.target_height,
                 },
-                Err(error) => TxIndexStatus::Failed {
+                Err(error) => CapabilityState::Failed {
                     reason: error.to_string(),
                 },
             };
         }
         match Self::progress(engine, enabled) {
-            Ok(progress) if progress.synced => TxIndexStatus::Ready,
-            Ok(progress) => TxIndexStatus::CatchingUp {
+            Ok(progress) if progress.synced => CapabilityState::Ready,
+            Ok(progress) => CapabilityState::CatchingUp {
                 processed_height: progress.processed_height,
                 target_height: progress.target_height,
             },
-            Err(error) => TxIndexStatus::Failed {
+            Err(error) => CapabilityState::Failed {
                 reason: error.to_string(),
             },
         }
@@ -3830,17 +3832,20 @@ impl TxIndexCapability {
     }
 }
 
-impl TxIndexStatusSource for TxIndexCapability {
-    fn enabled(&self) -> bool {
-        !self.enabled.is_empty()
-    }
-
-    fn status(&self) -> Option<TxIndexStatus> {
-        match (&self.lifecycle, &self.runtime) {
-            (Some(lifecycle), Some(runtime)) if !self.enabled.is_empty() => {
-                Some(Self::report(&lifecycle.load(), runtime, self.enabled))
+impl TxIndexCapabilitySource for TxIndexCapability {
+    fn capability(&self) -> CapabilityStatus {
+        let enabled = !self.enabled.is_empty();
+        let state = match (&self.lifecycle, &self.runtime) {
+            (Some(lifecycle), Some(runtime)) if enabled => {
+                Self::report(&lifecycle.load(), runtime, self.enabled)
             }
-            _ => None,
+            _ => CapabilityState::Disabled,
+        };
+        CapabilityStatus {
+            id: TXINDEX_CAPABILITY.to_owned(),
+            compiled: true,
+            enabled,
+            state,
         }
     }
 }

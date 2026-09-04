@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::{Candidate, TemplateId};
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
@@ -18,9 +18,8 @@ use bitcoin_rs_primitives::{
     encode::double_sha256,
 };
 use bitcoin_rs_rpc::context::{
-    BlockBodySource, BlockRecord, BlockTemplate, BlockTemplateRequest, BlockTemplateResult,
-    BlockValidationResult, ChainControl, ChainControlError, Context, MiningControl,
-    MiningControlError, MiningInfo,
+    BlockRecord, BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
+    ChainControl, ChainControlError, Context, MiningControl, MiningControlError, MiningInfo,
 };
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};

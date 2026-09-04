@@ -156,7 +156,6 @@ Owners:
 ## Live gaps
 
 - **Node slimming and extraction (#217)**: Peer connection session and lease
-- **Node slimming and extraction (#217)**: Peer connection session and lease
   ownership has moved to `PeerTable` / `P2pService` in `crates/p2p` (#215,
   #217, #218). BIP9/softfork lookups, P2P chain serving, txindex status
   projection, mempool mutation consumers, and block-body access live with their

@@ -7,8 +7,10 @@ rebuilds.
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
-- Capability status: worker-owned facts in `crates/node/src/txindex_worker.rs`
-  (`TxIndexCapability`) and RPC projection in `crates/rpc/src/capabilities.rs`
+- Capability status: worker-owned `TxIndexLifecycle` in
+  `crates/node/src/txindex_worker.rs` mapped by `TxIndexCapability` onto the
+  RPC wire types in `crates/rpc/src/capabilities.rs`. There is no parallel
+  status enum.
 
 ## Clauses
 

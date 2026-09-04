@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{BlockBodySource, TipSnapshot};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationResult};
 use bitcoin_rs_primitives::{
@@ -11,12 +11,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-
-/// Neutral block-body seam owned by `chain`. Re-exported so RPC handlers keep
-/// the historical `context::BlockBodySource` path without RPC owning bodies.
-pub use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource};
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
@@ -771,66 +766,6 @@ pub struct TxIndexInfo {
     pub best_block_height: u32,
 }
 
-/// Lifecycle state reported for a node-owned RPC capability.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CapabilityState {
-    /// The capability is current with the applied chain tip.
-    Ready,
-    /// The capability is catching up to the applied chain tip.
-    CatchingUp {
-        /// Height covered by the capability.
-        processed_height: u32,
-        /// Applied-chain height the capability is approaching.
-        target_height: u32,
-    },
-    /// The capability is deleting rows on a branch the applied chain
-    /// abandoned, block by block, down to the common ancestor.
-    RollingBack {
-        /// Height of the watermark being rewound.
-        from_height: u32,
-        /// Height of the last block shared with the applied chain.
-        to_height: u32,
-    },
-    /// The capability was reset and is rebuilding from genesis.
-    Rebuilding {
-        /// Height the rebuild has reached.
-        processed_height: u32,
-        /// Applied-chain height the rebuild is approaching.
-        target_height: u32,
-    },
-    /// The capability failed and cannot currently provide complete answers.
-    Failed {
-        /// Failure description.
-        reason: String,
-    },
-    /// The capability is not enabled for this node.
-    Disabled,
-    /// The capability is opening and cannot answer yet.
-    Opening,
-    /// The capability worker was abandoned during shutdown.
-    ShutdownAbandoned,
-}
-
-/// Status of one concrete node capability exposed through RPC.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CapabilityStatus {
-    /// Stable capability identifier.
-    pub id: String,
-    /// Whether the capability is compiled into this binary.
-    pub compiled: bool,
-    /// Whether the capability is enabled for this node.
-    pub enabled: bool,
-    /// Current lifecycle state.
-    pub state: CapabilityState,
-}
-
-/// Point-in-time status report for concrete node capabilities.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CapabilitySnapshot {
-    /// Status rows in the node's stable capability order.
-    pub capabilities: Vec<CapabilityStatus>,
-}
-
 /// Failure from a complete transaction-index query.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TxQueryError {
@@ -971,7 +906,7 @@ pub struct ContextHandles {
     /// Mining capability: the template coordinator, when one is attached.
     pub mining: MiningHandles,
     /// Live txindex status for the `getcapabilities` projection.
-    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexStatusSource>>,
+    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexCapabilitySource>>,
 }
 
 /// Chain capability handles.
@@ -1088,7 +1023,7 @@ pub struct Context {
     /// Optional node-owned generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
     /// Live txindex status for the `getcapabilities` projection.
-    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexStatusSource>>,
+    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexCapabilitySource>>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
     /// Network selector used by handlers needing consensus parameters (e.g.
