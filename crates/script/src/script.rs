@@ -343,7 +343,8 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     } else {
         32 + 4 + 1 + 107 + 4 + 8 + script_size
     };
-    dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX)) / 1000
+    let fee = dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
+    fee.saturating_add(999) / 1000
 }
 
 /// Encodes `data` as a minimal canonical push (direct push for 1..=75 bytes,
