@@ -119,13 +119,7 @@ status = "implemented_unverified"
 [[rpc]]
 method = "getchaintxstats"
 group = "blockchain"
-status = "deviation"
-deviation = "Optional window statistics (`txrate`, `window_interval`, `window_tx_count`) are serialized as JSON null; Core omits them when unknown. Tracked in #160."
-schema_mismatched = [
-    "txrate: Null vs NUM",
-    "window_interval: Null vs NUM",
-    "window_tx_count: Null vs NUM",
-]
+status = "implemented_unverified"
 
 [[rpc]]
 method = "getblockcount"
