@@ -1,13 +1,14 @@
 //! Consensus validation surfaces for bitcoin-rs.
 //!
-//! The `kernel` feature is the production default in this crate and in
-//! `bitcoin-rs-node`: it routes every script class through bitcoinkernel
-//! (Bitcoin Core's native consensus engine). The `bin/bitcoin-rs` binary
-//! defaults to `["fjall", "redb", "zmq"]` (no `kernel`), so `cargo build
-//! -p bitcoin-rs` uses the native Rust interpreter in `bitcoin-rs-script`,
-//! which verifies legacy, P2SH, `SegWit` v0, and Taproot key-path and
-//! script-path spends. Issue #213 keeps `kernel` as the library default
-//! until native wins the signed-spend and full-replay gates; see
+//! Script verification has two backends. The native Rust interpreter in
+//! `bitcoin-rs-script` executes every consensus spend class: legacy, P2SH,
+//! `SegWit` v0, and Taproot key-path and script-path. The `kernel` feature
+//! routes the same checks through bitcoinkernel (Bitcoin Core's C++ engine)
+//! and is the production default in this crate and in `bitcoin-rs-node`.
+//! The `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no
+//! `kernel`), so `cargo build -p bitcoin-rs` uses the native interpreter.
+//! Issue #213 keeps `kernel` as the library default until native wins the
+//! signed-spend and full-replay gates; see
 //! `docs/contracts/validation-default.md`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]

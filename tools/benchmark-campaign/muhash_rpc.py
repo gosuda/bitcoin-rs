@@ -47,17 +47,6 @@ MAX_COMMAND_ARGS = 64
 ARM_READY_TIMEOUT_NS = 10_000_000_000
 CHILD_TERMINATE_GRACE_NS = 1_000_000_000
 CHILD_KILL_REAP_NS = 1_000_000_000
-_CAMPAIGN_PLACEHOLDERS = frozenset(
-    {"{binary}", "{data_dir}", "{rpc_port}", "{rpc_bind}", "{cookie}", "{config}"}
-)
-def _cache_action(policy: str) -> str:
-    return {
-        "warm": "warm-untimed-query-done",
-        "process-cold/page-cache-unspecified": "fresh-process-before-observation",
-        "process-cold/page-cache-evicted": "page-cache-evicted",
-    }[policy]
-
-
 CACHE_POLICIES = frozenset(
     {
         "warm",
@@ -65,6 +54,16 @@ CACHE_POLICIES = frozenset(
         "process-cold/page-cache-evicted",
     }
 )
+CACHE_POLICY_ACTIONS = {
+    "warm": "warm-untimed-query-done",
+    "process-cold/page-cache-unspecified": "fresh-process-before-observation",
+    "process-cold/page-cache-evicted": "page-cache-evicted",
+}
+_CAMPAIGN_PLACEHOLDERS = frozenset(
+    {"{binary}", "{config}", "{data_dir}", "{rpc_port}", "{rpc_bind}", "{cookie}"}
+)
+_TCP_LISTEN = 0x0A
+_LOOPBACK_V4 = "0100007F"
 OPERATOR_TRUST_BOUNDARY = (
     "operator-controlled observation; not remote binary authentication"
 )
@@ -491,8 +490,7 @@ def _parse_pre(value: object, field: str = "pre_receipt") -> JsonObject:
     corpus = _parse_corpus(item["corpus"], f"{field}.corpus")
     endpoint = _validate_endpoint(item["endpoint"], f"{field}.endpoint")
     action = _text(item["cache_policy_action"], f"{field}.cache_policy_action")
-    expected_action = _cache_action(policy)
-    if action != expected_action:
+    if action != CACHE_POLICY_ACTIONS[policy]:
         raise ContractError(f"{field}.cache_policy_action is wrong for {policy}")
     eviction_value = item["eviction_procedure"]
     eviction = (
@@ -1572,7 +1570,7 @@ def _command(value: object, field: str) -> tuple[str, ...]:
     if command[0] != "{binary}":
         raise ContractError(f"{field}[0] must be {{binary}}")
     if "{config}" not in command:
-        raise ContractError(f"{field} must contain the {{config}} placeholder")
+        raise ContractError(f"{field} must include {{config}}")
     for part in command:
         if "{" in part and part not in _CAMPAIGN_PLACEHOLDERS:
             raise ContractError(f"{field} contains an unsupported placeholder")
@@ -1704,26 +1702,81 @@ def _write_json(
     return _file_ref_from_path(path, cap, str(path))
 
 
-def _allocate_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        if not isinstance(port, int) or port <= 0:
-            raise ContractError("could not allocate a loopback RPC port")
-        return port
+def _allocate_distinct_loopback_ports(count: int) -> tuple[int, ...]:
+    held: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            held.append(sock)
+        ports = tuple(int(sock.getsockname()[1]) for sock in held)
+        if len(set(ports)) != count or any(port <= 0 for port in ports):
+            raise ContractError("could not allocate distinct loopback RPC ports")
+        return ports
+    finally:
+        for sock in held:
+            sock.close()
 
 
-def _wait_tcp(host: str, port: int, deadline_ns: int, process: subprocess.Popen[bytes] | None = None) -> None:
+def _listen_inodes(port: int) -> set[int]:
+    needle = f"{_LOOPBACK_V4}:{port:04X}"
+    inodes: set[int] = set()
+    try:
+        text = Path("/proc/net/tcp").read_text()
+    except OSError as error:
+        raise ContractError("cannot read /proc/net/tcp") from error
+    for line in text.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 10:
+            continue
+        if fields[1].upper() != needle:
+            continue
+        try:
+            if int(fields[3], 16) != _TCP_LISTEN:
+                continue
+            inodes.add(int(fields[9]))
+        except ValueError as error:
+            raise ContractError("/proc/net/tcp is unparsable") from error
+    return inodes
+
+
+def _pid_owns_inode(pid: int, inode: int) -> bool:
+    want = f"socket:[{inode}]"
+    try:
+        names = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return False
+    for name in names:
+        try:
+            if os.readlink(f"/proc/{pid}/fd/{name}") == want:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _endpoint_owned_by(pid: int, port: int) -> None:
+    inodes = _listen_inodes(port)
+    if len(inodes) != 1:
+        raise ContractError("RPC port does not have exactly one loopback listener")
+    if not _pid_owns_inode(pid, next(iter(inodes))):
+        raise ContractError("RPC endpoint is not owned by the arm process")
+
+
+def _wait_owned_endpoint(
+    process: subprocess.Popen[bytes], port: int, deadline_ns: int
+) -> None:
     while True:
-        if process is not None and process.poll() is not None:
-            raise ContractError("arm process exited before RPC readiness")
+        if process.poll() is not None:
+            raise ContractError("arm process exited before RPC was ready")
         remaining = deadline_ns - time.perf_counter_ns()
         if remaining <= 0:
             raise ContractError("arm RPC endpoint never became ready")
         try:
             with socket.create_connection(
-                (host, port), timeout=min(0.05, remaining / 1_000_000_000)
+                ("127.0.0.1", port), timeout=min(0.05, remaining / 1_000_000_000)
             ):
+                _endpoint_owned_by(process.pid, port)
                 return
         except OSError:
             time.sleep(0.01)
@@ -1831,18 +1884,18 @@ def _expand_command(
     template: tuple[str, ...],
     *,
     binary: Path,
+    config: Path,
     data_dir: Path,
     port: int,
     cookie: Path,
-    config: Path,
 ) -> list[str]:
     replacements = {
         "{binary}": str(binary),
+        "{config}": str(config),
         "{data_dir}": str(data_dir),
         "{rpc_port}": str(port),
         "{rpc_bind}": "127.0.0.1",
         "{cookie}": str(cookie),
-        "{config}": str(config),
     }
     return [replacements.get(part, part) for part in template]
 
@@ -1885,10 +1938,10 @@ class _ArmProcess:
         argv = _expand_command(
             self.spec.command,
             binary=self.binary,
+            config=self.spec.config.path,
             data_dir=self.spec.datadir,
             port=self.port,
             cookie=self.cookie,
-            config=self.spec.config.path,
         )
         try:
             self._process = subprocess.Popen(
@@ -1901,9 +1954,19 @@ class _ArmProcess:
         except OSError as error:
             raise ContractError(f"cannot spawn {self.spec.kind} process") from error
         self._pid = self._process.pid
-        _wait_tcp("127.0.0.1", self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS, self._process)
+        _wait_owned_endpoint(
+            self._process, self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS
+        )
         self._starttime = _read_starttime(self._pid)
         self._warmed = False
+
+    def require_endpoint(self) -> None:
+        if self._process is None or self._pid is None:
+            raise ContractError(f"{self.spec.kind} process is not running")
+        if self._process.poll() is not None:
+            raise ContractError(f"{self.spec.kind} process exited")
+        self.identity()
+        _endpoint_owned_by(self._pid, self.port)
 
     def ensure(self, policy: str) -> None:
         if policy == "warm":
@@ -1917,6 +1980,7 @@ class _ArmProcess:
     def warm(self) -> None:
         if self._warmed:
             return
+        self.require_endpoint()
         _rpc_once(
             self.endpoint,
             self._credentials,
@@ -2030,16 +2094,13 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
     )
     expected_height = _uint(config.expected["height"], "campaign expected.height")
     expected_hash = _hash(config.expected["bestblock"], "campaign expected.bestblock")
-    core_port = _allocate_loopback_port()
-    candidate_port = _allocate_loopback_port()
-    if candidate_port == core_port:
-        raise ContractError("arm RPC ports collided")
+    core_port, candidate_port = _allocate_distinct_loopback_ports(2)
     arms = {
         "core": _ArmProcess(
             config.core,
             core_bin,
             config.credential_file.path,
-            _allocate_loopback_port(),
+            core_port,
             credentials,
             config.timeout_seconds,
             config.max_response_bytes,
@@ -2050,7 +2111,7 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
             config.candidate,
             candidate_bin,
             config.credential_file.path,
-            _allocate_loopback_port(),
+            candidate_port,
             credentials,
             config.timeout_seconds,
             config.max_response_bytes,
@@ -2081,6 +2142,7 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
                     raise ContractError("eviction policy is missing its procedure")
                 eviction_execution = _run_eviction(config.eviction_procedure)
             arm.ensure(config.policy)
+            arm.require_endpoint()
             pid, starttime = arm.identity()
             proc_stat_before, proc_io_before = arm.snapshot()
             prefix = f"{index:02d}-{kind}"
@@ -2109,7 +2171,7 @@ def run_campaign(config_path: Path, workspace: Path) -> JsonObject:
                 "attested_pid": pid,
                 "attested_starttime": starttime,
                 "affinity": config.affinity,
-                "cache_policy_action": _cache_action(config.policy),
+                "cache_policy_action": CACHE_POLICY_ACTIONS[config.policy],
                 "eviction_procedure": (
                     None
                     if config.eviction_procedure is None

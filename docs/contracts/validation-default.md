@@ -23,7 +23,8 @@ Owners:
   all pass: Core-vector parity, signed-spend **apply-path** native median
   faster than the pinned kernel median with both arms inside five percent
   of their own three-run median, and the end-to-end full-mainnet replay
-  wall owned by #34/#42.
+  wall owned by #34. #42 froze the C150/Cmodern corpus contracts; that
+  freeze does not run the comparator.
 - The signed-spend Criterion target times `NodeState::apply_block`. It is
   the in-tree engine comparison that can run without the held corpus. It
   is not a CLI/P2P wall and does not substitute for the missing replay

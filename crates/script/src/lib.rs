@@ -19,7 +19,7 @@ pub mod interpreter;
 pub mod script;
 /// Signature operation counters.
 pub mod sigops;
-/// Bounded stack infrastructure for the opcode evaluator.
+/// Bounded script stack with Core's 1000-item maximum depth.
 pub mod stack;
 /// Taproot verification helpers.
 pub mod taproot;

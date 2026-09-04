@@ -209,9 +209,11 @@ controller pre-receipt reference. The campaign config is a strict
 always `coinsdb`) to one bitcoin-rs arm (`backend` is exactly one of
 `fjall`, `rocksdb`, or `redb`), the single cache policy, the corpus, and the
 pinned binaries and commands. `{binary}` is copied and re-hashed before every
-spawn; `{rpc_bind}`, `{rpc_port}`, `{data_dir}`, and `{cookie}` are the only
-other placeholders. The controller owns process lifecycle and `/proc` fault
-and I/O snapshots, writes each pre-receipt/trial/observation/post-receipt
+spawn; `{config}` is required so the receipt's pinned config is the file the
+daemon received; `{rpc_bind}`, `{rpc_port}`, `{data_dir}`, and `{cookie}` are
+the only other placeholders. Readiness requires the listening socket inode to
+belong to the spawned child. The controller owns process lifecycle and `/proc`
+fault and I/O snapshots, writes each pre-receipt/trial/observation/post-receipt
 triple, and then hands the same 14 triples to `aggregate`. A second backend
 is a second campaign and a second result file.
 

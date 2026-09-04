@@ -9,16 +9,17 @@ verify progress before moving on.
 - The default binary build is pure Rust and requires no C++ compiler or system
   libraries. It uses the native Rust script interpreter, which verifies
   legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends.
-  `libbitcoinkernel` remains the library production default and the Compose
-  image engine until issue #213 promotes native
+  Core's committed script and transaction vectors currently pin zero native
+  mismatches. `libbitcoinkernel` remains the library production default and
+  the Compose image engine until issue #213 promotes native
   (`docs/contracts/validation-default.md`). For that engine, enable the
   `kernel` feature.
 
-If you plan to compile with the `kernel` feature for production consensus
-validation via `libbitcoinkernel`, install `cmake` and `libboost-dev`:
+If you plan to compile with the `kernel` feature to run `libbitcoinkernel` as
+an independent verification oracle, install `cmake` and `libboost-dev`:
 
 ```sh
-# Required for the kernel consensus engine feature
+# Required for the kernel verification-oracle feature
 sudo apt-get install -y cmake libboost-dev
 ```
 
@@ -36,7 +37,7 @@ binary build uses the native Rust script interpreter for every consensus spend
 class. Library crates and the Compose image still default to
 `libbitcoinkernel` (`docs/contracts/validation-default.md`).
 
-To compile with `libbitcoinkernel` as the consensus engine:
+To compile with `libbitcoinkernel` as an independent verification oracle:
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel
@@ -86,7 +87,7 @@ Configuration defaults:
 | `--prune-target-mb` | 0 (no pruning) |
 | `--txindex` | off |
 | `--scriptindex` | off (accepts `full`, `utxo`, or boolean; defaults to `full` when passed without a value) |
-| `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` consensus engine |
+| `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` as a verification oracle |
 
 The node logs its startup banner, effective cache allocation, and the address
 the JSON-RPC listener bound to.
@@ -162,7 +163,11 @@ Then, in a second terminal, run the wallet while the node is still running:
 
 ```sh
 btcw balance -n regtest -u http://127.0.0.1:18443
+btcw balance -n regtest -u http://127.0.0.1:18443/api
 ```
+
+`/api` and `/api/v1` are aliases of the Esplora surface at the listener
+root, so a mempool.space-style base URL works without a reverse proxy.
 
 The wallet stays in that repository. This node only serves the public
 surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).

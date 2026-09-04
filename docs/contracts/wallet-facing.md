@@ -26,12 +26,16 @@ out of tree.
 - Chain tip: `GET /blocks/tip/height`, `GET /blocks/tip/hash`.
 - Checkpoint hashes: `GET /block-height/{h}` (BDK walks this while
   building its chain).
+- Headers: `GET /block/{hash}/header` (80-byte header as hex).
 - Fee estimates: `GET /fee-estimates`.
 - Address or script activity: `GET /address/{addr}`, `/utxo`, `/txs` and
-  the `scripthash` twins. These routes follow `--scriptindex`; they
-  return HTTP 503 until that index covers the applied tip.
+  the `scripthash` twins. BDK syncs through scripthash, not address.
+  These routes follow `--scriptindex`; they return HTTP 503 until that
+  index covers the applied tip.
 - Broadcast: `POST /tx` (hex body), which dispatches `sendrawtransaction`
   through the same admission owner as JSON-RPC.
+- `/api/…` and `/api/v1/…` are aliases of the same routes. Wallets that
+  copy a mempool.space base URL (`…/api`) must not 404 on `/block-height`.
 
 ### `WF-03`: Proof is a public-HTTP consumer
 
@@ -43,14 +47,16 @@ out of tree.
   import that lib, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or index
   types. It depends on rust-bitcoin and speaks only HTTP. It funds a
   regtest chain through `getblocktemplate` / `submitblock` (this node
-  has no `generate*` RPC), then scans, fee-estimates, and broadcasts
-  the way
-  [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw -u`)
-  does against any Esplora URL.
+  has no `generate*` RPC), then issues the BDK/esplora-client dialect —
+  tip, block height (including `/api/v1/block-height/{h}`), headers,
+  scripthash UTXOs/history, fee estimates, and `POST /api/v1/tx` — the
+  same operations [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet)
+  (`btcw -u`) sends against any Esplora URL.
 - Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>`
-  against a node started with `--network regtest --scriptindex`. Failures
-  of that run are public-interface defects, not reasons to patch a wallet
-  into this repository.
+  (or `http://<rpc-bind>/api`) against a node started with
+  `--network regtest --scriptindex`. Failures of that run are
+  public-interface defects, not reasons to patch a wallet into this
+  repository.
 
 ## Proven by
 
