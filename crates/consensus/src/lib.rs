@@ -54,7 +54,11 @@ pub mod verify_block;
 /// Transaction rule checks.
 pub mod verify_tx;
 
-pub use bip9::{DeploymentContext, DeploymentParams, DeploymentState, compute_state};
+pub use bip9::{
+    BIP9_PERIOD, CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState,
+    SEGWIT_DEPLOYMENT_ID, SoftforkState, compute_state, deployment_params,
+};
+pub use bip113::locktime_cutoff;
 pub use block_view::BlockView;
 pub use rust_path::{TipState, UtxoView};
 pub use verify_block::{

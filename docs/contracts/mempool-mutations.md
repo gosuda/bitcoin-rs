@@ -52,9 +52,8 @@ in `crates/node/src/mempool_observer.rs`; payload encoding in
   wake threads the last change's sequence into
   `MempoolSequenceWake::publish_generation_from`, which builds the
   generation key from `applied_tip` plus that sequence and never touches
-  the mempool read lock (`crates/node/src/mining.rs`); the node observer
-  routes every mutation through it (`crates/node/src/mempool_observer.rs`,
-  `NodeMutationObserver::on_mutation`).
+  the mempool read lock (`crates/node/src/mining.rs`); `node` attaches that
+  mining observer and the ZMQ sequence observer as `CompositeObserver` legs.
 
 ### `MPL-02`: Atomic mutation records and sequence assignment
 

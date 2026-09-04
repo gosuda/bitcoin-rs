@@ -359,27 +359,69 @@ impl NodeConfig {
         Ok(config)
     }
 
-    /// Loads configuration from defaults, optional Core/TOML files,
-    /// environment, and CLI args, resolving and validating in one step.
+    /// Loads configuration from defaults, optional TOML, environment, and CLI.
+    ///
+    /// Bitcoin Core `bitcoin.conf` is process-input compatibility and is
+    /// applied by the binary before calling [`Self::from_user_layers`].
     pub fn load_from_args<I, T>(args: I) -> Result<Self>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        let cli = match UserConfig::try_parse_from(args) {
-            Ok(cli) => cli,
-            Err(err) => {
-                err.exit();
-            }
-        };
-        let env = std::env::vars();
-        Self::from_layers(cli.config.as_ref(), cli.bitcoin_conf.as_ref(), env, &cli)
+        let cli = UserConfig::parse_from_or_exit(args);
+        let env = UserConfig::from_process_env()?;
+        Self::from_user_layers(
+            cli.config_path()
+                .map(UserConfig::load_toml_file)
+                .transpose()?
+                .as_ref(),
+            None,
+            Some(&env),
+            &cli,
+        )
     }
 
-    /// Testable layered loader with an explicit environment source.
+    /// Applies already-parsed user layers in Core-style order.
+    ///
+    /// Later layers override earlier ones: bitcoin.conf, TOML, env, CLI.
+    /// Network is resolved from TOML / env / CLI only; bitcoin.conf never
+    /// selects the network because its sections are interpreted against it.
+    pub fn from_user_layers(
+        toml: Option<&UserConfig>,
+        bitcoin_conf: Option<&UserConfig>,
+        env: Option<&UserConfig>,
+        cli: &UserConfig,
+    ) -> Result<Self> {
+        let empty = UserConfig::default();
+        let env = env.unwrap_or(&empty);
+        let network = effective_network(toml, env, cli);
+        let mut config = Self::default_for_network(network);
+        if let Some(layer) = bitcoin_conf {
+            config.apply_layer(layer)?;
+        }
+        if let Some(layer) = toml {
+            config.apply_layer(layer)?;
+        }
+        config.apply_layer(env)?;
+        config.apply_layer(cli)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Network selected by TOML / env / CLI before bitcoin.conf sections apply.
+    #[must_use]
+    pub fn network_from_layers(
+        toml: Option<&UserConfig>,
+        env: &UserConfig,
+        cli: &UserConfig,
+    ) -> Network {
+        effective_network(toml, env, cli)
+    }
+
+    /// Test helper: compose a config from explicit layered sources.
     pub fn from_layered_sources<E, K, V, A, T>(
         toml_path: Option<&Path>,
-        bitcoin_conf_path: Option<&Path>,
+        bitcoin_conf: Option<&UserConfig>,
         env: E,
         args: A,
     ) -> Result<Self>
@@ -394,10 +436,13 @@ impl NodeConfig {
         if cli.config.is_none() {
             cli.config = toml_path.map(Path::to_path_buf);
         }
-        if cli.bitcoin_conf.is_none() {
-            cli.bitcoin_conf = bitcoin_conf_path.map(Path::to_path_buf);
-        }
-        Self::from_layers(cli.config.as_ref(), cli.bitcoin_conf.as_ref(), env, &cli)
+        let toml = cli
+            .config
+            .as_deref()
+            .map(UserConfig::load_toml_file)
+            .transpose()?;
+        let env = UserConfig::from_env(env)?;
+        Self::from_user_layers(toml.as_ref(), bitcoin_conf, Some(&env), &cli)
     }
 
     /// Validates backend names and simple cross-field constraints.
@@ -428,37 +473,6 @@ impl NodeConfig {
     #[must_use]
     pub fn zmq_endpoints(&self) -> &[crate::zmq_publisher::ZmqEndpointConfig] {
         &self.notifications.zmq
-    }
-
-    fn from_layers<E, K, V>(
-        toml_path: Option<&PathBuf>,
-        bitcoin_conf_path: Option<&PathBuf>,
-        env: E,
-        cli: &UserConfig,
-    ) -> Result<Self>
-    where
-        E: IntoIterator<Item = (K, V)>,
-        K: AsRef<str>,
-        V: AsRef<str>,
-    {
-        let toml_layer = match toml_path {
-            Some(path) => Some(load_toml_layer(path)?),
-            None => None,
-        };
-        let env_layer = UserConfig::from_env(env)?;
-        let network = effective_network(toml_layer.as_ref(), &env_layer, cli);
-        let mut config = Self::default_for_network(network);
-
-        if let Some(path) = &bitcoin_conf_path {
-            crate::bitcoin_conf_compat::apply_file(&mut config, path)?;
-        }
-        if let Some(layer) = &toml_layer {
-            config.apply_layer(layer)?;
-        }
-        config.apply_layer(&env_layer)?;
-        config.apply_layer(cli)?;
-        config.validate()?;
-        Ok(config)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -659,8 +673,150 @@ pub struct UserConfig {
 }
 
 impl UserConfig {
-    pub(crate) fn apply_to(&self, config: &mut NodeConfig) -> Result<()> {
-        config.apply_layer(self)
+    /// Parses CLI args, exiting the process on clap errors.
+    pub fn parse_from_or_exit<I, T>(args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        match Self::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(err) => err.exit(),
+        }
+    }
+
+    /// Reads `BITCOIN_RS_*` variables from the process environment.
+    pub fn from_process_env() -> Result<Self> {
+        Self::from_env(std::env::vars())
+    }
+
+    /// Deserializes one TOML user-config file.
+    pub fn load_toml_file(path: &Path) -> Result<Self> {
+        load_toml_layer(path)
+    }
+
+    /// Path supplied by `--config`, if any.
+    #[must_use]
+    pub fn config_path(&self) -> Option<&Path> {
+        self.config.as_deref()
+    }
+
+    /// Path supplied by `--bitcoin-conf`, if any.
+    #[must_use]
+    pub fn bitcoin_conf_path(&self) -> Option<&Path> {
+        self.bitcoin_conf.as_deref()
+    }
+
+    /// Overlays specified fields from `other` onto `self`.
+    ///
+    /// This is the single UserConfig-to-UserConfig merge: bitcoin.conf
+    /// section overlays and any other user-layer composition use it.
+    pub fn overlay(&mut self, other: &Self) {
+        if other.config.is_some() {
+            self.config.clone_from(&other.config);
+        }
+        if other.bitcoin_conf.is_some() {
+            self.bitcoin_conf.clone_from(&other.bitcoin_conf);
+        }
+        if other.network.is_some() {
+            self.network = other.network;
+        }
+        if other.p2p_magic.is_some() {
+            self.p2p_magic = other.p2p_magic;
+        }
+        if other.data_dir.is_some() {
+            self.data_dir.clone_from(&other.data_dir);
+        }
+        if other.storage_backend.is_some() {
+            self.storage_backend.clone_from(&other.storage_backend);
+        }
+        if other.rpc_bind.is_some() {
+            self.rpc_bind = other.rpc_bind;
+        }
+        if other.rest.is_some() {
+            self.rest = other.rest;
+        }
+        if other.rpc_auth.is_some() {
+            self.rpc_auth.clone_from(&other.rpc_auth);
+        }
+        if other.rpc_user.is_some() {
+            self.rpc_user.clone_from(&other.rpc_user);
+        }
+        if other.rpc_password.is_some() {
+            self.rpc_password.clone_from(&other.rpc_password);
+        }
+        if other.rpc_cookie.is_some() {
+            self.rpc_cookie.clone_from(&other.rpc_cookie);
+        }
+        if other.script_index.is_some() {
+            self.script_index.clone_from(&other.script_index);
+        }
+        if other.p2p_listen.is_some() {
+            self.p2p_listen.clone_from(&other.p2p_listen);
+        }
+        if other.dns_seeds_enabled.is_some() {
+            self.dns_seeds_enabled = other.dns_seeds_enabled;
+        }
+        if other.connect.is_some() {
+            self.connect.clone_from(&other.connect);
+        }
+        if other.prune_target_mb.is_some() {
+            self.prune_target_mb = other.prune_target_mb;
+        }
+        if other.txindex.is_some() {
+            self.txindex = other.txindex;
+        }
+        if other.dbcache_mb.is_some() {
+            self.dbcache_mb = other.dbcache_mb;
+        }
+        if other.log_level.is_some() {
+            self.log_level.clone_from(&other.log_level);
+        }
+        if other.metrics_bind.is_some() {
+            self.metrics_bind = other.metrics_bind;
+        }
+        if other.notifications.is_some() {
+            self.notifications.clone_from(&other.notifications);
+        }
+        if other.assume_valid_height.is_some() {
+            self.assume_valid_height = other.assume_valid_height;
+        }
+    }
+
+    /// Maps one Bitcoin Core `bitcoin.conf` key into this layer.
+    ///
+    /// Unknown keys are ignored. File I/O and `[network]` section selection
+    /// stay at the process-input boundary.
+    pub fn apply_core_key(&mut self, key: &str, value: &str) {
+        match key {
+            "prune" => {
+                if let Ok(prune_target_mb) = value.parse() {
+                    self.prune_target_mb = Some(prune_target_mb);
+                }
+            }
+            "rpcuser" => self.rpc_user = Some(value.to_owned()),
+            "rpcpassword" => self.rpc_password = Some(value.to_owned()),
+            "rpccookiefile" => self.rpc_cookie = Some(value.into()),
+            "rest" => self.rest = parse_core_bool(value),
+            "listen" if parse_core_bool(value).is_some_and(|listen| !listen) => {
+                self.p2p_listen = Some(Vec::new());
+            }
+            "txindex" => self.txindex = parse_core_bool(value),
+            "dbcache" => {
+                if let Ok(dbcache_mb) = value.parse() {
+                    self.dbcache_mb = Some(dbcache_mb);
+                }
+            }
+            _ => {}
+        }
+        if self.rpc_user.is_some() || self.rpc_password.is_some() {
+            let user = self
+                .rpc_user
+                .clone()
+                .unwrap_or_else(|| DEFAULT_RPC_USER.to_owned());
+            let password = self.rpc_password.clone().unwrap_or_default();
+            self.rpc_auth = Some(Auth::basic(user, password));
+        }
     }
 
     fn from_env<E, K, V>(env: E) -> Result<Self>
@@ -753,6 +909,14 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
         .filter(|part| !part.trim().is_empty())
         .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
         .collect()
+}
+
+fn parse_core_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_bool(value: &str) -> Result<bool> {

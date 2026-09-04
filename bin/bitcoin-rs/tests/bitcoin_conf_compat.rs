@@ -1,7 +1,8 @@
-//! Integration tests for the bitcoin-rs node.
+//! Process-input tests for Bitcoin Core `bitcoin.conf` parsing.
 
 use anyhow::Result;
-use bitcoin_rs_node::{Auth, Network, NodeConfig, bitcoin_conf_compat};
+use bitcoin_rs::bitcoin_conf;
+use bitcoin_rs_node::{Auth, Network, NodeConfig, UserConfig};
 use std::fs;
 
 #[test]
@@ -22,8 +23,8 @@ fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
 ",
     )?;
 
-    let mut config = NodeConfig::default();
-    bitcoin_conf_compat::apply_file(&mut config, &conf_path)?;
+    let layer = bitcoin_conf::load_file(&conf_path, Network::Mainnet)?;
+    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
 
     assert_eq!(config.prune_target_mb, 550);
     assert_auth(&config.rpc_auth, "foo", "bar");
@@ -48,8 +49,8 @@ fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Resu
 ",
     )?;
 
-    let mut config = NodeConfig::default_for_network(bitcoin_rs_node::Network::Regtest);
-    bitcoin_conf_compat::apply_file(&mut config, &conf_path)?;
+    let layer = bitcoin_conf::load_file(&conf_path, Network::Regtest)?;
+    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
 
     assert_eq!(config.prune_target_mb, 900);
     assert_auth(&config.rpc_auth, "regtest-user", "regtest-pass");
@@ -74,8 +75,8 @@ fn bitcoin_conf_zmq_keys_are_not_promoted_into_node_config() -> Result<()> {
 ",
     )?;
 
-    let mut config = NodeConfig::default_for_network(bitcoin_rs_node::Network::Regtest);
-    bitcoin_conf_compat::apply_file(&mut config, &conf_path)?;
+    let layer = bitcoin_conf::load_file(&conf_path, Network::Regtest)?;
+    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
 
     assert!(config.notifications.zmq.is_empty());
     Ok(())
@@ -92,8 +93,8 @@ assumevalid=0000000000000000000000000000000000000000000000000000000000000000
 ",
     )?;
 
-    let mut config = NodeConfig::default();
-    bitcoin_conf_compat::apply_file(&mut config, &conf_path)?;
+    let layer = bitcoin_conf::load_file(&conf_path, Network::Mainnet)?;
+    let config = NodeConfig::from_user_layers(None, Some(&layer), None, &UserConfig::default())?;
 
     assert_eq!(
         config.assume_valid_height,

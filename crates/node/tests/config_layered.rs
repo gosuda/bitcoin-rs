@@ -11,7 +11,6 @@ type EnvPair = (&'static str, &'static str);
 fn config_layers_resolve_defaults_bitcoin_conf_toml_env_then_cli() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let toml_path = temp.path().join("node.toml");
-    let bitcoin_conf_path = temp.path().join("bitcoin.conf");
 
     fs::write(
         &toml_path,
@@ -25,15 +24,11 @@ rpc_user = "toml-user"
 rpc_password = "toml-pass"
 "#,
     )?;
-    fs::write(
-        &bitcoin_conf_path,
-        r"
--prune=550
--rpcuser=conf-user
--rpcpassword=conf-pass
--txindex=1
-",
-    )?;
+    let mut bitcoin_conf = bitcoin_rs_node::UserConfig::default();
+    bitcoin_conf.apply_core_key("prune", "550");
+    bitcoin_conf.apply_core_key("rpcuser", "conf-user");
+    bitcoin_conf.apply_core_key("rpcpassword", "conf-pass");
+    bitcoin_conf.apply_core_key("txindex", "1");
 
     let env: [EnvPair; 3] = [
         ("BITCOIN_RS_STORAGE_BACKEND", "redb"),
@@ -42,7 +37,7 @@ rpc_password = "toml-pass"
     ];
     let config = NodeConfig::from_layered_sources(
         Some(&toml_path),
-        Some(&bitcoin_conf_path),
+        Some(&bitcoin_conf),
         env,
         [
             "bitcoin-rs-node",

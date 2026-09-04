@@ -252,7 +252,7 @@ impl QueryFixture {
             });
             source
         });
-        let block_source = NodeBlockSource::new(Arc::new(RwLock::new(
+        let block_source = IndexBlockSource::new(Arc::new(RwLock::new(
             records
                 .into_iter()
                 .collect::<bitcoin_rs_rpc::context::BlockLog>(),

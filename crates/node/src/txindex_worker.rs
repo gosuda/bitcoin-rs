@@ -42,7 +42,9 @@ use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 
 use crate::apply::{PruneBodyReader, PruneBodyStore};
-use crate::block_source::NodeBlockSource;
+use bitcoin_rs_index::BlockSource;
+use bitcoin_rs_rpc::capabilities::{TxIndexStatus, TxIndexStatusSource};
+use bitcoin_rs_rpc::context::{BlockLog, record_at_height};
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -717,7 +719,7 @@ impl TxIndexWorker {
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
         body_store: Option<Arc<dyn PruneBodyStore>>,
-        block_source: NodeBlockSource,
+        block_source: IndexBlockSource,
         body_source: Option<Arc<dyn BlockBodySource>>,
         chain_events: Arc<crate::state::ChainEventPublisher>,
         reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
@@ -872,7 +874,7 @@ fn run_worker_with_open(
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
     body_store: Option<Arc<dyn PruneBodyStore>>,
-    block_source: NodeBlockSource,
+    block_source: IndexBlockSource,
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<crate::state::ChainEventPublisher>,
     reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
@@ -988,7 +990,7 @@ fn open_and_run(
     applied_tip: &Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: &Arc<RwLock<BlockTree>>,
     body_store: &Option<Arc<dyn PruneBodyStore>>,
-    block_source: &NodeBlockSource,
+    block_source: &IndexBlockSource,
     body_source: &Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<crate::state::ChainEventPublisher>,
     reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
@@ -2575,7 +2577,7 @@ impl QueryBudget {
 pub(crate) struct TxIndexQueryEngine {
     runtime: Arc<TxIndexRuntime>,
     reader: Arc<dyn IndexReader>,
-    block_source: NodeBlockSource,
+    block_source: IndexBlockSource,
     block_tree: Arc<RwLock<BlockTree>>,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     body_source: Option<Arc<dyn BlockBodySource>>,
@@ -2593,7 +2595,7 @@ impl TxIndexQueryEngine {
     pub(crate) fn new(
         runtime: Arc<TxIndexRuntime>,
         reader: Arc<dyn IndexReader>,
-        block_source: NodeBlockSource,
+        block_source: IndexBlockSource,
         block_tree: Arc<RwLock<BlockTree>>,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         body_source: Option<Arc<dyn BlockBodySource>>,
@@ -3170,6 +3172,178 @@ pub(crate) struct IndexProgress {
     pub target_height: u32,
 }
 
+/// Private index-side `BlockSource`: active-chain identity from the tree,
+/// bodies from the chain body store. Not a node-owned concept.
+#[derive(Clone)]
+pub(crate) struct IndexBlockSource {
+    blocks: Arc<RwLock<BlockLog>>,
+    block_body_source: Option<Arc<dyn BlockBodySource>>,
+    block_tree: Option<Arc<RwLock<BlockTree>>>,
+}
+
+impl IndexBlockSource {
+    #[must_use]
+    pub(crate) const fn new(blocks: Arc<RwLock<BlockLog>>) -> Self {
+        Self {
+            blocks,
+            block_body_source: None,
+            block_tree: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
+        self.block_body_source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_block_tree(mut self, tree: Arc<RwLock<BlockTree>>) -> Self {
+        self.block_tree = Some(tree);
+        self
+    }
+
+    pub(crate) fn block_body_bytes_for(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+        self.block_body_source.as_ref()?.block_body(height, hash)
+    }
+
+    fn resolve_block_by_hash(&self, height: u32, active_hash: Hash256) -> Option<Block> {
+        let bytes = self.block_body_bytes_for(height, BlockHash::from(active_hash))?;
+        let block = deserialize::<Block>(&bytes).ok()?;
+        (block.block_hash() == BlockHash::from(active_hash)).then_some(block)
+    }
+}
+
+impl core::fmt::Debug for IndexBlockSource {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IndexBlockSource").finish_non_exhaustive()
+    }
+}
+
+impl BlockSource for IndexBlockSource {
+    fn block_at_height(&self, height: u32) -> Option<Block> {
+        let active_hash = if let Some(tree) = &self.block_tree {
+            tree.read().active_node_at_height(height)?.hash
+        } else {
+            let guard = self.blocks.read();
+            Hash256::from(record_at_height(&guard, height)?.hash)
+        };
+        self.resolve_block_by_hash(height, active_hash)
+    }
+
+    fn block_bytes_at_height(&self, height: u32, offset: u32, len: u32) -> Option<Vec<u8>> {
+        let source = self.block_body_source.as_ref()?;
+        let hash = if let Some(tree) = &self.block_tree {
+            BlockHash::from(tree.read().active_node_at_height(height)?.hash)
+        } else {
+            let guard = self.blocks.read();
+            record_at_height(&guard, height)?.hash
+        };
+        source.block_body_range(height, hash, offset, len)
+    }
+}
+
+/// Progress reads that raced a tip or revision move before the status
+/// report gives up on a coherent answer for this snapshot.
+const PROGRESS_READ_ATTEMPTS: usize = 4;
+
+/// Worker-owned txindex facts for the RPC capability projection.
+pub(crate) struct TxIndexCapability {
+    lifecycle: Option<Arc<ArcSwap<TxIndexLifecycle>>>,
+    runtime: Option<Arc<TxIndexRuntime>>,
+    enabled: bool,
+}
+
+impl TxIndexCapability {
+    pub(crate) fn new(
+        lifecycle: Option<Arc<ArcSwap<TxIndexLifecycle>>>,
+        runtime: Option<Arc<TxIndexRuntime>>,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            lifecycle,
+            runtime,
+            enabled,
+        }
+    }
+
+    fn report(lifecycle: &TxIndexLifecycle, runtime: &TxIndexRuntime) -> TxIndexStatus {
+        if let Some(message) = runtime.failure_message() {
+            return TxIndexStatus::Failed {
+                reason: message.to_string(),
+            };
+        }
+        let engine = match lifecycle {
+            TxIndexLifecycle::Opening => return TxIndexStatus::Opening,
+            TxIndexLifecycle::ShutdownAbandoned => return TxIndexStatus::ShutdownAbandoned,
+            TxIndexLifecycle::Failed(reason) => {
+                return TxIndexStatus::Failed {
+                    reason: reason.to_string(),
+                };
+            }
+            TxIndexLifecycle::Serving(engine) => engine,
+        };
+        let phase = runtime.phase();
+        if let Some((from_height, to_height)) = phase.rolling_back() {
+            return TxIndexStatus::RollingBack {
+                from_height,
+                to_height,
+            };
+        }
+        let rebuilding = phase.rebuilding();
+        if rebuilding != IndexCapabilities::NONE {
+            return match Self::progress(engine, rebuilding) {
+                Ok(progress) => TxIndexStatus::Rebuilding {
+                    processed_height: progress.processed_height,
+                    target_height: progress.target_height,
+                },
+                Err(error) => TxIndexStatus::Failed {
+                    reason: error.to_string(),
+                },
+            };
+        }
+        match Self::progress(engine, IndexCapabilities::TX_LOOKUP) {
+            Ok(progress) if progress.synced => TxIndexStatus::Ready,
+            Ok(progress) => TxIndexStatus::CatchingUp {
+                processed_height: progress.processed_height,
+                target_height: progress.target_height,
+            },
+            Err(error) => TxIndexStatus::Failed {
+                reason: error.to_string(),
+            },
+        }
+    }
+
+    fn progress(
+        engine: &TxIndexQueryEngine,
+        required: IndexCapabilities,
+    ) -> Result<IndexProgress, TxQueryError> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match engine.index_progress_for(required) {
+                Err(TxQueryError::Retry) if attempts < PROGRESS_READ_ATTEMPTS => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+impl TxIndexStatusSource for TxIndexCapability {
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn status(&self) -> Option<TxIndexStatus> {
+        match (&self.lifecycle, &self.runtime) {
+            (Some(lifecycle), Some(runtime)) if self.enabled => {
+                Some(Self::report(&lifecycle.load(), runtime))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl TxIndexQuery for TxIndexQueryEngine {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
         self.with_snapshot(IndexCapabilities::TX_LOOKUP, |snapshot, tip, budget| {
@@ -3392,6 +3566,10 @@ mod body_reader_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "txindex_worker_block_source_tests.rs"]
+mod block_source_tests;
 
 #[cfg(test)]
 #[path = "txindex_worker_query_tests.rs"]

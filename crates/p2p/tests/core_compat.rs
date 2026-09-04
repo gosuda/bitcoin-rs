@@ -126,7 +126,7 @@ fn headers_into_blocks(headers: &[Header]) -> HashMap<NativeBlockHash, Block> {
 
 /// Model of the node's active-chain view at the [`ChainQuery`] seam.
 ///
-/// Semantics mirror `NodeP2pChainQuery` in `crates/node/src/p2p_chain.rs`:
+/// Semantics mirror `ActiveChainQuery` in `crates/p2p/src/chain_query.rs`:
 /// the first locator hash on the active chain anchors the response walk, a
 /// total miss anchors after genesis, an empty locator answers only the stop
 /// header, and only active-chain bodies are served (`notfound` otherwise).

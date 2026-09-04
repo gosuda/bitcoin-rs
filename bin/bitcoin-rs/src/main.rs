@@ -10,11 +10,13 @@
 
 use std::process::ExitCode;
 
+use bitcoin_rs::load_node_config;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
-    match bitcoin_rs_node::NodeConfig::load_from_args(std::env::args_os())
+    match load_node_config(std::env::args_os())
         .and_then(|config| bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default()))
     {
         Ok(()) => ExitCode::SUCCESS,

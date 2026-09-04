@@ -191,14 +191,13 @@ impl Node {
         }
     }
 
-    /// Returns the live extension-registry capability report.
+    /// Returns the live txindex capability report.
     ///
-    /// The snapshot comes from the node capability registry — the same
-    /// provider `getcapabilities` serves — so embedded callers gate on the
-    /// identical compiled/enabled/health facts.
+    /// The snapshot is the same projection `getcapabilities` serves, so
+    /// embedded callers gate on the identical compiled/enabled/health facts.
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {
-        self.state.capability_provider().snapshot()
+        bitcoin_rs_rpc::capabilities::txindex_snapshot(Some(self.state.txindex_status().as_ref()))
     }
 
     /// Returns the decoded block with `hash`, or `None` when the node does
@@ -497,7 +496,7 @@ mod tests {
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
 
-    use crate::mempool_observer::MempoolSequenceObserver;
+    use crate::zmq_publisher::MempoolSequenceObserver;
     use crate::zmq_publisher::{SequenceEvent, ZmqPublisher};
 
     /// Captures every `sequence`-topic event the gateway's observer emits.

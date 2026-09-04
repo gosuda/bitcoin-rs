@@ -1745,17 +1745,13 @@ fn prove_window<'a>(
             else {
                 return Vec::new();
             };
-            let softfork = crate::bip9_context::contextual_softfork_state(
-                &tree,
-                handles.network,
-                Some(parent_id),
-                height,
+            let softfork =
+                bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(parent_id), height);
+            let cutoff = bitcoin_rs_consensus::locktime_cutoff(
+                softfork.csv_active,
+                tree.median_time_past_at(parent_id, 11).unwrap_or(0),
+                block.header.time,
             );
-            let cutoff = if softfork.csv_active {
-                tree.median_time_past_at(parent_id, 11).unwrap_or(0)
-            } else {
-                block.header.time
-            };
             // The next block's context needs this one in the tree. Header-first
             // sync put it there; without it there is no window.
             let Some(node_id) = tree.lookup(hash) else {
@@ -1964,7 +1960,7 @@ struct BlockValidationContext {
 struct Bip68Context<'a> {
     validation: &'a BlockValidationContext,
     median_time_past: u32,
-    softfork_state: crate::bip9_context::ContextualSoftforkState,
+    softfork_state: bitcoin_rs_chain::SoftforkState,
     previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
 }
 
@@ -2226,25 +2222,21 @@ fn apply_block_admitted<'b>(
     let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
         let tree = handles.block_tree.read();
         let mtp = tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0);
-        let softfork_state = crate::bip9_context::contextual_softfork_state(
-            &tree,
-            handles.network,
-            Some(tip.tip_id),
-            height,
-        );
+        let softfork_state =
+            bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(tip.tip_id), height);
         (mtp, softfork_state)
     } else {
         let tree = handles.block_tree.read();
         (
             0,
-            crate::bip9_context::contextual_softfork_state(&tree, handles.network, None, height),
+            bitcoin_rs_chain::softfork_state(&tree, handles.network, None, height),
         )
     };
-    let locktime_cutoff = if softfork_state.csv_active {
-        prev_median_time_past
-    } else {
-        block.header.time
-    };
+    let locktime_cutoff = bitcoin_rs_consensus::locktime_cutoff(
+        softfork_state.csv_active,
+        prev_median_time_past,
+        block.header.time,
+    );
     let verify_flags = compute_verify_flags(handles.network, height, block_hash, softfork_state);
     let validation_context = BlockValidationContext {
         hash: block_hash,
@@ -3601,7 +3593,7 @@ fn compute_verify_flags(
     network: Network,
     height: u32,
     block_hash: Hash256,
-    softfork_state: crate::bip9_context::ContextualSoftforkState,
+    softfork_state: bitcoin_rs_chain::SoftforkState,
 ) -> bitcoin_rs_script::VerifyFlags {
     use bitcoin_rs_script::VerifyFlags;
 
@@ -7345,7 +7337,7 @@ mod consensus_rule_tests {
         let query = crate::txindex_worker::TxIndexQueryEngine::new(
             Arc::clone(&runtime),
             reader,
-            crate::block_source::NodeBlockSource::new(Arc::clone(&handles.blocks)),
+            crate::txindex_worker::IndexBlockSource::new(Arc::clone(&handles.blocks)),
             Arc::clone(&handles.block_tree),
             Arc::clone(&handles.applied_tip),
             None,
@@ -7931,8 +7923,8 @@ mod consensus_rule_tests {
         vec![0x51]
     }
 
-    fn softfork_state(csv_active: bool) -> crate::bip9_context::ContextualSoftforkState {
-        crate::bip9_context::ContextualSoftforkState {
+    fn softfork_state(csv_active: bool) -> bitcoin_rs_chain::SoftforkState {
+        bitcoin_rs_chain::SoftforkState {
             csv_active,
             segwit_active: false,
         }
@@ -8285,7 +8277,7 @@ mod consensus_rule_tests {
         let normal_hash = Hash256::from_le_bytes(&[0x11; 32]); // any non-exception block
 
         // csv + segwit inactive: height 170060 predates both softforks.
-        let softforks = crate::bip9_context::ContextualSoftforkState {
+        let softforks = bitcoin_rs_chain::SoftforkState {
             csv_active: false,
             segwit_active: false,
         };
@@ -8624,7 +8616,7 @@ mod consensus_rule_tests {
                 crate::SequenceEvent::Connected(hash) => (hash, b'C'),
                 crate::SequenceEvent::Disconnected(hash) => (hash, b'D'),
                 // Test-fake arms for the mempool `A`/`R` events; the
-                // production payload mapping lives in `mempool_observer`.
+                // production payload mapping lives in `zmq_publisher`.
                 crate::SequenceEvent::Added(txid, _) => (Hash256::from(txid), b'A'),
                 crate::SequenceEvent::Removed(txid, _) => (Hash256::from(txid), b'R'),
             };
@@ -9984,11 +9976,11 @@ mod contextual_softfork_tests {
 
     #[test]
     fn verify_flags_use_contextual_csv_and_segwit_state() {
-        let inactive = crate::bip9_context::ContextualSoftforkState {
+        let inactive = bitcoin_rs_chain::SoftforkState {
             csv_active: false,
             segwit_active: false,
         };
-        let active = crate::bip9_context::ContextualSoftforkState {
+        let active = bitcoin_rs_chain::SoftforkState {
             csv_active: true,
             segwit_active: true,
         };
@@ -10009,7 +10001,7 @@ mod contextual_softfork_tests {
     #[test]
     fn compute_verify_flags_drops_p2sh_only_for_bip16_exception_block()
     -> Result<(), Box<dyn std::error::Error>> {
-        let state = crate::bip9_context::ContextualSoftforkState {
+        let state = bitcoin_rs_chain::SoftforkState {
             csv_active: false,
             segwit_active: false,
         };

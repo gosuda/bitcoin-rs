@@ -1865,7 +1865,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             mining: MiningHandles {
                 mining_control: None,
             },
-            capabilities: None,
+            txindex_status: None,
         })
         .with_chain_control(Arc::new(NodeInvalidator {
             handles: state.apply_handles(),
