@@ -639,6 +639,21 @@ fn assert_prefixed_chain_view(
         prefixed_fees.get("6").and_then(Value::as_f64).is_some(),
         "GET /api/v1/fee-estimates must alias GET /fee-estimates: {prefixed_fees}"
     );
+
+    let leaked = client.esplora_post("/api/v1/not-esplora", b"{}")?;
+    assert_eq!(
+        leaked.status,
+        404,
+        "POST under /api/v1 must stay Esplora (404), not fall through to JSON-RPC (401): {}",
+        leaked.text()
+    );
+    let backend = client.esplora_get("/api/internal/mempool/txs")?;
+    assert_eq!(
+        backend.status,
+        404,
+        "GET /api/internal/* must not alias the mempool-backend listener: {}",
+        backend.text()
+    );
     Ok(())
 }
 
