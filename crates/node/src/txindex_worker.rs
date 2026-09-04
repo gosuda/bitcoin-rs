@@ -826,9 +826,10 @@ pub(crate) struct OpenTxIndex {
 
 /// Opens an `IndexWriter` with legacy/unsupported-format recovery.
 ///
-/// Format 3 is upgraded inside [`bitcoin_rs_index::IndexWriter::open`] by
-/// resetting `ScriptHistory` only. This path still full-resets foreign
-/// versions and cursorless legacy tables so they can rebuild.
+/// Formats 3 and 4 (little-endian height keys) are upgraded inside
+/// [`bitcoin_rs_index::IndexWriter::open`] by resetting `TxLookup` and
+/// `ScriptHistory` only. This path still full-resets foreign versions and
+/// cursorless legacy tables so they can rebuild.
 pub(crate) fn open_writer<S>(
     store: &Arc<S>,
     generation: u64,

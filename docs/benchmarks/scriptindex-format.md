@@ -105,9 +105,9 @@ as a benchmark corpus or a data file.
 
 | Row type | Column family | Key bytes | Value bytes | Total per row |
 |---|---|---|---|---|
-| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Funding | `Funding` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Spending | `Spending` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
+| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (BE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
+| Funding | `Funding` | 8 (prefix) + 4 (BE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
+| Spending | `Spending` | 8 (prefix) + 4 (BE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
 | BlockHeaders | `BlockHeaders` | 80 (raw header = block hash) | 0 (empty value) | 80 |
 
 **Key observations:**
@@ -178,30 +178,28 @@ spend path the same one-transaction read as funding.
 
 ### Q3: Keep LE height vs switch to sortable (big-endian) height?
 
-**Verdict: keep LE. Sort in the reader.**
+**Verdict: switch to big-endian heights (store format 5).**
 
-Switching the height suffix from little-endian to big-endian would make
-lexicographic key order match numeric height order. That is not a
-compatibility constraint: derived ScriptIndex bytes are disposable.
-The pick is keep-LE because the reader already restores numeric order
-cheaply, and BE would buy nothing the API does not already guarantee:
+Switching the height suffix from little-endian to big-endian makes
+lexicographic key order match numeric height order. Derived index bytes are
+disposable, so electrs little-endian compatibility is not a reason to keep
+the old suffix. The pick is sortable keys because:
 
-1. **The sort cost is negligible.** The reader sorts a `Vec` of
-   `ScriptHistoryEntry` (two `u32` fields each) or `(Txid, u32, u64, u32)`
-   tuples by height. For a typical scripthash with 10–100 funding rows, this
-   is a few hundred nanoseconds — invisible against the block-fetch I/O that
-   follows.
-2. **LE is the electrs convention.** The index is shaped to match electrs's
-   key layout for compatibility reasoning. Switching to BE would diverge
-   from the reference design for no measurable query benefit.
+1. **A prefix scan is already chronological.** History pagination and bounded
+   height walks can stop after N entries without loading the whole prefix and
+   sorting it. High-activity scripts are the workload that pays for LE.
+2. **API order is still restored in the reader.** Resolvers continue to sort
+   by numeric height after exact-resolve so a prefix collision cannot leak
+   another script's rows into the wrong place. Proof:
+   `crates/index/tests/be_order.rs`.
+3. **Predecessor stores reset, they are not read.** Formats 3 and 4 used
+   little-endian heights. Opening them deletes `TxLookup` and `ScriptHistory`
+   rows and leaves `ScriptLive` (its locator has no height suffix). There is
+   no dual-read of LE keys.
 
-The sort-in-reader approach (`entries.sort_by_key(|entry| entry.height)`) is
-applied in `resolve_script_history`, `resolve_script_history_scan`,
-`resolve_unspent_outputs_with_height`, and
-`resolve_unspent_outputs_with_height_scan`. The raw `iter_funding_rows`,
-`iter_spending_rows`, and `iter_txid_rows` functions document the LE caveat
-and return rows in store order, so callers that want chronological order
-must sort — but the high-level resolvers already do it for them.
+The earlier keep-LE note in this file described a fixture-scale sort cost.
+That cost is not the pagination cost, and it is not a compatibility
+constraint. Store format 5 is the chosen layout.
 
 ### Q4: Per-CF cost table (fixture-scale)
 
