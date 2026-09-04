@@ -2484,9 +2484,15 @@ fn parse_block_for_apply(
             ),
         ));
     }
+    if let Some(raw) = provided_serialized {
+        return bitcoin_rs_primitives::txids_from_serialized_block(raw).map_err(|error| {
+            ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Encoding(
+                error.to_string(),
+            ))
+        });
+    }
     // Hash each transaction of the already-decoded block exactly once.
-    // Re-decoding preserved bytes here would make apply pay two full
-    // decodes plus one consensus re-serialization per block.
+    // Used when apply has no preserved wire bytes to hash in place.
     Ok(block_txids(block))
 }
 
