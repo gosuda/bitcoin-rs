@@ -61,8 +61,8 @@ pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 pub use block_view::BlockView;
 pub use rust_path::{TipState, UtxoView};
 pub use verify_block::{
-    BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
-    verify_merkle_root_with_txids,
+    BlockRuleContext, WITNESS_COMMITMENT_PREFIX, verify_block_rules,
+    verify_block_rules_precomputed, verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
     ScriptStageTimings, is_final_tx, verify_block_input_scripts, verify_coinbase_script_sig_size,
