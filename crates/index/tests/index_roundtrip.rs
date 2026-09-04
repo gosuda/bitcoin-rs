@@ -18,7 +18,7 @@ use parking_lot::{Mutex, RwLock};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
 use bitcoin_rs_index::{
-    ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexFormat, IndexReader, IndexRowCounts,
+    ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexRowCounts,
     IndexWatermark, IndexWatermarks, IndexWriter, Indexer, PreparedBatch, PreparedBatchLimits,
 };
 use bitcoin_rs_storage::{
@@ -744,11 +744,11 @@ fn predecessor_height_format_resets_historical(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
         Some(5_u32.to_le_bytes().as_slice())
     );
-    assert_eq!(
+    assert!(
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
-            .as_deref(),
-        Some(2_u32.to_le_bytes().as_slice())
+            .is_none(),
+        "the leftover ASCII row-value marker must not survive a format reset"
     );
     assert_eq!(
         writer.watermarks()?,
@@ -776,6 +776,30 @@ fn unversioned_rows_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
         IndexWriter::open(Arc::clone(&store), 1),
         Err(IndexError::LegacyCursorlessIndex)
     ));
+    Ok(())
+}
+
+/// `IDX-05`: a markerless store with Funding rows and no headers is refused,
+/// not stamped format 5.
+#[test]
+fn ensure_format_version_rejects_markerless_funding_rows() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryStore::default());
+    store.put(
+        ColumnFamily::Funding,
+        &[0u8; bitcoin_rs_index::HASH_PREFIX_ROW_SIZE],
+        &[],
+    )?;
+
+    let indexer = Indexer::new(Arc::clone(&store));
+    assert!(matches!(
+        indexer.ensure_format_version(),
+        Err(IndexError::LegacyCursorlessIndex)
+    ));
+    assert!(
+        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.is_none(),
+        "must not stamp format 5 onto a markerless populated store"
+    );
     Ok(())
 }
 
@@ -1271,8 +1295,9 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
         "claim value is mask(1) || process_epoch(8 LE) || base_version(8 LE)"
     );
     assert_eq!(
-        marker_puts[0].deletes, 2,
-        "the claim atomically deletes the selected watermark and global cursor"
+        marker_puts[0].deletes, 3,
+        "the claim atomically deletes the selected watermark, global cursor, \
+         and leftover ASCII format marker"
     );
     assert_eq!(
         marker_puts[1].marker_put.as_deref(),
@@ -1280,8 +1305,8 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
         "completion CASes the exact claim to Idle(base_version + 1)"
     );
     assert_eq!(
-        marker_puts[1].deletes, 0,
-        "completion never deletes the state key"
+        marker_puts[1].deletes, 1,
+        "completion deletes the leftover ASCII format marker; the reset state key is CASed to Idle"
     );
     assert!(writer.consumer_cursor()?.is_none());
     Ok(())
@@ -1934,6 +1959,8 @@ fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset()
     Ok(())
 }
 
+/// `IDX-05`: format 5 remains the only durable marker after historical reset
+/// and rebuild; the leftover ASCII dual-read key stays deleted.
 #[test]
 fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
@@ -1943,21 +1970,25 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
     writer.reset_capabilities(IndexCapabilities::HISTORICAL)?;
     drop(writer);
 
-    // The emptied index claims the current row format before rebuilding.
+    // The emptied index claims the current store format before rebuilding.
     let indexer = Indexer::new(Arc::clone(&store));
-    assert_eq!(indexer.ensure_format_version()?, IndexFormat::Current);
+    indexer.ensure_format_version()?;
     drop(indexer);
 
     seed_populated_store(&store, 1)?;
 
     let indexer = Indexer::new(Arc::clone(&store));
-    assert_eq!(indexer.ensure_format_version()?, IndexFormat::Current);
+    indexer.ensure_format_version()?;
     assert_eq!(
+        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
+        Some(5_u32.to_le_bytes().as_slice()),
+        "the store format marker survives reset and rebuild"
+    );
+    assert!(
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
-            .as_deref(),
-        Some(2u32.to_le_bytes().as_slice()),
-        "the row-format marker survives reset and rebuild"
+            .is_none(),
+        "the leftover ASCII row-value marker must not return after rebuild"
     );
     assert!(
         store
@@ -3065,6 +3096,43 @@ fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
     Ok(())
 }
 
+/// `IDX-05`: completing a same-mask claim from an older binary drops the leftover ASCII marker.
+#[test]
+fn completing_an_adopted_claim_deletes_the_leftover_ascii_marker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    seed_populated_store(&store, 1)?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"index:format_version",
+        &2_u32.to_le_bytes(),
+    )?;
+    let mut crash = store.new_batch();
+    crash.put(
+        ColumnFamily::UtxoMeta,
+        RESET_KEY,
+        &claim_bytes(SCRIPT_HISTORY_MASK, 9, 0),
+    );
+    crash.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
+    crash.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
+    store.write_durable(crash)?;
+
+    IndexWriter::open(Arc::clone(&store), 7)?;
+
+    assert!(
+        store
+            .get(ColumnFamily::UtxoMeta, b"index:format_version")?
+            .is_none(),
+        "same-mask adoption must still drop the leftover ASCII marker on completion"
+    );
+    assert_eq!(
+        store.get(ColumnFamily::UtxoMeta, FORMAT_KEY)?.as_deref(),
+        Some(FORMAT_VALUE.as_slice()),
+        "completion stamps format 5 even when the adopted claim did not rewrite metadata"
+    );
+    Ok(())
+}
+
 #[test]
 fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -3106,14 +3174,17 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
         "growth changes byte zero only; width, process epoch, and base survive raw"
     );
     assert_eq!(
-        markers[0].deletes, 3,
-        "the claim deletes the union watermarks and the consumer cursor"
+        markers[0].deletes, 4,
+        "the claim deletes the union watermarks, the consumer cursor, and the leftover ASCII format marker"
     );
     assert_eq!(
         markers[1].marker_put.as_deref(),
         Some(idle_bytes(4).as_slice())
     );
-    assert_eq!(markers[1].deletes, 0, "completion never deletes");
+    assert_eq!(
+        markers[1].deletes, 1,
+        "completion deletes the leftover ASCII format marker"
+    );
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, RESET_KEY)?,

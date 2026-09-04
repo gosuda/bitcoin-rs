@@ -162,6 +162,9 @@ const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 const FORMAT_VERSION_VALUE: [u8; 4] = 5_u32.to_le_bytes();
 const FORMAT_VERSION_V3: [u8; 4] = 3_u32.to_le_bytes();
 const FORMAT_VERSION_V4: [u8; 4] = 4_u32.to_le_bytes();
+/// Leftover ASCII row-value marker from formats 1–4. Written nowhere; deleted
+/// on reset so a store does not carry two version keys.
+const INDEX_FORMAT_VERSION_KEY: &[u8] = b"index:format_version";
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
@@ -194,6 +197,43 @@ const RESET_CLAIM_LEN: usize = 1 + 2 * size_of::<u64>();
 
 fn is_predecessor_height_format(value: &[u8]) -> bool {
     value == FORMAT_VERSION_V3 || value == FORMAT_VERSION_V4
+}
+
+fn decode_format_version(value: &[u8]) -> u32 {
+    value
+        .get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map_or(0, u32::from_le_bytes)
+}
+
+/// Decoded `[0x00, 'V']` marker. Callers apply policy: [`IndexWriter::open`]
+/// resets predecessors; [`Indexer::ensure_format_version`] refuses them.
+enum StoreFormat {
+    Current,
+    Predecessor { version: u32 },
+    Foreign { version: u32 },
+    Absent,
+}
+
+fn classify_store_format(value: Option<&[u8]>) -> StoreFormat {
+    match value {
+        Some(value) if value == FORMAT_VERSION_VALUE => StoreFormat::Current,
+        Some(value) if is_predecessor_height_format(value) => StoreFormat::Predecessor {
+            version: decode_format_version(value),
+        },
+        Some(value) => StoreFormat::Foreign {
+            version: decode_format_version(value),
+        },
+        None => StoreFormat::Absent,
+    }
+}
+
+fn stored_format<S: KvStore>(store: &S) -> Result<StoreFormat, IndexError> {
+    Ok(classify_store_format(
+        store
+            .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
+            .as_deref(),
+    ))
 }
 
 /// Decoded durable capability-reset state.
@@ -619,7 +659,8 @@ fn ensure_fence_live<S: KvStore>(
 }
 
 /// Publishes or adopts a reset claim. Same-mask adoption writes nothing; mask
-/// growth changes only byte zero of the exact observed claim.
+/// growth changes only byte zero of the exact observed claim. Leftover
+/// dual-format keys converge when the claim completes, not on adoption.
 fn acquire_capability_reset<S: KvStore>(
     store: &S,
     requested_mask: u8,
@@ -706,20 +747,13 @@ fn acquire_capability_reset<S: KvStore>(
             FORMAT_VERSION_KEY,
             &FORMAT_VERSION_VALUE,
         );
+        batch.delete(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY);
         let capabilities = IndexCapabilities::from_mask(mask)?;
         if capabilities.tx_lookup {
             batch.delete(ColumnFamily::UtxoMeta, TX_LOOKUP_WATERMARK_KEY);
         }
         if capabilities.script_history {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY);
-            // Same durable batch as FORMAT_VERSION_VALUE so a predecessor
-            // height-format reset cannot publish version 5 while leaving the
-            // row-value marker behind.
-            batch.put(
-                ColumnFamily::UtxoMeta,
-                INDEX_FORMAT_VERSION_KEY,
-                &INDEX_FORMAT_VERSION.to_le_bytes(),
-            );
         }
         if capabilities.script_live {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY);
@@ -816,15 +850,14 @@ fn resume_capability_reset<S: KvStore>(
             ORDINARY_STATE_REVISION_KEY,
             &work.next_revision,
         );
-        if capabilities.script_history {
-            // Resume of a claim that predates the acquire-batch marker
-            // still publishes the current row-value format.
-            completion.put(
-                ColumnFamily::UtxoMeta,
-                INDEX_FORMAT_VERSION_KEY,
-                &INDEX_FORMAT_VERSION.to_le_bytes(),
-            );
-        }
+        // Same-mask adoption of an older claim never rewrites the claim
+        // batch, so leftover dual-format keys converge here (`IDX-05`).
+        completion.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        completion.delete(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY);
         if store.write_durable_if(&conditions, completion)? {
             return Ok(());
         }
@@ -1724,72 +1757,43 @@ impl<S: KvStore> Indexer<S> {
         Ok(None)
     }
 
-    /// Reports whether this index's rows carry transaction positions, adopting
-    /// the current format when the index is empty.
+    /// Confirms this store carries the current layout, adopting it when empty.
     ///
-    /// Reading is always correct either way — a row without positions takes the
-    /// scan fallback — so this exists to tell an operator which path their node
-    /// is on, not to gate correctness. The difference is three orders of
-    /// magnitude on history resolution, which is worth a startup line.
+    /// A populated store with a missing or foreign marker is an error, not a
+    /// slower dual-read path. Empty-or-malformed *row values* still scan the
+    /// block: that is corruption safety, not an old-format decoder.
     ///
-    /// An index with rows but no version marker predates the format and is
-    /// reported as [`IndexFormat::Legacy`]. The marker is written only for an
-    /// empty index, because that is the only case where every row that will ever
-    /// exist is going to be written with positions. Writing it for a populated
-    /// legacy index would claim positions that are not there.
-    pub fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
-        match self.read_format_version()? {
-            Some(FormatMarker::Version(found)) => {
-                return Ok(if found == INDEX_FORMAT_VERSION {
-                    IndexFormat::Current
-                } else {
-                    IndexFormat::Legacy { found: Some(found) }
-                });
+    /// Emptiness matches [`IndexWriter::open`]: any row in `TxConfirmed`,
+    /// `Funding`, `Spending`, `BlockHeaders`, or `ScriptLive` is an index row.
+    /// A markerless store that already has one is
+    /// [`IndexError::LegacyCursorlessIndex`].
+    ///
+    /// Adopting an empty store writes format 5 and deletes the leftover ASCII
+    /// marker in one [`KvStore::write_durable`] batch (`IDX-05`). The commit
+    /// point is that durable batch. A crash before it is durable leaves the
+    /// store unmarked; the next call retries. Storage errors belong to the
+    /// caller.
+    pub fn ensure_format_version(&self) -> Result<(), IndexError> {
+        match stored_format(self.store.as_ref())? {
+            StoreFormat::Current => Ok(()),
+            StoreFormat::Predecessor { version } | StoreFormat::Foreign { version } => {
+                Err(IndexError::UnsupportedTxIndexFormatVersion { version })
             }
-            Some(FormatMarker::Unreadable { len }) => {
-                return Ok(IndexFormat::UnreadableMarker { len });
+            StoreFormat::Absent if has_any_index_row(self.store.as_ref())? => {
+                Err(IndexError::LegacyCursorlessIndex)
             }
-            None => {}
+            StoreFormat::Absent => {
+                let mut batch = self.store.new_batch();
+                batch.put(
+                    ColumnFamily::UtxoMeta,
+                    FORMAT_VERSION_KEY,
+                    &FORMAT_VERSION_VALUE,
+                );
+                batch.delete(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY);
+                self.store.write_durable(batch)?;
+                Ok(())
+            }
         }
-        if self.has_any_header()? {
-            return Ok(IndexFormat::Legacy { found: None });
-        }
-        let mut batch = self.store.new_batch();
-        batch.put(
-            ColumnFamily::UtxoMeta,
-            INDEX_FORMAT_VERSION_KEY,
-            &INDEX_FORMAT_VERSION.to_le_bytes(),
-        );
-        self.store.write(batch)?;
-        Ok(IndexFormat::Current)
-    }
-
-    fn read_format_version(&self) -> Result<Option<FormatMarker>, IndexError> {
-        let Some(bytes) = self
-            .store
-            .get(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY)?
-        else {
-            return Ok(None);
-        };
-        let Ok(encoded) = <[u8; 4]>::try_from(bytes.as_slice()) else {
-            // Reported as its own outcome rather than folded into version 0: an
-            // operator told "your index is at version 0" deletes and re-syncs,
-            // which is the wrong response to bytes that should be a `u32` and
-            // are not.
-            return Ok(Some(FormatMarker::Unreadable { len: bytes.len() }));
-        };
-        Ok(Some(FormatMarker::Version(u32::from_le_bytes(encoded))))
-    }
-
-    /// True when the header column family holds at least one row.
-    ///
-    /// Deliberately not `header_count`: a legacy index takes this branch on
-    /// every single start, and counting reads every row in the column family
-    /// and allocates an 80-byte array per row — roughly a million of each at
-    /// mainnet height — to answer a question that is only ever yes or no.
-    fn has_any_header(&self) -> Result<bool, IndexError> {
-        let mut rows = self.store.iter_prefix(ColumnFamily::BlockHeaders, &[])?;
-        Ok(rows.next().transpose()?.is_some())
     }
 
     const FLUSH_THRESHOLD_ROWS: usize = 500_000;
@@ -3103,26 +3107,19 @@ impl<S: KvStore> IndexWriter<S> {
     /// [`IndexError::UnsupportedTxIndexFormatVersion`].
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
-        match indexer
-            .store
-            .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
-        {
-            Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
-            Some(value) if is_predecessor_height_format(value.as_slice()) => {
+        match stored_format(indexer.store.as_ref())? {
+            StoreFormat::Current => {}
+            StoreFormat::Predecessor { .. } => {
                 resume_capability_reset(
                     indexer.store.as_ref(),
                     generation,
                     IndexCapabilities::HISTORICAL.to_mask(),
                 )?;
             }
-            Some(value) => {
-                let version = value
-                    .get(..4)
-                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-                    .map_or(0, u32::from_le_bytes);
+            StoreFormat::Foreign { version } => {
                 return Err(IndexError::UnsupportedTxIndexFormatVersion { version });
             }
-            None => {
+            StoreFormat::Absent => {
                 if has_any_index_row(&*indexer.store)? {
                     return Err(IndexError::LegacyCursorlessIndex);
                 }
@@ -3729,13 +3726,12 @@ pub trait IndexerLike: Send + Sync {
     /// Walks `block` once and writes index rows. See `Indexer::ingest_block`.
     fn ingest_block(&mut self, block: &[u8], height: u32) -> Result<IndexRowCounts, IndexError>;
 
-    /// Reports the row-value format. See [`Indexer::ensure_format_version`].
+    /// Confirms the store carries the current layout. See [`Indexer::ensure_format_version`].
     ///
-    /// Defaults to [`IndexFormat::Current`] for the in-memory and stub indexers
-    /// used in tests, which have no persisted rows and therefore no legacy ones.
-    /// A store-backed implementation must override this.
-    fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
-        Ok(IndexFormat::Current)
+    /// Defaults to success for in-memory and stub indexers, which have no
+    /// persisted rows. A store-backed implementation must override this.
+    fn ensure_format_version(&self) -> Result<(), IndexError> {
+        Ok(())
     }
 
     /// Walks `block` once and writes index rows, reusing precomputed transaction IDs when supported.
@@ -3846,49 +3842,6 @@ pub trait IndexerLike: Send + Sync {
     ) -> Result<Option<u64>, IndexError>;
 }
 
-/// Metadata key marking which row-value format an index was written with.
-const INDEX_FORMAT_VERSION_KEY: &[u8] = b"index:format_version";
-
-/// Current row-value format. Version 1 added transaction byte positions to
-/// funding and txid row values; version 2 added positions to spending row
-/// values; version 0 (unmarked) has empty values.
-pub const INDEX_FORMAT_VERSION: u32 = 2;
-
-/// Which row-value format an opened index carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IndexFormat {
-    /// Rows carry transaction positions; resolvers take the fast path.
-    Current,
-    /// Rows predate transaction positions; resolvers scan whole blocks.
-    ///
-    /// Correct but far slower. Clearing the index directory and re-syncing
-    /// rebuilds it in the current format.
-    Legacy {
-        /// The version marker found, or `None` when the index carries none.
-        found: Option<u32>,
-    },
-    /// A version marker exists but is not the 4 little-endian bytes of a `u32`.
-    ///
-    /// Resolvers scan, exactly as for [`Self::Legacy`], but the operator
-    /// response differs: this is damaged metadata, not an old index, and
-    /// deleting the directory would discard the evidence of whatever wrote it.
-    UnreadableMarker {
-        /// Byte length of the marker value that failed to decode.
-        len: usize,
-    },
-}
-
-/// What the format-version marker key holds, when it is present at all.
-enum FormatMarker {
-    /// Four little-endian bytes that decoded to this version.
-    Version(u32),
-    /// Present, but not a 4-byte little-endian `u32`.
-    Unreadable {
-        /// Byte length of the value found.
-        len: usize,
-    },
-}
-
 /// Provides block lookups for resolving lossy index prefixes to full identities.
 ///
 /// The index column families store 8-byte prefixes of txids/scripthashes/outpoints.
@@ -3920,7 +3873,7 @@ impl<S: KvStore + Send + Sync + 'static> IndexerLike for Indexer<S> {
         Self::ingest_block(self, block, height)
     }
 
-    fn ensure_format_version(&self) -> Result<IndexFormat, IndexError> {
+    fn ensure_format_version(&self) -> Result<(), IndexError> {
         Self::ensure_format_version(self)
     }
 
