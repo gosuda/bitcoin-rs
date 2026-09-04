@@ -115,6 +115,7 @@ struct Workers {
 pub struct P2pService {
     config: P2pServiceConfig,
     shutdown: Arc<AtomicBool>,
+    worker_shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     lifecycle: Arc<PeerLifecycle>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
@@ -152,6 +153,7 @@ impl P2pService {
         Self {
             config,
             shutdown,
+            worker_shutdown: Arc::new(AtomicBool::new(false)),
             network_active: Arc::new(AtomicBool::new(true)),
             lifecycle: Arc::new(PeerLifecycle::new(registry, leases)),
             banned: Arc::new(RwLock::new(Vec::new())),
@@ -193,7 +195,7 @@ impl P2pService {
         let mut listeners = Vec::with_capacity(self.config.listen_addrs.len());
         for addr in &self.config.listen_addrs {
             let listener_addr = *addr;
-            let shutdown = Arc::clone(&self.shutdown);
+            let shutdown = Arc::clone(&self.worker_shutdown);
             let network_active = Arc::clone(&self.network_active);
             let lifecycle = Arc::clone(&self.lifecycle);
             let banned = Arc::clone(&self.banned);
@@ -251,7 +253,7 @@ impl P2pService {
         listeners: Vec<JoinHandle<()>>,
         outbound: Option<JoinHandle<()>>,
     ) {
-        self.shutdown.store(true, Ordering::Release);
+        self.worker_shutdown.store(true, Ordering::Release);
         self.lifecycle.cancel_all();
         for handle in listeners {
             let _ = handle.join();
@@ -259,6 +261,7 @@ impl P2pService {
         if let Some(handle) = outbound {
             let _ = handle.join();
         }
+        self.worker_shutdown.store(false, Ordering::Release);
     }
 
     fn spawn_outbound_worker(
@@ -273,7 +276,7 @@ impl P2pService {
         let headers_tx = self.inbound_headers_tx.clone();
         let blocks_tx = self.inbound_blocks_tx.clone();
         let network_active = Arc::clone(&self.network_active);
-        let shutdown = Arc::clone(&self.shutdown);
+        let shutdown = Arc::clone(&self.worker_shutdown);
         let magic = self.config.magic;
         let active_limit = self.config.outbound_active_limit;
         thread::Builder::new()
@@ -330,7 +333,7 @@ impl P2pService {
 
     fn spawn_bootstrap_worker(&self) -> Result<Option<JoinHandle<()>>, io::Error> {
         if !self.config.fixed_peers.is_empty() {
-            let shutdown = Arc::clone(&self.shutdown);
+            let shutdown = Arc::clone(&self.worker_shutdown);
             let network_active = Arc::clone(&self.network_active);
             let lifecycle = Arc::clone(&self.lifecycle);
             let outbound_tx = self.outbound_tx.clone();
@@ -352,7 +355,7 @@ impl P2pService {
             tracing::debug!("p2p peer bootstrap disabled");
             return Ok(None);
         }
-        let shutdown = Arc::clone(&self.shutdown);
+        let shutdown = Arc::clone(&self.worker_shutdown);
         let network_active = Arc::clone(&self.network_active);
         let lifecycle = Arc::clone(&self.lifecycle);
         let outbound_tx = self.outbound_tx.clone();
@@ -378,6 +381,7 @@ impl P2pService {
     /// Stops P2P workers and asks all current connection owners to tear down.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.worker_shutdown.store(true, Ordering::Release);
         self.network_active.store(false, Ordering::Release);
         self.lifecycle.cancel_all();
     }
