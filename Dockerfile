@@ -5,10 +5,6 @@ FROM rust:1.95-bookworm AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
-        clang \
-        cmake \
-        libboost-dev \
-        libclang-dev \
         libzmq3-dev \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -17,9 +13,10 @@ WORKDIR /workspace
 COPY . .
 
 # Build the production verifier with the default fjall storage backend, while
-# leaving the other storage engines out of the runtime image.
+# leaving the other storage engines and the optional kernel oracle out of the
+# runtime image.
 RUN cargo build --locked --release -p bitcoin-rs \
-    --no-default-features --features fjall,kernel
+    --no-default-features --features fjall
 
 FROM debian:bookworm-slim AS runtime
 

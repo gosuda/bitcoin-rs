@@ -6,8 +6,8 @@
 //! natively executes only taproot key-path spends, so that differential is
 //! interpreter-scoped. This file takes a different angle: it feeds Core's own
 //! known-good and known-bad transaction vectors through the kernel's
-//! `verify_tx_scripts` (the production seam under `feature = "kernel"`) and
-//! asserts the kernel's verdict matches the vector's expected outcome.
+//! `verify_tx_scripts` (the independent Core oracle under `feature = "kernel"`)
+//! and asserts the kernel's verdict matches the vector's expected outcome.
 //!
 //! This is a **kernel oracle test**: the kernel is the authority, and the
 //! vectors are the oracle. Every assertion is a real kernel verdict on a real

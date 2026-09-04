@@ -1,11 +1,10 @@
 //! G19 — Validation-engine default matches the recorded #213 verdict.
 //!
 //! **G19 — Validation default.** `bitcoin-rs-consensus` and `bitcoin-rs-node`
-//! default to `kernel` while [`RECORDED_VERDICT`] is [`Verdict::KeepKernel`].
-//! `bin/bitcoin-rs` default features never include `kernel`. Promoting native
-//! is one coordinated change: flip the verdict and drop `kernel` from the two
-//! library defaults in the same commit, after the measurement gates in
-//! `docs/benchmarks/native-validation-default.md` pass.
+//! omit `kernel` from `default` while [`RECORDED_VERDICT`] is
+//! [`Verdict::PromoteNative`]. `bin/bitcoin-rs` default features never include
+//! `kernel`. Reverting that split is one coordinated change: flip the verdict
+//! and put `kernel` back in the two library defaults in the same commit.
 //!
 //! The check walks each package's default feature graph, including local
 //! aliases and `crate/feature` / `dep:bitcoinkernel` forwarding, so an
@@ -23,16 +22,15 @@ use std::process::Command;
 /// Recorded #213 promotion verdict.
 ///
 /// Change this only together with the matching `default` lists in
-/// `crates/consensus/Cargo.toml` and `crates/node/Cargo.toml`, and only after
-/// every gate in `docs/benchmarks/native-validation-default.md` passes.
-const RECORDED_VERDICT: Verdict = Verdict::KeepKernel;
+/// `crates/consensus/Cargo.toml` and `crates/node/Cargo.toml`.
+const RECORDED_VERDICT: Verdict = Verdict::PromoteNative;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Verdict {
     /// Library crates keep `kernel` in `default`.
+    #[allow(dead_code, reason = "retained so a revert is one coordinated flip")]
     KeepKernel,
     /// Library crates have dropped `kernel` from `default`.
-    #[allow(dead_code, reason = "constructed when RECORDED_VERDICT flips")]
     PromoteNative,
 }
 

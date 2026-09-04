@@ -8,9 +8,9 @@ workflow, coding standards, and verification commands used across the project.
 - Rust toolchain: Rust 2024 edition (MSRV 1.95.0 or newer).
 - Default build: Pure Rust. No C++ compiler or system libraries required.
   Script validation uses the native interpreter in `bitcoin-rs-script`.
-- Optional kernel engine: `cmake` and `libboost-dev` (only when building with
-  `--features kernel` for `libbitcoinkernel`). Library crates default to
-  `kernel`; the binary does not. See `docs/contracts/validation-default.md`.
+- Optional kernel oracle: `cmake` and `libboost-dev` (only when building with
+  `--features kernel` for `libbitcoinkernel`). Off by default. See
+  `docs/contracts/validation-default.md`.
 
 Install tools:
 
@@ -117,9 +117,7 @@ Key rules:
 - Storage isolation: storage backends remain behind `crates/storage`. `crates/rpc` consumes node-level capabilities, never storage engines directly.
 - Consensus authority: the native Rust interpreter in `crates/script` verifies
   every consensus spend class. `libbitcoinkernel` is an opt-in differential
-  oracle behind `--features kernel`. The `kernel` feature remains the default
-  in `bitcoin-rs-consensus` and `bitcoin-rs-node` until the #213 measurement
-  gate flips those crates.
+  oracle behind `--features kernel`.
 
 ## Commit and PR conventions
 

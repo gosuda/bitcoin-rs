@@ -8,17 +8,19 @@ mod enabled {
 
     /// Verifies every input script of `tx` through bitcoinkernel.
     ///
+    /// Independent Core oracle: callers compare this verdict against the native
+    /// interpreter. Production apply never routes here.
+    ///
     /// `spent_outputs` pairs each input's outpoint with the output it spends, in
     /// input order — the shape the verify path already holds after prevout
     /// resolution. One transaction serialization/parse and one
     /// [`bitcoinkernel::PrecomputedTransactionData`] are shared across all inputs.
     ///
-    /// Per-input verdict failures map to [`ConsensusError::Script`] (preserving
-    /// the verify entry's error contract); parse and precompute failures map to
-    /// [`ConsensusError::Kernel`]. A `spent_outputs` length that disagrees with
-    /// the input count is rejected outright: the loop below is driven by
-    /// `spent_outputs`, so a short slice would otherwise leave trailing inputs
-    /// silently unverified.
+    /// Per-input verdict failures map to [`ConsensusError::Script`]; parse and
+    /// precompute failures map to [`ConsensusError::Kernel`]. A `spent_outputs`
+    /// length that disagrees with the input count is rejected outright: the loop
+    /// below is driven by `spent_outputs`, so a short slice would otherwise
+    /// leave trailing inputs silently unverified.
     pub fn verify_tx_scripts(
         tx: &Tx,
         spent_outputs: &[(OutPoint, TxOut)],
@@ -36,12 +38,9 @@ mod enabled {
 
     /// A block parsed once by `libbitcoinkernel`.
     ///
-    /// Parsing here is worth far more than the parse itself. Core's
-    /// `CTransaction` hashes itself while deserializing, using the SHA-256
-    /// implementation Core selects at runtime (`avx2(8way)` on this host), so
-    /// every txid comes out of this parse for free and the per-transaction
-    /// serialization + `bitcoinkernel::Transaction::new` round-trip disappears
-    /// with it.
+    /// This is the independent Core parse used by `--verify-kernel` and by
+    /// differential tests. Production apply hashes native `Tx` values and
+    /// never feeds this handle into Rust state.
     pub struct KernelBlock {
         block: bitcoinkernel::Block,
     }
@@ -75,31 +74,17 @@ mod enabled {
         pub fn transaction_count(&self) -> usize {
             self.block.transaction_count()
         }
-
-        pub(crate) fn transaction(
-            &self,
-            index: usize,
-        ) -> Result<bitcoinkernel::TransactionRef<'_>, ConsensusError> {
-            self.block
-                .transaction(index)
-                .map_err(|error| ConsensusError::Kernel(error.to_string()))
-        }
     }
 
-    /// Kernel transaction plus sighash precompute retained for parallel
-    /// per-input verification.
-    ///
-    /// Generic over the transaction handle so the block path can hold a
-    /// borrowed [`bitcoinkernel::TransactionRef`] while the standalone
-    /// [`verify_tx_scripts`] entry keeps an owned one.
-    pub(crate) struct PreparedKernelTx<T: bitcoinkernel::prelude::TransactionExt> {
+    /// Kernel transaction plus sighash precompute retained across inputs.
+    struct PreparedKernelTx<T: bitcoinkernel::prelude::TransactionExt> {
         kernel_tx: T,
         precomputed: bitcoinkernel::PrecomputedTransactionData,
     }
 
     /// Builds the shared [`bitcoinkernel::PrecomputedTransactionData`] over an
     /// already-parsed kernel transaction.
-    pub(crate) fn prepare_kernel_tx<T: bitcoinkernel::prelude::TransactionExt>(
+    fn prepare_kernel_tx<T: bitcoinkernel::prelude::TransactionExt>(
         kernel_tx: T,
         input_count: usize,
         spent_outputs: &[(OutPoint, TxOut)],
@@ -124,7 +109,7 @@ mod enabled {
     }
 
     /// Verifies a single input against a previously prepared kernel transaction.
-    pub(crate) fn verify_prepared_input<T: bitcoinkernel::prelude::TransactionExt>(
+    fn verify_prepared_input<T: bitcoinkernel::prelude::TransactionExt>(
         prepared: &PreparedKernelTx<T>,
         prevout: &TxOut,
         input_index: usize,
@@ -210,35 +195,19 @@ mod enabled {
     }
 }
 
+/// Returns whether this build compiled `libbitcoinkernel`.
+///
+/// The production apply path is always native. This flag only tells callers
+/// whether the independent Core oracle is available for differential checks.
+#[must_use]
+pub const fn kernel_compiled() -> bool {
+    cfg!(feature = "kernel")
+}
+
 #[cfg(feature = "kernel")]
 pub use enabled::{KernelBlock, KernelContext, verify_tx_scripts};
-#[cfg(feature = "kernel")]
-pub(crate) use enabled::{PreparedKernelTx, prepare_kernel_tx, verify_prepared_input};
 
 #[cfg(not(feature = "kernel"))]
 /// Stub kernel context available when the `kernel` feature is off.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KernelContext;
-
-#[cfg(not(feature = "kernel"))]
-/// Portable-build stand-in for the kernel's one-shot block parse.
-///
-/// The native apply path computes every transaction ID directly from the
-/// decoded block it already owns, so this marker carries no data. It keeps
-/// the prepared-apply shape identical across backends without taking a
-/// second owned copy of the block's txids.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct KernelBlock;
-
-#[cfg(not(feature = "kernel"))]
-impl KernelBlock {
-    /// Decodes `raw_block` to validate preserved block bytes.
-    ///
-    /// # Errors
-    /// Returns [`ConsensusError::Kernel`] if `raw_block` is not a valid block.
-    pub fn parse(raw_block: &[u8]) -> Result<Self, crate::ConsensusError> {
-        bitcoin_rs_primitives::Block::consensus_decode(raw_block)
-            .map_err(|error| crate::ConsensusError::Kernel(error.to_string()))?;
-        Ok(Self)
-    }
-}

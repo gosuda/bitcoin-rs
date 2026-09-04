@@ -33,11 +33,11 @@ Large corpus/replay/evidence harnesses are intentionally not shipped by this
 runtime crate.
 
 ## Features
-- `default` (enables `fjall`, `kernel`, and `zmq`): the performance-oriented fjall
-  storage backend plus the bitcoinkernel consensus verifier and ZMQ notifications,
-  so per-crate `cargo check` works out of the box. The `bitcoin-rs` binary's own
-  defaults are the pure-Rust `fjall,redb,zmq`; `kernel` stays opt-in there. Issue
-  #213 is the measurement gate for dropping `kernel` from this crate's defaults.
+- `default` (enables `fjall` and `zmq`): the performance-oriented fjall
+  storage backend plus ZMQ notifications, so per-crate `cargo check` works
+  out of the box. The `bitcoin-rs` binary's own defaults are the pure-Rust
+  `fjall,redb,zmq`. `kernel` compiles the independent Core oracle and stays
+  off by default (`docs/contracts/validation-default.md`).
 - `rocksdb`, `fjall`, `redb`: forward the named storage backend to every subsystem
   crate.
 - `mdbx`: forward the mdbx backend to the crates that provide one.

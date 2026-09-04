@@ -162,6 +162,11 @@ impl EcdsaType {
 /// The taproot amount/scriptPubKey midstates assume the same prevout set is supplied to
 /// every call on this cache (the same assumption the `bitcoin` crate's cache makes);
 /// construct a fresh cache when the prevout set changes.
+///
+/// [`Self::precompute`] fills the shared BIP143/BIP341 hashes once per
+/// transaction. Cloning a filled cache is the cheap way to hand each input its
+/// own `&mut` checker without recomputing those midstates.
+#[derive(Clone)]
 pub struct SighashCache<'t> {
     tx: &'t Tx,
     segwit_prevouts: Option<Hash256>,
@@ -188,6 +193,25 @@ impl<'t> SighashCache<'t> {
             taproot_scriptpubkeys: None,
             taproot_sequences: None,
             taproot_outputs: None,
+        }
+    }
+
+    /// Fills every BIP143 and BIP341 midstate that does not depend on a
+    /// per-input script code.
+    ///
+    /// Call once per transaction before verifying its inputs. Cloned caches
+    /// then skip the shared hashes, matching Core's
+    /// `PrecomputedTransactionData` reuse without a second parse.
+    pub fn precompute(&mut self, prevouts: &[TxOut]) {
+        let _ = self.segwit_prevouts();
+        let _ = self.segwit_sequences();
+        let _ = self.segwit_outputs();
+        let _ = self.taproot_prevouts();
+        let _ = self.taproot_sequences();
+        let _ = self.taproot_outputs();
+        if prevouts.len() == self.tx.inputs.len() {
+            let _ = self.taproot_amounts(prevouts);
+            let _ = self.taproot_scriptpubkeys(prevouts);
         }
     }
 

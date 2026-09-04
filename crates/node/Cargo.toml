@@ -23,7 +23,7 @@ workspace = true
 # Note: `--workspace --features "..."` in a virtual workspace (no root [package])
 # does NOT forward CLI features to library crates; always use -p when features
 # must reach a specific crate.
-default = ["fjall", "kernel", "zmq"]
+default = ["fjall", "zmq"]
 rocksdb = [
     "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-consensus/rocksdb",

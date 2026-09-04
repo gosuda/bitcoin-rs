@@ -10,9 +10,8 @@ use bitcoin_rs_primitives::{Tx, TxOut, Txid, Wtxid};
 
 /// A decoded block's transactions, identities, and resolved prevouts.
 ///
-/// The node computes the transaction IDs once (the kernel parse provides them
-/// in kernel builds; the native build hashes each transaction once) and hands
-/// them here by value. Witness IDs are computed lazily at most once, because
+/// The node hashes each already-decoded transaction once and hands those
+/// identities here by value. Witness IDs are computed lazily at most once, because
 /// only witness-carrying blocks under active segwit ever need them (the BIP141
 /// witness-commitment check).
 pub struct BlockView<'b> {
