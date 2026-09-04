@@ -144,13 +144,10 @@ impl CountingStream<std::net::TcpStream> {
     ///
     /// Returns the error `TcpStream::try_clone` returned.
     pub fn try_clone(&self) -> IoResult<Self> {
-        Ok(Self {
-            inner: self.inner.try_clone()?,
-            counters: Arc::clone(&self.counters),
-            read_buf: Vec::new(),
-            read_pos: 0,
-            read_end: 0,
-        })
+        Ok(Self::new(
+            self.inner.try_clone()?,
+            Arc::clone(&self.counters),
+        ))
     }
 
     /// Applies a read timeout to the wrapped socket.
@@ -196,8 +193,12 @@ impl<S: Read> CountingStream<S> {
         if self.read_buf.len() < INBOUND_READ_BUFFER {
             self.read_buf.resize(INBOUND_READ_BUFFER, 0);
         }
+        // Indices move only after a successful read. Resetting `read_pos`
+        // first would make a timeout revive already-consumed leftover bytes;
+        // the handshake and message loops retry TimedOut/WouldBlock.
+        let filled = self.inner.read(&mut self.read_buf)?;
         self.read_pos = 0;
-        self.read_end = self.inner.read(&mut self.read_buf)?;
+        self.read_end = filled;
         Ok(())
     }
 
@@ -347,6 +348,58 @@ mod tests {
         assert_eq!(read, 3);
         assert_eq!(second, [3, 4, 5]);
         assert_eq!(counters.bytes_recv(), 5);
+    }
+
+    /// Handshake and message loops retry `TimedOut`. A refill that fails
+    /// after leftover bytes were consumed must not revive those bytes.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn a_timed_out_refill_does_not_replay_consumed_bytes() {
+        struct TimeoutAfterFirst {
+            remaining: Vec<u8>,
+            reads: u8,
+        }
+        impl Read for TimeoutAfterFirst {
+            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+                self.reads = self.reads.saturating_add(1);
+                if self.reads > 1 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                }
+                let take = self.remaining.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&self.remaining[..take]);
+                self.remaining.drain(..take);
+                Ok(take)
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            TimeoutAfterFirst {
+                remaining: vec![1, 2, 3],
+                reads: 0,
+            },
+            Arc::clone(&counters),
+        );
+        let mut first = [0_u8; 3];
+        let read = stream
+            .read(&mut first)
+            .unwrap_or_else(|error| panic!("first read failed: {error}"));
+        assert_eq!(read, 3);
+        assert_eq!(first, [1, 2, 3]);
+
+        let mut retry = [0_u8; 3];
+        let error = match stream.read(&mut retry) {
+            Ok(n) => panic!("refill must time out, got {n} bytes"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let error = match stream.read(&mut retry) {
+            Ok(n) => panic!("retry after timeout must not replay, got {n} bytes"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(counters.bytes_recv(), 3);
     }
 
     /// Two framed pings delivered in one inner read must both decode without
