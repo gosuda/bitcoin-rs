@@ -4,7 +4,7 @@ The single mutation gateway in front of the mempool, the records it emits,
 and the ZMQ `sequence` mapping built on them. Owners: `MempoolGateway` in
 `crates/mempool/src/gateway.rs`; `MutationResult`/`MutationOutcome`/
 `RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` in
-`crates/mempool/src/mutation.rs`; the node-side sequence observer
+`crates/mempool/src/mutation.rs`; the ZMQ sequence observer
 in `crates/node/src/zmq_publisher.rs`.
 
 ## Clauses
@@ -52,7 +52,8 @@ in `crates/node/src/zmq_publisher.rs`.
   `MempoolSequenceWake::publish_generation_from`, which builds the
   generation key from `applied_tip` plus that sequence and never touches
   the mempool read lock (`crates/node/src/mining.rs`); `node` attaches that
-  mining observer and the ZMQ sequence observer as `CompositeObserver` legs.
+  mining observer at gateway construction and the ZMQ sequence observer as
+  an extra named leg on the gateway's `CompositeObserver`.
 
 ### `MPL-02`: Atomic mutation records and sequence assignment
 

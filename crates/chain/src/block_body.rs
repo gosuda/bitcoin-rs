@@ -29,8 +29,11 @@ pub trait BlockBodySource: Send + Sync {
 
     /// Bytes this source's block storage currently occupies on disk.
     ///
-    /// `None` means this source does not know. Callers that need a figure
-    /// for `getblockchaininfo` then fall back to the sum of recorded sizes.
+    /// This is `getblockchaininfo`'s `size_on_disk`. It has to come from
+    /// whatever owns the bytes: the block-record log can only offer the sum of
+    /// sizes it has seen, which keeps counting bytes pruning has already
+    /// deleted. `None` means this source does not know; callers then fall back
+    /// to that sum.
     fn disk_usage(&self) -> Option<u64> {
         None
     }
