@@ -982,14 +982,18 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 
 fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     match error {
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
+        ApplyError::Shutdown
+        | ApplyError::JournalBackpressure(_)
+        | ApplyError::Consensus(ConsensusError::Bip { bip: "INTERNAL", .. }) => {
             BlockValidationResult::Inconclusive
         }
         other => BlockValidationResult::Rejected(bip22_reject_reason(&other)),
     }
 }
 
-/// Core `GetRejectReason` strings used by `BIP22ValidationResult`.
+/// Core v31.0 `GetRejectReason` strings used by `BIP22ValidationResult`.
+/// Reference: Bitcoin Core `src/validation.cpp` at v31.0,
+/// <https://github.com/bitcoin/bitcoin/blob/v31.0/src/validation.cpp>.
 fn bip22_reject_reason(error: &ApplyError) -> CompactString {
     match error {
         ApplyError::ProofOfWork { .. } => CompactString::from("high-hash"),
@@ -1017,10 +1021,13 @@ fn bip22_consensus_reason(error: &ConsensusError) -> CompactString {
         ConsensusError::NullPrevout { .. } => "bad-txns-prevout-null",
         ConsensusError::DuplicateInput { .. } => "bad-txns-inputs-duplicate",
         ConsensusError::MissingPrevout { .. } => "bad-txns-inputs-missingorspent",
-        ConsensusError::OutputValueOverflow => "bad-txns-txouttotal-toolarge",
+        ConsensusError::OutputValueOverflow => "bad-txns-vout-toolarge",
+        ConsensusError::OutputTotalValueOverflow => "bad-txns-txouttotal-toolarge",
+        ConsensusError::InputValueOverflow => "bad-txns-in-belowout",
         ConsensusError::InputsLessThanOutputs { .. } => "bad-txns-in-belowout",
         ConsensusError::SigopsLimit { .. } => "bad-blk-sigops",
-        ConsensusError::EmptyBlock | ConsensusError::MissingCoinbase => "bad-cb-missing",
+        ConsensusError::EmptyBlock => "bad-blk-length",
+        ConsensusError::MissingCoinbase => "bad-cb-missing",
         ConsensusError::ExtraCoinbase { .. } => "bad-cb-multiple",
         ConsensusError::MerkleMutation => "bad-txns-duplicate",
         ConsensusError::MerkleRoot => "bad-txnmrklroot",
@@ -1121,7 +1128,7 @@ mod apply_error_tests {
         );
         assert_eq!(
             rejected(ApplyError::Consensus(ConsensusError::EmptyBlock)),
-            "bad-cb-missing"
+            "bad-blk-length"
         );
         assert_eq!(
             rejected(ApplyError::Consensus(ConsensusError::ExtraCoinbase {

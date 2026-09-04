@@ -269,7 +269,7 @@ fn prepare_tx_checks(
             .ok_or(ConsensusError::MissingPrevout { input_index })?;
         input_value = input_value
             .checked_add(prevout.value)
-            .ok_or(ConsensusError::OutputValueOverflow)?;
+            .ok_or(ConsensusError::InputValueOverflow)?;
         prevouts.push((input.previous_output, prevout));
     }
 
@@ -786,11 +786,14 @@ fn cached_prevout_lookup(
 
 fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
     tx.outputs.iter().try_fold(0u64, |sum, output| {
+        if output.value > MAX_MONEY {
+            return Err(ConsensusError::OutputValueOverflow);
+        }
         let next = sum
             .checked_add(output.value)
-            .ok_or(ConsensusError::OutputValueOverflow)?;
+            .ok_or(ConsensusError::OutputTotalValueOverflow)?;
         if next > MAX_MONEY {
-            Err(ConsensusError::OutputValueOverflow)
+            Err(ConsensusError::OutputTotalValueOverflow)
         } else {
             Ok(next)
         }

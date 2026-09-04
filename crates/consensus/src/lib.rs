@@ -104,9 +104,15 @@ pub enum ConsensusError {
         /// Input index whose previous output is unavailable.
         input_index: usize,
     },
-    /// Total output value exceeds Bitcoin's maximum money supply.
+    /// A single output exceeds Bitcoin's maximum money supply.
     #[error("transaction output value exceeds max money")]
     OutputValueOverflow,
+    /// The cumulative output value exceeds Bitcoin's maximum money supply.
+    #[error("transaction output total exceeds max money")]
+    OutputTotalValueOverflow,
+    /// The cumulative input value overflows the representable money range.
+    #[error("transaction input value overflows")]
+    InputValueOverflow,
     /// Total input value is smaller than total output value.
     #[error("transaction spends {input_value} sats but creates {output_value} sats")]
     InputsLessThanOutputs {
