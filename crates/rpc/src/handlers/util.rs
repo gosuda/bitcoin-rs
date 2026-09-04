@@ -566,6 +566,7 @@ fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, Desc
 }
 
 fn parse_combo(text: &str) -> Result<Option<&str>, DescriptorError> {
+    let text = strip_checksum(text);
     if let Some(key) = text
         .strip_prefix("combo(")
         .and_then(|s| s.strip_suffix(')'))

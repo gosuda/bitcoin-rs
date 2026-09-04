@@ -117,12 +117,10 @@ The default mainnet configuration: `fjall` backend, multi-peer download (outboun
 ### Sync regimes (download-bound vs processing-bound)
 The two cost regimes a sync measurement must name before its numbers mean anything. **Download-bound:** wall is decided by the network path — live IBD. **Processing-bound:** blocks are local and wall is decided by validation plus storage commit — reindex and replay. A node can rank differently in the two, so a faster-than-X claim needs the regime and validation posture stated.
 
-All benchmark campaign evidence and tooling is retired by #224. The seven
-retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
-(`bitcoin-rs-consensus --bench merkle`, `bitcoin-rs-consensus --bench verify_tx`,
-`bitcoin-rs-storage --bench kvstore_backends`, `bitcoin-rs-utxo --bench record_codec`,
-`bitcoin-rs-utxo --bench utxo_commit`, `bitcoin-rs-mining --bench candidate`,
-`bitcoin-rs-node --bench sync_pipeline`).
+All benchmark campaign evidence and tooling is retired by #224. The retained
+Criterion benchmark targets are compiled in the main-only `bench-smoke` CI lane
+(`bitcoin-rs-consensus --bench merkle`, `bitcoin-rs-utxo --bench utxo_commit`,
+`bitcoin-rs-node --bench sync_pipeline`, `bitcoin-rs-node --bench chainstate_journal`).
 
 ## Consensus validation
 
@@ -366,4 +364,4 @@ A throughput change is measured against CPU time as well as wall time, because a
 A parallelism constant tuned while the harness competes with the node for CPU, so the optimum measures the contention. Never tune a parallelism constant against a harness sharing CPU with the node, and never on wall alone.
 
 ### CI lane parity
-A branch is green only against the commands in `.github/workflows/ci.yml`, never a local approximation: `-D warnings` on the `clippy` and `kernel-parity` lanes promotes warnings the workspace lint job merely reports; a virtual workspace drops `--workspace --features`, so the full surface is only reached through the per-crate `-p` invocations; `kernel-parity` adds `--include-ignored`. `cargo deny` failures are bug reports, not lint noise.
+A branch is green only against the commands in `.github/workflows/ci.yml`, never a local approximation. The required PR gate is `fmt`, `deny`, `clippy`, and normal workspace tests on the kernel-free surface; `-D warnings` promotes clippy warnings that a local lint without it merely reports. A virtual workspace drops `--workspace --features`, so extra backend, kernel, and isolated-feature surfaces are reached only through the per-crate `-p` invocations in `.github/workflows/main.yml`. `cargo deny` failures are bug reports, not lint noise.
