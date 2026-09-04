@@ -53,7 +53,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-deny
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
       - run: ./scripts/ci-pr.sh deny
 
   rust:

@@ -33,8 +33,10 @@ case "$1" in
       --no-default-features --features fjall,zmq --no-fail-fast
     ;;
   deny)
-    cargo deny check --workspace --no-default-features \
-      --features rocksdb,fjall,redb,mdbx,kernel
+    # deny.toml [graph] all-features owns the audited graph, including every
+    # storage backend and kernel. cargo-deny 0.20 takes common flags before
+    # `check`; do not restated them here.
+    cargo deny check
     ;;
   all)
     "$0" fmt
