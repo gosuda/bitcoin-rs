@@ -1,3 +1,11 @@
+//! Out-of-order block staging bounded by the download window budget.
+//!
+//! [`BlockStager`] holds decoded inbound bodies until their predecessor is
+//! applied. Slot-count eviction and byte-budget backpressure live here;
+//! [`crate::DownloadWindow`] owns in-flight assignment. The node sync
+//! coordinator stages arrivals and drains a contiguous apply prefix; it does
+//! not own this policy.
+
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -6,10 +14,11 @@ use std::{
 use bitcoin_rs_primitives::{Block, Hash256, consensus_bytes};
 use hashbrown::{HashMap, hash_map::Entry};
 
-use bitcoin_rs_p2p::SyncBudget;
+use crate::SyncBudget;
 
+/// Bounded in-memory staging set for inbound block bodies.
 #[derive(Debug)]
-pub(super) struct BlockStager {
+pub struct BlockStager {
     budget: SyncBudget,
     received: HashMap<Hash256, ReceivedBlock>,
     received_order: VecDeque<Hash256>,
@@ -35,34 +44,51 @@ struct ReceivedBlock {
     bytes: usize,
 }
 
+/// A contiguous apply-prefix body drained from staging.
 #[derive(Clone, Debug)]
-pub(super) struct DrainedBlock {
-    pub(super) hash: Hash256,
-    pub(super) block: Block,
-    pub(super) serialized: bytes::Bytes,
+pub struct DrainedBlock {
+    /// Identity of the drained body.
+    pub hash: Hash256,
+    /// Decoded block.
+    pub block: Block,
+    /// Preserved wire payload for apply-without-reserialize.
+    pub serialized: bytes::Bytes,
     received_at: Instant,
     bytes: usize,
 }
 
+/// A staged body dropped for retry or eviction.
 #[derive(Clone, Debug)]
-pub(super) struct DroppedBlock {
-    pub(super) hash: Hash256,
+pub struct DroppedBlock {
+    /// Identity of the dropped body.
+    pub hash: Hash256,
 }
 
+/// Result of attempting to stage one inbound body.
 #[derive(Clone, Debug)]
-pub(super) enum StagedBlock {
+pub enum StagedBlock {
+    /// The hash is already in the staging set.
     AlreadyStaged,
+    /// The body is retained. `dropped` are count-budget evictions caused by
+    /// this insert.
     Memory {
+        /// Serialized size of the newly staged body.
         bytes: usize,
+        /// Bodies evicted so this insert could fit the slot budget.
         dropped: Vec<DroppedBlock>,
     },
+    /// The body was refused (byte budget or oversize) and should be
+    /// re-requested.
     DroppedForRetry {
+        /// The refused body.
         dropped: DroppedBlock,
     },
 }
 
 impl BlockStager {
-    pub(super) fn new(budget: SyncBudget) -> Self {
+    /// Empty stager sized to `budget`.
+    #[must_use]
+    pub fn new(budget: SyncBudget) -> Self {
         Self {
             budget,
             received: HashMap::with_capacity(budget.max_received_blocks),
@@ -74,25 +100,34 @@ impl BlockStager {
         }
     }
 
-    pub(super) fn received_len(&self) -> usize {
+    /// Number of currently staged bodies.
+    #[must_use]
+    pub fn received_len(&self) -> usize {
         self.received.len()
     }
 
-    pub(super) fn received_bytes(&self) -> usize {
+    /// Total serialized bytes of currently staged bodies.
+    #[must_use]
+    pub fn received_bytes(&self) -> usize {
         self.received_bytes
     }
 
     /// Highest staged-block population ever observed this run.
-    pub(super) const fn received_high_water(&self) -> usize {
+    #[must_use]
+    pub const fn received_high_water(&self) -> usize {
         self.received_blocks_high_water
     }
 
     /// Highest staged-byte total ever observed this run.
-    pub(super) const fn received_bytes_high_water(&self) -> usize {
+    #[must_use]
+    pub const fn received_bytes_high_water(&self) -> usize {
         self.received_bytes_high_water
     }
 
-    pub(super) fn ready_received_len(&self, next_expected_hash: Option<Hash256>) -> Option<usize> {
+    /// Staged count when the apply frontier is present, or `None` if empty or
+    /// the next expected hash is not staged.
+    #[must_use]
+    pub fn ready_received_len(&self, next_expected_hash: Option<Hash256>) -> Option<usize> {
         let received_len = self.received.len();
         if received_len == 0 {
             return None;
@@ -105,7 +140,8 @@ impl BlockStager {
         Some(received_len)
     }
 
-    pub(super) fn insert(
+    /// Stages `block` or refuses it for retry under the byte budget.
+    pub fn insert(
         &mut self,
         hash: Hash256,
         next_expected_hash: Option<Hash256>,
@@ -166,20 +202,22 @@ impl BlockStager {
     /// Whether `hash` is currently staged. Feeds the stall detector's
     /// no-blame guard: a staged next-expected block means the apply side owns
     /// the frontier.
-    pub(super) fn contains(&self, hash: &Hash256) -> bool {
+    #[must_use]
+    pub fn contains(&self, hash: &Hash256) -> bool {
         self.received.contains_key(hash)
     }
 
     /// Clones one staged decoded body and its original wire bytes without
     /// removing it from the bounded staging set.
-    pub(super) fn staged_body(&self, hash: Hash256) -> Option<(Block, bytes::Bytes)> {
+    #[must_use]
+    pub fn staged_body(&self, hash: Hash256) -> Option<(Block, bytes::Bytes)> {
         self.received
             .get(&hash)
             .map(|entry| (entry.block.clone(), entry.serialized.clone()))
     }
 
     /// Releases one body after that exact block commits during a branch switch.
-    pub(super) fn retire_applied(&mut self, hash: &Hash256) -> bool {
+    pub fn retire_applied(&mut self, hash: &Hash256) -> bool {
         let removed = self.take_entry(hash).is_some();
         if self.received.is_empty() {
             self.received_order.clear();
@@ -188,10 +226,9 @@ impl BlockStager {
         removed
     }
 
-    pub(super) fn drain_expected_prefix(
-        &mut self,
-        expected_hashes: &[Hash256],
-    ) -> Vec<DrainedBlock> {
+    /// Removes the contiguous prefix of `expected_hashes` that is currently
+    /// staged. Stops at the first missing hash.
+    pub fn drain_expected_prefix(&mut self, expected_hashes: &[Hash256]) -> Vec<DrainedBlock> {
         let mut drained = Vec::with_capacity(expected_hashes.len());
         for hash in expected_hashes {
             let Some(block) = self.take_entry(hash) else {
@@ -206,7 +243,8 @@ impl BlockStager {
         drained
     }
 
-    pub(super) fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
+    /// Restores previously drained bodies after a partial apply.
+    pub fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
         for drained in drained {
             let previous = self.received.insert(
                 drained.hash,
@@ -240,7 +278,8 @@ impl BlockStager {
         })
     }
 
-    pub(super) fn prune_expired(&mut self, now: Instant) -> Vec<DroppedBlock> {
+    /// Drops staged bodies whose received deadline has passed.
+    pub fn prune_expired(&mut self, now: Instant) -> Vec<DroppedBlock> {
         if self.received.is_empty() {
             self.next_received_deadline = None;
             return Vec::new();
@@ -380,7 +419,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{BlockStager, block_size};
-    use bitcoin_rs_p2p::default_sync_budget;
+    use crate::{SyncBudget, default_sync_budget};
 
     #[test]
     fn block_size_matches_consensus_serialized_len() {
@@ -752,10 +791,9 @@ mod tests {
             budget.max_received_bytes,
             budget
                 .max_received_blocks
-                .saturating_mul(bitcoin_rs_p2p::download_window::PENDING_BLOCK_BYTE_ESTIMATE)
+                .saturating_mul(crate::download_window::PENDING_BLOCK_BYTE_ESTIMATE)
         );
-        let block =
-            block_with_total_size(bitcoin_rs_p2p::download_window::PENDING_BLOCK_BYTE_ESTIMATE);
+        let block = block_with_total_size(crate::download_window::PENDING_BLOCK_BYTE_ESTIMATE);
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
@@ -915,5 +953,40 @@ mod tests {
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].hash, first);
         assert!(stager.contains(&second));
+    }
+
+    #[test]
+    fn insert_evicts_same_height_fork_before_expected_hash() {
+        let expected_hash = Hash256::from_le_bytes(&[0x11; 32]);
+        let fork_hash = Hash256::from_le_bytes(&[0x22; 32]);
+        let mut stager = BlockStager::new(SyncBudget {
+            max_received_blocks: 1,
+            max_received_bytes: usize::MAX,
+            ..default_sync_budget()
+        });
+        let now = Instant::now();
+        let block = Network::Regtest.genesis_block();
+        let serialized = bytes::Bytes::from(consensus_bytes(&block));
+
+        let super::StagedBlock::Memory { dropped, .. } = stager.insert(
+            fork_hash,
+            Some(expected_hash),
+            block.clone(),
+            serialized.clone(),
+            now,
+        ) else {
+            panic!("fork block should stage");
+        };
+        assert!(dropped.is_empty());
+
+        let super::StagedBlock::Memory { dropped, .. } =
+            stager.insert(expected_hash, Some(expected_hash), block, serialized, now)
+        else {
+            panic!("expected block should stage");
+        };
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].hash, fork_hash);
+        assert_eq!(stager.received_len(), 1);
+        assert!(stager.contains(&expected_hash));
     }
 }

@@ -353,7 +353,7 @@ name = "pending/download-window, out-of-order staging, contiguous-prefix drain"
 parent = "cell.wall"
 concurrency_group = "p2p-stage"
 domains = ["p2p"]
-seams = ["crates/node/src/sync/stage.rs", "crates/p2p/src/download_window.rs"]
+seams = ["crates/p2p/src/block_stager.rs", "crates/p2p/src/download_window.rs"]
 disposition = "blocked"
 evidence = "Staging retains decoded Block and original Bytes (#51). Byte budget undercounts. Raw-first staging is the reversible candidate; decoded-block cache in front of BlockSource was rejected (see levers)."
 
@@ -580,7 +580,7 @@ name = "retained memory and peak RSS"
 parent = "cell.wall"
 concurrency_group = "class"
 domains = ["offline", "p2p", "muhash"]
-seams = ["crates/utxo/src/set.rs", "crates/node/src/sync/stage.rs"]
+seams = ["crates/utxo/src/set.rs", "crates/p2p/src/block_stager.rs"]
 disposition = "blocked"
 evidence = "Quiet-tip UTXO set was 77.4% of RSS at height 412,732. Remaining RSS residual unattributed. IBD-in-flight RSS is not this class (#51)."
 
@@ -606,7 +606,7 @@ name = "P2P staging retains decoded Block and original Bytes"
 parent = "class.retained_memory"
 concurrency_group = "memory"
 domains = ["p2p"]
-seams = ["crates/node/src/sync/stage.rs"]
+seams = ["crates/p2p/src/block_stager.rs"]
 disposition = "blocked"
 evidence = "Same lever as p2p.stage. RSS sampled during IBD cannot attribute the UTXO set (#51)."
 
