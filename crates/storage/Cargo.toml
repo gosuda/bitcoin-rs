@@ -37,5 +37,6 @@ redb = { workspace = true, optional = true }
 signet-libmdbx = { workspace = true, optional = true }
 
 [dev-dependencies]
+rustix.workspace = true
 sha2.workspace = true
 tempfile = ">=3.20.0, <4"

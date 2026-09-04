@@ -1564,7 +1564,7 @@ mod tests {
     fn gettxoutproof_with_blockhash_skips_unrelated_records() {
         struct PanicBodySource;
 
-        impl crate::context::BlockBodySource for PanicBodySource {
+        impl bitcoin_rs_chain::BlockBodySource for PanicBodySource {
             fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
                 panic!("specified blockhash proof should not load unrelated body {height}:{hash}");
             }
@@ -1742,7 +1742,7 @@ mod tests {
         body: Vec<u8>,
     }
 
-    impl crate::context::BlockBodySource for PanicUnlessBodySource {
+    impl bitcoin_rs_chain::BlockBodySource for PanicUnlessBodySource {
         fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
             if height == self.height && hash == self.hash {
                 Some(self.body.clone())
@@ -1756,7 +1756,7 @@ mod tests {
         bodies: Vec<(u32, BlockHash, Vec<u8>)>,
     }
 
-    impl crate::context::BlockBodySource for SeededBodySource {
+    impl bitcoin_rs_chain::BlockBodySource for SeededBodySource {
         fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
             self.bodies
                 .iter()
@@ -1770,7 +1770,7 @@ mod tests {
         responses: parking_lot::Mutex<std::collections::VecDeque<Option<Vec<u8>>>>,
     }
 
-    impl crate::context::BlockBodySource for ScriptedBodySource {
+    impl bitcoin_rs_chain::BlockBodySource for ScriptedBodySource {
         fn block_body(&self, _height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
             self.responses.lock().pop_front().flatten()
         }
@@ -2146,7 +2146,7 @@ mod tests {
             bodies: Vec<(u32, Vec<u8>)>,
         }
 
-        impl crate::context::BlockBodySource for LockProbeSource {
+        impl bitcoin_rs_chain::BlockBodySource for LockProbeSource {
             fn block_body(&self, height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
                 assert!(
                     self.blocks.try_write().is_some(),

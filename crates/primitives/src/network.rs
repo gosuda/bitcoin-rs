@@ -114,6 +114,22 @@ pub enum Network {
 }
 
 impl Network {
+    /// Stable identity spelling for logs and evidence records.
+    ///
+    /// This is distinct from Bitcoin Core's `testnet` configuration alias, which
+    /// still names [`Self::Testnet3`]. Checkpoint files keep that Core spelling
+    /// in `crates/node/src/checkpoint.rs`.
+    #[must_use]
+    pub const fn identity_name(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet3 => "testnet3",
+            Self::Testnet4 => "testnet4",
+            Self::Signet => "signet",
+            Self::Regtest => "regtest",
+        }
+    }
+
     /// Returns the four P2P message-start bytes in wire order.
     #[must_use]
     pub const fn magic(self) -> [u8; 4] {
@@ -625,6 +641,15 @@ mod tests {
         assert_eq!(Network::Signet.magic(), [0x0a, 0x03, 0xcf, 0x40]);
         assert_eq!(Network::Regtest.magic(), [0xfa, 0xbf, 0xb5, 0xda]);
         assert_eq!(Network::Regtest.retarget_interval(), 144);
+    }
+
+    #[test]
+    fn identity_name_is_distinct_from_core_testnet_alias() {
+        assert_eq!(Network::Mainnet.identity_name(), "mainnet");
+        assert_eq!(Network::Testnet3.identity_name(), "testnet3");
+        assert_eq!(Network::Testnet4.identity_name(), "testnet4");
+        assert_eq!(Network::Signet.identity_name(), "signet");
+        assert_eq!(Network::Regtest.identity_name(), "regtest");
     }
 
     #[test]

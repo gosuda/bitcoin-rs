@@ -943,7 +943,7 @@ mod tests {
 
     struct PanicBlockSource;
 
-    impl crate::context::BlockBodySource for PanicBlockSource {
+    impl bitcoin_rs_chain::BlockBodySource for PanicBlockSource {
         fn block_body(&self, _height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
             panic!("exhausted render budget must not load a block body");
         }

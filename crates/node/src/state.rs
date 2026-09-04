@@ -1851,9 +1851,9 @@ impl NodeState {
         tx_admission.attach_ingress(inbound_tx_tx.clone());
         if let Err(error) = mempool_gateway.attach_observer_leg(
             "tx-orphans",
-            Arc::new(crate::mempool_observer::OrphanWakeObserver::new(
-                Arc::clone(&tx_admission),
-            )),
+            Arc::new(crate::tx_admission::OrphanWakeObserver::new(Arc::clone(
+                &tx_admission,
+            ))),
         ) {
             tracing::error!(error, "failed to attach orphan-wake observer");
         }
@@ -2176,7 +2176,7 @@ impl NodeState {
 
     /// Returns the live txindex status source for `getcapabilities`.
     #[must_use]
-    pub fn txindex_status(&self) -> Arc<dyn bitcoin_rs_rpc::capabilities::TxIndexStatusSource> {
+    pub fn txindex_status(&self) -> Arc<dyn bitcoin_rs_rpc::capabilities::TxIndexCapabilitySource> {
         self.txindex_status.clone()
     }
 

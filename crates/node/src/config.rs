@@ -300,6 +300,30 @@ pub struct ChainstateJournalOverrides {
 }
 
 impl ChainstateJournalOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.enabled.is_some() {
+            self.enabled = other.enabled;
+        }
+        if other.blocks.is_some() {
+            self.blocks = other.blocks;
+        }
+        if other.seconds.is_some() {
+            self.seconds = other.seconds;
+        }
+        if other.rotate_mib.is_some() {
+            self.rotate_mib = other.rotate_mib;
+        }
+        if other.max_journal_mib.is_some() {
+            self.max_journal_mib = other.max_journal_mib;
+        }
+        if other.max_lag_blocks.is_some() {
+            self.max_lag_blocks = other.max_lag_blocks;
+        }
+        if other.max_lag_seconds.is_some() {
+            self.max_lag_seconds = other.max_lag_seconds;
+        }
+    }
+
     fn apply_to(self, config: &mut ChainstateJournalConfig) {
         if let Some(enabled) = self.enabled {
             config.enabled = enabled;
@@ -386,6 +410,115 @@ pub struct UserConfig {
     pub chainstate_journal: Option<ChainstateJournalOverrides>,
     /// Validation settings.
     pub validation: ValidationOverrides,
+}
+
+impl StorageOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.backend.is_some() {
+            self.backend = other.backend;
+        }
+        if other.dbcache_mb.is_some() {
+            self.dbcache_mb = other.dbcache_mb;
+        }
+        if other.prune_target_mb.is_some() {
+            self.prune_target_mb = other.prune_target_mb;
+        }
+    }
+}
+
+impl P2pOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.magic.is_some() {
+            self.magic = other.magic;
+        }
+        if other.listen.is_some() {
+            self.listen.clone_from(&other.listen);
+        }
+        if other.dns_seeds.is_some() {
+            self.dns_seeds = other.dns_seeds;
+        }
+        if other.connect.is_some() {
+            self.connect.clone_from(&other.connect);
+        }
+    }
+}
+
+impl RpcOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.bind.is_some() {
+            self.bind = other.bind;
+        }
+        if other.rest.is_some() {
+            self.rest = other.rest;
+        }
+        if other.user.is_some() {
+            self.user.clone_from(&other.user);
+        }
+        if other.password.is_some() {
+            self.password.clone_from(&other.password);
+        }
+        if other.cookie.is_some() {
+            self.cookie.clone_from(&other.cookie);
+        }
+    }
+}
+
+impl IndexOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.txindex.is_some() {
+            self.txindex = other.txindex;
+        }
+        if other.script_index.is_some() {
+            self.script_index = other.script_index;
+        }
+    }
+}
+
+impl ObservabilityOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.log_level.is_some() {
+            self.log_level.clone_from(&other.log_level);
+        }
+        if other.metrics_bind.is_some() {
+            self.metrics_bind = other.metrics_bind;
+        }
+    }
+}
+
+impl ValidationOverrides {
+    fn overlay(&mut self, other: &Self) {
+        if other.assume_valid_height.is_some() {
+            self.assume_valid_height = other.assume_valid_height;
+        }
+    }
+}
+
+impl UserConfig {
+    /// Applies set fields from `other` over this layer. `other` wins.
+    pub fn overlay(&mut self, other: &Self) {
+        if other.network.is_some() {
+            self.network = other.network;
+        }
+        if other.data_dir.is_some() {
+            self.data_dir.clone_from(&other.data_dir);
+        }
+        self.storage.overlay(&other.storage);
+        self.p2p.overlay(&other.p2p);
+        self.rpc.overlay(&other.rpc);
+        self.indexes.overlay(&other.indexes);
+        self.observability.overlay(&other.observability);
+        if other.notifications.is_some() {
+            self.notifications.clone_from(&other.notifications);
+        }
+        if let Some(other_journal) = other.chainstate_journal {
+            if let Some(journal) = &mut self.chainstate_journal {
+                journal.overlay(&other_journal);
+            } else {
+                self.chainstate_journal = Some(other_journal);
+            }
+        }
+        self.validation.overlay(&other.validation);
+    }
 }
 
 /// Resolved storage configuration.
@@ -716,5 +849,53 @@ mod tests {
         let rendered = format!("{auth:?}");
         assert!(!rendered.contains("/secret/.cookie"));
         assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
+    fn user_config_overlay_lets_set_fields_win() {
+        let mut base = UserConfig {
+            storage: StorageOverrides {
+                prune_target_mb: Some(550),
+                ..StorageOverrides::default()
+            },
+            rpc: RpcOverrides {
+                user: Some("global".to_owned()),
+                password: Some("g".to_owned()),
+                ..RpcOverrides::default()
+            },
+            chainstate_journal: Some(ChainstateJournalOverrides {
+                blocks: Some(900),
+                ..ChainstateJournalOverrides::default()
+            }),
+            ..UserConfig::default()
+        };
+        let other = UserConfig {
+            storage: StorageOverrides {
+                prune_target_mb: Some(900),
+                ..StorageOverrides::default()
+            },
+            rpc: RpcOverrides {
+                user: Some("regtest".to_owned()),
+                ..RpcOverrides::default()
+            },
+            chainstate_journal: Some(ChainstateJournalOverrides {
+                seconds: Some(45),
+                ..ChainstateJournalOverrides::default()
+            }),
+            ..UserConfig::default()
+        };
+        base.overlay(&other);
+        assert_eq!(base.storage.prune_target_mb, Some(900));
+        assert_eq!(base.rpc.user.as_deref(), Some("regtest"));
+        assert_eq!(base.rpc.password.as_deref(), Some("g"));
+        assert_eq!(
+            base.chainstate_journal,
+            Some(ChainstateJournalOverrides {
+                blocks: Some(900),
+                seconds: Some(45),
+                ..ChainstateJournalOverrides::default()
+            })
+        );
     }
 }

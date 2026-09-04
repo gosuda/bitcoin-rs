@@ -983,7 +983,7 @@ mod tests {
         body: Vec<u8>,
     }
 
-    impl crate::context::BlockBodySource for SingleBlockSource {
+    impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
         fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
             (height == self.height && hash == self.hash).then(|| self.body.clone())
         }
