@@ -589,6 +589,12 @@ impl BlockSync {
                     "block sync: chainstate torn by a failed disconnect, shutting down"
                 );
             }
+            Err(error @ crate::reorg::ReorgError::CheckpointSettlement(_)) => {
+                tracing::error!(
+                    %error,
+                    "block sync: reorg left checkpoint debt unsettled; a clean shutdown will retry"
+                );
+            }
             Err(crate::reorg::ReorgError::ConnectFailed {
                 hash, invalidated, ..
             }) => {

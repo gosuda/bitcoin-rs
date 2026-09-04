@@ -22,7 +22,7 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config.chainstate_journal.blocks = 1;
 
     let genesis = Network::Regtest.genesis_block();
@@ -65,7 +65,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("reorg-node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config.chainstate_journal.blocks = 1;
 
     let genesis = Network::Regtest.genesis_block();
@@ -124,7 +124,7 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("deep-reorg-node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config.chainstate_journal.blocks = 1;
 
     let genesis = Network::Regtest.genesis_block();
@@ -170,7 +170,7 @@ fn periodic_publication_compacts_and_journals_new_suffix() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("periodic-node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config.chainstate_journal.blocks = 1;
 
     let state = NodeState::open(config.clone(), None)?;
@@ -211,7 +211,7 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("idle-flush-node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config.chainstate_journal.blocks = 100;
     config.chainstate_journal.seconds = 1;
     config.chainstate_journal.max_lag_blocks = 100;
@@ -245,7 +245,7 @@ fn retention_pressure_stops_apply_before_tip_mutation() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("retention-node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config.chainstate_journal.max_journal_mib = 1;
     config.chainstate_journal.rotate_mib = 1;
 

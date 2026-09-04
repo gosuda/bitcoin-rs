@@ -69,8 +69,10 @@ pub(crate) const JOURNAL_DIR_NAME: &str = "chainstate-journal";
 /// - crash after directory sync: the marker is gone; boot may restore the
 ///   published replacement checkpoint
 ///
-/// Failure classification: a missing journal directory or marker is success
-/// (already clear). Open, unlink, and directory-sync errors are I/O
+/// Failure classification: a missing journal directory is success (nothing to
+/// retire). A missing marker still syncs an existing journal directory so a
+/// retry after an earlier sync failure can durably commit the prior unlink.
+/// Open, unlink, and directory-sync errors are I/O
 /// ([`JournalWriterError::Io`]). They are not consensus-fatal. The already
 /// published checkpoint remains durable; only marker retirement is unfinished.
 ///
@@ -88,9 +90,18 @@ pub(crate) fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), J
 }
 
 fn clear_full_revalidation_marker(dir: &cap_std::fs::Dir) -> Result<(), JournalWriterError> {
+    clear_full_revalidation_marker_with_sync(dir, crate::checkpoint_fs::sync_dir)
+}
+
+fn clear_full_revalidation_marker_with_sync(
+    dir: &cap_std::fs::Dir,
+    sync_dir: impl FnOnce(&cap_std::fs::Dir) -> std::io::Result<()>,
+) -> Result<(), JournalWriterError> {
     match dir.remove_file(FULL_REVALIDATION_MARKER) {
-        Ok(()) => crate::checkpoint_fs::sync_dir(dir).map_err(JournalWriterError::from),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => sync_dir(dir).map_err(JournalWriterError::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            sync_dir(dir).map_err(JournalWriterError::from)
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -1441,6 +1452,31 @@ mod tests {
         clear_full_revalidation_marker_at(dir.path())?;
         assert!(!marker.exists());
         clear_full_revalidation_marker_at(dir.path())?;
+        Ok(())
+    }
+
+    #[test]
+    fn marker_clear_retry_syncs_directory_after_prior_sync_failure() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let journal_path = dir.path().join(JOURNAL_DIR_NAME);
+        std::fs::create_dir_all(&journal_path)?;
+        std::fs::write(
+            journal_path.join(FULL_REVALIDATION_MARKER),
+            b"journal fork crossed below checkpoint base\n",
+        )?;
+        let journal_dir = cap_std::fs::Dir::open_ambient_dir(&journal_path, ambient_authority())?;
+
+        let first = clear_full_revalidation_marker_with_sync(&journal_dir, |_| {
+            Err(std::io::Error::other("injected directory sync failure"))
+        });
+        assert!(matches!(first, Err(JournalWriterError::Io(_))));
+
+        let sync_calls = std::cell::Cell::new(0_u32);
+        clear_full_revalidation_marker_with_sync(&journal_dir, |_| {
+            sync_calls.set(sync_calls.get() + 1);
+            Ok(())
+        })?;
+        assert_eq!(sync_calls.get(), 1, "retry must re-sync the directory");
         Ok(())
     }
 

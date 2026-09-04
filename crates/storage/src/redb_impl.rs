@@ -19,6 +19,8 @@ const TXINDEX_TX_CONFIRMED_VALUES: TxIndexValueTable =
 const TXINDEX_FUNDING: FixedTable<12> = TableDefinition::new("txindex_v1_funding");
 const TXINDEX_FUNDING_VALUES: TxIndexValueTable = TableDefinition::new("txindex_v1_funding_values");
 const TXINDEX_SPENDING: FixedTable<12> = TableDefinition::new("txindex_v1_spending");
+const TXINDEX_SPENDING_VALUES: TxIndexValueTable =
+    TableDefinition::new("txindex_v1_spending_values");
 const TXINDEX_BLOCK_HEADERS: FixedTable<80> = TableDefinition::new("txindex_v1_block_headers");
 const TXINDEX_SCRIPT_LIVE: FixedTable<SCRIPT_LIVE_KEY_LEN> =
     TableDefinition::new("txindex_v1_script_live");
@@ -259,6 +261,11 @@ impl RedbTxIndexStore {
         );
         drop(
             write_txn
+                .open_table(TXINDEX_SPENDING_VALUES)
+                .map_err(StorageError::backend)?,
+        );
+        drop(
+            write_txn
                 .open_table(TXINDEX_BLOCK_HEADERS)
                 .map_err(StorageError::backend)?,
         );
@@ -314,7 +321,9 @@ impl KvStore for RedbTxIndexStore {
             ColumnFamily::Funding => {
                 fixed_value_get(&read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, key)
             }
-            ColumnFamily::Spending => fixed_get(&read_txn, TXINDEX_SPENDING, key),
+            ColumnFamily::Spending => {
+                fixed_value_get(&read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, key)
+            }
             ColumnFamily::BlockHeaders => fixed_get(&read_txn, TXINDEX_BLOCK_HEADERS, key),
             ColumnFamily::ScriptLive => fixed_get(&read_txn, TXINDEX_SCRIPT_LIVE, key),
             ColumnFamily::UtxoMeta => byte_get(&read_txn, TXINDEX_META, key),
@@ -610,7 +619,12 @@ impl KvSnapshot for RedbTxIndexSnapshot {
             ColumnFamily::Funding => {
                 fixed_value_get(&self.read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, key)
             }
-            ColumnFamily::Spending => fixed_get(&self.read_txn, TXINDEX_SPENDING, key),
+            ColumnFamily::Spending => fixed_value_get(
+                &self.read_txn,
+                TXINDEX_SPENDING,
+                TXINDEX_SPENDING_VALUES,
+                key,
+            ),
             ColumnFamily::BlockHeaders => fixed_get(&self.read_txn, TXINDEX_BLOCK_HEADERS, key),
             ColumnFamily::ScriptLive => fixed_get(&self.read_txn, TXINDEX_SCRIPT_LIVE, key),
             ColumnFamily::UtxoMeta => byte_get(&self.read_txn, TXINDEX_META, key),
@@ -1016,7 +1030,9 @@ fn collect_txindex_prefix(
         ColumnFamily::Funding => {
             fixed_value_prefix_collect(read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, prefix)
         }
-        ColumnFamily::Spending => fixed_prefix_collect::<12>(read_txn, TXINDEX_SPENDING, prefix),
+        ColumnFamily::Spending => {
+            fixed_value_prefix_collect(read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, prefix)
+        }
         ColumnFamily::BlockHeaders => {
             fixed_prefix_collect::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix)
         }
@@ -1049,9 +1065,13 @@ fn scan_txindex_prefix(
             prefix,
             limit,
         ),
-        ColumnFamily::Spending => {
-            fixed_prefix_scan::<12>(read_txn, TXINDEX_SPENDING, prefix, limit)
-        }
+        ColumnFamily::Spending => fixed_value_prefix_scan(
+            read_txn,
+            TXINDEX_SPENDING,
+            TXINDEX_SPENDING_VALUES,
+            prefix,
+            limit,
+        ),
         ColumnFamily::BlockHeaders => {
             fixed_prefix_scan::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, limit)
         }
@@ -1194,10 +1214,8 @@ fn apply_byte_run(
 fn validate_txindex_batch(batch: &RedbWriteBatch) -> Result<(), StorageError> {
     batch.ops.iter().try_for_each(|op| match op {
         BatchOp::Put { cf, key, value } => {
-            if matches!(
-                cf,
-                ColumnFamily::Spending | ColumnFamily::BlockHeaders | ColumnFamily::ScriptLive
-            ) && !value.is_empty()
+            if matches!(cf, ColumnFamily::BlockHeaders | ColumnFamily::ScriptLive)
+                && !value.is_empty()
             {
                 return Err(fixed_value_error());
             }
@@ -1247,7 +1265,13 @@ fn apply_txindex_ops(
                 op,
                 &mut ops,
             )?,
-            ColumnFamily::Spending => apply_fixed_run(write_txn, TXINDEX_SPENDING, op, &mut ops)?,
+            ColumnFamily::Spending => apply_fixed_value_run(
+                write_txn,
+                TXINDEX_SPENDING,
+                TXINDEX_SPENDING_VALUES,
+                op,
+                &mut ops,
+            )?,
             ColumnFamily::BlockHeaders => {
                 apply_fixed_run(write_txn, TXINDEX_BLOCK_HEADERS, op, &mut ops)?;
             }
@@ -1281,9 +1305,13 @@ fn txindex_condition_matches(
             key,
             condition,
         ),
-        ColumnFamily::Spending => {
-            txindex_fixed_condition_matches(write_txn, TXINDEX_SPENDING, key, condition)
-        }
+        ColumnFamily::Spending => txindex_fixed_value_condition_matches(
+            write_txn,
+            TXINDEX_SPENDING,
+            TXINDEX_SPENDING_VALUES,
+            key,
+            condition,
+        ),
         ColumnFamily::BlockHeaders => {
             txindex_fixed_condition_matches(write_txn, TXINDEX_BLOCK_HEADERS, key, condition)
         }

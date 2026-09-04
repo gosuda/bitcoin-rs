@@ -5,8 +5,7 @@
 //! small trait so notification failures cannot affect block connection.
 
 #[cfg(feature = "zmq")]
-use anyhow::{Context as _, Result, bail, ensure};
-#[cfg(not(feature = "zmq"))]
+use anyhow::{Context as _, bail};
 use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
 #[cfg(feature = "zmq")]
@@ -583,6 +582,7 @@ mod tests {
     #[cfg(feature = "zmq")]
     use std::time::{Duration, Instant};
 
+    #[cfg(feature = "zmq")]
     fn endpoint(endpoint: impl Into<String>, topics: Vec<ZmqTopic>, hwm: u32) -> ZmqEndpointConfig {
         ZmqEndpointConfig {
             endpoint: endpoint.into(),

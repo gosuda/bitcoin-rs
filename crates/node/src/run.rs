@@ -141,8 +141,8 @@ fn spawn_p2p_listeners(
     chain_query: P2pChainQuery,
     services: &mut NodeServices,
 ) -> anyhow::Result<()> {
-    let magic = bitcoin::p2p::Magic::from_bytes(config.p2p_magic);
-    for addr in &config.p2p_listen {
+    let magic = bitcoin::p2p::Magic::from_bytes(config.p2p.magic);
+    for addr in &config.p2p.listen {
         let listener_addr = *addr;
         let listener_shutdown = std::sync::Arc::clone(shutdown);
         let listener_network_active = std::sync::Arc::clone(network_active);
@@ -219,7 +219,7 @@ fn spawn_p2p_outbound_drain(
     chain_query: P2pChainQuery,
 ) -> anyhow::Result<std::thread::JoinHandle<()>> {
     let outbound_rx = state.p2p_outbound_receiver();
-    let magic = bitcoin::p2p::Magic::from_bytes(state.config().p2p_magic);
+    let magic = bitcoin::p2p::Magic::from_bytes(state.config().p2p.magic);
     let outbound_peer_table = state.peer_table();
     let outbound_banned = state.banned_subnets();
     let outbound_headers_tx = state.inbound_headers_sender();
@@ -294,7 +294,7 @@ fn spawn_dns_peer_maintenance(
     peer_table: PeerTable,
     outbound_tx: crossbeam_channel::Sender<SocketAddr>,
 ) -> anyhow::Result<Option<std::thread::JoinHandle<()>>> {
-    if !config.dns_seeds_enabled {
+    if !config.p2p.dns_seeds_enabled {
         tracing::debug!("dns peer bootstrap disabled");
         return Ok(None);
     }
@@ -490,7 +490,7 @@ fn spawn_fixed_peer_bootstrap(
     state: &NodeState,
     shutdown: &Arc<AtomicBool>,
 ) -> anyhow::Result<Option<std::thread::JoinHandle<()>>> {
-    let connect = state.config().connect.clone();
+    let connect = state.config().p2p.connect.clone();
     if connect.is_empty() {
         return Ok(None);
     }
@@ -900,14 +900,10 @@ pub(crate) fn start_node(
     // already restored the checkpoint and, when enabled, replayed the
     // journal's committed suffix before derived-index workers were started.
 
-    tracing::info!(
-        network = ?state.config().network,
-        data_dir = %state.data_dir().display(),
-        storage_backend = %state.config().storage_backend,
-        "bitcoin-rs node booting"
-    );
+    tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
 
-    let metrics = crate::metrics::start_metrics(state.config().metrics_bind, state.shutdown())?;
+    let metrics =
+        crate::metrics::start_metrics(state.config().observability.metrics_bind, state.shutdown())?;
     guard.services.metrics = metrics;
 
     let shutdown = state.shutdown();
@@ -954,7 +950,7 @@ pub(crate) fn start_node(
     // coordinator's lifetime: the RPC context owns the coordinator, and an
     // owned reference here would cycle through `apply_handles`.
     state.mining_generation_signal().attach(&mining_control);
-    let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
+    let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc.auth)?);
     let mut rpc_context =
         bitcoin_rs_rpc::context::Context::from_handles(bitcoin_rs_rpc::context::ContextHandles {
             chain: bitcoin_rs_rpc::context::ChainHandles {
@@ -1003,12 +999,12 @@ pub(crate) fn start_node(
     let context = Arc::new(rpc_context);
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(
-        state.config().rpc_bind,
+        state.config().rpc.bind,
         rpc_auth,
         rpc_handler,
         RPC_MAX_CONNECTIONS,
         RPC_IDLE_TIMEOUT,
-        state.config().rest,
+        state.config().rpc.rest,
     )?;
     let rpc_local_addr = rpc_server.local_addr()?;
     tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
@@ -1033,7 +1029,7 @@ pub(crate) fn start_node(
     let outbound_worker =
         spawn_p2p_outbound_drain(state, &shutdown, sync_wake_tx, Arc::clone(&p2p_chain_query))?;
     guard.services.outbound_worker = Some(outbound_worker);
-    let bootstrap_worker = if state.config().connect.is_empty() {
+    let bootstrap_worker = if state.config().p2p.connect.is_empty() {
         spawn_dns_peer_maintenance(
             state.config(),
             Arc::clone(&shutdown),
@@ -1080,7 +1076,7 @@ pub(crate) fn start_node(
 ///    handler, then publish one immutable clean-shutdown chainstate
 ///    checkpoint.
 pub fn run(config: NodeConfig, runtime: RuntimeInputs) -> Result<()> {
-    logging::install_tracing(&config.log_level)?;
+    logging::install_tracing(&config.observability.log_level)?;
     let (state, services, context) = start_node(config, runtime, true)?;
     let node = crate::embed::node_from_parts(state, services, context);
     let shutdown = node.state.shutdown();
@@ -1217,11 +1213,11 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = temp.path().join("node-success");
-        config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        config.rpc_auth = crate::Auth::basic("user", "password");
-        config.script_index = crate::config::ScriptIndexMode::Disabled;
-        config.p2p_listen.clear();
-        config.metrics_bind = None;
+        config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        config.rpc.auth = crate::Auth::basic("user", "password");
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        config.p2p.listen.clear();
+        config.observability.metrics_bind = None;
 
         let state = crate::state::NodeState::open(config.clone(), None)?;
         state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
@@ -1252,16 +1248,16 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = temp.path().join("node");
-        config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        config.rpc_auth = crate::Auth::basic("user", "password");
-        config.script_index = crate::config::ScriptIndexMode::Disabled;
-        config.p2p_listen.clear();
-        config.metrics_bind = None;
+        config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        config.rpc.auth = crate::Auth::basic("user", "password");
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        config.p2p.listen.clear();
+        config.observability.metrics_bind = None;
         // Force a bootstrap worker to spawn (fixed-peer path) so the drain
         // below is exercised — with an empty `connect`, `bootstrap_worker`
         // would be `None` and the cleanup-ordering assertion could not catch a
         // regression that moves `?` back onto `write_clean_checkpoint`.
-        config.connect = vec!["127.0.0.1:1".to_owned()];
+        config.p2p.connect = vec!["127.0.0.1:1".to_owned()];
 
         let state = crate::state::NodeState::open(config.clone(), None)?;
         state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
@@ -1299,11 +1295,11 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = temp.path().join("node-join-failure");
-        config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        config.rpc_auth = crate::Auth::basic("user", "password");
-        config.script_index = crate::config::ScriptIndexMode::Disabled;
-        config.p2p_listen.clear();
-        config.metrics_bind = None;
+        config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        config.rpc.auth = crate::Auth::basic("user", "password");
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        config.p2p.listen.clear();
+        config.observability.metrics_bind = None;
 
         let state = crate::state::NodeState::open(config.clone(), None)?;
         state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
@@ -1358,11 +1354,11 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = temp.path().join("node-slow-bootstrap");
-        config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        config.rpc_auth = crate::Auth::basic("user", "password");
-        config.script_index = crate::config::ScriptIndexMode::Disabled;
-        config.p2p_listen.clear();
-        config.metrics_bind = None;
+        config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        config.rpc.auth = crate::Auth::basic("user", "password");
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        config.p2p.listen.clear();
+        config.observability.metrics_bind = None;
 
         let state = crate::state::NodeState::open(config.clone(), None)?;
         state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
@@ -1430,11 +1426,11 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = temp.path().join("node-late-failure");
-        config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        config.rpc_auth = crate::Auth::basic("user", "password");
-        config.script_index = crate::config::ScriptIndexMode::Disabled;
-        config.p2p_listen.clear();
-        config.metrics_bind = None;
+        config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        config.rpc.auth = crate::Auth::basic("user", "password");
+        config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        config.p2p.listen.clear();
+        config.observability.metrics_bind = None;
 
         let state = crate::state::NodeState::open(config.clone(), None)?;
         state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
@@ -1488,11 +1484,11 @@ mod tests {
         // Daemon path: run() with an injected pre-sent shutdown receiver.
         let mut daemon_config = NodeConfig::default_for_network(crate::Network::Regtest);
         daemon_config.data_dir = temp.path().join("daemon");
-        daemon_config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        daemon_config.rpc_auth = crate::Auth::basic("user", "password");
-        daemon_config.script_index = crate::config::ScriptIndexMode::Disabled;
-        daemon_config.p2p_listen.clear();
-        daemon_config.metrics_bind = None;
+        daemon_config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        daemon_config.rpc.auth = crate::Auth::basic("user", "password");
+        daemon_config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        daemon_config.p2p.listen.clear();
+        daemon_config.observability.metrics_bind = None;
         let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
         shutdown_tx.send(())?;
         let stages_before = shutdown::take_shutdown_stages_reached();
@@ -1510,11 +1506,11 @@ mod tests {
         // through the same teardown the daemon uses.
         let mut embedded_config = NodeConfig::default_for_network(crate::Network::Regtest);
         embedded_config.data_dir = temp.path().join("embedded");
-        embedded_config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        embedded_config.rpc_auth = crate::Auth::basic("user", "password");
-        embedded_config.script_index = crate::config::ScriptIndexMode::Disabled;
-        embedded_config.p2p_listen.clear();
-        embedded_config.metrics_bind = None;
+        embedded_config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        embedded_config.rpc.auth = crate::Auth::basic("user", "password");
+        embedded_config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        embedded_config.p2p.listen.clear();
+        embedded_config.observability.metrics_bind = None;
         let installed_before = crate::signal::testing::installed_total();
         let closed_before = crate::signal::testing::closed_total();
         let (state, services, context) =
@@ -1541,11 +1537,11 @@ mod tests {
         // handler from the first, and the clean checkpoint resumes.
         let mut reopen_config = NodeConfig::default_for_network(crate::Network::Regtest);
         reopen_config.data_dir = temp.path().join("embedded");
-        reopen_config.rpc_bind = SocketAddr::from(([127, 0, 0, 1], 0));
-        reopen_config.rpc_auth = crate::Auth::basic("user", "password");
-        reopen_config.script_index = crate::config::ScriptIndexMode::Disabled;
-        reopen_config.p2p_listen.clear();
-        reopen_config.metrics_bind = None;
+        reopen_config.rpc.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        reopen_config.rpc.auth = crate::Auth::basic("user", "password");
+        reopen_config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+        reopen_config.p2p.listen.clear();
+        reopen_config.observability.metrics_bind = None;
         let (state, services, context) = start_node(reopen_config, RuntimeInputs::default(), true)?;
         let node = crate::embed::node_from_parts(state, services, context);
         node.shutdown_blocking()?;
@@ -1813,11 +1809,11 @@ mod tests {
     fn fixed_peer_bootstrap_does_not_spawn_for_empty_connect_list() -> anyhow::Result<()> {
         // NodeState is heavyweight; test the guard directly via spawn_fixed_peer_bootstrap's
         // early-return path by confirming it returns Ok(None) when connect is empty.
-        // The function reads state.config().connect, so we verify the public contract
+        // The function reads state.config().p2p.connect, so we verify the public contract
         // through the DNS path: spawn_dns_peer_maintenance returns Some when seeds exist.
         let config = NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Signet);
         assert!(
-            config.connect.is_empty(),
+            config.p2p.connect.is_empty(),
             "default signet config must have no --connect peers"
         );
         // When connect is empty, spawn_dns_peer_maintenance is taken; its handle is Some.
@@ -1846,7 +1842,7 @@ mod tests {
     fn maintenance_does_not_spawn_for_regtest_or_disabled_dns() {
         let regtest = NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Regtest);
         let mut disabled = NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Signet);
-        disabled.dns_seeds_enabled = false;
+        disabled.p2p.dns_seeds_enabled = false;
 
         for config in [regtest, disabled] {
             let shutdown = Arc::new(AtomicBool::new(false));

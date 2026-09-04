@@ -4509,7 +4509,7 @@ mod chaintxstats_window_tests {
     /// A rate must keep the full window count, not the low 32 bits.
     ///
     /// Capping through `u32::try_from` locks `txrate` once the window's
-    /// transactions pass 4_294_967_295. Bitcoin Core divides the 64-bit
+    /// transactions pass `4_294_967_295`. Bitcoin Core divides the 64-bit
     /// count by the 64-bit interval; so does [`u64_to_f64`].
     #[test]
     fn txrate_keeps_counts_above_u32_max() {
@@ -4552,7 +4552,8 @@ mod chaintxstats_window_tests {
         let expected = super::u64_to_f64(count) / super::u64_to_f64(interval);
         let capped = f64::from(u32::MAX) / super::u64_to_f64(interval);
         assert_ne!(
-            expected, capped,
+            expected.to_bits(),
+            capped.to_bits(),
             "the fixture must sit above the old 32-bit cap"
         );
         assert!(

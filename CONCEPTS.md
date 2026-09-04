@@ -28,11 +28,21 @@ router returns `503` if the applied-tip identity changed before composition
 finished, rather than mixing answers from opposite sides of a reorg.
 
 ### Sequence stream
-The Core-compatible `pubsequence` ZMQ stream: each event carries the block hash,
-one label (`C` connect, `D` disconnect), and a topic-local little-endian `u32`
-counter. Reorg disconnects are emitted tip-first before connects on the
-replacement branch. Mempool `A`/`R` events are deliberately omitted until the
-mempool has per-transaction sequence assignment and reason-carrying removals.
+The Core-compatible `pubsequence` ZMQ stream. Block events carry the 32-byte
+reversed block hash and label byte (`C` connect, `D` disconnect). Mempool
+events carry the 32-byte reversed txid, label byte (`A` admission, `R`
+removal), and the 8-byte little-endian mempool sequence number assigned to the
+change. A transaction mined in a connected block emits no `R`: the block's `C`
+event covers it, matching Core. Every event concludes with a topic-local
+little-endian `u32` sequence counter frame. Reorg disconnects are emitted
+tip-first before connects on the replacement branch.
+
+### Authoritative peer table
+The single owner of live peer connections and their published handshake
+metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
+address, cancels predecessors atomically on replacement, prevents stale
+connection handles from evicting newer sessions via connection-identity checks,
+and ties handshake metadata strictly to the live connection identity.
 
 ### Embedded node
 The typed in-process surface (`bitcoin_rs_node::Node`) over the same

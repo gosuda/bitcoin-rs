@@ -1,4 +1,4 @@
-//! `ScriptLive` behavior over the prepared/commit path (#225).
+//! `ScriptLive` behavior over the prepared/commit path (`IDX-01`, `IDX-07`, #225).
 //!
 //! Everything here drives the same `IndexWriter` API the node's worker uses,
 //! with a map-backed [`SpentCoinScripts`] standing in for the undo-record

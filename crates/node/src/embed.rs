@@ -543,9 +543,9 @@ mod tests {
     fn embedded_config(data_dir: &std::path::Path) -> NodeConfig {
         let mut config = NodeConfig::default_for_network(Network::Regtest);
         config.data_dir = data_dir.to_path_buf();
-        config.p2p_listen.clear();
-        config.rpc_bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
-        config.metrics_bind = None;
+        config.p2p.listen.clear();
+        config.rpc.bind = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        config.observability.metrics_bind = None;
         config
     }
 

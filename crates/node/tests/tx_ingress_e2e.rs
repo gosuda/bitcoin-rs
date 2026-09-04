@@ -85,7 +85,7 @@ fn open_node() -> anyhow::Result<(NodeState, tempfile::TempDir)> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
     Ok((state, dir))
 }
@@ -462,7 +462,7 @@ impl Harness {
     /// marker so concurrent tests never share prevouts.
     fn build(source_marker: u8) -> anyhow::Result<Self> {
         let (state, dir) = open_node()?;
-        let magic = Magic::from_bytes(state.config().p2p_magic);
+        let magic = Magic::from_bytes(state.config().p2p.magic);
         let gateway = state.mempool_gateway();
         let admission = Arc::new(TxAdmission::new(Arc::clone(&gateway)));
 

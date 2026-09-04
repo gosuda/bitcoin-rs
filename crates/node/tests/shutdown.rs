@@ -17,12 +17,12 @@ fn run_exits_cleanly_after_fast_shutdown_signal() -> Result<()> {
 
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = temp.path().join("node");
-    config.storage_backend = "redb".to_owned();
-    config.rpc_bind = loopback(0);
-    config.rpc_auth = Auth::basic("user", "password");
-    config.script_index = bitcoin_rs_node::config::ScriptIndexMode::Disabled;
-    config.p2p_listen.clear();
-    config.metrics_bind = None;
+    config.storage.backend = bitcoin_rs_storage::StorageBackend::Redb;
+    config.rpc.bind = loopback(0);
+    config.rpc.auth = Auth::basic("user", "password");
+    config.indexes.script_index = bitcoin_rs_node::config::ScriptIndexMode::Disabled;
+    config.p2p.listen.clear();
+    config.observability.metrics_bind = None;
     let runtime = RuntimeInputs::default().with_shutdown(shutdown_rx);
 
     thread::spawn(move || {

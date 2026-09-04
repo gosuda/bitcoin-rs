@@ -76,14 +76,15 @@ Configuration defaults:
 | Flag | Default |
 |---|---|
 | `--data-dir` | `.bitcoin-rs` |
-| `--network` | `mainnet` (`mainnet`, `testnet3`, `testnet4`, `signet`, `regtest`) |
+| `--network` | `mainnet` (`mainnet`, `testnet3`, `testnet4`, `signet`, `regtest`, `drynet4`) |
 | `--storage-backend` | `fjall` |
 | `--rpc-bind` | `127.0.0.1:8332` on mainnet, network Core port otherwise |
+| `--rest` | off (enables unauthenticated Core-compatible REST routes on the RPC port) |
 | `--rpc-user` / `--rpc-password` | `bitcoin-rs` / `bitcoin-rs` |
 | `--dbcache-mb` | 450 (split 80/20 across chainstate and txindex when enabled, with disabled shares going to chainstate) |
 | `--prune-target-mb` | 0 (no pruning) |
 | `--txindex` | off |
-| `--scriptindex` | off |
+| `--scriptindex` | off (accepts `full`, `utxo`, or boolean; defaults to `full` when passed without a value) |
 | `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` consensus engine |
 
 The node logs its startup banner, effective cache allocation, and the address
@@ -97,7 +98,8 @@ compact live-output view: current UTXO routes work once that view is ready,
 while history, statistics, pagination, and confirmed outspend routes return
 HTTP 503 as a disabled capability rather than as a lagging backfill. Address
 and scripthash UTXO routes return HTTP 503 until the live view catches up, or
-when ScriptIndex is disabled.
+when ScriptIndex is disabled. `--rest` enables the unauthenticated Core REST
+gateway (`/rest/tx`, `/rest/block`, `/rest/headers`, etc.) alongside JSON-RPC.
 
 The datadir schema marker covers the transaction and script indexes as well as
 chainstate. An unmarked or incompatible datadir fails before any derived index

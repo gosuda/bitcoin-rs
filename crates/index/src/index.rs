@@ -157,7 +157,11 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
-const FORMAT_VERSION_VALUE: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
+/// Format 3 stores Spending keys without positions. This build still
+/// understands those rows (resolvers fall back to a full block) and upgrades
+/// by resetting only `ScriptHistory`, leaving `TxLookup` ready (`IDX-04`).
+const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
@@ -704,6 +708,14 @@ fn acquire_capability_reset<S: KvStore>(
         }
         if capabilities.script_history {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY);
+            // Same durable batch as FORMAT_VERSION_VALUE so a format-3
+            // upgrade cannot publish version 4 while leaving the row-value
+            // marker at 1.
+            batch.put(
+                ColumnFamily::UtxoMeta,
+                INDEX_FORMAT_VERSION_KEY,
+                &INDEX_FORMAT_VERSION.to_le_bytes(),
+            );
         }
         if capabilities.script_live {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY);
@@ -800,6 +812,15 @@ fn resume_capability_reset<S: KvStore>(
             ORDINARY_STATE_REVISION_KEY,
             &work.next_revision,
         );
+        if capabilities.script_history {
+            // Resume of a claim that predates the acquire-batch marker
+            // still publishes the current row-value format.
+            completion.put(
+                ColumnFamily::UtxoMeta,
+                INDEX_FORMAT_VERSION_KEY,
+                &INDEX_FORMAT_VERSION.to_le_bytes(),
+            );
+        }
         if store.write_durable_if(&conditions, completion)? {
             return Ok(());
         }
@@ -1953,9 +1974,9 @@ impl<S: KvStore> Indexer<S> {
         for_each_row_group(&rows.funding_rows, |row, _positions| {
             batch.delete(ColumnFamily::Funding, row.as_bytes());
         });
-        for row in &rows.spending_rows {
+        for_each_row_group(&rows.spending_rows, |row, _positions| {
             batch.delete(ColumnFamily::Spending, row.as_bytes());
-        }
+        });
         for row in &rows.header_rows {
             batch.delete(ColumnFamily::BlockHeaders, row);
         }
@@ -2011,9 +2032,13 @@ impl<S: KvStore> Indexer<S> {
                 &crate::types::TxPositionValue::encode(positions),
             );
         });
-        for row in &self.pending_rows.spending_rows {
-            batch.put(ColumnFamily::Spending, row.as_bytes(), &[]);
-        }
+        for_each_row_group(&self.pending_rows.spending_rows, |row, positions| {
+            batch.put(
+                ColumnFamily::Spending,
+                row.as_bytes(),
+                &crate::types::TxPositionValue::encode(positions),
+            );
+        });
         for row in &self.pending_rows.header_rows {
             batch.put(ColumnFamily::BlockHeaders, row, &[]);
         }
@@ -2080,6 +2105,7 @@ fn pending_rows_for_block_with_header(
             invalid_header_len: None,
             block,
             pending_funding: Vec::new(),
+            pending_spending: Vec::new(),
             pending_live: Vec::new(),
             live_created: Vec::new(),
             live_spent: Vec::new(),
@@ -2222,8 +2248,10 @@ fn pending_rows_for_decoded_block(
         });
         for tx_in in &tx.inputs {
             if !is_null_outpoint(&tx_in.previous_output) {
-                rows.spending_rows
-                    .push(SpendingPrefixRow::row(&tx_in.previous_output, height));
+                rows.spending_rows.push(PositionedRow {
+                    row: SpendingPrefixRow::row(&tx_in.previous_output, height),
+                    position,
+                });
             }
         }
         for tx_out in &tx.outputs {
@@ -2252,7 +2280,7 @@ struct PositionedRow {
 struct PendingRows {
     txid_rows: Vec<PositionedRow>,
     funding_rows: Vec<PositionedRow>,
-    spending_rows: Vec<HashPrefixRow>,
+    spending_rows: Vec<PositionedRow>,
     header_rows: Vec<[u8; crate::types::HEADER_ROW_SIZE]>,
     /// Ordered live-view mutations. Never sorted: unlike the append-only
     /// families above, this one mixes puts and deletes, and a later block's
@@ -2316,7 +2344,7 @@ impl PendingRows {
         IndexRowCounts {
             txids: distinct_row_count(&self.txid_rows),
             funding: distinct_row_count(&self.funding_rows),
-            spending: self.spending_rows.len(),
+            spending: distinct_row_count(&self.spending_rows),
             headers: self.header_rows.len(),
             live: self.live_ops.len(),
         }
@@ -2343,13 +2371,14 @@ impl PendingRows {
         let funding_positions = self.funding_rows.len();
         let distinct_prefix = distinct_row_count(&self.txid_rows)
             .checked_add(distinct_row_count(&self.funding_rows))
-            .and_then(|s| s.checked_add(self.spending_rows.len()))
+            .and_then(|s| s.checked_add(distinct_row_count(&self.spending_rows)))
             .ok_or(IndexError::MutationSizeOverflow)?;
         let prefix_bytes = distinct_prefix
             .checked_mul(crate::types::HASH_PREFIX_ROW_SIZE)
             .ok_or(IndexError::MutationSizeOverflow)?;
         let position_count = txid_positions
             .checked_add(funding_positions)
+            .and_then(|s| s.checked_add(self.spending_rows.len()))
             .ok_or(IndexError::MutationSizeOverflow)?;
         let position_bytes = position_count
             .checked_mul(crate::types::TX_POSITION_SIZE)
@@ -2419,9 +2448,13 @@ fn put_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows) {
             &crate::types::TxPositionValue::encode(positions),
         );
     });
-    for row in &rows.spending_rows {
-        batch.put(ColumnFamily::Spending, row.as_bytes(), &[]);
-    }
+    for_each_row_group(&rows.spending_rows, |row, positions| {
+        batch.put(
+            ColumnFamily::Spending,
+            row.as_bytes(),
+            &crate::types::TxPositionValue::encode(positions),
+        );
+    });
     for row in &rows.header_rows {
         batch.put(ColumnFamily::BlockHeaders, row, &[]);
     }
@@ -2485,9 +2518,9 @@ fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_i
     for_each_row_group(&rows.funding_rows, |row, _positions| {
         batch.delete(ColumnFamily::Funding, row.as_bytes());
     });
-    for row in &rows.spending_rows {
+    for_each_row_group(&rows.spending_rows, |row, _positions| {
         batch.delete(ColumnFamily::Spending, row.as_bytes());
-    }
+    });
     // The live rollback is the inverse authoritative transition (#225):
     // outputs the block created leave the view, outputs it spent return.
     apply_live_ops(batch, &rows.live_ops, true);
@@ -2507,13 +2540,15 @@ struct IndexBlockVisitor<'a> {
     invalid_header_len: Option<usize>,
     /// The serialized block being visited, used as the base for byte offsets.
     block: &'a [u8],
-    /// Funding prefixes seen for the transaction currently being parsed.
+    /// Funding and spending prefixes seen for the transaction currently being parsed.
     ///
-    /// `visit_tx_out` fires while the transaction is still being parsed, so its
-    /// byte range is not known yet — `visit_transaction` runs at the end and is
-    /// the first point where the position exists. Outputs are therefore buffered
-    /// here and drained once, in emission order.
+    /// `visit_tx_in` and `visit_tx_out` fire while the transaction is still
+    /// being parsed, so its byte range is not known yet — `visit_transaction`
+    /// runs at the end and is the first point where the position exists. Inputs
+    /// and outputs are therefore buffered here and drained once, in emission
+    /// order.
     pending_funding: Vec<crate::types::HashPrefix>,
+    pending_spending: Vec<HashPrefixRow>,
     /// Outputs of the transaction currently being parsed, as `(vout,
     /// optional scripthash)`. `None` means the output is not admitted to the
     /// UTXO set (`OP_RETURN` or oversize), but it still participates in
@@ -2582,6 +2617,11 @@ impl Visitor for IndexBlockVisitor<'_> {
                 position,
             });
         }
+        for row in self.pending_spending.drain(..) {
+            self.rows
+                .spending_rows
+                .push(PositionedRow { row, position });
+        }
         if !self.pending_live.is_empty() {
             let txid = tx.txid_sha2();
             let mut txid_bytes = [0_u8; 32];
@@ -2633,7 +2673,7 @@ impl Visitor for IndexBlockVisitor<'_> {
             return ControlFlow::Continue(());
         }
         if self.capabilities.script_history {
-            self.rows.spending_rows.push(SpendingPrefixRow::row_parts(
+            self.pending_spending.push(SpendingPrefixRow::row_parts(
                 prevout.txid(),
                 prevout.vout(),
                 self.height_bytes,
@@ -3057,20 +3097,33 @@ impl<S: KvStore> IndexWriter<S> {
     }
 
     /// Opens a writer over `store`, rejecting unversioned index tables.
+    ///
+    /// Format 3 (Spending keys without positions) is upgraded in place by
+    /// resetting `ScriptHistory` only. Any other version mismatch is
+    /// [`IndexError::UnsupportedTxIndexFormatVersion`].
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
         match indexer
             .store
             .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
         {
+            Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
+            Some(value) if value.as_slice() == FORMAT_VERSION_V3 => {
+                // Only Spending's representation changed. Reset ScriptHistory
+                // so new spending rows carry positions, and leave TxLookup
+                // serving (`IDX-04`). Foreign versions still refuse start.
+                resume_capability_reset(
+                    indexer.store.as_ref(),
+                    generation,
+                    IndexCapabilities::SCRIPT_HISTORY.to_mask(),
+                )?;
+            }
             Some(value) => {
-                if value.as_slice() != FORMAT_VERSION_VALUE {
-                    let version = value
-                        .get(..4)
-                        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-                        .map_or(0, u32::from_le_bytes);
-                    return Err(IndexError::UnsupportedTxIndexFormatVersion { version });
-                }
+                let version = value
+                    .get(..4)
+                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+                    .map_or(0, u32::from_le_bytes);
+                return Err(IndexError::UnsupportedTxIndexFormatVersion { version });
             }
             None => {
                 if has_any_index_row(&*indexer.store)? {
@@ -3128,7 +3181,11 @@ impl<S: KvStore> IndexWriter<S> {
     ///
     /// The live watermark is written only with the last batch, so an
     /// interrupted seed stays unqueryable. Refuses to run over an existing
-    /// live watermark.
+    /// live watermark ([`IndexError::LiveAlreadySeeded`]).
+    ///
+    /// A missing live watermark with leftover rows is treated as an
+    /// interrupted seed: `ScriptLive` is reset before any new row is
+    /// written so a later watermark cannot advertise a stale view.
     pub fn seed_script_live_stream<F>(
         &mut self,
         mut produce: F,
@@ -3145,6 +3202,10 @@ impl<S: KvStore> IndexWriter<S> {
         if fence.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
         }
+        // An interrupted seed leaves rows without a ready watermark. Clear
+        // them before writing so this publication cannot mix leftover
+        // locators from a previous attempt.
+        self.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
         let mut written = 0;
         let mut batch = self.indexer.store.new_batch();
         batch.put(
@@ -3787,8 +3848,9 @@ pub trait IndexerLike: Send + Sync {
 const INDEX_FORMAT_VERSION_KEY: &[u8] = b"index:format_version";
 
 /// Current row-value format. Version 1 added transaction byte positions to
-/// funding and txid row values; version 0 (unmarked) has empty values.
-pub const INDEX_FORMAT_VERSION: u32 = 1;
+/// funding and txid row values; version 2 added positions to spending row
+/// values; version 0 (unmarked) has empty values.
+pub const INDEX_FORMAT_VERSION: u32 = 2;
 
 /// Which row-value format an opened index carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

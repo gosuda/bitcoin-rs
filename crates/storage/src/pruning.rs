@@ -10,12 +10,13 @@
 //! [`stage_block_and_undo_prune`] is the main entry point. It stages
 //! block-body and undo-row deletion together with prune-height metadata into
 //! one caller-owned atomic batch, so node wiring commits them in a single
-//! backend commit. Undo rows are pruned against the durable tip rather than
-//! the in-memory tip -- a crash restores to the last durable checkpoint and
-//! must still be able to disconnect back through it, while block bodies are
-//! re-downloadable and are not held to that constraint. After the index rows
-//! commit, [`reclaim_staged_flat_block_files`] deletes the staged flat block
-//! files, and [`PruneOutcome`] reports the bytes and row counts freed.
+//! backend commit. Both kinds of data are pruned against the durable tip
+//! rather than the in-memory tip: a crash restores to the last durable
+//! checkpoint, and bodies between that base and the crash-recovery sidecar tip
+//! are evidence needed for local replay while undo records are needed to
+//! disconnect back through the restored chain. After the index rows commit,
+//! [`reclaim_staged_flat_block_files`] deletes the staged flat block files,
+//! and [`PruneOutcome`] reports the bytes and row counts freed.
 //!
 //! [`PrunePolicy`] carries no behaviour of its own: the node builds one from
 //! configuration and hands it in, which is the policy/mechanism split this
@@ -47,13 +48,12 @@ use thiserror::Error;
 #[doc(hidden)]
 /// `durable_tip_height` is the height the node would restore to after a crash.
 ///
-/// Undo records are pruned against it rather than against `current_tip_height`,
-/// because the in-memory applied tip can run far ahead of the last durable
-/// checkpoint. Pruning to the in-memory tip can delete the undo record for the
-/// block the checkpoint names, and a crash then restores a chainstate that
-/// cannot disconnect its own tip: the reorg fails with `UndoRecordMissing`.
-/// Block bodies do not need this — they are re-downloadable, and undo records
-/// are not.
+/// Both block bodies and undo records are pruned against it rather than
+/// against `current_tip_height`, because the in-memory applied tip can run far
+/// ahead of the last durable checkpoint. Bodies above this base may be named
+/// by the crash-recovery sidecar and must remain available for local replay;
+/// undo records below the base would prevent a restored chain from disconnecting
+/// its own tip.
 pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     store: &S,
     batch: &mut S::WriteBatch,
@@ -66,7 +66,8 @@ pub fn stage_block_and_undo_prune<S: crate::KvStore>(
         return Ok((PruneOutcome::default(), PruneOutcome::default(), Vec::new()));
     }
 
-    let prune_below_height = current_tip_height.saturating_sub(policy.retention_depth());
+    let durable_tip = current_tip_height.min(durable_tip_height);
+    let prune_below_height = durable_tip.saturating_sub(policy.retention_depth());
     let (block_outcome, block_files) = block_pruner::stage_flat_block_file_prune(
         store,
         batch,
@@ -84,7 +85,7 @@ pub fn stage_block_and_undo_prune<S: crate::KvStore>(
         // undo records within the reorg-safety margin of it, and that margin is
         // exactly the guarantee being protected: a restore to the durable tip
         // must be able to disconnect back through it.
-        current_tip_height.min(durable_tip_height),
+        durable_tip,
         policy,
     )?;
 

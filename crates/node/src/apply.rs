@@ -898,6 +898,9 @@ pub struct ApplyHandles {
     /// as a checkpoint-only node. The writer is single-owner (the apply path);
     /// the `Mutex` only makes the shared handle exclusive.
     pub(crate) journal: Option<crate::chainstate_journal::SharedJournalWriter>,
+    /// Publishes checkpoints to settle rolled-back disconnect debt after a
+    /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
+    pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint_worker::CheckpointPublisher>>,
 }
 
 impl ApplyHandles {
@@ -980,6 +983,7 @@ impl ApplyHandles {
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
             journal: None,
+            checkpoint_publisher: None,
         }
     }
 

@@ -8,7 +8,10 @@ use std::{
     },
 };
 
-use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, encode::double_sha256};
+use bitcoin_rs_primitives::{
+    Block, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    encode::double_sha256,
+};
 use parking_lot::{Mutex, RwLock};
 
 #[cfg(feature = "redb")]
@@ -681,12 +684,59 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 5 })
     ));
+    Ok(())
+}
+
+#[test]
+fn format_3_open_resets_only_script_history() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    seed_populated_store(&store, 1)?;
+    store.put(ColumnFamily::Spending, b"legacy-spend", &[])?;
+    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &3_u32.to_le_bytes())?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"index:format_version",
+        &1_u32.to_le_bytes(),
+    )?;
+
+    let Some(tx_lookup) = store.get(ColumnFamily::UtxoMeta, &[0x00, b'T'])? else {
+        return Err("tx lookup watermark".into());
+    };
+    let confirmed_before = store.count(ColumnFamily::TxConfirmed);
+    let headers_before = store.count(ColumnFamily::BlockHeaders);
+    assert!(store.count(ColumnFamily::Funding) > 0);
+    assert!(store.count(ColumnFamily::Spending) > 0);
+
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+
+    assert_eq!(
+        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
+        Some(4_u32.to_le_bytes().as_slice())
+    );
+    assert_eq!(
+        store
+            .get(ColumnFamily::UtxoMeta, b"index:format_version")?
+            .as_deref(),
+        Some(2_u32.to_le_bytes().as_slice())
+    );
+    assert_eq!(
+        writer.watermarks()?,
+        IndexWatermarks {
+            tx_lookup: Some(IndexWatermark::from_bytes(&tx_lookup)?),
+            script_history: None,
+            script_live: None,
+        }
+    );
+    assert_eq!(store.count(ColumnFamily::TxConfirmed), confirmed_before);
+    assert_eq!(store.count(ColumnFamily::BlockHeaders), headers_before);
+    assert_eq!(store.count(ColumnFamily::Funding), 0);
+    assert_eq!(store.count(ColumnFamily::Spending), 0);
     Ok(())
 }
 
@@ -738,7 +788,7 @@ fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0],
+        &[4, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -869,6 +919,71 @@ fn snapshot_scan_preserves_position_values() -> Result<(), Box<dyn std::error::E
         TxPositionValue::decode(&scan.rows[0].value).map(<[TxPosition]>::len),
         Some(1)
     );
+    Ok(())
+}
+
+#[test]
+fn spending_rows_carry_transaction_positions() -> Result<(), Box<dyn std::error::Error>> {
+    let mut block = Network::Regtest.genesis_block();
+    let funding_txid = block.txs[0].txid();
+    let spending_tx = Tx {
+        version: 2,
+        lock_time: 0,
+        inputs: vec![TxIn {
+            previous_output: OutPoint {
+                txid: funding_txid,
+                vout: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
+        }],
+        outputs: vec![TxOut {
+            value: block.txs[0].outputs[0].value,
+            script_pubkey: Vec::new(),
+        }],
+    };
+    block.txs.push(spending_tx.clone());
+    let body = consensus_bytes(&block);
+    let spending_bytes = consensus_bytes(&spending_tx);
+    let position = TxPosition::new(
+        u32::try_from(body.len() - spending_bytes.len())?,
+        u32::try_from(spending_bytes.len())?,
+    );
+
+    let store = Arc::new(MemoryStore::default());
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
+    let mut batch = PreparedBatch::new(PreparedBatchLimits {
+        max_rows: 100,
+        max_bytes: 1_000_000,
+    });
+    assert!(batch.try_push(prepared).is_ok());
+    writer.commit_forward(batch)?;
+
+    let snapshot = writer.snapshot()?;
+    let outpoint = OutPoint {
+        txid: funding_txid,
+        vout: 0,
+    };
+    let scan = snapshot.spending_rows(
+        &outpoint,
+        PrefixScanLimit {
+            max_rows: 10,
+            max_bytes: 1_024,
+        },
+    )?;
+    assert!(scan.complete);
+    assert_eq!(scan.rows.len(), 1);
+    let positions = TxPositionValue::decode(&scan.rows[0].value)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "spending position"))?;
+    assert_eq!(positions, &[position]);
+    let start = usize::try_from(position.offset())?;
+    let end =
+        usize::try_from(position.end().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "position end")
+        })?)?;
+    assert_eq!(Tx::consensus_decode(&body[start..end])?, spending_tx);
     Ok(())
 }
 
@@ -1495,7 +1610,7 @@ const SCRIPT_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
-const FORMAT_VALUE: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
 /// concurrent writer commits. Injection points run these claims wholesale;
@@ -1816,7 +1931,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
             .as_deref(),
-        Some(1u32.to_le_bytes().as_slice()),
+        Some(2u32.to_le_bytes().as_slice()),
         "the row-format marker survives reset and rebuild"
     );
     assert!(
@@ -1882,15 +1997,15 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
 #[test]
 fn format_version_requires_exact_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
-    // Extra trailing byte must be rejected even though the prefix is version 3.
+    // Extra trailing byte must be rejected even though the prefix is version 4.
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0, 0],
+        &[4, 0, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 3 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
     ));
     Ok(())
 }
@@ -1905,7 +2020,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0],
+        &[4, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1945,7 +2060,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[3, 0, 0, 0],
+        &[4, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -2531,8 +2646,12 @@ fn fenced_watermarks_captures_one_coherent_snapshot_across_five_reads()
     assert_eq!(captured_keys, expected_keys);
     let live = store.read_order.lock().clone();
     assert!(
-        live.iter().all(|(cf, key)| !(*cf == ColumnFamily::UtxoMeta
-            && (key.as_slice() == TX_WATERMARK_KEY || key.as_slice() == SCRIPT_WATERMARK_KEY))),
+        live.iter().all(|(cf, key)| {
+            !(*cf == ColumnFamily::UtxoMeta
+                && (key.as_slice() == TX_WATERMARK_KEY
+                    || key.as_slice() == SCRIPT_WATERMARK_KEY
+                    || key.as_slice() == LIVE_WATERMARK_KEY))
+        }),
         "watermark state was read outside the capture snapshot: {live:?}"
     );
 

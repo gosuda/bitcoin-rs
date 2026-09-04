@@ -21,8 +21,8 @@ fn assert_backend_opens(backend: &str) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = temp.path().join(backend);
-    backend.clone_into(&mut config.storage_backend);
-    config.p2p_listen.clear();
+    config.storage.backend = backend.parse().map_err(anyhow::Error::msg)?;
+    config.p2p.listen.clear();
 
     let state = NodeState::open(config, None)?;
 

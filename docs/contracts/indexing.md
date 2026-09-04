@@ -102,6 +102,11 @@ remove another script's output.
     forward.
   - If the watermark is on an abandoned branch, the worker rolls back to the
     common ancestor and connects forward to the active tip.
+- `NodeState::open` restores the authenticated checkpoint and, when enabled,
+  replays the journal's committed suffix (`docs/chainstate-recovery.md`) before
+  `NodeState::start_index_workers()` spawns worker threads
+  (`crates/node/src/run.rs`), so index workers reconcile against a restored
+  active chainstate.
 
 ### `IDX-06`: Reorganization rollback and forward reconciliation
 
@@ -112,6 +117,11 @@ remove another script's output.
   - Height-keyed rows (transaction position rows) are removed using per-block
     watermark identity records to delete exactly the rows contributed by each
     disconnected block from the tip down to the common ancestor.
+  - When the rollback depth (watermark height minus common ancestor height)
+    exceeds `txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100 000 blocks),
+    the worker routes to `reset_capabilities` and backfills forward instead of
+    executing a long block-by-block rollback
+    (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
 - **Connect walk**:
   - The worker loads bodies from `PruneBodyStore`, constructs bounded forward
     batches (`PreparedBatchLimits`), and commits row mutations and updated
@@ -130,6 +140,9 @@ remove another script's output.
   branch block pruned before rollback completed), the worker resets the
   affected capability watermark and initiates a fresh rebuild from the active
   chain.
+- A missing or unreadable undo record is fatal only for `ScriptLive`. The
+  worker resets that capability and reseeds from the authoritative UTXO view;
+  `TxLookup` and `ScriptHistory` continue their body-only rollback.
 - When `ScriptLive` has no watermark after restoration or reset, the worker
   rebuilds it by scanning one stable authoritative UTXO view. Each seed batch
   and the watermark stamp are ordinary fenced writes (reset, revision, and
@@ -154,6 +167,7 @@ remove another script's output.
   - `absent_tip_rewinds_index_to_empty`
   - `missing_disconnected_body_routes_rewind_to_rebuild`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
+  - `live_only_index_ahead_is_reported_and_reseeded`
 - `crates/node/src/txindex_worker_lifecycle_tests.rs` and
   `crates/node/src/txindex_worker_integration_tests.rs`: lifecycle
   publication, open failure/timeout, and shutdown abandonment.
