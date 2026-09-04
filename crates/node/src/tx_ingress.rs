@@ -844,15 +844,16 @@ mod tests {
         let mining = Arc::new(RecordingMining::new());
         let consumer = make_consumer(&gateway, mining);
         let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
-        // A 401_000-weight witness keeps the body over the 400k standard
-        // cap so MissingInputs cannot consume orphan quota.
+        // Witness counts 1× toward BIP141 weight. A 400_000-byte stack
+        // item puts the body over the 400k standard cap so MissingInputs
+        // cannot consume orphan quota.
         let tx = Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(parent, 0),
                 script_sig: Vec::new(),
                 sequence: 0xFFFF_FFFF,
-                witness: vec![vec![0; 100_250]],
+                witness: vec![vec![0; 400_000]],
             }],
             outputs: vec![TxOut {
                 value: 1_000,
