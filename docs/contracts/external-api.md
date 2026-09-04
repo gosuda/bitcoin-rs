@@ -8,7 +8,7 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 `API-10` is GBT client-rule negotiation. `API-11` is `submitblock` decode.
 `API-12` is GBT proposal request parsing. `API-13` is `submitblock` uncommitted
 witness fill. `API-14` is Core v31 `submitblock` / GBT proposal duplicate
-vocabulary.
+vocabulary. `API-15` is BIP22 reject-reason mapping.
 
 ## Clauses
 
@@ -193,6 +193,16 @@ vocabulary.
   accepted block is `duplicate`. A header admitted by `submitheader` still
   receives the body.
 
+### `API-15`: BIP22 reject reasons
+
+- **Owner**: `bip22_reject_reason` in `crates/node/src/mining.rs`.
+- Proposal and `submitblock` project apply/consensus failures as Core
+  `GetRejectReason` strings (`bad-cb-missing`, `bad-txnmrklroot`,
+  `bad-cb-amount`, `high-hash`, `time-too-old`, …). Operational apply
+  refusals (`Shutdown`, journal backpressure) stay `inconclusive`.
+- Consensus crate Display remains log text. This mapping is the BIP22
+  wire owner.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -271,3 +281,9 @@ owned by [wallet-facing.md](wallet-facing.md).
     `proposal_of_an_invalid_header_is_duplicate_invalid`,
     `proposal_of_a_header_only_block_is_duplicate_inconclusive`,
     `duplicate_submit_returns_duplicate`
+- `API-15`:
+  - `crates/node/src/mining.rs` tests `consensus_failures_use_core_bip22_reasons`,
+    `header_failures_use_core_bip22_reasons`
+  - `crates/node/tests/mining.rs` tests `proposal_without_coinbase_is_bad_cb_missing`,
+    `proposal_merkle_mismatch_is_bad_txnmrklroot`,
+    `proposal_rejects_excess_coinbase_without_side_effects`
