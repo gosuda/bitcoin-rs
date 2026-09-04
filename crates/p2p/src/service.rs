@@ -227,23 +227,14 @@ impl P2pService {
         let outbound = match self.spawn_outbound_worker(chain_query, sync_wake_tx, peer_ready) {
             Ok(handle) => handle,
             Err(error) => {
-                self.shutdown.store(true, Ordering::Release);
-                self.lifecycle.cancel_all();
-                for handle in listeners {
-                    let _ = handle.join();
-                }
+                self.rollback_startup(listeners, None);
                 return Err(error);
             }
         };
         let bootstrap = match self.spawn_bootstrap_worker() {
             Ok(handle) => handle,
             Err(error) => {
-                self.shutdown.store(true, Ordering::Release);
-                self.lifecycle.cancel_all();
-                for handle in listeners {
-                    let _ = handle.join();
-                }
-                let _ = outbound.join();
+                self.rollback_startup(listeners, Some(outbound));
                 return Err(error);
             }
         };
@@ -253,6 +244,21 @@ impl P2pService {
             bootstrap,
         });
         Ok(())
+    }
+
+    fn rollback_startup(
+        &self,
+        listeners: Vec<JoinHandle<()>>,
+        outbound: Option<JoinHandle<()>>,
+    ) {
+        self.shutdown.store(true, Ordering::Release);
+        self.lifecycle.cancel_all();
+        for handle in listeners {
+            let _ = handle.join();
+        }
+        if let Some(handle) = outbound {
+            let _ = handle.join();
+        }
     }
 
     fn spawn_outbound_worker(
@@ -720,6 +726,14 @@ fn run_fixed_peer_bootstrap(
     }
 }
 
+fn live_outbound_count(lifecycle: &PeerLifecycle) -> usize {
+    lifecycle
+        .live_leases()
+        .iter()
+        .filter(|(_, lease)| !lease.is_inbound())
+        .count()
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_dns_peer_maintenance(
     shutdown: Arc<AtomicBool>,
@@ -753,11 +767,7 @@ fn run_dns_peer_maintenance(
     tracing::info!(queued, "dns peer bootstrap queued initial addresses");
 
     while !shutdown.load(Ordering::Acquire) {
-        let live = lifecycle
-            .live_leases()
-            .iter()
-            .filter(|(_, lease)| !lease.is_inbound())
-            .count();
+        let live = live_outbound_count(&lifecycle);
         let delay = if live == 0 && queued > 0 && fast_refills < DNS_BOOTSTRAP_FAST_REFILL_LIMIT {
             fast_refills = fast_refills.saturating_add(1);
             DNS_BOOTSTRAP_REFILL_INTERVAL
@@ -776,11 +786,7 @@ fn run_dns_peer_maintenance(
         if wait_for_shutdown(&shutdown, delay) {
             break;
         }
-        let live = lifecycle
-            .live_leases()
-            .iter()
-            .filter(|(_, lease)| !lease.is_inbound())
-            .count();
+        let live = live_outbound_count(&lifecycle);
         if live >= target {
             continue;
         }
