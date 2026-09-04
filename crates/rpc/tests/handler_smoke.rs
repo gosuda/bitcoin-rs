@@ -99,7 +99,6 @@ impl MiningControl for SmokeMiningControl {
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,
-            warnings: Vec::new(),
         })
     }
 
@@ -262,6 +261,44 @@ fn invalidateblock_maps_unknown_block_to_core_not_found() {
         .expect_err("unknown block should map to an error");
     // Core reports an unknown block as RPC_INVALID_ADDRESS_OR_KEY (-5).
     assert_eq!(err.code(), RpcError::CORE_NOT_FOUND);
+}
+
+/// Core serves `getblockchaininfo`, `getnetworkinfo`, and `getmininginfo`
+/// `warnings` from one `GetWarningsForRpc`; here every one of them must
+/// present the single node-owned source, so none can drift or stay empty.
+#[test]
+fn every_rpc_warnings_field_presents_the_one_node_warning_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct FixedWarnings(Vec<String>);
+    impl bitcoin_rs_rpc::context::WarningSource for FixedWarnings {
+        fn warnings(&self) -> Vec<String> {
+            self.0.clone()
+        }
+    }
+
+    let expected = vec![
+        "checkpoint fallback at 200".to_owned(),
+        "txindex ahead of applied tip".to_owned(),
+    ];
+    let ctx = Context::new()
+        .with_mining_control(Arc::new(SmokeMiningControl::new()))
+        .with_warnings(Arc::new(FixedWarnings(expected.clone())));
+    let handler = Handler::new(Arc::new(ctx));
+    for method in ["getblockchaininfo", "getnetworkinfo", "getmininginfo"] {
+        let result = handler.dispatch(method, &json!([]))?;
+        let warnings: Vec<String> = result
+            .get("warnings")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| format!("{method}: warnings missing"))?
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            warnings, expected,
+            "{method} must present the node warning source"
+        );
+    }
+    Ok(())
 }
 
 #[test]

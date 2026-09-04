@@ -471,9 +471,9 @@ impl Default for WarningStore {
     }
 }
 
-impl bitcoin_rs_rpc::context::RollbackWarningSource for WarningStore {
-    fn rollback_warnings(&self) -> Vec<String> {
-        self.warnings()
+impl bitcoin_rs_rpc::context::WarningSource for WarningStore {
+    fn warnings(&self) -> Vec<String> {
+        Self::warnings(self)
     }
 }
 

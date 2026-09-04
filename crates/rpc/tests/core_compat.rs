@@ -335,7 +335,6 @@ impl MiningControl for CompatMiningControl {
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,
-            warnings: Vec::new(),
         })
     }
 

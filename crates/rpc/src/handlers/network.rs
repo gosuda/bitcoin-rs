@@ -152,7 +152,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         relay_fee: DEFAULT_RELAY_FEE_BTC_PER_KVB,
         incremental_fee: DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB,
         local_addresses: Vec::new(),
-        warnings: Vec::new(),
+        warnings: ctx.warnings(),
     })
 }
 

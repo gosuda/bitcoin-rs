@@ -73,7 +73,7 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     let info = control.mining_info().map_err(map_mining_control_error)?;
-    render_mining_info(&info)
+    render_mining_info(&info, ctx.warnings())
 }
 
 pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -336,7 +336,7 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
     })
 }
 
-fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
+fn render_mining_info(info: &MiningInfo, warnings: Vec<String>) -> Result<Value, RpcError> {
     let chain = match info.network {
         bitcoin_rs_primitives::Network::Mainnet => "main",
         bitcoin_rs_primitives::Network::Testnet3 => "test",
@@ -370,7 +370,7 @@ fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
             difficulty: info.next_difficulty,
             target: next_target,
         },
-        warnings: info.warnings.iter().map(ToString::to_string).collect(),
+        warnings,
     })
 }
 
@@ -560,7 +560,6 @@ mod tests {
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,
-            warnings: Vec::new(),
         }
     }
 

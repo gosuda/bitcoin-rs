@@ -53,11 +53,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         automatic_pruning: None,
         prune_target_size: None,
         signet_challenge: None,
-        warnings: ctx
-            .rollback_warnings
-            .as_ref()
-            .map(|source| source.rollback_warnings())
-            .unwrap_or_default(),
+        warnings: ctx.warnings(),
     };
     typed_to_sonic(&response)
 }

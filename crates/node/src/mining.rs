@@ -654,11 +654,6 @@ impl MiningCoordinator {
             next_difficulty,
             minimum_fee_rate,
             signet: signet_info(self.network),
-            warnings: crate::metrics::node_warnings()
-                .messages()
-                .into_iter()
-                .map(CompactString::from)
-                .collect(),
         })
     }
 }

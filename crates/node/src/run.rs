@@ -993,7 +993,7 @@ pub(crate) fn start_node(
     }));
     rpc_context = rpc_context.with_zmq_notifications(state.active_zmq_notifications());
     rpc_context = rpc_context.with_debug_log_path(state.data_dir().join("debug.log"));
-    rpc_context = rpc_context.with_rollback_warnings(state.warning_store());
+    rpc_context = rpc_context.with_warnings(state.warning_store());
     let context = Arc::new(rpc_context);
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(

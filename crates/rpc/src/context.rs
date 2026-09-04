@@ -467,14 +467,17 @@ pub trait BlockBodySource: Send + Sync {
     }
 }
 
-/// Read-only source of rollback-evidence warnings for `getblockchaininfo`.
+/// Read-only source of the node's active warnings.
 ///
-/// Implemented by the node crate's `WarningStore`. Each call loads one
-/// immutable snapshot; the handler copies rendered strings into the
-/// existing `warnings` field without reading disk or reparsing markers.
-pub trait RollbackWarningSource: Send + Sync {
+/// The one warnings fact every RPC `warnings` field presents —
+/// `getblockchaininfo`, `getnetworkinfo`, and `getmininginfo`, the same
+/// three Core serves from `GetWarningsForRpc`. Implemented by the node
+/// crate's `WarningStore`; each call loads one immutable snapshot, so a
+/// handler copies rendered strings without reading disk or reparsing
+/// markers.
+pub trait WarningSource: Send + Sync {
     /// Returns rendered warnings in deterministic order.
-    fn rollback_warnings(&self) -> Vec<String>;
+    fn warnings(&self) -> Vec<String>;
 }
 
 impl BlockRecord {
@@ -810,8 +813,6 @@ pub struct MiningInfo {
     pub minimum_fee_rate: u64,
     /// Signet mining data, absent on other networks.
     pub signet: Option<SignetMiningInfo>,
-    /// Active node warnings.
-    pub warnings: Vec<CompactString>,
 }
 
 /// Failure to execute a node-owned mining operation.
@@ -1203,11 +1204,11 @@ pub struct Context {
     pub debug_log_path: Option<PathBuf>,
     /// Limits concurrent full-block REST response materializations.
     rest_render_budget: Arc<RestRenderBudget>,
-    /// Rollback-evidence warning source for `getblockchaininfo`.
+    /// Node warning source behind every RPC `warnings` field.
     ///
     /// `None` in test contexts; populated by `NodeState` with the process-wide
     /// `WarningStore`. Each request loads one immutable snapshot.
-    pub rollback_warnings: Option<Arc<dyn RollbackWarningSource>>,
+    warnings: Option<Arc<dyn WarningSource>>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
 // handle behind it uses atomics, channels, or locks for interior mutation.
@@ -1276,7 +1277,7 @@ impl Context {
             zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
-            rollback_warnings: None,
+            warnings: None,
         }
     }
 
@@ -1328,7 +1329,7 @@ impl Context {
             zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
-            rollback_warnings: None,
+            warnings: None,
         }
     }
     /// Builds a context that shares pre-existing handles owned elsewhere.
@@ -1396,7 +1397,7 @@ impl Context {
             zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
-            rollback_warnings: None,
+            warnings: None,
         }
     }
 
@@ -1415,11 +1416,23 @@ impl Context {
         self
     }
 
-    /// Attaches the rollback-evidence warning source for `getblockchaininfo`.
+    /// Attaches the node warning source every RPC `warnings` field presents.
     #[must_use]
-    pub fn with_rollback_warnings(mut self, source: Arc<dyn RollbackWarningSource>) -> Self {
-        self.rollback_warnings = Some(source);
+    pub fn with_warnings(mut self, source: Arc<dyn WarningSource>) -> Self {
+        self.warnings = Some(source);
         self
+    }
+
+    /// The node's active warnings, rendered in deterministic order.
+    ///
+    /// Empty without an attached source. This is the single read behind
+    /// `getblockchaininfo`, `getnetworkinfo`, and `getmininginfo`.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings
+            .as_ref()
+            .map(|source| source.warnings())
+            .unwrap_or_default()
     }
 
     /// Attaches the node-owned pruning mutator used by `pruneblockchain`.
