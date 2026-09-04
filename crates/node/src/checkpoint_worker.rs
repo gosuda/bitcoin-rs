@@ -15,11 +15,12 @@
 //!
 //! ## Recovery story
 //!
-//! The published checkpoint is the sole recovery anchor: a node killed
-//! mid-sync restarts from the last published checkpoint (periodic or
-//! clean-shutdown) and re-validates blocks mined after it.  The former V1
-//! recovery sidecar / body-replay path was retired (issue #230, task 0); a
-//! stale sidecar file on disk is simply ignored.
+//! The published checkpoint is the base recovery anchor. When the chainstate
+//! journal is enabled, boot replays its committed suffix from that checkpoint;
+//! otherwise the node re-validates blocks mined after the checkpoint. Periodic
+//! publication also bounds journal retention by providing a new compaction
+//! base. The former V1 recovery sidecar / body-replay path was retired (issue
+//! #230, task 0); a stale sidecar file on disk is simply ignored.
 //!
 //! ## Cost when it fires
 //!

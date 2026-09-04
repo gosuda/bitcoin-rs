@@ -575,10 +575,13 @@ impl<S: KvStore> JournalWriter<S> {
     pub(crate) fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError> {
         self.ensure_appendable()?;
         if record.height != self.next_height {
-            return Err(JournalWriterError::OutOfOrder {
-                got: record.height,
-                expected: self.next_height,
-            });
+            return self.fail_append(
+                record.height,
+                JournalWriterError::OutOfOrder {
+                    got: record.height,
+                    expected: self.next_height,
+                },
+            );
         }
 
         let next_frontier = self.next_append_frontier(record);
@@ -1593,6 +1596,30 @@ mod tests {
         assert!(matches!(
             writer.append(&sample_record(2)),
             Err(JournalWriterError::AppendGap { height: 1 })
+        ));
+        assert_eq!(writer.head().height, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn out_of_order_append_blocks_the_next_apply() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("out-of-order-gap", store)?;
+
+        assert!(matches!(
+            writer.append(&sample_record(2)),
+            Err(JournalWriterError::OutOfOrder {
+                got: 2,
+                expected: 1
+            })
+        ));
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::AppendGap { height: 2 })
+        ));
+        assert!(matches!(
+            writer.append(&sample_record(1)),
+            Err(JournalWriterError::AppendGap { height: 2 })
         ));
         assert_eq!(writer.head().height, 0);
         Ok(())
