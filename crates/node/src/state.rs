@@ -1801,7 +1801,6 @@ impl NodeState {
                 outbound_peer_target: P2P_OUTBOUND_QUEUE_LIMIT,
                 outbound_queue_limit: P2P_OUTBOUND_QUEUE_LIMIT,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
-                download_budget: bitcoin_rs_p2p::default_sync_budget(),
             },
             Arc::clone(&shutdown),
         ));
