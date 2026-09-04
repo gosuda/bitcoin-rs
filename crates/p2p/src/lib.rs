@@ -27,8 +27,6 @@ pub mod inbound;
 pub mod inv;
 /// TCP listener skeleton with graceful shutdown.
 pub mod listener;
-/// Peer TCP socket options: `TCP_NODELAY`, blocking I/O, poll timeouts.
-pub mod socket;
 /// Peer state and peer manager types.
 pub mod peer;
 /// Peer metadata published after a successful handshake.
@@ -37,6 +35,8 @@ pub mod peer_info;
 pub mod peer_table;
 /// Runtime owner for P2P control state and workers.
 pub mod service;
+/// Peer TCP socket options: `TCP_NODELAY`, blocking I/O, poll timeouts.
+pub mod socket;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Bitcoin P2P wire codec.
@@ -51,7 +51,6 @@ pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use listener::{ListenerExtras, spawn_outbound_connection};
-pub use socket::configure_peer_stream;
 pub use peer::{
     AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
     MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, NetworkControls,
@@ -64,6 +63,7 @@ pub use service::{
     P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
     apply_network_active,
 };
+pub use socket::configure_peer_stream;
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
 
