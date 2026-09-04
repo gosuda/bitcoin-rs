@@ -87,7 +87,7 @@ impl ChainEffects {
             .push(BlockRecord::from_block(height, block));
     }
 
-    /// Hash/raw ZMQ topics. Runs after mempool eviction and before `applied_tip`.
+    /// Hash/raw ZMQ topics; ordering follows `ARCH-07`.
     pub fn emit_connected(
         &self,
         tip_hash: Hash256,
@@ -198,6 +198,7 @@ mod tests {
         }
     }
 
+    /// ARCH-07: verifies the no-op post-commit effects contract.
     #[test]
     fn noop_asks_for_no_payloads() {
         let effects = ChainEffects::noop();
@@ -207,6 +208,7 @@ mod tests {
         assert!(effects.block_log().read().is_empty());
     }
 
+    /// ARCH-07: verifies post-commit RPC/ZMQ effect ownership and ordering.
     #[test]
     fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() {
         let genesis = Network::Regtest.genesis_block();
@@ -240,6 +242,7 @@ mod tests {
         );
     }
 
+    /// ARCH-07: verifies disconnect effects preserve the RPC block-log contract.
     #[test]
     fn disconnect_does_not_pop_a_different_tail() {
         let genesis = Network::Regtest.genesis_block();
