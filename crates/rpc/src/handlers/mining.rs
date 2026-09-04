@@ -10,7 +10,9 @@ use bitcoin_rs_primitives::{Block, Txid, consensus_bytes, deserialize};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{compact_target_hex, i64_saturated, sat_to_btc, typed_to_sonic};
+use crate::compat::convert::{
+    compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic,
+};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, params_array, required_str};
@@ -120,15 +122,14 @@ pub(crate) fn getnetworkhashps(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .mining_control
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
-    if !params.is_null() && params_array(params)?.len() > 2 {
-        return Err(RpcError::InvalidParams("too many parameters"));
+    let (lookup, height) = parse_network_hash_ps_args(params)?;
+    match control.network_hash_ps(lookup, height) {
+        Ok(rate) => Ok(json!(rate)),
+        Err(MiningControlError::InvalidRequest(message)) => {
+            Err(RpcError::InvalidParameter(message.to_string()))
+        }
+        Err(error) => Err(map_mining_control_error(error)),
     }
-    let lookup = optional_i64(params, 0, 120)?;
-    let height = optional_i64(params, 1, -1)?;
-    let rate = control
-        .network_hash_ps(lookup, height)
-        .map_err(map_mining_control_error)?;
-    Ok(json!(rate))
 }
 
 pub(crate) fn getprioritisedtransactions(
@@ -139,16 +140,40 @@ pub(crate) fn getprioritisedtransactions(
     let mut object = sonic_rs::Object::new();
     for entry in ctx.mempool.prioritised_transactions() {
         let txid = entry.txid.to_string();
-        let _ = object.insert(
-            &txid,
-            json!({
-                "fee_delta": entry.fee_delta,
-                "in_mempool": entry.in_mempool,
-                  "modified_fee": entry.modified_fee,
-            }),
-        );
+        let mut row = sonic_rs::Object::new();
+        let _ = row.insert("fee_delta", json!(entry.fee_delta));
+        let _ = row.insert("in_mempool", json!(entry.in_mempool));
+        if let Some(modified_fee) = entry.modified_fee {
+            let _ = row.insert("modified_fee", json!(signed_sat_to_btc(modified_fee)));
+        }
+        let _ = object.insert(&txid, Value::from(row));
     }
     Ok(Value::from(object))
+}
+
+/// Bitcoin Core `getnetworkhashps(nblocks=120, height=-1)`: both arguments are
+/// optional, extra positionals are rejected, and omitted/`null` params use the
+/// defaults. Invalid `nblocks`/`height` values are Core `-8`, not JSON-RPC `-32602`.
+fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
+    if !params.is_null() {
+        let array = params_array(params)?;
+        if array.len() > 2 {
+            return Err(RpcError::InvalidParams("too many parameters"));
+        }
+    }
+    let lookup = optional_i64(params, 0, 120)?;
+    let height = optional_i64(params, 1, -1)?;
+    if lookup < -1 || lookup == 0 {
+        return Err(RpcError::InvalidParameter(
+            "Invalid nblocks. Must be a positive number or -1.".to_owned(),
+        ));
+    }
+    if height < -1 {
+        return Err(RpcError::InvalidParameter(
+            "Block does not exist at specified height".to_owned(),
+        ));
+    }
+    Ok((lookup, height))
 }
 
 fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
@@ -1101,15 +1126,87 @@ mod tests {
         assert!((result.as_f64().unwrap_or(0.0) - 42.5).abs() < f64::EPSILON);
         assert_eq!(*control.last_hash_ps.lock(), Some((120, -1)));
 
+        let omitted = getnetworkhashps(&ctx, &Value::new_null())
+            .unwrap_or_else(|err| panic!("omitted getnetworkhashps params failed: {err}"));
+        assert!((omitted.as_f64().unwrap_or(0.0) - 42.5).abs() < f64::EPSILON);
+        assert_eq!(*control.last_hash_ps.lock(), Some((120, -1)));
+
         getnetworkhashps(&ctx, &json!([60, 10]))
             .unwrap_or_else(|err| panic!("windowed getnetworkhashps failed: {err}"));
         assert_eq!(*control.last_hash_ps.lock(), Some((60, 10)));
     }
 
     #[test]
+    fn getnetworkhashps_rejects_arity_and_core_invalid_windows() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+
+        let extra = getnetworkhashps(&ctx, &json!([120, -1, 1]))
+            .expect_err("trailing getnetworkhashps arguments must fail");
+        assert!(matches!(
+            extra,
+            RpcError::InvalidParams("too many parameters")
+        ));
+        assert!(control.last_hash_ps.lock().is_none());
+
+        let nblocks = getnetworkhashps(&ctx, &json!([0])).expect_err("nblocks 0 must fail");
+        assert!(matches!(
+            nblocks,
+            RpcError::InvalidParameter(message)
+                if message == "Invalid nblocks. Must be a positive number or -1."
+        ));
+
+        let negative_lookup = getnetworkhashps(&ctx, &json!([-2]))
+            .expect_err("nblocks other than -1 or positive must fail");
+        assert!(matches!(
+            negative_lookup,
+            RpcError::InvalidParameter(message)
+                if message == "Invalid nblocks. Must be a positive number or -1."
+        ));
+
+        let height =
+            getnetworkhashps(&ctx, &json!([120, -10])).expect_err("height below -1 must fail");
+        assert!(matches!(
+            height,
+            RpcError::InvalidParameter(message)
+                if message == "Block does not exist at specified height"
+        ));
+        assert!(control.last_hash_ps.lock().is_none());
+    }
+
+    #[test]
+    fn getnetworkhashps_projects_control_invalid_request_as_invalid_parameter() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.fail.lock() = Some(MiningControlError::InvalidRequest(CompactString::from(
+            "Block does not exist at specified height",
+        )));
+        let ctx = ctx_with_control(control);
+        let error = getnetworkhashps(&ctx, &json!([120, 99]))
+            .expect_err("out-of-range height from control must fail");
+        assert!(matches!(
+            error,
+            RpcError::InvalidParameter(message)
+                if message == "Block does not exist at specified height"
+        ));
+    }
+
+    #[test]
     fn getprioritisedtransactions_projects_the_overlay() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
         let ctx = Arc::new(Context::new());
-        let pooled = Txid::from(Hash256::from_le_bytes(&[0x11; 32]));
+        let pooled_tx = Tx {
+            version: 2,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: 0,
+        };
+        let pooled = pooled_tx.txid();
+        {
+            let mut pool = ctx.mempool.pool().write();
+            pool.insert_entry(MempoolEntry::new(Arc::new(pooled_tx), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        }
         let absent = Txid::from(Hash256::from_le_bytes(&[0x22; 32]));
         ctx.mempool
             .prioritise(pooled, 500)
@@ -1122,33 +1219,43 @@ mod tests {
         let object = result
             .as_object()
             .unwrap_or_else(|| panic!("object result"));
+        let pooled_row = object
+            .get(&pooled.to_string())
+            .unwrap_or_else(|| panic!("pooled overlay is listed"));
         assert_eq!(
-            object
-                .get(&pooled.to_string())
-                .and_then(|entry| entry.get("fee_delta"))
-                .and_then(JsonValueTrait::as_i64),
+            pooled_row.get("fee_delta").and_then(JsonValueTrait::as_i64),
             Some(500)
         );
         assert_eq!(
-            object
-                .get(&pooled.to_string())
-                .and_then(|entry| entry.get("in_mempool"))
+            pooled_row
+                .get("in_mempool")
                 .and_then(JsonValueTrait::as_bool),
-            Some(false)
+            Some(true)
         );
+        let modified = pooled_row
+            .get("modified_fee")
+            .and_then(JsonValueTrait::as_f64)
+            .unwrap_or_else(|| panic!("pooled overlay must carry modified_fee in BTC"));
+        assert!(
+            (modified - signed_sat_to_btc(1_500)).abs() < f64::EPSILON,
+            "modified_fee must be actual fee plus delta in BTC, got {modified}"
+        );
+        let absent_row = object
+            .get(&absent.to_string())
+            .unwrap_or_else(|| panic!("absent overlay is listed"));
         assert_eq!(
-            object
-                .get(&absent.to_string())
-                .and_then(|entry| entry.get("fee_delta"))
-                .and_then(JsonValueTrait::as_i64),
+            absent_row.get("fee_delta").and_then(JsonValueTrait::as_i64),
             Some(-25)
         );
         assert_eq!(
-            object
-                .get(&absent.to_string())
-                .and_then(|entry| entry.get("in_mempool"))
+            absent_row
+                .get("in_mempool")
                 .and_then(JsonValueTrait::as_bool),
             Some(false)
+        );
+        assert!(
+            absent_row.get("modified_fee").is_none(),
+            "Core omits modified_fee unless the tx is in the mempool"
         );
     }
 }

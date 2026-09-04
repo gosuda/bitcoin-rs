@@ -964,6 +964,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn mining_payout_overlay_lets_the_later_address_win() {
         let mut base = UserConfig {
             mining: MiningOverrides {

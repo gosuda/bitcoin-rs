@@ -309,6 +309,49 @@ fn network_hash_ps_answers_on_the_applied_tip() -> anyhow::Result<()> {
         genesis_rate.abs() < f64::EPSILON,
         "genesis has no lookback window, got {genesis_rate}"
     );
+    assert_eq!(
+        mining.network_hash_ps(120, 0)?,
+        0.0,
+        "Core reports 0 at the genesis height"
+    );
+    Ok(())
+}
+
+#[test]
+fn network_hash_ps_rejects_core_invalid_windows() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    match mining.network_hash_ps(0, -1) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(
+                message.as_str(),
+                "Invalid nblocks. Must be a positive number or -1."
+            );
+        }
+        other => panic!("nblocks 0 must be invalid, got {other:?}"),
+    }
+    match mining.network_hash_ps(-2, -1) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(
+                message.as_str(),
+                "Invalid nblocks. Must be a positive number or -1."
+            );
+        }
+        other => panic!("nblocks -2 must be invalid, got {other:?}"),
+    }
+    match mining.network_hash_ps(120, -10) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(message.as_str(), "Block does not exist at specified height");
+        }
+        other => panic!("height -10 must be invalid, got {other:?}"),
+    }
+    match mining.network_hash_ps(120, 1) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(message.as_str(), "Block does not exist at specified height");
+        }
+        other => panic!("height above the tip must be invalid, got {other:?}"),
+    }
     Ok(())
 }
 

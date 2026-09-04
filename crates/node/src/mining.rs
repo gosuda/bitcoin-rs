@@ -765,13 +765,20 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
-        if lookup != -1 && lookup <= 0 {
-            return Err(MiningControlError::InvalidRequest("lookup must be positive or -1".into()));
-        }
-        if height < -1 || height >= 0 && self.applied_tip.load_full().as_ref().map_or(true, |tip| height > i64::from(tip.height)) {
-            return Err(MiningControlError::InvalidRequest("height is outside the applied chain".into()));
+        if lookup < -1 || lookup == 0 {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "Invalid nblocks. Must be a positive number or -1.",
+            )));
         }
         let tip = self.applied_tip.load_full();
+        let tip_height = tip
+            .as_ref()
+            .map_or(-1, |snapshot| i64::from(snapshot.height));
+        if height < -1 || height > tip_height {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "Block does not exist at specified height",
+            )));
+        }
         Ok(estimate_network_hashps(
             &self.block_tree,
             tip.as_deref(),
@@ -887,7 +894,7 @@ fn estimate_network_hashps(
     if start_node.height == 0 {
         return 0.0;
     }
-    let walk = if lookup <= 0 {
+    let walk = if lookup == -1 {
         let interval = i64::from(network.retarget_interval());
         if interval <= 0 {
             1
@@ -989,9 +996,8 @@ fn decode_nibble(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod generation_key_tests {
     use super::{GenerationKey, parse_long_poll_id};
-    use alloc::sync::Arc;
-    use bitcoin_rs_mining::{Candidate, TemplateId};
-    use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
+    use bitcoin_rs_mining::TemplateId;
+    use bitcoin_rs_primitives::Hash256;
 
     #[test]
     fn long_poll_round_trips_template_id() {
@@ -1028,6 +1034,180 @@ mod generation_key_tests {
             "negative elapsed must report 0.0 hashes/s, got {negative_elapsed}"
         );
     }
+}
+
+/// Oracle: Bitcoin Core `GetNetworkHashPS` in `src/rpc/mining.cpp` (kernel 31.99).
+///
+/// `workDiff = nChainWork[end] - nChainWork[start]` over `lookup` parent walks,
+/// `timeDiff = max(GetBlockTime) - min(GetBlockTime)` in that window, result
+/// `workDiff.getdouble() / timeDiff`. Non-monotonic timestamps use min/max, not
+/// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
+#[cfg(test)]
+mod network_hashps_oracle_tests {
+    use super::estimate_network_hashps;
+    use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use parking_lot::RwLock;
+
+    const BITS: u32 = 0x207f_ffff;
+
+    fn header(prev: BlockHash, time: u32) -> Header {
+        Header {
+            version: 1,
+            prev_blockhash: prev,
+            merkle_root: Hash256::default(),
+            time,
+            bits: BITS,
+            nonce: 0,
+        }
+    }
+
+    fn append(tree: &mut BlockTree, prev: BlockHash, time: u32) -> NodeId {
+        tree.insert_header(header(prev, time), NodeStatus::HeaderValid)
+            .unwrap_or_else(|err| panic!("insert header at time {time}: {err}"))
+    }
+
+    fn snapshot(tree: &BlockTree, tip_id: NodeId) -> TipSnapshot {
+        let node = tree
+            .node(tip_id)
+            .unwrap_or_else(|err| panic!("missing tip {tip_id:?}: {err}"));
+        TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    }
+
+    fn work_to_f64(work: bitcoin_rs_chain::ChainWork) -> f64 {
+        work.to_be_bytes()
+            .iter()
+            .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)))
+    }
+
+    /// Independent Core parent-walk, not the height-range implementation under test.
+    fn core_getnetworkhashps(
+        tree: &BlockTree,
+        start_id: NodeId,
+        lookup: i64,
+        network: Network,
+    ) -> f64 {
+        let start = tree
+            .node(start_id)
+            .unwrap_or_else(|err| panic!("missing start: {err}"));
+        if start.height == 0 {
+            return 0.0;
+        }
+        let mut walk = if lookup == -1 {
+            i64::from(start.height) % i64::from(network.retarget_interval()) + 1
+        } else {
+            lookup
+        };
+        if walk > i64::from(start.height) {
+            walk = i64::from(start.height);
+        }
+        let walk = u32::try_from(walk).unwrap_or_else(|_| panic!("walk fits u32"));
+        let mut min_time = start.header.time;
+        let mut max_time = min_time;
+        let mut earliest_id = start_id;
+        for _ in 0..walk {
+            earliest_id = tree
+                .node(earliest_id)
+                .unwrap_or_else(|err| panic!("missing walked node: {err}"))
+                .parent
+                .unwrap_or_else(|| panic!("Core walks `lookup` parents; chain too short"));
+            let time = tree
+                .node(earliest_id)
+                .unwrap_or_else(|err| panic!("missing parent: {err}"))
+                .header
+                .time;
+            min_time = min_time.min(time);
+            max_time = max_time.max(time);
+        }
+        if min_time == max_time {
+            return 0.0;
+        }
+        let earliest = tree
+            .node(earliest_id)
+            .unwrap_or_else(|err| panic!("missing earliest: {err}"));
+        let work = work_to_f64(start.chainwork.saturating_sub(earliest.chainwork));
+        work / f64::from(max_time.saturating_sub(min_time))
+    }
+
+    fn assert_matches_core(
+        tree: &RwLock<BlockTree>,
+        tip: &TipSnapshot,
+        lookup: i64,
+        height: i64,
+        network: Network,
+    ) {
+        let expected = {
+            let guard = tree.read();
+            let start_id = if height < 0 {
+                tip.tip_id
+            } else {
+                let requested = u32::try_from(height).unwrap_or_else(|_| panic!("height fits u32"));
+                guard
+                    .node_at_height_from(tip.tip_id, requested)
+                    .unwrap_or_else(|| panic!("missing height {height}"))
+            };
+            core_getnetworkhashps(&guard, start_id, lookup, network)
+        };
+        let got = estimate_network_hashps(tree, Some(tip), lookup, height, network);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "lookup={lookup} height={height}: got {got}, Core oracle {expected}"
+        );
+    }
+
+    #[test]
+    fn estimate_network_hashps_matches_core_getnetworkhashps() {
+        let mut tree = BlockTree::new();
+        // Non-monotonic times: height 2 goes backwards so min/max ≠ first/last.
+        let times = [1_000_000_u32, 1_000_600, 1_000_300, 1_001_200, 1_001_800];
+        let mut prev = BlockHash::default();
+        let mut tip_id = None;
+        for &time in &times {
+            let id = append(&mut tree, prev, time);
+            prev = tree
+                .node(id)
+                .unwrap_or_else(|err| panic!("inserted node: {err}"))
+                .header
+                .compute_hash();
+            tip_id = Some(id);
+        }
+        let tip_id = tip_id.unwrap_or_else(|| panic!("chain has a tip"));
+        let tip = snapshot(&tree, tip_id);
+        let tree = RwLock::new(tree);
+        let network = Network::Regtest;
+
+        assert_matches_core(&tree, &tip, 2, -1, network);
+        assert_matches_core(&tree, &tip, 1, 3, network);
+        assert_matches_core(&tree, &tip, -1, -1, network);
+        assert_matches_core(&tree, &tip, 120, -1, network);
+
+        let genesis = estimate_network_hashps(&tree, Some(&tip), 120, 0, network);
+        assert!(
+            genesis.abs() < f64::EPSILON,
+            "Core returns 0 at genesis, got {genesis}"
+        );
+
+        let retarget_lookup = i64::from(tip.height) % i64::from(network.retarget_interval()) + 1;
+        let via_minus_one = estimate_network_hashps(&tree, Some(&tip), -1, -1, network);
+        let via_explicit = estimate_network_hashps(&tree, Some(&tip), retarget_lookup, -1, network);
+        assert!(
+            (via_minus_one - via_explicit).abs() < 1e-9,
+            "-1 lookback must equal height % interval + 1 ({retarget_lookup})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod candidate_template_tests {
+    use super::CoordinatorState;
+    use alloc::sync::Arc;
+    use bitcoin_rs_mining::{Candidate, TemplateId};
+    use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
 
     #[test]
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
