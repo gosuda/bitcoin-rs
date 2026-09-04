@@ -519,8 +519,8 @@ fn split_path_query(path: &str) -> (&str, &str) {
         .map_or((path, ""), |(path, query)| (path, query))
 }
 
-/// Listener directories. JSON-RPC owns `/`; Esplora owns `/api` and `/esplora`;
-/// Core REST owns `/rest/`.
+/// Directory chosen by `classify` before authentication.
+/// Esplora directories follow contract WF-02.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
     Rest { path: &'a str, query: &'a str },
