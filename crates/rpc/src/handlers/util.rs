@@ -15,7 +15,7 @@ use corepc_types::v31;
 use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{params_array, required_str, required_u64};
+use crate::handlers::{ensure_at_most_params, params_array, required_i64, required_str, required_u64};
 
 static SERVER_START: OnceLock<Instant> = OnceLock::new();
 
@@ -130,14 +130,14 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     // CONTRACT: docs/contracts/external-api.md#API-23
     ensure_at_most_params(params, 2)?;
-    let conf_target = required_u64(params, 0, "conf_target is required")?;
-    if !(1..=ESTIMATE_SMART_FEE_MAX_TARGET).contains(&conf_target) {
+    let conf_target = required_i64(params, 0, "conf_target is required")?;
+    if conf_target < 1 || conf_target > ESTIMATE_SMART_FEE_MAX_TARGET as i64 {
         return Err(RpcError::InvalidParameter(
             ESTIMATE_SMART_FEE_TARGET_ERROR.to_owned(),
         ));
     }
     parse_estimate_mode(params)?;
-    let blocks = conf_target_blocks(conf_target);
+    let blocks = conf_target_blocks(conf_target as u64);
     let pool = ctx.mempool.read();
     match pool.estimate_fee_rate(blocks) {
         Some(rate) => typed_to_sonic_omitting_nulls(&v31::EstimateSmartFee {
@@ -153,17 +153,6 @@ pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Val
             blocks,
         }),
     }
-}
-
-fn ensure_at_most_params(params: &Value, max: usize) -> Result<(), RpcError> {
-    if params.is_null() {
-        return Ok(());
-    }
-    let array = params_array(params)?;
-    if array.len() > max {
-        return Err(RpcError::InvalidParams("too many parameters"));
-    }
-    Ok(())
 }
 
 fn parse_estimate_mode(params: &Value) -> Result<(), RpcError> {
@@ -1172,7 +1161,7 @@ mod tests {
     // CONTRACT: docs/contracts/external-api.md#API-23
     fn estimatesmartfee_rejects_conf_target_outside_core_range() {
         let ctx = Arc::new(Context::new());
-        for target in [0_u64, 1009] {
+        for target in [-1_i64, 0, 1009] {
             let error = estimatesmartfee(&ctx, &json!([target]))
                 .expect_err("conf_target outside 1..=1008 must fail");
             assert!(matches!(error, RpcError::InvalidParameter(_)));
