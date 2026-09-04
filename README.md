@@ -5,8 +5,8 @@ C++ toolchain required) and runs the native script interpreter for every
 consensus spend class. Enable `--features kernel` to route the same checks
 through `libbitcoinkernel` as an independent oracle. The `kernel` feature
 remains the default in the `bitcoin-rs-consensus` and `bitcoin-rs-node`
-library crates, and in the Compose image, until the #213 measurement gate
-flips them.
+library crates, and in the Compose image, until issue #213 promotes native
+(`docs/contracts/validation-default.md`).
 
 [![CI](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
@@ -90,8 +90,9 @@ risk of correlated implementation failures.
 - Kernel feature: `--features kernel` enables `libbitcoinkernel`. The
   `crates/consensus` and `crates/node` library crates still default to `kernel`;
   the `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no kernel)
-  so a default binary build is pure Rust. Issue #213 is the measurement gate
-  for making the native path the library default as well.
+  so a default binary build is pure Rust. Issue #213 keeps that split until
+  native wins the signed-spend and full-replay gates
+  (`docs/contracts/validation-default.md`).
 - Pure-Rust storage defaults: LSM-tree storage backed by `fjall` by default,
   with `redb` compiled in, and `rocksdb`/`mdbx` available through optional Cargo
   features.
@@ -192,7 +193,7 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 | Setting | Default |
 |---|---|
 | Storage backend | `fjall` |
-| Validation engine | Native Rust interpreter (default binary); `libbitcoinkernel` with `--features kernel` |
+| Validation engine | Native Rust interpreter (default binary); `libbitcoinkernel` with `--features kernel` and as the consensus/node library default |
 | Kernel feature | Off in default binary build; on in `crates/consensus` and `crates/node` library defaults |
 | Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
 | Multi-peer download | On (8 outbound peers, 128-block window) |

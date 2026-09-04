@@ -3,9 +3,8 @@
 //!
 //! This is the executable proof of `docs/contracts/wallet-facing.md`. It
 //! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
-//! The package `[lib]` is process-input adapters (`bitcoin.conf`); this
-//! test does not import it, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or
-//! index types. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
+//! `source_does_not_import_node_internals` enforces `WF-01` on this
+//! source. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
 //! (`btcw -u`).
 
 #![allow(missing_docs)]
@@ -129,6 +128,7 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn startup_child_kills_the_process_unless_handed_off() -> TestResult {
     let failed = spawn_held_child()?;
@@ -151,6 +151,7 @@ fn startup_child_kills_the_process_unless_handed_off() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
 fn spawn_held_child() -> TestResult<Child> {
     Command::new("sleep")
         .arg("30")
@@ -161,6 +162,7 @@ fn spawn_held_child() -> TestResult<Child> {
         .map_err(|error| format!("failed to spawn sleep: {error}").into())
 }
 
+#[cfg(unix)]
 fn pid_is_alive(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -168,10 +170,10 @@ fn pid_is_alive(pid: u32) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success())
 }
 
+#[cfg(unix)]
 fn wait_until_dead(pid: u32) -> bool {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -183,6 +185,120 @@ fn wait_until_dead(pid: u32) -> bool {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn source_does_not_import_node_internals() {
+    let source = include_str!("wallet_facing.rs");
+    let code = uncommented_except_guard(source);
+    // Executable tokens for WF-01. This function is removed from `code`
+    // before the scan, so the list can name the identifiers it forbids.
+    // `bitcoin_rs` also covers `use bitcoin_rs as …` aliases of the package
+    // lib; the `_node` / `_storage` / … tokens are the other workspace crates.
+    for banned in [
+        "bitcoin_rs",
+        "bitcoin_rs_node",
+        "bitcoin_rs_storage",
+        "bitcoin_rs_primitives",
+        "bitcoin_rs_index",
+        "bitcoin_rs_utxo",
+        "NodeState",
+        "UtxoSet",
+    ] {
+        assert!(
+            !code.contains(banned),
+            "wallet-facing proof must not name {banned} (WF-01)"
+        );
+    }
+}
+
+/// Drop `//` and `/* */` comments, then drop this file's WF-01 guard
+/// function so its token list is not scored as a consumer import.
+fn uncommented_except_guard(source: &str) -> String {
+    strip_fn(
+        &strip_rust_comments(source),
+        "fn source_does_not_import_node_internals() {",
+    )
+}
+
+fn strip_rust_comments(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' || (chars[i] == 'b' && chars.get(i + 1) == Some(&'"')) {
+            if chars[i] == 'b' {
+                out.push('b');
+                i += 1;
+            }
+            out.push('"');
+            i += 1;
+            while i < chars.len() {
+                let next = chars[i];
+                out.push(next);
+                i += 1;
+                if next == '\\' {
+                    if i < chars.len() {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                } else if next == '"' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+            i += 2;
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = i.saturating_add(2);
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn strip_fn(source: &str, signature: &str) -> String {
+    let Some(start) = source.find(signature) else {
+        panic!("wallet-facing proof must contain {signature}");
+    };
+    let Some(rel_brace) = source[start..].find('{') else {
+        panic!("wallet-facing proof guard is missing a body");
+    };
+    let brace = start + rel_brace;
+    let mut depth = 0_u32;
+    let mut end = None;
+    for (offset, next) in source[brace..].char_indices() {
+        match next {
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = Some(brace + offset + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        panic!("wallet-facing proof guard is missing a closing brace");
+    };
+    let mut out = String::with_capacity(source.len() - (end - start));
+    out.push_str(&source[..start]);
+    out.push_str(&source[end..]);
+    out
 }
 
 /// Coinbase output the miner pays, besides the witness commitment.

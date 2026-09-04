@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot};
-use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, rust_path::UtxoView};
+use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, MEDIAN_TIME_PAST_WINDOW, rust_path::UtxoView};
 use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeGuard, Mempool, MempoolGateway};
 use bitcoin_rs_primitives::{
     Block, BlockHash, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid,
@@ -2140,7 +2140,8 @@ fn prove_window<'a>(
                 bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(parent_id), height);
             let cutoff = bitcoin_rs_consensus::locktime_cutoff(
                 softfork.csv_active,
-                tree.median_time_past_at(parent_id, 11).unwrap_or(0),
+                tree.median_time_past_at(parent_id, MEDIAN_TIME_PAST_WINDOW)
+                    .unwrap_or(0),
                 block.header.time,
             );
             // The next block's context needs this one in the tree. Header-first
@@ -2618,7 +2619,9 @@ fn apply_block_admitted<'b>(
 
     let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
         let tree = handles.block_tree.read();
-        let mtp = tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0);
+        let mtp = tree
+            .median_time_past_at(tip.tip_id, MEDIAN_TIME_PAST_WINDOW)
+            .unwrap_or(0);
         let softfork_state =
             bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(tip.tip_id), height);
         (mtp, softfork_state)
@@ -3908,7 +3911,8 @@ fn bip68_prevout_mtp(
             },
         ));
     };
-    let Some(prevout_mtp) = tree.median_time_past_at(prev_block_node, 11) else {
+    let Some(prevout_mtp) = tree.median_time_past_at(prev_block_node, MEDIAN_TIME_PAST_WINDOW)
+    else {
         return Err(ApplyError::Consensus(
             bitcoin_rs_consensus::ConsensusError::Bip {
                 bip: "BIP68",

@@ -26,6 +26,7 @@ crossbeam-channel.workspace = true
 hashbrown.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
+rustix.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

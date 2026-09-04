@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
-    ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
+    BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptLiveScan, TxIndexScan, TxIndexScanRow,
     TxIndexSnapshot,
@@ -32,9 +32,10 @@ use bitcoin_rs_index::{
 };
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, Txid, deserialize};
+use bitcoin_rs_rpc::capabilities::{TxIndexStatus, TxIndexStatusSource};
 use bitcoin_rs_rpc::context::{
-    BlockBodySource, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
-    SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError,
+    BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
+    SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
 };
 use bitcoin_rs_storage::PrefixScanLimit;
 use compact_str::CompactString;
@@ -43,9 +44,6 @@ use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 
 use crate::apply::{PruneBodyReader, PruneBodyStore};
-use bitcoin_rs_index::BlockSource;
-use bitcoin_rs_rpc::capabilities::{TxIndexStatus, TxIndexStatusSource};
-use bitcoin_rs_rpc::context::{BlockLog, record_at_height};
 
 /// Bounded scan limits used by the query engine.
 ///

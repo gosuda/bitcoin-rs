@@ -107,10 +107,10 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 ## Consensus validation
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Whether the native path also becomes the library and image default is the #213 measurement gate.
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Issue #213 keeps this library default until native wins the signed-spend and full-replay gates (`docs/contracts/validation-default.md`).
 
 ### Native Rust interpreter
-The pure-Rust script path used when `kernel` is off (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context.
+The pure-Rust script path used when `kernel` is off (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. It is the C++-free quickstart engine, not the library production default.
 
 ### One-shot kernel block parse
 Parsing each block exactly once with `bitcoinkernel::Block::new` (`KernelBlock`, `crates/consensus/src/kernel.rs`) and reusing that parse downstream for txids and the transaction objects script preparation borrows via `TransactionRef`. Price a replacement by everything it subsumes, not by the line item that motivated it.
@@ -280,6 +280,18 @@ authority, resolve locators from one stable UTXO view, and exact-check the full
 script before returning a result. Its watermark is independent of historical
 script rows, so live queries can become ready while history is still catching
 up.
+
+### Logical owner ledger
+Exact serialized key and value bytes for each column family or owning
+subsystem. Explains data-model growth. It is not filesystem allocation and
+must not be added to the physical ledger.
+
+### Physical namespace ledger
+Allocated filesystem blocks (`st_blocks * 512`) for each top-level
+data-directory namespace. The source of the data-directory budget. A snapshot
+is a lower bound on peak allocation; a passing sub-1-TB default-node result
+requires a conservative high-water from an isolated filesystem or project
+quota. See [docs/contracts/storage-footprint.md](docs/contracts/storage-footprint.md).
 
 ### Consumer cursor
 The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/node/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.

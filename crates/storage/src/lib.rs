@@ -71,6 +71,8 @@ pub mod cache_budget;
 pub mod column_families;
 /// Storage error type.
 pub mod error;
+/// Custody-grade logical and physical storage-footprint ledgers.
+pub mod footprint;
 /// Retention and deletion of block bodies and undo rows.
 pub mod pruning;
 /// Backend-neutral key-value store traits.
@@ -88,13 +90,19 @@ mod redb_impl;
 mod rocksdb_impl;
 
 pub use block_file::{
-    BLOCK_FILE_MAGIC, BLOCK_FILE_MAX_BYTES, BlockFilePosition, FlatFileBlockReader,
-    FlatFileBlockStore, block_file_max_height_key, decode_block_file_max_height,
-    encode_block_file_max_height,
+    BLOCK_FILE_DIRECTORY, BLOCK_FILE_MAGIC, BLOCK_FILE_MAX_BYTES, BlockFilePosition,
+    FlatFileBlockReader, FlatFileBlockStore, block_file_max_height_key, complete_framed_bytes,
+    complete_framed_stats, decode_block_file_max_height, encode_block_file_max_height,
+    is_block_file_name,
 };
 pub use cache_budget::{CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget};
 pub use column_families::ColumnFamily;
 pub use error::StorageError;
+pub use footprint::{
+    DataDirAnchor, FootprintError, LogicalLedger, LogicalOwner, PhysicalCategory, PhysicalLedger,
+    PhysicalNamespace, PhysicalObservationKind, logical_column_family, logical_store_owners,
+    measure_physical_tree,
+};
 pub use trait_::{
     KvIter, KvPair, KvSnapshot, KvStore, PrefixScan, PrefixScanLimit, WriteBatch, WriteCondition,
 };

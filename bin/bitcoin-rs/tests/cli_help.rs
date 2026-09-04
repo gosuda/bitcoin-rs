@@ -11,4 +11,8 @@ fn help_prints_binary_name() {
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("bitcoin-rs"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("--measure-storage"),
+        "help must name the storage-footprint measurement command"
+    );
 }

@@ -10,9 +10,8 @@ Owners:
   `crates/node/src/checkpoint.rs`, `crates/node/src/recovery_evidence.rs`
 - Derived-index position and transitions: `Worker::reconcile_once`,
   `ReconcilePhase`, `TxIndexLifecycle` in `crates/node/src/txindex_worker.rs`
-- Operator visibility: txindex status in `crates/node/src/txindex_worker.rs`,
-  RPC projection in `crates/rpc/src/capabilities.rs`,
-  `CapabilityState` in `crates/rpc/src/context.rs`, `WarningStore` and
+- Operator visibility: `TxIndexCapability` in `crates/node/src/txindex_worker.rs`,
+  RPC projection in `crates/rpc/src/capabilities.rs`, `WarningStore` and
   `RecoveryReporter` in `crates/node/src/recovery_evidence.rs`
 
 ## Clauses

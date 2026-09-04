@@ -7,8 +7,9 @@
 //! and is the production default in this crate and in `bitcoin-rs-node`.
 //! The `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no
 //! `kernel`), so `cargo build -p bitcoin-rs` uses the native interpreter.
-//! Whether that native path also becomes the library default is the
-//! measurement gate in issue #213.
+//! Issue #213 keeps `kernel` as the library default until native wins the
+//! signed-spend and full-replay gates; see
+//! `docs/contracts/validation-default.md`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 

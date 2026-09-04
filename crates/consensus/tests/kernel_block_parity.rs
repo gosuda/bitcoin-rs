@@ -23,20 +23,23 @@
 //! interpreter divergence. That cfg structure is production-correct and is
 //! pinned elsewhere (`verify_tx.rs` kernel tests); this file deliberately
 //! bypasses it for the *test-only* Rust verdict. [`differential_is_non_vacuous`]
-//! proves the bypass holds: it asserts the two engines *disagree* on inputs
-//! where they are known to differ, which is impossible if both sides reach the
-//! kernel.
+//! proves the bypass holds: each engine is run twice on a committed taproot
+//! script-path fixture (pristine vs tampered control block) and must accept
+//! the first and reject the second.
 //!
-//! ## Honest interpreter scoping — no fake parity
+//! ## Interpreter scoping (VAL-02)
 //!
-//! The portable `Interpreter` (`crates/script/src/interpreter.rs`, the script
-//! crate's default posture) natively executes exactly one class: **taproot
-//! key-path spends** (local BIP341 Schnorr verification). Legacy, P2SH,
-//! segwit v0, and taproot script-path spends have no Rust execution path —
-//! production routes those through bitcoinkernel. Fixtures therefore
-//! carry an explicit `interpreter_parity` flag: only the taproot key-path
-//! fixture asserts two-engine verdict parity; every other class is verified
-//! against the kernel alone, with the scoping stated rather than faked.
+//! This test is part of the proof for `VAL-02` in
+//! `docs/contracts/validation-default.md`. The native `Interpreter` executes
+//! every consensus spend class (legacy, P2SH, `SegWit` v0, Taproot key-path
+//! and script-path). Fixtures still carry an explicit `interpreter_parity`
+//! flag so the differential can be widened one class at a time; today the
+//! committed corpus asserts two-engine verdict parity on the taproot key-path
+//! fixture. Other classes are verified against the kernel, with native coverage
+//! proven separately by `crates/script/tests/core_vectors.rs`
+//! (`NATIVE_*_FAILURES = 0`, pinned skip counts). This file supplies the
+//! kernel-vs-interpreter differential for the Taproot key-path fixture and the
+//! script-path non-vacuity check.
 //!
 //! ## Fixtures
 //!
@@ -413,8 +416,7 @@ struct FixtureFile {
     source: String,
     /// Core-named verify flags active at `height`.
     flags: String,
-    /// Whether the in-repo Rust interpreter natively supports this class
-    /// (see module docs: single-input taproot key-path only).
+    /// Whether this fixture asserts kernel-vs-interpreter verdict parity.
     interpreter_parity: bool,
     /// Raw transaction hex.
     tx_hex: String,

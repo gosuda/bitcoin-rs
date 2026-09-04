@@ -14,6 +14,10 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Neutral block-body seam owned by `chain`. Re-exported so RPC handlers keep
+/// the historical `context::BlockBodySource` path without RPC owning bodies.
+pub use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource};
+
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
 /// How stale the applied tip may be while the node still counts as synced.
@@ -358,7 +362,6 @@ pub fn record_at_height_hash(
     }
     None
 }
-pub use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource};
 
 /// Read-only source of rollback-evidence warnings for `getblockchaininfo`.
 ///

@@ -39,19 +39,20 @@ out of tree.
 
 ### `WF-03`: Proof is a public-HTTP consumer
 
-- In-tree fixtures that import `NodeState`, `UtxoSet`, index types, or
-  other node crates do not prove this contract.
+- In-tree fixtures that violate `WF-01` do not prove this contract.
 - Proof: `bin/bitcoin-rs/tests/wallet_facing.rs` lives in the binary
   package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`. The package `[lib]`
-  is process-input adapters (`bitcoin.conf`); the test source does not
-  import that lib, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or index
-  types. It depends on rust-bitcoin and speaks only HTTP. It funds a
-  regtest chain through `getblocktemplate` / `submitblock` (this node
-  has no `generate*` RPC), then issues the BDK/esplora-client dialect —
-  tip, block height (including `/api/v1/block-height/{h}`), headers,
-  scripthash UTXOs/history, fee estimates, and `POST /api/v1/tx` — the
-  same operations [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet)
-  (`btcw -u`) sends against any Esplora URL.
+  is process-input adapters (`bitcoin.conf`). The binary package still
+  compiles node and storage so the daemon can start;
+  `source_does_not_import_node_internals` enforces `WF-01` on uncommented
+  proof source, including aliases and fully qualified paths. The test
+  depends on rust-bitcoin and speaks only HTTP. It funds a regtest chain
+  through `getblocktemplate` / `submitblock` (this node has no `generate*`
+  RPC), then issues the BDK/esplora-client dialect — tip, block height
+  (including `/api/v1/block-height/{h}`), headers, scripthash UTXOs/history,
+  fee estimates, and `POST /api/v1/tx` — the same operations
+  [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw -u`)
+  sends against any Esplora URL.
 - Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>`
   (or `http://<rpc-bind>/api`) against a node started with
   `--network regtest --scriptindex`. Failures of that run are
@@ -61,6 +62,7 @@ out of tree.
 ## Proven by
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
+- `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
 
 ## Vocabulary
 
