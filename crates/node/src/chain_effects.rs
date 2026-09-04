@@ -1,7 +1,8 @@
 //! Derived consumers of committed chain transitions.
 //!
-//! Ownership and ordering are specified by `ARCH-07` in
-//! [`docs/contracts/architecture.md`](https://github.com/gosuda/bitcoin-rs/blob/main/docs/contracts/architecture.md). Apply does not import these consumers.
+//! Ownership and ordering rules are defined by `ARCH-07` in
+//! [`docs/contracts/architecture.md`](../../docs/contracts/architecture.md). Apply
+//! does not import these consumer types.
 
 use std::sync::Arc;
 
