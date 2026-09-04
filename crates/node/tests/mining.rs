@@ -557,10 +557,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     })?;
     match result {
         BlockTemplateResult::Proposal(BlockValidationResult::Rejected(reason)) => {
-            assert!(
-                reason.contains("bad-cb-amount"),
-                "unexpected rejection reason: {reason}"
-            );
+            assert_eq!(reason.as_str(), "bad-cb-amount");
         }
         other => panic!("expected bad-cb-amount proposal rejection, got {other:?}"),
     }
@@ -572,6 +569,46 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     assert_eq!(before.hash, after.hash);
     assert_eq!(before_seq, state.mempool().read().sequence_number());
     assert_eq!(before_blocks, state.blocks().read().len());
+    Ok(())
+}
+
+#[test]
+fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let mut block = mined_child(genesis.block_hash())?;
+    let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+        panic!("child missing coinbase input");
+    };
+    input.previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0);
+    block.header.merkle_root = block_merkle_root(&block);
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-cb-missing");
+        }
+        other => panic!("expected bad-cb-missing, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let mut block = mined_child(genesis.block_hash())?;
+    block.header.merkle_root = Hash256::from_le_bytes(&[0x11; 32]);
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-txnmrklroot");
+        }
+        other => panic!("expected bad-txnmrklroot, got {other:?}"),
+    }
     Ok(())
 }
 

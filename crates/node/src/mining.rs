@@ -16,6 +16,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
     BlockTree, ChainError, NodeId, NodeStatus, TipSnapshot, accept_headers, current_unix_seconds,
 };
+use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_mempool::{
     Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
 };
@@ -981,25 +982,88 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 
 fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     match error {
-        ApplyError::ProofOfWork { .. } => {
-            BlockValidationResult::Rejected(CompactString::from("high-hash"))
-        }
-        ApplyError::PrevHashMismatch { .. } => {
-            BlockValidationResult::Rejected(CompactString::from("inconclusive-not-best-prevblk"))
-        }
-        ApplyError::TargetAboveLimit | ApplyError::NbitsNonRetargetMismatch { .. } => {
-            BlockValidationResult::Rejected(CompactString::from("bad-diffbits"))
-        }
-        ApplyError::BlockOutputsExceedInputs
-        | ApplyError::BlockValueOverflow
-        | ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { .. }) => {
-            BlockValidationResult::Rejected(CompactString::from("bad-cb-amount"))
-        }
         ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
             BlockValidationResult::Inconclusive
         }
-        other => BlockValidationResult::Rejected(CompactString::from(other.to_string())),
+        other => BlockValidationResult::Rejected(bip22_reject_reason(&other)),
     }
+}
+
+/// Core `GetRejectReason` strings used by `BIP22ValidationResult`.
+fn bip22_reject_reason(error: &ApplyError) -> CompactString {
+    match error {
+        ApplyError::ProofOfWork { .. } => CompactString::from("high-hash"),
+        ApplyError::PrevHashMismatch { .. } => CompactString::from("inconclusive-not-best-prevblk"),
+        ApplyError::TargetAboveLimit | ApplyError::NbitsNonRetargetMismatch { .. } => {
+            CompactString::from("bad-diffbits")
+        }
+        ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
+            CompactString::from("bad-cb-amount")
+        }
+        ApplyError::UndoPrevoutMissing { .. } => {
+            CompactString::from("bad-txns-inputs-missingorspent")
+        }
+        ApplyError::Consensus(consensus) => bip22_consensus_reason(consensus),
+        ApplyError::Chain(chain) => bip22_chain_reason(chain),
+        other => CompactString::from(other.to_string()),
+    }
+}
+
+fn bip22_consensus_reason(error: &ConsensusError) -> CompactString {
+    CompactString::from(match error {
+        ConsensusError::EmptyInputs => "bad-txns-vin-empty",
+        ConsensusError::EmptyOutputs => "bad-txns-vout-empty",
+        ConsensusError::CoinbaseScriptSigSize { .. } => "bad-cb-length",
+        ConsensusError::NullPrevout { .. } => "bad-txns-prevout-null",
+        ConsensusError::DuplicateInput { .. } => "bad-txns-inputs-duplicate",
+        ConsensusError::MissingPrevout { .. } => "bad-txns-inputs-missingorspent",
+        ConsensusError::OutputValueOverflow => "bad-txns-txouttotal-toolarge",
+        ConsensusError::InputsLessThanOutputs { .. } => "bad-txns-in-belowout",
+        ConsensusError::SigopsLimit { .. } => "bad-blk-sigops",
+        ConsensusError::EmptyBlock | ConsensusError::MissingCoinbase => "bad-cb-missing",
+        ConsensusError::ExtraCoinbase { .. } => "bad-cb-multiple",
+        ConsensusError::MerkleMutation => "bad-txns-duplicate",
+        ConsensusError::MerkleRoot => "bad-txnmrklroot",
+        ConsensusError::CoinbaseAmount { .. } => "bad-cb-amount",
+        ConsensusError::BlockValueOverflow => "bad-txns-accumulated-fee-outofrange",
+        ConsensusError::WitnessCommitment => "bad-witness-merkle-match",
+        ConsensusError::BlockWeight { .. } => "bad-blk-weight",
+        ConsensusError::Script { reason, .. } => {
+            return CompactString::from(format!("block-script-verify-flag-failed ({reason})"));
+        }
+        ConsensusError::Bip { bip, reason } => return bip22_bip_reason(bip, reason),
+        ConsensusError::PrevoutMatrixSize { .. }
+        | ConsensusError::Kernel(_)
+        | ConsensusError::Encoding(_) => return CompactString::from(error.to_string()),
+    })
+}
+
+fn bip22_bip_reason(bip: &str, reason: &str) -> CompactString {
+    CompactString::from(match bip {
+        "BIP30" => "bad-txns-BIP30",
+        "BIP34" => "bad-cb-height",
+        "BIP68" | "BIP113" => "bad-txns-nonfinal",
+        "COINBASE_MATURITY" => "bad-txns-premature-spend-of-coinbase",
+        _ => {
+            return CompactString::from(format!(
+                "block-script-verify-flag-failed ({bip}: {reason})"
+            ));
+        }
+    })
+}
+
+fn bip22_chain_reason(error: &ChainError) -> CompactString {
+    CompactString::from(match error {
+        ChainError::InvalidPow { .. } => "high-hash",
+        ChainError::ZeroTarget { .. }
+        | ChainError::TargetExceedsLimit { .. }
+        | ChainError::NbitsMismatch { .. } => "bad-diffbits",
+        ChainError::TimestampTooEarly { .. } => "time-too-old",
+        ChainError::TimestampTooFarAhead { .. } => "time-too-new",
+        ChainError::MissingParent { .. } => "prev-blk-not-found",
+        ChainError::DuplicateHeader { .. } => "duplicate",
+        _ => return CompactString::from(error.to_string()),
+    })
 }
 
 fn header_reject_reason(error: ChainError) -> MiningControlError {
@@ -1022,6 +1086,17 @@ fn header_reject_reason(error: ChainError) -> MiningControlError {
 mod apply_error_tests {
     use super::{BlockValidationResult, map_apply_error};
     use crate::state::ApplyError;
+    use bitcoin_rs_chain::{ChainError, ChainWork};
+    use bitcoin_rs_consensus::ConsensusError;
+    use bitcoin_rs_primitives::Hash256;
+    use compact_str::CompactString;
+
+    fn rejected(error: ApplyError) -> CompactString {
+        match map_apply_error(error) {
+            BlockValidationResult::Rejected(reason) => reason,
+            other => panic!("expected rejected, got {other:?}"),
+        }
+    }
 
     #[test]
     fn journal_backpressure_is_operational() {
@@ -1032,16 +1107,128 @@ mod apply_error_tests {
     }
 
     #[test]
-    fn coinbase_amount_is_bad_cb_amount() {
-        assert!(matches!(
-            map_apply_error(ApplyError::Consensus(
-                bitcoin_rs_consensus::ConsensusError::CoinbaseAmount {
-                    paid: 1,
-                    allowed: 0,
+    fn consensus_failures_use_core_bip22_reasons() {
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::CoinbaseAmount {
+                paid: 1,
+                allowed: 0,
+            })),
+            "bad-cb-amount"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::MissingCoinbase)),
+            "bad-cb-missing"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::EmptyBlock)),
+            "bad-cb-missing"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::ExtraCoinbase {
+                tx_index: 1
+            })),
+            "bad-cb-multiple"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::MerkleRoot)),
+            "bad-txnmrklroot"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::MerkleMutation)),
+            "bad-txns-duplicate"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::WitnessCommitment)),
+            "bad-witness-merkle-match"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::BlockWeight {
+                weight: 5,
+                max: 4,
+            })),
+            "bad-blk-weight"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::EmptyInputs)),
+            "bad-txns-vin-empty"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::MissingPrevout {
+                input_index: 0
+            })),
+            "bad-txns-inputs-missingorspent"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(
+                ConsensusError::InputsLessThanOutputs {
+                    input_value: 1,
+                    output_value: 2,
                 }
             )),
-            BlockValidationResult::Rejected(reason) if reason == "bad-cb-amount"
-        ));
+            "bad-txns-in-belowout"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::Bip {
+                bip: "BIP34",
+                reason: "x".to_owned(),
+            })),
+            "bad-cb-height"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::Bip {
+                bip: "BIP113",
+                reason: "x".to_owned(),
+            })),
+            "bad-txns-nonfinal"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::Bip {
+                bip: "COINBASE_MATURITY",
+                reason: "x".to_owned(),
+            })),
+            "bad-txns-premature-spend-of-coinbase"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::Script {
+                input_index: 0,
+                reason: "EVAL_FALSE".to_owned(),
+            })),
+            "block-script-verify-flag-failed (EVAL_FALSE)"
+        );
+    }
+
+    #[test]
+    fn header_failures_use_core_bip22_reasons() {
+        let hash = Hash256::default();
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::InvalidPow {
+                hash,
+                target: ChainWork::ZERO,
+            })),
+            "high-hash"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::TimestampTooEarly {
+                hash,
+                timestamp: 1,
+                median: 2,
+            })),
+            "time-too-old"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::TimestampTooFarAhead {
+                hash,
+                timestamp: 9,
+                max_allowed: 1,
+            })),
+            "time-too-new"
+        );
+        assert_eq!(
+            rejected(ApplyError::Chain(ChainError::MissingParent {
+                prev_hash: hash
+            })),
+            "prev-blk-not-found"
+        );
     }
 }
 
