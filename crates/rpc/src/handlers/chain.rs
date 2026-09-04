@@ -312,7 +312,7 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                 return Err(RpcError::NotFound("block not found"));
             };
             if ctx.block_hash_at_height(height) != Some(hash) {
-                return Err(RpcError::InvalidParameter("Block is not in main chain".to_owned()));
+                return Err(RpcError::InvalidParams("Block is not in main chain"));
             }
             hash
         }
@@ -368,7 +368,9 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                 } else {
                     total_tx_count.saturating_sub(start.chain_tx_count)
                 };
-                if total_tx_count == 0 && ctx.applied_hash() == tip_hash {
+                if (total_tx_count == 0 || start.chain_tx_count == 0)
+                    && ctx.applied_hash() == tip_hash
+                {
                       let log = ctx.blocks.read();
                       let complete = log.first().is_some_and(|record| record.height == 0)
                           && log.last().is_some_and(|record| {
@@ -3959,7 +3961,7 @@ mod chaintxstats_durability_tests {
         let err = getchaintxstats(&ctx, &json!([1, lost_hash.to_string_be()])).unwrap_err();
         assert!(matches!(
             err,
-            RpcError::InvalidParams("Block is not in main chain")
+            RpcError::InvalidParameter("Block is not in main chain".to_owned())
         ));
         let value = getchaintxstats(&ctx, &json!([1, won.hash.to_string_be()]))
             .unwrap_or_else(|err| panic!("winning branch stats failed: {err}"));
@@ -4606,7 +4608,7 @@ mod chaintxstats_window_tests {
         let err = getchaintxstats(&ctx, &json!([1, lost_hash.to_string_be()])).unwrap_err();
         assert!(matches!(
             err,
-            RpcError::InvalidParams("Block is not in main chain")
+            RpcError::InvalidParameter("Block is not in main chain".to_owned())
         ));
         let value = getchaintxstats(&ctx, &json!([1, won.hash.to_string_be()]))
             .unwrap_or_else(|err| panic!("winning branch stats failed: {err}"));
