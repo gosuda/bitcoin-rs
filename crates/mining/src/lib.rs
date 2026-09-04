@@ -3,7 +3,7 @@
 
 /// Coinbase transaction assembly.
 pub mod coinbase;
-/// Candidate chain context and proposal header checks.
+/// Candidate chain context.
 pub mod context;
 /// Node-facing mining control contract.
 pub mod control;
@@ -13,7 +13,7 @@ pub mod policy;
 pub mod template;
 
 pub use coinbase::{MiningError, WITNESS_RESERVED_VALUE, witness_commitment_script};
-pub use context::{MiningChainContext, check_candidate_header};
+pub use context::MiningChainContext;
 pub use control::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
     BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
