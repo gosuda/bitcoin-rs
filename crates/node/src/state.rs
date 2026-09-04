@@ -54,7 +54,8 @@ pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
 // lock a listener needs, so the bound cannot deadlock. Sized well above the
 // in-flight request window (`PENDING_BUDGET` = 256) so honest delivery, which
 // wakes the drain on every block, is never throttled.
-pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
+pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize =
+      2 * bitcoin_rs_p2p::PENDING_BUDGET;
 // Bounds chain-event hints between the block-apply commit path and
 // reconciliation consumers (#77). Hints are wake-ups, never data: a consumer
 // that misses one recovers by reconciling `ChainSnapshot` against its own
@@ -1798,7 +1799,7 @@ impl NodeState {
                 dns_port: config.network.default_p2p_port(),
                 fixed_peers: config.p2p.connect.clone(),
                 outbound_active_limit: P2P_OUTBOUND_QUEUE_LIMIT,
-                outbound_peer_target: P2P_OUTBOUND_QUEUE_LIMIT,
+                outbound_peer_target: bitcoin_rs_p2p::DEFAULT_OUTBOUND_PEER_TARGET,
                 outbound_queue_limit: P2P_OUTBOUND_QUEUE_LIMIT,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
                 download_budget: bitcoin_rs_p2p::default_sync_budget(),

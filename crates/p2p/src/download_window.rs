@@ -23,7 +23,7 @@ use crate::PeerInfo;
 pub const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///
-/// 256 is the measured single-peer IBD depth: a bounded 0–150,000 daemon
+/// A deeper single-peer IBD window; fan-out still stripes at the per-peer cap.
 /// run at this window was 1.52× the 128-block control. Fan-out still stripes
 /// at [`MAX_BLOCKS_IN_TRANSIT_PER_PEER`] once [`MIN_PEERS_FOR_FANOUT`] eligible
 /// peers exist, so a full outbound set does not deepen per-peer pipelines.
@@ -89,7 +89,8 @@ pub const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
 /// does not reproduce the recorded head-of-line collapse. Do not scale this
 /// with [`PENDING_BUDGET`]: `PENDING_BUDGET / 16` would be 16, and fan-out
 /// would never engage at the 8-outbound default.
-pub const MIN_PEERS_FOR_FANOUT: usize = 8;
+pub const DEFAULT_OUTBOUND_PEER_TARGET: usize = 8;
+  pub const MIN_PEERS_FOR_FANOUT: usize = DEFAULT_OUTBOUND_PEER_TARGET;
 /// Initial window-blocked stalling threshold.
 ///
 /// Mirrors Bitcoin Core's `BLOCK_STALLING_TIMEOUT_DEFAULT` (2s,
@@ -641,7 +642,7 @@ impl DownloadWindow {
         self.budget
             .max_pending_blocks
             .div_ceil(self.fanout_eligible_peers.max(1))
-            .max(self.budget.fanout_peer_inflight)
+            .min(self.budget.fanout_peer_inflight)
             .min(self.budget.max_peer_inflight)
     }
 
