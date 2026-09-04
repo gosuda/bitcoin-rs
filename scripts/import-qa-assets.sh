@@ -187,11 +187,8 @@ map_direct() {
 map_p2p
 map_script
 map_direct "${CORPORA}/bitcoin_deserialize_block" "${OUT_BASE}/block_validate" block_validate/deserialize
-map_direct "${CORPORA}/bitcoin_arbitrary_block" "${OUT_BASE}/block_validate" block_validate/arbitrary
 map_direct "${CORPORA}/bitcoin_deserialize_transaction" "${OUT_BASE}/tx_validate" tx_validate/deserialize
-map_direct "${CORPORA}/bitcoin_arbitrary_transaction" "${OUT_BASE}/tx_validate" tx_validate/arbitrary
 map_direct "${CORPORA}/bitcoin_deserialize_witness" "${OUT_BASE}/tx_validate" tx_validate/witness
-map_direct "${CORPORA}/bitcoin_arbitrary_witness" "${OUT_BASE}/tx_validate" tx_validate/arbitrary_witness
 
 # --- 6. Minimize each target corpus with cargo fuzz cmin ---------------------
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message

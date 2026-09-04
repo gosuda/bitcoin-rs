@@ -7,13 +7,16 @@ use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_consensus::{verify_block_rules, verify_transaction_non_script};
 use bitcoin_rs_primitives::{Block, OutPoint, TxOut};
 
-/// UTXO view with no coins. Non-coinbase inputs fail `MissingPrevout`;
-/// `verify_block_rules` does not consult it.
-struct EmptyView;
+/// Deterministic synthetic coins let transaction checks reach value and sigop
+/// validation while retaining the normal structural checks.
+struct SyntheticView;
 
-impl UtxoView for EmptyView {
+impl UtxoView for SyntheticView {
     fn lookup(&self, _outpoint: &OutPoint) -> Option<TxOut> {
-        None
+        Some(TxOut {
+            value: 50_000_000,
+            script_pubkey: Vec::new(),
+        })
     }
 }
 
@@ -28,7 +31,7 @@ fn validate_block(data: &[u8]) {
     };
     let _ = verify_block_rules(&block);
     for tx in &block.txs {
-        let _ = verify_transaction_non_script(tx, &EmptyView, 1, 0);
+        let _ = verify_transaction_non_script(tx, &SyntheticView, 1, 0);
     }
 }
 
