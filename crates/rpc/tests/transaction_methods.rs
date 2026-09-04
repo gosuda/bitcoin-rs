@@ -163,12 +163,12 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// A transaction the mempool evicted after an earlier `sendrawtransaction`
-/// must be admitted again on resubmission. Wallets rebroadcast unconfirmed
-/// transactions; a success reply that leaves the pool untouched would make
-/// that rebroadcast a silent no-op.
+/// POL-01: a transaction the mempool evicted after an earlier
+/// `sendrawtransaction` must be admitted again on resubmission. Wallets
+/// rebroadcast unconfirmed transactions; a success reply that leaves the pool
+/// untouched would make that rebroadcast a silent no-op.
 #[test]
-fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
+fn pol01_sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
 -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
