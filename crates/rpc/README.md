@@ -18,7 +18,7 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 ### 1. Protocol demuxing and authentication
 - **Transport Demuxing**: Private free function `classify` (`crates/rpc/src/server.rs`) is the listener directory table. `serve_connection` dispatches that table before authentication:
   - `GET /rest/*` → Core REST (`rest::route`).
-  - `GET` or `POST` under `/api` or `/esplora` → Esplora (`esplora::route` / `route_post`). Those directories are closed: unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
+  - `GET` or `POST` under `/api` or `/esplora` → Esplora. `classify` strips the directory prefix and passes `Surface` plus the rest; `esplora::route` / `route_post` only dispatch inside that directory. Unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
   - Other `POST` → JSON-RPC. `Auth::validate_header` (`crates/rpc/src/auth.rs`) guards this path only.
   - Any other method or GET outside `/rest/`, `/api`, and `/esplora` → 404 at the demux. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` do not enter Esplora or JSON-RPC. The request parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
 - **JSON-RPC Framing & Protocol Versioning**: `JsonRpcVersion` (`crates/rpc/src/server.rs`) governs wire framing:

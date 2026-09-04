@@ -21,7 +21,6 @@ use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::Response;
 
-use self::http::not_found;
 use self::projection::Projection;
 
 /// Which Esplora directory a request landed in.
@@ -33,15 +32,12 @@ pub enum Surface {
     Backend,
 }
 
-/// Routes a read-only Esplora request from the node HTTP listener.
+/// Routes a read-only Esplora request already classified onto a surface.
 ///
-/// `/api` is the public electrs directory. `/esplora` is the mempool-backend
-/// superset of that tree. Unprefixed paths 404 so JSON-RPC owns `/`.
+/// `path` is the rest after `/api` or `/esplora`. The listener demux owns
+/// prefix matching; this function only dispatches inside a directory.
 #[must_use]
-pub fn route(handler: &Handler, path: &str, query: &str) -> Response {
-    let Some((surface, path)) = namespace(path) else {
-        return not_found();
-    };
+pub fn route(handler: &Handler, surface: Surface, path: &str, query: &str) -> Response {
     let ctx = handler.context();
     let projection = Projection::new(&ctx);
     let chain_view = projection.capture_chain_view();
@@ -69,18 +65,16 @@ fn dispatch_get(
 
 /// Routes Esplora raw-transaction broadcast and mempool-backend POSTs.
 ///
-/// Returns `None` outside `/api` and `/esplora` so the HTTP demux can fall
-/// through to JSON-RPC. Inside either directory the namespace is closed:
-/// unknown paths 404.
+/// `path` is the rest after `/api` or `/esplora`. Unknown paths 404.
+/// The listener demux never calls this outside those directories.
 #[must_use]
-pub fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
-    let (surface, path) = namespace(path)?;
+pub fn route_post(handler: &Handler, surface: Surface, path: &str, body: &[u8]) -> Response {
     if surface == Surface::Backend {
         if let Some(response) = backend::post(handler, path, body) {
-            return Some(response);
+            return response;
         }
     }
-    Some(public::post(handler, path, body))
+    public::post(handler, path, body)
 }
 
 /// See `docs/contracts/wallet-facing.md` WF-02.
@@ -136,19 +130,29 @@ mod tests {
     /// Canonical public Esplora lives at `/api`. Tests that omit the prefix
     /// are naming that surface, not a second listener root.
     fn route(handler: &Handler, path: &str, query: &str) -> Response {
-        super::route(handler, &api(path), query)
+        dispatch(handler, &api(path), query)
     }
 
-    fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
-        super::route_post(handler, &api(path), body)
+    fn route_post(handler: &Handler, path: &str, body: &[u8]) -> Response {
+        dispatch_post(handler, &api(path), body)
     }
 
     fn backend_route(handler: &Handler, path: &str, query: &str) -> Response {
-        super::route(handler, &esplora(path), query)
+        dispatch(handler, &esplora(path), query)
     }
 
-    fn backend_route_post(handler: &Handler, path: &str, body: &[u8]) -> Option<Response> {
-        super::route_post(handler, &esplora(path), body)
+    fn backend_route_post(handler: &Handler, path: &str, body: &[u8]) -> Response {
+        dispatch_post(handler, &esplora(path), body)
+    }
+
+    fn dispatch(handler: &Handler, full: &str, query: &str) -> Response {
+        let (surface, path) = super::namespace(full).expect("test path is an Esplora directory");
+        super::route(handler, surface, path, query)
+    }
+
+    fn dispatch_post(handler: &Handler, full: &str, body: &[u8]) -> Response {
+        let (surface, path) = super::namespace(full).expect("test path is an Esplora directory");
+        super::route_post(handler, surface, path, body)
     }
 
     fn api(path: &str) -> String {
@@ -688,7 +692,7 @@ mod tests {
 
         let broadcast_transaction = transaction_with_funded_input(handler.context().as_ref());
         let raw = consensus_bytes(&broadcast_transaction).to_lower_hex_string();
-        let broadcast = route_post(&handler, "/tx", raw.as_bytes()).expect("POST /tx is routed");
+        let broadcast = route_post(&handler, "/tx", raw.as_bytes());
         assert_eq!(
             broadcast.status,
             200,
@@ -700,8 +704,7 @@ mod tests {
         // Package relay is conditional in API.md (Bitcoin Core 28+). This node
         // has no atomic package-admission capability, so it must not advertise
         // sequential sendrawtransaction calls as that endpoint.
-        let package = route_post(&handler, "/txs/package", b"[]")
-            .expect("package path must not fall through to JSON-RPC");
+        let package = route_post(&handler, "/txs/package", b"[]");
         assert_eq!(package.status, 404);
         Ok(())
     }
@@ -878,39 +881,35 @@ mod tests {
         let genesis = route(&handler, "/block-height/0", "");
         assert_eq!(genesis.status, 200);
         assert_eq!(
-            super::route(&handler, "/api/block-height/0", "").body,
+            dispatch(&handler, "/api/block-height/0", "").body,
             genesis.body
         );
-        assert_eq!(
-            super::route(&handler, "/block-height/0", "").status,
-            404,
+        assert!(
+            super::namespace("/block-height/0").is_none(),
             "unprefixed electrs paths are not Esplora on this listener"
         );
         assert_eq!(
-            super::route(&handler, "/api/v1/block-height/0", "").status,
+            dispatch(&handler, "/api/v1/block-height/0", "").status,
             404,
             "/api/v1 is Mempool's API, not an Esplora alias"
         );
-        assert_eq!(super::route(&handler, "/apitx", "").status, 404);
         assert!(
-            super::route_post(&handler, "/api/tx", b"00").is_some(),
-            "POST /api/tx must not fall through to JSON-RPC"
-        );
-        assert!(
-            super::route_post(&handler, "/api/v1/tx", b"00").is_some(),
-            "POST /api/v1/tx stays in the /api namespace (404), not JSON-RPC"
+            super::namespace("/apitx").is_none(),
+            "/apitx is not an Esplora directory"
         );
         assert_eq!(
-            super::route_post(&handler, "/api/v1/tx", b"00").map(|response| response.status),
-            Some(404)
+            dispatch_post(&handler, "/api/tx", b"00").status,
+            400,
+            "POST /api/tx stays Esplora"
+        );
+        assert_eq!(
+            dispatch_post(&handler, "/api/v1/tx", b"00").status,
+            404,
+            "POST /api/v1/tx stays in the /api namespace, not JSON-RPC"
         );
         assert!(
-            super::route_post(&handler, "/tx", b"00").is_none(),
+            super::namespace("/tx").is_none(),
             "unprefixed POST /tx falls through to JSON-RPC"
-        );
-        assert!(
-            super::route_post(&handler, "/apitx", b"00").is_none(),
-            "POST /apitx is not an Esplora path"
         );
         Ok(())
     }
@@ -928,24 +927,22 @@ mod tests {
             404,
             "/api/block-template is not a wallet-facing route"
         );
-        assert_eq!(
-            super::route(&handler, "/internal/mempool/txs", "").status,
-            404,
+        assert!(
+            super::namespace("/internal/mempool/txs").is_none(),
             "unprefixed /internal is not served"
         );
         assert_eq!(
-            super::route_post(&handler, "/api/internal/txs", b"[]").map(|response| response.status),
-            Some(404),
+            dispatch_post(&handler, "/api/internal/txs", b"[]").status,
+            404,
             "POST /api/internal/txs stays in the public directory (404)"
         );
         assert_eq!(
-            super::route_post(&handler, "/api/v1/not-esplora", b"{}")
-                .map(|response| response.status),
-            Some(404),
+            dispatch_post(&handler, "/api/v1/not-esplora", b"{}").status,
+            404,
             "unknown POST under /api must not fall through to JSON-RPC"
         );
         assert!(
-            super::route_post(&handler, "/not-esplora", b"{}").is_none(),
+            super::namespace("/not-esplora").is_none(),
             "unprefixed unknown POST still falls through to JSON-RPC"
         );
         Ok(())
@@ -970,19 +967,17 @@ mod tests {
             "/esplora is a superset: public electrs routes still answer"
         );
         assert_eq!(
-            super::route_post(&handler, "/esplora/internal/txs", b"[]")
-                .map(|response| response.status),
-            Some(200),
+            dispatch_post(&handler, "/esplora/internal/txs", b"[]").status,
+            200,
             "POST /esplora/internal/txs is the mempool-backend bulk path"
         );
         assert_eq!(
-            super::route_post(&handler, "/esplora/not-esplora", b"{}")
-                .map(|response| response.status),
-            Some(404),
+            dispatch_post(&handler, "/esplora/not-esplora", b"{}").status,
+            404,
             "unknown POST under /esplora must not fall through to JSON-RPC"
         );
         assert!(
-            super::route_post(&handler, "/esplorafoo", b"{}").is_none(),
+            super::namespace("/esplorafoo").is_none(),
             "POST /esplorafoo is not an Esplora path"
         );
         Ok(())
@@ -1032,8 +1027,7 @@ mod tests {
         let handler = Handler::new(Arc::clone(&ctx));
         let body = serde_json::to_vec(&vec![txid.to_string()]).expect("txids serialize");
 
-        let post = backend_route_post(&handler, "/internal/mempool/txs", &body)
-            .expect("internal route is handled");
+        let post = backend_route_post(&handler, "/internal/mempool/txs", &body);
         assert_eq!(post.status, 200);
         let paged = backend_route(&handler, "/internal/mempool/txs", "max_txs=1");
         assert_eq!(paged.status, 200);
@@ -1055,8 +1049,7 @@ mod tests {
             ("/internal/txs/outspends/by-txid", ids.as_slice()),
             ("/internal/txs/outspends/by-outpoint", outpoints.as_slice()),
         ] {
-            let response =
-                backend_route_post(&handler, path, body).expect("internal POST route exists");
+            let response = backend_route_post(&handler, path, body);
             assert_eq!(response.status, 200, "status for {path}");
             assert_eq!(response.content_type, "application/json");
         }
@@ -1075,10 +1068,7 @@ mod tests {
     #[test]
     fn package_broadcast_is_not_exposed_without_package_admission() {
         let handler = Handler::new(Arc::new(Context::new()));
-        assert_eq!(
-            route_post(&handler, "/txs/package", b"[]").map(|response| response.status),
-            Some(404)
-        );
+        assert_eq!(route_post(&handler, "/txs/package", b"[]").status, 404);
     }
 
     #[test]
@@ -1088,7 +1078,7 @@ mod tests {
         let txid = transaction.txid();
         let handler = Handler::new(ctx);
         let raw = consensus_bytes(&transaction).to_lower_hex_string();
-        let broadcast = route_post(&handler, "/tx", raw.as_bytes()).expect("broadcast route");
+        let broadcast = route_post(&handler, "/tx", raw.as_bytes());
         assert_eq!(broadcast.status, 200);
         let response = route(&handler, &format!("/tx/{txid}"), "");
         assert_eq!(response.status, 200);
