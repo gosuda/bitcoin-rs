@@ -1288,7 +1288,15 @@ impl Chainstate {
 
     /// See `ARCH-07` in `docs/contracts/architecture.md`.
     pub fn validate_block(&self, block: &Block) -> core::result::Result<(), ApplyError> {
-        let _lock = self.lock_transition()?;
+        let lock = self.lock_transition()?;
+        self.validate_block_locked(block, &lock)
+    }
+
+    pub(crate) fn validate_block_locked(
+        &self,
+        block: &Block,
+        _lock: &TransitionLock<'_>,
+    ) -> core::result::Result<(), ApplyError> {
         match apply_block_admitted(
             self,
             block,

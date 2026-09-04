@@ -619,11 +619,17 @@ impl MiningCoordinator {
                     "node is shutting down",
                 )));
             }
+            let transition = if matches!(request.selection, GenerateSelection::Ordered(_)) {
+                Some(self.apply_handles.lock_transition().map_err(|error| {
+                    MiningControlError::Unavailable(CompactString::from(error.to_string()))
+                })?)
+            } else {
+                None
+            };
             let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
             let mut block = candidate.into_unsolved_block();
-            if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                // CONTRACT: docs/contracts/external-api.md#API-27
-                self.test_generateblock_validity(&block)?;
+            if let Some(ref lock) = transition {
+                self.test_generateblock_validity(&block, lock)?;
             }
             solve_block(&mut block, request.max_tries).map_err(|error| {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
@@ -653,14 +659,14 @@ impl MiningCoordinator {
         Ok(generated)
     }
 
-    /// Core `generateblock` `TestBlockValidity` before `GenerateBlock`.
-    ///
-    /// `ApplyIntent::Propose` already skips hash-meets-target. This path does
-    /// not use [`Self::propose`], which owns GBT `LookupBlockIndex` duplicate
-    /// vocabulary (`API-14`/`API-21`).
+    /// Validate a freshly assembled `generateblock` candidate under the chain transition lock.
     /// CONTRACT: docs/contracts/external-api.md#API-27
-    fn test_generateblock_validity(&self, block: &Block) -> Result<(), MiningControlError> {
-        match apply::validate_block(&self.apply_handles, block) {
+    fn test_generateblock_validity(
+        &self,
+        block: &Block,
+        lock: &apply::TransitionLock<'_>,
+    ) -> Result<(), MiningControlError> {
+        match self.apply_handles.validate_block_locked(block, lock) {
             Ok(()) => Ok(()),
             Err(error) => Err(test_block_validity_error(error)),
         }
@@ -1006,11 +1012,10 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 }
 
 fn map_apply_error(error: ApplyError) -> BlockValidationResult {
-    match error {
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
-            BlockValidationResult::Inconclusive
-        }
-        other => BlockValidationResult::Rejected(bip22_reject_reason(&other)),
+    if is_operational_apply_error(&error) {
+        BlockValidationResult::Inconclusive
+    } else {
+        BlockValidationResult::Rejected(bip22_reject_reason(&error))
     }
 }
 
@@ -1096,8 +1101,21 @@ fn bip22_chain_reason(error: &ChainError) -> CompactString {
 /// Core `JSONRPCError(RPC_VERIFY_ERROR, "TestBlockValidity failed: %s")`.
 ///
 /// Shutdown and journal backpressure stay operational; they are not wrapped
-/// as `TestBlockValidity`. CONTRACT: docs/contracts/external-api.md#API-27
+/// as TestBlockValidity. CONTRACT: docs/contracts/external-api.md#API-27
+fn is_operational_apply_error(error: &ApplyError) -> bool {
+    matches!(error, ApplyError::Shutdown | ApplyError::JournalBackpressure(_))
+}
+
 fn test_block_validity_error(error: ApplyError) -> MiningControlError {
+    if is_operational_apply_error(&error) {
+        MiningControlError::Unavailable(CompactString::from(error.to_string()))
+    } else {
+        MiningControlError::Rejected(CompactString::from(format!(
+            "TestBlockValidity failed: {}",
+            bip22_reject_reason(&error)
+        )))
+    }
+/*REMOVED
     match error {
         ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
             MiningControlError::Unavailable(CompactString::from(error.to_string()))
@@ -1107,6 +1125,7 @@ fn test_block_validity_error(error: ApplyError) -> MiningControlError {
             bip22_reject_reason(&other)
         ))),
     }
+*/
 }
 
 fn header_reject_reason(error: ChainError) -> MiningControlError {
