@@ -2,7 +2,8 @@
 
 `API-01`–`API-04` place owners under the
 [contracts precedence rule](README.md). `API-05` is the solo-mining generate
-path. `API-06` is `getnetworkhashps` snapshot consistency.
+path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the RPC
+transport socket policy.
 
 ## Clauses
 
@@ -84,6 +85,13 @@ path. `API-06` is `getnetworkhashps` snapshot consistency.
 - An empty chain with `height == -1` estimates `0.0`.
 - `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
   does not use this RPC height-validation error path.
+
+### `API-07`: RPC transport sockets disable Nagle
+
+- RPC HTTP and metrics scrape TCP sockets set `TCP_NODELAY` before serving
+  requests, so small responses are not delayed by Nagle's algorithm.
+- This socket policy applies to both accepted RPC connections and metrics
+  scrape connections.
 
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
