@@ -163,7 +163,19 @@ pub enum ConsensusError {
     /// Summing a block's values overflowed the satoshi range.
     #[error("block value total overflows the satoshi range")]
     BlockValueOverflow,
+    /// Coinbase witness reserved nonce is missing or the wrong size.
+    ///
+    /// Bitcoin Core's `bad-witness-nonce-size`.
+    #[error("coinbase witness reserved nonce is missing or the wrong size")]
+    WitnessNonceSize,
+    /// Witness data is present without a BIP141 commitment, or before SegWit.
+    ///
+    /// Bitcoin Core's `unexpected-witness`.
+    #[error("unexpected witness data")]
+    UnexpectedWitness,
     /// Block witness commitment does not match.
+    ///
+    /// Bitcoin Core's `bad-witness-merkle-match`.
     #[error("block witness commitment mismatch")]
     WitnessCommitment,
     /// Block weight exceeds consensus maximum.
