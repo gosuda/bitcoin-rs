@@ -2125,7 +2125,8 @@ mod writer_shutdown_tests {
     }
 
     #[test]
-    fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
+    /// P2P-03: control messages coalesce while bulk payloads remain isolated.
+      fn collect_write_burst_coalesces_control_until_a_bulk_payload() {
         let (tx, rx) = crossbeam_channel::unbounded();
         tx.send(crate::Message::Pong(1)).expect("pong");
         tx.send(crate::Message::Block(
@@ -2145,7 +2146,8 @@ mod writer_shutdown_tests {
     }
 
     #[test]
-    fn collect_write_burst_emits_a_bulk_payload_alone() {
+    /// P2P-03: bulk payloads are emitted alone and do not consume queued controls.
+      fn collect_write_burst_emits_a_bulk_payload_alone() {
         let (tx, rx) = crossbeam_channel::unbounded();
         tx.send(crate::Message::Ping(1)).expect("ping");
         let (burst, leftover) = collect_write_burst(
