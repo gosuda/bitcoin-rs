@@ -25,7 +25,9 @@ pub use bip9_cache::CachedState;
 pub use bitcoin_rs_consensus::SoftforkState;
 pub use bitcoin_rs_primitives::Network;
 pub use block_body::{BlockBodyMetadata, BlockBodySource};
-pub use deployment::{candidate_version, softfork_state};
+pub use deployment::{
+    SignallingDeployment, candidate_version, signalling_deployments, softfork_state,
+};
 pub use header_sync::{accept_headers, current_unix_seconds, validate_header_timestamp};
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use reorg::{ReorgPlan, plan_reorg};

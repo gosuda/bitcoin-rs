@@ -74,9 +74,10 @@ pub use bitcoin_rs_primitives::Network;
 pub use chain_effects::{ChainEffects, ChainFollowers};
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
-    NetworkSelection, NodeConfig, NotificationConfig, ObservabilityConfig, ObservabilityOverrides,
-    P2pConfig, P2pOverrides, RpcConfig, RpcOverrides, RuntimeInputs, ScriptIndexMode,
-    StorageConfig, StorageOverrides, UserConfig, ValidationConfig, ValidationOverrides, resolve,
+    MiningConfig, MiningOverrides, NetworkSelection, NodeConfig, NotificationConfig,
+    ObservabilityConfig, ObservabilityOverrides, P2pConfig, P2pOverrides, RpcConfig, RpcOverrides,
+    RuntimeInputs, ScriptIndexMode, StorageConfig, StorageOverrides, UserConfig, ValidationConfig,
+    ValidationOverrides, resolve,
 };
 pub use embed::{Node, NodeError, SyncProgress};
 pub use mining::{GenerationKey, MiningCoordinator};

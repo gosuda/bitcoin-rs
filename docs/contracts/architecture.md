@@ -114,17 +114,23 @@ Owners:
   node runtime.
 - Domain mechanics belong to domain crates: consensus rules in consensus/script,
   mempool admission and mutation sequencing in mempool, connection lifecycle in
-  p2p, template assembly in mining, and index schemas in their owning crates.
+  p2p, template assembly and the mining control contract in mining, and index
+  schemas in their owning crates. `bitcoin-rs-mining` owns `Candidate`,
+  `BlockTemplate`, `MiningInfo`, and `MiningControl`. RPC maps those types onto
+  BIP22/BIP23 JSON and does not cache templates or long-poll.
 - `bitcoin-rs-node` owns runtime startup/shutdown sequencing, configuration
-  resolution and validation (`UserConfig` layers → `NodeConfig`), and
+  resolution and validation (`UserConfig` layers → `NodeConfig`), the mining
+  generation coordinator keyed by `(applied_tip_hash, mempool_sequence)`,
+  watch-only coinbase payout configuration (`MiningConfig::payout_script`), and
   process-level cache budgeting (`dbcache` distribution across chainstate and
   txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
   TOML parsing. Applied-tip mutation is owned by the chainstate facade
   (`ARCH-07`), not by a public field bag of subsystem handles.
 - `UserConfig::overlay` applies a later layer field-wise: a set field replaces
   the earlier value; an unset field leaves it. Nested override structs merge
-  the same way, including `ChainstateJournalOverrides`. Proof:
-  `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`.
+  the same way, including `ChainstateJournalOverrides` and `MiningOverrides`. Proof:
+  `crates/node/src/config.rs` tests `user_config_overlay_lets_set_fields_win` and
+  `mining_payout_overlay_lets_the_later_address_win`.
 
 ### `ARCH-06`: Hierarchy change and exception process
 
@@ -226,3 +232,7 @@ Owners:
 - `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`:
   later `UserConfig` layers win on set fields, including nested
   `ChainstateJournalOverrides` (`ARCH-05`).
+- `crates/node/src/config.rs` test `mining_payout_overlay_lets_the_later_address_win`
+  and `crates/node/tests/config_layered.rs` test
+  `mining_payout_address_decodes_after_all_layers`: watch-only mining payout is
+  decoded once after overlay, against the resolved network (`ARCH-05`).

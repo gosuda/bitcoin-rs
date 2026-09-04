@@ -1216,7 +1216,7 @@ mod compat_manifest_tests {
             AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,
             MempoolObserver,
         };
-        use bitcoin_rs_rpc::context::{
+        use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
         use compact_str::CompactString;
@@ -1239,17 +1239,22 @@ mod compat_manifest_tests {
                 Err(unavailable())
             }
 
-            fn mining_info(
+            fn mining_info(&self) -> Result<bitcoin_rs_mining::MiningInfo, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn network_hash_ps(
                 &self,
-            ) -> Result<bitcoin_rs_rpc::context::MiningInfo, MiningControlError> {
+                _lookup: i64,
+                _height: i64,
+            ) -> Result<f64, MiningControlError> {
                 Err(unavailable())
             }
 
             fn submit_block(
                 &self,
                 _block: bitcoin_rs_primitives::Block,
-            ) -> Result<bitcoin_rs_rpc::context::BlockValidationResult, MiningControlError>
-            {
+            ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
                 Err(unavailable())
             }
 
@@ -1487,7 +1492,7 @@ mod sequence_observer_tests {
     #[test]
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use crate::mining::{MempoolSequenceWake, MiningGenerationSignal};
-        use bitcoin_rs_rpc::context::{
+        use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
         use compact_str::CompactString;
@@ -1509,17 +1514,22 @@ mod sequence_observer_tests {
                 Err(unavailable())
             }
 
-            fn mining_info(
+            fn mining_info(&self) -> Result<bitcoin_rs_mining::MiningInfo, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn network_hash_ps(
                 &self,
-            ) -> Result<bitcoin_rs_rpc::context::MiningInfo, MiningControlError> {
+                _lookup: i64,
+                _height: i64,
+            ) -> Result<f64, MiningControlError> {
                 Err(unavailable())
             }
 
             fn submit_block(
                 &self,
                 _block: bitcoin_rs_primitives::Block,
-            ) -> Result<bitcoin_rs_rpc::context::BlockValidationResult, MiningControlError>
-            {
+            ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
                 Err(unavailable())
             }
 

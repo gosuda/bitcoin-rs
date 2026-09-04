@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
+use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
@@ -17,8 +18,8 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::{
-    ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningControl,
-    MiningHandles, NetworkHandles,
+    ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
+    NetworkHandles,
 };
 use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::Mutex;
@@ -378,7 +379,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         state.mempool(),
         state.apply_handles(),
         state.chain_followers(),
-        Vec::new(),
+        state.config().mining.payout_script.clone(),
         state.shutdown(),
     )
     .with_mempool_update_wait(Duration::ZERO);

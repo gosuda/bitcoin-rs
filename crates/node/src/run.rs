@@ -819,7 +819,7 @@ pub(crate) fn start_node(
     let sync = state.sync();
     let peer_ready_sync = Arc::clone(&sync);
     let loop_handle = EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx);
-    let mining_control: Arc<dyn bitcoin_rs_rpc::context::MiningControl> =
+    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> =
         Arc::new(crate::MiningCoordinator::new(
             state.config().network,
             state.applied_tip(),
@@ -827,7 +827,7 @@ pub(crate) fn start_node(
             state.mempool(),
             state.apply_handles(),
             state.chain_followers(),
-            Vec::new(),
+            state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
         ));
     // From here on, every gateway mutation and every authoritative tip move

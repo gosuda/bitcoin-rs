@@ -16,15 +16,13 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{Mempool, MempoolObserver, MutationEnvelope};
 use bitcoin_rs_mining::{
-    Candidate, CandidateContext, MiningChainContext, TemplateId, assemble_candidate,
-};
-use bitcoin_rs_primitives::{Block, Hash256, Network};
-use bitcoin_rs_rpc::context::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, LastCandidateInfo, MiningCapability, MiningControl,
-    MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation,
+    BlockTemplateResult, BlockValidationResult, Candidate, CandidateContext, LastCandidateInfo,
+    MiningCapability, MiningChainContext, MiningControl, MiningControlError, MiningInfo,
+    MiningRule, SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate,
     difficulty_for_bits,
 };
+use bitcoin_rs_primitives::{Block, Hash256, Network};
 use compact_str::CompactString;
 use hashbrown::HashMap;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -467,7 +465,8 @@ impl MiningCoordinator {
                     state.last_candidate = Some(LastCandidateInfo {
                         weight: candidate.weight,
                         transactions: u64::try_from(candidate.transactions.len())
-                            .unwrap_or(u64::MAX),
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(1),
                     });
                     state.published = Some(key);
                     Ok(Arc::clone(candidate))
@@ -540,9 +539,12 @@ impl MiningCoordinator {
     }
 
     fn template_from_candidate(
+        network: Network,
         candidate: Arc<Candidate>,
         request: &BlockTemplateRequest,
         submit_old: Option<bool>,
+        version_bits_available: Vec<AvailableMiningRule>,
+        version_bits_required: u32,
     ) -> BlockTemplate {
         let mut rules = Vec::new();
         if candidate.segwit_active {
@@ -550,6 +552,9 @@ impl MiningCoordinator {
         }
         if candidate.csv_active {
             rules.push(MiningRule::new("csv"));
+        }
+        if network.is_taproot_active(candidate.height) {
+            rules.push(MiningRule::new("taproot"));
         }
         let mut capabilities = vec![
             MiningCapability::new("proposal"),
@@ -566,8 +571,8 @@ impl MiningCoordinator {
         BlockTemplate {
             candidate,
             rules,
-            version_bits_available: Vec::<AvailableMiningRule>::new(),
-            version_bits_required: 0,
+            version_bits_available,
+            version_bits_required,
             capabilities,
             mutable: vec![
                 TemplateMutation::Time,
@@ -577,6 +582,36 @@ impl MiningCoordinator {
             submit_old,
             work_id: None,
         }
+    }
+
+    fn version_bits_for(&self, candidate: &Candidate) -> (Vec<AvailableMiningRule>, u32) {
+        let Some(tip) = self.applied_tip.load_full() else {
+            return (Vec::new(), 0);
+        };
+        if tip.hash != candidate.previous_block_hash {
+            return (Vec::new(), 0);
+        }
+        let tree = self.block_tree.read();
+        let signalling = bitcoin_rs_chain::signalling_deployments(
+            &tree,
+            self.network,
+            tip.tip_id,
+            candidate.height,
+        );
+        let mut required = 0_u32;
+        let available = signalling
+            .into_iter()
+            .map(|deployment| {
+                if deployment.locked_in {
+                    required |= 1_u32 << u32::from(deployment.bit);
+                }
+                AvailableMiningRule {
+                    rule: MiningRule::new(deployment.name),
+                    bit: deployment.bit,
+                }
+            })
+            .collect();
+        (available, required)
     }
 
     fn propose(&self, block: &Block) -> BlockValidationResult {
@@ -656,7 +691,8 @@ impl MiningCoordinator {
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
         let last_candidate = self.state.lock().last_candidate;
-        let network_hashes_per_second = estimate_network_hashps(&self.block_tree, tip.as_deref());
+        let network_hashes_per_second =
+            estimate_network_hashps(&self.block_tree, tip.as_deref(), 120, -1, self.network);
         Ok(MiningInfo {
             blocks,
             last_candidate,
@@ -713,7 +749,16 @@ impl MiningControl for MiningCoordinator {
                 let candidate = self.live_candidate()?;
                 let submit_old =
                     waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
-                let template = Self::template_from_candidate(candidate, &request, submit_old);
+                let (version_bits_available, version_bits_required) =
+                    self.version_bits_for(&candidate);
+                let template = Self::template_from_candidate(
+                    self.network,
+                    candidate,
+                    &request,
+                    submit_old,
+                    version_bits_available,
+                    version_bits_required,
+                );
                 Ok(BlockTemplateResult::Template(template))
             }
         }
@@ -721,6 +766,30 @@ impl MiningControl for MiningCoordinator {
 
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
         self.mining_info_snapshot()
+    }
+
+    fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
+        if lookup < -1 || lookup == 0 {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "Invalid nblocks. Must be a positive number or -1.",
+            )));
+        }
+        let tip = self.applied_tip.load_full();
+        let tip_height = tip
+            .as_ref()
+            .map_or(-1, |snapshot| i64::from(snapshot.height));
+        if height < -1 || height > tip_height {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "Block does not exist at specified height",
+            )));
+        }
+        Ok(estimate_network_hashps(
+            &self.block_tree,
+            tip.as_deref(),
+            lookup,
+            height,
+            self.network,
+        ))
     }
 
     fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
@@ -801,28 +870,73 @@ mod apply_error_tests {
     }
 }
 
-fn estimate_network_hashps(block_tree: &RwLock<BlockTree>, tip: Option<&TipSnapshot>) -> f64 {
-    const WINDOW: u32 = 120;
+fn estimate_network_hashps(
+    block_tree: &RwLock<BlockTree>,
+    tip: Option<&TipSnapshot>,
+    lookup: i64,
+    height: i64,
+    network: Network,
+) -> f64 {
     let Some(tip) = tip else {
         return 0.0;
     };
     let tree = block_tree.read();
-    let Ok(tip_node) = tree.node(tip.tip_id) else {
+    let start_id = if height < 0 {
+        tip.tip_id
+    } else {
+        let Ok(requested) = u32::try_from(height) else {
+            return 0.0;
+        };
+        let Some(id) = tree.node_at_height_from(tip.tip_id, requested) else {
+            return 0.0;
+        };
+        id
+    };
+    let Ok(start_node) = tree.node(start_id) else {
         return 0.0;
     };
-    let target_height = tip_node.height.saturating_sub(WINDOW);
-    let Some(earliest_id) = tree.node_at_height_from(tip.tip_id, target_height) else {
+    if start_node.height == 0 {
+        return 0.0;
+    }
+    let walk = if lookup == -1 {
+        let interval = i64::from(network.retarget_interval());
+        if interval <= 0 {
+            1
+        } else {
+            i64::from(start_node.height) % interval + 1
+        }
+    } else {
+        lookup
+    };
+    let walk = u32::try_from(walk).unwrap_or(u32::MAX);
+    let walk = walk.min(start_node.height);
+    if walk == 0 {
+        return 0.0;
+    }
+    let target_height = start_node.height.saturating_sub(walk);
+    let Some(earliest_id) = tree.node_at_height_from(start_id, target_height) else {
         return 0.0;
     };
     let Ok(earliest_node) = tree.node(earliest_id) else {
         return 0.0;
     };
-    if earliest_node.height == tip_node.height {
+    if earliest_node.height == start_node.height {
         return 0.0;
     }
-    let work_delta = tip_node.chainwork.saturating_sub(earliest_node.chainwork);
-    let time_delta_secs =
-        i64::from(tip_node.header.time).saturating_sub(i64::from(earliest_node.header.time));
+    let mut min_time = start_node.header.time;
+    let mut max_time = min_time;
+    for window_height in target_height..=start_node.height {
+        let Some(id) = tree.node_at_height_from(start_id, window_height) else {
+            continue;
+        };
+        let Ok(node) = tree.node(id) else {
+            continue;
+        };
+        min_time = min_time.min(node.header.time);
+        max_time = max_time.max(node.header.time);
+    }
+    let work_delta = start_node.chainwork.saturating_sub(earliest_node.chainwork);
+    let time_delta_secs = i64::from(max_time).saturating_sub(i64::from(min_time));
     hashes_per_second(work_delta.to_be_bytes(), time_delta_secs)
 }
 
@@ -886,9 +1000,8 @@ fn decode_nibble(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod generation_key_tests {
     use super::{GenerationKey, parse_long_poll_id};
-    use alloc::sync::Arc;
-    use bitcoin_rs_mining::{Candidate, TemplateId};
-    use bitcoin_rs_primitives::{Hash256, Tx, TxOut};
+    use bitcoin_rs_mining::TemplateId;
+    use bitcoin_rs_primitives::Hash256;
 
     #[test]
     fn long_poll_round_trips_template_id() {
@@ -925,6 +1038,180 @@ mod generation_key_tests {
             "negative elapsed must report 0.0 hashes/s, got {negative_elapsed}"
         );
     }
+}
+
+/// Oracle: Bitcoin Core `GetNetworkHashPS` in `src/rpc/mining.cpp` (kernel 31.99).
+///
+/// `workDiff = nChainWork[end] - nChainWork[start]` over `lookup` parent walks,
+/// `timeDiff = max(GetBlockTime) - min(GetBlockTime)` in that window, result
+/// `workDiff.getdouble() / timeDiff`. Non-monotonic timestamps use min/max, not
+/// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
+#[cfg(test)]
+mod network_hashps_oracle_tests {
+    use super::estimate_network_hashps;
+    use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use parking_lot::RwLock;
+
+    const BITS: u32 = 0x207f_ffff;
+
+    fn header(prev: BlockHash, time: u32) -> Header {
+        Header {
+            version: 1,
+            prev_blockhash: prev,
+            merkle_root: Hash256::default(),
+            time,
+            bits: BITS,
+            nonce: 0,
+        }
+    }
+
+    fn append(tree: &mut BlockTree, prev: BlockHash, time: u32) -> NodeId {
+        tree.insert_header(header(prev, time), NodeStatus::HeaderValid)
+            .unwrap_or_else(|err| panic!("insert header at time {time}: {err}"))
+    }
+
+    fn snapshot(tree: &BlockTree, tip_id: NodeId) -> TipSnapshot {
+        let node = tree
+            .node(tip_id)
+            .unwrap_or_else(|err| panic!("missing tip {tip_id:?}: {err}"));
+        TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    }
+
+    fn work_to_f64(work: bitcoin_rs_chain::ChainWork) -> f64 {
+        let bytes: [u8; 32] = work.to_be_bytes();
+        bytes
+            .iter()
+            .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)))
+    }
+
+    /// Independent Core parent-walk, not the height-range implementation under test.
+    fn core_getnetworkhashps(
+        tree: &BlockTree,
+        start_id: NodeId,
+        lookup: i64,
+        network: Network,
+    ) -> f64 {
+        let start = tree
+            .node(start_id)
+            .unwrap_or_else(|err| panic!("missing start: {err}"));
+        if start.height == 0 {
+            return 0.0;
+        }
+        let mut walk = if lookup == -1 {
+            i64::from(start.height) % i64::from(network.retarget_interval()) + 1
+        } else {
+            lookup
+        };
+        if walk > i64::from(start.height) {
+            walk = i64::from(start.height);
+        }
+        let walk = u32::try_from(walk).unwrap_or_else(|_| panic!("walk fits u32"));
+        let mut min_time = start.header.time;
+        let mut max_time = min_time;
+        let mut earliest_id = start_id;
+        for _ in 0..walk {
+            earliest_id = tree
+                .node(earliest_id)
+                .unwrap_or_else(|err| panic!("missing walked node: {err}"))
+                .parent
+                .unwrap_or_else(|| panic!("Core walks `lookup` parents; chain too short"));
+            let time = tree
+                .node(earliest_id)
+                .unwrap_or_else(|err| panic!("missing parent: {err}"))
+                .header
+                .time;
+            min_time = min_time.min(time);
+            max_time = max_time.max(time);
+        }
+        if min_time == max_time {
+            return 0.0;
+        }
+        let earliest = tree
+            .node(earliest_id)
+            .unwrap_or_else(|err| panic!("missing earliest: {err}"));
+        let work = work_to_f64(start.chainwork.saturating_sub(earliest.chainwork));
+        work / f64::from(max_time.saturating_sub(min_time))
+    }
+
+    fn assert_matches_core(
+        tree: &RwLock<BlockTree>,
+        tip: &TipSnapshot,
+        lookup: i64,
+        height: i64,
+        network: Network,
+    ) {
+        let expected = {
+            let guard = tree.read();
+            let start_id = if height < 0 {
+                tip.tip_id
+            } else {
+                let requested = u32::try_from(height).unwrap_or_else(|_| panic!("height fits u32"));
+                guard
+                    .node_at_height_from(tip.tip_id, requested)
+                    .unwrap_or_else(|| panic!("missing height {height}"))
+            };
+            core_getnetworkhashps(&guard, start_id, lookup, network)
+        };
+        let got = estimate_network_hashps(tree, Some(tip), lookup, height, network);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "lookup={lookup} height={height}: got {got}, Core oracle {expected}"
+        );
+    }
+
+    #[test]
+    fn estimate_network_hashps_matches_core_getnetworkhashps() {
+        let mut tree = BlockTree::new();
+        // Non-monotonic times: height 2 goes backwards so min/max ≠ first/last.
+        let times = [1_000_000_u32, 1_000_600, 1_000_300, 1_001_200, 1_001_800];
+        let mut prev = BlockHash::default();
+        let mut tip_id = None;
+        for &time in &times {
+            let id = append(&mut tree, prev, time);
+            prev = tree
+                .node(id)
+                .unwrap_or_else(|err| panic!("inserted node: {err}"))
+                .header
+                .compute_hash();
+            tip_id = Some(id);
+        }
+        let tip_id = tip_id.unwrap_or_else(|| panic!("chain has a tip"));
+        let tip = snapshot(&tree, tip_id);
+        let tree = RwLock::new(tree);
+        let network = Network::Regtest;
+
+        assert_matches_core(&tree, &tip, 2, -1, network);
+        assert_matches_core(&tree, &tip, 1, 3, network);
+        assert_matches_core(&tree, &tip, -1, -1, network);
+        assert_matches_core(&tree, &tip, 120, -1, network);
+
+        let genesis = estimate_network_hashps(&tree, Some(&tip), 120, 0, network);
+        assert!(
+            genesis.abs() < f64::EPSILON,
+            "Core returns 0 at genesis, got {genesis}"
+        );
+
+        let retarget_lookup = i64::from(tip.height) % i64::from(network.retarget_interval()) + 1;
+        let via_minus_one = estimate_network_hashps(&tree, Some(&tip), -1, -1, network);
+        let via_explicit = estimate_network_hashps(&tree, Some(&tip), retarget_lookup, -1, network);
+        assert!(
+            (via_minus_one - via_explicit).abs() < 1e-9,
+            "-1 lookback must equal height % interval + 1 ({retarget_lookup})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod candidate_template_tests {
+    use alloc::sync::Arc;
+    use bitcoin_rs_mining::{Candidate, TemplateId};
+    use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
 
     #[test]
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
@@ -1021,25 +1308,35 @@ mod generation_key_tests {
         }
     }
 
-    fn empty_request() -> bitcoin_rs_rpc::context::BlockTemplateRequest {
-        bitcoin_rs_rpc::context::BlockTemplateRequest {
-            mode: bitcoin_rs_rpc::context::BlockTemplateMode::Template,
+    fn empty_request() -> bitcoin_rs_mining::BlockTemplateRequest {
+        bitcoin_rs_mining::BlockTemplateRequest {
+            mode: bitcoin_rs_mining::BlockTemplateMode::Template,
             capabilities: Vec::new(),
             rules: Vec::new(),
             long_poll_id: None,
         }
     }
 
+    fn template_for(
+        candidate: Candidate,
+        submit_old: Option<bool>,
+    ) -> bitcoin_rs_mining::BlockTemplate {
+        super::MiningCoordinator::template_from_candidate(
+            Network::Regtest,
+            Arc::new(candidate),
+            &empty_request(),
+            submit_old,
+            Vec::new(),
+            0,
+        )
+    }
+
     #[test]
     fn template_facts_follow_mutated_candidate_generation() {
-        use bitcoin_rs_rpc::context::MiningRule;
+        use bitcoin_rs_mining::MiningRule;
 
         let first_prev = Hash256::from_le_bytes(&[0x11; 32]);
-        let first = super::MiningCoordinator::template_from_candidate(
-            Arc::new(sample_candidate(first_prev, false, true)),
-            &empty_request(),
-            Some(true),
-        );
+        let first = template_for(sample_candidate(first_prev, false, true), Some(true));
         assert_eq!(first.candidate.previous_block_hash, first_prev);
         assert_eq!(
             first
@@ -1047,15 +1344,11 @@ mod generation_key_tests {
                 .iter()
                 .map(MiningRule::as_str)
                 .collect::<Vec<_>>(),
-            vec!["segwit"]
+            vec!["segwit", "taproot"]
         );
 
         let mutated_prev = Hash256::from_le_bytes(&[0x22; 32]);
-        let mutated = super::MiningCoordinator::template_from_candidate(
-            Arc::new(sample_candidate(mutated_prev, true, false)),
-            &empty_request(),
-            Some(false),
-        );
+        let mutated = template_for(sample_candidate(mutated_prev, true, false), Some(false));
         assert_eq!(mutated.candidate.previous_block_hash, mutated_prev);
         assert_ne!(mutated.candidate.template_id, first.candidate.template_id);
         assert_eq!(
@@ -1064,29 +1357,24 @@ mod generation_key_tests {
                 .iter()
                 .map(MiningRule::as_str)
                 .collect::<Vec<_>>(),
-            vec!["csv"]
+            vec!["csv", "taproot"]
         );
         assert_eq!(mutated.submit_old, Some(false));
     }
 
     #[test]
     fn deployment_boundary_rules_follow_candidate_flags() {
-        use bitcoin_rs_rpc::context::MiningRule;
+        use bitcoin_rs_mining::MiningRule;
 
         let prev = Hash256::from_le_bytes(&[0x33; 32]);
-        let request = empty_request();
         let cases = [
-            (false, false, Vec::new()),
-            (true, false, vec!["csv"]),
-            (false, true, vec!["segwit"]),
-            (true, true, vec!["segwit", "csv"]),
+            (false, false, vec!["taproot"]),
+            (true, false, vec!["csv", "taproot"]),
+            (false, true, vec!["segwit", "taproot"]),
+            (true, true, vec!["segwit", "csv", "taproot"]),
         ];
         for (csv_active, segwit_active, expected) in cases {
-            let template = super::MiningCoordinator::template_from_candidate(
-                Arc::new(sample_candidate(prev, csv_active, segwit_active)),
-                &request,
-                None,
-            );
+            let template = template_for(sample_candidate(prev, csv_active, segwit_active), None);
             assert_eq!(template.candidate.csv_active, csv_active);
             assert_eq!(template.candidate.segwit_active, segwit_active);
             assert_eq!(
@@ -1104,10 +1392,10 @@ mod generation_key_tests {
 #[cfg(test)]
 mod generation_signal_tests {
     use super::{MempoolSequenceWake, MiningGenerationSignal};
-    use bitcoin_rs_primitives::Block;
-    use bitcoin_rs_rpc::context::{
+    use bitcoin_rs_mining::{
         BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
     };
+    use bitcoin_rs_primitives::Block;
     use compact_str::CompactString;
     use parking_lot::Mutex;
     use std::sync::Arc;
@@ -1132,14 +1420,18 @@ mod generation_signal_tests {
             Err(unavailable())
         }
 
-        fn mining_info(&self) -> Result<bitcoin_rs_rpc::context::MiningInfo, MiningControlError> {
+        fn mining_info(&self) -> Result<bitcoin_rs_mining::MiningInfo, MiningControlError> {
+            Err(unavailable())
+        }
+
+        fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
             Err(unavailable())
         }
 
         fn submit_block(
             &self,
             _block: Block,
-        ) -> Result<bitcoin_rs_rpc::context::BlockValidationResult, MiningControlError> {
+        ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
             Err(unavailable())
         }
 
