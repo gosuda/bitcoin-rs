@@ -85,6 +85,14 @@ path. `API-06` is `getnetworkhashps` snapshot consistency.
 - `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
   does not use this RPC height-validation error path.
 
+### `API-07`: Checksummed descriptor analysis
+
+- Descriptor checksums are verified before analysis, and the verified payload
+  (without the `#checksum` suffix) is passed to the descriptor parser. This
+  preserves Core-compatible analysis for descriptors such as `combo(KEY)`.
+  The checksum format and descriptor grammar follow BIP 380 and Bitcoin Core's
+  descriptor implementation.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
