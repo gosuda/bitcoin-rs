@@ -171,7 +171,7 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         // manifest gap), and invalidateblock requires a chain control, which
         // the dedicated invalidateblock tests wire themselves.
         ("getmininginfo", json!([])),
-        ("getblocktemplate", json!([{}])),
+        ("getblocktemplate", json!([{"rules": ["segwit"]}])),
         ("submitblock", json!([raw_tx.as_str()])),
     ];
 
