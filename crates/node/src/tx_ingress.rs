@@ -217,7 +217,14 @@ impl TxIngressConsumer {
             Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs)
         ) {
             let held = Arc::new(tx);
-            self.tx_admission.record_orphan(&held);
+            if tx.inputs.iter().any(|input| {
+                  input.previous_output.txid == Txid::default()
+                      && input.previous_output.vout == u32::MAX
+              }) {
+                  self.tx_admission.record_reject(txid, wtxid);
+                  return;
+              }
+              self.tx_admission.record_orphan(&held, source);
             self.request_missing_parents(&held, source);
             tracing::debug!(%txid, "p2p tx missing inputs; held as orphan");
             return;
@@ -240,7 +247,7 @@ impl TxIngressConsumer {
             connection_id: source.connection_id().get(),
         };
         let candidate = ReplacementCandidate::new(
-            Arc::new(tx),
+            Arc::new(tx.clone()),
             fact.vsize,
             fact.base_fee.unwrap_or(0),
             policy.incremental_relay_fee_sat_per_kvb,
@@ -266,11 +273,11 @@ impl TxIngressConsumer {
                 });
                 if accepted {
                     self.relay
-                        .announce(txid, wtxid, Some(source.connection_id().get()));
+                        .announce(txid, tx.wtxid(), Some(source.connection_id().get()));
                     self.mining_control.publish_generation();
                     tracing::trace!(%txid, "p2p tx admitted and relayed");
-                    for orphan in self.tx_admission.take_orphans_waiting_on(txid) {
-                        self.process_one(bitcoin_rs_p2p::InboundTx::new((*orphan).clone(), source));
+                    for (orphan, orphan_source) in self.tx_admission.take_orphans_waiting_on(txid) {
+                        self.process_one(bitcoin_rs_p2p::InboundTx::new((*orphan).clone(), orphan_source));
                     }
                 }
             }
@@ -362,16 +369,20 @@ impl TxIngressConsumer {
         if !lease.is_current(source) {
             return;
         }
-        let items: Vec<Inventory> = tx
-            .inputs
-            .iter()
-            .filter(|input| input.previous_output != OutPoint::default())
-            .map(|input| {
-                Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(
-                    *input.previous_output.txid.as_bytes(),
-                ))
-            })
-            .collect();
+        let mut parent_ids = hashbrown::HashSet::new();
+          for input in &tx.inputs {
+              let prevout = input.previous_output;
+              if prevout != OutPoint::default()
+                  && self.utxo.get_entry(&prevout).is_none()
+
+              {
+                  parent_ids.insert(prevout.txid);
+              }
+          }
+          let items: Vec<Inventory> = parent_ids
+              .into_iter()
+              .map(|txid| Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(*txid.as_bytes())))
+              .collect();
         if items.is_empty() {
             return;
         }

@@ -53,7 +53,7 @@ pub struct TxAdmission {
 struct AdmissionInner {
     /// Orphan transactions keyed by txid, stored in insertion order via
     /// [`orphan_order`] for FIFO eviction.
-    orphans: hashbrown::HashMap<Txid, Arc<Tx>>,
+    orphans: hashbrown::HashMap<Txid, (Arc<Tx>, bitcoin_rs_p2p::PeerSource)>,
     /// Secondary index: wtxid → txid, so BIP339 wtxid-typed inventory can
     /// be matched against held orphans without a linear scan.
     orphan_by_wtxid: hashbrown::HashMap<Wtxid, Txid>,
@@ -97,19 +97,19 @@ impl TxAdmission {
     /// (FIFO), so after `quota + 1` inserts the map size is exactly
     /// `quota`. Re-inserting an already-held orphan (by txid) refreshes its
     /// body without growing the map.
-    pub fn record_orphan(&self, tx: &Arc<Tx>) {
+    pub fn record_orphan(&self, tx: &Arc<Tx>, source: bitcoin_rs_p2p::PeerSource) {
         let txid = tx.txid();
         let wtxid = tx.wtxid();
         let mut inner = self.inner.lock();
-        if let Some(old) = inner.orphans.insert(txid, Arc::clone(tx)) {
+        if let Some(old) = inner.orphans.insert(txid, (Arc::clone(tx), source)) {
             // Replace: refresh the body without growing the map or
             // reordering. Drop the previous body's wtxid index entry so a
             // changed witness does not leave a stale wtxid → txid mapping.
-            let old_wtxid = old.wtxid();
+            let old_wtxid = old.0.wtxid();
             if old_wtxid != wtxid {
                 inner.orphan_by_wtxid.remove(&old_wtxid);
             }
-            unindex_orphan_parents(&mut inner, &txid, &old);
+            unindex_orphan_parents(&mut inner, &txid, &old.0);
             index_orphan_parents(&mut inner, tx);
         } else {
             // New entry: append and evict the oldest over the quota.
@@ -120,8 +120,8 @@ impl TxAdmission {
                     break;
                 };
                 if let Some(evicted_tx) = inner.orphans.remove(&evicted) {
-                    inner.orphan_by_wtxid.remove(&evicted_tx.wtxid());
-                    unindex_orphan_parents(&mut inner, &evicted, &evicted_tx);
+                    inner.orphan_by_wtxid.remove(&evicted_tx.0.wtxid());
+                    unindex_orphan_parents(&mut inner, &evicted, &evicted_tx.0);
                 }
             }
         }
@@ -136,13 +136,13 @@ impl TxAdmission {
 
     /// Removes an orphan by txid, returning its body if present. Used when a
     /// parent arrives and the orphan is re-evaluated through the gateway.
-    pub fn take_orphan(&self, txid: &Txid) -> Option<Arc<Tx>> {
+    pub fn take_orphan(&self, txid: &Txid) -> Option<(Arc<Tx>, bitcoin_rs_p2p::PeerSource)> {
         let mut inner = self.inner.lock();
-        let tx = inner.orphans.remove(txid)?;
+        let (tx, source) = inner.orphans.remove(txid)?;
         inner.orphan_by_wtxid.remove(&tx.wtxid());
         inner.orphan_order.retain(|id| id != txid);
         unindex_orphan_parents(&mut inner, txid, &tx);
-        Some(tx)
+        Some((tx, source))
     }
 
     /// Removes and returns every orphan that spends an output of `parent`.
@@ -150,7 +150,7 @@ impl TxAdmission {
     /// Called when `parent` is admitted so the children can be re-evaluated
     /// through the gateway. Missing children (already evicted or taken) are
     /// skipped.
-    pub fn take_orphans_waiting_on(&self, parent: Txid) -> Vec<Arc<Tx>> {
+    pub fn take_orphans_waiting_on(&self, parent: Txid) -> Vec<(Arc<Tx>, bitcoin_rs_p2p::PeerSource)> {
         let waiting = {
             let mut inner = self.inner.lock();
             inner.orphans_waiting.remove(&parent).unwrap_or_default()
@@ -253,7 +253,7 @@ impl TxAdmission {
         }
         let inner = self.inner.lock();
         let txid = inner.orphan_by_wtxid.get(wtxid)?;
-        inner.orphans.get(txid).map(|arc| (**arc).clone())
+        inner.orphans.get(txid).map(|(arc, _)| (**arc).clone())
     }
 
     fn have_tx(&self, hash: Hash256, wtxid_relay: bool) -> bool {
