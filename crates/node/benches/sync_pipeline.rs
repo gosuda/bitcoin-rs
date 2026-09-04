@@ -542,10 +542,16 @@ impl SyncFixture {
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
-            tx_index_runtime,
+        )
+        .capturing(false, tx_index_runtime.is_some());
+        let followers = bitcoin_rs_node::ChainFollowers::new(
+            bitcoin_rs_node::ChainEffects::noop().with_tx_index(tx_index_runtime),
+            Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
+            None,
         );
         let sync = BlockSync::new(
             handles,
+            followers,
             Arc::clone(&peer_table),
             inbound_headers_rx,
             inbound_blocks_rx,
@@ -1104,7 +1110,6 @@ fn apply_handles(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    tx_index_runtime: Option<Arc<TxIndexRuntime>>,
 ) -> Chainstate {
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let mut utxo = UtxoSet::new();
@@ -1121,10 +1126,8 @@ fn apply_handles(
         coin_stats,
         mempool,
         mempool_gateway,
-        Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
         Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
     )
-    .with_effects(bitcoin_rs_node::ChainEffects::noop().with_tx_index(tx_index_runtime))
 }
 
 fn tx_index_for_mode(mode: TxIndexMode) -> Option<Arc<TxIndexRuntime>> {

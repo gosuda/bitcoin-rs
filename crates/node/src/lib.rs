@@ -67,9 +67,11 @@ mod window_overlay;
 /// ZMQ publisher trait + implementations for the notification subsystem.
 pub mod zmq_publisher;
 
-pub use apply::{ChainTransition, Chainstate, ChainstateSnapshot};
+pub use apply::{
+    ChainEvent, ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
+};
 pub use bitcoin_rs_primitives::Network;
-pub use chain_effects::ChainEffects;
+pub use chain_effects::{ChainEffects, ChainFollowers};
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
     NetworkSelection, NodeConfig, NotificationConfig, ObservabilityConfig, ObservabilityOverrides,

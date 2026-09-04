@@ -1309,7 +1309,7 @@ mod compat_manifest_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::as_conversions)]
 mod sequence_observer_tests {
     use super::*;
     use bitcoin_rs_mempool::{

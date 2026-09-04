@@ -117,8 +117,8 @@ remove another script's output.
 ### `IDX-06`: Reorganization rollback and forward reconciliation
 
 - Reorganizations reconcile asynchronously across the chain-event seam
-  (`docs/contracts/chain-events.md`). `ChainEffects` invokes
-  `TxIndexRuntime::wake()` after each committed `applied_tip.store`.
+  (`docs/contracts/chain-events.md`). `ChainFollowers` invoke
+  `TxIndexRuntime::wake()` after each committed connect or disconnect.
 - **Disconnect walk**:
   - Height-keyed rows (transaction position rows) are removed using per-block
     watermark identity records to delete exactly the rows contributed by each

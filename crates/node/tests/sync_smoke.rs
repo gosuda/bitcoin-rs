@@ -40,6 +40,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     );
     let sync = BlockSync::new(
         handles,
+        bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
         inbound_blocks_rx,
@@ -93,6 +94,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
     );
     let sync = BlockSync::new(
         handles,
+        bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
         inbound_blocks_rx,
@@ -257,7 +259,6 @@ fn apply_handles_with_coin_stats_and_utxo(
     let utxo = Arc::new(utxo);
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
     let mempool_gateway = MempoolGateway::shared(Arc::clone(&mempool));
-    let mining_generation = Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new());
     let (chain_events, _chain_events_rx) = bitcoin_rs_node::state::ChainEventPublisher::detached(0);
     let handles = Chainstate::new(
         network,
@@ -268,7 +269,6 @@ fn apply_handles_with_coin_stats_and_utxo(
         Arc::clone(&coin_stats),
         mempool,
         mempool_gateway,
-        mining_generation,
         Arc::new(chain_events),
     );
     (handles, coin_stats, utxo)
