@@ -96,9 +96,10 @@ const POSITION_PREFETCH_BLOCKS: usize = 65_536;
 /// are small; catch-up also prepares already-stored bodies, so this is not
 /// `RECEIVED_BLOCK_BUDGET`. The byte budget below is independent of P2P staging.
 const PREPARE_CHUNK_BLOCKS: usize = 256;
-/// Serialized-body budget for one parallel prepare step. Stops a 1 MiB-class
-/// window from holding 256 bodies in RAM while still packing early-chain
-/// blocks up to the count cap.
+/// Serialized-body budget for one parallel prepare step. Later bodies are not
+/// retained once this bound would be exceeded. Stops a 1 MiB-class window from
+/// holding 256 bodies in RAM while still packing early-chain blocks up to the
+/// count cap.
 const PREPARE_CHUNK_BYTES: usize = 32 << 20;
 const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
@@ -2323,7 +2324,8 @@ impl Worker {
         }
 
         // Load bodies serially through the single reader until either cap.
-        // An oversized first body is still loaded so catch-up always moves.
+        // The first body is always retained so catch-up moves; a later body
+        // that would cross the byte cap is left at the front of `identities`.
         let mut bodies = Vec::new();
         let mut loaded_bytes = 0_usize;
         for identity in *identities {
@@ -2333,6 +2335,11 @@ impl Worker {
             let hash = Hash256::from_le_bytes(&identity.hash);
             match body_reader.load_block_body(identity.height, hash) {
                 Ok(Some(body)) => {
+                    if !bodies.is_empty()
+                        && loaded_bytes.saturating_add(body.len()) > PREPARE_CHUNK_BYTES
+                    {
+                        break;
+                    }
                     loaded_bytes = loaded_bytes.saturating_add(body.len());
                     bodies.push(body);
                 }
@@ -2352,7 +2359,7 @@ impl Worker {
                 }
                 Err(e) => return Err(TxIndexWorkerError::Storage(e)),
             }
-            if bodies.len() >= PREPARE_CHUNK_BLOCKS || loaded_bytes >= PREPARE_CHUNK_BYTES {
+            if bodies.len() >= PREPARE_CHUNK_BLOCKS {
                 break;
             }
         }
