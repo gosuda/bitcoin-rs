@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import stat
 import sys
@@ -99,6 +98,7 @@ parser.add_argument('--data-dir', required=True)
 parser.add_argument('--corpus', required=True)
 parser.add_argument('--manifest', required=True)
 parser.add_argument('--state', required=True)
+parser.add_argument('--assume-valid-height', default='0')
 parser.add_argument('--reopen', action='store_true')
 args = parser.parse_args()
 corpus = Path(args.corpus).read_bytes()
@@ -127,6 +127,7 @@ def _command(*, reopen: bool = False) -> list[str]:
         "{manifest_path}",
         "--state",
         "{state_path}",
+        "--assume-valid-height=0",
     ]
     if reopen:
         command.append("--reopen")
@@ -220,6 +221,22 @@ class ArchiveContractTests(unittest.TestCase):
         digest = hashlib.sha256(hashlib.sha256(payload[:80]).digest()).digest()
         self.assertEqual(header_hash(payload), digest[::-1].hex())
 
+    def test_header_hash_matches_published_mainnet_genesis(self) -> None:
+        # 80-byte header from Bitcoin Core CMainParams / bitcoin-rs MAINNET_GENESIS.
+        header = bytes.fromhex(
+            "01000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a"
+            "29ab5f49"
+            "ffff001d"
+            "1dac2b7c"
+        )
+        self.assertEqual(len(header), 80)
+        self.assertEqual(
+            header_hash(header),
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+        )
+
     def test_trailing_bytes_are_refused(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="offline-trailing-"))
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
@@ -274,6 +291,63 @@ class ConfigContractTests(unittest.TestCase):
         config["posture"]["txindex"] = True
         with self.assertRaises(ContractError):
             parse_config(config)
+
+    def test_evicted_cache_policy_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-evict-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_workspace(root)
+        config = json.loads(config_path.read_text())
+        config["posture"]["cache_policy"] = "process-cold/page-cache-evicted"
+        with self.assertRaises(ContractError):
+            parse_config(config)
+
+    def test_timed_command_must_disable_assume_valid(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-assume-token-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_workspace(root)
+        config = json.loads(config_path.read_text())
+        config["core"]["command"] = [
+            part
+            for part in config["core"]["command"]
+            if part != "--assume-valid-height=0"
+        ]
+        with self.assertRaises(ContractError):
+            parse_config(config)
+
+    def test_timed_command_index_on_token_is_refused(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-index-token-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_workspace(root)
+        config = json.loads(config_path.read_text())
+        config["candidate"]["command"].append("-txindex=1")
+        with self.assertRaises(ContractError):
+            parse_config(config)
+
+    def test_assume_valid_height_two_token_form_is_accepted(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-assume-two-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_workspace(root)
+        config = json.loads(config_path.read_text())
+        command = [
+            part
+            for part in config["core"]["command"]
+            if part != "--assume-valid-height=0"
+        ]
+        command.extend(["--assume-valid-height", "0"])
+        config["core"]["command"] = command
+        parse_config(config)
+
+    def test_reopen_command_need_not_repeat_assume_valid(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-reopen-token-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, _ = _build_workspace(root, reopen=True)
+        config = json.loads(config_path.read_text())
+        config["core"]["reopen_command"] = [
+            part
+            for part in config["core"]["reopen_command"]
+            if part != "--assume-valid-height=0"
+        ]
+        parse_config(config)
 
     def test_expected_height_must_match_manifest_tip(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="offline-height-"))
@@ -409,10 +483,35 @@ class CampaignTests(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
         config_path, _ = _build_workspace(root)
         config = load_config(config_path)
-        (root / "blocks.dat").write_bytes((root / "blocks.dat").read_bytes() + b"")
-        os.utime(root / "blocks.dat", (0, 0))
+        raw = bytearray((root / "blocks.dat").read_bytes())
+        raw[-1] ^= 0xFF
+        (root / "blocks.dat").write_bytes(raw)
         with self.assertRaises(ContractError):
             run_campaign(config, root / "arms")
+
+    def test_leftover_descendant_refuses_publication(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="offline-daemon-"))
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        config_path, expected = _build_workspace(root)
+        daemon = _write_executable(
+            root / "daemon.py",
+            _node_source(expected).replace(
+                "raise SystemExit(0)\n",
+                "child = __import__('os').fork()\n"
+                "if child == 0:\n"
+                "    __import__('time').sleep(30)\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(0)\n",
+            ),
+        )
+        config = json.loads(config_path.read_text())
+        config["candidate"]["binary"] = str(daemon)
+        config["candidate"]["binary_sha256"] = _sha256_file(daemon)
+        config_path.write_bytes(canonical_bytes(config) + b"\n")
+        output = root / OUTPUT_NAME
+        with self.assertRaises(ContractError):
+            main(["--config", str(config_path), "--output", str(output)])
+        self.assertFalse(output.exists())
 
     def test_summarize_uses_nearest_rank(self) -> None:
         summary = summarize([10, 20, 30, 40, 50, 60, 70])

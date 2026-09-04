@@ -24,19 +24,16 @@ import os
 import signal
 import stat
 import subprocess
-import shutil
-#
-# The archive and manifest are copied into a private custody directory before
-# any arm starts.  Children only receive those copies; the configured paths are
-# never used as a check-then-use input after custody is established.
-#
 import sys
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, TypedDict, TypeIs
+
+from p2p_loopback import ContractError as _P2PContractError
+from p2p_loopback import _ChildSubreaperScope, _direct_children_pids
 
 CONFIG_SCHEMA = "offline-full-validation-config-v1"
 MANIFEST_SCHEMA = "core-framed-archive-manifest-v1"
@@ -44,23 +41,60 @@ RESULT_SCHEMA = "offline-full-validation-result-v1"
 PAIR_COUNT = 7
 HEADER_BYTES = 80
 MAX_PAYLOAD_BYTES = 4_000_000
-MAX_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
-MAX_MANIFEST_BYTES = 32 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 1 * 1024 * 1024 * 1024 * 1024
+MAX_MANIFEST_BYTES = 512 * 1024 * 1024
 MAX_CONFIG_BYTES = 1 * 1024 * 1024
 MAX_STATE_BYTES = 1024 * 1024
 MAX_BINARY_BYTES = 1024 * 1024 * 1024
 MAX_JSON_DEPTH = 32
 MAX_COMMAND_ARGS = 256
-MAX_BLOCKS = 1_000_000
+MAX_BLOCKS = 2_000_000
 MAX_ARM_TIMEOUT_NS = 4 * 60 * 60 * 1_000_000_000
 MIN_ARM_TIMEOUT_NS = 1_000_000_000
 CHILD_TERMINATE_GRACE_NS = 1_000_000_000
 CHILD_KILL_REAP_NS = 1_000_000_000
 _HASH_LENGTH = 64
-CACHE_POLICIES = frozenset(
+CACHE_POLICIES = frozenset({"process-cold/page-cache-unspecified"})
+_ASSUME_VALID_OFF_EQUAL = frozenset(
     {
-        "process-cold/page-cache-unspecified",
-        "process-cold/page-cache-evicted",
+        "-assumevalid=0",
+        "--assumevalid=0",
+        "-assume-valid=0",
+        "--assume-valid=0",
+        "-assume-valid-height=0",
+        "--assume-valid-height=0",
+    }
+)
+_ASSUME_VALID_OFF_FLAGS = frozenset(
+    {
+        "-assumevalid",
+        "--assumevalid",
+        "-assume-valid",
+        "--assume-valid",
+        "-assume-valid-height",
+        "--assume-valid-height",
+    }
+)
+_INDEX_ON_TOKENS = frozenset(
+    {
+        "-txindex",
+        "-txindex=1",
+        "-txindex=true",
+        "--txindex",
+        "--txindex=1",
+        "--txindex=true",
+        "-blockfilterindex",
+        "-blockfilterindex=1",
+        "-blockfilterindex=true",
+        "--blockfilterindex",
+        "--blockfilterindex=1",
+        "--blockfilterindex=true",
+        "-coinstatsindex",
+        "-coinstatsindex=1",
+        "-coinstatsindex=true",
+        "--coinstatsindex",
+        "--coinstatsindex=1",
+        "--coinstatsindex=true",
     }
 )
 ALLOWED_PLACEHOLDERS = frozenset(
@@ -163,6 +197,14 @@ class FileIdentity:
     size: int
     mtime_ns: int
     sha256: str
+
+
+@dataclass(frozen=True)
+class PinnedCorpus:
+    archive: FileRef
+    archive_identity: FileIdentity
+    manifest: FileRef
+    manifest_identity: FileIdentity
 
 
 @dataclass(frozen=True)
@@ -578,7 +620,29 @@ def _posture(value: object) -> Posture:
     return posture
 
 
-def _command(raw: object, field: str) -> tuple[str, ...]:
+def _assume_valid_is_off(parts: Sequence[str]) -> bool:
+    if any(part in _ASSUME_VALID_OFF_EQUAL for part in parts):
+        return True
+    for index, part in enumerate(parts[:-1]):
+        if part in _ASSUME_VALID_OFF_FLAGS and parts[index + 1] == "0":
+            return True
+    return False
+
+
+def _require_timed_command_tokens(parts: Sequence[str], field: str) -> None:
+    if not _assume_valid_is_off(parts):
+        raise ContractError(
+            f"{field} must disable assume-valid "
+            "(-assumevalid=0 or --assume-valid-height=0)"
+        )
+    for part in parts:
+        if part in _INDEX_ON_TOKENS:
+            raise ContractError(f"{field} enables an auxiliary index ({part})")
+
+
+def _command(
+    raw: object, field: str, *, require_validation_tokens: bool
+) -> tuple[str, ...]:
     parts = tuple(_text(part, field) for part in _array(raw, field))
     if not parts or len(parts) > MAX_COMMAND_ARGS:
         raise ContractError(f"{field} must contain 1 to {MAX_COMMAND_ARGS} arguments")
@@ -594,16 +658,22 @@ def _command(raw: object, field: str) -> tuple[str, ...]:
                 end = part.find("}", start)
                 if end < 0 or part[start : end + 1] not in ALLOWED_PLACEHOLDERS:
                     raise ContractError(f"{field} contains an unsupported placeholder")
+    if require_validation_tokens:
+        _require_timed_command_tokens(parts, field)
     return parts
 
 
 def _program(raw: object, role: str, reopen_required: bool) -> Program:
     item = _object(raw, role, _PROGRAM_KEYS)
-    command = _command(item["command"], f"{role}.command")
+    command = _command(
+        item["command"], f"{role}.command", require_validation_tokens=True
+    )
     reopen_raw = item["reopen_command"]
     reopen: tuple[str, ...] | None = None
     if reopen_raw is not None:
-        reopen = _command(reopen_raw, f"{role}.reopen_command")
+        reopen = _command(
+            reopen_raw, f"{role}.reopen_command", require_validation_tokens=False
+        )
     elif reopen_required:
         raise ContractError(f"{role}.reopen_command is required for reopen lifecycle")
     return Program(
@@ -798,6 +868,82 @@ def _verify_copy_digest(binary_path: Path, expected: str) -> None:
         raise ContractError("arm binary changed after its verified copy")
 
 
+def _copy_readonly(
+    source: Path,
+    dest: Path,
+    expected_sha256: str,
+    expected_size: int,
+    field: str,
+) -> FileIdentity:
+    descriptor = _open_regular(source, field)
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        dest_fd = os.open(
+            dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o400
+        )
+        try:
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                digest.update(chunk)
+                written = 0
+                while written < len(chunk):
+                    written += os.write(dest_fd, chunk[written:])
+            os.fsync(dest_fd)
+            info = os.fstat(dest_fd)
+        finally:
+            os.close(dest_fd)
+    except OSError as error:
+        dest.unlink(missing_ok=True)
+        raise ContractError(f"cannot pin {field}: {error}") from error
+    finally:
+        os.close(descriptor)
+    observed = digest.hexdigest()
+    if copied != expected_size or observed != expected_sha256:
+        dest.unlink(missing_ok=True)
+        raise ContractError(f"{field} changed before the campaign pin")
+    dest.chmod(0o400)
+    return _identity_from_stat(info, observed)
+
+
+def _pin_corpus(config: Config, root: Path) -> PinnedCorpus:
+    custody = root / "custody"
+    custody.mkdir()
+    archive_path = custody / "archive"
+    manifest_path = custody / "manifest"
+    archive_identity = _copy_readonly(
+        config.archive.path,
+        archive_path,
+        config.archive.sha256,
+        config.archive.size,
+        "archive",
+    )
+    manifest_identity = _copy_readonly(
+        config.manifest.path,
+        manifest_path,
+        config.manifest.sha256,
+        config.manifest.size,
+        "manifest",
+    )
+    try:
+        dirfd = os.open(custody, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as error:
+        raise ContractError(f"cannot dirsync custody pin: {error}") from error
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+    return PinnedCorpus(
+        FileRef(archive_path, config.archive.sha256, config.archive.size),
+        archive_identity,
+        FileRef(manifest_path, config.manifest.sha256, config.manifest.size),
+        manifest_identity,
+    )
+
+
 def _state(path: Path, field: str) -> CertifiedState:
     return _certified_state(_load_json(path, field, MAX_STATE_BYTES), field)
 
@@ -881,15 +1027,50 @@ def _kill_tree(process: subprocess.Popen[bytes]) -> None:
     raise ContractError("child process group did not terminate")
 
 
-def _evict_page_cache() -> None:
-    """Fail closed unless Linux can perform the declared cache eviction."""
+def _kill_pids(pids: Sequence[int]) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic_ns() + CHILD_KILL_REAP_NS
+    remaining = set(pids)
+    while remaining and time.monotonic_ns() < deadline:
+        for pid in tuple(remaining):
+            try:
+                waited, _status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                remaining.discard(pid)
+                continue
+            if waited == pid:
+                remaining.discard(pid)
+        if remaining:
+            time.sleep(0.01)
+
+
+def _reap_owned_descendants() -> list[int]:
+    leftover = _direct_children_pids()
+    if leftover:
+        _kill_pids(leftover)
+    return leftover
+
+
+def _settle_after_wait(process: subprocess.Popen[bytes]) -> None:
+    group_left = False
     try:
-        os.sync()
-        with open("/proc/sys/vm/drop_caches", "w", encoding="ascii") as stream:
-            stream.write("3\n")
-            stream.flush()
-    except OSError as error:
-        raise ContractError(f"cannot evict page cache: {error}") from error
+        os.killpg(process.pid, 0)
+        group_left = True
+    except ProcessLookupError:
+        pass
+    if group_left:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            group_left = False
+    leftover = _reap_owned_descendants()
+    if group_left or leftover:
+        listed = ",".join(str(pid) for pid in leftover) or str(process.pid)
+        raise ContractError(f"arm left descendant processes after exit: {listed}")
 
 
 def _child_env(arm_dir: Path) -> dict[str, str]:
@@ -923,9 +1104,11 @@ def _run_phase(
         raise ContractError(f"cannot spawn arm process: {error}") from error
     try:
         code, cpu_ns, peak_rss = _wait_child(process, deadline_ns)
+        _settle_after_wait(process)
     except BaseException:
         if process.poll() is None:
             _kill_tree(process)
+        _reap_owned_descendants()
         raise
     wall_ns = time.monotonic_ns() - started
     if wall_ns <= 0:
@@ -934,24 +1117,28 @@ def _run_phase(
 
 
 def _run_arm(
-    config: Config, program: Program, pair_index: int, order_index: int, root: Path
+    config: Config,
+    program: Program,
+    pair_index: int,
+    order_index: int,
+    root: Path,
+    pinned: PinnedCorpus,
 ) -> ArmObservation:
     arm_dir = root / f"{order_index:02d}-{program.role}"
     arm_dir.mkdir(parents=True)
-    if config.posture.cache_policy == "process-cold/page-cache-evicted":
-        _evict_page_cache()
     data_dir = arm_dir / "data"
     data_dir.mkdir()
     binary_path = _verified_copy(program, arm_dir)
-    _require_unchanged(config.archive.path, config.archive_identity, "archive")
+    _require_unchanged(pinned.archive.path, pinned.archive_identity, "archive")
+    _require_unchanged(pinned.manifest.path, pinned.manifest_identity, "manifest")
     _verify_copy_digest(binary_path, program.binary_sha256)
     state_path = arm_dir / "state.json"
     argv = _expand_command(
         program.command,
         binary_path=binary_path,
         data_dir=data_dir,
-        corpus_path=config.archive.path,
-        manifest_path=config.manifest.path,
+        corpus_path=pinned.archive.path,
+        manifest_path=pinned.manifest.path,
         state_path=state_path,
     )
     deadline = time.monotonic_ns() + config.arm_timeout_ns
@@ -973,8 +1160,8 @@ def _run_arm(
             program.reopen_command,
             binary_path=binary_path,
             data_dir=data_dir,
-            corpus_path=config.archive.path,
-            manifest_path=config.manifest.path,
+            corpus_path=pinned.archive.path,
+            manifest_path=pinned.manifest.path,
             state_path=reopen_path,
         )
         reopen_deadline = time.monotonic_ns() + config.arm_timeout_ns
@@ -1085,35 +1272,28 @@ def run_campaign(config: Config, output_root: Path) -> JsonObject:
     if sys.platform != "linux":
         raise ContractError("offline full-validation comparator requires Linux")
     output_root.mkdir(parents=True, exist_ok=True)
-    custody_dir = output_root / "custody"
-    custody_dir.mkdir()
-    frozen_archive = custody_dir / "archive.dat"
-    frozen_manifest = custody_dir / "manifest.json"
-    try:
-        shutil.copyfile(config.archive.path, frozen_archive)
-        shutil.copyfile(config.manifest.path, frozen_manifest)
-    except OSError as error:
-        raise ContractError(f"cannot create immutable corpus custody copy: {error}") from error
-    with frozen_archive.open("rb") as stream:
-        archive_digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    with frozen_manifest.open("rb") as stream:
-        manifest_digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if archive_digest != config.archive.sha256:
-        raise ContractError("archive changed while creating custody copy")
-    if manifest_digest != config.manifest.sha256:
-        raise ContractError("manifest changed while creating custody copy")
-    frozen_archive_ref = replace(config.archive, path=frozen_archive)
-    frozen_manifest_ref = replace(config.manifest, path=frozen_manifest)
-    config = replace(config, archive=frozen_archive_ref, manifest=frozen_manifest_ref)
+    pinned = _pin_corpus(config, output_root)
     arms: list[ArmObservation] = []
     order_index = 0
-    for pair_index in range(PAIR_COUNT):
-        first = config.core if pair_index % 2 == 0 else config.candidate
-        second = config.candidate if first is config.core else config.core
-        arms.append(_run_arm(config, first, pair_index, order_index, output_root))
-        order_index += 1
-        arms.append(_run_arm(config, second, pair_index, order_index, output_root))
-        order_index += 1
+    try:
+        with _ChildSubreaperScope():
+            for pair_index in range(PAIR_COUNT):
+                first = config.core if pair_index % 2 == 0 else config.candidate
+                second = config.candidate if first is config.core else config.core
+                arms.append(
+                    _run_arm(
+                        config, first, pair_index, order_index, output_root, pinned
+                    )
+                )
+                order_index += 1
+                arms.append(
+                    _run_arm(
+                        config, second, pair_index, order_index, output_root, pinned
+                    )
+                )
+                order_index += 1
+    except _P2PContractError as error:
+        raise ContractError(str(error)) from error
     _require_comparable(config, arms)
     core_walls = [arm.wall_ns for arm in arms if arm.role == "core"]
     candidate_walls = [arm.wall_ns for arm in arms if arm.role == "candidate"]
@@ -1163,15 +1343,19 @@ def run_campaign(config: Config, output_root: Path) -> JsonObject:
 
 
 def _publish_result(result: JsonObject, output: Path) -> None:
-    """Publish atomically; commitment is the successful directory fsync.
+    """Atomically publish one result document.
 
-    The unnamed inode is fsynced before linking, then the containing directory
-    is fsynced.  Thus a successful return means the result name and bytes are
-    durable.  Failures before the directory fsync are non-committed and may be
-    retried (the destination must still be absent); an EEXIST or ambiguous
-    post-fsync failure is non-retriable and callers must inspect the destination.
-    This function owns no retries or compensation, and crash recovery consists
-    of retaining the already-linked result or rerunning when the name is absent.
+    Commit point is successful ``linkat(AT_EMPTY_PATH)``. Bytes are written
+    to an unnamed ``O_TMPFILE`` inode, flushed, and fsynced; only then is
+    the inode named in the output directory. ``os.fsync`` of that directory
+    follows a successful link so the directory entry is durable.
+
+    Crash before the link leaves the destination unchanged. The unnamed
+    inode vanishes with the descriptor; the run is retriable against the
+    same output path. Crash after the link (or a retry against an existing
+    name) surfaces ``EEXIST``: the published bytes are the committed
+    document and must not be overwritten. This function does not retry;
+    the caller owns retry policy and must choose a new output path.
     """
     if sys.platform != "linux":
         raise ContractError("publication requires Linux O_TMPFILE support")

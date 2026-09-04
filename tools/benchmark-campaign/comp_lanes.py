@@ -235,6 +235,7 @@ parser.add_argument('--data-dir', required=True)
 parser.add_argument('--corpus', required=True)
 parser.add_argument('--manifest', required=True)
 parser.add_argument('--state', required=True)
+parser.add_argument('--assume-valid-height', default='0')
 args = parser.parse_args()
 corpus = Path(args.corpus).read_bytes()
 if not corpus:
@@ -304,6 +305,7 @@ def _build_offline_fixture(workspace: Path) -> Path:
         "{manifest_path}",
         "--state",
         "{state_path}",
+        "--assume-valid-height=0",
     ]
 
     def _program() -> dict[str, object]:

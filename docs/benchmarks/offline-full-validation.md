@@ -21,17 +21,24 @@ One `offline-full-validation-config-v1` document binds every arm:
   manifest. Trailing bytes, a magic mismatch, a length mismatch, or a header
   hash that does not match the manifest refuse the run before any child
   starts. Block hash is double-SHA256 of the 80-byte header, displayed
-  little-endian, matching Bitcoin.
+  little-endian, matching Bitcoin. The hash helper is checked against the
+  published 80-byte mainnet genesis header
+  (`000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f`),
+  not only against synthetic fixture bytes hashed with the same algorithm.
 - **Manifest**: `core-framed-archive-manifest-v1` names network, magic,
   inclusive height range, archive digest and size, and one packed entry per
   height (`hash`, `offset`, `payload_length`). Heights are contiguous. The
   packed records must consume the archive exactly.
+- **Pinned corpus**: after config load, the campaign copies archive and
+  manifest into a private campaign directory, re-hashes both, and
+  chmod's them `0o400`. Every arm reads those pins. A same-size rewrite
+  of the operator path after load cannot change what the children see.
 - **Posture**: `assume_valid` must be false. `txindex`, `blockfilterindex`,
-  and `coinstatsindex` must be off. Cache policy is a closed set
-  (`process-cold/page-cache-unspecified` or
-  `process-cold/page-cache-evicted`). A configured cache number that
-  production code does not consume cannot appear here as if it established
-  parity.
+  and `coinstatsindex` must be off. Cache policy is the closed set
+  `process-cold/page-cache-unspecified`. The sibling MuHash comparator
+  requires hash-bound evidence before it will claim page-cache eviction;
+  this harness does not enact eviction, so that policy string is refused
+  rather than published as a posture the run did not take.
 - **Certified state**: height, best block, UTXO count, total amount in
   satoshis, MuHash, `hash_serialized_3`, body availability, and one-block
   disconnect readiness. Height and best block must equal the manifest tip.
@@ -43,7 +50,13 @@ One `offline-full-validation-config-v1` document binds every arm:
   The controller copies the pinned program into a private arm directory,
   verifies the copy, strips owner-write (`0o500`), and re-hashes immediately
   before every spawn. Placeholders are `{binary}`, `{data_dir}`,
-  `{corpus_path}`, `{manifest_path}`, `{state_path}`.
+  `{corpus_path}`, `{manifest_path}`, `{state_path}`. The timed command
+  must carry a known assume-valid-off token (`-assumevalid=0`,
+  `--assume-valid-height=0`, or the two-token form with `0`) and must not
+  carry a known index-on token (`-txindex`, `-txindex=1`, `--txindex=true`,
+  `-blockfilterindex`, `-coinstatsindex`, and the same spellings with
+  `--` and `=1`/`=true`). Reopen commands are not re-checked. The
+  comparator does not parse the rest of either product's flag dialect.
 
 ## Timed boundary
 
@@ -58,9 +71,10 @@ must not daemonize (`-daemon=0`) and should stop after import
 (`-stopafterblockimport=1`, `-assumevalid=0`, `-stopatheight=H`). bitcoin-rs
 commands must apply the same archive through height `H` with
 `--assume-valid-height 0`, persist bodies and undo, publish the production
-clean checkpoint, and exit nonzero if publication fails. The comparator
-does not parse product-specific flags; the pinned command and the certified
-state are the proof.
+clean checkpoint, and exit nonzero if publication fails. After wait, the
+process group must be empty and the comparator, running as a Linux child
+subreaper, must own no leftover descendants. A fixture that forks a
+sleeper and then exits 0 is refused; no result JSON is published.
 
 ## Correctness gates, in order
 
@@ -68,15 +82,18 @@ state are the proof.
 
 1. Exactly 14 arms, two per pair, one Core and one bitcoin-rs.
 2. Alternation: even pairs Core-first, odd pairs bitcoin-rs-first.
-3. Archive and binary identities unchanged from config load.
+3. Archive and binary identities unchanged from the campaign pin.
 4. Each arm exited 0 (durable clean exit). Reopen arms additionally exited 0.
 5. Certified state equals the config expectation on both arms and the two
    arms agree with each other.
 
 Any refusal raises `ContractError`, the process exits 2, and **no result
 JSON is emitted**. Publication is atomic: bytes are written to an unnamed
-`O_TMPFILE` inode, fsynced, and linked with `linkat(AT_EMPTY_PATH)`. An
-existing destination survives.
+`O_TMPFILE` inode, fsynced, and linked with `linkat(AT_EMPTY_PATH)`. The
+commit point is a successful link. Crash before the link leaves the
+destination unchanged and is retriable; crash after the link (or a retry
+against an existing name) is `EEXIST` and must not overwrite. Directory
+fsync follows the link. This function does not retry.
 
 ## Result contract
 
@@ -106,6 +123,10 @@ hash-pinned `bitcoind` and bitcoin-rs binaries plus a frozen corpus from
 issue #42.
 
 ## Limits
+
+Campaign ceilings: archive 1 TiB, manifest 512 MiB, 2 000 000 blocks.
+Those bounds admit a Cmodern prefix; they are not a promise to ingest the
+live full-tip chain (~760 GiB) until issue #42 freezes that corpus.
 
 This is the processing-bound regime in CONCEPTS.md: blocks are local, wall
 is validation plus durable commit. It is not download-bound IBD. Historical
