@@ -705,6 +705,52 @@ mod tests {
     }
 
     #[test]
+    fn listener_directory_table_is_closed_over_http() -> std::io::Result<()> {
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let server = RpcServer::bind(
+            "127.0.0.1:0",
+            auth,
+            handler,
+            4,
+            core::time::Duration::from_millis(500),
+            false,
+        )?;
+        let addr = server.listener.local_addr()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+
+        let status = |method: &str, path: &str| -> std::io::Result<u16> {
+            let mut stream = TcpStream::connect(addr)?;
+            write!(
+                stream,
+                "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )?;
+            stream.flush()?;
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf)?;
+            let text = String::from_utf8_lossy(&buf);
+            let code = text
+                .split_whitespace()
+                .nth(1)
+                .and_then(|token| token.parse().ok())
+                .expect("HTTP status");
+            Ok(code)
+        };
+
+        assert_eq!(status("GET", "/blocks/tip/height")?, 404);
+        assert_eq!(status("HEAD", "/api/tx")?, 404);
+        assert_eq!(status("PUT", "/")?, 404);
+        assert_eq!(status("POST", "/")?, 401);
+        assert_eq!(status("GET", "/api/blocks/tip/height")?, 200);
+
+        shutdown.store(true, Ordering::Release);
+        handle.join().expect("join serve thread")?;
+        Ok(())
+    }
+
+    #[test]
     fn json_rpc_2_success_omits_null_error_for_jsonrpsee_clients() {
         let handler = Handler::new(Arc::new(Context::new()));
         let response = handle_json(
