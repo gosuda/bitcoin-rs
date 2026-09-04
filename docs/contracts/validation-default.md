@@ -16,8 +16,9 @@ Owners:
 - `bitcoin-rs-consensus` and `bitcoin-rs-node` default features do not
   include `kernel` while the recorded verdict in `g19_validation_default.rs`
   is `PromoteNative`.
-- Production apply is always the native Rust path: decode once, hash native
-  `Tx` values once, verify scripts through `Interpreter` with a shared
+- Production apply is always the native Rust path: decode once, hash each
+  transaction once (from preserved wire bytes when present, otherwise from
+  the decoded `Tx`), verify scripts through `Interpreter` with a shared
   `SighashCache`. Enabling `--features kernel` compiles `libbitcoinkernel`;
   it does not replace that path or feed kernel-owned data into apply.
 - The verdict may move back to `KeepKernel` only together with those two

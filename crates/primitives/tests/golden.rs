@@ -94,6 +94,13 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn st
                 "height {height} tx index {index}"
             );
         }
+        // CONTRACT: VAL-01 (docs/contracts/validation-default.md#val-01).
+        // Blockstream's txids remain the external fixture oracle.
+        assert_eq!(
+            bitcoin_rs_primitives::txids_from_serialized_block(&block_bytes)?,
+            expected_txids,
+            "height {height} wire txids"
+        );
         assert_eq!(
             bitcoin_rs_primitives::consensus_bytes(&block),
             block_bytes,
