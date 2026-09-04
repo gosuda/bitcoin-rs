@@ -17,12 +17,29 @@
 use std::path::PathBuf;
 
 use bitcoin_rs_primitives::USER_AGENT;
+use serde_json::Value;
 
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";
 const SCHEMA: &str = "bitcoin-rs-core-differential-v1";
 
-fn main_error(message: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+type LiveError = Box<dyn std::error::Error>;
+
+fn main_error(message: impl std::fmt::Display) -> LiveError {
     Box::<std::io::Error>::new(std::io::Error::other(message.to_string())).into()
+}
+
+fn evidence_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, LiveError> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| main_error(format!("evidence missing `{key}`")))
+}
+
+fn evidence_u64(value: &Value, key: &str) -> Result<u64, LiveError> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| main_error(format!("evidence missing `{key}`")))
 }
 
 /// Parses Core's user agent into its dotted version.
@@ -60,28 +77,19 @@ fn version_is_pinned_line(parsed: &str, pinned: &str) -> bool {
     parsed.len() >= pinned.len() && parsed[..pinned.len()] == pinned[..]
 }
 
-#[test]
-#[ignore = "requires live bitcoind; run scripts/run-p2p-core-interop.sh"]
-fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), Box<dyn std::error::Error>> {
+fn load_evidence() -> Result<Value, LiveError> {
     let path = std::env::var(EVIDENCE_ENV).map_err(|_| {
         format!(
             "{EVIDENCE_ENV} must point at the evidence JSON from scripts/run-p2p-core-interop.sh"
         )
     })?;
     let raw = std::fs::read_to_string(PathBuf::from(&path))?;
-    let evidence: serde_json::Value = serde_json::from_str(&raw)?;
+    Ok(serde_json::from_str(&raw)?)
+}
 
-    let schema = evidence
-        .get("schema")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| main_error("evidence missing `schema`"))?;
-    assert_eq!(schema, SCHEMA, "evidence schema");
-    let core_version = evidence
-        .get("core_version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| main_error("evidence missing `core_version`"))?;
-    // Core reports its user agent in BIP 14 form (`/Satoshi:31.1.0/`), not a
-    // bare version; normalize before pinning CORE-01's 31.1 line.
+fn assert_pinned_core_and_network(evidence: &Value) -> Result<(), LiveError> {
+    assert_eq!(evidence_str(evidence, "schema")?, SCHEMA, "evidence schema");
+    let core_version = evidence_str(evidence, "core_version")?;
     let parsed_core_version = parse_core_subversion(core_version).ok_or_else(|| {
         main_error(format!(
             "Core subversion {core_version:?} is not Satoshi-format \
@@ -97,64 +105,44 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), Box<dyn std::e
          {parsed_core_version:?}",
         bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
     );
-    let magic = evidence
-        .get("magic")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| main_error("evidence missing `magic`"))?;
     assert_eq!(
-        magic, "fabfb5da",
+        evidence_str(evidence, "magic")?,
+        "fabfb5da",
         "regtest magic must match Network::Regtest.magic()"
     );
+    Ok(())
+}
 
-    // Handshake, as observed by Core itself: it accepted our version message
-    // (services + user agent recorded) and completed verack as an inbound peer.
+fn assert_inbound_handshake(evidence: &Value) -> Result<(), LiveError> {
     let peer = evidence
         .get("peer")
         .ok_or_else(|| main_error("evidence missing `peer`"))?;
     let inbound = peer
         .get("inbound")
-        .and_then(serde_json::Value::as_bool)
+        .and_then(Value::as_bool)
         .ok_or_else(|| main_error("evidence peer missing `inbound`"))?;
     assert!(
         inbound,
         "bitcoin-rs dials Core; Core must see the connection as inbound"
     );
-    let subver = peer
-        .get("subver")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| main_error("evidence peer missing `subver`"))?;
     assert_eq!(
-        subver, USER_AGENT,
+        evidence_str(peer, "subver")?,
+        USER_AGENT,
         "Core recorded our user agent from the version message"
     );
-    let services = peer
-        .get("services")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| main_error("evidence peer missing `services`"))?;
+    let services = evidence_u64(peer, "services")?;
     let network_bit = bitcoin::p2p::ServiceFlags::NETWORK.to_u64();
     let witness_bit = bitcoin::p2p::ServiceFlags::WITNESS.to_u64();
     assert_ne!(services & network_bit, 0, "NODE_NETWORK advertised");
     assert_ne!(services & witness_bit, 0, "NODE_WITNESS advertised");
+    Ok(())
+}
 
-    // Heights: initial sync proves version/verack + getheaders/headers +
-    // getdata/block; the catch-up round proves live post-handshake relay.
-    let initial = evidence
-        .get("initial_sync_height")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| main_error("evidence missing `initial_sync_height`"))?;
-    let catchup_from = evidence
-        .get("catchup_from")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| main_error("evidence missing `catchup_from`"))?;
-    let catchup_to = evidence
-        .get("catchup_to")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| main_error("evidence missing `catchup_to`"))?;
-    let rs_height = evidence
-        .get("bitcoin_rs_height")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| main_error("evidence missing `bitcoin_rs_height`"))?;
-
+fn assert_chain_identity(evidence: &Value) -> Result<(), LiveError> {
+    let initial = evidence_u64(evidence, "initial_sync_height")?;
+    let catchup_from = evidence_u64(evidence, "catchup_from")?;
+    let catchup_to = evidence_u64(evidence, "catchup_to")?;
+    let rs_height = evidence_u64(evidence, "bitcoin_rs_height")?;
     assert!(
         initial >= catchup_from,
         "initial sync must reach at least the pre-catchup Core height"
@@ -167,40 +155,36 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), Box<dyn std::e
         rs_height, catchup_to,
         "bitcoin-rs followed Core's post-handshake blocks over P2P"
     );
-
-    let chain = evidence
-        .get("chain")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| main_error("evidence missing `chain`"))?;
-    assert_eq!(chain, "regtest", "differential runs on regtest");
-    let core_tip = evidence
-        .get("bestblockhash")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| main_error("evidence missing `bestblockhash`"))?;
-    let rs_tip = evidence
-        .get("bitcoin_rs_bestblockhash")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| main_error("evidence missing `bitcoin_rs_bestblockhash`"))?;
     assert_eq!(
-        core_tip, rs_tip,
+        evidence_str(evidence, "chain")?,
+        "regtest",
+        "differential runs on regtest"
+    );
+    assert_eq!(
+        evidence_str(evidence, "bestblockhash")?,
+        evidence_str(evidence, "bitcoin_rs_bestblockhash")?,
         "getbestblockhash must match after P2P catch-up"
     );
-    let core_blocks = evidence
-        .get("core_blocks")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| main_error("evidence missing `core_blocks`"))?;
-    let rs_blocks = evidence
-        .get("bitcoin_rs_blocks")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| main_error("evidence missing `bitcoin_rs_blocks`"))?;
+    let rs_blocks = evidence_u64(evidence, "bitcoin_rs_blocks")?;
     assert_eq!(
-        core_blocks, rs_blocks,
+        evidence_u64(evidence, "core_blocks")?,
+        rs_blocks,
         "getblockchaininfo.blocks must match after P2P catch-up"
     );
     assert_eq!(
         rs_blocks, rs_height,
         "getblockchaininfo.blocks must match getblockcount"
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires live bitcoind; run scripts/run-p2p-core-interop.sh"]
+fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), LiveError> {
+    let evidence = load_evidence()?;
+    assert_pinned_core_and_network(&evidence)?;
+    assert_inbound_handshake(&evidence)?;
+    assert_chain_identity(&evidence)?;
     Ok(())
 }
 
