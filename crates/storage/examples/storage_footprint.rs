@@ -24,6 +24,22 @@ use hashbrown::HashMap;
 use std::path::Path;
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
+use std::time::Instant;
+
+const INDEX_CFS: &[(ColumnFamily, usize, usize)] = &[
+    (ColumnFamily::TxConfirmed, 12, 6),
+    (ColumnFamily::TxMempool, 5, 4),
+    (ColumnFamily::BlockHeaders, 32, 0),
+    (ColumnFamily::Funding, 12, 6),
+    (ColumnFamily::Spending, 12, 6),
+    (ColumnFamily::Coinstats, 12, 8),
+    (ColumnFamily::BlockTree, 37, 0),
+    (ColumnFamily::UtxoMeta, 16, 8),
+    (ColumnFamily::ScriptLive, 43, 0),
+];
+
+// `INDEX_CFS` is the canonical format-5 footprint schema used by both sizing and writing.
+
 
 // ---------------------------------------------------------------------------
 // Corpus
@@ -55,19 +71,7 @@ fn logical_data_size() -> u64 {
     // + 8-byte value (Coinstats),
     // 37-byte key + 0-byte value (BlockTree), 16-byte key + 8-byte value
     // (UtxoMeta), 5-byte key + 4-byte value (TxMempool), 43-byte live locator.
-    let index_cfs: &[(ColumnFamily, usize, usize)] = &[
-        (ColumnFamily::TxConfirmed, 12, 6),
-        (ColumnFamily::TxMempool, 5, 4),
-        (ColumnFamily::BlockHeaders, 32, 0),
-        (ColumnFamily::Funding, 12, 6),
-        (ColumnFamily::Spending, 12, 6),
-        (ColumnFamily::Coinstats, 12, 8),
-        (ColumnFamily::BlockTree, 37, 0),
-        (ColumnFamily::UtxoMeta, 16, 8),
-        (ColumnFamily::ScriptLive, 43, 0),
-    ];
-
-    for &(_, key_len, val_len) in index_cfs {
+    for &(_, key_len, val_len) in INDEX_CFS {
         total += u64::from(INDEX_ROWS)
             * (u64::try_from(key_len).expect("key length fits in u64")
                 + u64::try_from(val_len).expect("value length fits in u64"));
@@ -299,6 +303,7 @@ fn main() {
         .unwrap_or_else(|| "fjall".to_string());
 
     let logical = logical_data_size();
+    let started = Instant::now();
     println!("=== Storage footprint measurement ===");
     println!("Backend:     {backend}");
     println!(
@@ -352,6 +357,7 @@ fn main() {
             std::process::exit(1);
         }
     }
+    println!("Elapsed end-to-end: {:.3}s", started.elapsed().as_secs_f64());
 }
 
 fn print_results(
