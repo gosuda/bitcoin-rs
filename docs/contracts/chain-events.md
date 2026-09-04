@@ -90,7 +90,7 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
 ## Live gaps
 
 - **Cross-crate lifecycle boundary**: Slimming `crates/node` orchestration and shifting domain-owned mechanics to their respective crates is tracked under #217 (open).
-- **Crash/reorg recovery invariants**: Broader convergence across block data and secondary indexes remains tracked under #209 (open). Chainstate restart itself uses the authenticated checkpoint plus redo-only journal contract in `docs/chainstate-recovery.md`; `crates/node/tests/crash_recovery.rs` exercises process `SIGKILL` boundaries, journal replay, reorg rewind/fallback, and upgrade compatibility. The retired recovery-meta sidecar is neither authoritative nor read. The recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) remains proven by G11.
+- **Full-stack crash convergence**: System-level convergence rules across chainstate checkpoints, block data, and secondary indexes are normative in [recovery.md](recovery.md). Broader remaining work is tracked under #209 (open). Chainstate restart itself uses the authenticated checkpoint plus redo-only journal contract in `docs/chainstate-recovery.md`; `crates/node/tests/crash_recovery.rs` exercises process `SIGKILL` boundaries, journal replay, reorg rewind/fallback, and upgrade compatibility. The retired recovery-meta sidecar is neither authoritative nor read. The recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) remains proven by G11.
 
 ## Proven by
 
@@ -99,13 +99,10 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `record_drops_hints_when_channel_full`,
   `active_chain_snapshot_starts_at_genesis_on_fresh_node`,
   `active_chain_snapshot_anchors_at_restored_tip_after_restart`.
-- `crates/node/src/txindex_worker_reconcile_tests.rs`:
-  `forward_commit_overlapping_tip_extension_repairs_on_next_pass`,
-  `forward_commit_overlapping_rival_reorg_repairs_on_next_pass`,
-  `snapshot_identity_changes_reconcile_from_the_cursor_position`,
-  `missing_disconnected_body_resets_and_rebuilds_selected_capabilities`,
-  `stale_script_index_reset_preserves_ready_tx_lookup_then_rebuilds`,
-  `consumer_cursor_round_trips_bytes`.
+- `crates/node/src/txindex_worker_recovery_tests.rs`:
+  `shallow_reorg_rewinds_to_common_ancestor_then_replays`,
+  `tip_change_during_rebuild_converges_on_new_tip`,
+  `missing_disconnected_body_routes_rewind_to_rebuild`.
 - `crates/node/src/apply.rs`:
   `a_clean_disconnect_leaves_no_in_flight_marker`,
   `chain_change_proof_finish_restores_even_generation`,

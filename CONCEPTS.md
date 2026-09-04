@@ -105,6 +105,21 @@ means preserving value and operation order, not forcing JSON text to match. See
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change. See `docs/solutions/logic-errors/exclude-provably-unspendable-utxos.md`.
 
+### Notification configuration
+
+Node configuration groups external notification adapters below
+`NotificationConfig`. ZMQ configuration follows the socket ownership boundary:
+one endpoint group contains its endpoint, all topics published by that socket,
+and an optional socket HWM override. Topics that share an endpoint therefore
+cannot claim different HWM values. The ZMQ publisher owns the default HWM of
+1,000; configuration mentions HWM only when an endpoint needs an operational
+override.
+
+The supported file form is `[[notifications.zmq]]` with `endpoint`, `topics`,
+and optional `hwm`. The former topic-specific `zmqpub*` endpoint and HWM fields
+are not part of node configuration, including CLI, environment, TOML, and
+`bitcoin.conf` adapters.
+
 ## Block apply
 ### Window script batching
 Verifying the ordered transaction unit of several consecutive blocks in one parallel dispatch. The window prepares each block against an ordered overlay, dispatches once, and issues a private, single-use `BlockValidationProof` that owns the `PreparedApply` it certifies and binds block hash, predecessor, height, flags, and locktime cutoff. Blocks then commit one at a time, in order; commit re-derives all five fields and on mismatch discards proof and prepared state and rebuilds from the live UTXO set. The proof bypasses only the transaction-validation slot: block rules and BIP30 stay before it, coinbase maturity and BIP68 after. Assume-valid produces a distinct `AssumeValidSkipped` state that never takes the bypass. See `docs/solutions/performance/script-batching-needs-a-split-apply-path.md`.

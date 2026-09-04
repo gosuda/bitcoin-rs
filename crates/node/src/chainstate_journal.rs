@@ -44,5 +44,6 @@ pub(crate) use replay::{ReplayOutcome, replay_from_journal};
 #[allow(unused_imports)]
 // writer surface; Task 5 (boot fast path) consumes HeadMarker + failpoints
 pub(crate) use writer::{
-    FULL_REVALIDATION_MARKER, HeadMarker, JournalWriter, JournalWriterError, JournalWriterFailpoint,
+    FULL_REVALIDATION_MARKER, HeadMarker, JOURNAL_DIR_NAME, JournalWriter, JournalWriterError,
+    JournalWriterFailpoint, clear_full_revalidation_marker_at, full_revalidation_required,
 };

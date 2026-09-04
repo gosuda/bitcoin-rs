@@ -25,7 +25,7 @@ Checkpoint publication is one serialized operation: pause chain transitions, fre
 | Unreadable journal head, committed-range corruption, base mismatch, or rejected header | Discard that journal generation and use the checkpoint |
 | No complete checkpoint | Start cold and initialize a journal |
 | Reorg below the checkpoint base | Persist `chainstate-journal/full-revalidation` and start cold on every restart until a replacement checkpoint publishes |
-| Journal disabled | Use checkpoint-only recovery |
+| Journal disabled | Use checkpoint-only recovery. A persisted full-revalidation marker still forces cold validation until a replacement checkpoint publishes |
 
 Replay mutates an owned checkpoint state. Any error discards the partially reconstructed state before it can become runtime state. Segment contents are read one frame at a time; memory use is bounded by checkpoint state plus one decoded journal record rather than the complete replay gap.
 
@@ -33,7 +33,7 @@ Replay mutates an owned checkpoint state. Any error discards the partially recon
 
 A reorg whose fork is at or above the checkpoint base rewrites `head.json` to the fork before truncating and deleting old-branch segment tails. The disconnect marker is released only after the new journal frontier is durable. A replacement block can then append to the rewritten frontier and survives another restart.
 
-A fork below the checkpoint base cannot be represented as a suffix of that checkpoint. The writer invalidates the journal generation and publishes the full-revalidation marker. Operators should not delete this marker while the old checkpoint remains. Successful publication of a checkpoint rebuilt by normal validation replaces the base and removes the marker.
+A fork below the checkpoint base cannot be represented as a suffix of that checkpoint. The writer invalidates the journal generation and publishes the full-revalidation marker. The marker is independent of whether journaling is currently enabled: startup must not restore the invalidated checkpoint. Operators should not delete this marker while the old checkpoint remains. Successful publication of a checkpoint rebuilt by normal validation replaces the base and removes the marker.
 
 ## Degraded mode
 

@@ -108,34 +108,22 @@ Owners:
 
 ## Live gaps
 
-- **Asynchronous recovery decoupling**: Index stores now open on their
-  worker threads (`TxIndexWorker::spawn_with_open`), not synchronously
-  during `NodeState::open`. Durable recovery-evidence detection
-  (`crates/node/src/recovery_evidence.rs`) validates the applied-tip
-  witness semantically before rotating the current record and detects
-  checkpoint fallback from durable evidence. Full decoupling of index
-  recovery from authoritative chain listener readiness is tracked under
-  #208 and #209 (open on GitHub; #208 addressed on this branch by
-  `b67bd87`).
+- **Full-stack crash convergence**: The recovery model across chainstate,
+  checkpoints, block bodies, and derived indexes is normative in
+  [recovery.md](recovery.md) (`RCV-01`–`RCV-04`); a `kill -9` gate that
+  re-applies real block bodies through it is not yet exercised.
 - **Deep reorg memory bounding**: Disconnect planning preloads branch block bodies into memory; streaming bounded-memory disconnect is tracked under #206 (open).
 ## Proven by
 
-- `crates/node/src/txindex_worker_reconcile_tests.rs`:
-  - `forward_commit_overlapping_tip_extension_repairs_on_next_pass`
-  - `forward_commit_overlapping_rival_reorg_repairs_on_next_pass`
-  - `rollback_of_recanonicalized_watermark_repairs_on_next_pass`
-  - `absent_tip_rolls_index_back_to_none`
-  - `missing_disconnected_body_resets_and_rebuilds_selected_capabilities`
-  - `stale_script_index_reset_preserves_ready_tx_lookup_then_rebuilds`
-  - `missing_rollback_identity_resets_and_rebuilds_selected_capabilities`
-  - `overflow_block_is_reprepared_and_committed_on_next_pass`
-  - `reconciliation_plan_walks_the_tree`
-  - `snapshot_identity_changes_reconcile_from_the_cursor_position`
-  - `consumer_cursor_round_trips_bytes`
-  - `interrupted_consumer_converges_to_the_uninterrupted_index_state`
+- `crates/node/src/txindex_worker_recovery_tests.rs`:
+  - `shallow_reorg_rewinds_to_common_ancestor_then_replays`
+  - `absent_tip_rewinds_index_to_empty`
+  - `missing_disconnected_body_routes_rewind_to_rebuild`
+  - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
+- `crates/node/src/txindex_worker_lifecycle_tests.rs` and
+  `crates/node/src/txindex_worker_integration_tests.rs`: lifecycle
+  publication, open failure/timeout, and shutdown abandonment.
 - `crates/node/src/txindex_worker_query_tests.rs`: query gating, snapshot
   consistency, and revision ABA detection tests.
-- `crates/node/src/txindex_worker_catchup_tests.rs`: multi-branch catchup,
-  parallel batching, and watermark alignment tests.
-- `bin/bitcoin-rs/tests/gates/g10_reorg_deep.rs`: reorganization planning,
-  execution, disconnect restoration, and index reconciliation gate.
+- `crates/node/src/apply.rs`:
+  `txindex_worker_failure_makes_queries_unavailable_without_blocking_apply`.

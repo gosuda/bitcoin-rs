@@ -42,17 +42,38 @@ const MAX_HEAD_BYTES: u64 = 4 * 1024;
 /// Maximum serialized segment name length sanity bound.
 const SEGMENT_NAME_MAX: usize = 32;
 pub(crate) const FULL_REVALIDATION_MARKER: &str = "full-revalidation";
+/// Directory name under the node data dir that owns journal files.
+pub(crate) const JOURNAL_DIR_NAME: &str = "chainstate-journal";
 
-/// Durability batch size, in blocks (plan §2.3 default; config lands in Task 3).
-const DEFAULT_BATCH_BLOCKS: u32 = 500;
-/// Durability batch period, in seconds (plan §2.3 default; config lands in Task 3).
-const DEFAULT_BATCH_SECONDS: u64 = 5;
-/// Segment rotation threshold, in MiB (plan §2.1; config lands in Task 3).
-const DEFAULT_ROTATE_MIB: u64 = 256;
-/// Retention bound on total journal size, in MiB (plan §2.1; config lands in Task 3).
-const DEFAULT_MAX_JOURNAL_MIB: u64 = 2048;
-const DEFAULT_MAX_LAG_BLOCKS: u32 = DEFAULT_BATCH_BLOCKS;
-const DEFAULT_MAX_LAG_SECONDS: u64 = 30;
+/// Returns whether a sticky full-revalidation marker is present.
+pub(crate) fn full_revalidation_required(data_dir: &std::path::Path) -> bool {
+    data_dir
+        .join(JOURNAL_DIR_NAME)
+        .join(FULL_REVALIDATION_MARKER)
+        .is_file()
+}
+
+/// Removes the sticky full-revalidation marker after a replacement checkpoint
+/// is durably published. Missing journal directories or markers are success.
+pub(crate) fn clear_full_revalidation_marker_at(
+    data_dir: &std::path::Path,
+) -> Result<(), JournalWriterError> {
+    let path = data_dir.join(JOURNAL_DIR_NAME);
+    let dir = match crate::checkpoint_fs::open_data_dir(&path) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    clear_full_revalidation_marker(&dir)
+}
+
+fn clear_full_revalidation_marker(dir: &cap_std::fs::Dir) -> Result<(), JournalWriterError> {
+    match dir.remove_file(FULL_REVALIDATION_MARKER) {
+        Ok(()) => crate::checkpoint_fs::sync_dir(dir).map_err(JournalWriterError::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 
 /// Zero-padded 10-digit generation: lexicographic order equals numeric order.
 const SEGMENT_GEN_WIDTH: usize = 10;
@@ -98,6 +119,8 @@ pub(crate) enum JournalWriterFailpoint {
     HeadDirSync,
     /// Injected just before the storage-dependency flush at the boundary.
     StorageFlush,
+    /// Injected just before obsolete tails are truncated after a fork-head publish.
+    TruncateAfter,
 }
 
 #[derive(Debug, Error)]
@@ -180,7 +203,7 @@ impl HeadMarker {
         !crc
     }
 
-    fn serialize(&self) -> Result<Vec<u8>, JournalWriterError> {
+    pub(crate) fn serialize(&self) -> Result<Vec<u8>, JournalWriterError> {
         let payload = serde_json::to_vec(self).map_err(|error| {
             JournalWriterError::HeadUnreadable(format!("marker serialization failed: {error}"))
         })?;
@@ -319,6 +342,10 @@ pub(crate) struct JournalWriter<S: KvStore> {
     /// fails closed before any later block mutation; restart recovery truncates
     /// the active segment to the durable cursor and creates a fresh writer.
     append_gap_height: Option<u32>,
+    /// A post-append durability boundary failed while the current block remains
+    /// tracked in `pending_records`. The next apply retries that boundary and
+    /// stops before mutation until it succeeds.
+    pending_durability_failed: bool,
     state: WriterState,
     failpoint: Option<JournalWriterFailpoint>,
 }
@@ -407,17 +434,19 @@ impl<S: KvStore> JournalWriter<S> {
             record_count: head.record_count,
             durable_block_hash: head.block_hash,
             durable_prev_hash: head.prev_hash,
-            rotate_bytes: DEFAULT_ROTATE_MIB * 1024 * 1024,
-            batch_blocks: DEFAULT_BATCH_BLOCKS,
-            batch_seconds: Duration::from_secs(DEFAULT_BATCH_SECONDS),
-            max_journal_bytes: DEFAULT_MAX_JOURNAL_MIB * 1024 * 1024,
-            max_lag_blocks: DEFAULT_MAX_LAG_BLOCKS,
-            max_lag_seconds: Duration::from_secs(DEFAULT_MAX_LAG_SECONDS),
+            rotate_bytes: 0,
+            batch_blocks: 0,
+            batch_seconds: Duration::ZERO,
+            max_journal_bytes: 0,
+            max_lag_blocks: 0,
+            max_lag_seconds: Duration::ZERO,
             last_boundary: Instant::now(),
             append_gap_height: None,
+            pending_durability_failed: false,
             state: WriterState::Open,
             failpoint: None,
         };
+        writer.apply_config(crate::config::ChainstateJournalConfig::default())?;
         writer.recover_active_segment()?;
         metrics::gauge!("node.chainstate_journal.append_gap").set(0.0);
         Ok(writer)
@@ -463,27 +492,46 @@ impl<S: KvStore> JournalWriter<S> {
         max_lag_blocks: u32,
         max_lag_seconds: Duration,
     ) -> Result<(), JournalWriterError> {
-        if batch_blocks == 0
-            || batch_seconds.is_zero()
-            || rotate_mib == 0
-            || max_journal_mib == 0
-            || max_lag_blocks == 0
-            || max_lag_seconds.is_zero()
+        self.apply_config(crate::config::ChainstateJournalConfig {
+            enabled: true,
+            blocks: batch_blocks,
+            seconds: batch_seconds.as_secs(),
+            rotate_mib,
+            max_journal_mib,
+            max_lag_blocks,
+            max_lag_seconds: max_lag_seconds.as_secs(),
+        })
+    }
+
+    fn apply_config(
+        &mut self,
+        config: crate::config::ChainstateJournalConfig,
+    ) -> Result<(), JournalWriterError> {
+        if config.blocks == 0
+            || config.seconds == 0
+            || config.rotate_mib == 0
+            || config.max_journal_mib == 0
+            || config.max_lag_blocks == 0
+            || config.max_lag_seconds == 0
         {
             return Err(JournalWriterError::CursorMismatch(
                 "journal runtime limits must be non-zero".to_owned(),
             ));
         }
-        self.batch_blocks = batch_blocks;
-        self.batch_seconds = batch_seconds;
-        self.rotate_bytes = rotate_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+        self.batch_blocks = config.blocks;
+        self.batch_seconds = Duration::from_secs(config.seconds);
+        self.rotate_bytes = config.rotate_mib.checked_mul(1024 * 1024).ok_or_else(|| {
             JournalWriterError::CursorMismatch("journal rotation size overflow".to_owned())
         })?;
-        self.max_journal_bytes = max_journal_mib.checked_mul(1024 * 1024).ok_or_else(|| {
-            JournalWriterError::CursorMismatch("journal retention size overflow".to_owned())
-        })?;
-        self.max_lag_blocks = max_lag_blocks;
-        self.max_lag_seconds = max_lag_seconds;
+        self.max_journal_bytes =
+            config
+                .max_journal_mib
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| {
+                    JournalWriterError::CursorMismatch("journal retention size overflow".to_owned())
+                })?;
+        self.max_lag_blocks = config.max_lag_blocks;
+        self.max_lag_seconds = Duration::from_secs(config.max_lag_seconds);
         Ok(())
     }
 
@@ -491,6 +539,7 @@ impl<S: KvStore> JournalWriter<S> {
     /// chainstate. A failed durability retry stops that apply before any write.
     pub(crate) fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
         self.ensure_appendable()?;
+        self.retry_failed_durability()?;
         self.flush_due()?;
         let lag = self
             .next_height
@@ -544,6 +593,13 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(())
     }
 
+    fn retry_failed_durability(&mut self) -> Result<(), JournalWriterError> {
+        if !self.pending_durability_failed {
+            return Ok(());
+        }
+        self.advance_durability()
+    }
+
     pub(crate) fn mark_append_gap(&mut self, height: u32) {
         self.append_gap_height.get_or_insert(height);
         metrics::gauge!("node.chainstate_journal.append_gap").set(1.0);
@@ -574,6 +630,7 @@ impl<S: KvStore> JournalWriter<S> {
     /// the strict ordering rule (callers replay whole records after a crash).
     pub(crate) fn append(&mut self, record: &JournalRecord) -> Result<(), JournalWriterError> {
         self.ensure_appendable()?;
+        self.retry_failed_durability()?;
         if record.height != self.next_height {
             return self.fail_append(
                 record.height,
@@ -609,7 +666,10 @@ impl<S: KvStore> JournalWriter<S> {
             })?
             || self.last_boundary.elapsed() >= self.batch_seconds
         {
-            self.advance_durability()?;
+            if let Err(error) = self.advance_durability() {
+                self.pending_durability_failed = true;
+                return Err(error);
+            }
         }
         self.record_lag_metrics();
         Ok(())
@@ -826,6 +886,7 @@ impl<S: KvStore> JournalWriter<S> {
             .map_err(|_| JournalWriterError::CursorMismatch("record count overflow".to_owned()))?;
         self.pending_records.drain(..target);
         self.last_boundary = Instant::now();
+        self.pending_durability_failed = false;
         self.record_lag_metrics();
         Ok(())
     }
@@ -923,8 +984,31 @@ impl<S: KvStore> JournalWriter<S> {
         // The atomic head rewrite is the logical invalidation point. Physical
         // truncation follows; a crash between them leaves only an ignored tail.
         self.write_head_atomic(&marker)?;
-        self.truncate_after(cursor)?;
+        if let Err(error) = self.adopt_fork_cursor(
+            cursor,
+            fork_height,
+            fork_hash,
+            fork_prev_hash,
+            chain_tx_count,
+        ) {
+            self.mark_append_gap(fork_height);
+            return Err(error);
+        }
+        if let Err(error) = self.truncate_after(cursor) {
+            self.mark_append_gap(self.next_height);
+            return Err(error);
+        }
+        Ok(())
+    }
 
+    fn adopt_fork_cursor(
+        &mut self,
+        cursor: ForkCursor,
+        fork_height: u32,
+        fork_hash: [u8; 32],
+        fork_prev_hash: [u8; 32],
+        chain_tx_count: u64,
+    ) -> Result<(), JournalWriterError> {
         self.segment_gen = cursor.generation;
         self.segment_offset = cursor.offset;
         self.durable = DurableCursor {
@@ -992,6 +1076,7 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     fn truncate_after(&self, cursor: ForkCursor) -> Result<(), JournalWriterError> {
+        self.fail_truncate_after()?;
         let name = segment_name(cursor.generation);
         match self
             .dir
@@ -1141,11 +1226,7 @@ impl<S: KvStore> JournalWriter<S> {
         for name in entries {
             self.dir.remove_file(name)?;
         }
-        match self.dir.remove_file(FULL_REVALIDATION_MARKER) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+        clear_full_revalidation_marker(&self.dir)?;
         crate::checkpoint_fs::sync_dir(&self.dir)?;
         Ok(())
     }
@@ -1234,6 +1315,10 @@ impl<S: KvStore> JournalWriter<S> {
 
     fn fail_head_dir_sync(&self) -> Result<(), JournalWriterError> {
         self.failpoint(JournalWriterFailpoint::HeadDirSync)
+    }
+
+    fn fail_truncate_after(&self) -> Result<(), JournalWriterError> {
+        self.failpoint(JournalWriterFailpoint::TruncateAfter)
     }
 
     fn failpoint(&self, boundary: JournalWriterFailpoint) -> Result<(), JournalWriterError> {
@@ -1867,6 +1952,99 @@ mod tests {
         reopened.append(&sample_record(2))?;
         reopened.flush_to(2)?;
         assert_eq!(reopened.head().height, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn append_durability_failure_blocks_next_apply_when_lag_allows_more() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("durability-gap-lag", Arc::clone(&store))?;
+        writer.configure(
+            1,
+            Duration::from_secs(10),
+            1,
+            10,
+            10,
+            Duration::from_secs(10),
+        )?;
+        store.set_fail_flush(true);
+        assert!(matches!(
+            writer.append(&sample_record(1)),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert!(
+            writer.append_gap_height.is_none(),
+            "tracked pending records stay retryable after a durability miss"
+        );
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert!(matches!(
+            writer.append(&sample_record(2)),
+            Err(JournalWriterError::StorageFlush(_))
+        ));
+        assert_eq!(writer.head().height, 0);
+
+        store.set_fail_flush(false);
+        writer.prepare_for_apply()?;
+        assert_eq!(writer.head().height, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn rewind_truncate_failure_adopts_fork_and_fails_closed() -> TestResult {
+        let store = Arc::new(CountingStore::new());
+        let mut writer = open_fresh("rewind-truncate", store)?;
+        writer.append(&sample_record(1))?;
+        writer.append(&sample_record(2))?;
+        writer.flush_to(2)?;
+        writer.inject_failpoint(JournalWriterFailpoint::TruncateAfter);
+
+        let fork = sample_record(1);
+        assert!(
+            writer
+                .rewind_to(1, fork.block_hash, fork.prev_hash, 3)
+                .is_err()
+        );
+        assert_eq!(writer.head().height, 1);
+        assert_eq!(writer.head().block_hash, fork.block_hash);
+        assert!(matches!(
+            writer.prepare_for_apply(),
+            Err(JournalWriterError::AppendGap { height: 2 })
+        ));
+        assert!(matches!(
+            writer.append(&sample_record(2)),
+            Err(JournalWriterError::AppendGap { height: 2 })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn writer_defaults_match_journal_config() -> TestResult {
+        let writer = open_fresh("defaults", Arc::new(CountingStore::new()))?;
+        let defaults = crate::config::ChainstateJournalConfig::default();
+        assert_eq!(writer.batch_blocks, defaults.blocks);
+        assert_eq!(writer.batch_seconds, Duration::from_secs(defaults.seconds));
+        assert_eq!(
+            writer.rotate_bytes,
+            defaults
+                .rotate_mib
+                .checked_mul(1024 * 1024)
+                .ok_or("rotate overflow")?
+        );
+        assert_eq!(
+            writer.max_journal_bytes,
+            defaults
+                .max_journal_mib
+                .checked_mul(1024 * 1024)
+                .ok_or("retention overflow")?
+        );
+        assert_eq!(writer.max_lag_blocks, defaults.max_lag_blocks);
+        assert_eq!(
+            writer.max_lag_seconds,
+            Duration::from_secs(defaults.max_lag_seconds)
+        );
         Ok(())
     }
 }

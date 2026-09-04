@@ -454,7 +454,6 @@ impl WarningStore {
 
     /// Atomically adds an index-ahead warning. Deduplicates exact repeats.
     /// Preserves the checkpoint warning.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn add_index(&self, msg: &str) {
         self.snapshot
             .rcu(|current| Arc::new((**current).clone().with_index(msg)));
@@ -496,7 +495,6 @@ pub(crate) fn checkpoint_fallback_warning(witness_height: u32, restored_height: 
 }
 
 /// Renders an index-watermark-ahead warning message.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn index_ahead_warning(
     capability: &str,
     watermark_height: u32,
@@ -548,9 +546,9 @@ pub(crate) fn detect_checkpoint_fallback(
 // Reporter
 // ---------------------------------------------------------------------------
 
-/// Concrete private reporter installed in `TxIndexRuntime` before workers
-/// spawn. Routes checkpoint-fallback and index-ahead facts through one
-/// `WarningStore`.
+/// Concrete private reporter created once in `NodeState::open` and shared
+/// with the txindex worker. Routes checkpoint-fallback and index-ahead facts
+/// through one `WarningStore` and one event marker.
 ///
 /// For each event: emit structured WARN, atomically update the in-memory
 /// warning snapshot, then durably publish the event marker.
@@ -609,9 +607,9 @@ impl RecoveryReporter {
         write_marker(&self.data_dir, &event)
     }
 
-    /// Reports an index-watermark-ahead event. Marker failure fails only
-    /// that index capability; authoritative chain and RPC stay live.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Reports an index-watermark-ahead event. The warning snapshot is
+    /// updated before the marker write, so a marker failure (returned to the
+    /// caller) still leaves the fact RPC-visible for this process.
     pub(crate) fn report_index_ahead(
         &self,
         capability: &str,

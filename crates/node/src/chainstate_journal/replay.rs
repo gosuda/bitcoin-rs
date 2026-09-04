@@ -19,8 +19,10 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd, UtxoSet};
 
-use super::record::{JournalRecord, Mutation, decode_record};
+use super::record::{FRAME_HEADER_LEN, JournalRecord, Mutation, decode_record};
 use super::writer::{HeadMarker, read_head_bytes};
+
+const FRAME_HEADER_U64: u64 = 4 + 1 + 4;
 
 /// Classification of a boot replay attempt.
 pub(crate) enum ReplayOutcome {
@@ -165,9 +167,6 @@ fn stream_segment(
 ) -> Result<u64, JournalReplayError> {
     use std::io::{Read, Seek, SeekFrom};
 
-    const FRAME_HEADER_U64: u64 = 4 + 1 + 4;
-    const FRAME_HEADER: usize = 4 + 1 + 4;
-
     let name = super::writer::segment_name_pub(generation);
     let file = dir.open(name.as_str()).map_err(|error| {
         JournalReplayError::CommittedRangeInvalid(format!("open segment {generation}: {error}"))
@@ -198,23 +197,13 @@ fn stream_segment(
                 "segment {generation}: truncated frame header at offset {offset}"
             )));
         }
-        let mut header = [0_u8; FRAME_HEADER];
+        let mut header = [0_u8; FRAME_HEADER_LEN];
         reader.read_exact(&mut header).map_err(|error| {
             JournalReplayError::CommittedRangeInvalid(format!(
                 "segment {generation}: read frame header at offset {offset}: {error}"
             ))
         })?;
-        let payload_len = u32::from_le_bytes(header[5..9].try_into().map_err(|_| {
-            JournalReplayError::CommittedRangeInvalid(
-                "frame header length slice mismatch".to_owned(),
-            )
-        })?);
-        let frame_len = FRAME_HEADER_U64
-            .checked_add(u64::from(payload_len))
-            .and_then(|length| length.checked_add(4))
-            .ok_or_else(|| {
-                JournalReplayError::CommittedRangeInvalid("frame length overflow".to_owned())
-            })?;
+        let frame_len = frame_len_from_header(&header, generation)?;
         if offset
             .checked_add(frame_len)
             .is_none_or(|frame_end| frame_end > end)
@@ -230,7 +219,7 @@ fn stream_segment(
         frame.extend_from_slice(&header);
         frame.resize(frame_size, 0);
         reader
-            .read_exact(&mut frame[FRAME_HEADER..])
+            .read_exact(&mut frame[FRAME_HEADER_LEN..])
             .map_err(|error| {
                 JournalReplayError::CommittedRangeInvalid(format!(
                     "segment {generation}: read frame at offset {offset}: {error}"
@@ -264,6 +253,26 @@ fn stream_segment(
         })?;
     }
     Ok(record_count)
+}
+
+fn frame_len_from_header(
+    header: &[u8; FRAME_HEADER_LEN],
+    generation: u64,
+) -> Result<u64, JournalReplayError> {
+    let payload_len = u32::from_le_bytes(header[5..9].try_into().map_err(|_| {
+        JournalReplayError::CommittedRangeInvalid("frame header length slice mismatch".to_owned())
+    })?);
+    if !super::record::payload_len_permitted(payload_len) {
+        return Err(JournalReplayError::CommittedRangeInvalid(format!(
+            "segment {generation}: payload length {payload_len} exceeds limit"
+        )));
+    }
+    FRAME_HEADER_U64
+        .checked_add(u64::from(payload_len))
+        .and_then(|length| length.checked_add(4))
+        .ok_or_else(|| {
+            JournalReplayError::CommittedRangeInvalid("frame length overflow".to_owned())
+        })
 }
 
 /// Replays a usable journal above an owned checkpoint state.
@@ -632,7 +641,10 @@ mod tests {
     use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
     use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd, UtxoSet};
 
-    use super::{JournalRecord, Mutation, replay_records, validate_replayed_head};
+    use super::{
+        JournalRecord, Mutation, ReplayOutcome, replay_from_journal, replay_records,
+        validate_replayed_head,
+    };
     use crate::chainstate_journal::Coin;
     use crate::chainstate_journal::writer::HeadMarker;
 
@@ -773,6 +785,68 @@ mod tests {
         let mut wrong_hash = head;
         wrong_hash.block_hash[0] ^= 0xff;
         assert!(validate_replayed_head(&replayed, &wrong_hash).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_committed_payload_is_rejected_before_allocation() -> TestResult {
+        use std::io::Write;
+
+        use cap_std::ambient_authority;
+
+        let (tree, utxo, coin_stats, base_tip, _) = base_state()?;
+        let path =
+            std::env::temp_dir().join(format!("journal-replay-oversize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path)?;
+        let dir = cap_std::fs::Dir::open_ambient_dir(&path, ambient_authority())?;
+
+        let payload_len = u32::try_from(super::super::record::MAX_PAYLOAD_LEN)?
+            .checked_add(1)
+            .ok_or("payload length overflow")?;
+        let mut header = vec![b'J', b'R', b'N', b'L', 1];
+        header.extend_from_slice(&payload_len.to_le_bytes());
+        let claimed_len = 9_u64
+            .checked_add(u64::from(payload_len))
+            .and_then(|length| length.checked_add(4))
+            .ok_or("claimed frame length overflow")?;
+
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create(true);
+        let mut file = dir.open_with("segment-0000000000.log", &options)?;
+        file.write_all(&header)?;
+        file.set_len(claimed_len)?;
+
+        let head = HeadMarker {
+            base_generation: 0,
+            base_height: 0,
+            base_hash: base_tip.hash.to_le_bytes(),
+            base_chain_tx_count: 1,
+            start_gen: 0,
+            start_offset: 0,
+            journal_gen: 0,
+            offset: claimed_len,
+            height: 1,
+            block_hash: [2; 32],
+            prev_hash: base_tip.hash.to_le_bytes(),
+            chain_tx_count: 3,
+            record_count: 1,
+        };
+        dir.write("head.json", &head.serialize()?)?;
+
+        let outcome = replay_from_journal(&dir, 0, tree, utxo, coin_stats, base_tip, 1);
+        let _ = std::fs::remove_dir_all(&path);
+        match outcome {
+            ReplayOutcome::Fallback(error) => {
+                assert!(
+                    error.to_string().contains("exceeds limit"),
+                    "unexpected fallback: {error}"
+                );
+            }
+            ReplayOutcome::Replayed(_) => {
+                return Err("oversized committed frame was replayed".into());
+            }
+        }
         Ok(())
     }
 }

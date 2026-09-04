@@ -7419,6 +7419,7 @@ mod consensus_rule_tests {
         handles.tx_index_runtime = Some(Arc::clone(&runtime));
         let index: Arc<FailAfterStartupTxIndex> = Arc::new(FailAfterStartupTxIndex::new()?);
         let writer: Arc<dyn crate::txindex_worker::TxIndexWriter> = index.clone();
+        let evidence_dir = tempfile::tempdir()?;
         let _worker = crate::txindex_worker::TxIndexWorker::spawn(
             Arc::clone(&runtime),
             writer,
@@ -7428,6 +7429,7 @@ mod consensus_rule_tests {
             crate::txindex_worker::DEFAULT_BATCH_LIMITS,
             bitcoin_rs_index::IndexCapabilities::ALL,
             Arc::new(crate::state::ChainEventPublisher::detached(0).0),
+            crate::txindex_worker::test_recovery_reporter(evidence_dir.path()).0,
             u32::MAX,
             wake_rx,
         )?;

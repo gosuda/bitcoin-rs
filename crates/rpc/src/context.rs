@@ -892,6 +892,21 @@ pub enum CapabilityState {
         /// Applied-chain height the capability is approaching.
         target_height: u32,
     },
+    /// The capability is deleting rows on a branch the applied chain
+    /// abandoned, block by block, down to the common ancestor.
+    RollingBack {
+        /// Height of the watermark being rewound.
+        from_height: u32,
+        /// Height of the last block shared with the applied chain.
+        to_height: u32,
+    },
+    /// The capability was reset and is rebuilding from genesis.
+    Rebuilding {
+        /// Height the rebuild has reached.
+        processed_height: u32,
+        /// Applied-chain height the rebuild is approaching.
+        target_height: u32,
+    },
     /// The capability failed and cannot currently provide complete answers.
     Failed {
         /// Failure description.

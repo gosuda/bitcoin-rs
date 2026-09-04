@@ -222,6 +222,14 @@ impl CheckpointPublisher {
             );
             recovery_evidence::write_witness(&self.data_dir, &witness)
                 .map_err(|e| CheckpointError::Invalid(e.to_string()))?;
+            if let Err(error) =
+                crate::chainstate_journal::clear_full_revalidation_marker_at(&self.data_dir)
+            {
+                tracing::warn!(
+                    %error,
+                    "failed to clear chainstate full-revalidation marker after checkpoint publication"
+                );
+            }
         }
         // Remove the disconnect marker only after this checkpoint publishes the
         // matching UTXO set and applied tip.

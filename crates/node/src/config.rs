@@ -39,7 +39,7 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_RPC_USER: &str = "bitcoin-rs";
 const DEFAULT_RPC_PASSWORD: &str = "bitcoin-rs";
 const DEFAULT_DBCACHE_MB: u64 = 450;
-const DEFAULT_ZMQ_HWM: u32 = 1_000;
+
 const DRYNET4_CONNECT: &str = "drynet4.drivechain.dev:8533";
 const DRYNET4_P2P_MAGIC: [u8; 4] = [0xec, 0xa5, 0xd4, 0x04];
 
@@ -149,15 +149,12 @@ impl Default for Auth {
     }
 }
 
-/// One configured ZMQ PUB notification endpoint.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ZmqPublication {
-    /// Notification topic name.
-    pub topic: crate::zmq_publisher::ZmqTopic,
-    /// ZMQ endpoint to bind.
-    pub endpoint: String,
-    /// PUB socket high-water mark.
-    pub hwm: u32,
+/// Node notification adapters, grouped below the node-level configuration.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationConfig {
+    /// ZMQ PUB sockets, each owning its endpoint, topics, and optional HWM override.
+    pub zmq: Vec<crate::zmq_publisher::ZmqEndpointConfig>,
 }
 
 /// How much of the derived `ScriptIndex` a node maintains.
@@ -328,16 +325,31 @@ pub struct ChainstateJournalConfig {
     pub max_lag_seconds: u64,
 }
 
+impl ChainstateJournalConfig {
+    /// Durability batch size, in blocks.
+    pub const DEFAULT_BLOCKS: u32 = 500;
+    /// Durability batch period, in seconds.
+    pub const DEFAULT_SECONDS: u64 = 5;
+    /// Segment rotation threshold, in MiB.
+    pub const DEFAULT_ROTATE_MIB: u64 = 256;
+    /// Retention bound on total journal size, in MiB.
+    pub const DEFAULT_MAX_JOURNAL_MIB: u64 = 2048;
+    /// Backpressure threshold in blocks; matches [`Self::DEFAULT_BLOCKS`].
+    pub const DEFAULT_MAX_LAG_BLOCKS: u32 = Self::DEFAULT_BLOCKS;
+    /// Backpressure threshold, in seconds.
+    pub const DEFAULT_MAX_LAG_SECONDS: u64 = 30;
+}
+
 impl Default for ChainstateJournalConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            blocks: 500,
-            seconds: 5,
-            rotate_mib: 256,
-            max_journal_mib: 2048,
-            max_lag_blocks: 500,
-            max_lag_seconds: 30,
+            blocks: Self::DEFAULT_BLOCKS,
+            seconds: Self::DEFAULT_SECONDS,
+            rotate_mib: Self::DEFAULT_ROTATE_MIB,
+            max_journal_mib: Self::DEFAULT_MAX_JOURNAL_MIB,
+            max_lag_blocks: Self::DEFAULT_MAX_LAG_BLOCKS,
+            max_lag_seconds: Self::DEFAULT_MAX_LAG_SECONDS,
         }
     }
 }
@@ -401,28 +413,9 @@ pub struct NodeConfig {
     pub log_level: String,
     /// Optional Prometheus metrics bind address. `None` disables metrics.
     pub metrics_bind: Option<SocketAddr>,
-    /// ZMQ `hashblock` PUB bind endpoints.
-    pub zmqpubhashblock: Vec<String>,
-    /// ZMQ `hashtx` PUB bind endpoints.
-    pub zmqpubhashtx: Vec<String>,
-    /// ZMQ `rawblock` PUB bind endpoints.
-    pub zmqpubrawblock: Vec<String>,
-    /// ZMQ `rawtx` PUB bind endpoints.
-    pub zmqpubrawtx: Vec<String>,
-    /// Optional `hashblock` PUB socket high-water mark.
-    pub zmqpubhashblockhwm: Option<u32>,
-    /// Optional `hashtx` PUB socket high-water mark.
-    pub zmqpubhashtxhwm: Option<u32>,
-    /// Optional `rawblock` PUB socket high-water mark.
-    pub zmqpubrawblockhwm: Option<u32>,
-    /// Optional `rawtx` PUB socket high-water mark.
-    pub zmqpubrawtxhwm: Option<u32>,
-    /// ZMQ `sequence` PUB bind endpoints.
-    pub zmqpubsequence: Vec<String>,
-    /// Optional `sequence` PUB socket high-water mark.
-    pub zmqpubsequencehwm: Option<u32>,
-    /// Block height at or below which script verification is skipped during
-    /// block apply.
+    /// External notification adapters.
+    pub notifications: NotificationConfig,
+    /// Block height at or below which script verification is skipped during block apply.
     ///
     /// On mainnet the default is the hash-pinned assume-valid anchor
     /// ([`Network::assume_valid_anchor`]): blocks at or below the anchor
@@ -454,16 +447,7 @@ impl fmt::Debug for NodeConfig {
             .field("chainstate_journal", &self.chainstate_journal)
             .field("log_level", &self.log_level)
             .field("metrics_bind", &self.metrics_bind)
-            .field("zmqpubhashblock", &self.zmqpubhashblock)
-            .field("zmqpubhashtx", &self.zmqpubhashtx)
-            .field("zmqpubrawblock", &self.zmqpubrawblock)
-            .field("zmqpubrawtx", &self.zmqpubrawtx)
-            .field("zmqpubhashblockhwm", &self.zmqpubhashblockhwm)
-            .field("zmqpubhashtxhwm", &self.zmqpubhashtxhwm)
-            .field("zmqpubrawblockhwm", &self.zmqpubrawblockhwm)
-            .field("zmqpubrawtxhwm", &self.zmqpubrawtxhwm)
-            .field("zmqpubsequence", &self.zmqpubsequence)
-            .field("zmqpubsequencehwm", &self.zmqpubsequencehwm)
+            .field("notifications", &self.notifications)
             .field("assume_valid_height", &self.assume_valid_height)
             .finish()
     }
@@ -505,16 +489,7 @@ impl NodeConfig {
             chainstate_journal: ChainstateJournalConfig::default(),
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             metrics_bind: None,
-            zmqpubhashblock: Vec::new(),
-            zmqpubhashtx: Vec::new(),
-            zmqpubrawblock: Vec::new(),
-            zmqpubrawtx: Vec::new(),
-            zmqpubhashblockhwm: None,
-            zmqpubhashtxhwm: None,
-            zmqpubrawblockhwm: None,
-            zmqpubrawtxhwm: None,
-            zmqpubsequence: Vec::new(),
-            zmqpubsequencehwm: None,
+            notifications: NotificationConfig::default(),
             assume_valid_height: network
                 .assume_valid_anchor()
                 .map_or(0, |(height, _)| height),
@@ -622,55 +597,14 @@ impl NodeConfig {
             journal.max_lag_seconds > 0,
             "chainstate_journal.max_lag_seconds must be positive"
         );
-        for (name, hwm) in [
-            ("zmqpubhashblockhwm", self.zmqpubhashblockhwm),
-            ("zmqpubhashtxhwm", self.zmqpubhashtxhwm),
-            ("zmqpubrawblockhwm", self.zmqpubrawblockhwm),
-            ("zmqpubrawtxhwm", self.zmqpubrawtxhwm),
-            ("zmqpubsequencehwm", self.zmqpubsequencehwm),
-        ] {
-            if hwm.is_some_and(|value| value > 2_147_483_647) {
-                bail!("{name} exceeds libzmq SNDHWM range");
-            }
-        }
+        crate::zmq_publisher::validate_endpoint_configs(&self.notifications.zmq)?;
         Ok(())
     }
 
-    /// Returns active ZMQ publications in Core notification order.
+    /// Returns configured ZMQ endpoint groups.
     #[must_use]
-    pub fn zmq_publications(&self) -> Vec<ZmqPublication> {
-        let mut publications = Vec::new();
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::HashBlock,
-            &self.zmqpubhashblock,
-            self.zmqpubhashblockhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::HashTx,
-            &self.zmqpubhashtx,
-            self.zmqpubhashtxhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::RawBlock,
-            &self.zmqpubrawblock,
-            self.zmqpubrawblockhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::RawTx,
-            &self.zmqpubrawtx,
-            self.zmqpubrawtxhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::Sequence,
-            &self.zmqpubsequence,
-            self.zmqpubsequencehwm,
-        );
-        publications
+    pub fn zmq_endpoints(&self) -> &[crate::zmq_publisher::ZmqEndpointConfig] {
+        &self.notifications.zmq
     }
 
     fn from_layers<E, K, V>(
@@ -770,35 +704,8 @@ impl NodeConfig {
         if let Some(metrics_bind) = layer.metrics_bind {
             self.metrics_bind = Some(metrics_bind);
         }
-        if let Some(endpoints) = &layer.zmqpubhashblock {
-            self.zmqpubhashblock.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubhashtx {
-            self.zmqpubhashtx.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubrawblock {
-            self.zmqpubrawblock.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubrawtx {
-            self.zmqpubrawtx.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubsequence {
-            self.zmqpubsequence.clone_from(endpoints);
-        }
-        if let Some(hwm) = layer.zmqpubhashblockhwm {
-            self.zmqpubhashblockhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubhashtxhwm {
-            self.zmqpubhashtxhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubrawblockhwm {
-            self.zmqpubrawblockhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubrawtxhwm {
-            self.zmqpubrawtxhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubsequencehwm {
-            self.zmqpubsequencehwm = Some(hwm);
+        if let Some(notifications) = &layer.notifications {
+            self.notifications.clone_from(notifications);
         }
         if let Some(height) = layer.assume_valid_height {
             self.assume_valid_height = height;
@@ -866,7 +773,7 @@ impl RuntimeInputs {
 /// [`NodeConfig::default_for_network`].
 #[derive(Clone, Debug, Default, Deserialize, Parser)]
 #[command(name = "bitcoin-rs-node", about = "Run a bitcoin-rs node")]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct UserConfig {
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
@@ -925,26 +832,10 @@ pub struct UserConfig {
     pub(crate) log_level: Option<String>,
     #[arg(long = "metrics-bind")]
     pub(crate) metrics_bind: Option<SocketAddr>,
-    #[arg(long = "zmqpubhashblock", value_delimiter = ',')]
-    pub(crate) zmqpubhashblock: Option<Vec<String>>,
-    #[arg(long = "zmqpubhashtx", value_delimiter = ',')]
-    pub(crate) zmqpubhashtx: Option<Vec<String>>,
-    #[arg(long = "zmqpubrawblock", value_delimiter = ',')]
-    pub(crate) zmqpubrawblock: Option<Vec<String>>,
-    #[arg(long = "zmqpubrawtx", value_delimiter = ',')]
-    pub(crate) zmqpubrawtx: Option<Vec<String>>,
-    #[arg(long = "zmqpubsequence", value_delimiter = ',')]
-    pub(crate) zmqpubsequence: Option<Vec<String>>,
-    #[arg(long = "zmqpubhashblockhwm")]
-    pub(crate) zmqpubhashblockhwm: Option<u32>,
-    #[arg(long = "zmqpubhashtxhwm")]
-    pub(crate) zmqpubhashtxhwm: Option<u32>,
-    #[arg(long = "zmqpubrawblockhwm")]
-    pub(crate) zmqpubrawblockhwm: Option<u32>,
-    #[arg(long = "zmqpubrawtxhwm")]
-    pub(crate) zmqpubrawtxhwm: Option<u32>,
-    #[arg(long = "zmqpubsequencehwm")]
-    pub(crate) zmqpubsequencehwm: Option<u32>,
+    /// Notification configuration is intentionally file-only; adapter internals
+    /// are not promoted back to flat process flags.
+    #[arg(skip)]
+    pub(crate) notifications: Option<NotificationConfig>,
     #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
 }
@@ -985,36 +876,6 @@ impl UserConfig {
                 "BITCOIN_RS_DBCACHE_MB" => layer.dbcache_mb = Some(value.parse()?),
                 "BITCOIN_RS_LOG_LEVEL" => layer.log_level = Some(value.to_owned()),
                 "BITCOIN_RS_METRICS_BIND" => layer.metrics_bind = Some(value.parse()?),
-                "BITCOIN_RS_ZMQPUBHASHBLOCK" => {
-                    layer.zmqpubhashblock = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBHASHTX" => {
-                    layer.zmqpubhashtx = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBRAWBLOCK" => {
-                    layer.zmqpubrawblock = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBRAWTX" => {
-                    layer.zmqpubrawtx = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBSEQUENCE" => {
-                    layer.zmqpubsequence = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBHASHBLOCKHWM" => {
-                    layer.zmqpubhashblockhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBHASHTXHWM" => {
-                    layer.zmqpubhashtxhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBRAWBLOCKHWM" => {
-                    layer.zmqpubrawblockhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBRAWTXHWM" => {
-                    layer.zmqpubrawtxhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBSEQUENCEHWM" => {
-                    layer.zmqpubsequencehwm = Some(value.parse()?);
-                }
                 "BITCOIN_RS_ASSUME_VALID_HEIGHT" => {
                     layer.assume_valid_height = Some(value.parse()?);
                 }
@@ -1086,29 +947,6 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
         .filter(|part| !part.trim().is_empty())
         .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
         .collect()
-}
-
-fn parse_string_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn push_zmq_publications(
-    publications: &mut Vec<ZmqPublication>,
-    topic: crate::zmq_publisher::ZmqTopic,
-    endpoints: &[String],
-    hwm: Option<u32>,
-) {
-    let hwm = hwm.unwrap_or(DEFAULT_ZMQ_HWM);
-    publications.extend(endpoints.iter().cloned().map(|endpoint| ZmqPublication {
-        topic,
-        endpoint,
-        hwm,
-    }));
 }
 
 fn parse_bool(value: &str) -> Result<bool> {

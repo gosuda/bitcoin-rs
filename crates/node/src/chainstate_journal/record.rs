@@ -7,7 +7,13 @@ const MAGIC: [u8; 4] = *b"JRNL";
 const VERSION: u8 = 1;
 pub(crate) const FRAME_HEADER_LEN: usize = MAGIC.len() + 1 + core::mem::size_of::<u32>();
 const FRAME_TRAILER_LEN: usize = core::mem::size_of::<u32>();
-const MAX_PAYLOAD_LEN: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_PAYLOAD_LEN: usize = 256 * 1024 * 1024;
+
+/// Returns whether an encoded payload length is within the codec limit.
+pub(crate) fn payload_len_permitted(payload_len: u32) -> bool {
+    usize::try_from(payload_len).is_ok_and(|len| len <= MAX_PAYLOAD_LEN)
+}
+
 const MAX_MUTATIONS: u32 = 4_000_000;
 
 /// A complete coin, including the fields required by `CoinStats`' `MuHash` preimage.
@@ -159,15 +165,16 @@ pub(crate) fn decode_record(bytes: &[u8]) -> Result<JournalRecord, JournalRecord
         });
     }
 
-    let payload_len = usize::try_from(u32::from_le_bytes(
+    let encoded_payload_len = u32::from_le_bytes(
         bytes[MAGIC.len() + 1..FRAME_HEADER_LEN]
             .try_into()
             .map_err(|_| JournalRecordError::UnexpectedEof)?,
-    ))
-    .map_err(|_| JournalRecordError::MalformedPayload)?;
-    if payload_len > MAX_PAYLOAD_LEN {
+    );
+    if !payload_len_permitted(encoded_payload_len) {
         return Err(JournalRecordError::MalformedPayload);
     }
+    let payload_len =
+        usize::try_from(encoded_payload_len).map_err(|_| JournalRecordError::MalformedPayload)?;
     let total_len = FRAME_HEADER_LEN
         .checked_add(payload_len)
         .and_then(|length| length.checked_add(FRAME_TRAILER_LEN))

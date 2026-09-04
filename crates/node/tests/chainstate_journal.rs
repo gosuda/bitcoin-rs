@@ -166,6 +166,54 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
 }
 
 #[test]
+fn full_revalidation_marker_survives_journal_disable() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("deep-reorg-disabled-node");
+    config.p2p_listen.clear();
+    config.chainstate_journal.blocks = 1;
+
+    let genesis = Network::Regtest.genesis_block();
+    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let initial = NodeState::open(config.clone(), None)?;
+    initial.apply_block(&genesis)?;
+    initial.apply_block(&block1)?;
+    initial.publish_checkpoint()?;
+    drop(initial);
+
+    let state = NodeState::open(config.clone(), None)?;
+    bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block1)?;
+    drop(state);
+
+    let enabled_resume = NodeState::open(config.clone(), None)?;
+    assert!(
+        enabled_resume.applied_tip().load_full().is_none(),
+        "a checkpoint above the fork must not be trusted"
+    );
+    drop(enabled_resume);
+
+    let mut disabled = config.clone();
+    disabled.chainstate_journal.enabled = false;
+    let disabled_resume = NodeState::open(disabled.clone(), None)?;
+    assert!(
+        disabled_resume.applied_tip().load_full().is_none(),
+        "disabling the journal must not restore a checkpoint invalidated by full revalidation"
+    );
+    disabled_resume.apply_block(&genesis)?;
+    let replacement_tip = disabled_resume.apply_block(&block1)?;
+    disabled_resume.publish_checkpoint()?;
+    drop(disabled_resume);
+
+    let recovered = NodeState::open(disabled, None)?;
+    let recovered_tip = recovered
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("replacement checkpoint was ignored"))?;
+    assert_eq!(recovered_tip.as_ref(), &replacement_tip);
+    Ok(())
+}
+
+#[test]
 fn periodic_publication_compacts_and_journals_new_suffix() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
