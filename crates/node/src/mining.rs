@@ -687,8 +687,10 @@ impl MiningCoordinator {
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
         let last_candidate = self.state.lock().last_candidate;
-        let network_hashes_per_second =
-            estimate_network_hashps(&self.block_tree, tip.as_deref(), 120, -1, self.network);
+        let network_hashes_per_second = {
+            let tree = self.block_tree.read();
+            estimate_network_hashps(&tree, tip.as_deref(), 120, -1, self.network)
+        };
         Ok(MiningInfo {
             blocks,
             last_candidate,
@@ -770,22 +772,9 @@ impl MiningControl for MiningCoordinator {
                 "Invalid nblocks. Must be a positive number or -1.",
             )));
         }
+        let tree = self.block_tree.read();
         let tip = self.applied_tip.load_full();
-        let tip_height = tip
-            .as_ref()
-            .map_or(-1, |snapshot| i64::from(snapshot.height));
-        if height < -1 || height > tip_height {
-            return Err(MiningControlError::InvalidRequest(CompactString::from(
-                "Block does not exist at specified height",
-            )));
-        }
-        Ok(estimate_network_hashps(
-            &self.block_tree,
-            tip.as_deref(),
-            lookup,
-            height,
-            self.network,
-        ))
+        hash_ps_at(&tree, tip.as_deref(), lookup, height, self.network)
     }
 
     fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
@@ -866,8 +855,37 @@ mod apply_error_tests {
     }
 }
 
+fn hash_ps_at(
+    tree: &BlockTree,
+    tip: Option<&TipSnapshot>,
+    lookup: i64,
+    height: i64,
+    network: Network,
+) -> Result<f64, MiningControlError> {
+    let tip_height = tip.map_or(-1, |snapshot| i64::from(snapshot.height));
+    if height < -1 || height > tip_height {
+        return Err(MiningControlError::InvalidRequest(CompactString::from(
+            "Block does not exist at specified height",
+        )));
+    }
+    if height >= 0 {
+        let requested = u32::try_from(height).map_err(|_| {
+            MiningControlError::InvalidRequest(CompactString::from(
+                "Block does not exist at specified height",
+            ))
+        })?;
+        let resolved = tip.and_then(|tip| tree.node_at_height_from(tip.tip_id, requested));
+        if resolved.is_none() {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "Block does not exist at specified height",
+            )));
+        }
+    }
+    Ok(estimate_network_hashps(tree, tip, lookup, height, network))
+}
+
 fn estimate_network_hashps(
-    block_tree: &RwLock<BlockTree>,
+    tree: &BlockTree,
     tip: Option<&TipSnapshot>,
     lookup: i64,
     height: i64,
@@ -876,7 +894,6 @@ fn estimate_network_hashps(
     let Some(tip) = tip else {
         return 0.0;
     };
-    let tree = block_tree.read();
     let start_id = if height < 0 {
         tip.tip_id
     } else {
@@ -933,7 +950,8 @@ fn estimate_network_hashps(
     }
     let work_delta = start_node.chainwork.saturating_sub(earliest_node.chainwork);
     let time_delta_secs = i64::from(max_time).saturating_sub(i64::from(min_time));
-    hashes_per_second(work_delta.to_be_bytes(), time_delta_secs)
+    let work_bytes: [u8; 32] = work_delta.to_be_bytes();
+    hashes_per_second(work_bytes, time_delta_secs)
 }
 
 fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
@@ -1044,10 +1062,10 @@ mod generation_key_tests {
 /// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
 #[cfg(test)]
 mod network_hashps_oracle_tests {
-    use super::estimate_network_hashps;
+    use super::{estimate_network_hashps, hash_ps_at};
     use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+    use bitcoin_rs_mining::MiningControlError;
     use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
-    use parking_lot::RwLock;
 
     const BITS: u32 = 0x207f_ffff;
 
@@ -1136,24 +1154,20 @@ mod network_hashps_oracle_tests {
     }
 
     fn assert_matches_core(
-        tree: &RwLock<BlockTree>,
+        tree: &BlockTree,
         tip: &TipSnapshot,
         lookup: i64,
         height: i64,
         network: Network,
     ) {
-        let expected = {
-            let guard = tree.read();
-            let start_id = if height < 0 {
-                tip.tip_id
-            } else {
-                let requested = u32::try_from(height).unwrap_or_else(|_| panic!("height fits u32"));
-                guard
-                    .node_at_height_from(tip.tip_id, requested)
-                    .unwrap_or_else(|| panic!("missing height {height}"))
-            };
-            core_getnetworkhashps(&guard, start_id, lookup, network)
+        let start_id = if height < 0 {
+            tip.tip_id
+        } else {
+            let requested = u32::try_from(height).unwrap_or_else(|_| panic!("height fits u32"));
+            tree.node_at_height_from(tip.tip_id, requested)
+                .unwrap_or_else(|| panic!("missing height {height}"))
         };
+        let expected = core_getnetworkhashps(tree, start_id, lookup, network);
         let got = estimate_network_hashps(tree, Some(tip), lookup, height, network);
         assert!(
             (got - expected).abs() < 1e-9,
@@ -1179,7 +1193,6 @@ mod network_hashps_oracle_tests {
         }
         let tip_id = tip_id.unwrap_or_else(|| panic!("chain has a tip"));
         let tip = snapshot(&tree, tip_id);
-        let tree = RwLock::new(tree);
         let network = Network::Regtest;
 
         assert_matches_core(&tree, &tip, 2, -1, network);
@@ -1200,6 +1213,20 @@ mod network_hashps_oracle_tests {
             (via_minus_one - via_explicit).abs() < 1e-9,
             "-1 lookback must equal height % interval + 1 ({retarget_lookup})"
         );
+    }
+
+    #[test]
+    fn hash_ps_at_rejects_a_height_the_tip_cannot_resolve() {
+        let mut tree = BlockTree::new();
+        let genesis = append(&mut tree, BlockHash::default(), 1_000_000);
+        let mut stale = snapshot(&tree, genesis);
+        stale.height = 4;
+        match hash_ps_at(&tree, Some(&stale), 120, 3, Network::Regtest) {
+            Err(MiningControlError::InvalidRequest(message)) => {
+                assert_eq!(message.as_str(), "Block does not exist at specified height");
+            }
+            other => panic!("unresolvable height must be invalid, got {other:?}"),
+        }
     }
 }
 
