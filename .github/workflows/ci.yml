@@ -35,11 +35,6 @@ env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Feature set for the full dependency-graph deny check: all four storage
-  # backends plus the bitcoinkernel script-verification engine. cargo-deny
-  # resolves metadata without compiling, so checking the full graph costs no
-  # C++ toolchain here.
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,mdbx,kernel"
 
 jobs:
   fmt:
@@ -55,12 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-deny
         with:
-          rust-version: "1.95.0"
-          # Same graph as `scripts/ci-pr.sh deny`. The action installs
-          # cargo-deny; the script is the local/CI command owner.
-          arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
+          tool: cargo-deny
+      - run: ./scripts/ci-pr.sh deny
 
   rust:
     runs-on: ubuntu-latest
