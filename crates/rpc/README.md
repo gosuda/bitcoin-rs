@@ -16,10 +16,11 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 ## Interface architecture and implementation guidance
 
 ### 1. Protocol demuxing and authentication
-- **Transport Demuxing**: Private free function `serve_connection` (`crates/rpc/src/server.rs`) demuxes incoming HTTP requests before authentication:
-  - `GET`: If path starts with `/rest/*`, routed to unauthenticated `rest::route`; `/api/*` is public Esplora and `/esplora/*` is the mempool-backend electrs superset (`esplora::route`). Unprefixed GET paths 404 so JSON-RPC keeps the listener root.
-  - `POST` (Esplora): Paths under `/api` and `/esplora` are closed namespaces (`esplora::route_post`): they never fall through to JSON-RPC. Wallet broadcast is `POST /api/tx`. Mempool-backend bulk paths live under `/esplora/internal/*`. Unprefixed POST paths (including `/tx`) fall through to JSON-RPC.
-  - `POST` (JSON-RPC): Unhandled POST paths (such as `/`) fall through to JSON-RPC authentication. `serve_connection` in `crates/rpc/src/server.rs` calls `Auth::validate_header`, which is owned by `crates/rpc/src/auth.rs` (HTTP Basic / Cookie).
+- **Transport Demuxing**: Private free function `classify` (`crates/rpc/src/server.rs`) is the listener directory table. `serve_connection` dispatches that table before authentication:
+  - `GET /rest/*` → Core REST (`rest::route`).
+  - `GET` or `POST` under `/api` or `/esplora` → Esplora (`esplora::route` / `route_post`). Those directories are closed: unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
+  - Other `POST` → JSON-RPC. `Auth::validate_header` (`crates/rpc/src/auth.rs`) guards this path only.
+  - Any other method or GET outside `/rest/`, `/api`, and `/esplora` → 404 at the demux. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` do not enter Esplora or JSON-RPC. The request parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
 - **JSON-RPC Framing & Protocol Versioning**: `JsonRpcVersion` (`crates/rpc/src/server.rs`) governs wire framing:
   - Requests with `"jsonrpc": "2.0"` use JSON-RPC 2.0 (`JsonRpcVersion::V2`): success responses emit `{"jsonrpc":"2.0","result":...,"id":...}` (HTTP 200), error responses emit `{"jsonrpc":"2.0","error":...,"id":...}` (HTTP 200), and requests omitting `id` are treated as notifications returning HTTP 204 No Content.
   - Other requests use JSON-RPC 1.1 / legacy (`JsonRpcVersion::Legacy`): success responses emit `{"result":...,"error":null,"id":...}` (HTTP 200), error responses emit `{"result":null,"error":...,"id":...}` with HTTP 500 status, and missing `id` values default to `null`.
@@ -29,7 +30,6 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 - **Adapters vs Modules**: RPC handlers, REST routes, and Esplora projections sit at the transport Seam as pure wire Adapters translating network payloads into deep Module Interfaces (`Context`, `BlockTree`, `TxIndexQuery`, `applied_tip`). They leverage domain-local concurrency and storage mechanisms without leaking database locks, indexing details, or consensus logic into protocol serialization.
 - **System Owners**:
   - **Routing & Demux**: `classify` in `crates/rpc/src/server.rs` owns the listener directory table; see [Transport Demuxing](#1-protocol-demuxing-and-authentication) for the routing rules.
-  - **Routing & Demux**: `classify` in `crates/rpc/src/server.rs` owns the listener directory table; see [Transport Demuxing](#1-protocol-demuxing-and-authentication) above for the authoritative routing rules.
   - **Authentication**: `Auth::validate_header` in `crates/rpc/src/auth.rs` guards JSON-RPC requests; `serve_connection` in `crates/rpc/src/server.rs` is the routing callsite. REST and Esplora remain unauthenticated.
   - **Error Codes**: JSON-RPC failures map through `RpcError` in `crates/rpc/src/error.rs`. Current mappings cover standard JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Bitcoin Core codes `-3` (invalid type) and `-5` (not found). The code reserves `-8` (invalid parameter), but no current variant emits it. Other Core codes (`-1`, `-22`, `-25`, `-26`, `-27`) remain method-specific obligations when their behavior is implemented.
   - **Read Consistency & Tip Fencing**: Multi-record queries against chain state must use two-phase optimistic fencing (`capture_chain_view` / `ensure_chain_view` in `crates/rpc/src/esplora.rs`) or active-tip ancestry verification against `BlockTree` (`crates/rpc/src/rest.rs`). If a reorg occurs during execution, return `503 Service Unavailable`.

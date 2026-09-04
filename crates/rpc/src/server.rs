@@ -167,9 +167,12 @@ fn serve_connection(
                         write_response(reader.get_mut(), &response, keep_alive)?;
                     }
                     None => {
-                        write_status(reader.get_mut(), 404, "Not Found", b"not found", keep_alive)?;
+                        write_not_found(reader.get_mut(), keep_alive)?;
                     }
                 }
+            }
+            HttpRoute::NotFound => {
+                write_not_found(reader.get_mut(), keep_alive)?;
             }
             HttpRoute::JsonRpc => {
                 if !auth.validate_header(request.authorization.as_deref()) {
@@ -237,7 +240,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
+    if method.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request method",
@@ -519,24 +522,39 @@ fn split_path_query(path: &str) -> (&str, &str) {
         .map_or((path, ""), |(path, query)| (path, query))
 }
 
-/// Listener directories. JSON-RPC owns `/`; Esplora owns `/api` and `/esplora`;
-/// Core REST owns `/rest/`.
+/// Directory table for this listener. `classify` is the owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
     Rest { path: &'a str, query: &'a str },
     EsploraGet { path: &'a str, query: &'a str },
     EsploraPost { path: &'a str },
     JsonRpc,
+    NotFound,
 }
 
 fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     let (path, query) = split_path_query(raw_path);
+    let esplora = crate::esplora::namespace(path).is_some();
     match method {
         "GET" if path.starts_with("/rest/") => HttpRoute::Rest { path, query },
-        "GET" => HttpRoute::EsploraGet { path, query },
-        _ if crate::esplora::namespace(path).is_some() => HttpRoute::EsploraPost { path },
-        _ => HttpRoute::JsonRpc,
+        "GET" if esplora => HttpRoute::EsploraGet { path, query },
+        "POST" if esplora => HttpRoute::EsploraPost { path },
+        "POST" => HttpRoute::JsonRpc,
+        _ => HttpRoute::NotFound,
     }
+}
+
+fn write_not_found(stream: &mut TcpStream, keep_alive: bool) -> io::Result<()> {
+    write_response(
+        stream,
+        &crate::rest::Response {
+            status: 404,
+            reason: "Not Found",
+            content_type: "text/plain",
+            body: b"not found".to_vec(),
+        },
+        keep_alive,
+    )
 }
 
 fn write_response(
@@ -635,9 +653,31 @@ mod tests {
         assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
         assert_eq!(
             classify("GET", "/blocks/tip/height"),
+            HttpRoute::NotFound,
+            "unprefixed GET is not Esplora"
+        );
+        assert_eq!(
+            classify("HEAD", "/api/tx"),
+            HttpRoute::NotFound,
+            "HEAD /api/tx must not run POST /tx"
+        );
+        assert_eq!(
+            classify("PUT", "/"),
+            HttpRoute::NotFound,
+            "non-POST methods are not JSON-RPC"
+        );
+        assert_eq!(
+            classify("GET", "/api/v1/block-height/0"),
             HttpRoute::EsploraGet {
-                path: "/blocks/tip/height",
+                path: "/api/v1/block-height/0",
                 query: ""
+            },
+            "GET /api/v1 stays in the closed /api directory (404 inside Esplora)"
+        );
+        assert_eq!(
+            classify("POST", "/api/v1/tx"),
+            HttpRoute::EsploraPost {
+                path: "/api/v1/tx"
             }
         );
     }
