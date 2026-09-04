@@ -9,10 +9,7 @@
 //! (`CheckSignatureEncoding`, `CheckPubKeyEncoding`, `IsLowDERSignature`,
 //! `CheckLockTime`, `CheckSequence`).
 
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, Script, Sequence, Sighash, SighashCache, SighashError, Tx, TxOut,
-    Witness,
-};
+use bitcoin_rs_primitives::{Amount, Hash256, Sighash, SighashCache, SighashError, Tx, TxOut};
 use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
 
 use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
