@@ -186,9 +186,9 @@ fn verify_transaction_with_locktime_cutoff(
     };
 
     if !skip_scripts {
-        // KTD5: under the kernel feature every script class routes through Core's
+        // Under the kernel feature every script class routes through Core's
         // engine — one transaction parse plus one sighash precompute shared across
-        // inputs. The portable arm keeps the interpreter dispatch.
+        // inputs. Without it, the native interpreter in bitcoin-rs-script runs.
         #[cfg(feature = "kernel")]
         crate::kernel::verify_tx_scripts(tx, &prep.prevouts, flags)?;
         #[cfg(not(feature = "kernel"))]
@@ -302,7 +302,7 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
 }
 
 /// Portable per-input script verdict: the native interpreter covers every
-/// consensus spend class (legacy, P2SH, segwit v0, taproot key-path and
+/// consensus spend class (legacy, P2SH, `SegWit` v0, Taproot key-path and
 /// script-path).
 #[cfg(not(feature = "kernel"))]
 fn verify_input_script_portable(
@@ -1934,11 +1934,9 @@ mod tests {
     // ---- Taproot script-path public-seam regression ---------------------------
     //
     // The committed `taproot_scriptpath_spend.json` fixture is a real mainnet
-    // BIP342 script-path spend. The kernel production path accepts it; the
-    // portable interpreter only implements Taproot key-path, so it rejects the
-    // multi-element witness with `TaprootUnsupportedWitness`. These two tests
-    // pin `verify_transaction`'s public seam for both builds against this
-    // fixture without pulling in a BIP342 VM or new dependencies.
+    // BIP342 script-path spend. Both the kernel path and the native interpreter
+    // accept it. These two tests pin `verify_transaction`'s public seam for
+    // both builds against this fixture.
 
     struct TaprootScriptPathFixture {
         tx: Tx,

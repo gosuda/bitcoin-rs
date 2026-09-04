@@ -670,6 +670,47 @@ impl std::fmt::Display for Counts {
     }
 }
 
+/// VAL-02: zero mismatches on runnable rows is not corpus coverage unless
+/// skip reasons stay inside the named allow-list and the skip/executed
+/// counts stay pinned. A new skip category or a silent shrink fails.
+fn assert_pinned_native_column(
+    counts: &Counts,
+    mismatch_count: usize,
+    pinned_failures: usize,
+    pinned_skips: usize,
+    pinned_executed: usize,
+    allowed_skip_reasons: &[&str],
+    corpus: &str,
+) {
+    assert_eq!(
+        mismatch_count, pinned_failures,
+        "{corpus} native mismatches changed; triage each row, then move the pinned count"
+    );
+    assert_eq!(
+        counts.skipped, pinned_skips,
+        "{corpus} native skips changed; a new skip category shrinks coverage"
+    );
+    assert_eq!(
+        counts.executed, pinned_executed,
+        "{corpus} native executed count changed; update the pin with the skip triage"
+    );
+    for reason in &counts.skip_reasons {
+        assert!(
+            allowed_skip_reasons
+                .iter()
+                .copied()
+                .any(|allowed| allowed == reason),
+            "{corpus}: unexpected skip reason `{reason}`; allowed {allowed_skip_reasons:?}"
+        );
+    }
+    assert_eq!(
+        counts.skip_reasons.len(),
+        allowed_skip_reasons.len(),
+        "{corpus}: skip-reason set changed: {:?}",
+        counts.skip_reasons
+    );
+}
+
 // ===========================================================================
 // Corpus 1: script_tests.json
 // ===========================================================================
@@ -813,9 +854,7 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                 // it reports `Bad test` only for other short shapes
                 // (`script_tests.cpp:955-960`). There is no scriptSig,
                 // scriptPubKey, flags, or expected error to assemble.
-                counts.record_skip(
-                    "prose row (1 string element: format note or section header, no test fields)",
-                );
+                counts.record_skip(SCRIPT_TESTS_PROSE_SKIP);
                 continue;
             } else {
                 counts.record_skip(&format!(
@@ -1092,7 +1131,7 @@ fn load_tx_vectors(
 
         let flags_str = arr[2].as_str().unwrap_or("NONE");
         if flags_str.contains("BADTX") {
-            counts.record_skip("BADTX: fails CheckTransaction, not script verification");
+            counts.record_skip(TX_INVALID_BADTX_SKIP);
             continue;
         }
 
@@ -1558,6 +1597,12 @@ fn asm_assembler_matches_known_bytes() {
 /// the issue that owns the remaining work; the count is pinned so a shrink
 /// lowers it with evidence and a growth fails the lane.
 const NATIVE_SCRIPT_TESTS_FAILURES: usize = 0;
+/// Prose / section-header rows in `script_tests.json` (one string element).
+/// A growth means the harness started skipping real tests.
+const NATIVE_SCRIPT_TESTS_SKIPS: usize = 55;
+const NATIVE_SCRIPT_TESTS_EXECUTED: usize = 1233;
+const SCRIPT_TESTS_PROSE_SKIP: &str =
+    "prose row (1 string element: format note or section header, no test fields)";
 
 #[test]
 fn script_tests_native_column() {
@@ -1577,10 +1622,14 @@ fn script_tests_native_column() {
     for m in mismatches.iter().take(mismatch_print_limit()) {
         println!("  {m}");
     }
-    assert_eq!(
+    assert_pinned_native_column(
+        &counts,
         mismatches.len(),
         NATIVE_SCRIPT_TESTS_FAILURES,
-        "script_tests native mismatches changed; triage each row, then move the pinned count"
+        NATIVE_SCRIPT_TESTS_SKIPS,
+        NATIVE_SCRIPT_TESTS_EXECUTED,
+        &[SCRIPT_TESTS_PROSE_SKIP],
+        "script_tests",
     );
 }
 
@@ -1615,6 +1664,8 @@ fn script_tests_kernel_column() {
 /// Pinned like `NATIVE_SCRIPT_TESTS_FAILURES`: a shrink lowers it with
 /// evidence, a growth fails the lane.
 const NATIVE_TX_VALID_FAILURES: usize = 0;
+const NATIVE_TX_VALID_SKIPS: usize = 0;
+const NATIVE_TX_VALID_EXECUTED: usize = 121;
 
 #[test]
 fn tx_valid_native_column() {
@@ -1631,10 +1682,14 @@ fn tx_valid_native_column() {
     for m in mismatches.iter().take(mismatch_print_limit()) {
         println!("  {m}");
     }
-    assert_eq!(
+    assert_pinned_native_column(
+        &counts,
         mismatches.len(),
         NATIVE_TX_VALID_FAILURES,
-        "tx_valid native mismatches changed; triage each row, then move the pinned count"
+        NATIVE_TX_VALID_SKIPS,
+        NATIVE_TX_VALID_EXECUTED,
+        &[],
+        "tx_valid",
     );
 }
 
@@ -1666,6 +1721,10 @@ fn tx_valid_kernel_column() {
 /// A `tx_invalid` mismatch means the evaluator ACCEPTED a transaction Core
 /// rejects, so this count is the one that must reach zero first.
 const NATIVE_TX_INVALID_FAILURES: usize = 0;
+/// `BADTX` rows fail `CheckTransaction` before script verification.
+const NATIVE_TX_INVALID_SKIPS: usize = 9;
+const NATIVE_TX_INVALID_EXECUTED: usize = 84;
+const TX_INVALID_BADTX_SKIP: &str = "BADTX: fails CheckTransaction, not script verification";
 
 #[test]
 fn tx_invalid_native_column() {
@@ -1682,10 +1741,14 @@ fn tx_invalid_native_column() {
     for m in mismatches.iter().take(mismatch_print_limit()) {
         println!("  {m}");
     }
-    assert_eq!(
+    assert_pinned_native_column(
+        &counts,
         mismatches.len(),
         NATIVE_TX_INVALID_FAILURES,
-        "tx_invalid native mismatches changed; a wrongly accepted transaction is a consensus break"
+        NATIVE_TX_INVALID_SKIPS,
+        NATIVE_TX_INVALID_EXECUTED,
+        &[TX_INVALID_BADTX_SKIP],
+        "tx_invalid",
     );
 }
 
