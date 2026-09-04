@@ -1050,6 +1050,7 @@ fn script_from_descriptor(
     }
     ensure_keys_match_network(&descriptor, network)?;
     ensure_secret_keys_match_network(keys, network)?;
+    reject_hardened_xpub(&descriptor)?;
     let derived = descriptor
         .at_derivation_index(0)
         .map_err(|_| DescriptorError::PrivateKeys)?;
@@ -1068,6 +1069,7 @@ fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, 
         .paths
         .first()
         .ok_or_else(|| DescriptorError::Parse("Invalid combo descriptor".into()))?;
+    reject_hardened_xpub(path)?;
     let derived = path
         .at_derivation_index(0)
         .map_err(|_| DescriptorError::PrivateKeys)?;
@@ -1082,6 +1084,20 @@ fn multipath_descriptor_rejected() -> DescriptorError {
 
 fn ranged_descriptor_rejected() -> DescriptorError {
     DescriptorError::Range(GENERATEBLOCK_RANGED)
+}
+
+/// rust-miniscript panics in `at_derivation_index` on an xpub hardened step.
+/// Core `Expand` returns false, which `getScriptFromDescriptor` maps to
+/// `Cannot derive script without private keys`. An xprv is converted to an
+/// xpub with those steps already applied during parse, so it never hits this.
+fn reject_hardened_xpub(
+    descriptor: &MiniscriptDescriptor<DescriptorPublicKey>,
+) -> Result<(), DescriptorError> {
+    if descriptor.for_any_key(DescriptorPublicKey::has_hardened_step) {
+        Err(DescriptorError::PrivateKeys)
+    } else {
+        Ok(())
+    }
 }
 
 fn descriptor_text_with_optional_checksum(text: &str) -> Result<String, DescriptorError> {

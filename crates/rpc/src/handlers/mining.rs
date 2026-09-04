@@ -2282,5 +2282,8 @@ mod tests {
             .unwrap_or_else(|| panic!("hardened xpub must fail Expand"));
         assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
         assert_eq!(error.to_string(), GENERATEBLOCK_NEEDS_PRIVATE_KEYS);
+        let tprv = "tprv8ZgxMBicQKsPd3EupYiPRhaMooHKUHJxNsTfYuScep13go8QFfHdtkG9nRkFGb7busX4isf6X9dURGCoKgitaApQ6MupRhZMcELAxTBRJgS";
+        generateblock(&ctx, &json!([format!("wpkh({tprv}/0h/0)"), []]))
+            .unwrap_or_else(|err| panic!("hardened tprv must Expand: {err}"));
     }
 }
