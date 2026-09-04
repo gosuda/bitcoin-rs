@@ -479,50 +479,7 @@ impl NodeConfig {
              requires does not exist (#225). Only `full` and `disabled` are accepted."
         );
 
-        let mut endpoints = HashSet::new();
-        for group in &self.notifications.zmq {
-            ensure!(
-                endpoints.insert(&group.endpoint),
-                "duplicate ZMQ endpoint: {}",
-                group.endpoint
-            );
-            ensure!(
-                group.effective_hwm() <= i32::MAX as u32,
-                "ZMQ HWM exceeds libzmq's signed SNDHWM range: {}",
-                group.effective_hwm()
-            );
-            let mut topics = HashSet::new();
-            for topic in &group.topics {
-                ensure!(topics.insert(topic), "duplicate ZMQ topic on endpoint: {}", group.endpoint);
-            }
-        }
-        ensure!(
-            self.script_index.has_live_store(),
-            "scriptindex=utxo is not yet usable: the compact live-output store it requires does not exist (#225). Only `full` and `disabled` are accepted."
-        );
-
-        let mut endpoints = std::collections::HashSet::new();
-        for zmq in &self.notifications.zmq {
-            ensure!(
-                endpoints.insert(&zmq.endpoint),
-                "duplicate ZMQ endpoint: {}",
-                zmq.endpoint
-            );
-            ensure!(
-                zmq.effective_hwm() <= i32::MAX as u32,
-                "ZMQ HWM must not exceed {}",
-                i32::MAX
-            );
-            let mut topics = std::collections::HashSet::new();
-            for topic in &zmq.topics {
-                ensure!(
-                    topics.insert(topic),
-                    "duplicate ZMQ topic `{}` for endpoint {}",
-                    topic.as_str(),
-                    zmq.endpoint
-                );
-            }
-        }
+        crate::zmq_publisher::validate_endpoint_configs(&self.notifications.zmq)?;
         Ok(())
     }
 
