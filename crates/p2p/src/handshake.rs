@@ -297,6 +297,11 @@ mod tests {
 
         let (outbound_verack, _) = read_message(&mut outbound, magic)?;
         assert_eq!(outbound_verack, Message::Verack);
+        assert_eq!(
+            usize::try_from(outbound.position()).unwrap_or(usize::MAX),
+            outbound.get_ref().len(),
+            "handshake writes each frame once",
+        );
 
         Ok(())
     }
