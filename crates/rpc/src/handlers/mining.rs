@@ -666,7 +666,7 @@ fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
     let next_bits = format!("{:08x}", info.next_bits);
     let next_target = compact_target_hex(info.next_bits);
     let next_height = u64::from(info.blocks) + 1;
-    // Core pushes currentblockweight/tx and signet_challenge only when set.
+    // CONTRACT: docs/contracts/external-api.md#API-22
     typed_to_sonic_omitting_nulls(&v31::GetMiningInfo {
         blocks: u64::from(info.blocks),
         current_block_weight: info.last_candidate.map(|candidate| candidate.weight),
@@ -1465,6 +1465,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-22
     fn getmininginfo_omits_unset_optional_fields() {
         let control = FakeMiningControl::with_template(sample_template());
         {
