@@ -789,7 +789,7 @@ pub(crate) fn start_node(
     let network_active = state.network_active();
     let block_body_source = state.block_body_source();
     let p2p_chain_query: P2pChainQuery = Arc::new(
-        crate::NodeP2pChainQuery::new(state.block_tree())
+        bitcoin_rs_p2p::ActiveChainQuery::new(state.block_tree())
             .with_block_body_source(Arc::clone(&block_body_source)),
     );
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
@@ -843,7 +843,7 @@ pub(crate) fn start_node(
             mining: bitcoin_rs_rpc::context::MiningHandles {
                 mining_control: Some(Arc::clone(&mining_control)),
             },
-            capabilities: Some(state.capability_provider()),
+            txindex_status: Some(state.txindex_status()),
         })
         .with_esplora_tx_index(state.esplora_tx_index_query());
     rpc_context = rpc_context.with_block_body_source(block_body_source);
@@ -1038,7 +1038,7 @@ mod tests {
     fn disabled_zmq_still_seals_the_observer_slot() {
         // The state constructs the gateway with its observer at
         // `NodeState::open` time. Even without a ZMQ endpoint the
-        // observer slot is occupied by the node's `NodeMutationObserver`
+        // observer slot is occupied by a `CompositeObserver`
         // (mining-generation leg only). Verify the API contract:
         // `shared_with` produces a gateway whose observer is present.
         let pool = Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(

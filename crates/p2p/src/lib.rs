@@ -5,8 +5,10 @@
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
-pub mod connection;
+/// Active-chain `getheaders` / `getdata` serving.
+pub mod chain_query;
 /// Per-connection identity and cancellation.
+pub mod connection;
 /// Per-connection traffic counters.
 pub mod counters;
 /// Inbound message dispatcher.
@@ -38,6 +40,7 @@ pub mod wire;
 /// BIP339 wtxid-relay state.
 pub mod wtxid;
 
+pub use chain_query::ActiveChainQuery;
 pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerStats, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
