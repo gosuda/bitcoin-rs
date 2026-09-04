@@ -9,6 +9,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 use crate::context::{CachedBlockTemplate, Context};
 use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, params_array, required_str};
+use crate::handlers::util::sat_per_kvb_to_btc;
 
 const NETWORK_HASHPS_WINDOW: u32 = 120;
 
@@ -284,7 +285,7 @@ fn assemble(
         let min_time = tree
             .median_time_past_at(tip.tip_id, MEDIAN_TIME_SPAN)
             .map_or(0, |mtp| mtp.saturating_add(1));
-        let candidate_time = u32::try_from(now).unwrap_or(u32::MAX).max(min_time);
+        let candidate_time = normalize_candidate_time(now, min_time);
         let bits = bitcoin_rs_chain::expected_next_bits(
             ctx.chain_network,
             &tree,
@@ -294,7 +295,7 @@ fn assemble(
         .map_err(|error| RpcError::Internal(format!("next difficulty is unknown: {error}")))?;
         (min_time, bits)
     };
-    let current_time = u32::try_from(now).unwrap_or(u32::MAX).max(min_time);
+    let current_time = normalize_candidate_time(now, min_time);
 
     let params = BlockTemplateParams {
         previous_block_hash: tip.hash,
@@ -466,7 +467,10 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         json!(chain.as_ref().map_or(0.0, |chain| chain.network_hashps)),
     );
     let _ = response.insert(&"pooledtx", ctx.mempool.read().stats().txs);
-    let _ = response.insert(&"blockmintxfee", json!(ctx.mempool.read().min_relay_fee_sat_per_kvb() as f64 / 100_000_000.0));
+    let _ = response.insert(
+          &"blockmintxfee",
+          json!(sat_per_kvb_to_btc(ctx.mempool.read().min_relay_fee_sat_per_kvb())),
+      );
     let _ = response.insert(&"chain", chain_name(ctx.chain_network));
 
     // The next block's difficulty, which is the number a miner is actually
@@ -550,7 +554,11 @@ struct ChainFields {
 }
 
 impl ChainFields {
-    /// Reads every chain-dependent field from `tip` under `tree`.
+    fn normalize_candidate_time(candidate_time: u64, min_time: u32) -> u32 {
+      u32::try_from(candidate_time).unwrap_or(u32::MAX).max(min_time)
+  }
+
+  /// Reads every chain-dependent field from `tip` under `tree`.
     ///
     /// Takes the tree guard by reference rather than acquiring it, so the
     /// caller decides the scope and there is exactly one for the whole answer.

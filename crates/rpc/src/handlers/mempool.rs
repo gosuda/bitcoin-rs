@@ -9,6 +9,7 @@ use sonic_rs::{Value, json};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, required_str, serde_to_sonic};
+use crate::handlers::util::sat_per_kvb_to_btc;
 
 // Bitcoin Core default for incremental relay-fee policy until per-node
 // configuration is wired. Units: sat/kvB (the canonical workspace internal).
@@ -231,15 +232,6 @@ fn entry_to_serde(entry: &MempoolEntry, pool: &bitcoin_rs_mempool::Mempool) -> s
 
 fn sats_to_btc(sats: u64) -> f64 {
     bitcoin::Amount::from_sat(sats).to_btc()
-}
-
-// TODO(refactor): share fee-unit helpers via handlers::common.
-fn sat_per_kvb_to_btc(sat: u64) -> f64 {
-    if let Ok(small) = u32::try_from(sat) {
-        f64::from(small) / 100_000_000.0_f64
-    } else {
-        f64::from(u32::MAX) / 100_000_000.0_f64
-    }
 }
 
 #[cfg(test)]
