@@ -615,6 +615,22 @@ mod deriveaddresses_tests {
     }
 
     #[test]
+    fn deriveaddresses_rejects_range_arguments() {
+        let ctx = Arc::new(Context::new());
+        let payload = "addr(1111111111111111111114oLvT2)";
+        let checksum = descriptor_checksum(payload).unwrap_or_else(|| panic!("checksum failed"));
+        let descriptor = format!("{payload}#{checksum}");
+
+        for range in [json!(0), json!([0, 1]), json!(null)] {
+            let result = deriveaddresses(&ctx, &json!([descriptor, range]));
+            assert!(
+                matches!(result, Err(RpcError::MethodDisabled(message)) if message.contains("range")),
+                "range argument should be disabled: {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn deriveaddresses_rejects_missing_checksum() {
         let ctx = Arc::new(Context::new());
         let result = deriveaddresses(&ctx, &json!(["addr(1111111111111111111114oLvT2)"]));
