@@ -2,7 +2,7 @@
 //!
 //! Script verification has two backends. The native Rust interpreter in
 //! `bitcoin-rs-script` executes every consensus spend class: legacy, P2SH,
-//! SegWit v0, and Taproot key-path and script-path. The `kernel` feature
+//! `SegWit` v0, and Taproot key-path and script-path. The `kernel` feature
 //! routes the same checks through bitcoinkernel (Bitcoin Core's C++ engine)
 //! and is the production default in this crate and in `bitcoin-rs-node`.
 //! The `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no
