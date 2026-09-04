@@ -99,8 +99,9 @@ pub fn dispatch_inbound<S>(
 ///
 /// Equivalent to [`dispatch_inbound_full`] with `tx_inventory: None`: every
 /// announced tx is requested, and tx-typed `getdata` items are reported
-/// missing. Kept for call sites (the listener) that have not yet been wired
-/// with a [`TxInventory`] handle.
+/// missing. Production listeners pass a [`TxInventory`] through
+/// [`dispatch_inbound_full`]; this wrapper remains for call sites that only
+/// have a chain view.
 pub fn dispatch_inbound_with_chain<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -413,7 +414,7 @@ mod tests {
         }
     }
 
-    /// Streaming fake mirroring `NodeP2pChainQuery`: block-typed items that
+    /// Streaming fake mirroring `ActiveChainQuery`: block-typed items that
     /// resolve to a stored body are served behind `headroom`; everything
     /// else lands in `not_found` without a load.
     fn inv_hash(item: &Inventory) -> Option<[u8; 32]> {
@@ -601,7 +602,7 @@ mod tests {
         Ok(())
     }
 
-    /// Streaming chain fake mirroring `NodeP2pChainQuery`: block-typed items
+    /// Streaming chain fake mirroring `ActiveChainQuery`: block-typed items
     /// that resolve to a stored body are served behind `headroom`; all other
     /// items land in `not_found` without a load. Counters and the tripwire
     /// back the hostile-preload gates.

@@ -10,6 +10,9 @@
 
 use std::process::ExitCode;
 
+use bitcoin_rs::bitcoin_conf;
+use bitcoin_rs_node::{Network, UserConfig};
+
 mod cli;
 mod env;
 mod toml;
@@ -29,10 +32,31 @@ fn load(
     if let Some(path) = &cli.config {
         layers.push(toml::user_config_from_path(path)?);
     }
-    layers.push(env::user_config_from_env(vars)?);
-    layers.push(cli.into_user_config());
+    let env_layer = env::user_config_from_env(vars)?;
+    let bitcoin_conf_path = cli.bitcoin_conf.clone();
+    let cli_layer = cli.into_user_config();
+    if let Some(path) = bitcoin_conf_path {
+        let network = network_from_layers(layers.iter().chain([&env_layer, &cli_layer]));
+        layers.push(bitcoin_conf::load_file(&path, network)?);
+    }
+    layers.push(env_layer);
+    layers.push(cli_layer);
     let layer_refs: Vec<_> = layers.iter().collect();
     bitcoin_rs_node::resolve(&layer_refs)
+}
+
+/// Network used to select `[regtest]` / `[main]` sections in bitcoin.conf.
+///
+/// Resolved from TOML, environment, and CLI only. bitcoin.conf never chooses
+/// the network that selects its own sections.
+fn network_from_layers<'a>(layers: impl IntoIterator<Item = &'a UserConfig>) -> Network {
+    let mut network = Network::Mainnet;
+    for layer in layers {
+        if let Some(selection) = layer.network {
+            network = selection.consensus_network();
+        }
+    }
+    network
 }
 
 fn main() -> ExitCode {
@@ -54,6 +78,46 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
+
+    #[test]
+    fn bitcoin_conf_is_applied_before_environment_and_cli() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = dir.path().join("bitcoin.conf");
+        std::fs::write(&path, "prune=777\n").unwrap_or_else(|error| panic!("write conf: {error}"));
+
+        let config = super::load(
+            [
+                "bitcoin-rs",
+                "--bitcoin-conf",
+                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
+            ],
+            std::iter::empty(),
+        )
+        .unwrap_or_else(|error| panic!("valid bitcoin.conf configuration: {error}"));
+
+        assert_eq!(config.storage.prune_target_mb, 777);
+    }
+
+    #[test]
+    fn bitcoin_conf_is_overridden_by_cli() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = dir.path().join("bitcoin.conf");
+        std::fs::write(&path, "prune=777\n").unwrap_or_else(|error| panic!("write conf: {error}"));
+
+        let config = super::load(
+            [
+                "bitcoin-rs",
+                "--bitcoin-conf",
+                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
+                "--prune-target-mb",
+                "100",
+            ],
+            std::iter::empty(),
+        )
+        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+
+        assert_eq!(config.storage.prune_target_mb, 100);
+    }
 
     #[test]
     fn environment_is_overridden_by_cli() {
@@ -206,7 +270,7 @@ hwm = 5000
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
     }
 
-    /// IDX-01: `--scriptindex=utxo` enables ScriptLive only.
+    /// IDX-01: `--scriptindex=utxo` enables `ScriptLive` only.
     #[test]
     fn cli_scriptindex_utxo_enables_live_only_index() {
         let config = super::load(

@@ -3,7 +3,7 @@
 This note records the #213 decision. It does not change crate defaults.
 The owner of the default is
 [`docs/contracts/validation-default.md`](../contracts/validation-default.md),
-proven by `g18_validation_default`.
+proven by `g19_validation_default`.
 
 A **measured observation** copies a field from a cited artifact. An
 **inference** interprets those observations or names evidence that is
@@ -34,21 +34,33 @@ NATIVE_TX_INVALID_FAILURES = 0
 
 Those columns feed Core's `script_tests.json`, `tx_valid.json`, and
 `tx_invalid.json` through `Interpreter`. The harness reports parsed, executed,
-skipped, and failed rows (including skip reasons); the recorded gate is scoped
-to runnable rows and also requires nonzero execution, rather than claiming
-that zero mismatches covers rows it cannot execute. Kernel-
-vs-interpreter fixture parity lives in
-`crates/consensus/tests/kernel_block_parity.rs`: the committed differential is
-currently Taproot key-path, script-path has a separate non-vacuity check, and
-legacy, P2SH, bare multisig, and SegWit v0 fixtures are kernel-only in that
-harness. Native coverage for every class is established by the Core-vector
-lane.
+skipped, and failed rows. The recorded gate is zero mismatches on runnable
+rows, a pinned skip count per corpus, **and** a skip-reason allow-list:
+`script_tests` may skip only one-string prose/section headers (55),
+`tx_valid` skips nothing, and `tx_invalid` may skip only `BADTX` parse-stage
+rows (9). A new skip category cannot shrink coverage while staying green.
+Kernel-vs-interpreter fixture parity lives in
+`crates/consensus/tests/kernel_block_parity.rs`:
+the committed differential is currently Taproot key-path, script-path has a
+separate non-vacuity check, and legacy, P2SH, bare multisig, and `SegWit` v0
+fixtures are kernel-only in that harness. Native coverage for every class is
+established by the Core-vector lane.
 
 The earlier stub (`verify_non_taproot_portable`, bare `OP_TRUE` only) is
 gone. `CONCEPTS.md` and the crate rustdocs that still described it were
 wrong against this tree.
 
 ## Signed-spend performance (measured)
+
+This is the in-tree **apply-path** comparison that actually runs the script
+engine: `NodeState::apply_block` over a generated signed-spend corpus. Keep
+it for engine diagnostics. It is not a daemon, P2P, or CLI wall.
+
+The named end-to-end wall for promotion is the offline full-validation
+corpus and full-mainnet replay versus Bitcoin Core (#34, #42), not a CLI
+wrapper around this same generated corpus. That cell is still missing, so
+this apply-path result cannot promote native by itself. Issue #213's
+performance gate that can run without that corpus is this harness.
 
 Source:
 [`data/overhaul-signed-spend-20260902.md`](data/overhaul-signed-spend-20260902.md).

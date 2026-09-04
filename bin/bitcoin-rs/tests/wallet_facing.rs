@@ -1,10 +1,12 @@
 //! Wallet-facing consumer: spawn the public `bitcoin-rs` binary and talk
-//! only HTTP (Esplora + JSON-RPC).
+//! only HTTP (Esplora + JSON-RPC) using rust-bitcoin.
 //!
 //! This is the executable proof of `docs/contracts/wallet-facing.md`. It
-//! does not import `NodeState`, `UtxoSet`, or index types. The named
-//! out-of-repo consumer is `gosuda/bitcoin-wallet` (`btcw -u`); this test
-//! issues the same operations that wallet issues against any Esplora URL.
+//! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
+//! The package `[lib]` is process-input adapters (`bitcoin.conf`); this
+//! test does not import it, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or
+//! index types. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
+//! (`btcw -u`).
 
 #![allow(missing_docs)]
 
@@ -18,27 +20,27 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_primitives::encode::{consensus_bytes, double_sha256};
-use bitcoin_rs_primitives::{
-    Block, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, deserialize,
+use bitcoin::absolute::LockTime;
+use bitcoin::block::{Header, Version as BlockVersion};
+use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
+use bitcoin::constants::{COINBASE_MATURITY, genesis_block};
+use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256;
+use bitcoin::opcodes::all::OP_PUSHNUM_1;
+use bitcoin::script::Builder;
+use bitcoin::transaction::Version as TxVersion;
+use bitcoin::{
+    Address, Amount, Block, CompactTarget, Network, OutPoint, ScriptBuf, Sequence, Target,
+    Transaction, TxIn, TxMerkleNode, TxOut, Txid, WPubkeyHash, Witness,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 const RPC_USER: &str = "bitcoin-rs";
 const RPC_PASSWORD: &str = "bitcoin-rs";
-const MATURE_AFTER: u32 = 100;
 const FEE_SATS: u64 = 10_000;
-const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
+const REGTEST_SUBSIDY_SATS: u64 = 5_000_000_000;
 const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
-const OP_TRUE: [u8; 1] = [0x51];
-/// P2WPKH for key hash `[2; 20]`, the same fixture the Esplora unit tests use.
-const P2WPKH_SCRIPT: [u8; 22] = [
-    0x00, 0x14, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
-    0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
-];
-/// BIP173 `bcrt1` encoding of `P2WPKH_SCRIPT`.
-const P2WPKH_ADDRESS: &str = "bcrt1qqgpqyqszqgpqyqszqgpqyqszqgpqyqszazmwwa";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const INDEX_TIMEOUT: Duration = Duration::from_mins(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -53,25 +55,29 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         addr: node.addr,
         logs: Arc::clone(&node.logs),
     };
+    let p2wpkh = p2wpkh_script();
+    let address = Address::from_script(&p2wpkh, Network::Regtest)
+        .map_err(|error| format!("p2wpkh fixture must be a standard address: {error}"))?
+        .to_string();
 
     client.submit_genesis()?;
-    for _ in 0..MATURE_AFTER {
+    for _ in 0..COINBASE_MATURITY {
         client.mine(Coinbase::AnyoneCanSpend)?;
     }
-    client.mine(Coinbase::P2wpkh)?;
+    client.mine(Coinbase::P2wpkh(&p2wpkh))?;
 
     let height = client.esplora_text("/blocks/tip/height")?;
     assert_eq!(
         height.trim(),
-        MATURE_AFTER.saturating_add(1).to_string(),
+        COINBASE_MATURITY.saturating_add(1).to_string(),
         "tip height after genesis + {} mined blocks",
-        MATURE_AFTER.saturating_add(1)
+        COINBASE_MATURITY.saturating_add(1)
     );
     let tip_hash = client.esplora_text("/blocks/tip/hash")?;
     let genesis_hash = client.esplora_text("/block-height/0")?;
     assert_eq!(
         genesis_hash.trim(),
-        Network::Regtest.genesis_block().block_hash().to_string(),
+        genesis_block(Network::Regtest).block_hash().to_string(),
         "GET /block-height/0 must return the regtest genesis hash"
     );
     assert_ne!(
@@ -86,26 +92,10 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         "fee estimates must include the 6-block target wallets use: {fees}"
     );
 
-    client.wait_for_scriptindex(P2WPKH_ADDRESS)?;
+    client.wait_for_scriptindex(&address)?;
+    assert_script_activity(&client, &address, &p2wpkh)?;
 
-    let address_utxos = client.esplora_json(&format!("/address/{P2WPKH_ADDRESS}/utxo"))?;
-    let utxos = address_utxos
-        .as_array()
-        .ok_or("address UTXO response must be a JSON array")?;
-    assert!(
-        !utxos.is_empty(),
-        "P2WPKH coinbase must be visible on /address/{{addr}}/utxo: {address_utxos}"
-    );
-
-    let history = client.esplora_json(&format!("/address/{P2WPKH_ADDRESS}/txs"))?;
-    assert!(
-        history
-            .as_array()
-            .is_some_and(|entries| !entries.is_empty()),
-        "address history must list the funding transaction: {history}"
-    );
-
-    let spend_hex = spend_first_anyone_can_spend(&client)?;
+    let spend_hex = spend_first_anyone_can_spend(&client, &p2wpkh)?;
     let broadcast = client.esplora_post("/tx", spend_hex.as_bytes())?;
     assert_eq!(broadcast.status, 200, "POST /tx: {}", broadcast.text());
     let txid = broadcast.text();
@@ -128,17 +118,16 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
 }
 
 /// Coinbase output the miner pays, besides the witness commitment.
-#[derive(Clone, Copy)]
-enum Coinbase {
+enum Coinbase<'a> {
     AnyoneCanSpend,
-    P2wpkh,
+    P2wpkh(&'a ScriptBuf),
 }
 
-impl Coinbase {
-    fn script_pubkey(self) -> Vec<u8> {
+impl Coinbase<'_> {
+    fn script_pubkey(self) -> ScriptBuf {
         match self {
-            Self::AnyoneCanSpend => OP_TRUE.to_vec(),
-            Self::P2wpkh => P2WPKH_SCRIPT.to_vec(),
+            Self::AnyoneCanSpend => Builder::new().push_opcode(OP_PUSHNUM_1).into_script(),
+            Self::P2wpkh(script) => script.clone(),
         }
     }
 }
@@ -149,12 +138,37 @@ struct NodeProcess {
     child: Child,
 }
 
-struct StartupChild(Child);
+/// Kills the daemon if startup fails before [`NodeProcess`] takes ownership.
+struct StartupChild {
+    child: Option<Child>,
+}
+
+impl StartupChild {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> TestResult<&mut Child> {
+        self.child
+            .as_mut()
+            .ok_or("startup child already taken")
+            .map_err(Into::into)
+    }
+
+    fn into_inner(mut self) -> TestResult<Child> {
+        self.child
+            .take()
+            .ok_or("startup child already taken")
+            .map_err(Into::into)
+    }
+}
 
 impl Drop for StartupChild {
     fn drop(&mut self) {
-        let _ignored = self.0.kill();
-        let _ignored = self.0.wait();
+        if let Some(mut child) = self.child.take() {
+            let _ignored = child.kill();
+            let _ignored = child.wait();
+        }
     }
 }
 
@@ -164,7 +178,7 @@ impl NodeProcess {
         let config_path = root.join("node.toml");
         std::fs::write(&config_path, "p2p_listen = []\ndns_seeds_enabled = false\n")?;
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_bitcoin-rs"))
+        let spawned = Command::new(env!("CARGO_BIN_EXE_bitcoin-rs"))
             .arg("--config")
             .arg(&config_path)
             .arg("--network")
@@ -187,10 +201,10 @@ impl NodeProcess {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("failed to spawn bitcoin-rs: {error}"))?;
-        let mut child = StartupChild(child);
+        let mut child = StartupChild::new(spawned);
 
         let stderr = child
-            .0
+            .child_mut()?
             .stderr
             .take()
             .ok_or("bitcoin-rs stderr was not piped")?;
@@ -204,13 +218,13 @@ impl NodeProcess {
         let addr = addr_rx.recv_timeout(STARTUP_TIMEOUT).map_err(|_| {
             format!(
                 "timed out waiting for rpc listener bind\n{}",
-                logs.lock().clone()
+                locked_string(&logs)
             )
         })?;
         Ok(Self {
             addr,
             logs,
-            child: child.0,
+            child: child.into_inner()?,
         })
     }
 }
@@ -257,6 +271,10 @@ fn parse_rpc_addr(line: &str) -> Option<SocketAddr> {
     rest.get(..end)?.parse().ok()
 }
 
+fn locked_string(logs: &Mutex<String>) -> String {
+    logs.lock().clone()
+}
+
 struct Client {
     addr: SocketAddr,
     logs: Arc<Mutex<String>>,
@@ -286,7 +304,7 @@ impl HttpResponse {
 
 impl Client {
     fn submit_genesis(&self) -> TestResult {
-        let hex = hex_encode(&consensus_bytes(&Network::Regtest.genesis_block()));
+        let hex = serialize_hex(&genesis_block(Network::Regtest));
         let result = self.rpc("submitblock", &json!([hex]))?;
         if !result.is_null() {
             return Err(format!("submitblock(genesis) rejected: {result}").into());
@@ -294,10 +312,10 @@ impl Client {
         Ok(())
     }
 
-    fn mine(&self, coinbase: Coinbase) -> TestResult {
+    fn mine(&self, coinbase: Coinbase<'_>) -> TestResult {
         let template = self.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
         let block = assemble_from_template(&template, coinbase)?;
-        let hex = hex_encode(&consensus_bytes(&block));
+        let hex = serialize_hex(&block);
         let result = self.rpc("submitblock", &json!([hex]))?;
         if !result.is_null() {
             return Err(format!("submitblock rejected: {result}").into());
@@ -319,7 +337,7 @@ impl Client {
                     INDEX_TIMEOUT,
                     response.status,
                     response.text(),
-                    self.logs.lock().clone()
+                    locked_string(&self.logs)
                 )
                 .into());
             }
@@ -398,39 +416,89 @@ impl Client {
     }
 }
 
-fn spend_first_anyone_can_spend(client: &Client) -> TestResult<String> {
-    // Height-1 coinbase is anyone-can-spend (`OP_TRUE`), the one script class
-    // the portable interpreter verifies. The node holds no keys; a wallet
-    // would sign here. Broadcast still goes through the public `POST /tx`
-    // path, paying a standard P2WPKH so policy accepts the output.
+fn p2wpkh_script() -> ScriptBuf {
+    ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]))
+}
+
+fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) -> TestResult {
+    let summary = client.esplora_json(&format!("/address/{address}"))?;
+    assert!(
+        summary.get("chain_stats").is_some(),
+        "address summary must include chain_stats: {summary}"
+    );
+
+    let address_utxos = client.esplora_json(&format!("/address/{address}/utxo"))?;
+    let utxos = address_utxos
+        .as_array()
+        .ok_or("address UTXO response must be a JSON array")?;
+    assert!(
+        !utxos.is_empty(),
+        "P2WPKH coinbase must be visible on /address/{{addr}}/utxo: {address_utxos}"
+    );
+
+    let history = client.esplora_json(&format!("/address/{address}/txs"))?;
+    assert!(
+        history
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "address history must list the funding transaction: {history}"
+    );
+
+    let script_hash = sha256::Hash::hash(script.as_bytes()).to_string();
+    let twin = client.esplora_json(&format!("/scripthash/{script_hash}"))?;
+    assert!(
+        twin.get("chain_stats").is_some(),
+        "scripthash summary must include chain_stats: {twin}"
+    );
+    let twin_utxos = client.esplora_json(&format!("/scripthash/{script_hash}/utxo"))?;
+    assert_eq!(
+        twin_utxos, address_utxos,
+        "scripthash UTXOs must match the address twin"
+    );
+    let twin_history = client.esplora_json(&format!("/scripthash/{script_hash}/txs"))?;
+    assert!(
+        twin_history
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "scripthash history must list the funding transaction: {twin_history}"
+    );
+    Ok(())
+}
+
+fn spend_first_anyone_can_spend(client: &Client, payout: &ScriptBuf) -> TestResult<String> {
+    // Height-1 coinbase is anyone-can-spend (`OP_TRUE`). The default binary's
+    // portable interpreter verifies that class; it does not verify P2WPKH, and
+    // the node holds no keys. A wallet would sign here. Broadcast still goes
+    // through the public `POST /tx` path, paying a standard P2WPKH so policy
+    // accepts the output.
     let block_hash = client.esplora_text("/block-height/1")?;
     let txid_hex = client.esplora_text(&format!("/block/{}/txid/0", block_hash.trim()))?;
     let txid: Txid = txid_hex.trim().parse()?;
-    let spend = Tx {
-        version: 2,
-        inputs: vec![TxIn {
+    let spend = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
             previous_output: OutPoint::new(txid, 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
-        outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS.saturating_sub(FEE_SATS),
-            script_pubkey: P2WPKH_SCRIPT.to_vec(),
+        output: vec![TxOut {
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS.saturating_sub(FEE_SATS)),
+            script_pubkey: payout.clone(),
         }],
-        lock_time: 0,
     };
-    Ok(hex_encode(&consensus_bytes(&spend)))
+    Ok(serialize_hex(&spend))
 }
 
-fn assemble_from_template(template: &Value, coinbase: Coinbase) -> TestResult<Block> {
+fn assemble_from_template(template: &Value, coinbase: Coinbase<'_>) -> TestResult<Block> {
     let prev_hex = required_str(template, "previousblockhash")?;
     let height = u32::try_from(required_u64(template, "height")?)?;
     let coinbase_value = required_u64(template, "coinbasevalue")?;
-    let bits = u32::from_str_radix(required_str(template, "bits")?, 16)?;
+    let bits = CompactTarget::from_unprefixed_hex(required_str(template, "bits")?)?;
     let curtime = u32::try_from(required_u64(template, "curtime")?)?;
     let version = i32::try_from(required_u64(template, "version")?)?;
-    let commitment_script = hex_decode(required_str(template, "default_witness_commitment")?)?;
+    let commitment = ScriptBuf::from_hex(required_str(template, "default_witness_commitment")?)?;
 
     let mut txs = Vec::new();
     if let Some(entries) = template.get("transactions").and_then(Value::as_array) {
@@ -439,133 +507,73 @@ fn assemble_from_template(template: &Value, coinbase: Coinbase) -> TestResult<Bl
                 .get("data")
                 .and_then(Value::as_str)
                 .ok_or("template transaction missing data hex")?;
-            txs.push(deserialize::<Tx>(&hex_decode(data)?)?);
+            txs.push(deserialize_hex::<Transaction>(data)?);
         }
     }
 
-    let coinbase_tx = Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+    let coinbase_tx = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
             script_sig: coinbase_script_sig(height),
-            sequence: 0xffff_ffff,
-            witness: vec![WITNESS_RESERVED.to_vec()],
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[&WITNESS_RESERVED]),
         }],
-        outputs: vec![
+        output: vec![
             TxOut {
-                value: coinbase_value,
+                value: Amount::from_sat(coinbase_value),
                 script_pubkey: coinbase.script_pubkey(),
             },
             TxOut {
-                value: 0,
-                script_pubkey: commitment_script,
+                value: Amount::from_sat(0),
+                script_pubkey: commitment,
             },
         ],
-        lock_time: 0,
     };
 
-    let mut block_txs = Vec::with_capacity(txs.len().saturating_add(1));
-    block_txs.push(coinbase_tx);
-    block_txs.extend(txs);
-    let merkle_root = merkle_root(&block_txs).ok_or("block must have a merkle root")?;
+    let mut txdata = Vec::with_capacity(txs.len().saturating_add(1));
+    txdata.push(coinbase_tx);
+    txdata.extend(txs);
     let mut block = Block {
-        header: bitcoin_rs_primitives::Header {
-            version,
+        header: Header {
+            version: BlockVersion::from_consensus(version),
             prev_blockhash: prev_hex.parse()?,
-            merkle_root,
+            merkle_root: TxMerkleNode::all_zeros(),
             time: curtime,
             bits,
             nonce: 0,
         },
-        txs: block_txs,
+        txdata,
     };
-    grind_pow(&mut block)?;
+    block.header.merkle_root = block
+        .compute_merkle_root()
+        .ok_or("block must have a merkle root")?;
+    grind_pow(&mut block.header)?;
     Ok(block)
 }
 
-fn coinbase_script_sig(height: u32) -> Vec<u8> {
-    let mut script = script_push_int(i64::from(height));
+fn coinbase_script_sig(height: u32) -> ScriptBuf {
+    let mut builder = Builder::new().push_int(i64::from(height));
     // Coinbase scriptSig must be at least two bytes (Core bad-cb-length).
     // Heights 1..=16 encode as a single OP_N.
-    script.extend(script_push_int(0));
-    script
+    if builder.len() < 2 {
+        builder = builder.push_int(0);
+    }
+    builder.into_script()
 }
 
-fn script_push_int(value: i64) -> Vec<u8> {
-    match value {
-        0 => vec![0x00],
-        1..=16 => vec![0x50_u8.saturating_add(u8::try_from(value).unwrap_or_default())],
-        _ => {
-            let mut payload = Vec::new();
-            let mut magnitude = value.unsigned_abs();
-            while magnitude > 0 {
-                payload.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-                magnitude >>= 8;
-            }
-            let mut out = Vec::with_capacity(payload.len().saturating_add(1));
-            out.push(u8::try_from(payload.len()).unwrap_or_default());
-            out.extend(payload);
-            out
-        }
-    }
-}
-
-fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    if txs.is_empty() {
-        return None;
-    }
-    let mut level: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pos in 0..level.len().div_ceil(2) {
-            let left = level[2 * pos];
-            let right = level[(2 * pos + 1).min(level.len().saturating_sub(1))];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(*double_sha256(&pair).as_byte_array());
-        }
-        level = next;
-    }
-    Some(Hash256::from_le_bytes(level.first()?))
-}
-
-fn grind_pow(block: &mut Block) -> TestResult {
+fn grind_pow(header: &mut Header) -> TestResult {
+    let target = Target::from(header.bits);
     loop {
-        if pow_is_met(block.header.bits, &block.header.compute_hash().into()) {
+        if target.is_met_by(header.block_hash()) {
             return Ok(());
         }
-        let Some(next) = block.header.nonce.checked_add(1) else {
-            return Err("nonce exhausted while grinding block".into());
-        };
-        block.header.nonce = next;
+        header.nonce = header
+            .nonce
+            .checked_add(1)
+            .ok_or("nonce exhausted while grinding block")?;
     }
-}
-
-fn pow_is_met(bits: u32, hash: &Hash256) -> bool {
-    let exponent = usize::try_from(bits >> 24).unwrap_or(usize::MAX);
-    let mantissa = bits & 0x00ff_ffff;
-    if mantissa == 0 || mantissa & 0x0080_0000 != 0 || exponent > 32 {
-        return false;
-    }
-    let shift = exponent.saturating_sub(3);
-    let mantissa_le = mantissa.to_le_bytes();
-    let mut target = [0_u8; 32];
-    for (offset, byte) in mantissa_le.iter().take(3).enumerate() {
-        let position = shift.saturating_add(offset);
-        if let Some(slot) = target.get_mut(position) {
-            *slot = *byte;
-        }
-    }
-    let hash_le = hash.to_le_bytes();
-    for index in (0..32).rev() {
-        match hash_le[index].cmp(&target[index]) {
-            std::cmp::Ordering::Less => return true,
-            std::cmp::Ordering::Greater => return false,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-    true
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> TestResult<&'a str> {
@@ -585,44 +593,11 @@ fn required_u64(value: &Value, key: &str) -> TestResult<u64> {
         .ok_or_else(|| format!("template field {key} is not an integer: {entry}").into())
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
-fn hex_decode(hex: &str) -> TestResult<Vec<u8>> {
-    let bytes = hex.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return Err("hex string must have even length".into());
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let hi = hex_nibble(pair[0]).ok_or("invalid hex")?;
-        let lo = hex_nibble(pair[1]).ok_or("invalid hex")?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 fn basic_token() -> String {
-    base64(format!("{RPC_USER}:{RPC_PASSWORD}").as_bytes())
+    encode_base64(format!("{RPC_USER}:{RPC_PASSWORD}").as_bytes())
 }
 
-fn base64(input: &[u8]) -> String {
+fn encode_base64(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
     for chunk in input.chunks(3) {

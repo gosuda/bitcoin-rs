@@ -13,13 +13,10 @@
 //! the sockets: the bystander peer receives the `inv`, the source peer does
 //! not.
 //!
-//! One seam is filled by the test's node-side thread: the production listener
-//! (`crates/p2p/src/listener.rs::run_message_loop`) does not yet carry a
-//! `Message::Tx` → `InboundTx` hand-off (`InboundSyncSinks` is
-//! headers/blocks/wake only), so the stand-in forwards the decoded body with
-//! the *real* lease-stamped [`PeerSource`]. Everything else — handshake FSM,
-//! inv filter, admission, relay queue, relay worker, peer leases, wire
-//! framing — is the production code under test.
+//! The production listener now forwards `Message::Tx` into the ingress
+//! channel and dispatches through `TxInventory`. This harness still drives
+//! its own loopback sockets so the assertions stay deterministic; it uses
+//! the same consumer, admission, and relay worker `start_node` spawns.
 //!
 //! Skip gate: when loopback TCP is unavailable (sandboxed environment) the
 //! tests return early with a `tracing::warn!` rather than failing.
@@ -99,7 +96,7 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> anyhow::Result<()> 
         OutPoint::new(parent, 0),
         TxOut {
             value,
-            script_pubkey: Vec::new(),
+            script_pubkey: vec![0x51],
         },
         false,
         100,
@@ -117,13 +114,13 @@ fn spending_tx(parent: Txid, output_value: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: vec![0x52, 0x02, 0xAA, 0xBB],
+            script_sig: Vec::new(),
             sequence: 0xffff_ffff,
             witness: Vec::new(),
         }],
         outputs: vec![TxOut {
             value: output_value,
-            script_pubkey: vec![0x6A],
+            script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
         }],
         lock_time: 0,
     }

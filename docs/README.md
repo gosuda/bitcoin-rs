@@ -32,7 +32,10 @@ precedence rule and the index of contract pages live in
 - [benchmarks/](benchmarks/) holds the retained benchmark notes:
   [end-to-end-sync.md](benchmarks/end-to-end-sync.md),
   [index-read-path.md](benchmarks/index-read-path.md),
-  [utxo-memory.md](benchmarks/utxo-memory.md), and the #213 decision
+  [utxo-memory.md](benchmarks/utxo-memory.md), the product hot-path
+  [ledger](benchmarks/hot-path-ledger.toml) owned by
+  [hot-path-attribution.md](contracts/hot-path-attribution.md), and the
+  #213 decision
   [native-validation-default.md](benchmarks/native-validation-default.md).
   Read the methodology before quoting any number: the results depend on CPU
   pinning and on whether the harness competes with the node. Raw run

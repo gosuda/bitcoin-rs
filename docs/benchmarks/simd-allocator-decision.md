@@ -16,7 +16,7 @@ Host-specific results do not transfer across instruction-set architectures.
 
 | Lever from issue #40 | Disposition | Scope |
 |---|---|---|
-| AVX2 Merkle reduction | **Adopt after production integration in #16** | Runtime-dispatched AVX2 on supported x86-64 hosts, with the scalar path retained |
+| AVX2 Merkle reduction | **Adopted** | Runtime-dispatched AVX2 on supported x86-64 hosts; scalar spine for small trees and unsupported hosts |
 | x86 SHA-NI hashing | **Defer** | No controlled whole-domain candidate on a project measurement host |
 | ARM SIMD and ARMv8 SHA acceleration | **Defer** | No ARM candidate/control custody artifact |
 | Global allocator choice | **Adopt** | mimalloc for the measured x86-64 Linux production configuration; keep the system-allocator comparison arm |
@@ -27,7 +27,7 @@ Host-specific results do not transfer across instruction-set architectures.
 These are seven distinct decisions. In particular, adopting one x86 AVX2 kernel
 does not approve an ARM implementation or a separate SHA acceleration path.
 
-## AVX2 Merkle reduction: adopt after production integration
+## AVX2 Merkle reduction: adopted
 
 ### Measured observations
 
@@ -68,13 +68,12 @@ arms. The correctness section records `equal at every Merkle level` over blocks
 
 The repeated wall-time direction across three storage backends, isolated Merkle
 ratios, and corpus parity justify the decision to adopt runtime-dispatched AVX2.
-The production integration remains part of issue #16; the current implementation
-is test-gated and production validation still uses the scalar path. The CPU
-speedups are much smaller than the wall speedups, so this decision does not claim
-that Merkle work alone caused every whole-replay difference. The artifact does
-not record a CPU model or architecture field; the AVX2 treatment itself bounds
-this result to AVX2-capable x86 hosts. A scalar fallback remains part of the
-selected design.
+Production validation uses this kernel when the host and tree can fill an 8-lane
+batch; otherwise the scalar spine. The CPU speedups are much smaller than the
+wall speedups, so this decision does not claim that Merkle work alone caused
+every whole-replay difference. The artifact does not record a CPU model or
+architecture field; the AVX2 treatment itself bounds this result to AVX2-capable
+x86 hosts. A scalar fallback remains part of the selected design.
 
 ## SHA acceleration: defer x86 SHA-NI and ARM SIMD
 
@@ -211,9 +210,8 @@ before adoption.
 
 ## Evidence boundary
 
-This document adopts two implementation changes: runtime-dispatched AVX2 Merkle
-reduction on supported x86 hosts and the v5 UTXO layout measured on the stated
-host and chainstate.
+This document adopts runtime-dispatched AVX2 Merkle reduction on supported x86
+hosts and the v5 UTXO layout measured on the stated host and chainstate. It
 keeps mimalloc as the canonical allocator for the measured x86-64 Linux
 production configuration. It rejects the current UTXO arena/pool proposal and
 defers SHA-specific SIMD, ARM SIMD, and additional zero-copy work. The bounded

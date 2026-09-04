@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 description = "bitcoin-rs node binary"
 
+[lib]
+name = "bitcoin_rs"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bitcoin-rs"
 path = "src/main.rs"
@@ -27,10 +31,9 @@ bitcoin-rs-storage.workspace = true
 [dev-dependencies]
 parking_lot.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile = ">=3.20.0, <4"
-bitcoin-rs-consensus.workspace = true
-bitcoin-rs-primitives.workspace = true
+bitcoin.workspace = true
+
 [features]
 default = ["fjall", "redb", "zmq"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]
@@ -45,5 +48,9 @@ name = "g17_dependency_direction"
 path = "tests/gates/g17_dependency_direction.rs"
 
 [[test]]
-name = "g18_validation_default"
-path = "tests/gates/g18_validation_default.rs"
+name = "g18_hot_path_ledger"
+path = "tests/gates/g18_hot_path_ledger.rs"
+
+[[test]]
+name = "g19_validation_default"
+path = "tests/gates/g19_validation_default.rs"

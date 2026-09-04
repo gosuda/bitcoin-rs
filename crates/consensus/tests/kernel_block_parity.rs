@@ -37,7 +37,9 @@
 //! committed corpus asserts two-engine verdict parity on the taproot key-path
 //! fixture. Other classes are verified against the kernel, with native coverage
 //! proven separately by `crates/script/tests/core_vectors.rs`
-//! (`NATIVE_*_FAILURES = 0`).
+//! (`NATIVE_*_FAILURES = 0`, pinned skip counts). This file supplies the
+//! kernel-vs-interpreter differential for the Taproot key-path fixture and the
+//! script-path non-vacuity check.
 //!
 //! ## Fixtures
 //!
