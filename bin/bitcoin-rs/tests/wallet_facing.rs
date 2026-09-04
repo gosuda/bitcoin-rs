@@ -185,6 +185,32 @@ fn wait_until_dead(pid: u32) -> bool {
     }
 }
 
+#[test]
+fn source_does_not_import_node_internals() {
+    let source = include_str!("wallet_facing.rs");
+    let imports = source.lines().filter_map(|line| {
+        let line = line.trim_start();
+        line.starts_with("use ").then_some(line)
+    });
+    for line in imports {
+        for banned in [
+            "bitcoin_rs::",
+            "bitcoin_rs_node",
+            "bitcoin_rs_storage",
+            "bitcoin_rs_primitives",
+            "bitcoin_rs_index",
+            "bitcoin_rs_utxo",
+            "NodeState",
+            "UtxoSet",
+        ] {
+            assert!(
+                !line.contains(banned),
+                "wallet-facing proof must not import {banned}: {line}"
+            );
+        }
+    }
+}
+
 /// Coinbase output the miner pays, besides the witness commitment.
 enum Coinbase<'a> {
     AnyoneCanSpend,

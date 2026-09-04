@@ -45,7 +45,8 @@ out of tree.
   package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`. The package `[lib]`
   is process-input adapters (`bitcoin.conf`); the test source does not
   import that lib, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or index
-  types. It depends on rust-bitcoin and speaks only HTTP. It funds a
+  types. `source_does_not_import_node_internals` forbids those imports.
+  The test depends on rust-bitcoin and speaks only HTTP. It funds a
   regtest chain through `getblocktemplate` / `submitblock` (this node
   has no `generate*` RPC), then issues the BDK/esplora-client dialect —
   tip, block height (including `/api/v1/block-height/{h}`), headers,
@@ -61,6 +62,7 @@ out of tree.
 ## Proven by
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
+- `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
 
 ## Vocabulary
 
