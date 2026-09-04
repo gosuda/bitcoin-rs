@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
-    BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
-    MiningControlError,
+    BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningCapability,
+    MiningControl, MiningControlError,
 };
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, NodeConfig, UserConfig, resolve,
@@ -724,6 +724,42 @@ fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     assert!(info.signet.is_none());
+    Ok(())
+}
+
+#[test]
+fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let template = expect_template(mining.get_block_template(BlockTemplateRequest {
+        mode: BlockTemplateMode::Template,
+        capabilities: vec![MiningCapability::new("coinbasetxn")],
+        rules: Vec::new(),
+        long_poll_id: None,
+    })?);
+    assert_eq!(
+        template
+            .capabilities
+            .iter()
+            .map(MiningCapability::as_str)
+            .collect::<Vec<_>>(),
+        vec!["proposal", "longpoll"]
+    );
+    assert!(template.signet.is_none());
+    Ok(())
+}
+
+#[test]
+fn signet_template_includes_challenge_and_signet_rule() -> anyhow::Result<()> {
+    let state = open_network(Network::Signet)?;
+    apply_genesis_for(&state, Network::Signet)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let template = expect_template(mining.get_block_template(template_request(None))?);
+    assert!(template.rules.iter().any(|rule| rule.as_str() == "signet"));
+    assert!(template.signet.is_some());
     Ok(())
 }
 

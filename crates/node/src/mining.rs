@@ -645,7 +645,6 @@ impl MiningCoordinator {
     fn template_from_candidate(
         network: Network,
         candidate: Arc<Candidate>,
-        request: &BlockTemplateRequest,
         submit_old: Option<bool>,
         version_bits_available: Vec<AvailableMiningRule>,
         version_bits_required: u32,
@@ -660,31 +659,26 @@ impl MiningCoordinator {
         if network.is_taproot_active(candidate.height) {
             rules.push(MiningRule::new("taproot"));
         }
-        let mut capabilities = vec![
-            MiningCapability::new("proposal"),
-            MiningCapability::new("longpoll"),
-        ];
-        for capability in &request.capabilities {
-            if !capabilities
-                .iter()
-                .any(|known| known.as_str() == capability.as_str())
-            {
-                capabilities.push(capability.clone());
-            }
+        let signet = signet_info(network);
+        if signet.is_some() {
+            rules.push(MiningRule::new("signet"));
         }
         BlockTemplate {
             candidate,
             rules,
             version_bits_available,
             version_bits_required,
-            capabilities,
+            capabilities: vec![
+                MiningCapability::new("proposal"),
+                MiningCapability::new("longpoll"),
+            ],
             mutable: vec![
                 TemplateMutation::Time,
                 TemplateMutation::Transactions,
                 TemplateMutation::PreviousBlock,
             ],
             submit_old,
-            work_id: None,
+            signet,
         }
     }
 
@@ -865,7 +859,6 @@ impl MiningControl for MiningCoordinator {
                 let template = Self::template_from_candidate(
                     self.network,
                     candidate,
-                    &request,
                     submit_old,
                     version_bits_available,
                     version_bits_required,
@@ -1546,15 +1539,6 @@ mod candidate_template_tests {
         }
     }
 
-    fn empty_request() -> bitcoin_rs_mining::BlockTemplateRequest {
-        bitcoin_rs_mining::BlockTemplateRequest {
-            mode: bitcoin_rs_mining::BlockTemplateMode::Template,
-            capabilities: Vec::new(),
-            rules: Vec::new(),
-            long_poll_id: None,
-        }
-    }
-
     fn template_for(
         candidate: Candidate,
         submit_old: Option<bool>,
@@ -1562,7 +1546,6 @@ mod candidate_template_tests {
         super::MiningCoordinator::template_from_candidate(
             Network::Regtest,
             Arc::new(candidate),
-            &empty_request(),
             submit_old,
             Vec::new(),
             0,
@@ -1598,6 +1581,48 @@ mod candidate_template_tests {
             vec!["csv", "taproot"]
         );
         assert_eq!(mutated.submit_old, Some(false));
+        assert_eq!(
+            first
+                .capabilities
+                .iter()
+                .map(bitcoin_rs_mining::MiningCapability::as_str)
+                .collect::<Vec<_>>(),
+            vec!["proposal", "longpoll"]
+        );
+        assert!(first.signet.is_none());
+    }
+
+    #[test]
+    fn signet_template_carries_challenge_and_mandatory_rule() {
+        use bitcoin_rs_mining::MiningRule;
+
+        let template = super::MiningCoordinator::template_from_candidate(
+            Network::Signet,
+            Arc::new(sample_candidate(
+                Hash256::from_le_bytes(&[0x44; 32]),
+                true,
+                true,
+            )),
+            None,
+            Vec::new(),
+            0,
+        );
+        assert!(
+            template
+                .rules
+                .iter()
+                .map(MiningRule::as_str)
+                .any(|rule| rule == "signet")
+        );
+        assert!(template.signet.is_some());
+        assert_eq!(
+            template
+                .capabilities
+                .iter()
+                .map(bitcoin_rs_mining::MiningCapability::as_str)
+                .collect::<Vec<_>>(),
+            vec!["proposal", "longpoll"]
+        );
     }
 
     #[test]
