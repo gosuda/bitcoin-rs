@@ -5,8 +5,10 @@
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
-pub mod connection;
+/// Bitcoin Core P2P compatibility inventory: pinned reference and command set.
+pub mod compat;
 /// Per-connection identity and cancellation.
+pub mod connection;
 /// Per-connection traffic counters.
 pub mod counters;
 /// Inbound message dispatcher.
@@ -38,6 +40,7 @@ pub mod wire;
 /// BIP339 wtxid-relay state.
 pub mod wtxid;
 
+pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
 pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerStats, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};

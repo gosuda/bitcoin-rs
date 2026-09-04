@@ -416,10 +416,16 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
         "wtxidrelay" => empty_payload(payload, Message::WtxidRelay)?,
         "addrv2" => Message::AddrV2(decode_addrv2(payload)?),
         "sendaddrv2" => empty_payload(payload, Message::SendAddrV2)?,
-        _ => Message::Unknown {
-            command: command_string(command)?,
-            payload: payload.to_vec(),
-        },
+        _ => {
+            debug_assert!(
+                crate::compat::command(command).is_none(),
+                "typed command {command} is missing from decode_payload"
+            );
+            Message::Unknown {
+                command: command_string(command)?,
+                payload: payload.to_vec(),
+            }
+        }
     };
     Ok(message)
 }
