@@ -574,6 +574,7 @@ mod tests {
     use crate::context::Context;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
+    /// Proves contract `API-07`: RPC transport sockets disable Nagle.
     #[test]
     fn configure_rpc_stream_disables_nagle() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
