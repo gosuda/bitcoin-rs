@@ -1050,7 +1050,12 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         let error = service
-            .start(None, None, &idle_ready(), crate::listener::ListenerExtras::default())
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
             .expect_err("occupied listen addr must fail start");
         assert!(
             matches!(error, P2pServiceError::Listener(ListenerError::Bind { .. })),
@@ -1070,7 +1075,12 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         service
-            .start(None, None, &idle_ready(), crate::listener::ListenerExtras::default())
+            .start(
+                None,
+                None,
+                &idle_ready(),
+                crate::listener::ListenerExtras::default(),
+            )
             .expect("empty listen set starts");
         service.shutdown();
         service.join().expect("clean join");

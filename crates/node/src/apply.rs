@@ -1390,6 +1390,17 @@ pub(crate) fn disconnect_block_admitted(
     // publishes the rolled-back UTXO set and tip.
     if let Some(admission) = &handles.tx_admission {
         admission.invalidate_recent_rejects();
+        // Restored coins can make a previously-missing spend valid. Those
+        // children are indexed under the creating parent, which is already
+        // confirmed and will not publish another `Accepted` wake.
+        let restored_parents: HashSet<_> = undo
+            .restores()
+            .iter()
+            .map(|restored| restored.outpoint.txid)
+            .collect();
+        for parent in restored_parents {
+            admission.enqueue_orphans_waiting_on(parent);
+        }
     }
     Ok(parent_tip)
 }

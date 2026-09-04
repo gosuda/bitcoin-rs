@@ -96,7 +96,7 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> anyhow::Result<()> 
         OutPoint::new(parent, 0),
         TxOut {
             value,
-            script_pubkey: Vec::new(),
+            script_pubkey: vec![0x51],
         },
         false,
         100,
@@ -114,13 +114,13 @@ fn spending_tx(parent: Txid, output_value: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: vec![0x52, 0x02, 0xAA, 0xBB],
+            script_sig: Vec::new(),
             sequence: 0xffff_ffff,
             witness: Vec::new(),
         }],
         outputs: vec![TxOut {
             value: output_value,
-            script_pubkey: vec![0x6A],
+            script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
         }],
         lock_time: 0,
     }

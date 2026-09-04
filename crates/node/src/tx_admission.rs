@@ -51,6 +51,11 @@ pub struct TxAdmission {
     /// Optional ingress producer used to re-queue orphans when a parent
     /// becomes available from any origin (peer, RPC, reorg, or block).
     ingress: Mutex<Option<Sender<InboundTx>>>,
+    /// Children whose parent became available but could not be `try_send`'d
+    /// onto the bounded ingress channel. The ingress consumer drains this
+    /// directly so a parent that will not be accepted again cannot leave
+    /// them parked under `have_tx`.
+    pending_retries: Mutex<VecDeque<Txid>>,
 }
 
 /// An orphan body plus the peer that delivered it.
@@ -100,6 +105,7 @@ impl TxAdmission {
             quota,
             reject_cap: DEFAULT_REJECT_CAP,
             ingress: Mutex::new(None),
+            pending_retries: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -184,8 +190,11 @@ impl TxAdmission {
 
     /// Re-queues every orphan waiting on `parent` into the ingress channel.
     ///
-    /// Used when a parent is admitted (any origin) or confirmed in a block.
-    /// A full or missing channel puts the orphan back so it is not dropped.
+    /// Used when a parent is admitted (any origin), confirmed in a block, or
+    /// restored by a disconnect. A full or missing channel keeps the body in
+    /// the orphan map (so `have_tx` still suppresses re-requests) and records
+    /// it for [`Self::take_orphan_retries`], which the ingress consumer drains
+    /// without waiting for another parent-accept event.
     pub fn enqueue_orphans_waiting_on(&self, parent: Txid) {
         for (tx, source) in self.take_orphans_waiting_on(parent) {
             let inbound = InboundTx::new((*tx).clone(), source);
@@ -195,9 +204,26 @@ impl TxAdmission {
                 .as_ref()
                 .is_some_and(|sender| sender.try_send(inbound).is_ok());
             if !sent {
+                let txid = tx.txid();
                 self.record_orphan(&tx, source);
+                self.pending_retries.lock().push_back(txid);
             }
         }
+    }
+
+    /// Takes every orphan that failed to re-enter the ingress channel.
+    ///
+    /// The ingress consumer processes these directly so a saturated channel
+    /// cannot pin children under a parent that will not be accepted again.
+    pub fn take_orphan_retries(&self) -> Vec<(Arc<Tx>, PeerSource)> {
+        let txids: Vec<Txid> = {
+            let mut pending = self.pending_retries.lock();
+            pending.drain(..).collect()
+        };
+        txids
+            .into_iter()
+            .filter_map(|txid| self.take_orphan(&txid))
+            .collect()
     }
 
     /// Records a rejected transaction in the recent-rejects cache by both
@@ -531,6 +557,48 @@ mod tests {
             .get_tx(txid)
             .expect("getdata for a held orphan must serve its body");
         assert_eq!(served.txid(), txid);
+    }
+
+    #[test]
+    fn enqueue_parks_retries_when_the_ingress_channel_is_full() {
+        let gateway = empty_gateway();
+        let admission = TxAdmission::new(gateway);
+        let (ingress_tx, _ingress_rx) = crossbeam_channel::bounded::<InboundTx>(1);
+        admission.attach_ingress(ingress_tx.clone());
+
+        let filler = tx_with_marker(1);
+        ingress_tx
+            .try_send(InboundTx::new(filler, test_source()))
+            .expect("the single channel slot must fill");
+
+        let child = Arc::new(tx_with_marker(6));
+        let parent = Txid::from(Hash256::from_le_bytes(&[6; 32]));
+        let source = test_source();
+        admission.record_orphan(&child, source);
+        admission.enqueue_orphans_waiting_on(parent);
+
+        assert_eq!(
+            admission.orphan_count(),
+            1,
+            "a full channel must keep the child so have_tx still suppresses re-requests"
+        );
+        assert!(
+            admission.have_tx(Hash256::from(child.txid()), false),
+            "a parked retry must still count as have_tx"
+        );
+
+        let retries = admission.take_orphan_retries();
+        assert_eq!(
+            retries.len(),
+            1,
+            "the ingress consumer must be able to drain the parked child"
+        );
+        assert_eq!(retries[0].0.txid(), child.txid());
+        assert_eq!(
+            admission.orphan_count(),
+            0,
+            "take_orphan_retries must remove the child from the orphan map"
+        );
     }
 
     #[test]

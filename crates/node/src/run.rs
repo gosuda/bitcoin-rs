@@ -834,7 +834,8 @@ pub(crate) fn start_node(
     // owned reference here would cycle through `apply_handles`.
     state.mining_generation_signal().attach(&mining_control);
     let tx_admission = state.tx_admission();
-    let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = Arc::clone(&tx_admission);
+    let cloned_admission = Arc::clone(&tx_admission);
+    let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = cloned_admission;
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
         tx_inventory: Some(tx_inventory),
         inbound_tx: Some(state.inbound_tx_sender()),
