@@ -7,9 +7,10 @@ Transport-neutral block-candidate assembly for solo mining.
 The `policy` module selects dependency-closed packages by modified fee rate
 within weight, serialized-size, and sigop limits. The `coinbase` module funds
 the coinbase (subsidy plus actual fees) and, when `SegWit` is active, attaches the
-witness commitment. [`Candidate::solve`](crate::Candidate::solve) turns that
-candidate into a header that meets its compact target. Failures surface as
-[`MiningError`](crate::MiningError).
+witness commitment through consensus `compute_merkle_root` (the same AVX2/spine
+fold block rules use).
+[`Candidate::solve`](crate::Candidate::solve) turns that candidate into a header
+that meets its compact target. Failures surface as [`MiningError`](crate::MiningError).
 
 The crate owns the domain `Candidate`, [`Candidate::solve`](crate::Candidate::solve),
 and the node-facing mining contract ([`MiningControl`](crate::MiningControl),
