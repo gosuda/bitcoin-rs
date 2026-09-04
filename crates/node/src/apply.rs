@@ -4288,6 +4288,7 @@ mod consensus_rule_tests {
         Ok(())
     }
 
+    // Contract clauses: `docs/contracts/validation-default.md` `VAL-01`, `VAL-03`.
     #[test]
     fn verify_kernel_parse_tap_keeps_native_txids() -> Result<(), Box<dyn std::error::Error>> {
         let utxo = utxo_with_output(OutPoint::new(fixture_txid(0x62), 0), 1)?;
