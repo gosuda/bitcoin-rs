@@ -4224,6 +4224,7 @@ mod consensus_rule_tests {
         Ok(())
     }
 
+    // CONTRACT: VAL-03 requires kernel verification to remain an isolated tap.
     #[test]
     fn verify_kernel_tap_does_not_feed_kernel_data_into_apply()
     -> Result<(), Box<dyn std::error::Error>> {

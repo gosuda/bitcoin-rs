@@ -306,6 +306,7 @@ fn assume_valid_height_defaults_to_mainnet_anchor() -> Result<()> {
     Ok(())
 }
 
+// CONTRACT: VAL-03 (kernel-free default and feature requirement).
 #[test]
 fn verify_kernel_defaults_off() -> Result<()> {
     let config = resolve(&[])?;

@@ -603,7 +603,7 @@ pub struct ObservabilityConfig {
 pub struct ValidationConfig {
     /// Height through which script verification may be skipped.
     pub assume_valid_height: u32,
-    /// Compare native script verdicts against `libbitcoinkernel`.
+    /// Compare native script verdicts against `libbitcoinkernel`; see `VAL-03`.
     pub verify_kernel: bool,
 }
 
