@@ -43,10 +43,11 @@ pub trait ChainQuery: Send + Sync {
     /// Serves block inventory one body at a time, in `items` order. For each
     /// block-typed item `headroom` is consulted EXACTLY ONCE, immediately
     /// BEFORE its body load; `false` halts production and sets `halted`
-    /// (I7, I9). Each loaded body is the stored consensus payload, delivered
-    /// through `serve` without a decode/re-encode round trip. A `serve`
-    /// error aborts production and propagates. Non-block / unservable items
-    /// are collected into `not_found` and never loaded.
+    /// (I7, I9). Block framing follows the authoritative P2P-01 contract in
+    /// `docs/contracts/p2p-wire.md`; bodies are served without a
+    /// decode/re-encode round trip. A `serve` error aborts production and
+    /// propagates. Non-block / unservable items are collected into `not_found`
+    /// and never loaded.
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],

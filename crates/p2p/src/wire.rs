@@ -757,6 +757,7 @@ mod tests {
         }
     }
 
+    /// P2P-01: block payloads preserve the canonical wire frame.
     #[test]
     fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
