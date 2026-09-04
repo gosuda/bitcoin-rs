@@ -7,7 +7,9 @@ use bitcoin_rs_mining::{
     MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
     witness_commitment_script,
 };
-use bitcoin_rs_primitives::{Block, Header, Network, Tx, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{
+    Block, ConsensusDecode, Header, Network, Tx, Txid, consensus_bytes, deserialize,
+};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
 
@@ -26,8 +28,7 @@ const NONCE_RANGE: &str = "00000000ffffffff";
 /// Core v31.0 `src/rpc/mining.cpp` template-mode client-rule errors.
 const GBT_REQUIRE_SEGWIT: &str =
     r#"getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})"#;
-const GBT_REQUIRE_SIGNET: &str =
-    r#"getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})"#;
+const GBT_REQUIRE_SIGNET: &str = r#"getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})"#;
 
 fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
     fn nibble(byte: u8) -> Result<u8, ()> {
@@ -95,17 +96,25 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         .mining_control
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    ensure_at_most_params(params, 2)?;
     let hex = required_str(params, 0, "block hex is required")?;
-    let bytes = from_hex(hex)
-        .map_err(|()| RpcError::InvalidParams("block hex is not valid hexadecimal"))?;
-    let block: Block = match deserialize(&bytes) {
-        Ok(block) => block,
-        Err(_) => return Ok(json!("bad-block-encoding")),
-    };
+    let block = decode_submitted_block(hex)?;
     match control.submit_block(block) {
         Ok(result) => Ok(render_validation_result(result)),
         Err(error) => Err(map_mining_control_error(error)),
     }
+}
+
+fn decode_submitted_block(hex: &str) -> Result<Block, RpcError> {
+    let bytes = from_hex(hex).map_err(|()| block_decode_failed())?;
+    // Core `DecodeHexBlk` unserializes a witness block and ignores leftover
+    // bytes, so extra hex after a complete block is accepted.
+    let mut reader: &[u8] = &bytes;
+    <Block as ConsensusDecode>::consensus_decode(&mut reader).map_err(|_| block_decode_failed())
+}
+
+fn block_decode_failed() -> RpcError {
+    RpcError::Deserialization("Block decode failed".to_owned())
 }
 
 const HEADER_BYTES: usize = 80;
@@ -1269,9 +1278,31 @@ mod tests {
 
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control);
-        let result = submitblock(&ctx, &json!(["deadbeef"]))
-            .unwrap_or_else(|err| panic!("garbage should stay a result string: {err}"));
-        assert_eq!(result.as_str(), Some("bad-block-encoding"));
+        for hex in ["", "00", "zz", "0", "deadbeef"] {
+            let error = submitblock(&ctx, &json!([hex])).expect_err("undecodable block must fail");
+            assert!(matches!(error, RpcError::Deserialization(_)));
+            assert_eq!(error.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+            assert_eq!(error.to_string(), "Block decode failed");
+        }
+    }
+
+    #[test]
+    fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let genesis = sample_block();
+        let mut hex = to_lower_hex(&consensus_bytes(&genesis));
+        hex.push_str("ffff");
+        let result = submitblock(&ctx, &json!([hex.as_str(), "ignored"]))
+            .unwrap_or_else(|err| panic!("dummy and trailing bytes must be ignored: {err}"));
+        assert!(result.is_null());
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 1);
+        let extra = submitblock(&ctx, &json!([hex.as_str(), "ignored", "too-many"]))
+            .expect_err("a third submitblock argument must fail");
+        assert!(matches!(
+            extra,
+            RpcError::InvalidParams("too many parameters")
+        ));
     }
 
     #[test]
