@@ -3198,14 +3198,19 @@ impl<S: KvStore> IndexWriter<S> {
     {
         const SEED_BATCH_ROWS: usize = 4_096;
         self.ensure_prepared_ready()?;
-        let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
-        if fence.watermarks.script_live.is_some() {
+        let existing = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        if existing.watermarks.script_live.is_some() {
             return Err(IndexError::LiveAlreadySeeded);
         }
         // An interrupted seed leaves rows without a ready watermark. Clear
         // them before writing so this publication cannot mix leftover
-        // locators from a previous attempt.
+        // locators from a previous attempt. Recapture after the reset: the
+        // claim advances the fence, so a pre-reset capture cannot commit.
         self.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;
+        let mut fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        if fence.watermarks.script_live.is_some() {
+            return Err(IndexError::LiveAlreadySeeded);
+        }
         let mut written = 0;
         let mut batch = self.indexer.store.new_batch();
         batch.put(

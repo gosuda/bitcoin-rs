@@ -2015,14 +2015,9 @@ impl Worker {
             (target, utxo.lock_stable_view())
         };
 
-        // A missing watermark is also the recovery state after a crash
-        // between fenced seed batches and the final watermark stamp. The
-        // reset removes every partial row before this seed can stamp a new
-        // watermark, so an absent watermark never becomes a valid view over
-        // stale rows.
-        self.writer
-            .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-            .map_err(TxIndexWorkerError::Index)?;
+        // `seed_script_live_stream` owns leftover-row reset: an interrupted
+        // seed is rows without a watermark, and the stream clears that
+        // family before any new locator is committed.
         let written = self
             .writer
             .seed_script_live_stream(
@@ -2082,7 +2077,7 @@ impl Worker {
             .map_or(0, |d| d.as_secs());
         self.reporter
             .report_index_ahead(
-                capability,
+                &capability,
                 watermark.height,
                 target.height,
                 &target.hash.to_string_be(),

@@ -241,6 +241,43 @@ impl Harness {
         panic!("worker did not converge");
     }
 
+    /// Forwards the currently enabled capabilities without leftover demotion.
+    ///
+    /// `settle` runs `reconcile_pass`, which resets families that `enabled`
+    /// no longer maintains (`IDX-01` leftover). Tests that split watermarks
+    /// across families keep the disabled sibling's cursor and must not take
+    /// that path.
+    fn catch_up_enabled(&self, pending: &mut Option<PendingForward>) {
+        for _ in 0..64 {
+            let Some(target) = self.applied_tip.load_full() else {
+                panic!("catch-up requires an applied tip");
+            };
+            let (fence, watermarks) = self.writer.fenced_watermarks().expect("watermarks");
+            let Some((capabilities, watermark)) =
+                self.worker.forward_selection(watermarks, target.as_ref())
+            else {
+                return;
+            };
+            match self
+                .worker
+                .catch_up_to(
+                    target.as_ref(),
+                    fence,
+                    watermarks,
+                    watermark,
+                    capabilities,
+                    pending,
+                )
+                .expect("catch-up pass")
+            {
+                ReconcileAction::CaughtUp => return,
+                ReconcileAction::Progressed | ReconcileAction::Buffered => {}
+                ReconcileAction::Stalled => panic!("worker stalled"),
+            }
+        }
+        panic!("worker did not converge");
+    }
+
     fn watermarks(&self) -> IndexWatermarks {
         self.writer.fenced_watermarks().expect("watermarks").1
     }
@@ -480,7 +517,8 @@ fn selective_rebuild_leg_survives_sibling_rollback() {
     h.worker.enabled = IndexCapabilities::TX_LOOKUP;
     let a3 = f.tip(f.a[2]);
     h.set_tip(&a3);
-    h.settle(&mut pending);
+    h.catch_up_enabled(&mut pending);
+    pending = None;
     let watermarks = h.watermarks();
     assert_eq!(watermarks.tx_lookup.map(|w| w.height), Some(3));
     assert_eq!(watermarks.script_history.map(|w| w.height), Some(1));
