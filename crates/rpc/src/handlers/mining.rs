@@ -7,7 +7,7 @@ use bitcoin_rs_mining::{
     MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
     witness_commitment_script,
 };
-use bitcoin_rs_primitives::{Block, Tx, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{Block, Header, Tx, Txid, consensus_bytes, deserialize};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
 
@@ -97,6 +97,35 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
     };
     match control.submit_block(block) {
         Ok(result) => Ok(render_validation_result(result)),
+        Err(error) => Err(map_mining_control_error(error)),
+    }
+}
+
+const HEADER_BYTES: usize = 80;
+
+fn decode_block_header(hex: &str) -> Result<Header, RpcError> {
+    let bytes = from_hex(hex)
+        .map_err(|()| RpcError::Deserialization("Block header decode failed".to_owned()))?;
+    // Core's DecodeHexBlockHeader unserializes CBlockHeader and ignores leftover
+    // bytes, so extra hex after 80 bytes is accepted. Fewer than 80 bytes fail.
+    let Some(header_bytes) = bytes.get(..HEADER_BYTES) else {
+        return Err(RpcError::Deserialization(
+            "Block header decode failed".to_owned(),
+        ));
+    };
+    Header::consensus_decode(header_bytes)
+        .map_err(|_| RpcError::Deserialization("Block header decode failed".to_owned()))
+}
+
+pub(crate) fn submitheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let control = ctx
+        .mining_control
+        .as_ref()
+        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    let hex = required_str(params, 0, "header hex is required")?;
+    let header = decode_block_header(hex)?;
+    match control.submit_header(header) {
+        Ok(()) => Ok(json!(null)),
         Err(error) => Err(map_mining_control_error(error)),
     }
 }
@@ -625,6 +654,7 @@ fn render_validation_result(result: BlockValidationResult) -> Value {
 
 fn map_mining_control_error(error: MiningControlError) -> RpcError {
     match error {
+        MiningControlError::Rejected(message) => RpcError::TxVerifyError(message.to_string()),
         MiningControlError::InvalidRequest(message)
         | MiningControlError::Unavailable(message)
         | MiningControlError::Failed(message) => RpcError::Internal(message.to_string()),
@@ -660,6 +690,7 @@ mod tests {
         last_request: Mutex<Option<BlockTemplateRequest>>,
         last_hash_ps: Mutex<Option<(i64, i64)>>,
         last_generate: Mutex<Option<GenerateRequest>>,
+        last_header: Mutex<Option<Header>>,
         template_calls: AtomicUsize,
         submit_calls: AtomicUsize,
         info_calls: AtomicUsize,
@@ -676,6 +707,7 @@ mod tests {
                 last_request: Mutex::new(None),
                 last_hash_ps: Mutex::new(None),
                 last_generate: Mutex::new(None),
+                last_header: Mutex::new(None),
                 template_calls: AtomicUsize::new(0),
                 submit_calls: AtomicUsize::new(0),
                 info_calls: AtomicUsize::new(0),
@@ -738,6 +770,15 @@ mod tests {
                 return Err(error);
             }
             Ok(self.submit.lock().clone())
+        }
+
+        fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
+            *self.last_header.lock() = Some(header);
+            let fail = self.fail.lock().clone();
+            if let Some(error) = fail {
+                return Err(error);
+            }
+            Ok(())
         }
 
         fn publish_generation(&self) {}
@@ -1147,6 +1188,56 @@ mod tests {
         let result = submitblock(&ctx, &json!(["deadbeef"]))
             .unwrap_or_else(|err| panic!("garbage should stay a result string: {err}"));
         assert_eq!(result.as_str(), Some("bad-block-encoding"));
+    }
+
+    #[test]
+    fn submitheader_requires_mining_control() {
+        let ctx = Arc::new(Context::new());
+        let error = submitheader(&ctx, &json!(["00"])).expect_err("missing control must fail");
+        assert!(matches!(
+            error,
+            RpcError::MethodDisabled("mining is unavailable")
+        ));
+    }
+
+    #[test]
+    fn submitheader_rejects_undecodable_headers() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        for hex in ["", "00", "zz", "0"] {
+            let error =
+                submitheader(&ctx, &json!([hex])).expect_err("undecodable header must fail");
+            assert!(matches!(error, RpcError::Deserialization(_)));
+            assert_eq!(error.code(), RpcError::CORE_DESERIALIZATION_ERROR);
+            assert_eq!(error.to_string(), "Block header decode failed");
+        }
+    }
+
+    #[test]
+    fn submitheader_returns_null_and_forwards_decoded_header() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let header = sample_block().header;
+        let mut hex = to_lower_hex(&consensus_bytes(&header));
+        hex.push_str("ffff");
+        let result = submitheader(&ctx, &json!([hex]))
+            .unwrap_or_else(|err| panic!("submitheader failed: {err}"));
+        assert!(result.is_null());
+        assert_eq!(*control.last_header.lock(), Some(header));
+    }
+
+    #[test]
+    fn submitheader_maps_rejected_to_verify_error() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.fail.lock() = Some(MiningControlError::Rejected(CompactString::from(
+            "Must submit previous header (00) first",
+        )));
+        let ctx = ctx_with_control(control);
+        let hex = to_lower_hex(&consensus_bytes(&sample_block().header));
+        let error = submitheader(&ctx, &json!([hex])).expect_err("rejected header must fail");
+        assert!(matches!(error, RpcError::TxVerifyError(_)));
+        assert_eq!(error.code(), RpcError::CORE_VERIFY_ERROR);
+        assert_eq!(error.to_string(), "Must submit previous header (00) first");
     }
 
     #[test]

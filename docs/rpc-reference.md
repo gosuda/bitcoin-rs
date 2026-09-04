@@ -72,6 +72,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll. |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator. |
 | `submitblock` | 0.4.0 |  |
+| `submitheader` | 0.4.0 | Header-only admission through the same tree path as inbound P2P headers. Decode failures are -22; missing previous or invalid headers are -25. |
 | `prioritisetransaction` | 0.4.0 |  |
 | `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. |
 | `generateblock` | 0.4.0 | Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag. |
@@ -118,7 +119,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `help` | n/a | No per-method help text renderer. |
 | `logging` | n/a | Log-category controls not exposed over RPC. |
 | `stop` | n/a | Lifecycle control not exposed over RPC. |
-| `submitheader` | n/a | Header-only submission not implemented. |
 | `getaddrmaninfo` | n/a | Addrman table stats not exposed. |
 | `abortprivatebroadcast` | n/a | Private-broadcast store not implemented. |
 | `analyzepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
@@ -236,4 +236,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/node/src/zmq_publisher.rs). |
 
-Row counts: Implemented 70, Deviation 8, Extension 2, Unimplemented 94 - total 174.
+Row counts: Implemented 71, Deviation 8, Extension 2, Unimplemented 93 - total 174.

@@ -166,6 +166,15 @@ impl MiningControl for RecordingMining {
         ))
     }
 
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
+    }
+
     fn publish_generation(&self) {
         self.publishes.fetch_add(1, Ordering::Relaxed);
     }

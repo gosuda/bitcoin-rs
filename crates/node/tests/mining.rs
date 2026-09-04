@@ -596,6 +596,90 @@ fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
 }
 
 #[test]
+fn submit_header_admits_a_mined_child_and_is_idempotent() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    let child_hash = Hash256::from(child.block_hash());
+    mining.submit_header(child.header)?;
+    mining.submit_header(child.header)?;
+    assert!(
+        state.block_tree().read().lookup(child_hash).is_some(),
+        "submitted header must be in the tree"
+    );
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing"));
+    assert_eq!(
+        tip.hash,
+        Hash256::from(genesis.block_hash()),
+        "header submission must not apply the block"
+    );
+    Ok(())
+}
+
+#[test]
+fn submit_header_requires_the_previous_header() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let orphan = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
+    match mining.submit_header(orphan.header) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert!(
+                reason.starts_with("Must submit previous header ("),
+                "unexpected reason: {reason}"
+            );
+            assert!(
+                reason.contains(&orphan.header.prev_blockhash.to_string()),
+                "reason must name the missing prev hash: {reason}"
+            );
+        }
+        other => panic!("expected missing-prev rejection, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis = Network::Regtest.genesis_block();
+    let mut child = mined_child(genesis.block_hash())?;
+    child.header.bits = 0x207f_fffe;
+    mine_block_to_regtest_target(&mut child)?;
+    match mining.submit_header(child.header) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert_eq!(reason.as_str(), "bad-diffbits");
+        }
+        other => panic!("expected bad-diffbits, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn submit_header_rejects_time_too_new() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis = Network::Regtest.genesis_block();
+    let mut child = mined_child(genesis.block_hash())?;
+    child.header.time = u32::MAX;
+    mine_block_to_regtest_target(&mut child)?;
+    match mining.submit_header(child.header) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert_eq!(reason.as_str(), "time-too-new");
+        }
+        other => panic!("expected time-too-new, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;

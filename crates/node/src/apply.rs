@@ -10337,6 +10337,13 @@ mod consensus_rule_tests {
             Err(generation_unavailable())
         }
 
+        fn submit_header(
+            &self,
+            _header: bitcoin_rs_primitives::Header,
+        ) -> Result<(), MiningControlError> {
+            Err(generation_unavailable())
+        }
+
         fn publish_generation(&self) {
             *self.published.lock() += 1;
         }
