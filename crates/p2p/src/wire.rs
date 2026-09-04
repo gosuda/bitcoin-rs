@@ -61,6 +61,9 @@ pub enum Message {
     Tx(Tx),
     /// `block`
     Block(Block),
+    /// Already-serialized `block` payload. Written as a `block` command
+    /// without re-encoding; the decoder never produces this variant.
+    BlockPayload(bytes::Bytes),
     /// `headers`
     Headers(Vec<Header>),
     /// `sendheaders`
@@ -134,7 +137,7 @@ impl Message {
             Self::GetHeaders(_) => "getheaders",
             Self::MemPool => "mempool",
             Self::Tx(_) => "tx",
-            Self::Block(_) => "block",
+            Self::Block(_) | Self::BlockPayload(_) => "block",
             Self::Headers(_) => "headers",
             Self::SendHeaders => "sendheaders",
             Self::GetAddr => "getaddr",
@@ -179,7 +182,7 @@ impl Message {
             Self::GetBlocks(message) => NetworkMessage::GetBlocks(message.clone()),
             Self::GetHeaders(message) => NetworkMessage::GetHeaders(message.clone()),
             Self::MemPool => NetworkMessage::MemPool,
-            Self::Tx(_) | Self::Block(_) | Self::Headers(_) => {
+            Self::Tx(_) | Self::Block(_) | Self::BlockPayload(_) | Self::Headers(_) => {
                 unreachable!("native payloads are encoded directly")
             }
             Self::SendHeaders => NetworkMessage::SendHeaders,
@@ -266,28 +269,42 @@ pub fn write_message<W: Write + ?Sized>(
     magic: Magic,
     message: &Message,
 ) -> Result<usize, PeerError> {
-    let command = message.command();
-    let payload = encode_payload(message)?;
+    match message {
+        Message::BlockPayload(payload) => write_framed(writer, magic, &message.command(), payload),
+        other => {
+            let command = other.command();
+            let payload = encode_payload(other)?;
+            write_framed(writer, magic, &command, &payload)
+        }
+    }
+}
+
+fn write_framed<W: Write + ?Sized>(
+    writer: &mut W,
+    magic: Magic,
+    command: &CommandString,
+    payload: &[u8],
+) -> Result<usize, PeerError> {
     if payload.len() > MAX_MESSAGE_PAYLOAD {
         return Err(PeerError::PayloadTooLarge(payload.len()));
     }
 
     let mut header = [0u8; HEADER_LEN];
     header[..4].copy_from_slice(&magic.to_bytes());
-    header[4..16].copy_from_slice(&encode_command(&command)?);
+    header[4..16].copy_from_slice(&encode_command(command)?);
     header[16..20].copy_from_slice(
         &u32::try_from(payload.len())
             .map_err(|_| PeerError::PayloadTooLarge(payload.len()))?
             .to_le_bytes(),
     );
-    header[20..24].copy_from_slice(&checksum(&payload));
+    header[20..24].copy_from_slice(&checksum(payload));
 
     // Assemble header and payload into one vectored write so each message is
     // emitted with a single syscall instead of five (avoids header/payload
     // segment splits and per-part syscall overhead on TcpStream).
     let mut slices: &mut [std::io::IoSlice<'_>] = &mut [
         std::io::IoSlice::new(&header),
-        std::io::IoSlice::new(&payload),
+        std::io::IoSlice::new(payload),
     ];
     while !slices.is_empty() {
         match writer.write_vectored(slices) {
@@ -349,7 +366,11 @@ pub fn read_message<R: Read>(
 /// Admission accounts this exact count and `write_message` returns it for
 /// release, so budget accounting and wire emission charge identical bytes.
 pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
-    Ok(HEADER_LEN + encode_payload(message)?.len())
+    let payload_len = match message {
+        Message::BlockPayload(payload) => payload.len(),
+        other => encode_payload(other)?.len(),
+    };
+    Ok(HEADER_LEN + payload_len)
 }
 
 /// Encode only a message payload.
@@ -358,6 +379,7 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
     match message {
         Message::Tx(tx) => tx.consensus_encode(&mut payload)?,
         Message::Block(block) => block.consensus_encode(&mut payload)?,
+        Message::BlockPayload(bytes) => payload.extend_from_slice(bytes),
         Message::Headers(headers) => {
             let count = u64::try_from(headers.len())
                 .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
@@ -736,6 +758,24 @@ mod tests {
     }
 
     #[test]
+    fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let block_bytes = serialize(&block);
+        let native_block = bitcoin_rs_primitives::Block::consensus_decode(&block_bytes)
+            .map_err(super::PeerError::NativeDecode)?;
+        let decoded = super::Message::Block(native_block);
+        let payload = super::Message::BlockPayload(bytes::Bytes::from(block_bytes));
+
+        let mut decoded_wire = Vec::new();
+        let mut payload_wire = Vec::new();
+        write_message(&mut decoded_wire, Magic::REGTEST, &decoded)?;
+        write_message(&mut payload_wire, Magic::REGTEST, &payload)?;
+        assert_eq!(decoded_wire, payload_wire);
+        assert_eq!(wire_len(&decoded)?, wire_len(&payload)?);
+        Ok(())
+    }
+
+    #[test]
     fn write_message_rejects_payload_exceeding_cap() -> Result<(), PeerError> {
         let oversize = MAX_MESSAGE_PAYLOAD + 1;
         let message = super::Message::Unknown {
@@ -763,6 +803,7 @@ mod tests {
             super::Message::Verack,
             super::Message::Headers(vec![bitcoin_rs_primitives::Header::default(); 2_000]),
             super::Message::Block(bitcoin_rs_primitives::Block::default()),
+            super::Message::BlockPayload(bytes::Bytes::from(vec![0_u8; 80])),
             super::Message::Unknown {
                 command: super::command_string("unknown")?,
                 payload: vec![7; 61],

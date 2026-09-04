@@ -205,7 +205,7 @@ impl ChainQuery for FakeChain {
         &self,
         items: &[Inventory],
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError> {
         let mut outcome = InventoryServing::default();
         for item in items {
@@ -224,7 +224,7 @@ impl ChainQuery for FakeChain {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(self.bodies[&native].clone())?;
+                serve(consensus_bytes(&self.bodies[&native]).into())?;
             } else {
                 outcome.not_found.push(*item);
             }
@@ -261,8 +261,8 @@ fn serve_collect(
     items: &[Inventory],
 ) -> Result<(Vec<Block>, Vec<Inventory>), PeerError> {
     let blocks = std::cell::RefCell::new(Vec::new());
-    let outcome = chain.serve_inventory_blocks(items, &|| true, &mut |block| {
-        blocks.borrow_mut().push(block);
+    let outcome = chain.serve_inventory_blocks(items, &|| true, &mut |payload| {
+        blocks.borrow_mut().push(Block::consensus_decode(&payload)?);
         Ok(())
     })?;
     Ok((blocks.into_inner(), outcome.not_found))
@@ -786,7 +786,9 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
         Some(&chain),
     )?;
     let (served, not_found) = match response.as_slice() {
-        [Message::Block(block), Message::NotFound(items)] => (block, items),
+        [Message::BlockPayload(payload), Message::NotFound(items)] => {
+            (Block::consensus_decode(payload)?, items)
+        }
         other => return Err(format!("unexpected relay response {other:?}").into()),
     };
     assert_eq!(served.block_hash(), genesis.block_hash());
@@ -1077,7 +1079,8 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
         Some(&state),
     )?;
     match response.as_slice() {
-        [Message::Block(block), Message::NotFound(items)] => {
+        [Message::BlockPayload(payload), Message::NotFound(items)] => {
+            let block = Block::consensus_decode(payload)?;
             assert_eq!(block.block_hash(), branch_b[0].compute_hash());
             assert_eq!(
                 items,

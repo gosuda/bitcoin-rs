@@ -14,8 +14,9 @@ negotiates version/verack in `handshake`, then runs the peer finite-state machin
 in `fsm`; `wire` is the protocol codec. Inbound traffic reaches the host through
 `dispatch_inbound_with_chain`, which streams getdata responses behind the outbound
 budget's pre-load production headroom gate and reads the active chain through the
-`ChainQuery` trait; `inbound` hands over `InboundBlock` and `InboundHeaders` with
-their wire bytes preserved. Misbehaving peers accumulate score on the file-persisted
+`ChainQuery` trait. Served block bodies are the stored consensus bytes
+(`Message::BlockPayload`); they are not decoded and re-encoded. `inbound` hands over
+`InboundBlock` and `InboundHeaders` with their wire bytes preserved. Misbehaving peers accumulate score on the file-persisted
 `BanList`; whole subnets are excluded as a `BannedSubnet` built from an `IpSubnet`,
 and BIP155 addrv2 and BIP339 wtxid-relay state live in `addrv2` and `wtxid`.
 
