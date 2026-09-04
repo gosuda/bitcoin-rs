@@ -498,6 +498,16 @@ impl BlockTree {
         self.active_node_at_height(height).map(|node| &node.header)
     }
 
+    /// Height of `hash` on the ancestry of `tip_id`, or `None` if the hash is
+    /// unknown or not on that chain.
+    #[must_use]
+    pub fn active_height_of(&self, tip_id: crate::NodeId, hash: Hash256) -> Option<u32> {
+        let candidate = self.node_by_hash(hash)?;
+        let active_id = self.node_at_height_from(tip_id, candidate.height)?;
+        let active = self.node(active_id).ok()?;
+        (active.hash == hash).then_some(active.height)
+    }
+
     /// Returns the median time of the most recent `window` blocks, inclusive
     /// of `start_id`, walking backward via parent pointers.
     ///

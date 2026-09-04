@@ -1,6 +1,6 @@
 //! Bip9Cache — memoization layer for BIP9 deployment-state lookups.
 //!
-//! `compute_state` in node::bip9_context performs recursive tree walks that
+//! `compute_state` in [`crate::deployment`] performs recursive tree walks that
 //! span entire retarget periods. Without memoization each `apply_block` would
 //! pay ~351 retarget periods of MTP + vote-count lookups on mainnet Taproot.
 //!

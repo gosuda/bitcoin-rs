@@ -1,4 +1,15 @@
+use bitcoin_rs_primitives::Network;
+
 use crate::ConsensusError;
+
+/// BIP9 signalling period length in blocks.
+pub const BIP9_PERIOD: u32 = 2016;
+/// Deployment id for CSV (BIP68/112/113).
+pub const CSV_DEPLOYMENT_ID: u32 = 0;
+/// Deployment id for Segwit (BIP141/143).
+pub const SEGWIT_DEPLOYMENT_ID: u32 = 1;
+const MAINNET_THRESHOLD: u32 = 1916;
+const TESTNET3_THRESHOLD: u32 = 1512;
 const VERSIONBITS_TOP_MASK: u32 = 0xe000_0000;
 const VERSIONBITS_TOP_BITS: u32 = 0x2000_0000;
 
@@ -86,10 +97,61 @@ impl DeploymentParams {
     }
 }
 
+/// CSV/Segwit activation at one connect height.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SoftforkState {
+    /// Whether CSV (BIP68/112/113) is active.
+    pub csv_active: bool,
+    /// Whether Segwit (BIP141/143) is active.
+    pub segwit_active: bool,
+}
+
+/// Versionbits parameters for a named deployment on `network`.
+///
+/// Returns `None` when `network` has no BIP9 window for `deployment_id`
+/// (height-gated networks, or an unknown id).
+#[must_use]
+pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<DeploymentParams> {
+    let threshold = match network {
+        Network::Mainnet => MAINNET_THRESHOLD,
+        Network::Testnet3 => TESTNET3_THRESHOLD,
+        Network::Testnet4 | Network::Signet | Network::Regtest => return None,
+    };
+    match deployment_id {
+        CSV_DEPLOYMENT_ID => Some(DeploymentParams {
+            bit: 0,
+            start_time: match network {
+                Network::Mainnet => 1_462_060_800,
+                Network::Testnet3 => 1_456_790_400,
+                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
+            },
+            timeout: 1_493_596_800,
+            period: BIP9_PERIOD,
+            threshold,
+        }),
+        SEGWIT_DEPLOYMENT_ID => Some(DeploymentParams {
+            bit: 1,
+            start_time: match network {
+                Network::Mainnet => 1_479_168_000,
+                Network::Testnet3 => 1_462_060_800,
+                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
+            },
+            timeout: match network {
+                Network::Mainnet => 1_510_704_000,
+                Network::Testnet3 => 1_493_596_800,
+                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
+            },
+            period: BIP9_PERIOD,
+            threshold,
+        }),
+        _ => None,
+    }
+}
+
 /// Read-only chain context the state machine queries.
 ///
-/// The node crate implements this over `bitcoin_rs_chain::BlockTree`; the
-/// consensus crate stays agnostic of storage layout.
+/// Chain implements this over `BlockTree`; consensus stays agnostic of
+/// storage layout.
 pub trait DeploymentContext {
     /// Returns the block version field at `height`, or `None` if unknown.
     fn block_version(&self, height: u32) -> Option<i32>;
