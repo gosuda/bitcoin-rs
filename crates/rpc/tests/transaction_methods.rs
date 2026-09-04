@@ -78,7 +78,7 @@ fn make_tx(prevout: OutPoint, output_value: u64, script: Vec<u8>) -> Tx {
     }
 }
 
-fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64, script: Vec<u8>) -> OutPoint {
+fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
     let txid = Hash256::from_le_bytes(&[txid_byte; 32]);
     let outpoint = OutPoint::new(Txid(txid), 0);
     let mut changes = BlockChanges::default();
@@ -86,7 +86,9 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64, script: Vec<u8>) -> OutPo
         outpoint,
         TxOut {
             value,
-            script_pubkey: script,
+            // OP_TRUE: an anyone-can-spend prevout, so the empty scriptSigs
+            // these fixtures build satisfy script verification.
+            script_pubkey: vec![0x51],
         },
         false,
         1,
@@ -105,7 +107,7 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64, script: Vec<u8>) -> OutPo
 fn sendrawtransaction_admits_standard_tx_to_mempool() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
-    let prevout = fund_utxo(&ctx, 0x42, 10_000, script.clone());
+    let prevout = fund_utxo(&ctx, 0x42, 10_000);
     // Spend 10 000 sats, send 9 000 → fee 1 000 sats.
     let tx = make_tx(prevout, 9_000, script);
     let raw = hex_encode(&consensus_bytes(&tx));
@@ -136,7 +138,7 @@ fn sendrawtransaction_rejects_missing_inputs() {
     let err = handler
         .dispatch("sendrawtransaction", &json!([raw.as_str()]))
         .expect_err("missing-inputs tx should be rejected");
-    assert_eq!(err.code(), RpcError::INTERNAL_ERROR);
+    assert_eq!(err.code(), RpcError::CORE_VERIFY_REJECTED);
 }
 
 #[test]
@@ -144,7 +146,7 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn 
 {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
-    let prevout = fund_utxo(&ctx, 0x43, 10_000, script.clone());
+    let prevout = fund_utxo(&ctx, 0x43, 10_000);
     let tx = make_tx(prevout, 9_000, script);
     let txid = tx.txid();
 
@@ -169,7 +171,7 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn 
 fn testmempoolaccept_reports_allowed_for_valid_tx() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
-    let prevout = fund_utxo(&ctx, 0x44, 10_000, script.clone());
+    let prevout = fund_utxo(&ctx, 0x44, 10_000);
     let tx = make_tx(prevout, 9_000, script);
     let raw = hex_encode(&consensus_bytes(&tx));
     let handler = Handler::new(Arc::clone(&ctx));
@@ -190,7 +192,7 @@ fn testmempoolaccept_reports_reject_for_already_in_mempool()
 -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
-    let prevout = fund_utxo(&ctx, 0x45, 10_000, script.clone());
+    let prevout = fund_utxo(&ctx, 0x45, 10_000);
     let tx = make_tx(prevout, 9_000, script);
     let txid = tx.txid();
 
@@ -315,7 +317,7 @@ fn gettxout_returns_null_for_outpoint_spent_in_mempool() -> Result<(), Box<dyn s
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
 
     // Fund a UTXO.
-    let prevout = fund_utxo(&ctx, 0x55, 10_000, script.clone());
+    let prevout = fund_utxo(&ctx, 0x55, 10_000);
 
     // Create a spending tx that spends the UTXO but is only in mempool.
     let spending_tx = make_tx(prevout, 9_000, script);

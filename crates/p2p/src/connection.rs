@@ -6,8 +6,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
-use parking_lot::RwLock;
-
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Process-unique identity for one peer connection.
@@ -337,52 +335,48 @@ pub struct ReadyPeer {
 
 /// Sole mutation boundary for live peer leases and ready-peer metadata.
 ///
+/// This is a node-facing handle over the single [`crate::PeerTable`] store.
 /// Connection threads register, publish, replace, and remove peers through
-/// this handle. Higher layers may observe snapshots and request an
-/// identity-checked disconnect, but never mutate the shared maps directly.
+/// that table. Higher layers may observe snapshots and request an
+/// identity-checked disconnect, but never mutate sessions through a second
+/// map.
 #[derive(Clone, Debug)]
 pub struct PeerLifecycle {
-    registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    leases: Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>>,
+    table: Arc<crate::PeerTable>,
+}
+
+impl Default for PeerLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PeerLifecycle {
-    /// Wraps the shared stores used by the listener and its observers.
+    /// Creates a lifecycle handle that owns an empty peer table.
     #[must_use]
-    pub const fn new(
-        registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-        leases: Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>>,
-    ) -> Self {
-        Self { registry, leases }
+    pub fn new() -> Self {
+        Self {
+            table: Arc::new(crate::PeerTable::new()),
+        }
     }
 
-    /// Returns the shared lease view for legacy relay consumers.
-    ///
-    /// New connection and control mutations must continue to use this type's
-    /// identity-aware methods; the handle exists so older read-and-send
-    /// adapters observe the same authoritative lease map.
+    /// Wraps an existing peer table so node, RPC, and P2P workers share one
+    /// session store.
     #[must_use]
-    pub fn peer_outbound_handle(&self) -> Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>> {
-        Arc::clone(&self.leases)
+    pub fn from_table(table: Arc<crate::PeerTable>) -> Self {
+        Self { table }
+    }
+
+    /// Returns the shared session table.
+    #[must_use]
+    pub fn table(&self) -> Arc<crate::PeerTable> {
+        Arc::clone(&self.table)
     }
 
     /// Registers a connection before its handshake, cancelling a genuinely
     /// different predecessor and hiding its ready metadata.
     pub fn register(&self, addr: SocketAddr, lease: &PeerLease) -> bool {
-        let mut leases = self.leases.write();
-        let prior = leases.insert(addr, lease.clone());
-        if prior
-            .as_ref()
-            .is_some_and(|prior| prior.same_connection(lease))
-        {
-            return false;
-        }
-        let replaced = prior.is_some();
-        if let Some(prior) = prior {
-            prior.cancel();
-        }
-        self.registry.write().retain(|peer| peer.addr != addr);
-        replaced
+        self.table.register(addr, lease.clone())
     }
 
     /// Publishes handshake metadata only while `lease` remains current.
@@ -392,77 +386,35 @@ impl PeerLifecycle {
         lease: &PeerLease,
         info: crate::PeerInfo,
     ) -> bool {
-        let leases = self.leases.read();
-        if !leases
-            .get(&addr)
-            .is_some_and(|current| current.same_connection(lease))
-        {
-            return false;
-        }
-        let mut registry = self.registry.write();
-        registry.retain(|peer| peer.addr != addr);
-        registry.push(info);
-        true
+        self.table.publish_info(addr, lease, info)
     }
 
     /// Removes `lease` only if it is still the current connection.
     pub fn remove_current(&self, addr: SocketAddr, lease: &PeerLease) -> bool {
-        self.disconnect_if(addr, |current| current.same_connection(lease))
+        self.table.remove_current(addr, lease)
     }
 
     /// Disconnects the connection that produced `source`, preserving any
     /// newer same-address replacement.
     pub fn disconnect_source(&self, source: PeerSource) -> bool {
-        self.disconnect_if(source.addr, |current| current.is_current(source))
+        self.table.disconnect_source(source)
     }
 
-    /// Disconnects every matching current lease while holding the lease
+    /// Disconnects every matching current lease while holding the session
     /// mutation lock. A replacement can therefore never be selected by a
     /// predicate for the predecessor it replaced.
     pub fn disconnect_matching(
         &self,
         predicate: impl Fn(&SocketAddr, &PeerLease) -> bool,
     ) -> Vec<SocketAddr> {
-        let mut leases = self.leases.write();
-        let targets: Vec<SocketAddr> = leases
-            .iter()
-            .filter(|(addr, lease)| predicate(addr, lease))
-            .map(|(addr, _)| *addr)
-            .collect();
-        if targets.is_empty() {
-            return Vec::new();
-        }
-        let mut registry = self.registry.write();
-        targets
-            .into_iter()
-            .filter_map(|addr| {
-                let removed = leases.remove(&addr)?;
-                removed.cancel();
-                registry.retain(|peer| peer.addr != addr);
-                Some(addr)
-            })
-            .collect()
+        self.table.disconnect_matching(predicate)
     }
 
     /// Cancels all current connection leases without removing them. The
     /// connection owners observe cancellation and perform their own identity-
     /// checked teardown.
     pub fn cancel_all(&self) {
-        for lease in self.leases.read().values() {
-            lease.cancel();
-        }
-    }
-
-    fn disconnect_if(&self, addr: SocketAddr, predicate: impl FnOnce(&PeerLease) -> bool) -> bool {
-        let mut leases = self.leases.write();
-        if !leases.get(&addr).is_some_and(predicate) {
-            return false;
-        }
-        if let Some(removed) = leases.remove(&addr) {
-            removed.cancel();
-        }
-        self.registry.write().retain(|peer| peer.addr != addr);
-        true
+        self.table.cancel_all();
     }
 
     /// Returns the current connection source only when `addr` is published as
@@ -470,21 +422,13 @@ impl PeerLifecycle {
     /// a handshaking replacement cannot inherit an old scheduler decision.
     #[must_use]
     pub fn ready_source(&self, addr: SocketAddr) -> Option<PeerSource> {
-        let leases = self.leases.read();
-        let lease = leases.get(&addr)?;
-        if !self.registry.read().iter().any(|peer| peer.addr == addr) {
-            return None;
-        }
-        Some(lease.source(addr))
+        self.table.ready_source(addr)
     }
 
     /// Returns whether `source` still identifies the current connection.
     #[must_use]
     pub fn is_current(&self, source: PeerSource) -> bool {
-        self.leases
-            .read()
-            .get(&source.addr)
-            .is_some_and(|lease| lease.is_current(source))
+        self.table.is_current(source)
     }
 
     /// Runs `operation` while the source remains current. Registration of a
@@ -492,26 +436,15 @@ impl PeerLifecycle {
     /// identity validation and an address-scoped scheduler mutation one
     /// transition.
     pub fn with_current(&self, source: PeerSource, operation: impl FnOnce()) -> bool {
-        let leases = self.leases.read();
-        if !leases
-            .get(&source.addr)
-            .is_some_and(|lease| lease.is_current(source))
-        {
-            return false;
-        }
-        operation();
-        true
+        self.table.with_current(source, operation)
     }
 
     /// Clones the lease only when it is still the connection identified by
     /// `source`.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn lease_source(&self, source: PeerSource) -> Option<PeerLease> {
-        self.leases
-            .read()
-            .get(&source.addr)
-            .filter(|lease| lease.is_current(source))
-            .cloned()
+        self.table.lease_source(source)
     }
 
     /// Selects and disconnects a ready address while excluding same-address
@@ -520,17 +453,7 @@ impl PeerLifecycle {
         &self,
         select: impl FnOnce() -> Option<SocketAddr>,
     ) -> Option<(SocketAddr, PeerSource)> {
-        let mut leases = self.leases.write();
-        let addr = select()?;
-        let lease = leases.get(&addr)?;
-        if !self.registry.read().iter().any(|peer| peer.addr == addr) {
-            return None;
-        }
-        let source = lease.source(addr);
-        let removed = leases.remove(&addr)?;
-        removed.cancel();
-        self.registry.write().retain(|peer| peer.addr != addr);
-        Some((addr, source))
+        self.table.disconnect_selected_ready(select)
     }
 
     /// Sends a message only while `source` remains the current connection.
@@ -540,55 +463,35 @@ impl PeerLifecycle {
     /// an earlier address lookup.
     #[allow(clippy::result_large_err)]
     pub fn send(&self, source: PeerSource, message: crate::Message) -> Result<(), crate::Message> {
-        let Some(lease) = self
-            .leases
-            .read()
-            .get(&source.addr)
-            .filter(|lease| lease.is_current(source))
-            .cloned()
-        else {
-            return Err(message);
-        };
-        lease.send(message).map_err(|error| error.0)
+        self.table.send(source, message)
     }
 
     /// Snapshots ready-peer metadata.
     #[must_use]
     pub fn ready_peers(&self) -> Vec<ReadyPeer> {
-        let leases = self.leases.read();
-        self.registry
-            .read()
-            .iter()
-            .filter_map(|info| {
-                let lease = leases.get(&info.addr)?;
-                Some(ReadyPeer {
-                    source: lease.source(info.addr),
-                    info: info.clone(),
-                })
-            })
-            .collect()
+        self.table.ready_peers()
     }
 
     /// Snapshots all live leases with their connection identities.
     #[must_use]
     pub fn live_leases(&self) -> Vec<(PeerSource, PeerLease)> {
-        self.leases
-            .read()
-            .iter()
-            .map(|(addr, lease)| (lease.source(*addr), lease.clone()))
+        self.table
+            .sessions()
+            .into_iter()
+            .map(|session| (session.lease.source(session.addr), session.lease))
             .collect()
     }
 
     /// Returns whether any live connection currently occupies `addr`.
     #[must_use]
     pub fn contains(&self, addr: SocketAddr) -> bool {
-        self.leases.read().contains_key(&addr)
+        self.table.is_connected(addr)
     }
 
     /// Snapshots every live connection address, including handshaking peers.
     #[must_use]
     pub fn live_addresses(&self) -> Vec<SocketAddr> {
-        self.leases.read().keys().copied().collect()
+        self.table.addrs()
     }
 }
 
@@ -657,6 +560,12 @@ impl PeerLease {
     #[must_use]
     pub const fn node_id(&self) -> u64 {
         self.id.get()
+    }
+
+    /// Process-unique identity of this connection.
+    #[must_use]
+    pub const fn connection_id(&self) -> ConnectionId {
+        self.id
     }
 
     /// Whether this connection was accepted by the listener.
@@ -753,16 +662,9 @@ impl PeerLease {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-
-    use parking_lot::RwLock;
-
     use super::{PeerLease, PeerLifecycle};
     use crossbeam_channel::SendError;
-
-    type PeerRegistry = Arc<RwLock<Vec<crate::PeerInfo>>>;
-    type PeerLeases = Arc<RwLock<hashbrown::HashMap<SocketAddr, PeerLease>>>;
+    use std::net::SocketAddr;
 
     fn peer_info(addr: SocketAddr, conn_time: u64) -> crate::PeerInfo {
         crate::PeerInfo {
@@ -773,17 +675,14 @@ mod tests {
             start_height: 0,
             conn_time,
             inbound: false,
+            addr_bind: addr,
+            time_offset: 0,
+            counters: std::sync::Arc::new(crate::PeerCounters::default()),
         }
     }
 
-    fn lifecycle() -> (PeerLifecycle, PeerRegistry, PeerLeases) {
-        let registry = Arc::new(RwLock::new(Vec::new()));
-        let leases = Arc::new(RwLock::new(hashbrown::HashMap::new()));
-        (
-            PeerLifecycle::new(Arc::clone(&registry), Arc::clone(&leases)),
-            registry,
-            leases,
-        )
+    fn lifecycle() -> PeerLifecycle {
+        PeerLifecycle::new()
     }
 
     #[test]
@@ -830,7 +729,7 @@ mod tests {
 
     #[test]
     fn stale_connection_cannot_publish_over_replacement() {
-        let (lifecycle, registry, leases) = lifecycle();
+        let lifecycle = lifecycle();
         let addr = SocketAddr::from(([127, 0, 0, 1], 18_450));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
@@ -841,25 +740,25 @@ mod tests {
         let replacement = PeerLease::new(replacement_tx);
         assert!(lifecycle.register(addr, &replacement));
         assert!(old.is_cancelled());
-        assert!(registry.read().is_empty());
+        assert!(lifecycle.table().infos().is_empty());
         assert_eq!(lifecycle.ready_source(addr), None);
         assert!(!lifecycle.publish_ready(addr, &old, peer_info(addr, 2)));
-        assert!(registry.read().is_empty());
+        assert!(lifecycle.table().infos().is_empty());
 
         assert!(lifecycle.publish_ready(addr, &replacement, peer_info(addr, 3)));
-        assert_eq!(&*registry.read(), &[peer_info(addr, 3)]);
+        assert_eq!(lifecycle.table().infos(), vec![peer_info(addr, 3)]);
         assert_eq!(lifecycle.ready_source(addr), Some(replacement.source(addr)));
         assert!(
-            leases
-                .read()
-                .get(&addr)
+            lifecycle
+                .table()
+                .lease(addr)
                 .is_some_and(|current| current.same_connection(&replacement))
         );
     }
 
     #[test]
     fn stale_disconnect_source_preserves_replacement() {
-        let (lifecycle, registry, leases) = lifecycle();
+        let lifecycle = lifecycle();
         let addr = SocketAddr::from(([127, 0, 0, 1], 18_451));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
@@ -873,18 +772,18 @@ mod tests {
 
         assert!(!lifecycle.disconnect_source(stale_source));
         assert!(!replacement.is_cancelled());
-        assert!(leases.read().contains_key(&addr));
-        assert_eq!(&*registry.read(), &[peer_info(addr, 2)]);
+        assert!(lifecycle.contains(addr));
+        assert_eq!(lifecycle.table().infos(), vec![peer_info(addr, 2)]);
 
         assert!(lifecycle.disconnect_source(replacement.source(addr)));
         assert!(replacement.is_cancelled());
-        assert!(leases.read().is_empty());
-        assert!(registry.read().is_empty());
+        assert!(!lifecycle.contains(addr));
+        assert!(lifecycle.table().infos().is_empty());
     }
 
     #[test]
     fn ready_snapshot_keeps_identity_across_same_address_replacement() {
-        let (lifecycle, _registry, _leases) = lifecycle();
+        let lifecycle = lifecycle();
         let addr = SocketAddr::from(([127, 0, 0, 1], 18_452));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);
@@ -905,7 +804,7 @@ mod tests {
 
     #[test]
     fn current_guard_rejects_stale_scheduler_mutation() {
-        let (lifecycle, _registry, _leases) = lifecycle();
+        let lifecycle = lifecycle();
         let addr = SocketAddr::from(([127, 0, 0, 1], 18_453));
         let (old_tx, _old_rx) = crossbeam_channel::unbounded();
         let old = PeerLease::new(old_tx);

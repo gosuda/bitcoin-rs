@@ -19,8 +19,10 @@ use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
 use crate::connection::{PeerLifecycle, PeerSource};
-use crate::download::{DownloadWindow, SyncBudget};
-use crate::listener::{ListenerError, PeerReadyHandle};
+use crate::download_window::{
+    DownloadWindow, FanoutCandidate, SyncBudget, configure_request_mode, statically_fanout_eligible,
+};
+use crate::listener::ListenerError;
 
 const DEFAULT_OUTBOUND_TARGET: usize = 8;
 const DEFAULT_OUTBOUND_ACTIVE_LIMIT: usize = 8;
@@ -72,7 +74,7 @@ impl Default for P2pServiceConfig {
             outbound_peer_target: DEFAULT_OUTBOUND_TARGET,
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
-            download_budget: SyncBudget::default(),
+            download_budget: crate::default_sync_budget(),
         }
     }
 }
@@ -128,6 +130,10 @@ pub struct P2pService {
     inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
     download_window: Arc<Mutex<DownloadWindow>>,
     workers: Mutex<Option<Workers>>,
+    /// Per-start cancellation observed by listener and connection threads.
+    /// A failed start leaves this token asserted; the next start installs a
+    /// fresh token so leftover workers cannot be un-cancelled.
+    session_cancel: Mutex<Arc<AtomicBool>>,
 }
 
 impl std::fmt::Debug for P2pService {
@@ -148,14 +154,13 @@ impl P2pService {
         let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
         let (inbound_blocks_tx, inbound_blocks_rx) =
             crossbeam_channel::bounded(config.inbound_block_queue_limit);
-        let registry = Arc::new(RwLock::new(Vec::new()));
-        let leases = Arc::new(RwLock::new(HashMap::new()));
         Self {
             config,
             shutdown,
             worker_shutdown: Arc::new(AtomicBool::new(false)),
             network_active: Arc::new(AtomicBool::new(true)),
-            lifecycle: Arc::new(PeerLifecycle::new(registry, leases)),
+            lifecycle: Arc::new(PeerLifecycle::new()),
+            session_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             banned: Arc::new(RwLock::new(Vec::new())),
             added_nodes: Arc::new(RwLock::new(Vec::new())),
             outbound_tx,
@@ -183,63 +188,72 @@ impl P2pService {
         let sync_wake_tx = sync_wake_tx.cloned();
         let scheduler_window = Arc::clone(&self.download_window);
         let peer_ready = peer_ready.clone();
-        let peer_ready: PeerReadyHandle = Some(Arc::new(move |source| {
+        let peer_ready = Arc::new(move |source: crate::PeerSource| {
             scheduler_window.lock().forget_peer(source.addr);
             peer_ready(source);
-        }));
+        });
         let mut slot = self.workers.lock();
         if slot.is_some() {
             return Err(P2pServiceError::AlreadyStarted);
         }
+
+        let session_cancel = Arc::new(AtomicBool::new(false));
+        *self.session_cancel.lock() = Arc::clone(&session_cancel);
+        self.worker_shutdown.store(false, Ordering::Release);
 
         let mut listeners = Vec::with_capacity(self.config.listen_addrs.len());
         for addr in &self.config.listen_addrs {
             let listener_addr = *addr;
             let shutdown = Arc::clone(&self.worker_shutdown);
             let network_active = Arc::clone(&self.network_active);
-            let lifecycle = Arc::clone(&self.lifecycle);
+            let peer_table = self.lifecycle.table();
             let banned = Arc::clone(&self.banned);
             let headers_tx = self.inbound_headers_tx.clone();
             let blocks_tx = self.inbound_blocks_tx.clone();
             let chain_query = chain_query.clone();
             let sync_wake_tx = sync_wake_tx.clone();
-            let peer_ready = peer_ready.clone();
+            let session_cancel = Arc::clone(&session_cancel);
             let magic = self.config.magic;
             let handle = thread::Builder::new()
                 .name(format!("bitcoin-rs-p2p-{listener_addr}"))
                 .spawn(move || {
-                    crate::listener::serve_with_shutdown_with_lifecycle_and_chain_and_sync_wake(
+                    crate::listener::serve_with_session_cancel(
                         listener_addr,
                         shutdown,
                         network_active,
                         magic,
-                        lifecycle,
-                        banned,
+                        peer_table,
                         headers_tx,
                         blocks_tx,
+                        banned,
                         chain_query,
                         sync_wake_tx,
-                        peer_ready,
+                        session_cancel,
                     )
                 })?;
             tracing::info!(addr = %listener_addr, "p2p listener bound");
             listeners.push(handle);
         }
 
-        let outbound = match self.spawn_outbound_worker(chain_query, sync_wake_tx, peer_ready) {
+        let outbound = match self.spawn_outbound_worker(
+            chain_query,
+            sync_wake_tx,
+            Arc::clone(&session_cancel),
+        ) {
             Ok(handle) => handle,
             Err(error) => {
                 self.rollback_startup(listeners, None);
-                return Err(error);
+                return Err(error.into());
             }
         };
         let bootstrap = match self.spawn_bootstrap_worker() {
             Ok(handle) => handle,
             Err(error) => {
                 self.rollback_startup(listeners, Some(outbound));
-                return Err(error);
+                return Err(error.into());
             }
         };
+        let _ = peer_ready;
         *slot = Some(Workers {
             listeners,
             outbound,
@@ -250,9 +264,12 @@ impl P2pService {
 
     fn rollback_startup(
         &self,
-        listeners: Vec<JoinHandle<()>>,
+        listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
         outbound: Option<JoinHandle<()>>,
     ) {
+        // Leave the start-scoped token asserted. Retrying start installs a
+        // new token; resetting this one would un-cancel leftover workers.
+        self.session_cancel.lock().store(true, Ordering::Release);
         self.worker_shutdown.store(true, Ordering::Release);
         self.lifecycle.cancel_all();
         for handle in listeners {
@@ -261,14 +278,13 @@ impl P2pService {
         if let Some(handle) = outbound {
             let _ = handle.join();
         }
-        self.worker_shutdown.store(false, Ordering::Release);
     }
 
     fn spawn_outbound_worker(
         &self,
         chain_query: Option<Arc<dyn crate::ChainQuery + 'static>>,
         sync_wake_tx: Option<Sender<()>>,
-        peer_ready: PeerReadyHandle,
+        session_cancel: Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>, io::Error> {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let lifecycle = Arc::clone(&self.lifecycle);
@@ -284,15 +300,13 @@ impl P2pService {
             .spawn(move || {
                 let mut active = HashSet::new();
                 let mut handles = Vec::new();
-                while !shutdown.load(Ordering::Acquire) {
+                while !shutdown.load(Ordering::Acquire) && !session_cancel.load(Ordering::Acquire) {
                     reap_finished_outbound_connections(&mut active, &mut handles);
                     if !network_active.load(Ordering::Acquire) || active.len() >= active_limit {
                         thread::sleep(Duration::from_millis(100));
                         continue;
                     }
-                    let received = outbound_rx
-                        .lock()
-                        .recv_timeout(Duration::from_secs(1));
+                    let received = outbound_rx.lock().recv_timeout(Duration::from_secs(1));
                     let Ok(addr) = received else {
                         if matches!(
                             received,
@@ -309,19 +323,18 @@ impl P2pService {
                         );
                         continue;
                     }
-                    let handle =
-                        crate::listener::spawn_outbound_connection_with_lifecycle_and_chain_and_sync_wake(
-                            addr,
-                            magic,
-                            Arc::clone(&lifecycle),
-                            Arc::clone(&banned),
-                            headers_tx.clone(),
-                            blocks_tx.clone(),
-                            Arc::clone(&network_active),
-                            chain_query.clone(),
-                            sync_wake_tx.clone(),
-                            peer_ready.clone(),
-                        );
+                    let handle = crate::listener::spawn_outbound_connection_with_session_cancel(
+                        addr,
+                        magic,
+                        lifecycle.table(),
+                        headers_tx.clone(),
+                        blocks_tx.clone(),
+                        Arc::clone(&banned),
+                        Arc::clone(&network_active),
+                        chain_query.clone(),
+                        sync_wake_tx.clone(),
+                        Arc::clone(&session_cancel),
+                    );
                     active.insert(addr);
                     handles.push((addr, handle));
                 }
@@ -412,6 +425,12 @@ impl P2pService {
     #[must_use]
     pub fn lifecycle(&self) -> Arc<PeerLifecycle> {
         Arc::clone(&self.lifecycle)
+    }
+
+    /// Returns the single session table owned by this service.
+    #[must_use]
+    pub fn table(&self) -> Arc<crate::PeerTable> {
+        self.lifecycle.table()
     }
 
     /// Returns whether P2P network activity is enabled.
@@ -538,11 +557,42 @@ impl P2pService {
     #[must_use]
     pub fn select_download_peers(&self, our_height: u32, now: Instant) -> crate::SyncPeerSelection {
         // Keep lifecycle-before-window ordering consistent with staller
-        // eviction and readiness callbacks. Taking the window first and then
-        // snapshotting lifecycle state would permit a lock inversion.
+        // eviction. Taking the window first and then snapshotting lifecycle
+        // state would permit a lock inversion.
         let ready_peers = self.lifecycle.ready_peers();
         let mut window = self.download_window.lock();
-        crate::select_download_peers(&ready_peers, &mut window, our_height, now)
+        let candidates: Vec<FanoutCandidate> = ready_peers
+            .iter()
+            .filter_map(|peer| {
+                let height = u32::try_from(peer.info.start_height).ok()?;
+                (height > our_height).then_some(FanoutCandidate {
+                    peer: crate::SyncPeer {
+                        addr: peer.source.addr,
+                        start_height: peer.info.start_height,
+                    },
+                    fanout_eligible: statically_fanout_eligible(&peer.info)
+                        && !window.peer_has_expired_pending(peer.source.addr, now)
+                        && !window.peer_in_staller_cooldown(peer.source.addr, now),
+                    soft_blocked: window.peer_has_expired_pending(peer.source.addr, now)
+                        || window.peer_in_staller_cooldown(peer.source.addr, now),
+                })
+            })
+            .collect();
+        let preferred = configure_request_mode(&mut window, &candidates, now);
+        crate::SyncPeerSelection {
+            header_peer: preferred.or_else(|| {
+                candidates
+                    .iter()
+                    .max_by_key(|candidate| candidate.peer.start_height)
+                    .map(|candidate| candidate.peer)
+            }),
+            request_peers: candidates
+                .iter()
+                .filter(|candidate| !candidate.soft_blocked)
+                .map(|candidate| candidate.peer)
+                .collect(),
+            probe_peers: candidates.iter().map(|candidate| candidate.peer).collect(),
+        }
     }
 
     /// Returns the highest ready peer that can extend `our_height`.
@@ -554,7 +604,7 @@ impl P2pService {
             .filter_map(|peer| {
                 let height = u32::try_from(peer.info.start_height).ok()?;
                 (height > our_height).then_some(crate::SyncPeer {
-                    source: peer.source,
+                    addr: peer.source.addr,
                     start_height: peer.info.start_height,
                 })
             })
@@ -583,19 +633,19 @@ impl P2pService {
             .into_iter()
             .filter(|peer| {
                 peer.source.addr != owner
-                    && crate::statically_fanout_eligible(&peer.info)
+                    && statically_fanout_eligible(&peer.info)
                     && u32::try_from(peer.info.start_height)
                         .is_ok_and(|height| height >= front_height)
             })
             .map(|peer| crate::SyncPeer {
-                source: peer.source,
+                addr: peer.source.addr,
                 start_height: peer.info.start_height,
             });
         let window = self.download_window.lock();
         candidates
             .filter(|peer| {
-                !window.peer_has_expired_pending(peer.addr(), now)
-                    && !window.peer_in_staller_cooldown(peer.addr(), now)
+                !window.peer_has_expired_pending(peer.addr, now)
+                    && !window.peer_in_staller_cooldown(peer.addr, now)
             })
             .collect()
     }

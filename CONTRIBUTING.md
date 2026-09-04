@@ -104,7 +104,7 @@ cargo +nightly check --workspace --all-targets
 The workspace follows a strict one-way layer hierarchy:
 
 ```
-Surfaces:      bin/bitcoin-rs, crates/rpc, crates/ext-api, crates/ext-blockfilterindex
+Surfaces:      bin/bitcoin-rs, crates/rpc
 Capabilities:  crates/index, crates/mining, crates/mempool
 Node services: crates/node, crates/p2p, crates/storage
 Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crates/primitives
@@ -112,7 +112,7 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 
 Key rules:
 - No reverse dependencies: lower layers never depend on higher layers.
-- Storage isolation: storage backends remain behind `crates/storage`. `crates/rpc` and extensions consume node-level capabilities, never storage engines directly.
+- Storage isolation: storage backends remain behind `crates/storage`. `crates/rpc` consumes node-level capabilities, never storage engines directly.
 - Consensus authority: the native Rust validation engine in `crates/consensus` is the production default. `libbitcoinkernel` serves as an opt-in differential verification oracle.
 
 ## Commit and PR conventions
@@ -128,4 +128,3 @@ Key rules:
 - [docs/contracts/](docs/contracts/) — Normative architectural and protocol contracts
 - [docs/getting-started.md](docs/getting-started.md) — Node setup and configuration
 - [CONCEPTS.md](CONCEPTS.md) — Domain terminology and concepts
-

@@ -32,7 +32,7 @@ the first embedder — there is one lifecycle implementation, not two.
   `getblockchaininfo` fields from the same handles without RPC JSON (the
   `GuessVerificationProgress` twin in `embed.rs` is kept op-for-op with
   `crates/rpc/src/handlers/chain.rs`); `capabilities()` returns the node
-  registry's `CapabilitySnapshot`. Owner: `crates/node/src/embed.rs`.
+  concrete-service `CapabilitySnapshot`. Owner: `crates/node/src/embed.rs`.
 - **EMB-05 — Broadcast is the shared admission.** `Node::broadcast` runs
   `Context::admit_transaction` — the identical typed admission
   `sendrawtransaction` runs (crates/rpc/src/handlers/tx_admission.rs):

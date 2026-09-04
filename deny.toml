@@ -33,7 +33,7 @@ exceptions = [
     { crate = "hex_lit@0.1.1", allow = ["MITNFA"] },
     # The supported fjall backend pulls xxhash-rust through lsm-tree/sfa. Keep
     # BSL-1.0 scoped to the audited resolved version instead of dropping G7.
-    { crate = "xxhash-rust@0.8.15", allow = ["BSL-1.0"] },
+    { crate = "xxhash-rust@0.8.18", allow = ["BSL-1.0"] },
 ]
 
 [bans]
@@ -105,16 +105,16 @@ skip = [
     # rand 0.8 (secp256k1 0.29 rand-std, also via bitcoin rand-std) vs 0.9 ecosystem.
     { crate = "getrandom@0.2.17", reason = "rand_core 0.6 via secp256k1 0.29" },
     { crate = "getrandom@0.3.4", reason = "wasi/fjall chain" },
-    { crate = "rand@0.8.6", reason = "secp256k1 0.29 rand-std" },
+    { crate = "rand@0.8.8", reason = "secp256k1 0.29 rand-std" },
     { crate = "rand_chacha@0.3.1", reason = "rand 0.8 chain" },
     { crate = "rand_core@0.6.4", reason = "rand 0.8 chain" },
     { crate = "r-efi@5.3.0", reason = "getrandom 0.3 UEFI backend" },
-    { crate = "wit-bindgen@0.51.0", reason = "getrandom 0.3 wasm bindings" },
+    { crate = "wit-bindgen@0.57.1", reason = "getrandom 0.3 wasm bindings" },
     # dashmap 6.2 pins 0.14; metrics-util/quick_cache pin 0.16; the workspace uses 0.17.
     { crate = "hashbrown@0.14.5", reason = "dashmap 6.2 pin" },
     { crate = "hashbrown@0.16.1", reason = "metrics-util 0.20 and quick_cache 0.6" },
     # bitcoin 0.32 pins hex-conservative 0.2; bitcoin_slices uses 1.x.
-    { crate = "hex-conservative@0.2.2", reason = "bitcoin 0.32 pin" },
+    { crate = "hex-conservative@0.2.3", reason = "bitcoin 0.32 pin" },
     # cap-std 4 stack: fs-set-times 0.20 pins io-lifetimes 2, cap-std uses 3.
     { crate = "io-lifetimes@2.0.4", reason = "fs-set-times 0.20" },
     # system-deps 6 (zmq/rocksdb build chain) pins the toml 0.8 stack.
@@ -123,8 +123,20 @@ skip = [
     { crate = "toml_datetime@0.6.11", reason = "toml 0.8 via system-deps" },
     { crate = "winnow@0.7.15", reason = "toml_edit 0.22 via toml 0.8" },
     { crate = "shlex@1.3.0", reason = "bindgen 0.72 build dep" },
-    # windows-only metadata targets; 0.52 pinned by older win crates.
-    { crate = "windows-sys@0.52.0", reason = "windows-only split" },
+    # syn 3.0 pulled by newer proc-macro crates; workspace pins syn 2.0.
+    { crate = "syn@3.0.4", reason = "proc-macro crate chain" },
+    # windows-only metadata targets; multiple versions pinned by different win crates.
+    { crate = "windows-sys@0.59.0", reason = "windows-only split" },
+    { crate = "windows-sys@0.60.2", reason = "windows-only split" },
+    { crate = "windows-targets@0.52.6", reason = "windows-only split" },
+    { crate = "windows_aarch64_gnullvm@0.52.6", reason = "windows-only split" },
+    { crate = "windows_aarch64_msvc@0.52.6", reason = "windows-only split" },
+    { crate = "windows_i686_gnu@0.52.6", reason = "windows-only split" },
+    { crate = "windows_i686_gnullvm@0.52.6", reason = "windows-only split" },
+    { crate = "windows_i686_msvc@0.52.6", reason = "windows-only split" },
+    { crate = "windows_x86_64_gnu@0.52.6", reason = "windows-only split" },
+    { crate = "windows_x86_64_gnullvm@0.52.6", reason = "windows-only split" },
+    { crate = "windows_x86_64_msvc@0.52.6", reason = "windows-only split" },
 ]
 
 [sources]

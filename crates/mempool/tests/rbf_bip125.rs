@@ -190,6 +190,49 @@ fn bip125_replacement_rules_are_enforced() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Rule 1 is about every original, not about one of them.
+///
+/// A replacement that conflicts with an opt-in transaction and a final one used
+/// to be accepted on the strength of the opt-in alone, evicting the final
+/// transaction with it. The final transaction never signalled that it could be
+/// replaced, and BIP125 says it therefore cannot be.
+#[test]
+fn rule_one_requires_every_conflict_to_opt_in() -> Result<(), Box<dyn Error>> {
+    const RBF_SEQUENCE: u32 = 0xffff_fffd;
+    const FINAL_SEQUENCE: u32 = 0xffff_ffff;
+    for (name, second_sequence, expected) in [
+        ("both originals opt in", RBF_SEQUENCE, Ok(())),
+        (
+            "one original is final",
+            FINAL_SEQUENCE,
+            Err(RbfError::Rule1NoOptIn),
+        ),
+    ] {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let first_input = outpoint(1, 0);
+        let second_input = outpoint(2, 0);
+
+        let opt_in = tx_from_inputs(20, &[(first_input, RBF_SEQUENCE)], 1);
+        pool.insert_entry(MempoolEntry::new(Arc::new(opt_in), 100, 1_000, 1, 1))?;
+        let other = tx_from_inputs(21, &[(second_input, second_sequence)], 1);
+        pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 2, 1))?;
+
+        // One replacement, conflicting with both of them.
+        let replacement = tx_from_inputs(
+            40,
+            &[(first_input, RBF_SEQUENCE), (second_input, RBF_SEQUENCE)],
+            1,
+        );
+        let candidate = ReplacementCandidate::new(Arc::new(replacement), 200, 10_000, 1);
+
+        assert_eq!(
+            pool.check_replacement(&candidate).map(|_| ()),
+            expected,
+            "{name}"
+        );
+    }
+    Ok(())
+}
 #[test]
 fn package_acceptance_surfaces_bip125_replacement_boundaries() -> Result<(), Box<dyn Error>> {
     let (pool, mut replacement_tx) = pool_with_conflict(

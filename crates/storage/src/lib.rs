@@ -53,6 +53,12 @@ pub use rocksdb_impl::RocksDbStore;
 ///
 /// Split the value into 32-bit limbs so the conversion uses only exact
 /// `f64::from(u32)` operations and rounds like a direct `u64` conversion.
+#[cfg(any(
+    feature = "fjall",
+    feature = "mdbx",
+    feature = "redb",
+    feature = "rocksdb"
+))]
 pub(crate) fn metric_f64(value: u64) -> f64 {
     const TWO32: f64 = 4_294_967_296.0;
     let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_le_bytes();
@@ -62,6 +68,12 @@ pub(crate) fn metric_f64(value: u64) -> f64 {
 }
 
 /// Converts a `usize` byte count to an `f64` metric value via `u64`.
+#[cfg(any(
+    feature = "fjall",
+    feature = "mdbx",
+    feature = "redb",
+    feature = "rocksdb"
+))]
 pub(crate) fn metric_f64_from_usize(value: usize) -> f64 {
     metric_f64(u64::try_from(value).unwrap_or(u64::MAX))
 }

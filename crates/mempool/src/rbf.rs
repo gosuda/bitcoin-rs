@@ -5,7 +5,7 @@ use bitcoin_rs_primitives::Tx;
 use hashbrown::HashSet;
 use thiserror::Error;
 
-use crate::mutation::{MutationResult, RemovalReason};
+use crate::mutation::RemovalReason;
 use crate::pool::tx_fee_rate;
 use crate::{EntryId, Mempool, MempoolEntry, MempoolError};
 
@@ -20,6 +20,12 @@ pub struct ReplacementCandidate {
     pub fee: u64,
     /// Incremental relay fee rate in sat/kvB.
     pub min_relay_fee_rate: u64,
+    /// BIP141 sigop cost against the resolved prevouts.
+    ///
+    /// Carried through so a replacement lands with the same accounting a plain
+    /// acceptance would give it. Zero when the candidate was built without
+    /// resolved prevouts, which means unknown rather than none.
+    pub sigop_cost: u32,
 }
 
 impl ReplacementCandidate {
@@ -31,7 +37,15 @@ impl ReplacementCandidate {
             vsize,
             fee,
             min_relay_fee_rate,
+            sigop_cost: 0,
         }
+    }
+
+    /// Attaches a sigop cost counted against resolved prevouts.
+    #[must_use]
+    pub const fn with_sigop_cost(mut self, sigop_cost: u32) -> Self {
+        self.sigop_cost = sigop_cost;
+        self
     }
 
     /// Candidate fee rate in sat/vB multiplied by 1000.
@@ -51,8 +65,9 @@ pub struct ReplacementPlan {
 /// BIP125 replacement rejection reason.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RbfError {
-    /// No directly conflicting transaction signals replaceability, directly or through ancestors.
-    #[error("BIP125 rule 1: original transactions do not opt in")]
+    /// Some directly conflicting transaction does not signal replaceability,
+    /// itself or through an ancestor.
+    #[error("BIP125 rule 1: an original transaction does not opt in")]
     Rule1NoOptIn,
     /// Replacement spends a new unconfirmed input not spent by the originals.
     #[error("BIP125 rule 2: replacement adds a new unconfirmed input")]
@@ -87,9 +102,13 @@ impl Mempool {
             });
         }
 
+        // Rule 1 is a condition on *every* original the replacement would
+        // evict, not on the set containing one willing member. A candidate
+        // conflicting with an opt-in transaction and a final one would
+        // otherwise evict both -- and the final one never agreed to that.
         if !direct_conflicts
             .iter()
-            .any(|id| self.signals_rbf_including_ancestors(*id))
+            .all(|id| self.signals_rbf_including_ancestors(*id))
         {
             return Err(RbfError::Rule1NoOptIn);
         }
@@ -155,13 +174,19 @@ impl Mempool {
     /// computed earlier cannot silently race with concurrent admissions.
     /// Non-conflicting candidates take the same path with an empty eviction
     /// set.
+    ///
+    /// When the post-insert trim sheds the replacement itself, the conflict
+    /// removals and the insert have already committed; the outcome reports
+    /// as [`InsertionOutcome::ShedAfterCommit`] carrying that record, and
+    /// only an `Err` means nothing was committed.
     pub fn replace_transaction(
         &mut self,
         candidate: ReplacementCandidate,
         time: u64,
         height: u32,
         sigop_cost: u32,
-    ) -> Result<MutationResult, RbfError> {
+    ) -> Result<crate::mutation::InsertionOutcome, RbfError> {
+        let candidate_txid = candidate.tx.txid();
         let plan = self.check_replacement(&candidate)?;
         let direct: HashSet<EntryId> = self.conflicts_for(&candidate.tx).into_iter().collect();
         let entry = MempoolEntry::new(candidate.tx, candidate.vsize, candidate.fee, time, height)
@@ -184,6 +209,16 @@ impl Mempool {
         self.remove_entries_with_reasons(&removals, &mut changes);
         let replacement = self.commit_insert(prepared);
         changes.extend(replacement.changes);
-        Ok(self.finish_mutation(changes))
+        // The trim evicts the worst-paying entries, and the replacement can
+        // be one of them. The conflict removals and the insert already
+        // committed, so the outcome carries the whole record; reporting
+        // plain success would hand the caller a receipt for a transaction
+        // that is not in the pool. Same check as `insert_entry`.
+        let result = self.finish_mutation(changes);
+        Ok(if self.contains_txid(&candidate_txid) {
+            crate::mutation::InsertionOutcome::Accepted(result)
+        } else {
+            crate::mutation::InsertionOutcome::ShedAfterCommit(result)
+        })
     }
 }

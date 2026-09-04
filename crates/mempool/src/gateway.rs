@@ -18,11 +18,27 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{Tx, Txid};
+use bitcoin_rs_consensus::{UtxoView, verify_transaction};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Adapter that lets the consensus verifier look up prevouts from a
+/// resolved `(OutPoint, TxOut)` slice, layered under the mempool by
+/// `MempoolUtxoView`.
+struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
+
+impl UtxoView for PrevoutMap<'_> {
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        self.0
+            .iter()
+            .find(|(op, _)| op == outpoint)
+            .map(|(_, txout)| txout.clone())
+    }
+}
 
 /// Why a chain-change reservation or finish failed.
 ///
@@ -61,11 +77,24 @@ pub struct AdmissionRequest {
     /// Resolved per-transaction context (fee, vsize, sigop cost, missing
     /// inputs) from the mempool and UTXO set.
     pub context: crate::standardness::PackageTxContext,
+    /// Resolved prevouts for consensus verification. Empty when the caller
+    /// has not resolved them (e.g., missing inputs); the admission path
+    /// rejects the transaction outright rather than admitting it unverified.
+    pub prevouts: Vec<(
+        bitcoin_rs_primitives::OutPoint,
+        bitcoin_rs_primitives::TxOut,
+    )>,
+    /// Median-time-past of the applied chain tip for BIP113 finality checks.
+    /// Zero disables the locktime cutoff (pre-genesis).
+    pub locktime_cutoff: u32,
     /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
     pub max_feerate_sat_per_kvb: Option<u64>,
     /// Wall-clock seconds for the mempool entry timestamp.
     pub time: u64,
-    /// Current applied block height for the mempool entry.
+    /// Current applied block height for the mempool entry. Finality is
+    /// evaluated at the next block height (`height + 1`), matching Core's
+    /// `CheckFinalTxAtTip`, while the stored entry keeps this applied tip
+    /// height.
     pub height: u32,
     /// How the transaction entered the node.
     pub origin: AdmissionOrigin,
@@ -100,6 +129,12 @@ pub enum AdmitError {
     /// The transaction was rejected by policy. The reason is mempool-owned.
     #[error(transparent)]
     Policy(#[from] crate::standardness::AcceptanceRejectReason),
+    /// The transaction failed consensus verification (finality, duplicate
+    /// inputs, overspend, sigop limits) or failed its input scripts under
+    /// Core's policy flags (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp
+    /// `PolicyScriptChecks`).
+    #[error("consensus verification failed")]
+    Consensus,
 }
 
 /// Interns one [`MempoolGateway`] per pool `Arc` identity.
@@ -284,6 +319,26 @@ impl core::fmt::Debug for MempoolGateway {
     }
 }
 
+/// What publication reads from a committed mutating call: the record the
+/// pool committed. Plain pool mutations report their [`MutationResult`]
+/// directly; an admission insert reports through [`InsertionOutcome`] so a
+/// shed entry's removals publish like any other committed change.
+trait CommittedMutation {
+    fn committed(&self) -> &crate::mutation::MutationResult;
+}
+
+impl CommittedMutation for crate::mutation::MutationResult {
+    fn committed(&self) -> &crate::mutation::MutationResult {
+        self
+    }
+}
+
+impl CommittedMutation for crate::mutation::InsertionOutcome {
+    fn committed(&self) -> &crate::mutation::MutationResult {
+        self.mutation()
+    }
+}
+
 impl MempoolGateway {
     /// Wraps `pool` and optionally installs `observer`.
     ///
@@ -440,12 +495,13 @@ impl MempoolGateway {
         })
     }
 
-    /// Commits `pool.insert_entry` and publishes its result.
+    /// Commits `pool.insert_entry` and publishes its result, including the
+    /// removals of a shed-after-commit entry.
     pub fn insert_entry(
         &self,
         origin: AdmissionOrigin,
         entry: MempoolEntry,
-    ) -> Result<MutationResult, MempoolError> {
+    ) -> Result<crate::mutation::InsertionOutcome, MempoolError> {
         self.commit(origin, move |pool| pool.insert_entry(entry))
     }
 
@@ -454,7 +510,8 @@ impl MempoolGateway {
     /// `entries` must arrive in dependency order — parents before the
     /// transactions spending them — which is the order the reversed
     /// disconnect walk produces. Each candidate gets exactly one
-    /// commit-and-publish insert; a candidate the pool refuses is recorded,
+    /// commit-and-publish insert; a candidate the pool refuses (policy,
+    /// duplicate, or mempool-full after size-limit eviction) is recorded,
     /// and any later candidate spending a refused txid is withheld, so a
     /// rejected parent can never leave a partially admitted family behind.
     /// The same withholding follows a parent whose own successful insert
@@ -483,16 +540,17 @@ impl MempoolGateway {
                 continue;
             }
             match self.insert_entry(origin, entry) {
-                Ok(result) => {
-                    // A successful insert does not promise the entry stayed:
-                    // the same commit can evict it — or any other entry —
-                    // under size pressure. Whatever the result says left the
-                    // pool is unavailable to later spenders, exactly as if
-                    // the pool had refused it up front.
-                    for removed in result.removed_txids() {
+                Ok(outcome) => {
+                    // A committed insert does not promise the entry stayed:
+                    // the same commit can shed it — or evict any other entry
+                    // — under size pressure. Whatever the outcome reports as
+                    // removed, the shed entry itself included, is unavailable
+                    // to later spenders, exactly as if the pool had refused
+                    // it up front.
+                    for removed in outcome.mutation().removed_txids() {
                         refused.insert(removed);
                     }
-                    committed.push(result);
+                    committed.push(outcome.into_mutation());
                 }
                 Err(_) => {
                     refused.insert(txid);
@@ -502,7 +560,8 @@ impl MempoolGateway {
         committed
     }
 
-    /// Commits `pool.replace_transaction` and publishes its result.
+    /// Commits `pool.replace_transaction` and publishes its result,
+    /// including the removals of a replacement the trim shed after commit.
     pub fn replace_transaction(
         &self,
         origin: AdmissionOrigin,
@@ -510,7 +569,7 @@ impl MempoolGateway {
         time: u64,
         height: u32,
         sigop_cost: u32,
-    ) -> Result<MutationResult, RbfError> {
+    ) -> Result<crate::mutation::InsertionOutcome, RbfError> {
         self.commit(origin, move |pool| {
             pool.replace_transaction(candidate, time, height, sigop_cost)
         })
@@ -530,6 +589,9 @@ impl MempoolGateway {
     /// preserving under-lock BIP125 and package-limit revalidation. On
     /// success, one `MutationResult` whose ordered removals precede exactly
     /// one accepted change is published via the existing commit/publish seam.
+    /// A replacement the post-insert trim shed after commit publishes its
+    /// committed removals and then rejects with the same
+    /// [`AdmitError::Policy`] the pre-commit refusal produced.
     ///
     /// Any mismatch or rejection returns before publish-mutex acquisition and
     /// before mutation.
@@ -583,6 +645,41 @@ impl MempoolGateway {
             return Err(AdmitError::Policy(reason));
         }
 
+        // 4b. Consensus verification (finality, duplicate inputs, overspend,
+        //     sigop limits) plus Core's policy script checks over the
+        //     resolved prevouts layered with the mempool. A non-coinbase
+        //     transaction with no resolved prevouts must be rejected
+        //     outright — policy may not have caught it if the caller set
+        //     missing_inputs=false. Scripts run here under
+        //     `VerifyFlags::STANDARD`, matching Core's `PolicyScriptChecks`
+        //     (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp): an
+        //     unrelayable transaction must not occupy pool capacity until
+        //     block connection evicts it.
+        if request.prevouts.is_empty() {
+            // Coinbase transactions are never admitted via the gateway.
+            // Empty prevouts on a non-coinbase tx means the caller did not
+            // resolve inputs — reject rather than admit unverified.
+            return Err(AdmitError::Consensus);
+        }
+        let chain_view = PrevoutMap(&request.prevouts);
+        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
+        // Finality is evaluated at the height of the next block the
+        // transaction could be mined in (`height + 1`), exactly Core's
+        // `CheckFinalTxAtTip`.
+        // A u32 overflow on the next block height is not a valid chain
+        // state, but failing closed here matches the conservative choice:
+        // nothing is admitted when the finality question is unanswerable.
+        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
+        if let Err(_err) = verify_transaction(
+            &request.tx,
+            &view,
+            finality_height,
+            request.locktime_cutoff,
+            VerifyFlags::STANDARD,
+        ) {
+            return Err(AdmitError::Consensus);
+        }
+
         // 5. Mutate under the same write guard via `replace_transaction`,
         //    which handles BIP125 replacement, package limits, and insert.
         let candidate = ReplacementCandidate::new(
@@ -591,7 +688,7 @@ impl MempoolGateway {
             fact.base_fee.unwrap_or(0),
             policy.incremental_relay_fee_sat_per_kvb,
         );
-        let result = pool
+        let outcome = pool
             .replace_transaction(candidate, request.time, request.height, fact.sigop_cost)
             .map_err(|rbf| {
                 // Map RbfError to the correct AcceptanceRejectReason variant.
@@ -610,7 +707,11 @@ impl MempoolGateway {
                 }
             })?;
 
-        // 6. Enqueue for publication and elect a drainer if needed.
+        // 6. Enqueue for publication and elect a drainer if needed. Both
+        //    outcome variants carry a committed mutation: a replacement the
+        //    trim shed publishes its conflict removals like any other commit.
+        let shed = outcome.is_shed();
+        let result = outcome.into_mutation();
         let mut elected = false;
         if !result.changes.is_empty() && self.observer.is_some() {
             let mut publish = self.publish.lock();
@@ -624,6 +725,16 @@ impl MempoolGateway {
         drop(pool);
         if elected {
             self.drain();
+        }
+        if shed {
+            // The replacement committed and was immediately shed by the
+            // size-limit trim; report the same failure the pre-commit
+            // refusal produced, after the removals above were published.
+            return Err(AdmitError::Policy(
+                crate::standardness::AcceptanceRejectReason::Replacement(RbfError::Mempool(
+                    crate::pool::MempoolError::Full,
+                )),
+            ));
         }
         Ok(AdmitOutcome::Committed(result))
     }
@@ -684,18 +795,22 @@ impl MempoolGateway {
     }
 
     /// The single commit-and-publish path every publishing mutation flows
-    /// through. A failed `mutate` returns before the publish mutex is taken.
+    /// through. A failed `mutate` returns before the publish mutex is taken
+    /// and means nothing was committed. A committed insert publishes
+    /// whichever outcome it produced - a shed-after-commit entry publishes
+    /// its removals too - then hands the outcome to the caller to interpret.
     /// Successful mutations acquire the publish mutex before releasing the
     /// pool guard, then call observers only after releasing the pool guard.
-    fn commit<E>(
+    fn commit<T: CommittedMutation, E>(
         &self,
         origin: AdmissionOrigin,
-        mutate: impl FnOnce(&mut Mempool) -> Result<MutationResult, E>,
-    ) -> Result<MutationResult, E> {
+        mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
+    ) -> Result<T, E> {
         let mut elected = false;
-        let result = {
+        let outcome = {
             let mut pool = self.pool.write();
-            let result = mutate(&mut pool)?;
+            let outcome = mutate(&mut pool)?;
+            let result = outcome.committed();
             if !result.changes.is_empty() && self.observer.is_some() {
                 let mut publish = self.publish.lock();
                 publish.queue.push_back(MutationEnvelope {
@@ -705,12 +820,12 @@ impl MempoolGateway {
                 elected = !publish.draining;
                 publish.draining = true;
             }
-            result
+            outcome
         };
         if elected {
             self.drain();
         }
-        Ok(result)
+        Ok(outcome)
     }
 
     /// The same path for pool methods that cannot fail.
@@ -892,7 +1007,7 @@ mod tests {
         MempoolGateway, MempoolObserver,
     };
     use crate::mutation::{
-        AdmissionOrigin, MutationEnvelope, MutationOutcome, MutationResult, RemovalReason,
+        AdmissionOrigin, InsertionOutcome, MutationEnvelope, MutationOutcome, RemovalReason,
     };
     use crate::standardness::PackageTxContext;
     use crate::{Mempool, MempoolEntry, MempoolLimits};
@@ -993,6 +1108,25 @@ mod tests {
         }
     }
 
+    /// A one-input one-output RBF-signalling spend of `prev`, paying `value`
+    /// to a bare-push script byte, for replacement scenarios.
+    fn prevout_spend(prev: OutPoint, value: u64, script: u8) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![TxIn {
+                previous_output: prev,
+                script_sig: Vec::new(),
+                sequence: 0xFFFF_FFFD, // RBF signal
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value,
+                script_pubkey: vec![script],
+            }],
+        }
+    }
+
     fn admit_request(
         gateway: &MempoolGateway,
         tx: &Tx,
@@ -1010,6 +1144,16 @@ mod tests {
                 sigop_cost: 0,
                 missing_inputs: false,
             },
+            prevouts: vec![(
+                tx.inputs[0].previous_output,
+                TxOut {
+                    value: 11_000,
+                    // OP_TRUE: an anyone-can-spend prevout, the same shape the
+                    // RPC fixtures use, so script verification passes.
+                    script_pubkey: vec![0x51],
+                },
+            )],
+            locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
             height: 1,
@@ -1061,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_for_block_reports_block_inclusion_not_explicit() {
+    fn remove_for_block_publishes_removals_with_origins() {
         let observer = Arc::new(RecordingObserver::default());
         let gateway = gateway_with(Some(dyn_observer(&observer)));
 
@@ -1143,7 +1287,8 @@ mod tests {
                 7,
                 0,
             )
-            .expect("replacement lands");
+            .expect("replacement lands")
+            .into_mutation();
 
         assert_eq!(result.changes.len(), 3);
         assert_eq!(
@@ -1187,7 +1332,8 @@ mod tests {
         let gateway = gateway_with(None);
         let result = gateway
             .insert_entry(AdmissionOrigin::Rpc, entry(&tx(10)))
-            .expect("in");
+            .expect("in")
+            .into_mutation();
         assert_eq!(result.changes.len(), 1);
         assert_eq!(result.sequence_base, 1);
         assert_eq!(gateway.read().sequence_number(), 1);
@@ -1236,7 +1382,8 @@ mod tests {
             .expect("low in");
         let result = gateway
             .insert_entry(AdmissionOrigin::Rpc, high)
-            .expect("high in");
+            .expect("high in")
+            .into_mutation();
 
         assert_eq!(
             result.changes.len(),
@@ -1372,7 +1519,8 @@ mod tests {
         let second_handle = std::thread::spawn(move || {
             let result = second
                 .insert_entry(AdmissionOrigin::Rpc, entry(&tx(21)))
-                .expect("second in");
+                .expect("second in")
+                .into_mutation();
             let _ = done_tx.send(result);
         });
 
@@ -1413,7 +1561,7 @@ mod tests {
     struct ReentrantObserver {
         gateway: Mutex<Option<Arc<MempoolGateway>>>,
         stream: Mutex<Vec<u64>>,
-        nested: Mutex<Vec<MutationResult>>,
+        nested: Mutex<Vec<crate::mutation::InsertionOutcome>>,
     }
 
     impl MempoolObserver for ReentrantObserver {
@@ -1465,12 +1613,17 @@ mod tests {
             1,
             "the nested mutation completed and returned"
         );
+        let nested = nested
+            .first()
+            .map(|outcome: &InsertionOutcome| outcome.clone().into_mutation());
+        let Some(nested) = nested else {
+            panic!("nested mutation must be recorded");
+        };
         assert_eq!(
-            nested[0].sequence_base, 2,
+            nested.sequence_base, 2,
             "the nested mutation took the next sequence"
         );
-        assert_eq!(nested[0].len(), 1);
-        drop(nested);
+        assert_eq!(nested.len(), 1);
         assert_eq!(
             *observer.stream.lock(),
             vec![1, 2],
@@ -1699,15 +1852,14 @@ mod tests {
         assert!(!gateway.read().contains_txid(&parent_txid));
         assert!(!gateway.read().contains_txid(&child.txid()));
     }
-
     #[test]
     fn reconsider_disconnected_withholds_descendants_of_an_immediately_evicted_parent() {
         let observer = Arc::new(RecordingObserver::default());
         // A 150-byte pool already holding 100 vbytes of high-fee filler: the
-        // parent's own insert succeeds and then immediately evicts the parent
-        // as the lowest-fee package. The child pays far more than everything
-        // else, so once admitted it fits and survives — only the parent's
-        // eviction inside the parent's own MutationResult can keep it out.
+        // parent is inserted, the post-insert size-limit trim immediately
+        // sheds the parent, and the insert returns Ok(ShedAfterCommit)
+        // carrying the committed record. The child is withheld because the
+        // parent txid is in the refused set.
         let gateway = MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits {
                 min_relay_fee_sat_per_kvb: 0,
@@ -1739,18 +1891,24 @@ mod tests {
         assert_eq!(
             committed.len(),
             1,
-            "only the parent's insert commits; the child is withheld"
+            "the parent insert committed and shed; the record is returned"
         );
         assert_eq!(
             committed[0].changes,
             vec![
                 crate::mutation::change(&parent_txid, MutationOutcome::Accepted),
-                crate::mutation::change(&parent_txid, removed(RemovalReason::PolicyEviction)),
+                crate::mutation::change(
+                    &parent_txid,
+                    MutationOutcome::Removed(RemovalReason::PolicyEviction)
+                ),
             ],
-            "the parent was admitted and immediately evicted by its own insert"
+            "the parent's committed record includes its own acceptance and removal"
         );
         let pool = gateway.read();
-        assert!(!pool.contains_txid(&parent_txid));
+        assert!(
+            !pool.contains_txid(&parent_txid),
+            "the parent was evicted by the size limit"
+        );
         assert!(
             !pool.contains_txid(&child_txid),
             "an evicted parent must not admit its descendant"
@@ -1759,18 +1917,22 @@ mod tests {
             pool.contains_txid(&filler_txid),
             "no orphan replaced the parent"
         );
+        // The insert bumped the sequence even though the entry was evicted.
         assert_eq!(
             pool.sequence_number(),
             3,
-            "the withheld child assigns nothing"
+            "the parent's insert advanced the sequence; the child assigns nothing"
         );
         assert_eq!(
-            *observer.seen.lock(),
-            vec![
+            observer.seen.lock().as_slice(),
+            &vec![
                 (hash(&parent_txid), MutationOutcome::Accepted),
-                (hash(&parent_txid), removed(RemovalReason::PolicyEviction)),
-            ],
-            "the parent's two changes publish once each; the child publishes nothing"
+                (
+                    hash(&parent_txid),
+                    MutationOutcome::Removed(RemovalReason::PolicyEviction)
+                ),
+            ][..],
+            "the shed parent's committed record is published to the observer"
         );
     }
 
@@ -1785,6 +1947,271 @@ mod tests {
         assert!(committed.is_empty());
         assert_eq!(gateway.read().sequence_number(), before);
         assert!(observer.seen.lock().is_empty(), "nothing may publish");
+    }
+
+    /// An `insert_entry` that the size-limit trim sheds after commit
+    /// publishes the committed record to the observer, removes the entry,
+    /// and returns `ShedAfterCommit` so callers derive rejection.
+    #[test]
+    fn insert_entry_shed_after_commit_publishes_removal_and_rejects() {
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                max_total_bytes: 150,
+                ..MempoolLimits::default()
+            }))),
+            Some(dyn_observer(&observer)),
+        );
+
+        let filler = tx(70);
+        let filler_txid = filler.txid();
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(filler), 100, 9_000, 1, 7),
+            )
+            .expect("filler in");
+        observer.seen.lock().clear();
+
+        let shed = tx(71);
+        let shed_txid = shed.txid();
+        let outcome = gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(shed), 100, 100, 1, 7),
+            )
+            .expect("the insert committed");
+
+        assert!(
+            outcome.is_shed(),
+            "a trimmed insert must not report Accepted: {outcome:?}"
+        );
+        assert!(
+            !gateway.read().contains_txid(&shed_txid),
+            "the shed entry must not be in the pool"
+        );
+        assert!(gateway.read().contains_txid(&filler_txid), "filler stays");
+        assert_eq!(
+            outcome.mutation().changes,
+            vec![
+                crate::mutation::change(&shed_txid, MutationOutcome::Accepted),
+                crate::mutation::change(
+                    &shed_txid,
+                    MutationOutcome::Removed(RemovalReason::PolicyEviction)
+                ),
+            ],
+            "the record carries the shed entry's acceptance and removal"
+        );
+        assert_eq!(
+            observer.seen.lock().as_slice(),
+            &vec![
+                (hash(&shed_txid), MutationOutcome::Accepted),
+                (
+                    hash(&shed_txid),
+                    MutationOutcome::Removed(RemovalReason::PolicyEviction)
+                ),
+            ][..],
+            "the observer sees the committed shed record"
+        );
+    }
+
+    /// A `replace_transaction` that the size-limit trim sheds after commit
+    /// publishes the conflict removals and its own acceptance/removal to
+    /// the observer, removes the victims and the replacement, and returns
+    /// `ShedAfterCommit` so callers derive rejection.
+    #[test]
+    fn replace_transaction_shed_after_commit_publishes_removals_and_rejects() {
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                max_total_bytes: 1_000,
+                ..MempoolLimits::default()
+            }))),
+            Some(dyn_observer(&observer)),
+        );
+
+        // Shared prevout: original and replacement conflict.
+        let prev = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x73; 32])), 0);
+
+        let original = prevout_spend(prev, 1_000, 0x51);
+        let original_txid = original.txid();
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7),
+            )
+            .expect("original in");
+
+        let bystander = tx(72);
+        let bystander_txid = bystander.txid();
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(bystander), 850, 8_500_000, 1, 7),
+            )
+            .expect("bystander in");
+
+        // After evicting the original (100 vbytes freed), the pool has
+        // 850 + 900 = 1750 > 1000. The trim evicts the lowest fee-rate
+        // package, which is the replacement itself (111 sat/vB) below the
+        // bystander (10_000 sat/vB), so the replacement is shed.
+        let replacement = prevout_spend(prev, 100, 0x52);
+        let replacement_txid = replacement.txid();
+        observer.seen.lock().clear();
+
+        let outcome = gateway
+            .replace_transaction(
+                AdmissionOrigin::Rpc,
+                crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1),
+                2,
+                7,
+                4,
+            )
+            .expect("the replacement committed");
+
+        assert!(
+            outcome.is_shed(),
+            "a trimmed replacement must not report Accepted: {outcome:?}"
+        );
+        let pool = gateway.read();
+        assert!(
+            !pool.contains_txid(&original_txid),
+            "the conflict was removed"
+        );
+        assert!(
+            !pool.contains_txid(&replacement_txid),
+            "the replacement was shed"
+        );
+        assert!(pool.contains_txid(&bystander_txid), "the bystander stays");
+
+        assert_eq!(
+            outcome.mutation().removed_txids(),
+            vec![original_txid, replacement_txid],
+            "the record carries the conflict removal then the shed replacement"
+        );
+        assert_eq!(
+            outcome.mutation().changes,
+            vec![
+                crate::mutation::change(
+                    &original_txid,
+                    MutationOutcome::Removed(RemovalReason::Replaced)
+                ),
+                crate::mutation::change(&replacement_txid, MutationOutcome::Accepted),
+                crate::mutation::change(
+                    &replacement_txid,
+                    MutationOutcome::Removed(RemovalReason::PolicyEviction)
+                ),
+            ],
+            "the record is conflict removal, then acceptance, then eviction"
+        );
+        assert_eq!(
+            observer.seen.lock().as_slice(),
+            &vec![
+                (
+                    hash(&original_txid),
+                    MutationOutcome::Removed(RemovalReason::Replaced)
+                ),
+                (hash(&replacement_txid), MutationOutcome::Accepted),
+                (
+                    hash(&replacement_txid),
+                    MutationOutcome::Removed(RemovalReason::PolicyEviction)
+                ),
+            ][..],
+            "the observer sees every committed change"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Finality evaluation at the next block height.
+    // ---------------------------------------------------------------------------
+    /// A transaction with `lock_time == tip_height` and a non-final input
+    /// sequence is admissible: it is final in the next block (`height + 1`),
+    /// exactly Core's `CheckFinalTxAtTip` — `IsFinalTx` returns true as soon
+    /// as the lock time is below the block height, before the sequence rule.
+    #[test]
+    fn admit_transaction_accepts_locktime_equal_to_tip_at_next_height() {
+        let gateway = gateway_with(None);
+        let mut tx = standard_tx(0x80);
+        tx.lock_time = 100;
+        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+
+        let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
+        request.height = 100;
+
+        let result = gateway.admit_transaction(request);
+        assert!(
+            matches!(result, Ok(AdmitOutcome::Committed(_))),
+            "lock_time == tip_height must be final in the next block: {result:?}"
+        );
+    }
+
+    /// A transaction with `lock_time == tip_height + 1` is still non-final at
+    /// the next block height.
+    #[test]
+    fn admit_transaction_rejects_locktime_one_past_tip() {
+        let gateway = gateway_with(None);
+        let mut tx = standard_tx(0x81);
+        tx.lock_time = 101;
+        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+
+        let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
+        request.height = 100;
+
+        let result = gateway.admit_transaction(request);
+        assert!(
+            matches!(result, Err(AdmitError::Consensus)),
+            "lock_time == tip_height + 1 must still be non-final: {result:?}"
+        );
+    }
+
+    /// A timestamp-locked transaction is evaluated against the caller-supplied
+    /// applied-tip median-time-past cutoff, not a header tip that may run
+    /// ahead.
+    #[test]
+    fn admit_transaction_rejects_locktime_final_only_under_header_mtp() {
+        let gateway = gateway_with(None);
+        let mut tx = standard_tx(0x82);
+        // Timestamp-based lock time, above the threshold.
+        tx.lock_time = 1_800_000_000;
+        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+
+        let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
+        // The applied-tip MTP is lower than the header-tip MTP; a tx with
+        // lock_time between them is rejected when the cutoff comes from the
+        // applied tip and would be admitted when it comes from the header tip.
+        request.locktime_cutoff = 1_700_000_000;
+
+        let result = gateway.admit_transaction(request);
+        assert!(
+            matches!(result, Err(AdmitError::Consensus)),
+            "lock_time above applied-tip MTP must be non-final: {result:?}"
+        );
+    }
+
+    /// A transaction whose input script fails execution must be rejected
+    /// before the pool mutates. Core runs its `PolicyScriptChecks` inside
+    /// `AcceptToMemoryPool` (validation.cpp, "This is done last to help
+    /// prevent CPU exhaustion denial-of-service attacks"); deferring scripts
+    /// to block connection let an unrelayable transaction occupy pool
+    /// capacity and relay.
+    #[test]
+    fn admit_transaction_rejects_a_script_invalid_input() {
+        let gateway = gateway_with(None);
+        let tx = standard_tx(0x83);
+
+        let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
+        // OP_FALSE: the input script evaluates to false, so the spend is
+        // invalid under any verify flags.
+        request.prevouts[0].1.script_pubkey = vec![0x00];
+
+        let result = gateway.admit_transaction(request);
+        assert!(
+            matches!(result, Err(AdmitError::Consensus)),
+            "a script-invalid spend must fail verification: {result:?}"
+        );
+        assert!(gateway.read().is_empty());
     }
 
     #[test]
@@ -1943,6 +2370,16 @@ mod tests {
                 sigop_cost: 0,
                 missing_inputs: false,
             },
+            prevouts: vec![(
+                replacement.inputs[0].previous_output,
+                TxOut {
+                    value: 10_000,
+                    // OP_TRUE: anyone-can-spend, so script verification passes
+                    // and only the RBF rules are under test.
+                    script_pubkey: vec![0x51],
+                },
+            )],
+            locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
             height: 1,
@@ -2283,5 +2720,97 @@ mod tests {
             ],
             "mined is BlockInclusion, conflict and descendant are Conflict, in deterministic order"
         );
+    }
+
+    /// A non-coinbase transaction with no resolved prevouts must be rejected
+    /// by consensus verification, not admitted to the mempool.
+    #[test]
+    fn admit_transaction_rejects_a_transaction_with_no_prevouts() {
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                ..MempoolLimits::default()
+            }))),
+            None,
+        );
+        // A standard transaction with one input, but the caller passes empty
+        // prevouts — simulating a caller that did not resolve inputs. Policy
+        // passes (missing_inputs=false, standard output, fee>0), but the
+        // consensus gate rejects because prevouts are empty.
+        let tx = standard_tx(0x44);
+        let generation = gateway.stable_generation().expect("generation is even");
+        let sequence = gateway.read().sequence_number();
+        let request = AdmissionRequest {
+            tx: Arc::new(tx),
+            context: PackageTxContext {
+                fee: 1_000,
+                vsize: 100,
+                sigop_cost: 0,
+                missing_inputs: false,
+            },
+            prevouts: Vec::new(),
+            locktime_cutoff: 0,
+            max_feerate_sat_per_kvb: None,
+            time: 1,
+            height: 1,
+            origin: AdmissionOrigin::Rpc,
+            expected_generation: generation,
+            expected_sequence: sequence,
+        };
+        let result = gateway.admit_transaction(request);
+        assert!(
+            matches!(result, Err(AdmitError::Consensus)),
+            "a non-coinbase tx with no prevouts must be rejected: {result:?}"
+        );
+        assert!(gateway.read().is_empty());
+    }
+    /// A transaction spending the same prevout twice must be rejected by
+    /// consensus verification. Policy does not check for duplicate inputs
+    /// and pool insertion admits the double claim, so only the step-4b
+    /// `verify_transaction` call can produce this rejection: any
+    /// other outcome fails this assertion. Observed red with the guard
+    /// neutered (the double-spend committed as `Accepted`).
+    #[test]
+    fn admit_transaction_rejects_duplicate_inputs_as_consensus() {
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+                min_relay_fee_sat_per_kvb: 0,
+                ..MempoolLimits::default()
+            }))),
+            None,
+        );
+        let mut tx = standard_tx(0x45);
+        tx.inputs.push(tx.inputs[0].clone());
+        let generation = gateway.stable_generation().expect("generation is even");
+        let sequence = gateway.read().sequence_number();
+        let request = AdmissionRequest {
+            tx: Arc::new(tx.clone()),
+            context: PackageTxContext {
+                fee: 1_000,
+                vsize: 100,
+                sigop_cost: 0,
+                missing_inputs: false,
+            },
+            prevouts: vec![(
+                tx.inputs[0].previous_output,
+                TxOut {
+                    value: 11_000,
+                    script_pubkey: Vec::new(),
+                },
+            )],
+            locktime_cutoff: 0,
+            max_feerate_sat_per_kvb: None,
+            time: 1,
+            height: 1,
+            origin: AdmissionOrigin::Rpc,
+            expected_generation: generation,
+            expected_sequence: sequence,
+        };
+        let result = gateway.admit_transaction(request);
+        assert!(
+            matches!(result, Err(AdmitError::Consensus)),
+            "duplicate inputs must fail consensus verification: {result:?}"
+        );
+        assert!(gateway.read().is_empty());
     }
 }

@@ -280,7 +280,7 @@ struct VectorRow {
 /// vectors that are invalid only under policy flags (like `CONST_SCRIPTCODE`,
 /// `CLEANSTACK`, `MINIMALDATA`, `DISCOURAGE_*`) will be accepted by the
 /// kernel — which is correct consensus behavior, not a mismatch. We skip
-/// those vectors in the tx_invalid lane to avoid false positives.
+/// those vectors in the `tx_invalid` lane to avoid false positives.
 fn flags_are_mandatory_only(flags: VerifyFlags) -> bool {
     flags.bits() & !VerifyFlags::MANDATORY.bits() == 0
 }
@@ -311,7 +311,9 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
             continue; // fails CheckTransaction, not script verification
         }
 
-        let tx_hex = arr[1].as_str().expect("tx hex should be string");
+        let tx_hex = arr[1]
+            .as_str()
+            .ok_or_else(|| format!("row {index}: tx hex should be string"))?;
         let tx_bytes = hex_to_bytes(tx_hex).map_err(|e| format!("row {index}: bad tx hex: {e}"))?;
         let tx: Tx = deserialize(&tx_bytes)
             .map_err(|e| format!("row {index}: tx should deserialize: {e}"))?;
@@ -319,7 +321,9 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
         let flags = VerifyFlags::from_core_names(flags_str)
             .map_err(|e| format!("row {index}: bad flags: {e}"))?;
 
-        let prevout_specs = arr[0].as_array().expect("prevout specs should be array");
+        let prevout_specs = arr[0]
+            .as_array()
+            .ok_or_else(|| format!("row {index}: prevout specs should be array"))?;
         let mut prevouts = Vec::with_capacity(prevout_specs.len());
         for spec in prevout_specs {
             let spec = spec
@@ -342,7 +346,10 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
             let script_asm = spec[2]
                 .as_str()
                 .ok_or_else(|| format!("row {index}: bad prevout script"))?;
-            let amount = spec.get(3).and_then(|v| v.as_u64()).unwrap_or(0);
+            let amount = spec
+                .get(3)
+                .and_then(sonic_rs::JsonValueTrait::as_u64)
+                .unwrap_or(0);
 
             let script_pubkey = parse_core_asm(script_asm)
                 .map_err(|e| format!("row {index}: bad prevout script asm: {e}"))?;
@@ -400,13 +407,13 @@ fn kernel_verdict_matches_tx_valid_vectors() -> TestResult {
 
     for row in &mandatory_rows {
         let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
-        if actual != row.expected {
+        if actual == row.expected {
+            accepted += 1;
+        } else {
             mismatches.push(format!(
                 "row {}: expected Accept, kernel rejected",
                 row.row_index,
             ));
-        } else {
-            accepted += 1;
         }
     }
 
@@ -417,13 +424,12 @@ fn kernel_verdict_matches_tx_valid_vectors() -> TestResult {
         policy_flag_rows.len(),
     );
 
-    if !mismatches.is_empty() {
-        panic!(
-            "kernel rejected {} tx_valid vectors that it should have accepted:\n{}",
-            mismatches.len(),
-            mismatches.join("\n")
-        );
-    }
+    assert!(
+        mismatches.is_empty(),
+        "kernel rejected {} tx_valid vectors that it should have accepted:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
     Ok(())
 }
 
@@ -446,13 +452,13 @@ fn kernel_verdict_matches_tx_invalid_vectors() -> TestResult {
 
     for row in &mandatory_rows {
         let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
-        if actual != row.expected {
+        if actual == row.expected {
+            rejected += 1;
+        } else {
             mismatches.push(format!(
                 "row {}: expected Reject, kernel accepted",
                 row.row_index,
             ));
-        } else {
-            rejected += 1;
         }
     }
 
@@ -462,19 +468,18 @@ fn kernel_verdict_matches_tx_invalid_vectors() -> TestResult {
         mandatory_rows.len(),
     );
 
-    if !mismatches.is_empty() {
-        panic!(
-            "kernel accepted {} tx_invalid vectors that it should have rejected:\n{}",
-            mismatches.len(),
-            mismatches.join("\n")
-        );
-    }
+    assert!(
+        mismatches.is_empty(),
+        "kernel accepted {} tx_invalid vectors that it should have rejected:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
     Ok(())
 }
 
 /// Proves the assertions are non-vacuous by feeding a deliberately wrong
 /// expected verdict: if we assert a known-valid tx should be rejected, the
-/// test must go RED. This test constructs a tx_valid row, flips the expected
+/// test must go RED. This test constructs a `tx_valid` row, flips the expected
 /// verdict to Reject, and confirms the assertion logic catches the mismatch.
 #[test]
 fn non_vacuous_wrong_verdict_goes_red() -> TestResult {

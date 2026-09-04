@@ -18,6 +18,8 @@ pub mod bitcoin_conf_compat;
 ///
 /// Bridges in-memory block records to the index crate's BlockSource trait.
 pub mod block_source;
+/// RPC status for concrete node-owned capabilities.
+mod capabilities;
 mod checkpoint;
 mod checkpoint_fs;
 /// Periodic chainstate checkpoint publication during sync.
@@ -31,10 +33,6 @@ pub mod crash_recovery;
 pub mod embed;
 /// Central synchronous event loop.
 pub mod event_loop;
-/// Extension registry: descriptors, validation, capability report.
-pub mod extensions;
-/// BIP157/158 filter index reconciliation worker and query engine.
-mod filterindex_worker;
 /// Block import pipeline.
 pub mod import;
 /// Tracing initialization.
@@ -81,7 +79,9 @@ pub mod zmq_publisher;
 
 pub use bitcoin_rs_primitives::Network;
 pub use block_source::NodeBlockSource;
-pub use config::{Auth, NodeConfig, RuntimeInputs, ScriptIndexMode, UserConfig};
+pub use config::{
+    Auth, NodeConfig, NotificationConfig, RuntimeInputs, ScriptIndexMode, UserConfig,
+};
 pub use embed::{Node, NodeError, SyncProgress};
 pub use mining::{GenerationKey, MiningCoordinator};
 pub use p2p_chain::NodeP2pChainQuery;
@@ -92,4 +92,6 @@ pub use txindex_worker::TxIndexRuntime;
 pub use utxo_view::UtxoSetView;
 #[cfg(feature = "zmq")]
 pub use zmq_publisher::SocketZmqPublisher;
-pub use zmq_publisher::{NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqPublisher};
+pub use zmq_publisher::{
+    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
+};

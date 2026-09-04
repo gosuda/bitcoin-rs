@@ -57,17 +57,8 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
 - The transaction index is the first consumer: per-capability watermarks
   select its rollback/forward legs, and its wake is the coalesced revision
   counter (`crates/node/src/txindex_worker.rs`).
-- The BIP157/158 filter index is the second consumer
-  (`crates/node/src/filterindex_worker.rs` over the
-  `crates/ext-blockfilterindex` namespace schema). It proves the shape is
-  real: one cursor, one atomic batch per block, wake on a hint or a poll
-  tick.
-- Hash-addressed rows survive disconnects by construction. A consumer whose
-  rows are hash-keyed (filter and header rows) rewinds only its active
-  pointer and cursor to the common ancestor and never deletes rows;
-  re-derived rows are idempotent overwrites. A consumer whose rows embed the
-  height (txindex position rows) deletes exactly its own rows during
-- rollback, guarded by the watermark identity.
+- The txindex worker is the current consumer. Its height-keyed position rows
+  delete exactly their own rows during rollback, guarded by watermark identity.
 - A consumer that cannot obtain a required body reports failure and stops;
   it never blocks the apply path, and a restart re-plans from the persisted
   pointer.
@@ -99,7 +90,7 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
 ## Live gaps
 
 - **Cross-crate lifecycle boundary**: Slimming `crates/node` orchestration and shifting domain-owned mechanics to their respective crates is tracked under #217 (open).
-- **Crash/reorg recovery invariants**: Explicit system-level convergence rules across chainstate checkpoints, block data, and secondary indexes are tracked under #209 (open). The recovery-meta sidecar protocol (`crates/node/src/crash_recovery.rs`) and the recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) are proven by G11; full-stack `kill -9` convergence with real block-body re-application is not yet exercised by the gate.
+- **Full-stack crash convergence**: System-level convergence rules across chainstate checkpoints, block data, and secondary indexes are normative in [recovery.md](recovery.md). The recovery-meta sidecar protocol (`crates/node/src/crash_recovery.rs`) and the recovery-evidence bounded current/previous file protocol (`crates/node/src/recovery_evidence.rs`) are unit-proven; full-stack `kill -9` convergence with real block-body re-application is not yet exercised by a gate.
 
 ## Proven by
 
@@ -108,21 +99,10 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   `record_drops_hints_when_channel_full`,
   `active_chain_snapshot_starts_at_genesis_on_fresh_node`,
   `active_chain_snapshot_anchors_at_restored_tip_after_restart`.
-- `crates/node/src/txindex_worker_reconcile_tests.rs`:
-  `forward_commit_overlapping_tip_extension_repairs_on_next_pass`,
-  `forward_commit_overlapping_rival_reorg_repairs_on_next_pass`,
-  `snapshot_identity_changes_reconcile_from_the_cursor_position`,
-  `missing_disconnected_body_resets_and_rebuilds_selected_capabilities`,
-  `stale_script_index_reset_preserves_ready_tx_lookup_then_rebuilds`,
-  `consumer_cursor_round_trips_bytes`.
-- `crates/node/tests/extensions.rs`:
-  `filter_extension_tip_equivalence_disabled_vs_enabled`,
-  `filter_extension_restarts_reconcile_from_persisted_pointer`,
-  `filter_extension_apply_outpaces_a_lagging_consumer`.
-- `crates/node/src/filterindex_worker.rs` tests:
-  `worker_indexes_genesis_then_child_with_retained_rows`,
-  `rewind_keeps_hash_addressed_rows`,
-  `store_write_failure_is_reported_not_swallowed`.
+- `crates/node/src/txindex_worker_recovery_tests.rs`:
+  `shallow_reorg_rewinds_to_common_ancestor_then_replays`,
+  `tip_change_during_rebuild_converges_on_new_tip`,
+  `missing_disconnected_body_routes_rewind_to_rebuild`.
 - `crates/node/src/apply.rs`:
   `a_clean_disconnect_leaves_no_in_flight_marker`,
   `chain_change_proof_finish_restores_even_generation`,

@@ -14,11 +14,11 @@ use metrics::{
     SharedString, Unit,
 };
 
-/// The filters share of the minimum 16 MiB budget — smaller than every
-/// backend's historical floor, so configuring it verbatim is the regression.
-fn filters_share() -> u64 {
-    let share = split_cache_budget(MIN_DBCACHE_BYTES, true, true)[2].bytes;
-    assert_eq!(share, 1_677_721, "filters keeps a floored 10% of 16 MiB");
+/// The txindex share of the minimum 16 MiB budget, so configuring it verbatim
+/// keeps the backend from silently raising an allocated namespace budget.
+fn txindex_share() -> u64 {
+    let share = split_cache_budget(MIN_DBCACHE_BYTES, true)[1].bytes;
+    assert_eq!(share, 3_355_443, "txindex keeps a floored 20% of 16 MiB");
     share
 }
 
@@ -167,7 +167,7 @@ fn assert_gauge_eq(recorder: &LabeledRecorder, key: &str, expected: u64) {
 fn fjall_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let store = bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), filters_share())?;
+    let store = bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), txindex_share())?;
     metrics::with_local_recorder(&recorder, || {
         let Ok(()) = put_one_row(&store) else {
             panic!("fjall default write failed")
@@ -193,7 +193,7 @@ fn fjall_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Er
 fn fjall_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let share = filters_share();
+    let share = txindex_share();
     metrics::with_local_recorder(&recorder, || {
         let Ok(_store) = bitcoin_rs_storage::FjallStore::open_with_cache(dir.path(), share) else {
             panic!("fjall open with budgeted share failed")
@@ -208,7 +208,7 @@ fn fjall_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::err
 fn redb_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let store = bitcoin_rs_storage::RedbStore::open_with_cache(dir.path(), filters_share())?;
+    let store = bitcoin_rs_storage::RedbStore::open_with_cache(dir.path(), txindex_share())?;
     metrics::with_local_recorder(&recorder, || {
         let mut deferred = store.new_batch();
         deferred.put(ColumnFamily::BlockBodies, b"deferred-key", b"value");
@@ -236,7 +236,7 @@ fn redb_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Err
 fn redb_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let share = filters_share();
+    let share = txindex_share();
     metrics::with_local_recorder(&recorder, || {
         let Ok(_store) = bitcoin_rs_storage::RedbStore::open_with_cache(dir.path(), share) else {
             panic!("redb open with budgeted share failed")
@@ -252,7 +252,7 @@ fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim()
 -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let share = filters_share();
+    let share = txindex_share();
     metrics::with_local_recorder(&recorder, || {
         let Ok(_store) = bitcoin_rs_storage::open_redb_tx_index_store_with_cache(dir.path(), share)
         else {
@@ -268,7 +268,7 @@ fn redb_txindex_wrapper_configures_the_budgeted_share_verbatim()
 fn rocksdb_deferred_and_durable_writes_count_once() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let store = bitcoin_rs_storage::RocksDbStore::open_with_cache(dir.path(), filters_share())?;
+    let store = bitcoin_rs_storage::RocksDbStore::open_with_cache(dir.path(), txindex_share())?;
     metrics::with_local_recorder(&recorder, || {
         let Ok(()) = put_one_row(&store) else {
             panic!("rocksdb default write failed")
@@ -302,7 +302,7 @@ fn rocksdb_deferred_and_durable_writes_count_once() -> Result<(), Box<dyn std::e
 fn rocksdb_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let share = filters_share();
+    let share = txindex_share();
     metrics::with_local_recorder(&recorder, || {
         let Ok(_store) = bitcoin_rs_storage::RocksDbStore::open_with_cache(dir.path(), share)
         else {
@@ -318,7 +318,7 @@ fn rocksdb_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::e
 fn mdbx_durable_write_counts_once() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let store = bitcoin_rs_storage::MdbxStore::open_with_cache(dir.path(), filters_share())?;
+    let store = bitcoin_rs_storage::MdbxStore::open_with_cache(dir.path(), txindex_share())?;
     metrics::with_local_recorder(&recorder, || {
         let Ok(()) = put_one_row(&store) else {
             panic!("mdbx default write failed")
@@ -346,7 +346,7 @@ fn mdbx_durable_write_counts_once() -> Result<(), Box<dyn std::error::Error>> {
 fn mdbx_configures_the_budgeted_share_verbatim() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;
-    let share = filters_share();
+    let share = txindex_share();
     metrics::with_local_recorder(&recorder, || {
         let Ok(_store) = bitcoin_rs_storage::MdbxStore::open_with_cache(dir.path(), share) else {
             panic!("mdbx open with budgeted share failed")

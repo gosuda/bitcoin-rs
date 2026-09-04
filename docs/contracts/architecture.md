@@ -18,8 +18,8 @@ Owners:
                                        ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ Layer 3: Surface                                                        │
-  │   bitcoin-rs-rpc, bitcoin-rs-ext-api, bitcoin-rs-ext-blockfilterindex    │
-  │   - Protocol boundaries, RPC dispatch, extension contracts/adapters     │
+  │   bitcoin-rs-rpc                                                       │
+  │   - Protocol boundaries and RPC dispatch                               │
   └────────────────────────────────────┬────────────────────────────────────┘
                                        ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
@@ -63,9 +63,8 @@ Owners:
     `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
     block index records, undo storage, and UTXO snapshots. `mining` sits in
     Layer 2 because it depends on `mempool` for candidate selection.
-  - **Layer 3 (Surface)**: `bitcoin-rs-rpc`, `bitcoin-rs-ext-api`,
-    `bitcoin-rs-ext-blockfilterindex`. External wire protocols, RPC handlers,
-    and extension contracts.
+  - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
+    handlers.
   - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`. Daemon assembly,
     subsystem lifecycle coordination, and CLI binary entry points.
 - **Explicit non-goal**: Layer numbers do not justify speculative new crates or
@@ -113,10 +112,10 @@ Owners:
   node runtime.
 - Domain mechanics belong to domain crates: consensus rules in consensus/script,
   mempool admission and mutation sequencing in mempool, connection lifecycle in
-  p2p, template assembly in mining, and extension schemas in ext crates.
+  p2p, template assembly in mining, and index schemas in their owning crates.
 - `bitcoin-rs-node` owns runtime startup/shutdown sequencing, configuration
   parsing, and process-level cache budgeting (`dbcache` distribution across
-  chainstate, txindex, and filter namespaces).
+  chainstate and txindex namespaces).
 
 ### `ARCH-06`: Hierarchy change and exception process
 

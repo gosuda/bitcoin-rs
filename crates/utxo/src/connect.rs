@@ -1,5 +1,4 @@
-//! UTXO connect accounting: building the mutation, undo, and value totals
-//! for one block from its transactions and a resolved set of spent prevouts.
+//! UTXO connect accounting for one block.
 //!
 //! The node crate coordinates *when* to connect a block and *what* resolved
 //! prevouts to pass; this module owns the mechanics of walking the block's
@@ -96,7 +95,7 @@ pub trait SpentOutputLookup {
 ///   where a coinbase reuses a still-live txid.
 /// - `max_script_size`: consensus limit; outputs whose script exceeds this are
 ///   not added to the UTXO set.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn build_block_changes<'a>(
     block: &'a Block,
     height: u32,
@@ -130,11 +129,11 @@ pub fn build_block_changes<'a>(
             // never enters the UTXO set, but the transaction that created it
             // still paid for it, so it counts against the fee.
             let value = txout.value;
-            let vout = u32::try_from(vout_idx)
-                .map_err(|_| BlockChangeError::HeightOverflow(height))?;
+            let vout =
+                u32::try_from(vout_idx).map_err(|_| BlockChangeError::HeightOverflow(height))?;
             let outpoint = OutPoint::new(txid, vout);
-            let same_block = net_same_block_spends
-                && same_block_spent.is_some_and(|s| s.contains(&outpoint));
+            let same_block =
+                net_same_block_spends && same_block_spent.is_some_and(|s| s.contains(&outpoint));
             if coinbase {
                 totals.coinbase_out = totals
                     .coinbase_out

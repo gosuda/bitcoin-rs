@@ -37,7 +37,6 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-
 /// The load direction: v4 bytes must still decode to the same consensus values.
 #[test]
 fn a_v4_snapshot_loads_to_the_hash_and_trailer_it_was_written_with() {

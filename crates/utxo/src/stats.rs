@@ -1,5 +1,4 @@
-//! Running UTXO-set statistics over the live set: `MuHash3072`, incremental
-//! per-block [`CoinStats`], their persistence, and the disconnect rewind.
+//! Running UTXO-set statistics over the live set.
 //!
 //! This is derived computation over the authoritative UTXO state that
 //! [`crate::set`] owns, which is why it lives here rather than in a crate of

@@ -171,7 +171,6 @@ Artifact: rs-parprep-current-control-r1 (retired). Stage timers are nested and a
 | `node.apply_block.bip68_seconds` | 150,001 | 0.003535 |
 | `node.apply_block.script_verify_coinbase_only_seconds` | 82,110 | 0.002723 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.001598 |
-| `node.apply_block.filter_index_seconds` | 150,001 | 0.001587 |
 
 ### Current-campaign candidate, 0–150,000
 
@@ -201,7 +200,6 @@ Artifact: rs-parprep-current-candidate-r2 (retired). Stage timers are nested and
 | `node.apply_block.bip68_seconds` | 150,001 | 0.004973 |
 | `node.apply_block.script_verify_coinbase_only_seconds` | 82,110 | 0.002540 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.001991 |
-| `node.apply_block.filter_index_seconds` | 150,001 | 0.001938 |
 
 ### Long local replay, 0–642,000
 
@@ -226,7 +224,6 @@ Artifact: rs-spendable-local-nobody-a014 (retired). Stage timers are nested and 
 | `node.apply_block.coin_stats_finish_seconds` | 642,001 | 0.114629 |
 | `node.apply_block.mempool_evict_seconds` | 642,001 | 0.065607 |
 | `node.apply_block.block_body_persist_seconds` | 642,001 | 0.039602 |
-| `node.apply_block.filter_index_seconds` | 642,001 | 0.024323 |
 | `node.apply_block.tx_index_ingest_seconds` | 642,001 | 0.007908 |
 | `node.apply_block.script_verify_coinbase_only_seconds` | 88,956 | 0.005354 |
 
@@ -255,7 +252,6 @@ Artifact: rs-replay-150k-parverify (retired). Stage timers are nested and are no
 | `node.apply_block.script_verify_coinbase_only_seconds` | 82,110 | 0.012641 |
 | `node.apply_block.bip68_seconds` | 150,001 | 0.009737 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.005914 |
-| `node.apply_block.filter_index_seconds` | 150,001 | 0.005016 |
 
 ### Kernel full-validation replay, 0–150,000
 
@@ -282,7 +278,6 @@ Artifact: rs-replay-150k-kernel (retired). Stage timers are nested and are not a
 | `node.apply_block.bip68_seconds` | 150,001 | 0.010170 |
 | `node.apply_block.script_verify_coinbase_only_seconds` | 82,110 | 0.008839 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.006004 |
-| `node.apply_block.filter_index_seconds` | 150,001 | 0.004790 |
 
 ## Harness
 

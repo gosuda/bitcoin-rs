@@ -16,6 +16,7 @@ bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
 ] }
 bitcoin-rs-p2p = { path = "../crates/p2p", default-features = false }
 bitcoin-rs-script = { path = "../crates/script", default-features = false }
+bitcoin-rs-primitives = { path = "../crates/primitives" }
 bitcoin-rs-utxo = { path = "../crates/utxo" }
 
 [[bin]]

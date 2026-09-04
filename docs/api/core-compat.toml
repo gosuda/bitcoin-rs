@@ -1,0 +1,461 @@
+# Bitcoin Core compatibility manifest
+#
+# The machine-readable inventory #78 scope item 1 asks for: one entry per RPC
+# method, REST route and ZMQ topic this node exposes, each with the status it is
+# claimed at and what has actually checked that claim.
+#
+# THIS FILE IS ENFORCED, NOT DESCRIBED. `crates/rpc/src/compat_manifest.rs`
+# embeds it at compile time and cross-checks it against the dispatcher, the
+# REST router, the ZMQ topic table and `Cargo.lock`. Adding a method without
+# an entry here fails the test suite; so does an entry for a method that does
+# not dispatch, and so does bumping the kernel crate without revisiting the
+# pinned reference below.
+#
+# Anything absent from this file is `not_implemented` and answers JSON-RPC
+# -32601. That is asserted rather than assumed -- see
+# `an_unlisted_method_is_method_not_found`.
+
+[reference]
+# The Bitcoin Core revision every compatibility claim in this file is made
+# against. Not a released Core version: 31.99 is Core's master convention for
+# "after 31.x, before 32.0", so this is a pre-release snapshot and a claim made
+# against it is a claim about master, not about anything an operator can install
+# from a release tarball. Said plainly because a compatibility contract that
+# quietly points at a moving target is worse than none.
+core_version = "31.99.0"
+# Where that revision comes from, and what makes the pin real: the node links
+# libbitcoinkernel built from this tree, so the pin is load-bearing rather than
+# documentary. `bitcoinkernel` is the safe wrapper; `libbitcoinkernel-sys`
+# vendors the Core source under `bitcoin/`, and its `CMakeLists.txt` carries the
+# CLIENT_VERSION above.
+kernel_crate = "bitcoinkernel"
+kernel_crate_version = "0.2.1"
+kernel_sys_crate = "libbitcoinkernel-sys"
+kernel_sys_crate_version = "0.3.0"
+# Set when a differential harness exists (#78 scope item 2). Until then no entry
+# in this file may claim `supported`, and the test suite enforces that too.
+differential_harness = false
+
+# Status vocabulary, in the order of decreasing confidence:
+#
+#   supported              implemented AND differentially verified against the
+#                          pinned reference. Nothing qualifies yet; the harness
+#                          does not exist. `differential_harness = false` above
+#                          makes claiming it a test failure.
+#   deviation              implemented, with a known and stated difference from
+#                          the pinned reference. The difference is recorded in
+#                          `deviation` on the entry, not only in prose
+#                          elsewhere, so a client can read it.
+#   implemented_unverified implemented; believed Core-shaped; nothing has
+#                          compared it to the reference. This is the honest
+#                          state of most of the surface today, and #78 lists
+#                          "treating a Core method name as proof of behavioral
+#                          compatibility" as a non-goal -- so the manifest
+#                          refuses to call these supported.
+#   extension              bitcoin-rs-specific surface with no Core
+#                          counterpart. Not a compatibility claim against
+#                          the pinned reference; recorded so the manifest
+#                          names every method the dispatcher answers.
+#   disabled               refused by product policy with a stable error at
+#                          the parameter level (e.g. `deriveaddresses` refuses
+#                          ranged descriptors). No whole method is disabled;
+#                          methods this node does not expose are simply absent
+#                          from this file and answer -32601.
+#   not_implemented        not dispatched; answers -32601.
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC
+# ---------------------------------------------------------------------------
+
+[[rpc]]
+method = "getblockchaininfo"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getdifficulty"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getchaintips"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getchaintxstats"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getblockcount"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getblockhash"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getbestblockhash"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getblock"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getblockheader"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getblockstats"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "verifychain"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "gettxoutsetinfo"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getindexinfo"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "pruneblockchain"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "invalidateblock"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getrawtransaction"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "gettxout"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "gettxoutproof"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "verifytxoutproof"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "sendrawtransaction"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "testmempoolaccept"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "decoderawtransaction"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getmempoolinfo"
+group = "mempool"
+status = "deviation"
+deviation = "`usage` is an estimate of this node's own structures, as Core's is of boost's; the two are not the same number for the same mempool. `maxmempool` bounds the virtual-size sum rather than `usage`, so unlike Core the two fields are not in the same currency and `usage` may exceed `maxmempool`."
+
+[[rpc]]
+method = "getmempoolentry"
+group = "mempool"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getrawmempool"
+group = "mempool"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getmempoolancestors"
+group = "mempool"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getmempooldescendants"
+group = "mempool"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "estimatesmartfee"
+group = "util"
+status = "deviation"
+deviation = "The estimate comes from this node's mempool rather than Core's block-confirmation estimator, and the optional `errors` array Core returns when it cannot meet `conf_target` is never present -- so a caller cannot distinguish an estimate from a fallback."
+
+[[rpc]]
+method = "uptime"
+group = "util"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getrpcinfo"
+group = "util"
+status = "deviation"
+deviation = "`active_commands` is always an empty array and `logpath` an empty string. This node does not track in-flight RPC calls and does not surface its log path here; Core reports both."
+
+[[rpc]]
+method = "getmemoryinfo"
+group = "util"
+status = "deviation"
+deviation = "Only `mode=stats`; `mode=mallocinfo` is refused with -32602 because it requires Core's XML output. The figures are resident set size read from the OS, not Core's locked-pool allocator accounting, so the keys carry a different measurement than the same keys do on Core."
+
+[[rpc]]
+method = "estimaterawfee"
+group = "util"
+status = "deviation"
+deviation = "The `short`, `medium` and `long` horizons all carry the same feerate, with `decay` and `scale` reported as fixed constants. Core computes three independent estimates over three windows. The shape is Core's; the three numbers are not three estimates."
+
+[[rpc]]
+method = "getzmqnotifications"
+group = "util"
+status = "implemented_unverified"
+feature = "zmq"
+
+[[rpc]]
+method = "validateaddress"
+group = "util"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getnetworkinfo"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getpeerinfo"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "ping"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "addnode"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "disconnectnode"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getconnectioncount"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getnettotals"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getaddednodeinfo"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "listbanned"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "setban"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "clearbanned"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "setnetworkactive"
+group = "network"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getblocktemplate"
+group = "mining"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getmininginfo"
+group = "mining"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "submitblock"
+group = "mining"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "prioritisetransaction"
+group = "mining"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getdescriptorinfo"
+group = "wallet"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "deriveaddresses"
+group = "wallet"
+status = "disabled"
+note = "Only non-ranged addr() descriptors are supported; other descriptor forms and ranged descriptors return MethodDisabled. For addr() descriptors, the optional range argument is not honored and returns MethodDisabled rather than expanding addresses."
+
+[[rpc]]
+method = "scantxoutset"
+group = "wallet"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "finalizepsbt"
+group = "wallet"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "combinepsbt"
+group = "wallet"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "createrawtransaction"
+group = "rawtransactions"
+status = "implemented_unverified"
+
+[[rpc]]
+method = "getcapabilities"
+group = "blockchain"
+status = "extension"
+
+[[rpc]]
+method = "getnodeaddresses"
+group = "network"
+status = "implemented_unverified"
+
+# ---------------------------------------------------------------------------
+# REST
+#
+# Every prefix the REST router registers is listed here as a concrete served
+# example. The gateway is UNAUTHENTICATED: binding it to a public interface
+# exposes chain data to anyone who can reach the port.
+# ---------------------------------------------------------------------------
+
+[[rest]]
+path = "/rest/tx/"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/block/notxdetails/"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/block/"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/blockpart/"
+status = "deviation"
+deviation = "Binary formats only; JSON is rejected as in Core's original part endpoint."
+
+[[rest]]
+path = "/rest/chaininfo.json"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/mempool/<kind>.json"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/headers/<hash>.json"
+status = "deviation"
+deviation = "Unknown but well-formed block hashes return an empty 200 response rather than 404, and query parameters other than count are ignored."
+
+[[rest]]
+path = "/rest/getutxos/<hash>-0.json"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/deploymentinfo.json"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/deploymentinfo/<hash>.json"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/headers/"
+status = "implemented_unverified"
+[[rest]]
+path = "/rest/blockhashbyheight/"
+status = "implemented_unverified"
+
+[[rest]]
+path = "/rest/spenttxouts/"
+status = "deviation"
+deviation = "This node does not retain undo data, so every well-formed request answers Core's undo-unavailable error."
+
+# ---------------------------------------------------------------------------
+# ZMQ
+#
+# A low-latency projection of node state, not a durable replay mechanism.
+# A subscriber that misses a message recovers from the durable source in
+# #77, never from ZMQ. Publication failure cannot affect apply or consensus.
+# ---------------------------------------------------------------------------
+
+[[zmq]]
+topic = "hashblock"
+notifier = "pubhashblock"
+status = "implemented_unverified"
+
+[[zmq]]
+topic = "hashtx"
+notifier = "pubhashtx"
+status = "implemented_unverified"
+
+[[zmq]]
+topic = "rawblock"
+notifier = "pubrawblock"
+status = "implemented_unverified"
+
+[[zmq]]
+topic = "rawtx"
+notifier = "pubrawtx"
+status = "implemented_unverified"
+
+[[zmq]]
+topic = "sequence"
+notifier = "pubsequence"
+status = "implemented_unverified"

@@ -272,13 +272,36 @@ pub fn write_message<W: Write + ?Sized>(
         return Err(PeerError::PayloadTooLarge(payload.len()));
     }
 
-    writer.write_all(&magic.to_bytes())?;
-    write_command(writer, &command)?;
-    let len =
-        u32::try_from(payload.len()).map_err(|_| PeerError::PayloadTooLarge(payload.len()))?;
-    writer.write_all(&len.to_le_bytes())?;
-    writer.write_all(&checksum(&payload))?;
-    writer.write_all(&payload)?;
+    let mut header = [0u8; HEADER_LEN];
+    header[..4].copy_from_slice(&magic.to_bytes());
+    header[4..16].copy_from_slice(&encode_command(&command)?);
+    header[16..20].copy_from_slice(
+        &u32::try_from(payload.len())
+            .map_err(|_| PeerError::PayloadTooLarge(payload.len()))?
+            .to_le_bytes(),
+    );
+    header[20..24].copy_from_slice(&checksum(&payload));
+
+    // Assemble header and payload into one vectored write so each message is
+    // emitted with a single syscall instead of five (avoids header/payload
+    // segment splits and per-part syscall overhead on TcpStream).
+    let mut slices: &mut [std::io::IoSlice<'_>] = &mut [
+        std::io::IoSlice::new(&header),
+        std::io::IoSlice::new(&payload),
+    ];
+    while !slices.is_empty() {
+        match writer.write_vectored(slices) {
+            Ok(0) => {
+                return Err(PeerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole message",
+                )));
+            }
+            Ok(written) => std::io::IoSlice::advance_slices(&mut slices, written),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(PeerError::Io(error)),
+        }
+    }
     Ok(HEADER_LEN + payload.len())
 }
 
@@ -537,10 +560,7 @@ fn empty_payload(payload: &[u8], message: Message) -> Result<Message, PeerError>
     }
 }
 
-fn write_command<W: Write + ?Sized>(
-    writer: &mut W,
-    command: &CommandString,
-) -> Result<(), PeerError> {
+fn encode_command(command: &CommandString) -> Result<[u8; COMMAND_LEN], PeerError> {
     let command = command.as_ref().as_bytes();
     if command.len() > COMMAND_LEN || command.contains(&0) {
         return Err(PeerError::InvalidCommand(
@@ -549,8 +569,7 @@ fn write_command<W: Write + ?Sized>(
     }
     let mut raw = [0u8; COMMAND_LEN];
     raw[..command.len()].copy_from_slice(command);
-    writer.write_all(&raw)?;
-    Ok(())
+    Ok(raw)
 }
 
 fn read_command(raw: &[u8]) -> Result<String, PeerError> {

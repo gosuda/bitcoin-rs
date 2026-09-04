@@ -123,9 +123,7 @@ fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
     let txid_at_1 = block_at_1.txs[0].txid();
     let txid_at_256 = block_at_256.txs[0].txid();
     let source = MultiHeightSource {
-        blocks: [(1, block_at_1), (256, block_at_256)]
-            .into_iter()
-            .collect(),
+        blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
     };
     let Ok(entries) = indexer.resolve_script_history(scripthash, &source) else {
         panic!("resolve_script_history");
@@ -170,9 +168,7 @@ fn history_scan_resolver_also_sorts_by_height() {
     };
 
     let source = MultiHeightSource {
-        blocks: [(1, block_at_1), (256, block_at_256)]
-            .into_iter()
-            .collect(),
+        blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
     };
 
     let Ok(fast) = indexer.resolve_script_history(scripthash, &source) else {
@@ -214,9 +210,7 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() {
     };
 
     let source = MultiHeightSource {
-        blocks: [(1, block_at_1), (256, block_at_256)]
-            .into_iter()
-            .collect(),
+        blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
     };
 
     let Ok(outputs) = indexer.resolve_unspent_outputs_with_height(scripthash, &source) else {

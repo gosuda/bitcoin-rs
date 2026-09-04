@@ -1,6 +1,4 @@
-//! Inbound P2P transaction admission policy: the orphan map and the
-//! recent-rejects cache that sit in front of the one
-//! [`MempoolGateway`].
+//! Inbound P2P transaction admission policy: orphan map and reject cache.
 //!
 //! These two structures are the node-side admission tracking that Core owns
 //! in `TxOrphanage` + `m_recent_rejects`:
@@ -96,30 +94,27 @@ impl TxAdmission {
     /// (FIFO), so after `quota + 1` inserts the map size is exactly
     /// `quota`. Re-inserting an already-held orphan (by txid) refreshes its
     /// body without growing the map.
-    pub fn record_orphan(&self, tx: Arc<Tx>) {
+    pub fn record_orphan(&self, tx: &Arc<Tx>) {
         let txid = tx.txid();
         let wtxid = tx.wtxid();
         let mut inner = self.inner.lock();
-        match inner.orphans.insert(txid, Arc::clone(&tx)) {
+        if let Some(old) = inner.orphans.insert(txid, Arc::clone(tx)) {
             // Replace: refresh the body without growing the map or
             // reordering. Drop the previous body's wtxid index entry so a
             // changed witness does not leave a stale wtxid → txid mapping.
-            Some(old) => {
-                let old_wtxid = old.wtxid();
-                if old_wtxid != wtxid {
-                    inner.orphan_by_wtxid.remove(&old_wtxid);
-                }
+            let old_wtxid = old.wtxid();
+            if old_wtxid != wtxid {
+                inner.orphan_by_wtxid.remove(&old_wtxid);
             }
+        } else {
             // New entry: append and evict the oldest over the quota.
-            None => {
-                inner.orphan_order.push_back(txid);
-                while inner.orphan_order.len() > self.quota {
-                    let Some(evicted) = inner.orphan_order.pop_front() else {
-                        break;
-                    };
-                    if let Some(evicted_tx) = inner.orphans.remove(&evicted) {
-                        inner.orphan_by_wtxid.remove(&evicted_tx.wtxid());
-                    }
+            inner.orphan_order.push_back(txid);
+            while inner.orphan_order.len() > self.quota {
+                let Some(evicted) = inner.orphan_order.pop_front() else {
+                    break;
+                };
+                if let Some(evicted_tx) = inner.orphans.remove(&evicted) {
+                    inner.orphan_by_wtxid.remove(&evicted_tx.wtxid());
                 }
             }
         }
@@ -211,7 +206,8 @@ impl TxAdmission {
     /// Looks up a transaction body by txid in the mempool, then the orphan
     /// map. Returns a cloned body for serving over `getdata`.
     fn lookup_tx(&self, txid: &Txid) -> Option<Tx> {
-        if let Some(arc) = self.gateway.read().transaction_by_txid(txid) {
+        let arc = self.gateway.read().transaction_by_txid(txid);
+        if let Some(arc) = arc {
             return Some((*arc).clone());
         }
         self.inner
@@ -226,7 +222,7 @@ impl TxAdmission {
     fn lookup_tx_by_wtxid(&self, wtxid: &Wtxid) -> Option<Tx> {
         {
             let pool = self.gateway.read();
-            for (_, entry) in pool.entries.iter() {
+            for (_, entry) in &pool.entries {
                 if entry.wtxid == *wtxid {
                     return Some((*entry.tx).clone());
                 }
@@ -333,7 +329,8 @@ mod tests {
 
         // Insert quota + 1 = 5 distinct orphans.
         for byte in 1..=5_u8 {
-            admission.record_orphan(Arc::new(tx_with_marker(byte)));
+            let tx = Arc::new(tx_with_marker(byte));
+            admission.record_orphan(&tx);
         }
 
         assert_eq!(
@@ -349,9 +346,9 @@ mod tests {
         let admission = TxAdmission::with_quota(gateway, 4);
         let tx = Arc::new(tx_with_marker(1));
 
-        admission.record_orphan(Arc::clone(&tx));
-        admission.record_orphan(Arc::clone(&tx));
-        admission.record_orphan(Arc::clone(&tx));
+        admission.record_orphan(&tx);
+        admission.record_orphan(&tx);
+        admission.record_orphan(&tx);
 
         assert_eq!(
             admission.orphan_count(),
@@ -389,7 +386,11 @@ mod tests {
 
         let tx = tx_with_marker(9);
         admission.record_reject(tx.txid(), tx.wtxid());
-        assert_eq!(admission.recent_rejects_count(), 2);
+        // The marker fixture carries no witness, so txid and wtxid coincide
+        // and the set holds one entry; both hashes are suppressed all the same.
+        assert!(admission.is_rejected(Hash256::from(tx.txid())));
+        assert!(admission.is_rejected(Hash256::from(tx.wtxid())));
+        assert_eq!(admission.recent_rejects_count(), 1);
 
         admission.invalidate_recent_rejects();
         assert_eq!(
@@ -411,7 +412,7 @@ mod tests {
         let tx = Arc::new(tx_with_marker(3));
         let wtxid = tx.wtxid();
 
-        admission.record_orphan(Arc::clone(&tx));
+        admission.record_orphan(&tx);
 
         assert!(
             admission.have_tx(Hash256::from(wtxid), true),
@@ -430,7 +431,7 @@ mod tests {
         let tx = Arc::new(tx_with_marker(4));
         let txid = tx.txid();
 
-        admission.record_orphan(Arc::clone(&tx));
+        admission.record_orphan(&tx);
 
         let served = admission
             .get_tx(txid)
@@ -445,7 +446,7 @@ mod tests {
         let tx = Arc::new(tx_with_marker(5));
         let txid = tx.txid();
 
-        admission.record_orphan(Arc::clone(&tx));
+        admission.record_orphan(&tx);
         assert_eq!(admission.orphan_count(), 1);
 
         let taken = admission.take_orphan(&txid);
@@ -461,7 +462,7 @@ mod tests {
 
     /// Loopback accept: inv → getdata → tx → admitted.
     ///
-    /// A tx in the mempool is served via getdata, and have_tx suppresses
+    /// A tx in the mempool is served via `getdata`, and `have_tx` suppresses
     /// the inv for it.
     #[test]
     fn loopback_accept_inv_getdata_tx_admitted() {
@@ -474,7 +475,9 @@ mod tests {
         let wtxid = tx.wtxid();
 
         // Admit the tx into the mempool through the gateway.
-        let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 0, 1, 0);
+        // Fund the fixture: a zero-fee entry is correctly rejected below the
+        // 1000 sat/kvB min relay rate, which is what the policy must do.
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 0);
         gateway
             .insert_entry(AdmissionOrigin::Rpc, entry)
             .expect("insert must succeed");

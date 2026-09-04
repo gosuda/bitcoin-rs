@@ -39,7 +39,6 @@ fn plans_deep_reorg_to_common_fork() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 fn mine_child(
     tree: &BlockTree,
     parent: NodeId,

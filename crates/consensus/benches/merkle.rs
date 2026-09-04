@@ -4,7 +4,6 @@
 
 use std::hint::black_box;
 
-
 use bitcoin_rs_consensus::verify_block::block_merkle_root_matches_txids;
 use bitcoin_rs_primitives::{Block, Hash256, Header, Txid, encode::double_sha256};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -106,7 +105,6 @@ fn merkle_tree(c: &mut Criterion) {
         let root = oracle_merkle_root(&input);
         let block = benchmark_block(root);
         validate_benchmark_input(&block, &input);
-        let mut scratch = input.clone();
         group.bench_function(
             BenchmarkId::new("current_dispatch_parents", parent_count),
             |b| {

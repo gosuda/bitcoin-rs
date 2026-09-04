@@ -152,13 +152,13 @@ fn observed_snapshot_traversal_matches_the_current_reader() -> Result<(), Box<dy
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
         OutPoint::new(first_txid.into(), 0),
-        first.clone(),
+        first,
         false,
         2000,
     ));
     changes.add(UtxoAdd::new(
         OutPoint::new(first_txid.into(), 9),
-        second.clone(),
+        second,
         true,
         2001,
     ));
@@ -373,7 +373,7 @@ fn append_snapshot_output(
     coinbase: bool,
     script_pubkey: &[u8],
 ) {
-    let script_len = u16::try_from(script_pubkey.len()).expect("test script fits v4 encoding");
+    let script_len = u16::try_from(script_pubkey.len()).unwrap_or(u16::MAX);
     bytes.extend_from_slice(&vout.to_le_bytes());
     bytes.extend_from_slice(&value.to_le_bytes());
     bytes.extend_from_slice(&height.to_le_bytes());

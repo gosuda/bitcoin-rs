@@ -80,7 +80,7 @@ Configuration defaults:
 | `--storage-backend` | `fjall` |
 | `--rpc-bind` | `127.0.0.1:8332` on mainnet, network Core port otherwise |
 | `--rpc-user` / `--rpc-password` | `bitcoin-rs` / `bitcoin-rs` |
-| `--dbcache-mb` | 450 (split 70/20/10 across chainstate, txindex, and filters, with disabled shares going to chainstate) |
+| `--dbcache-mb` | 450 (split 80/20 across chainstate and txindex when enabled, with disabled shares going to chainstate) |
 | `--prune-target-mb` | 0 (no pruning) |
 | `--txindex` | off |
 | `--scriptindex` | off |

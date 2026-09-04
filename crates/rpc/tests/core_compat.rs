@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_mining::{Candidate, TemplateId};
-use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Tx, TxIn, Txid};
+use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Tx, TxIn, Txid, client_version};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::{
     BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Context,
@@ -146,7 +146,10 @@ fn network_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
 
     let network: corepc_types::v31::GetNetworkInfo =
         typed(&handler.dispatch("getnetworkinfo", &json!([]))?)?;
-    assert_eq!(network.version, 10000);
+    assert_eq!(
+        network.version,
+        usize::try_from(client_version()).unwrap_or(usize::MAX)
+    );
     assert_eq!(network.protocol_version, 70016);
     assert_eq!(network.connections, 0);
     assert_eq!(network.networks.len(), 3);
@@ -323,6 +326,7 @@ impl MiningControl for CompatMiningControl {
         Ok(MiningInfo {
             blocks: 0,
             last_candidate: None,
+            bits: 0x207f_ffff,
             difficulty: 1.0,
             network_hashes_per_second: 0.0,
             pooled_transactions: 0,

@@ -6,8 +6,8 @@
 //! records the tip the node reached.  On boot, if the sidecar's `height`
 //! exceeds the restored checkpoint height, the gap is replayed from stored
 //! block bodies: the tip hash lets the recovery walk backward through
-//! `prev_blockhash` fields to collect the missing blocks, then apply them
-//! forward through the ordinary apply path.
+//! `prev_blockhash` fields to identify the missing blocks, then apply them
+//! forward as locally validated replay without re-executing scripts.
 //!
 //! When the sidecar lacks a tip hash (legacy test metadata) or stored bodies
 //! are unavailable, recovery falls back to recording the gap in memory via
@@ -116,9 +116,10 @@ pub fn set_last_committed_height(state: &NodeState, height: u32) -> Result<()> {
 ///
 /// When the sidecar has a tip hash and stored bodies are available, the gap
 /// is replayed by walking backward from the tip through `prev_blockhash`
-/// fields, collecting blocks, and applying them forward through the ordinary
-/// apply path.  When the tip hash is absent (legacy test metadata) or a body
-/// cannot be loaded, recovery falls back to recording the gap in memory via
+/// fields, retaining only block identities, and applying bodies forward as
+/// locally validated replay. The walk must land on the restored base tip.
+/// When the tip hash is absent (legacy test metadata) or a body cannot be
+/// loaded, recovery falls back to recording the gap in memory via
 /// [`NodeState::push_replayed`].
 pub fn recover_if_needed(state: &NodeState) -> Result<()> {
     let Some(meta) = read_meta(state)? else {
@@ -132,27 +133,24 @@ pub fn recover_if_needed(state: &NodeState) -> Result<()> {
     // Legacy/test metadata (without `tip_hash_hex`) uses
     // `last_committed_height`, which tests rewind to simulate a partial
     // commit.
-    let restored_height = state
-        .applied_tip()
-        .load()
-        .as_ref()
-        .map_or(0, |tip| tip.height);
+    let restored_height = state.applied_tip().load().as_ref().map(|tip| tip.height);
 
     let gap_base = if meta.tip_hash_hex.is_some() {
         restored_height
     } else {
-        meta.last_committed_height
+        Some(meta.last_committed_height)
     };
+    let gap_start = gap_base.map_or(0, |base| base.saturating_add(1));
 
-    if meta.height <= gap_base {
-        tracing::debug!(height = meta.height, gap_base, "no gap; recovery skipped");
+    if gap_base.is_some_and(|base| meta.height <= base) {
+        tracing::debug!(height = meta.height, ?gap_base, "no gap; recovery skipped");
         return Ok(());
     }
 
     tracing::warn!(
         height = meta.height,
-        gap_base,
-        "crash-recovery gap detected: base at {} but tip was at {}",
+        ?gap_base,
+        "crash-recovery gap detected: base at {:?} but tip was at {}",
         gap_base,
         meta.height
     );
@@ -161,7 +159,7 @@ pub fn recover_if_needed(state: &NodeState) -> Result<()> {
     if let Some(tip_hex) = &meta.tip_hash_hex
         && let Some(tip_hash) = parse_hash_hex(tip_hex)
     {
-        match replay_from_bodies(state, gap_base, meta.height, tip_hash) {
+        match replay_from_bodies(state, meta.height, tip_hash) {
             Ok(replayed) => {
                 for height in &replayed {
                     state.push_replayed(*height);
@@ -174,7 +172,7 @@ pub fn recover_if_needed(state: &NodeState) -> Result<()> {
                 write_meta(state, &new_meta)?;
                 tracing::info!(
                     replayed = replayed.len(),
-                    from = gap_base + 1,
+                    from = gap_start,
                     to = meta.height,
                     "crash recovery replayed from stored bodies"
                 );
@@ -190,7 +188,7 @@ pub fn recover_if_needed(state: &NodeState) -> Result<()> {
     }
 
     // Fallback: record the gap in memory for the sync layer.
-    for replay in (gap_base + 1)..=meta.height {
+    for replay in gap_start..=meta.height {
         state.push_replayed(replay);
     }
     let new_meta = Meta {
@@ -202,11 +200,13 @@ pub fn recover_if_needed(state: &NodeState) -> Result<()> {
     Ok(())
 }
 
-/// Walks backward from `(tip_height, tip_hash)` to `restored_height + 1`,
-/// collecting blocks, then applies them forward through the apply path.
+/// Walks backward from `(tip_height, tip_hash)` to the restored tip, or
+/// through genesis when nothing is restored, retaining only block identities
+/// while reading headers. It then loads and replays one complete body at a
+/// time as locally validated input. The walk must land on the restored base
+/// tip before any body is replayed.
 fn replay_from_bodies(
     state: &NodeState,
-    restored_height: u32,
     tip_height: u32,
     tip_hash: bitcoin_rs_primitives::Hash256,
 ) -> Result<Vec<u32>> {
@@ -216,41 +216,94 @@ fn replay_from_bodies(
         .as_ref()
         .context("no block body store available for crash recovery replay")?;
 
-    // Walk backward from the tip, collecting (height, block) pairs.
-    let mut blocks: Vec<(u32, bitcoin_rs_primitives::Block)> = Vec::new();
+    let base = state
+        .applied_tip()
+        .load()
+        .as_deref()
+        .map(|tip| (tip.height, tip.hash));
+    let genesis_hash = handles.network.genesis_block_hash();
+
+    // Walk backward from the tip, retaining only identities. A ranged header
+    // read keeps the walk bounded by the largest body when the store supports
+    // slicing; stores without that capability fall back to one full body.
+    let mut identities: Vec<(u32, bitcoin_rs_primitives::Hash256)> = Vec::new();
     let mut current_hash = tip_hash;
     let mut current_height = tip_height;
 
-    while current_height > restored_height {
+    loop {
+        if base.is_some_and(|(base_height, _)| current_height <= base_height) {
+            break;
+        }
+
+        let header_bytes = match body_store
+            .load_block_body_range(current_height, current_hash, 0, 80)
+            .with_context(|| format!("load block header for replay at height {current_height}"))?
+        {
+            Some(bytes) => bytes,
+            None => body_store
+                .load_block_body(current_height, current_hash)
+                .with_context(|| format!("load block body for replay at height {current_height}"))?
+                .with_context(|| {
+                    format!(
+                        "block body missing for replay at height {current_height}; \
+                         it may have been pruned or not yet flushed to disk"
+                    )
+                })?,
+        };
+
+        let header_prefix = header_bytes
+            .get(..80)
+            .context("stored block body is shorter than its header")?;
+        let header: bitcoin_rs_primitives::Header =
+            bitcoin_rs_primitives::encode::deserialize(header_prefix)
+                .with_context(|| format!("deserialize block header at height {current_height}"))?;
+
+        identities.push((current_height, current_hash));
+        if current_height == 0 {
+            anyhow::ensure!(
+                current_hash == genesis_hash,
+                "crash-recovery walk reached height 0 at {} but genesis is {}",
+                current_hash.to_string_be(),
+                genesis_hash.to_string_be()
+            );
+            break;
+        }
+        current_hash = header.prev_blockhash.0;
+        current_height -= 1;
+    }
+
+    if let Some((base_height, base_hash)) = base {
+        anyhow::ensure!(
+            current_hash == base_hash,
+            "crash-recovery walk landed on {} at restored height {}, expected {}",
+            current_hash.to_string_be(),
+            base_height,
+            base_hash.to_string_be()
+        );
+    }
+
+    // Reverse to apply in forward order, loading one body at a time.
+    identities.reverse();
+
+    let mut replayed = Vec::with_capacity(identities.len());
+    for (height, hash) in identities {
         let body_bytes = body_store
-            .load_block_body(current_height, current_hash)
-            .with_context(|| format!("load block body for replay at height {current_height}"))?
+            .load_block_body(height, hash)
+            .with_context(|| format!("load block body for replay at height {height}"))?
             .with_context(|| {
                 format!(
-                    "block body missing for replay at height {current_height}; \
+                    "block body missing for replay at height {height}; \
                      it may have been pruned or not yet flushed to disk"
                 )
             })?;
-
         let block: bitcoin_rs_primitives::Block =
             bitcoin_rs_primitives::encode::deserialize(&body_bytes)
-                .with_context(|| format!("deserialize block body at height {current_height}"))?;
-
-        let prev_hash = block.header.prev_blockhash.0;
-        blocks.push((current_height, block));
-
-        current_hash = prev_hash;
-        current_height = current_height.saturating_sub(1);
-    }
-
-    // Reverse to apply in forward order.
-    blocks.reverse();
-
-    let mut replayed = Vec::with_capacity(blocks.len());
-    for (height, block) in blocks {
-        let tip = state
-            .apply_block(&block)
-            .map_err(|error| anyhow::anyhow!("replay apply failed at height {height}: {error}"))?;
+                .with_context(|| format!("deserialize block body at height {height}"))?;
+        let tip =
+            crate::apply::replay_local_block(&handles, &block, bytes::Bytes::from(body_bytes))
+                .map_err(|error| {
+                    anyhow::anyhow!("replay apply failed at height {height}: {error}")
+                })?;
         tracing::debug!(
             height,
             hash = %tip.hash.to_string_be(),

@@ -1,6 +1,5 @@
-//! Adapter that bridges in-memory block records into the index crate's
-//! `BlockSource` trait, enabling resolvers like `Indexer::resolve_script_history`
-//! to recover full transactions from lossy prefix rows.
+//! Adapter bridging in-memory block records into the index crate's
+//! `BlockSource` trait.
 //!
 //! The adapter uses height-ordered block records, matching the active-chain
 //! append order maintained by block application.

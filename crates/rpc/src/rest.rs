@@ -1,6 +1,6 @@
 //! Bitcoin Core-compatible REST surface used by remote clients.
 //!
-//! The fourteen route prefixes mirror Core's `StartREST` registration table.
+//! The twelve supported route prefixes mirror Core's `StartREST` registration table.
 //! JSON projections come from [`crate::render`] and [`crate::tx_render`]; hex
 //! and binary payloads use consensus serialization. Applied-chain membership is
 //! always resolved through [`crate::context::Context`] ancestry facts — never
@@ -31,13 +31,11 @@ const MAX_GETUTXOS_OUTPOINTS: usize = 15;
 const MAX_REST_BLOCK_BODY_BYTES: usize = 4_000_000;
 
 /// The Bitcoin Core REST prefixes registered by `StartREST`.
-pub const REGISTRATIONS: [&str; 14] = [
+pub const REGISTRATIONS: [&str; 12] = [
     "/rest/tx/",
     "/rest/block/notxdetails/",
     "/rest/block/",
     "/rest/blockpart/",
-    "/rest/blockfilter/",
-    "/rest/blockfilterheaders/",
     "/rest/chaininfo",
     "/rest/mempool/",
     "/rest/headers/",
@@ -91,12 +89,6 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
     }
     if let Some(suffix) = path.strip_prefix("/rest/blockpart/") {
         return route_block_part(ctx, suffix);
-    }
-    if let Some(suffix) = path.strip_prefix("/rest/blockfilterheaders/") {
-        return route_filter_headers(suffix, query);
-    }
-    if let Some(suffix) = path.strip_prefix("/rest/blockfilter/") {
-        return route_block_filter(suffix);
     }
     if let Some(suffix) = path.strip_prefix("/rest/block/") {
         return route_block(ctx, suffix, true);
@@ -254,62 +246,6 @@ fn bounded_block_body(ctx: &Context, record: &BlockRecord) -> Result<Vec<u8>, Re
         ));
     }
     Ok(body)
-}
-
-/// Core `/rest/blockfilter/<filtertype>/<hash>.<ext>`.
-///
-/// This node does not run a block filter index. The route is explicitly
-/// handled so the prefix never falls through to a generic 404; instead it
-/// answers with a precise unavailable response after validating the URI shape.
-fn route_block_filter(suffix: &str) -> Response {
-    let (rest, format) = split_format(suffix);
-    let mut parts = rest.split('/');
-    let filter_type = parts.next().unwrap_or_default();
-    let hash_text = parts.next().unwrap_or_default();
-    if parts.next().is_some() || hash_text.is_empty() {
-        return bad_request(
-            "Invalid URI format. Expected /rest/blockfilter/<filtertype>/<blockhash>",
-        );
-    }
-    if filter_type != "basic" {
-        return bad_request_owned(format!("Unknown filtertype {filter_type}"));
-    }
-    if Hash256::from_str(hash_text).is_err() {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
-    }
-    let Some(_format) = format else {
-        return format_not_found(available_formats());
-    };
-    not_found_owned("Block filter index is not available on this node".to_owned())
-}
-
-/// Core `/rest/blockfilterheaders/<filtertype>/<hash>.<ext>?count=<count>`.
-///
-/// Like [`route_block_filter`], the route is explicitly handled but answers
-/// with an unavailable response because no filter index runs on this node.
-fn route_filter_headers(suffix: &str, query: &str) -> Response {
-    let (rest, format) = split_format(suffix);
-    let mut parts = rest.split('/');
-    let filter_type = parts.next().unwrap_or_default();
-    let hash_text = parts.next().unwrap_or_default();
-    if parts.next().is_some() || hash_text.is_empty() {
-        return bad_request(
-            "Invalid URI format. Expected /rest/blockfilterheaders/<filtertype>/<blockhash>",
-        );
-    }
-    if filter_type != "basic" {
-        return bad_request_owned(format!("Unknown filtertype {filter_type}"));
-    }
-    if let Err(response) = parse_count(query) {
-        return response;
-    }
-    if Hash256::from_str(hash_text).is_err() {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
-    }
-    let Some(_format) = format else {
-        return format_not_found(available_formats());
-    };
-    not_found_owned("Block filter index is not available on this node".to_owned())
 }
 
 /// Core `/rest/chaininfo.json` (JSON only).
@@ -1650,68 +1586,6 @@ mod tests {
     }
 
     #[test]
-    fn blockfilter_returns_unavailable() {
-        let ctx = Arc::new(Context::new());
-        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-        for format in ["json", "hex", "bin"] {
-            let response = route(
-                &ctx,
-                &format!("/rest/blockfilter/basic/{hash}.{format}"),
-                "",
-                true,
-            );
-            assert_eq!(response.status, 404, "{format}");
-            assert!(
-                String::from_utf8(response.body)
-                    .expect("body")
-                    .contains("not available"),
-                "{format}"
-            );
-        }
-    }
-
-    #[test]
-    fn blockfilter_bad_uri_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/blockfilter/basic.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn blockfilter_unknown_filtertype_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-        let response = route(
-            &ctx,
-            &format!("/rest/blockfilter/extended/{hash}.json"),
-            "",
-            true,
-        );
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn blockfilterheaders_returns_unavailable() {
-        let ctx = Arc::new(Context::new());
-        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-        for format in ["json", "hex", "bin"] {
-            let response = route(
-                &ctx,
-                &format!("/rest/blockfilterheaders/basic/{hash}.{format}"),
-                "count=5",
-                true,
-            );
-            assert_eq!(response.status, 404, "{format}");
-            assert!(
-                String::from_utf8(response.body)
-                    .expect("body")
-                    .contains("not available"),
-                "{format}"
-            );
-        }
-    }
-
-    #[test]
     fn chaininfo_rejects_non_json_format() {
         let ctx = Arc::new(Context::new());
         let response = route(&ctx, "/rest/chaininfo.bin", "", true);
@@ -1928,14 +1802,6 @@ mod tests {
             (
                 "/rest/blockpart/0000000000000000000000000000000000000000000000000000000000000001.bin",
                 "",
-            ),
-            (
-                "/rest/blockfilter/basic/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "",
-            ),
-            (
-                "/rest/blockfilterheaders/basic/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "count=5",
             ),
             ("/rest/chaininfo.json", ""),
             ("/rest/mempool/info.json", ""),

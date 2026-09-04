@@ -170,7 +170,6 @@ fn txid_positions_address_their_own_transaction() {
     }
 }
 
-
 #[test]
 fn a_partial_position_decodes_to_none() {
     let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);

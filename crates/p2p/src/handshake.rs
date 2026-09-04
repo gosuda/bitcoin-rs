@@ -1,7 +1,7 @@
 use std::io::{Cursor, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::Address;
@@ -167,6 +167,13 @@ pub(crate) fn read_handshake_message<S: Read>(
                 lease.stats().record_msg_recv();
                 if let Some(totals) = totals {
                     totals.record_recv(wire_len);
+                }
+                if matches!(message, Message::Version(_)) {
+                    peer.version_received_time = Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_or(0, |duration| duration.as_secs()),
+                    );
                 }
                 return Ok((message, raw));
             }

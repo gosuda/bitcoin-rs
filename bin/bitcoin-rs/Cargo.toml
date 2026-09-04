@@ -24,7 +24,7 @@ bitcoin-rs-node.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile = "3"
+tempfile = ">=3.20.0, <4"
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-primitives.workspace = true
 [features]
@@ -39,6 +39,3 @@ zmq = ["bitcoin-rs-node/zmq"]
 [[test]]
 name = "g17_dependency_direction"
 path = "tests/gates/g17_dependency_direction.rs"
-[[test]]
-name = "g16_extension_model"
-path = "tests/gates/g16_extension_model.rs"

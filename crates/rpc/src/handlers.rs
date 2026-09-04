@@ -22,267 +22,17 @@ fn is_registered_method(method: &str) -> bool {
     manifest::is_registered(SurfaceKind::Rpc, method)
 }
 
-/// Signature of one dispatch arm.
-type HandlerFn = fn(&Arc<Context>, &Value) -> Result<Value, RpcError>;
-
-/// One live registry row: a method name bound to the handler arm serving it.
-pub(crate) struct DispatchEntry {
-    name: &'static str,
-    handler: HandlerFn,
-}
-
-/// The live dispatch registry: every JSON-RPC method name this build serves,
-/// bound to its handler arm. `dispatch` routes through this table and the
-/// manifest coverage gate enumerates it, so a name can neither dispatch
-/// without a shipped manifest row nor ship a row without a live arm.
-pub(crate) const DISPATCH_TABLE: &[DispatchEntry] = &[
-    DispatchEntry {
-        name: "getblockchaininfo",
-        handler: chain::getblockchaininfo,
-    },
-    DispatchEntry {
-        name: "getdifficulty",
-        handler: chain::getdifficulty,
-    },
-    DispatchEntry {
-        name: "getchaintips",
-        handler: chain::getchaintips,
-    },
-    DispatchEntry {
-        name: "getchaintxstats",
-        handler: chain::getchaintxstats,
-    },
-    DispatchEntry {
-        name: "getblockcount",
-        handler: chain::getblockcount,
-    },
-    DispatchEntry {
-        name: "getblockhash",
-        handler: chain::getblockhash,
-    },
-    DispatchEntry {
-        name: "getbestblockhash",
-        handler: chain::getbestblockhash,
-    },
-    DispatchEntry {
-        name: "getblock",
-        handler: chain::getblock,
-    },
-    DispatchEntry {
-        name: "getblockheader",
-        handler: chain::getblockheader,
-    },
-    DispatchEntry {
-        name: "getblockstats",
-        handler: chain::getblockstats,
-    },
-    DispatchEntry {
-        name: "verifychain",
-        handler: chain::verifychain,
-    },
-    DispatchEntry {
-        name: "gettxoutsetinfo",
-        handler: chain::gettxoutsetinfo,
-    },
-    DispatchEntry {
-        name: "getindexinfo",
-        handler: chain::getindexinfo,
-    },
-    DispatchEntry {
-        name: "getblockfilter",
-        handler: chain::getblockfilter,
-    },
-    DispatchEntry {
-        name: "getcapabilities",
-        handler: chain::getcapabilities,
-    },
-    DispatchEntry {
-        name: "pruneblockchain",
-        handler: chain::pruneblockchain,
-    },
-    DispatchEntry {
-        name: "invalidateblock",
-        handler: chain::invalidateblock,
-    },
-    DispatchEntry {
-        name: "scantxoutset",
-        handler: chain::scantxoutset,
-    },
-    DispatchEntry {
-        name: "getrawtransaction",
-        handler: tx::getrawtransaction,
-    },
-    DispatchEntry {
-        name: "gettxout",
-        handler: tx::gettxout,
-    },
-    DispatchEntry {
-        name: "gettxoutproof",
-        handler: tx::gettxoutproof,
-    },
-    DispatchEntry {
-        name: "verifytxoutproof",
-        handler: tx::verifytxoutproof,
-    },
-    DispatchEntry {
-        name: "sendrawtransaction",
-        handler: tx::sendrawtransaction,
-    },
-    DispatchEntry {
-        name: "testmempoolaccept",
-        handler: tx::testmempoolaccept,
-    },
-    DispatchEntry {
-        name: "decoderawtransaction",
-        handler: tx::decoderawtransaction,
-    },
-    DispatchEntry {
-        name: "createrawtransaction",
-        handler: tx::createrawtransaction,
-    },
-    DispatchEntry {
-        name: "combinepsbt",
-        handler: tx::combinepsbt,
-    },
-    DispatchEntry {
-        name: "finalizepsbt",
-        handler: tx::finalizepsbt,
-    },
-    DispatchEntry {
-        name: "getmempoolinfo",
-        handler: mempool::getmempoolinfo,
-    },
-    DispatchEntry {
-        name: "getmempoolentry",
-        handler: mempool::getmempoolentry,
-    },
-    DispatchEntry {
-        name: "getrawmempool",
-        handler: mempool::getrawmempool,
-    },
-    DispatchEntry {
-        name: "getmempoolancestors",
-        handler: mempool::getmempoolancestors,
-    },
-    DispatchEntry {
-        name: "getmempooldescendants",
-        handler: mempool::getmempooldescendants,
-    },
-    DispatchEntry {
-        name: "estimatesmartfee",
-        handler: util::estimatesmartfee,
-    },
-    DispatchEntry {
-        name: "uptime",
-        handler: util::uptime,
-    },
-    DispatchEntry {
-        name: "getrpcinfo",
-        handler: util::getrpcinfo,
-    },
-    DispatchEntry {
-        name: "getmemoryinfo",
-        handler: util::getmemoryinfo,
-    },
-    DispatchEntry {
-        name: "estimaterawfee",
-        handler: util::estimaterawfee,
-    },
-    #[cfg(feature = "zmq")]
-    DispatchEntry {
-        name: "getzmqnotifications",
-        handler: util::getzmqnotifications,
-    },
-    DispatchEntry {
-        name: "validateaddress",
-        handler: util::validateaddress,
-    },
-    DispatchEntry {
-        name: "getdescriptorinfo",
-        handler: util::getdescriptorinfo,
-    },
-    DispatchEntry {
-        name: "deriveaddresses",
-        handler: util::deriveaddresses,
-    },
-    DispatchEntry {
-        name: "getnetworkinfo",
-        handler: network::getnetworkinfo,
-    },
-    DispatchEntry {
-        name: "getpeerinfo",
-        handler: network::getpeerinfo,
-    },
-    DispatchEntry {
-        name: "ping",
-        handler: network::ping,
-    },
-    DispatchEntry {
-        name: "addnode",
-        handler: network::addnode,
-    },
-    DispatchEntry {
-        name: "disconnectnode",
-        handler: network::disconnectnode,
-    },
-    DispatchEntry {
-        name: "getconnectioncount",
-        handler: network::getconnectioncount,
-    },
-    DispatchEntry {
-        name: "getnettotals",
-        handler: network::getnettotals,
-    },
-    DispatchEntry {
-        name: "getaddednodeinfo",
-        handler: network::getaddednodeinfo,
-    },
-    DispatchEntry {
-        name: "listbanned",
-        handler: network::listbanned,
-    },
-    DispatchEntry {
-        name: "setban",
-        handler: network::setban,
-    },
-    DispatchEntry {
-        name: "clearbanned",
-        handler: network::clearbanned,
-    },
-    DispatchEntry {
-        name: "setnetworkactive",
-        handler: network::setnetworkactive,
-    },
-    DispatchEntry {
-        name: "getnodeaddresses",
-        handler: network::getnodeaddresses,
-    },
-    DispatchEntry {
-        name: "getblocktemplate",
-        handler: mining::getblocktemplate,
-    },
-    DispatchEntry {
-        name: "getmininginfo",
-        handler: mining::getmininginfo,
-    },
-    DispatchEntry {
-        name: "submitblock",
-        handler: mining::submitblock,
-    },
-    DispatchEntry {
-        name: "prioritisetransaction",
-        handler: mining::prioritisetransaction,
-    },
-];
-
 /// Enumerates the live registry names in table order.
 ///
-/// Exposed for the manifest coverage gate
+/// Projects from [`crate::registry::REGISTRY`], yielding only rows with a
+/// bound dispatch arm. Exposed for the manifest coverage gate
 /// (`crates/rpc/tests/manifest_coverage.rs`), which asserts set equality
-/// with the shipped manifest rows in both directions. Names are gated by
-/// the same cargo features as the manifest rows.
+/// with the shipped manifest rows in both directions.
 pub fn live_registry() -> impl Iterator<Item = &'static str> {
-    DISPATCH_TABLE.iter().map(|entry| entry.name)
+    crate::registry::REGISTRY
+        .iter()
+        .filter(|row| row.handler.is_some())
+        .map(|row| row.entry.name)
 }
 
 /// JSON-RPC method dispatcher backed by shared node context.
@@ -309,10 +59,16 @@ impl Handler {
         if !is_registered_method(method) {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         }
-        let Some(arm) = DISPATCH_TABLE.iter().find(|entry| entry.name == method) else {
-            unreachable!("registered RPC method missing a dispatch arm: {method}");
+        let Some(row) = crate::registry::REGISTRY
+            .iter()
+            .find(|row| row.entry.name == method)
+        else {
+            unreachable!("registered RPC method missing a registry row: {method}");
         };
-        (arm.handler)(&self.ctx, params)
+        let Some(handler) = row.handler else {
+            return Err(RpcError::MethodNotFound(method.to_owned()));
+        };
+        handler(&self.ctx, params)
     }
 }
 
@@ -384,12 +140,12 @@ mod registry_tests {
 
     use sonic_rs::json;
 
-    #[cfg(feature = "zmq")]
-    use super::DISPATCH_TABLE;
     use super::{Handler, live_registry};
     use crate::context::Context;
     use crate::error::RpcError;
     use crate::manifest::{self, SurfaceKind};
+    #[cfg(feature = "zmq")]
+    use crate::registry::REGISTRY;
 
     const POLICY_ABSENCES: &[&str] = &[
         "clearmempool",
@@ -436,9 +192,9 @@ mod registry_tests {
     #[test]
     fn zmq_build_adds_exactly_one_method() {
         assert_eq!(
-            DISPATCH_TABLE
+            REGISTRY
                 .iter()
-                .filter(|arm| arm.name == "getzmqnotifications")
+                .filter(|row| row.entry.name == "getzmqnotifications" && row.handler.is_some())
                 .count(),
             1
         );

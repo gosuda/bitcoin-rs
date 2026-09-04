@@ -14,7 +14,7 @@
 //!   layer 0  core       consensus, script, primitives
 //!   layer 1  storage    storage
 //!   layer 2  services   chain, utxo, p2p, mempool, index, mining
-//!   layer 3  surface    rpc, ext-api, ext-blockfilterindex
+//!   layer 3  surface    rpc
 //!   layer 4  compose    node, bin (bitcoin-rs)
 //! ```
 //!
@@ -76,7 +76,7 @@ fn approved_layer(crate_name: &str) -> u8 {
         STORAGE_CRATE => 1,
         "bitcoin-rs-chain" | "bitcoin-rs-utxo" | "bitcoin-rs-p2p" | "bitcoin-rs-mempool"
         | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
-        RPC_CRATE | "bitcoin-rs-ext-api" | "bitcoin-rs-ext-blockfilterindex" => 3,
+        RPC_CRATE => 3,
         NODE_CRATE | BIN_CRATE => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),
     }

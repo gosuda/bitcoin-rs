@@ -403,8 +403,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         network: NetworkHandles {
             network: state.network(),
             network_active: state.network_active(),
-            peers: state.peers(),
-            peer_outbound: state.peer_outbound(),
+            peer_table: state.peer_table(),
             p2p_outbound_sender: Some(state.p2p_outbound_sender()),
             banned: state.banned_subnets(),
             added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
@@ -412,7 +411,6 @@ fn mining_handler(state: &NodeState) -> Handler {
         mining: MiningHandles {
             mining_control: Some(mining_control),
         },
-        filter_index: None,
         capabilities: None,
     });
     Handler::new(Arc::new(ctx))

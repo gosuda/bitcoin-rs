@@ -99,19 +99,23 @@ jobs:
             --no-default-features --features fjall,zmq --no-fail-fast
       # Isolated so node's default `zmq` feature cannot unify this package on.
       - run: cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
-      # Node / binary tests run with the full-node feature set.  -p is
-      # required because `--workspace --features` silently ignores --features in
-      # a virtual workspace (no root [package] section in the top-level Cargo.toml).
+      # Node / binary tests run with the full-node backend set, minus the
+      # kernel engine: the kernel builds from C++ (cmake + libboost-dev),
+      # which this job deliberately does not install. Kernel-gated bin tests
+      # run in the main-only `full-node` lane, and the deny job still audits
+      # the full graph including kernel. -p is required because
+      # `--workspace --features` silently ignores --features in a virtual
+      # workspace (no root [package] section in the top-level Cargo.toml).
       - run: |
           cargo test -p bitcoin-rs --no-fail-fast \
-            --no-default-features --features "${FULL_NODE_FEATURES}"
+            --no-default-features --features "rocksdb,fjall,redb,mdbx"
 
   bench-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       # The kernel engine is built from C++ (cmake + libboost-dev); the default
       # feature set now includes it, so every production lane installs the
       # prerequisites up front.

@@ -136,42 +136,42 @@ pub trait MempoolSequenceWake: Send + Sync {
     fn publish_generation_from(&self, sequence: u64);
 }
 
- /// Wake seam between authoritative mutations and the template coordinator.
- ///
- /// [`MiningCoordinator::publish_generation`] documents that every long-poll
- /// waiter must observe each authoritative applied-tip or mempool mutation,
- /// but the coordinator is built after node state, so it cannot be referenced
- /// from the apply path or the mempool gateway directly. This signal is
- /// created with the node state, wired into the gateway's mutation observer
- /// and the apply-path tip publication points, and the coordinator attaches
- /// itself at startup: [`Self::publish_generation`] then forwards to the live
- /// coordinator. With nothing attached it is a no-op — there is no waiter to
- /// wake before the coordinator exists.
- #[derive(Default)]
- pub struct MiningGenerationSignal {
-     coordinator: RwLock<Option<std::sync::Weak<dyn MiningControl>>>,
-     /// Lock-free mempool-sequence wake; set by [`Self::attach_sequence_wake`].
+/// Wake seam between authoritative mutations and the template coordinator.
+///
+/// [`MiningCoordinator::publish_generation`] documents that every long-poll
+/// waiter must observe each authoritative applied-tip or mempool mutation,
+/// but the coordinator is built after node state, so it cannot be referenced
+/// from the apply path or the mempool gateway directly. This signal is
+/// created with the node state, wired into the gateway's mutation observer
+/// and the apply-path tip publication points, and the coordinator attaches
+/// itself at startup: [`Self::publish_generation`] then forwards to the live
+/// coordinator. With nothing attached it is a no-op — there is no waiter to
+/// wake before the coordinator exists.
+#[derive(Default)]
+pub struct MiningGenerationSignal {
+    coordinator: RwLock<Option<std::sync::Weak<dyn MiningControl>>>,
+    /// Lock-free mempool-sequence wake; set by [`Self::attach_sequence_wake`].
     sequence_wake: RwLock<Option<std::sync::Weak<dyn MempoolSequenceWake>>>,
- }
- 
- impl MiningGenerationSignal {
-     /// Creates a detached signal.
-     #[must_use]
-     pub fn new() -> Self {
-         Self::default()
-     }
- 
-     /// Points the signal at `coordinator` without extending its ownership.
-     ///
-     /// The RPC context owns the coordinator; this wake seam must not create
-     /// an ownership cycle through `MiningCoordinator::apply_handles`, which
-     /// carries the same signal back. A weak reference keeps the seam
-     /// observational: the coordinator's lifetime is the context's, and a
-     /// wake against a torn-down coordinator is a no-op.
-     pub fn attach(&self, coordinator: &Arc<dyn MiningControl>) {
-         *self.coordinator.write() = Some(Arc::downgrade(coordinator));
-     }
- 
+}
+
+impl MiningGenerationSignal {
+    /// Creates a detached signal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Points the signal at `coordinator` without extending its ownership.
+    ///
+    /// The RPC context owns the coordinator; this wake seam must not create
+    /// an ownership cycle through `MiningCoordinator::apply_handles`, which
+    /// carries the same signal back. A weak reference keeps the seam
+    /// observational: the coordinator's lifetime is the context's, and a
+    /// wake against a torn-down coordinator is a no-op.
+    pub fn attach(&self, coordinator: &Arc<dyn MiningControl>) {
+        *self.coordinator.write() = Some(Arc::downgrade(coordinator));
+    }
+
     /// Points the signal at a lock-free mempool-sequence wake.
     ///
     /// When attached, [`Self::publish_generation_from`] forwards to `wake`
@@ -181,17 +181,17 @@ pub trait MempoolSequenceWake: Send + Sync {
         *self.sequence_wake.write() = Some(Arc::downgrade(wake));
     }
 
-     /// Forwards one authoritative-mutation wake to the attached coordinator.
-     pub fn publish_generation(&self) {
-         if let Some(coordinator) = self
-             .coordinator
-             .read()
-             .as_ref()
-             .and_then(std::sync::Weak::upgrade)
-         {
-             coordinator.publish_generation();
-         }
-     }
+    /// Forwards one authoritative-mutation wake to the attached coordinator.
+    pub fn publish_generation(&self) {
+        if let Some(coordinator) = self
+            .coordinator
+            .read()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            coordinator.publish_generation();
+        }
+    }
 
     /// Forwards one mempool-sequence wake to the attached coordinator.
     ///
@@ -209,7 +209,7 @@ pub trait MempoolSequenceWake: Send + Sync {
             self.publish_generation();
         }
     }
- }
+}
 
 /// Production mining coordinator owned by the node process.
 ///
@@ -614,7 +614,7 @@ impl MiningCoordinator {
     fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
         let tip = self.applied_tip.load_full();
         let blocks = tip.as_ref().map_or(0, |tip| tip.height);
-        let (difficulty, next_bits, next_difficulty) = match tip.as_ref() {
+        let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
             Some(tip) => {
                 let tree = self.block_tree.read();
                 let tip_bits =
@@ -630,12 +630,13 @@ impl MiningCoordinator {
                             MiningControlError::Failed(CompactString::from(error.to_string()))
                         })?;
                 (
+                    tip_bits,
                     difficulty_for_bits(tip_bits),
                     next.bits,
                     difficulty_for_bits(next.bits),
                 )
             }
-            None => (0.0, 0, 0.0),
+            None => (0, 0.0, 0, 0.0),
         };
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
@@ -644,6 +645,7 @@ impl MiningCoordinator {
         Ok(MiningInfo {
             blocks,
             last_candidate,
+            bits,
             difficulty,
             network_hashes_per_second,
             pooled_transactions,
@@ -1055,7 +1057,7 @@ mod generation_key_tests {
 
 #[cfg(test)]
 mod generation_signal_tests {
-    use super::{MiningGenerationSignal, MempoolSequenceWake};
+    use super::{MempoolSequenceWake, MiningGenerationSignal};
     use bitcoin_rs_primitives::Block;
     use bitcoin_rs_rpc::context::{
         BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,

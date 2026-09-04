@@ -29,8 +29,8 @@ Note that `block_body_key` and `BLOCK_DATA_CF` are not only pruning concerns: th
 ## Cache budget
 
 `dbcache` is one process-wide budget. `cache_budget::split_cache_budget` divides
-it across the persistent namespaces — chainstate 70%, txindex 20%, filters 10%
-— flooring each share and handing the remainder (plus every disabled
+it across the persistent namespaces — chainstate 80% and txindex 20% when
+enabled — flooring each share and handing the remainder (plus every disabled
 namespace's share) to chainstate, so the shares always sum to at most the
 budget. Each backend accepts its namespace's share through `open_with_cache`
 (`open_redb_tx_index_store_with_cache` for the redb transaction index); fjall

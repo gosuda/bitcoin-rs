@@ -94,11 +94,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-chain"
+version = "0.4.0"
+dependencies = [
+ "arc-swap",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
+ "bytemuck",
+ "hashbrown",
+ "parking_lot",
+ "ruint",
+ "slab",
+ "thiserror",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
 name = "bitcoin-rs-fuzz"
 version = "0.0.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-p2p",
+ "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bitcoin-rs-utxo",
  "libfuzzer-sys",
@@ -110,12 +128,14 @@ version = "0.4.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
+ "bitcoin-rs-chain",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bytemuck",
  "bytes",
  "crossbeam-channel",
  "hashbrown",
+ "metrics",
  "parking_lot",
  "sha2",
  "smallvec",
@@ -129,8 +149,6 @@ dependencies = [
 name = "bitcoin-rs-primitives"
 version = "0.4.0"
 dependencies = [
- "bitcoin",
- "bitcoin_hashes",
  "bytemuck",
  "ruint",
  "sha2",
@@ -143,8 +161,8 @@ dependencies = [
 name = "bitcoin-rs-script"
 version = "0.4.0"
 dependencies = [
- "bitcoin",
  "bitcoin-rs-primitives",
+ "bitcoin_hashes",
  "bytemuck",
  "parking_lot",
  "rayon",
@@ -164,6 +182,8 @@ dependencies = [
  "bytemuck",
  "bytes",
  "crossbeam-channel",
+ "hashbrown",
+ "metrics",
  "parking_lot",
  "serde",
  "thiserror",
@@ -174,7 +194,6 @@ dependencies = [
 name = "bitcoin-rs-utxo"
 version = "0.4.0"
 dependencies = [
- "bitcoin",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bytemuck",
@@ -785,6 +804,15 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "slab"
+version = "0.4.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smallvec"

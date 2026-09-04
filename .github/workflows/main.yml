@@ -77,21 +77,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Compile exactly the 7 retained Criterion targets. All benches use
+      # Compile the retained Criterion targets. All benches use
       # --no-default-features (or --features fjall for storage/node/utxo),
       # so no C++ toolchain is needed -- the kernel feature is never enabled.
       # Bin package has no bench targets; all benchmarks live in their own
-      # crates. No allocator A/B lane: the `bench-mimalloc` feature and
-      # duplicate compile were retired by #224 (bench-only mimalloc was a
-      # campaign artefact, not production). After #225 the script_index
-      # bench is added to this list.
+      # crates.
       - run: |
           cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
-          cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench verify_tx
-          cargo bench -p bitcoin-rs-storage   --no-run --no-default-features --features fjall --bench kvstore_backends
-          cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench record_codec
           cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
-          cargo bench -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate
           cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
 
 
@@ -105,13 +98,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
+        with:
+          tool: cargo-fuzz
       # Explicit host triple: some cargo-fuzz versions default to a musl
       # target that is not installed here, and only the GNU host target is
       # guaranteed on the runner.
-      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
+      - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
       - run: |
           for target in p2p_message block_decode tx_decode script_eval utxo_snapshot; do
-            cargo fuzz run "$target" --target x86_64-unknown-linux-gnu -- -runs=10000
+            cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -runs=10000
           done
 
   # Main-only (issue #174): resolves every direct dependency at its oldest
@@ -156,17 +151,14 @@ jobs:
         with:
           rust-version: "1.95.0"
           arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
-
   # Kernel oracle differential: with `--features kernel`, replay the committed
   # fixture corpus through libbitcoinkernel AND the Rust path and hard-fail on
-  # verdict disagreement. The g03 test covers:
-  #   - Block-parse parity (15 committed mainnet blocks)
-  #   - Script-verdict parity (6 fixtures × mutations, all 5 script classes)
-  #   - Vector oracle parity (121 tx_valid + 84 tx_invalid rows)
+  # verdict disagreement. The parity tests cover:
+  #   - Block-parse parity (kernel_block_parity: 6 committed mainnet blocks)
+  #   - Vector oracle parity (kernel_vector_parity: 121 tx_valid + 84 tx_invalid rows)
   #   - Non-vacuity proof (corruption must go red)
-  # The g03 test functions are NOT #[ignore]; do not pass --ignored or they
-  # will be skipped. The test spawns subprocess cargo invocations to run the
-  # consensus crate's kernel_block_parity and kernel_vector_parity tests.
+  # The test functions are NOT #[ignore]; do not pass --ignored or they
+  # will be skipped.
   kernel-oracle:
     runs-on: ubuntu-latest
     steps:
@@ -174,4 +166,4 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo test -p bitcoin-rs --features kernel --test g03_kernel_parity -- --nocapture
+      - run: cargo test -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture

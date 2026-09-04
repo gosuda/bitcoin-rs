@@ -1,6 +1,37 @@
 //! Deterministic initial-sync proxy benchmark.
 // PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
-#![allow(missing_docs)]
+#![expect(
+    clippy::as_conversions,
+    reason = "benchmark casts are intentionally lossy for perf measurement"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "benchmark: panicking on setup failure is correct behavior"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "benchmark: truncation is intentional for perf measurement"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "benchmark: sign loss is intentional for perf measurement"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "benchmark: precision loss is intentional for perf measurement"
+)]
+#![expect(
+    clippy::items_after_statements,
+    reason = "benchmark: helper structs defined near use site for readability"
+)]
+#![expect(
+    clippy::suboptimal_flops,
+    reason = "benchmark: explicit mul-add is clearer than fma here"
+)]
+#![expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "benchmark: closure returns elapsed time, semicolon would break it"
+)]
 
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -15,16 +46,14 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::script::push_int;
 // seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
+use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::{All, Message as SecpMessage, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{
     Amount, OutPoint as OracleOutPoint, ScriptBuf as OracleScriptBuf, Sequence as OracleSequence,
-    Transaction as OracleTx, TxIn as OracleTxIn, TxOut as OracleTxOut, Txid as OracleTxid,
-    Witness, absolute, opcodes, script::Builder as OracleBuilder, transaction,
+    Transaction as OracleTx, TxIn as OracleTxIn, TxOut as OracleTxOut, Txid as OracleTxid, Witness,
+    absolute, opcodes, script::Builder as OracleBuilder, transaction,
 };
-use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_primitives::deserialize;
-use parking_lot::Mutex as ParkingMutex;
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource as _;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
@@ -34,13 +63,15 @@ use bitcoin_rs_node::{
     state::NodeState,
     sync::{SyncBudget, default_sync_budget},
 };
-use bitcoin_rs_p2p::{Message, PeerInfo};
+use bitcoin_rs_p2p::Message;
+use bitcoin_rs_primitives::deserialize;
 use bitcoin_rs_rpc::context::{BlockBodySource, BlockLog, BlockRecord};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
+use parking_lot::Mutex as ParkingMutex;
 use parking_lot::{Mutex, RwLock};
 use tempfile::TempDir;
 
@@ -48,7 +79,6 @@ const PROXY_BLOCKS: u32 = 32;
 const SYNC_PROXY_BLOCKS: u32 = 128;
 const SYNC_PROXY_HEADER_HEIGHT: u32 = 4_096;
 const SYNC_PROXY_BLOCKS_USIZE: usize = 128;
-const SYNC_PROXY_START_HEIGHT: i32 = 4_096;
 const SYNC_PROXY_PEERS: usize = 512;
 const SYNC_OVERSIZED_BURST_BLOCKS: u32 = 1_024;
 const SYNC_OVERSIZED_BURST_BLOCKS_USIZE: usize = 1_024;
@@ -152,9 +182,8 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     print_signed_spend_proxy_summary(&blocks);
 
     const SIGNED_SPEND_SAMPLES: usize = 30;
-    let samples: ParkingMutex<Vec<Duration>> = ParkingMutex::new(Vec::with_capacity(
-        SIGNED_SPEND_SAMPLES.saturating_mul(4),
-    ));
+    let samples: ParkingMutex<Vec<Duration>> =
+        ParkingMutex::new(Vec::with_capacity(SIGNED_SPEND_SAMPLES.saturating_mul(4)));
 
     c.bench_function("sync_pipeline_apply_signed_spend_proxy", |b| {
         b.iter_custom(|iters| {
@@ -475,8 +504,7 @@ struct SyncFixture {
     sync: BlockSync,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
     outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
-    peers: Arc<RwLock<Vec<PeerInfo>>>,
-    peer_outbound: Arc<RwLock<HashMap<SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
     /// Inbound payloads pre-cloned and pre-serialized during (untimed) setup, in
@@ -514,8 +542,7 @@ impl SyncFixture {
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());
-        let peers = Arc::new(RwLock::new(Vec::new()));
-        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let (_inbound_headers_tx, inbound_headers_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundHeaders>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
@@ -531,20 +558,18 @@ impl SyncFixture {
         );
         let sync = BlockSync::new(
             handles,
-            Arc::clone(&peers),
-            Arc::clone(&peer_outbound),
+            Arc::clone(&peer_table),
             inbound_headers_rx,
             inbound_blocks_rx,
         );
 
-        let outbound_rxs = install_synthetic_peers(&peers, &peer_outbound, peer_count);
+        let outbound_rxs = install_synthetic_peers(&peer_table, peer_count);
 
         Self {
             sync,
             inbound_blocks_tx,
             outbound_rxs,
-            peers,
-            peer_outbound,
+            peer_table,
             applied_tip,
             blocks,
             prebuilt_inbound: Vec::new(),
@@ -620,7 +645,7 @@ impl SyncFixture {
                 .unwrap_or_else(|error| panic!("send staged overflow block failed: {error}"));
         }
         fixture.sync.tick();
-        fixture.outbound_rxs = install_synthetic_peers(&fixture.peers, &fixture.peer_outbound, 1);
+        fixture.outbound_rxs = install_synthetic_peers(&fixture.peer_table, 1);
         fixture
     }
 
@@ -854,15 +879,17 @@ impl ProductionStateSyncFixture {
     ) -> Self {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         config.data_dir = dir.path().join("node");
-        let state = NodeState::open(config, None)
+        let mut state = NodeState::open(config, None)
             .unwrap_or_else(|error| panic!("open node state failed: {error}"));
+        state
+            .start_index_workers()
+            .unwrap_or_else(|error| panic!("start index workers failed: {error}"));
         let blocks = {
             let block_tree = state.block_tree();
             let mut tree = block_tree.write();
             populate_blocks(&mut tree)
         };
-        let outbound_rxs =
-            install_synthetic_peers(&state.peers(), &state.peer_outbound(), peer_count);
+        let outbound_rxs = install_synthetic_peers(&state.peer_table(), peer_count);
         Self {
             _dir: dir,
             state,
@@ -1069,20 +1096,16 @@ fn populate_header_chain_from_blocks(tree: &mut BlockTree, blocks: &[Block]) {
 }
 
 fn install_synthetic_peers(
-    peers: &Arc<RwLock<Vec<PeerInfo>>>,
-    peer_outbound: &Arc<RwLock<HashMap<SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    peer_table: &Arc<bitcoin_rs_p2p::PeerTable>,
     peer_count: usize,
 ) -> Vec<crossbeam_channel::Receiver<Message>> {
     let mut outbound_rxs = Vec::with_capacity(peer_count);
-    let mut peers = peers.write();
-    let mut peer_outbound = peer_outbound.write();
     for index in 0..peer_count {
         let port = u16::try_from(8_333_usize.saturating_add(index))
             .unwrap_or_else(|error| panic!("invalid synthetic peer port: {error}"));
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        peers.push(synthetic_peer(addr));
         let (outbound_tx, outbound_rx) = unbounded::<Message>();
-        peer_outbound.insert(addr, bitcoin_rs_p2p::PeerLease::new(outbound_tx));
+        peer_table.register(addr, bitcoin_rs_p2p::PeerLease::new(outbound_tx));
         outbound_rxs.push(outbound_rx);
     }
     outbound_rxs
@@ -1131,18 +1154,6 @@ fn tx_index_for_mode(mode: TxIndexMode) -> Option<Arc<TxIndexRuntime>> {
             let (wake_tx, _wake_rx) = crossbeam_channel::bounded(1);
             Some(Arc::new(TxIndexRuntime::new(wake_tx)))
         }
-    }
-}
-
-fn synthetic_peer(addr: SocketAddr) -> PeerInfo {
-    PeerInfo {
-        addr,
-        version: 70_016,
-        services: 0,
-        user_agent: "/bitcoin-rs-sync-bench:0.0.0/".to_owned(),
-        start_height: SYNC_PROXY_START_HEIGHT,
-        conn_time: 0,
-        inbound: false,
     }
 }
 
@@ -1432,9 +1443,11 @@ impl SigningKeys {
 }
 
 fn secret_pubkey(secp: &Secp256k1<All>, byte: u8) -> bitcoin::PublicKey {
-    let secret = SecretKey::from_slice(&[byte; 32])
-        .unwrap_or_else(|e| panic!("invalid secret key: {e}"));
-    bitcoin::PublicKey::new(bitcoin::secp256k1::PublicKey::from_secret_key(secp, &secret))
+    let secret =
+        SecretKey::from_slice(&[byte; 32]).unwrap_or_else(|e| panic!("invalid secret key: {e}"));
+    bitcoin::PublicKey::new(bitcoin::secp256k1::PublicKey::from_secret_key(
+        secp, &secret,
+    ))
 }
 
 fn secret_key(byte: u8) -> SecretKey {
@@ -1511,7 +1524,9 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
     }
     // P2WPKH outputs (indices 22..44).
     for i in 0..22u32 {
-    let pkh = keys.p2wpkh[usize::try_from(i).unwrap()].wpubkey_hash().unwrap();
+        let pkh = keys.p2wpkh[usize::try_from(i).unwrap()]
+            .wpubkey_hash()
+            .unwrap();
         let script = OracleScriptBuf::new_p2wpkh(&pkh);
         outputs.push(TxOut {
             value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
@@ -1686,9 +1701,21 @@ fn build_signed_spend_tx(
 ) -> Tx {
     let oracle_txid = OracleTxid::from_byte_array(*source_txid.as_bytes());
     if vout < 22 {
-        build_signed_p2pkh_spend(oracle_txid, vout, prevout_value, keys, usize::try_from(vout).unwrap())
+        build_signed_p2pkh_spend(
+            oracle_txid,
+            vout,
+            prevout_value,
+            keys,
+            usize::try_from(vout).unwrap(),
+        )
     } else if vout < 44 {
-        build_signed_p2wpkh_spend(oracle_txid, vout, prevout_value, keys, usize::try_from(vout - 22).unwrap())
+        build_signed_p2wpkh_spend(
+            oracle_txid,
+            vout,
+            prevout_value,
+            keys,
+            usize::try_from(vout - 22).unwrap(),
+        )
     } else {
         build_signed_p2wsh_spend(oracle_txid, vout, prevout_value, keys)
     }
@@ -1785,10 +1812,7 @@ fn build_signed_p2wpkh_spend(
     sig.normalize_s();
     let mut sig_bytes = sig.serialize_der().as_ref().to_vec();
     sig_bytes.push(EcdsaSighashType::All as u8);
-    tx.input[0].witness = Witness::from_slice(&[
-        sig_bytes,
-        pubkey.inner.serialize().to_vec(),
-    ]);
+    tx.input[0].witness = Witness::from_slice(&[sig_bytes, pubkey.inner.serialize().to_vec()]);
     to_native_tx(&tx)
 }
 
@@ -1854,8 +1878,7 @@ fn build_signed_p2wsh_spend(
 /// Consensus-bytes round-trip from rust-bitcoin oracle types to native `Tx`.
 fn to_native_tx(tx: &OracleTx) -> Tx {
     let bytes = bitcoin::consensus::serialize(tx);
-    deserialize(&bytes)
-        .unwrap_or_else(|e| panic!("oracle transaction must decode natively: {e}"))
+    deserialize(&bytes).unwrap_or_else(|e| panic!("oracle transaction must decode natively: {e}"))
 }
 
 fn print_signed_spend_proxy_summary(blocks: &[Block]) {

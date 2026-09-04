@@ -39,7 +39,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         loaded: true,
         size: i64_saturated(stats.txs),
         bytes: i64_saturated(stats.bytes),
-        usage: i64_saturated(stats.bytes),
+        usage: i64_saturated(pool.dynamic_memory_usage()),
         total_fee: sat_to_btc(stats.total_fee),
         max_mempool: i64_saturated(maxmempool),
         mempool_min_fee: sat_to_btc(mempool_min_fee_sat_per_kvb),
@@ -648,44 +648,74 @@ mod tests {
 }
 
 #[cfg(test)]
+mod usage_wiring_tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    use bitcoin_rs_mempool::MempoolEntry;
+    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use sonic_rs::{JsonValueTrait, json};
+
+    use super::*;
+
+    #[test]
+    fn getmempoolinfo_usage_is_the_pools_memory_not_its_vsize_sum() {
+        let ctx = Arc::new(Context::new());
+        {
+            let mut pool = ctx.mempool.pool().write();
+            for tag in 0_u8..4 {
+                let tx = Tx {
+                    version: 2,
+                    lock_time: 0,
+                    inputs: vec![TxIn {
+                        previous_output: OutPoint::new(
+                            Txid::from(Hash256::from_le_bytes(&[tag; 32])),
+                            0,
+                        ),
+                        script_sig: Vec::new(),
+                        sequence: u32::MAX,
+                        witness: Vec::new(),
+                    }],
+                    outputs: vec![TxOut {
+                        value: 10_000,
+                        script_pubkey: vec![0x51; 128],
+                    }],
+                };
+                let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+                let Ok(_id) = pool.insert_entry(entry) else {
+                    panic!("fixture insert failed");
+                };
+            }
+        }
+
+        let value =
+            getmempoolinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getmempoolinfo: {err}"));
+        let Some(bytes) = value.get("bytes").and_then(JsonValueTrait::as_u64) else {
+            panic!("bytes missing: {value:?}");
+        };
+        let Some(usage) = value.get("usage").and_then(JsonValueTrait::as_u64) else {
+            panic!("usage missing: {value:?}");
+        };
+
+        assert!(bytes > 0, "the fixture must hold transactions");
+        assert_ne!(
+            usage, bytes,
+            "`usage` was literally `bytes`; that is the defect"
+        );
+        assert!(usage > bytes, "{usage} vs {bytes}");
+    }
+}
+
+#[cfg(test)]
 mod spentby_tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
 
-    use bitcoin_rs_mempool::{Mempool, MempoolEntry};
+    use bitcoin_rs_mempool::MempoolEntry;
     use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
-    use core::str::FromStr as _;
     use sonic_rs::json;
 
     use super::*;
-
-    fn entry_to_serde(entry: &MempoolEntry, pool: &Mempool) -> serde_json::Value {
-        let typed = super::mempool_entry_typed(entry, pool);
-        let rendered = sonic_rs::to_string(&typed)
-            .unwrap_or_else(|err| panic!("re-encoding mempool entry failed: {err}"));
-        serde_json::from_str(&rendered)
-            .unwrap_or_else(|err| panic!("re-parsing mempool entry failed: {err}"))
-    }
-
-    /// The answer `entry_to_serde` used to compute: for every entry in the pool,
-    /// walk its inputs and keep it if any of them spends `txid`.
-    ///
-    /// Spelled out here instead of being shared with the implementation. An
-    /// oracle that calls the code under test cannot disagree with it.
-    fn spentby_by_scanning_every_entry(pool: &Mempool, txid: Txid) -> Vec<String> {
-        let mut spentby = Vec::new();
-        for (_id, candidate) in &pool.entries {
-            for input in &candidate.tx.inputs {
-                if input.previous_output.txid == txid {
-                    spentby.push(candidate.tx.txid().to_string());
-                    break;
-                }
-            }
-        }
-        spentby.sort();
-        spentby.dedup();
-        spentby
-    }
 
     fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
         Tx {
@@ -724,7 +754,7 @@ mod spentby_tests {
     /// `child_b` spends two of the root's outputs, so a walk of the spend index
     /// reaches it twice — the case a missing dedup shows up in, and the case a
     /// fixture where every child spends one output cannot reach.
-    fn graph_ctx() -> (Arc<Context>, Txid) {
+    fn graph_ctx() -> (Arc<Context>, Txid, Vec<String>) {
         let confirmed = OutPoint::new(Txid(Hash256::from_le_bytes(&[7_u8; 32])), 0);
         let root = tx_with(&[confirmed], 3, 1);
         let root_txid = root.txid();
@@ -735,7 +765,7 @@ mod spentby_tests {
             1,
             3,
         );
-        let child_b_txid = child_b.compute_txid();
+        let child_b_txid = child_b.txid();
         let child_c = tx_with(&[OutPoint::new(child_a_txid, 0)], 1, 4);
         let loner = tx_with(
             &[OutPoint::new(Txid(Hash256::from_le_bytes(&[9_u8; 32])), 0)],

@@ -41,7 +41,7 @@ sha2.workspace = true
 proptest.workspace = true
 proptest-derive.workspace = true
 criterion.workspace = true
-tempfile = "3"
+tempfile = ">=3.20.0, <4"
 # The benchmark uses the same allocator as the production binary. Inherits
 # `default-features = false`, matching `bin/bitcoin-rs`.
 mimalloc.workspace = true

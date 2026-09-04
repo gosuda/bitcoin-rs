@@ -1,9 +1,8 @@
 //! In-memory UTXO set for bitcoin-rs.
 //!
-//! The set is split into 256 first-byte shards. Each shard stores compact,
-//! transaction-level `UtxoRecord` owners inline in a `hashbrown::HashTable`;
-//! every record owns one boxed encoded payload and mutations are guarded by a
-//! cache-padded `parking_lot::RwLock`.
+//! 256 first-byte shards, each a `hashbrown::HashTable` of compact
+//! transaction-level records behind a `parking_lot::RwLock`, with a native
+//! snapshot format and versioned undo codec.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -11,6 +10,8 @@ extern crate alloc;
 
 /// Compact encodings for UTXO record fields.
 mod compress;
+/// UTXO connect accounting: block mutation, undo, and value totals.
+pub mod connect;
 /// UTXO hash-table key.
 pub mod key;
 /// Owned UTXO records.
@@ -25,9 +26,8 @@ pub mod snapshot;
 pub mod stats;
 /// Versioned on-disk encoding for undo records.
 pub mod undo_codec;
-/// UTXO connect accounting: block mutation, undo, and value totals.
-pub mod connect;
 
+pub use connect::{BlockChangeError, BlockValueTotals, SpentOutputLookup, is_coinbase_tx};
 pub use key::{UtxoBuildHasher, UtxoKey};
 pub use record::{OneUtxoOut, UtxoRecord};
 pub use set::{
@@ -35,7 +35,6 @@ pub use set::{
     UtxoCommittedEvent, UtxoError, UtxoInserted, UtxoMemoryReport, UtxoRemoved, UtxoScan, UtxoSet,
     UtxoSetView,
 };
-pub use connect::{BlockChangeError, BlockValueTotals, SpentOutputLookup, is_coinbase_tx};
 pub use shard::{LiveOutput, LiveOutputMeta};
 pub use snapshot::{
     SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, aggregate_hash, hash_serialized_3,

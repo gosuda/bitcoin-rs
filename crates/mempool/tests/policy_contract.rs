@@ -233,12 +233,14 @@ fn rbf_opt_in_replacement_sweeps_conflicts_and_descendants() -> Result<(), Box<d
     let previewed = preview_reason(&pool, &replacement, context(16_000, 4_000));
     assert_eq!(previewed, None, "legal replacement must preview clean");
 
-    let result = pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement.clone()), 4_000, 16_000, 1_000),
-        0,
-        1,
-        0,
-    )?;
+    let result = pool
+        .replace_transaction(
+            ReplacementCandidate::new(Arc::new(replacement.clone()), 4_000, 16_000, 1_000),
+            0,
+            1,
+            0,
+        )?
+        .into_mutation();
     assert_eq!(
         result
             .changes
@@ -563,7 +565,9 @@ fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<
     pool.insert_entry(entry(mid, 1_000, 2_000))?;
 
     let overflow = tx(outpoint(4, 0), 1_000, 0xFF_FF_FF_FF);
-    let result = pool.insert_entry(entry(overflow.clone(), 2_000, 6_000))?;
+    let result = pool
+        .insert_entry(entry(overflow.clone(), 2_000, 6_000))?
+        .into_mutation();
     assert_eq!(
         result
             .changes

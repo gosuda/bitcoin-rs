@@ -38,4 +38,4 @@ pub use sighash::{
     TAPSCRIPT_LEAF_VERSION, tapleaf_hash,
 };
 pub use tx::{Tx, TxIn, TxOut};
-pub use version::{PKG_VERSION, USER_AGENT};
+pub use version::{PKG_VERSION, USER_AGENT, client_version};

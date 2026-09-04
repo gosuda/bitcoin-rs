@@ -21,8 +21,6 @@ The gateway registers these Core REST prefixes:
 | `/rest/block/notxdetails/{hash}` | JSON, hex, binary | Block JSON uses transaction IDs |
 | `/rest/block/{hash}` | JSON, hex, binary | Block JSON includes transaction details |
 | `/rest/blockpart/{hash}` | Hex, binary | Raw block payload |
-| `/rest/blockfilter/basic/{hash}` | JSON, hex, binary | Explicitly unavailable: no block-filter index |
-| `/rest/blockfilterheaders/basic/{hash}` | JSON, hex, binary | Explicitly unavailable: no block-filter index |
 | `/rest/chaininfo` | JSON | Chain summary |
 | `/rest/mempool/{info,contents}` | JSON | Mempool summary or contents |
 | `/rest/headers/{hash}` | JSON, hex, binary | Active-chain header walk |

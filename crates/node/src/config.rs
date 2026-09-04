@@ -39,10 +39,7 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_RPC_USER: &str = "bitcoin-rs";
 const DEFAULT_RPC_PASSWORD: &str = "bitcoin-rs";
 const DEFAULT_DBCACHE_MB: u64 = 450;
-/// Fork depth (blocks) at which a stale txindex watermark stops the
-/// per-block rewind and routes to a selective reset + rebuild instead.
-const DEFAULT_INDEX_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
-const DEFAULT_ZMQ_HWM: u32 = 1_000;
+
 const DRYNET4_CONNECT: &str = "drynet4.drivechain.dev:8533";
 const DRYNET4_P2P_MAGIC: [u8; 4] = [0xec, 0xa5, 0xd4, 0x04];
 
@@ -152,43 +149,30 @@ impl Default for Auth {
     }
 }
 
-/// One configured ZMQ PUB notification endpoint.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ZmqPublication {
-    /// Notification topic name.
-    pub topic: crate::zmq_publisher::ZmqTopic,
-    /// ZMQ endpoint to bind.
-    pub endpoint: String,
-    /// PUB socket high-water mark.
-    pub hwm: u32,
+/// Node notification adapters, grouped below the node-level configuration.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationConfig {
+    /// ZMQ PUB sockets, each owning its endpoint, topics, and optional HWM override.
+    pub zmq: Vec<crate::zmq_publisher::ZmqEndpointConfig>,
 }
 
 /// How much of the derived `ScriptIndex` a node maintains.
 ///
 /// `ScriptIndex` is rebuildable derived state, so the mode is a capability
-/// selection rather than a storage compatibility question: `utxo` maintains
-/// only the compact live-output view, `full` adds historical funding/spending
-/// rows.
+/// selection rather than a storage compatibility question: `full` adds
+/// historical funding/spending rows while still maintaining the live-output
+/// view.
 ///
 /// The boolean spellings remain behaviorally compatible: `--scriptindex`,
 /// `--scriptindex=true`, and `BITCOIN_RS_SCRIPTINDEX=true` all mean
 /// [`Self::Full`], and `false` means [`Self::Disabled`].
-///
-/// [`Self::Utxo`] is parsed and named but not yet accepted by
-/// [`NodeConfig::validate`]: the durable live-output store it describes does
-/// not exist. See [`ScriptIndexMode::has_live_store`].
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScriptIndexMode {
     /// No `ScriptIndex` capability is maintained.
     #[default]
     Disabled,
-    /// Maintain only the compact live-output view.
-    ///
-    /// Named and parsed, but **not accepted** by [`NodeConfig::validate`] until
-    /// the durable live-output store exists. See
-    /// [`ScriptIndexMode::has_live_store`].
-    Utxo,
     /// Maintain both the live-output view and historical script activity.
     Full,
 }
@@ -201,31 +185,9 @@ impl ScriptIndexMode {
     }
 
     /// Whether historical funding/spending rows are maintained.
-    ///
-    /// Only `full` keeps history; `utxo` deliberately avoids paying the
-    /// storage cost of full historical script indexing.
     #[must_use]
     pub const fn keeps_history(self) -> bool {
         matches!(self, Self::Full)
-    }
-
-    /// Whether this mode has a durable store backing every view it claims.
-    ///
-    /// `utxo` is the one mode that does not, yet. Its whole purpose is the
-    /// compact live-output view, and that view has no on-disk representation:
-    /// #225 defers the `ScriptLive` row format to #226 Q5, which is still
-    /// choosing the locator. Until a live store exists, a node configured
-    /// `utxo` would build no `Funding`/`Spending` rows (those families are
-    /// claimed only under `script_history`), publish no `ScriptHistory`
-    /// watermark, and then have every `ScriptIndexQuery` method —
-    /// `unspent_outputs` included — gate on
-    /// `IndexCapabilities::SCRIPT_HISTORY` and report `Retry` forever. That is
-    /// an advertised capability with nothing behind it.
-    ///
-    /// `Disabled` trivially has every store it claims, which is none.
-    #[must_use]
-    pub const fn has_live_store(self) -> bool {
-        !matches!(self, Self::Utxo)
     }
 
     /// Parses a mode from a configuration value.
@@ -234,7 +196,6 @@ impl ScriptIndexMode {
     /// means `full` and `false` means disabled. Parsing is case-insensitive.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "utxo" => Some(Self::Utxo),
             // `true` is the historical boolean spelling and must keep meaning
             // `full`; it is a separate pattern for that readability, not a
             // distinct outcome.
@@ -288,11 +249,9 @@ pub struct NodeConfig {
     pub prune_target_mb: u64,
     /// Whether the transaction index is enabled.
     pub txindex: bool,
-    /// Whether the BIP157/158 basic block filter index extension is enabled.
-    pub blockfilterindex: bool,
-    /// Database cache budget in MiB, divided across the persistent storage
-    /// namespaces (chainstate 70%, txindex 20%, filters 10%; shares of
-    /// disabled namespaces redistribute to chainstate).
+    /// Database cache budget in MiB, divided across the chainstate and
+    /// transaction-index namespaces (shares of disabled namespaces redistribute
+    /// to chainstate).
     ///
     /// Bounds: values are clamped to the byte range
     /// `[16 MiB, 1 TiB]` — a zero or tiny value clamps up to the 16 MiB floor
@@ -300,41 +259,13 @@ pub struct NodeConfig {
     /// down so share arithmetic stays exact. Effective per-namespace
     /// capacities are logged at startup (`opened storage backend`).
     pub dbcache_mb: u64,
-    /// Fork depth at which a stale txindex watermark routes to a selective
-    /// reset and rebuild instead of a per-block rewind.
-    ///
-    /// Grounded in three measured runs of per-block forward-ingest versus
-    /// rollback cost (see `docs/benchmarks/index-rollback-rebuild-cutover.md`):
-    /// the default routes the 834k-block stale-branch incident shape to a
-    /// rebuild while organic reorgs (tens of blocks) keep rewinding block by
-    /// block.
-    pub index_rollback_rebuild_cutover: u32,
     /// Tracing filter level used when `RUST_LOG` is unset.
     pub log_level: String,
     /// Optional Prometheus metrics bind address. `None` disables metrics.
     pub metrics_bind: Option<SocketAddr>,
-    /// ZMQ `hashblock` PUB bind endpoints.
-    pub zmqpubhashblock: Vec<String>,
-    /// ZMQ `hashtx` PUB bind endpoints.
-    pub zmqpubhashtx: Vec<String>,
-    /// ZMQ `rawblock` PUB bind endpoints.
-    pub zmqpubrawblock: Vec<String>,
-    /// ZMQ `rawtx` PUB bind endpoints.
-    pub zmqpubrawtx: Vec<String>,
-    /// Optional `hashblock` PUB socket high-water mark.
-    pub zmqpubhashblockhwm: Option<u32>,
-    /// Optional `hashtx` PUB socket high-water mark.
-    pub zmqpubhashtxhwm: Option<u32>,
-    /// Optional `rawblock` PUB socket high-water mark.
-    pub zmqpubrawblockhwm: Option<u32>,
-    /// Optional `rawtx` PUB socket high-water mark.
-    pub zmqpubrawtxhwm: Option<u32>,
-    /// ZMQ `sequence` PUB bind endpoints.
-    pub zmqpubsequence: Vec<String>,
-    /// Optional `sequence` PUB socket high-water mark.
-    pub zmqpubsequencehwm: Option<u32>,
-    /// Block height at or below which script verification is skipped during
-    /// block apply.
+    /// External notification adapters.
+    pub notifications: NotificationConfig,
+    /// Block height at or below which script verification is skipped during block apply.
     ///
     /// On mainnet the default is the hash-pinned assume-valid anchor
     /// ([`Network::assume_valid_anchor`]): blocks at or below the anchor
@@ -362,24 +293,10 @@ impl fmt::Debug for NodeConfig {
             .field("connect", &self.connect)
             .field("prune_target_mb", &self.prune_target_mb)
             .field("txindex", &self.txindex)
-            .field("blockfilterindex", &self.blockfilterindex)
             .field("dbcache_mb", &self.dbcache_mb)
-            .field(
-                "index_rollback_rebuild_cutover",
-                &self.index_rollback_rebuild_cutover,
-            )
             .field("log_level", &self.log_level)
             .field("metrics_bind", &self.metrics_bind)
-            .field("zmqpubhashblock", &self.zmqpubhashblock)
-            .field("zmqpubhashtx", &self.zmqpubhashtx)
-            .field("zmqpubrawblock", &self.zmqpubrawblock)
-            .field("zmqpubrawtx", &self.zmqpubrawtx)
-            .field("zmqpubhashblockhwm", &self.zmqpubhashblockhwm)
-            .field("zmqpubhashtxhwm", &self.zmqpubhashtxhwm)
-            .field("zmqpubrawblockhwm", &self.zmqpubrawblockhwm)
-            .field("zmqpubrawtxhwm", &self.zmqpubrawtxhwm)
-            .field("zmqpubsequence", &self.zmqpubsequence)
-            .field("zmqpubsequencehwm", &self.zmqpubsequencehwm)
+            .field("notifications", &self.notifications)
             .field("assume_valid_height", &self.assume_valid_height)
             .finish()
     }
@@ -417,21 +334,10 @@ impl NodeConfig {
             connect: Vec::new(),
             prune_target_mb: 0,
             txindex: false,
-            blockfilterindex: false,
             dbcache_mb: DEFAULT_DBCACHE_MB,
-            index_rollback_rebuild_cutover: DEFAULT_INDEX_ROLLBACK_REBUILD_CUTOVER,
             log_level: DEFAULT_LOG_LEVEL.to_owned(),
             metrics_bind: None,
-            zmqpubhashblock: Vec::new(),
-            zmqpubhashtx: Vec::new(),
-            zmqpubrawblock: Vec::new(),
-            zmqpubrawtx: Vec::new(),
-            zmqpubhashblockhwm: None,
-            zmqpubhashtxhwm: None,
-            zmqpubrawblockhwm: None,
-            zmqpubrawtxhwm: None,
-            zmqpubsequence: Vec::new(),
-            zmqpubsequencehwm: None,
+            notifications: NotificationConfig::default(),
             assume_valid_height: network
                 .assume_valid_anchor()
                 .map_or(0, |(height, _)| height),
@@ -514,71 +420,14 @@ impl NodeConfig {
             "rocksdb" | "fjall" | "redb" | "mdbx" => {}
             other => bail!("unsupported storage backend {other}"),
         }
-        if self.blockfilterindex {
-            ensure!(
-                self.txindex || self.script_index.is_enabled(),
-                "blockfilterindex requires txindex"
-            );
-            ensure!(
-                self.prune_target_mb == 0,
-                "blockfilterindex requires prune disabled"
-            );
-        }
-        ensure!(
-            self.script_index.has_live_store(),
-            "scriptindex=utxo is not yet usable: the compact live-output store it \
-             requires does not exist (#225). Only `full` and `disabled` are accepted. \
-             Blocked on #226 Q5, which selects the ScriptLive locator format."
-        );
-        for (name, hwm) in [
-            ("zmqpubhashblockhwm", self.zmqpubhashblockhwm),
-            ("zmqpubhashtxhwm", self.zmqpubhashtxhwm),
-            ("zmqpubrawblockhwm", self.zmqpubrawblockhwm),
-            ("zmqpubrawtxhwm", self.zmqpubrawtxhwm),
-            ("zmqpubsequencehwm", self.zmqpubsequencehwm),
-        ] {
-            if hwm.is_some_and(|value| value > 2_147_483_647) {
-                bail!("{name} exceeds libzmq SNDHWM range");
-            }
-        }
+        crate::zmq_publisher::validate_endpoint_configs(&self.notifications.zmq)?;
         Ok(())
     }
 
-    /// Returns active ZMQ publications in Core notification order.
+    /// Returns configured ZMQ endpoint groups.
     #[must_use]
-    pub fn zmq_publications(&self) -> Vec<ZmqPublication> {
-        let mut publications = Vec::new();
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::HashBlock,
-            &self.zmqpubhashblock,
-            self.zmqpubhashblockhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::HashTx,
-            &self.zmqpubhashtx,
-            self.zmqpubhashtxhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::RawBlock,
-            &self.zmqpubrawblock,
-            self.zmqpubrawblockhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::RawTx,
-            &self.zmqpubrawtx,
-            self.zmqpubrawtxhwm,
-        );
-        push_zmq_publications(
-            &mut publications,
-            crate::zmq_publisher::ZmqTopic::Sequence,
-            &self.zmqpubsequence,
-            self.zmqpubsequencehwm,
-        );
-        publications
+    pub fn zmq_endpoints(&self) -> &[crate::zmq_publisher::ZmqEndpointConfig] {
+        &self.notifications.zmq
     }
 
     fn from_layers<E, K, V>(
@@ -647,7 +496,7 @@ impl NodeConfig {
         if let Some(script_index) = &layer.script_index {
             self.script_index = ScriptIndexMode::parse(script_index).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "invalid scriptindex value `{script_index}`: expected `utxo`, `full`, or a boolean"
+                    "invalid scriptindex value `{script_index}`: expected `full` or a boolean"
                 )
             })?;
         }
@@ -666,14 +515,8 @@ impl NodeConfig {
         if let Some(txindex) = layer.txindex {
             self.txindex = txindex;
         }
-        if let Some(blockfilterindex) = layer.blockfilterindex {
-            self.blockfilterindex = blockfilterindex;
-        }
         if let Some(dbcache_mb) = layer.dbcache_mb {
             self.dbcache_mb = dbcache_mb;
-        }
-        if let Some(cutover) = layer.index_rollback_rebuild_cutover {
-            self.index_rollback_rebuild_cutover = cutover;
         }
         if let Some(log_level) = &layer.log_level {
             self.log_level.clone_from(log_level);
@@ -681,38 +524,8 @@ impl NodeConfig {
         if let Some(metrics_bind) = layer.metrics_bind {
             self.metrics_bind = Some(metrics_bind);
         }
-        if layer.clear_metrics_bind {
-            self.metrics_bind = None;
-        }
-        if let Some(endpoints) = &layer.zmqpubhashblock {
-            self.zmqpubhashblock.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubhashtx {
-            self.zmqpubhashtx.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubrawblock {
-            self.zmqpubrawblock.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubrawtx {
-            self.zmqpubrawtx.clone_from(endpoints);
-        }
-        if let Some(endpoints) = &layer.zmqpubsequence {
-            self.zmqpubsequence.clone_from(endpoints);
-        }
-        if let Some(hwm) = layer.zmqpubhashblockhwm {
-            self.zmqpubhashblockhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubhashtxhwm {
-            self.zmqpubhashtxhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubrawblockhwm {
-            self.zmqpubrawblockhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubrawtxhwm {
-            self.zmqpubrawtxhwm = Some(hwm);
-        }
-        if let Some(hwm) = layer.zmqpubsequencehwm {
-            self.zmqpubsequencehwm = Some(hwm);
+        if let Some(notifications) = &layer.notifications {
+            self.notifications.clone_from(notifications);
         }
         if let Some(height) = layer.assume_valid_height {
             self.assume_valid_height = height;
@@ -780,7 +593,7 @@ impl RuntimeInputs {
 /// [`NodeConfig::default_for_network`].
 #[derive(Clone, Debug, Default, Deserialize, Parser)]
 #[command(name = "bitcoin-rs-node", about = "Run a bitcoin-rs node")]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct UserConfig {
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
@@ -831,42 +644,16 @@ pub struct UserConfig {
     pub(crate) prune_target_mb: Option<u64>,
     #[arg(long)]
     pub(crate) txindex: Option<bool>,
-    #[arg(
-        long = "blockfilterindex",
-        num_args = 0..=1,
-        default_missing_value = "true"
-    )]
-    pub(crate) blockfilterindex: Option<bool>,
     #[arg(long = "dbcache-mb")]
     pub(crate) dbcache_mb: Option<u64>,
-    #[arg(long = "index-rollback-rebuild-cutover")]
-    pub(crate) index_rollback_rebuild_cutover: Option<u32>,
     #[arg(long = "log-level")]
     pub(crate) log_level: Option<String>,
     #[arg(long = "metrics-bind")]
     pub(crate) metrics_bind: Option<SocketAddr>,
+    /// Notification configuration is intentionally file-only; adapter internals
+    /// are not promoted back to flat process flags.
     #[arg(skip)]
-    pub(crate) clear_metrics_bind: bool,
-    #[arg(long = "zmqpubhashblock", value_delimiter = ',')]
-    pub(crate) zmqpubhashblock: Option<Vec<String>>,
-    #[arg(long = "zmqpubhashtx", value_delimiter = ',')]
-    pub(crate) zmqpubhashtx: Option<Vec<String>>,
-    #[arg(long = "zmqpubrawblock", value_delimiter = ',')]
-    pub(crate) zmqpubrawblock: Option<Vec<String>>,
-    #[arg(long = "zmqpubrawtx", value_delimiter = ',')]
-    pub(crate) zmqpubrawtx: Option<Vec<String>>,
-    #[arg(long = "zmqpubsequence", value_delimiter = ',')]
-    pub(crate) zmqpubsequence: Option<Vec<String>>,
-    #[arg(long = "zmqpubhashblockhwm")]
-    pub(crate) zmqpubhashblockhwm: Option<u32>,
-    #[arg(long = "zmqpubhashtxhwm")]
-    pub(crate) zmqpubhashtxhwm: Option<u32>,
-    #[arg(long = "zmqpubrawblockhwm")]
-    pub(crate) zmqpubrawblockhwm: Option<u32>,
-    #[arg(long = "zmqpubrawtxhwm")]
-    pub(crate) zmqpubrawtxhwm: Option<u32>,
-    #[arg(long = "zmqpubsequencehwm")]
-    pub(crate) zmqpubsequencehwm: Option<u32>,
+    pub(crate) notifications: Option<NotificationConfig>,
     #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
 }
@@ -904,43 +691,9 @@ impl UserConfig {
                 "BITCOIN_RS_CONNECT" => layer.connect = Some(parse_connect_list(value)?),
                 "BITCOIN_RS_PRUNE_TARGET_MB" => layer.prune_target_mb = Some(value.parse()?),
                 "BITCOIN_RS_TXINDEX" => layer.txindex = Some(parse_bool(value)?),
-                "BITCOIN_RS_BLOCKFILTERINDEX" => layer.blockfilterindex = Some(parse_bool(value)?),
                 "BITCOIN_RS_DBCACHE_MB" => layer.dbcache_mb = Some(value.parse()?),
-                "BITCOIN_RS_INDEX_ROLLBACK_REBUILD_CUTOVER" => {
-                    layer.index_rollback_rebuild_cutover = Some(value.parse()?);
-                }
                 "BITCOIN_RS_LOG_LEVEL" => layer.log_level = Some(value.to_owned()),
                 "BITCOIN_RS_METRICS_BIND" => layer.metrics_bind = Some(value.parse()?),
-                "BITCOIN_RS_ZMQPUBHASHBLOCK" => {
-                    layer.zmqpubhashblock = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBHASHTX" => {
-                    layer.zmqpubhashtx = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBRAWBLOCK" => {
-                    layer.zmqpubrawblock = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBRAWTX" => {
-                    layer.zmqpubrawtx = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBSEQUENCE" => {
-                    layer.zmqpubsequence = Some(parse_string_list(value));
-                }
-                "BITCOIN_RS_ZMQPUBHASHBLOCKHWM" => {
-                    layer.zmqpubhashblockhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBHASHTXHWM" => {
-                    layer.zmqpubhashtxhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBRAWBLOCKHWM" => {
-                    layer.zmqpubrawblockhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBRAWTXHWM" => {
-                    layer.zmqpubrawtxhwm = Some(value.parse()?);
-                }
-                "BITCOIN_RS_ZMQPUBSEQUENCEHWM" => {
-                    layer.zmqpubsequencehwm = Some(value.parse()?);
-                }
                 "BITCOIN_RS_ASSUME_VALID_HEIGHT" => {
                     layer.assume_valid_height = Some(value.parse()?);
                 }
@@ -1000,29 +753,6 @@ fn parse_connect_list(value: &str) -> Result<Vec<String>> {
         .filter(|part| !part.trim().is_empty())
         .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
         .collect()
-}
-
-fn parse_string_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn push_zmq_publications(
-    publications: &mut Vec<ZmqPublication>,
-    topic: crate::zmq_publisher::ZmqTopic,
-    endpoints: &[String],
-    hwm: Option<u32>,
-) {
-    let hwm = hwm.unwrap_or(DEFAULT_ZMQ_HWM);
-    publications.extend(endpoints.iter().cloned().map(|endpoint| ZmqPublication {
-        topic,
-        endpoint,
-        hwm,
-    }));
 }
 
 fn parse_bool(value: &str) -> Result<bool> {

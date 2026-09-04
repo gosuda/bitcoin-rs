@@ -9,7 +9,7 @@
 //! channel drained by [`spawn_tx_ingress_consumer`], admission commits through
 //! the node's one shared `MempoolGateway`, and the real relay worker (started
 //! by that spawn) announces through `PeerRelaySink` over
-//! `NodeState::peer_outbound`. The assertions read framed messages back off
+//! `NodeState::peer_table`. The assertions read framed messages back off
 //! the sockets: the bystander peer receives the `inv`, the source peer does
 //! not.
 //!
@@ -50,8 +50,7 @@ use bitcoin_rs_rpc::context::{
 };
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
-use hashbrown::HashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 /// Node-side socket read poll while waiting for peer frames.
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -147,18 +146,21 @@ impl MiningControl for RecordingMining {
         &self,
         _request: BlockTemplateRequest,
     ) -> Result<BlockTemplateResult, MiningControlError> {
-        Err(MiningControlError::Failed("not implemented".to_owned().into()))
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
     }
 
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
-        Err(MiningControlError::Failed("not implemented".to_owned().into()))
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
     }
 
-    fn submit_block(
-        &self,
-        _block: Block,
-    ) -> Result<BlockValidationResult, MiningControlError> {
-        Err(MiningControlError::Failed("not implemented".to_owned().into()))
+    fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
     }
 
     fn publish_generation(&self) {
@@ -185,14 +187,14 @@ fn loopback_skip() -> Option<String> {
 /// Node-side wiring shared by every loopback peer of one test.
 struct PeerWiring {
     magic: Magic,
-    outbound: Arc<RwLock<HashMap<SocketAddr, PeerLease>>>,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     ingress_tx: Sender<InboundTx>,
     stop: Arc<AtomicBool>,
 }
 
 /// One connected peer. The dialer end is driven by the test; the accepted end
 /// is owned by the node-side service thread, and the peer's lease is
-/// registered in the node's shared `peer_outbound` map exactly like the
+/// registered in the node's shared `peer_table` exactly like the
 /// production listener registers inbound connections.
 struct LoopbackPeer {
     /// Test-held client end of the real TCP connection.
@@ -214,7 +216,7 @@ fn open_loopback_peer(
 
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<Message>();
     let lease = PeerLease::new_inbound(outbound_tx);
-    wiring.outbound.write().insert(peer_addr, lease.clone());
+    wiring.peer_table.register(peer_addr, lease.clone());
 
     let mut wire_out = accepted
         .try_clone()
@@ -289,9 +291,9 @@ fn serve_connection(
                     continue;
                 }
                 let mut send = |response: Message| {
-                    lease.send(response).map_err(|_| {
-                        PeerError::Protocol("outbound lease closed or saturated")
-                    })
+                    lease
+                        .send(response)
+                        .map_err(|_| PeerError::Protocol("outbound lease closed or saturated"))
                 };
                 let _ = dispatch_inbound_full(
                     &mut peer,
@@ -481,7 +483,7 @@ impl Harness {
 
         let wiring = PeerWiring {
             magic,
-            outbound: state.peer_outbound(),
+            peer_table: state.peer_table(),
             ingress_tx,
             stop: Arc::new(AtomicBool::new(false)),
         };

@@ -39,16 +39,6 @@ const PREFIX_PROBES: &[(&str, &str)] = &[
         "/rest/blockpart/0000000000000000000000000000000000000000000000000000000000000001.bin",
         "",
     ),
-    // /rest/blockfilter/
-    (
-        "/rest/blockfilter/basic/0000000000000000000000000000000000000000000000000000000000000001.json",
-        "",
-    ),
-    // /rest/blockfilterheaders/
-    (
-        "/rest/blockfilterheaders/basic/0000000000000000000000000000000000000000000000000000000000000001.json",
-        "count=5",
-    ),
     // /rest/chaininfo
     ("/rest/chaininfo.json", ""),
     // /rest/mempool/
@@ -80,11 +70,11 @@ const PREFIX_PROBES: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn registration_count_is_fourteen() {
+fn registration_count_is_twelve() {
     assert_eq!(
         REGISTRATIONS.len(),
-        14,
-        "Core registers exactly 14 REST prefixes"
+        12,
+        "Core registers exactly 12 supported REST prefixes"
     );
 }
 
@@ -152,11 +142,6 @@ fn unknown_suffixes_are_malformed_path_parameters() {
         (format!("/rest/block/notxdetails/{HASH}.txt"), ""),
         (format!("/rest/block/{HASH}.txt"), ""),
         (format!("/rest/blockpart/{HASH}.txt"), ""),
-        (format!("/rest/blockfilter/basic/{HASH}.txt"), ""),
-        (
-            format!("/rest/blockfilterheaders/basic/{HASH}.txt"),
-            "count=1",
-        ),
         (format!("/rest/headers/{HASH}.txt"), "count=1"),
         (format!("/rest/getutxos/{HASH}-0.txt"), ""),
         ("/rest/blockhashbyheight/0.txt".to_owned(), ""),
@@ -214,44 +199,6 @@ fn blockpart_prefix_bin_hex_dispatch() {
         response.status, 404,
         "blockpart .json → 404 (format not found)"
     );
-}
-
-#[test]
-fn blockfilter_prefix_returns_unavailable_not_generic_404() {
-    let ctx = Arc::new(Context::new());
-    let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-    let response = route(
-        &ctx,
-        &format!("/rest/blockfilter/basic/{hash}.json"),
-        "",
-        true,
-    );
-    assert_eq!(response.status, 404);
-    let body = String::from_utf8(response.body).expect("body");
-    assert!(
-        body.contains("not available"),
-        "filter response must say 'not available', got: {body}"
-    );
-    assert_ne!(body, "not found", "must not be the generic 404 body");
-}
-
-#[test]
-fn blockfilterheaders_prefix_returns_unavailable_not_generic_404() {
-    let ctx = Arc::new(Context::new());
-    let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-    let response = route(
-        &ctx,
-        &format!("/rest/blockfilterheaders/basic/{hash}.json"),
-        "count=5",
-        true,
-    );
-    assert_eq!(response.status, 404);
-    let body = String::from_utf8(response.body).expect("body");
-    assert!(
-        body.contains("not available"),
-        "filter headers response must say 'not available', got: {body}"
-    );
-    assert_ne!(body, "not found", "must not be the generic 404 body");
 }
 
 #[test]
@@ -389,8 +336,6 @@ fn registrations_contain_expected_literal_prefixes() {
         "/rest/block/notxdetails/",
         "/rest/block/",
         "/rest/blockpart/",
-        "/rest/blockfilter/",
-        "/rest/blockfilterheaders/",
         "/rest/chaininfo",
         "/rest/mempool/",
         "/rest/headers/",

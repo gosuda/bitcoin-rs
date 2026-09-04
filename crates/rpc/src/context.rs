@@ -1,20 +1,18 @@
 use alloc::sync::Arc;
-use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use std::path::PathBuf;
-
 use arc_swap::ArcSwapOption;
-
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_ext_api::CapabilityProvider;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationResult};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
 };
 use compact_str::CompactString;
+use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
@@ -799,7 +797,9 @@ pub struct MiningInfo {
     pub blocks: u32,
     /// Most recently assembled candidate facts.
     pub last_candidate: Option<LastCandidateInfo>,
-    /// Difficulty of the applied tip.
+    /// Compact target bits of the applied tip.
+    pub bits: u32,
+    /// Difficulty represented by `bits`.
     pub difficulty: f64,
     /// Estimated network hashes per second.
     pub network_hashes_per_second: f64,
@@ -880,6 +880,72 @@ pub struct TxIndexInfo {
     pub best_block_height: u32,
 }
 
+/// Lifecycle state reported for a node-owned RPC capability.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CapabilityState {
+    /// The capability is current with the applied chain tip.
+    Ready,
+    /// The capability is catching up to the applied chain tip.
+    CatchingUp {
+        /// Height covered by the capability.
+        processed_height: u32,
+        /// Applied-chain height the capability is approaching.
+        target_height: u32,
+    },
+    /// The capability is deleting rows on a branch the applied chain
+    /// abandoned, block by block, down to the common ancestor.
+    RollingBack {
+        /// Height of the watermark being rewound.
+        from_height: u32,
+        /// Height of the last block shared with the applied chain.
+        to_height: u32,
+    },
+    /// The capability was reset and is rebuilding from genesis.
+    Rebuilding {
+        /// Height the rebuild has reached.
+        processed_height: u32,
+        /// Applied-chain height the rebuild is approaching.
+        target_height: u32,
+    },
+    /// The capability failed and cannot currently provide complete answers.
+    Failed {
+        /// Failure description.
+        reason: String,
+    },
+    /// The capability is not enabled for this node.
+    Disabled,
+    /// The capability is opening and cannot answer yet.
+    Opening,
+    /// The capability worker was abandoned during shutdown.
+    ShutdownAbandoned,
+}
+
+/// Status of one concrete node capability exposed through RPC.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CapabilityStatus {
+    /// Stable capability identifier.
+    pub id: String,
+    /// Whether the capability is compiled into this binary.
+    pub compiled: bool,
+    /// Whether the capability is enabled for this node.
+    pub enabled: bool,
+    /// Current lifecycle state.
+    pub state: CapabilityState,
+}
+
+/// Point-in-time status report for concrete node capabilities.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CapabilitySnapshot {
+    /// Status rows in the node's stable capability order.
+    pub capabilities: Vec<CapabilityStatus>,
+}
+
+/// Read-only provider implemented by the node for the RPC capability report.
+pub trait CapabilityProvider: Send + Sync {
+    /// Captures the current capability status.
+    fn snapshot(&self) -> CapabilitySnapshot;
+}
+
 /// Failure from a complete transaction-index query.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TxQueryError {
@@ -912,33 +978,6 @@ pub trait TxIndexQuery: Send + Sync {
     }
     /// Returns the transaction index's actual durable progress.
     fn index_info(&self) -> Result<TxIndexInfo, TxQueryError>;
-}
-
-/// Actual progress reported by the node-owned basic block-filter index.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FilterIndexInfo {
-    /// Whether the index has completely caught up to the authoritative chain tip.
-    pub synced: bool,
-    /// Height of the best block whose filter the index can serve.
-    pub best_block_height: u32,
-}
-
-/// Lockless read-only adapter for basic block-filter index queries.
-///
-/// `None` on the context means the index is not enabled; implementations
-/// return [`TxQueryError`] for blocks the index does not cover.
-pub trait FilterIndexQuery: Send + Sync {
-    /// Returns the index's actual durable progress.
-    fn filter_info(&self) -> Result<FilterIndexInfo, TxQueryError>;
-
-    /// Returns the serialized BIP158 basic filter for `block_hash`.
-    ///
-    /// `None` means complete absence: the block is known to the index and
-    /// has no filter row (only possible below the indexed prefix).
-    fn basic_filter(&self, block_hash: Hash256) -> Result<Option<Vec<u8>>, TxQueryError>;
-
-    /// Returns the BIP157 filter header for `block_hash`.
-    fn filter_header(&self, block_hash: Hash256) -> Result<Option<[u8; 32]>, TxQueryError>;
 }
 
 /// One current unspent output indexed for a script.
@@ -1046,9 +1085,7 @@ pub struct ContextHandles {
     pub network: NetworkHandles,
     /// Mining capability: the template coordinator, when one is attached.
     pub mining: MiningHandles,
-    /// Complete basic block-filter index query adapter.
-    pub filter_index: Option<Arc<dyn FilterIndexQuery>>,
-    /// Live capability report backing the `getcapabilities` extension method.
+    /// Live capability report for concrete node-owned services.
     pub capabilities: Option<Arc<dyn CapabilityProvider>>,
 }
 
@@ -1096,8 +1133,8 @@ pub struct NetworkHandles {
     pub network: Arc<RwLock<NetworkState>>,
     /// Whether the node accepts or starts P2P connections.
     pub network_active: Arc<core::sync::atomic::AtomicBool>,
-    /// Shared identity-aware lifecycle authority for peer mutations.
-    pub peer_lifecycle: Arc<bitcoin_rs_p2p::PeerLifecycle>,
+    /// Authoritative live peer sessions.
+    pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     /// Channel that requests outbound P2P connections.
     pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
     /// Manual IP/CIDR bans.
@@ -1165,20 +1202,17 @@ pub struct Context {
     pub esplora_tx_index: Option<Arc<dyn TxIndexQuery>>,
     /// Optional node-owned generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
-    /// Optional node-owned complete basic block-filter index query adapter.
-    /// `None` when the filter index extension is not enabled.
-    pub filter_index: Option<Arc<dyn FilterIndexQuery>>,
-    /// Live capability report backing the `getcapabilities` extension method.
+    /// Live capability report for concrete node-owned services.
     pub capabilities: Option<Arc<dyn CapabilityProvider>>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
     /// Network selector used by handlers needing consensus parameters (e.g.
     /// difficulty calculation).
     pub chain_network: Network,
+    /// Authoritative live peer sessions.
+    pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     /// Whether outbound and inbound network activity is enabled through RPC.
     pub network_active: Arc<core::sync::atomic::AtomicBool>,
-    /// Shared identity-aware lifecycle authority for peer mutations.
-    pub peer_lifecycle: Arc<bitcoin_rs_p2p::PeerLifecycle>,
     /// Shared in-memory block tree.
     pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
     /// Optional durable block body reader for metadata-only block records.
@@ -1239,10 +1273,6 @@ impl Context {
         let mempool = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
             MempoolLimits::default(),
         ))));
-        let peer_lifecycle = Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(
-            Arc::new(RwLock::new(Vec::new())),
-            Arc::new(RwLock::new(HashMap::new())),
-        ));
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip: Arc::new(ArcSwapOption::empty()),
@@ -1257,11 +1287,10 @@ impl Context {
             tx_index: None,
             esplora_tx_index: None,
             script_index: None,
-            filter_index: None,
             capabilities: None,
             prune_service: None,
             chain_control: None,
-            peer_lifecycle,
+            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
             mining_control: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
@@ -1310,14 +1339,10 @@ impl Context {
             tx_index: None,
             esplora_tx_index: None,
             script_index: None,
-            filter_index: None,
             capabilities: None,
             prune_service: None,
             chain_control: None,
-            peer_lifecycle: Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(
-                Arc::new(RwLock::new(Vec::new())),
-                Arc::new(RwLock::new(HashMap::new())),
-            )),
+            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
             mining_control: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
@@ -1358,13 +1383,12 @@ impl Context {
                 NetworkHandles {
                     network,
                     network_active,
-                    peer_lifecycle,
+                    peer_table,
                     p2p_outbound_sender,
                     banned,
                     added_nodes,
                 },
             mining: MiningHandles { mining_control },
-            filter_index,
             capabilities,
         } = handles;
         Self {
@@ -1381,12 +1405,11 @@ impl Context {
             tx_index,
             esplora_tx_index: None,
             script_index,
-            filter_index,
             capabilities,
             network,
             chain_network,
+            peer_table,
             network_active,
-            peer_lifecycle,
             block_tree,
             block_body_source: None,
             p2p_outbound_sender,
@@ -1907,7 +1930,6 @@ mod tests {
             .collect()
     }
 
-
     /// Every record at a duplicated height must be reachable by its own hash.
     ///
     /// A search that stopped at the run's first record would answer `None` for
@@ -2046,10 +2068,6 @@ mod tests {
         let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
         let added_nodes = Arc::new(RwLock::new(Vec::new()));
         let network_active = Arc::new(core::sync::atomic::AtomicBool::new(true));
-        let peer_lifecycle = Arc::new(bitcoin_rs_p2p::PeerLifecycle::new(
-            Arc::new(RwLock::new(Vec::new())),
-            Arc::new(RwLock::new(HashMap::new())),
-        ));
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
                 chain_tip: Arc::clone(&chain_tip),
@@ -2073,7 +2091,7 @@ mod tests {
             network: NetworkHandles {
                 network: Arc::new(RwLock::new(NetworkState::default())),
                 network_active: Arc::clone(&network_active),
-                peer_lifecycle,
+                peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
                 p2p_outbound_sender: None,
                 banned: Arc::clone(&banned),
                 added_nodes: Arc::clone(&added_nodes),
@@ -2081,7 +2099,6 @@ mod tests {
             mining: MiningHandles {
                 mining_control: None,
             },
-            filter_index: None,
             capabilities: None,
         });
         assert!(

@@ -40,10 +40,9 @@ fn not_dispatchable(handler: &Handler, name: &str) -> bool {
 
 /// Invariant 1 (RPC, bidirectional): the live dispatch registry and the
 /// shipped manifest rows are set-equal in both directions. Both sides come
-/// from one static table (`handlers::DISPATCH_TABLE`) that binds each name
-/// to its handler arm and that `Handler::dispatch` itself consumes, so a
-/// method can neither dispatch without a shipped row nor ship a row
-/// without an arm.
+/// from one static table (`registry::REGISTRY`) that binds each name to its
+/// handler arm and that `Handler::dispatch` itself consumes, so a method can
+/// neither dispatch without a shipped row nor ship a row without an arm.
 #[test]
 fn rpc_rows_and_the_live_registry_agree_both_ways() {
     let live: BTreeSet<&str> = bitcoin_rs_rpc::handlers::live_registry().collect();

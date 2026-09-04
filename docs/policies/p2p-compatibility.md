@@ -79,7 +79,7 @@ The decoder in `crates/p2p/src/wire.rs::decode_payload` dispatches exactly **36 
 | `sendcmpct` | ignored (tracked) | BIP152 preference recorded per peer. We never announce compact-block relay, so Core sends us full blocks — the compatible fallback. |
 | `cmpctblock` / `getblocktxn` / `blocktxn` | ignored | BIP152 receive path unused because we never opt in. |
 | `merkleblock` / `filterload` / `filteradd` / `filterclear` | ignored | BIP37. We do not advertise `NODE_BLOOM`, so a default Core peer never sends them; if one does, they are ignored. |
-| `getcfilters` / `cfilter` / `getcfheaders` / `cfheaders` / `getcfcheckpt` / `cfcheckpt` | ignored | BIP157/158. We do not advertise `NODE_COMPACT_FILTERS`; compact filters are served over RPC (`getblockfilter`), not P2P. |
+| `getcfilters` / `cfilter` / `getcfheaders` / `cfheaders` / `getcfcheckpt` / `cfcheckpt` | ignored | BIP157/158 compact-filter P2P is unsupported. We do not advertise `NODE_COMPACT_FILTERS` and do not serve compact filters. |
 | `reject` | legacy | Decoded, never sent. Core 31 no longer emits `reject` for transaction acceptance results. |
 | `alert` | legacy | Decoded as opaque bytes, ignored. The command is dead in Core. |
 

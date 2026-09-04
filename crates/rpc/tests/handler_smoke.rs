@@ -9,9 +9,10 @@ use hashbrown::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-
 use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
-use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerLifecycle};
+use bitcoin_rs_mempool::MempoolEntry;
+use bitcoin_rs_mining::{Candidate, TemplateId};
+use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     encode::double_sha256,
@@ -23,7 +24,6 @@ use bitcoin_rs_rpc::context::{
 };
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
-use parking_lot::RwLock;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 struct SmokeMiningControl;
@@ -90,6 +90,7 @@ impl MiningControl for SmokeMiningControl {
         Ok(MiningInfo {
             blocks: 0,
             last_candidate: None,
+            bits: 0x207f_ffff,
             difficulty: 1.0,
             network_hashes_per_second: 0.0,
             pooled_transactions: 0,
@@ -397,44 +398,18 @@ fn getindexinfo_named_request_returns_only_that_index() -> Result<(), Box<dyn st
             best_block_height: 7,
         },
     }));
-    ctx.filter_index = Some(Arc::new(FakeFilterIndex {
-        info: bitcoin_rs_rpc::context::FilterIndexInfo {
-            synced: false,
-            best_block_height: 5,
-        },
-    }));
     let handler = Handler::new(Arc::new(ctx));
 
     let txindex = handler.dispatch("getindexinfo", &json!(["txindex"]))?;
     assert!(txindex.get("txindex").is_some(), "txindex must be present");
-    assert!(
-        txindex.get("basicblockfilterindex").is_none(),
-        "named request must exclude the filter index"
-    );
-
-    let filter = handler.dispatch("getindexinfo", &json!(["basicblockfilterindex"]))?;
-    assert!(
-        filter.get("basicblockfilterindex").is_some(),
-        "filter index must be present"
-    );
-    assert!(
-        filter.get("txindex").is_none(),
-        "named request must exclude txindex"
-    );
-
     let all = handler.dispatch("getindexinfo", &json!([]))?;
     assert!(
         all.get("txindex").is_some(),
         "no-param request includes txindex"
     );
-    assert!(
-        all.get("basicblockfilterindex").is_some(),
-        "no-param request includes the filter index"
-    );
-
     let unknown = handler.dispatch("getindexinfo", &json!(["unknown"]))?;
     assert!(
-        unknown.get("txindex").is_none() && unknown.get("basicblockfilterindex").is_none(),
+        unknown.get("txindex").is_none(),
         "unknown index name yields an empty object"
     );
     Ok(())
@@ -549,8 +524,9 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
 }
 
 #[test]
-fn network_peer_methods_read_shared_peer_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
-    let peers = Arc::new(RwLock::new(vec![PeerInfo {
+fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::error::Error>> {
+    let peer_table = Arc::new(PeerTable::new());
+    let info = PeerInfo {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
         version: 70016,
         services: 0,
@@ -558,8 +534,15 @@ fn network_peer_methods_read_shared_peer_lifecycle() -> Result<(), Box<dyn std::
         start_height: 0,
         conn_time: 0,
         inbound: true,
-    }]));
-    let ctx = context_with_peers(peers);
+        addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
+        time_offset: 0,
+        counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+    };
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let lease = PeerLease::new(tx);
+    peer_table.register(info.addr, lease.clone());
+    peer_table.publish_info(info.addr, &lease, info);
+    let ctx = context_with_peers(peer_table);
     let handler = Handler::new(ctx);
     let result = handler.dispatch("getpeerinfo", &json!([]))?;
     let array = result
@@ -618,33 +601,6 @@ impl bitcoin_rs_rpc::context::TxIndexQuery for FakeTxIndex {
         &self,
     ) -> Result<bitcoin_rs_rpc::context::TxIndexInfo, bitcoin_rs_rpc::context::TxQueryError> {
         Ok(self.info)
-    }
-}
-
-struct FakeFilterIndex {
-    info: bitcoin_rs_rpc::context::FilterIndexInfo,
-}
-
-impl bitcoin_rs_rpc::context::FilterIndexQuery for FakeFilterIndex {
-    fn filter_info(
-        &self,
-    ) -> Result<bitcoin_rs_rpc::context::FilterIndexInfo, bitcoin_rs_rpc::context::TxQueryError>
-    {
-        Ok(self.info)
-    }
-
-    fn basic_filter(
-        &self,
-        _block_hash: Hash256,
-    ) -> Result<Option<Vec<u8>>, bitcoin_rs_rpc::context::TxQueryError> {
-        Ok(None)
-    }
-
-    fn filter_header(
-        &self,
-        _block_hash: Hash256,
-    ) -> Result<Option<[u8; 32]>, bitcoin_rs_rpc::context::TxQueryError> {
-        Ok(None)
     }
 }
 
@@ -868,20 +824,9 @@ impl Fixture {
     }
 }
 #[allow(clippy::arc_with_non_send_sync)]
-fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
+fn context_with_peers(peer_table: Arc<PeerTable>) -> Arc<Context> {
     let mut ctx = Context::new();
-    let infos = peers.read().clone();
-    let lifecycle = Arc::new(PeerLifecycle::new(
-        peers,
-        Arc::new(RwLock::new(HashMap::new())),
-    ));
-    for info in infos {
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = PeerLease::new(tx);
-        lifecycle.register(info.addr, &lease);
-        lifecycle.publish_ready(info.addr, &lease, info);
-    }
-    ctx.peer_lifecycle = lifecycle;
+    ctx.peer_table = peer_table;
     Arc::new(ctx)
 }
 

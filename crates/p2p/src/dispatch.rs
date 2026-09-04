@@ -870,7 +870,7 @@ mod tests {
 
     // --- TxInventory filter and getdata tx serving tests ---
 
-    /// A fake TxInventory that knows a fixed set of txids/wtxids and can
+    /// A fake `TxInventory` that knows a fixed set of txids/wtxids and can
     /// serve their bodies.
     struct FakeTxInventory {
         txs_by_txid: hashbrown::HashMap<bitcoin::Txid, Tx>,
@@ -1069,6 +1069,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::expect_used)]
     fn dispatch_collect_full<S>(
         peer: &mut Peer<S>,
         message: &Message,

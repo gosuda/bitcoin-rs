@@ -11,10 +11,10 @@ made stale sync decisions capable of racing a same-address replacement.
 ## Decision
 
 `P2pService` is the runtime owner of P2P control state, workers, and download
-policy. Its `PeerLifecycle` is the sole mutation boundary for live leases and
-ready-peer metadata. P2P connection threads use it to register before handshake, publish
-metadata only while the publishing lease remains current, replace a genuine
-predecessor, and remove themselves during teardown.
+policy. Its `PeerLifecycle` handle is the node-facing mutation boundary over
+the single `PeerTable` session store. P2P connection threads register before
+handshake, publish metadata only while the publishing lease remains current,
+replace a genuine predecessor, and remove themselves during teardown.
 
 Higher layers receive a handshake-completion notification carrying the
 `PeerSource` immediately before P2P publishes the connection as ready.

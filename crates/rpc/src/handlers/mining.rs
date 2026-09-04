@@ -353,8 +353,8 @@ fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
         current_block_tx: info
             .last_candidate
             .and_then(|candidate| i64::try_from(candidate.transactions).ok()),
-        bits: next_bits.clone(),
-        target: next_target.clone(),
+        bits: format!("{:08x}", info.bits),
+        target: compact_target_hex(info.bits),
         difficulty: info.difficulty,
         network_hash_ps: info.network_hashes_per_second,
         pooled_tx: i64_saturated(info.pooled_transactions),
@@ -551,6 +551,7 @@ mod tests {
                 weight: 2_500,
                 transactions: 3,
             }),
+            bits: 0x207f_ffff,
             difficulty: 1.0,
             network_hashes_per_second: 42.5,
             pooled_transactions: 4,
@@ -807,6 +808,41 @@ mod tests {
             Some("regtest")
         );
         assert_eq!(control.info_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    // Core emits the tip's nBits at top level and the next block's only under next.
+    fn getmininginfo_top_level_target_is_the_tip_not_the_next_block() {
+        let control = FakeMiningControl::with_template(sample_template());
+        {
+            let mut info = control.info.lock();
+            info.bits = 0x1d00_ffff;
+            info.difficulty = 1.0;
+            info.next_bits = 0x1c00_ffff;
+        }
+        let ctx = ctx_with_control(control);
+        let result = getmininginfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getmininginfo failed: {err}"));
+        let target = result
+            .get("target")
+            .and_then(JsonValueTrait::as_str)
+            .expect("top-level target");
+        let next = result.get("next").expect("next object");
+        let next_target = next
+            .get("target")
+            .and_then(JsonValueTrait::as_str)
+            .expect("next target");
+        assert_eq!(
+            result.get("bits").and_then(JsonValueTrait::as_str),
+            Some("1d00ffff")
+        );
+        assert_eq!(target, compact_target_hex(0x1d00_ffff));
+        assert_eq!(
+            next.get("bits").and_then(JsonValueTrait::as_str),
+            Some("1c00ffff")
+        );
+        assert_eq!(next_target, compact_target_hex(0x1c00_ffff));
+        assert_ne!(target, next_target);
     }
 
     #[test]

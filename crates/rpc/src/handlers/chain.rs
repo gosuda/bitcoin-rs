@@ -1,5 +1,4 @@
 use alloc::sync::Arc;
-use bitcoin::hex::DisplayHex as _;
 use core::str::FromStr as _;
 use core::{fmt, fmt::Write as _};
 
@@ -229,11 +228,27 @@ pub(crate) fn getdifficulty(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 
 pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
+    // Tree guard first, then the tip -- and that order is load-bearing rather
+    // than incidental. A connect inserts its node under the tree's write lock
+    // and publishes the applied tip afterwards, so while this read guard is
+    // held no new node can appear, and any tip published in the meantime names
+    // a node that was already in the tree when the guard was taken. Loading the
+    // tip first would allow the reverse: a tip whose node this view has never
+    // seen, and every lookup below it answering `None` for a block the node has
+    // certainly connected.
     let tree = ctx.block_tree.read();
+    // The active chain is the one this node has *connected*, not the one its
+    // headers describe. Header-first sync runs the header tree thousands of
+    // blocks ahead of the applied tip during initial sync, and calling that
+    // lead "active" reports a chain the node has not validated -- while the
+    // chain it has validated goes unreported. Bitcoin Core asks
+    // `ActiveChain().Tip()`, which is the connected tip.
     let active_tip = ctx.applied_tip.load_full();
     let active_tip_id = active_tip.as_ref().map(|tip| tip.tip_id);
-    // Core: orphan leaves plus the active (applied) tip, even when headers
-    // extend past that tip so it is no longer a tree leaf.
+
+    // Core reports the active tip whether or not it is a leaf, and during
+    // initial sync it is not one: the headers already describe its
+    // descendants, so nothing here would list it.
     let mut tip_ids = tree.leaf_node_ids();
     if let Some(active_id) = active_tip_id {
         if !tip_ids.contains(&active_id) {
@@ -262,13 +277,48 @@ pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
             });
             continue;
         };
-        let status = if is_active {
-            ChainTipsStatus::Active
-        } else {
-            match node.status {
-                NodeStatus::Active | NodeStatus::HeaderValid => ChainTipsStatus::HeadersOnly,
-                NodeStatus::Stale => ChainTipsStatus::ValidFork,
-                NodeStatus::Invalid => ChainTipsStatus::Invalid,
+        // `NodeStatus` is not a validation record. `BlockTree::insert_node`
+        // stamps whichever node carries the most work `Active` and demotes the
+        // one it displaced to `Stale`, so on a header-first node every accepted
+        // header on the best chain is `Active` while its block sits
+        // unconnected. Reading it as "this block was validated" is what made a
+        // header tip report itself as the active chain.
+        //
+        // What is decidable: a block is connected exactly when it is the
+        // applied tip or an ancestor of it, and a leaf is never an ancestor of
+        // anything. So every leaf but the applied tip is unconnected *now*, and
+        // the only question left is whether it ever was.
+        let status = match node.status {
+            // **Invalid first, ahead of being the applied tip.** The two can
+            // both be true at once, and only for as long as it takes an
+            // invalidation to finish: `reorg::invalidate_block` marks the
+            // subtree invalid under the tree's write lock and releases it, and
+            // republishes `applied_tip` afterwards, when the disconnect has
+            // run. A call landing in between holds a tree view that says
+            // "invalid" and an applied tip that still names the block -- and
+            // deciding on the tip first labels a block the node has just
+            // rejected as the chain it is following. There is no ordering that
+            // removes the window, because the two are published separately;
+            // what removes the wrong answer is preferring the fact that cannot
+            // be stale. A block that is invalid was invalid before this call
+            // and stays invalid after it.
+            NodeStatus::Invalid => ChainTipsStatus::Invalid,
+            _ if is_active => ChainTipsStatus::Active,
+            // Everything else is a leaf whose block is not connected now, and
+            // the tree keeps no evidence that it ever was.
+            //
+            // `Stale` is not that evidence, which is the trap: the tree demotes
+            // whichever header it displaced, whether or not the block behind it
+            // was ever received, let alone applied. On a header-first node most
+            // stale nodes are headers whose bodies never arrived. Calling those
+            // `valid-fork` -- Core's "fully validated, since reorganised" --
+            // claims a validation that never happened.
+            //
+            // So `valid-fork` is never emitted. Core's `valid-headers` is not
+            // either: it means the body is present and unvalidated, which this
+            // node cannot reach because it applies a block as it arrives.
+            NodeStatus::Stale | NodeStatus::Active | NodeStatus::HeaderValid => {
+                ChainTipsStatus::HeadersOnly
             }
         };
         let branchlen = if is_active {
@@ -283,14 +333,11 @@ pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
             status,
         });
     }
-    // Sort with active first, then by height descending.
-    tips.sort_by(|a, b| {
-        let a_active = a.status == ChainTipsStatus::Active;
-        let b_active = b.status == ChainTipsStatus::Active;
-        b_active
-            .cmp(&a_active)
-            .then_with(|| b.height.cmp(&a.height))
-    });
+    // Core orders by height descending, with no special place for the active
+    // tip -- a longer fork is listed above it, which is the thing an operator
+    // is looking for. Ties break on the hash, so the order is the same on
+    // every call rather than following slab layout.
+    tips.sort_by(|a, b| b.height.cmp(&a.height).then_with(|| a.hash.cmp(&b.hash)));
     typed_to_sonic(&v31::GetChainTips(tips))
 }
 
@@ -957,22 +1004,9 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         synced: info.synced,
         best_block_height: info.best_block_height,
     });
-    let filter_entry = ctx
-        .filter_index
-        .as_ref()
-        .map(|filter_index| filter_index.filter_info())
-        .transpose()?;
-    let filter_entry = filter_entry.map(|info| v31::GetIndexInfoName {
-        synced: info.synced,
-        best_block_height: info.best_block_height,
-    });
-
     let mut indexes = alloc::collections::BTreeMap::new();
     if let Some(entry) = txindex_entry {
         indexes.insert("txindex".to_owned(), entry);
-    }
-    if let Some(entry) = filter_entry {
-        indexes.insert("basicblockfilterindex".to_owned(), entry);
     }
     // Core answers a named request with only that index; an unknown name
     // yields an empty object, as does a name for a disabled index.
@@ -987,33 +1021,6 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         }
     };
     typed_to_sonic(&v31::GetIndexInfo(selected))
-}
-
-/// Bitcoin Core `getblockfilter`.
-///
-/// Serves the BIP158 basic filter for one block from the filter index
-/// extension. Without `--blockfilterindex` the method is registered but
-/// answers the Core-shaped "Index is not enabled" parameter error, matching
-/// Core behavior without the index.
-pub(crate) fn getblockfilter(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let Some(filter_index) = ctx.filter_index.as_ref() else {
-        return Err(RpcError::InvalidParams("Index is not enabled"));
-    };
-    let block_hash_text = required_str(params, 0, "block hash is required")?;
-    let block_hash = Hash256::from_str_be(block_hash_text)
-        .map_err(|_| RpcError::InvalidParams("block hash must be a 64-character hex string"))?;
-    let filter_type = required_str(params, 1, "filter type is required")?;
-    if filter_type != "basic" {
-        return Err(RpcError::InvalidParams("unknown filtertype"));
-    }
-
-    let filter = filter_index
-        .basic_filter(block_hash)
-        .map_err(TxQueryError::into_rpc_error)?
-        .ok_or(RpcError::NotFound(
-            "Block not available (not fully indexed)",
-        ))?;
-    Ok(json!({ "hex": filter.to_lower_hex_string() }))
 }
 
 /// bitcoin-rs extension `getcapabilities`.
@@ -3345,8 +3352,7 @@ mod getchaintips_tests {
     }
 
     #[test]
-    fn getchaintips_emits_active_tip_from_applied_tip_snapshot()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn getchaintips_emits_the_applied_tip_as_active() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let genesis = synthetic_header(BlockHash::default(), 1_000_000);
         let hash = hash_from_header(&genesis);
@@ -3354,12 +3360,14 @@ mod getchaintips_tests {
             let mut tree = ctx.block_tree.write();
             tree.insert_node(None, genesis, NodeStatus::Active)?
         };
-        ctx.set_applied_tip(TipSnapshot {
+        let tip = TipSnapshot {
             tip_id,
             height: 0,
             chainwork: ChainWork::ZERO,
             hash,
-        });
+        };
+        ctx.set_chain_tip(tip.clone());
+        ctx.set_applied_tip(tip);
         let result = getchaintips(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
         let Some(arr) = result.as_array() else {
@@ -3434,12 +3442,14 @@ mod getchaintips_tests {
             let active_node = tree.node(active_tip)?;
             (active_tip, active_node.chainwork, active_node.hash)
         };
-        ctx.set_applied_tip(TipSnapshot {
+        let tip = TipSnapshot {
             tip_id: active_tip_id,
             height: 1,
             chainwork: active_chainwork,
             hash: active_hash,
-        });
+        };
+        ctx.set_chain_tip(tip.clone());
+        ctx.set_applied_tip(tip);
 
         let result = getchaintips(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
@@ -3511,6 +3521,325 @@ mod getchaintips_tests {
             "sibling at height 1 should have branchlen 1: {sibling_entry:?}"
         );
         assert_eq!(sibling_height, 1);
+        Ok(())
+    }
+
+    /// A chain whose headers run ahead of what has been applied.
+    ///
+    /// Returns the context, the applied tip's id, and the header tip's id.
+    fn ctx_with_headers_ahead(
+        applied_height: u32,
+        header_height: u32,
+    ) -> Result<
+        (
+            Arc<Context>,
+            bitcoin_rs_chain::NodeId,
+            bitcoin_rs_chain::NodeId,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let ctx = Arc::new(Context::new());
+        let mut previous = BlockHash::default();
+        let mut parent = None;
+        let mut applied = None;
+        let mut header_tip = None;
+        {
+            let mut tree = ctx.block_tree.write();
+            for height in 0..=header_height {
+                let header = synthetic_header(previous, 1_000_000 + height * 600);
+                previous = header.compute_hash();
+                // Applied blocks are Active; the headers past the applied tip
+                // have never been connected.
+                let status = if height <= applied_height {
+                    NodeStatus::Active
+                } else {
+                    NodeStatus::HeaderValid
+                };
+                let id = tree.insert_node(parent, header, status)?;
+                parent = Some(id);
+                if height == applied_height {
+                    applied = Some((id, tree.node(id)?.hash, tree.node(id)?.chainwork));
+                }
+                header_tip = Some(id);
+            }
+        }
+        let (Some((applied_id, applied_hash, applied_work)), Some(header_id)) =
+            (applied, header_tip)
+        else {
+            panic!("the fixture builds both tips");
+        };
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id: applied_id,
+            height: applied_height,
+            chainwork: applied_work,
+            hash: applied_hash,
+        });
+        Ok((ctx, applied_id, header_id))
+    }
+
+    fn tips_of(ctx: &Arc<Context>) -> Vec<sonic_rs::Value> {
+        let result = getchaintips(ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
+        let Some(array) = result.as_array() else {
+            panic!("expected array, got {result:?}");
+        };
+        array.iter().cloned().collect()
+    }
+
+    fn field<'a>(tip: &'a sonic_rs::Value, key: &str) -> &'a str {
+        tip.get(key)
+            .and_then(JsonValueTrait::as_str)
+            .unwrap_or_else(|| panic!("{key} missing from {tip:?}"))
+    }
+
+    /// The tip the node has connected is reported, even when it is not a leaf.
+    ///
+    /// During initial sync the applied tip never is one: the header tree
+    /// already describes its descendants. Listing only leaves left the chain
+    /// this node had actually validated out of the answer entirely, while the
+    /// unvalidated header tip was labelled "active" in its place.
+    #[test]
+    fn the_applied_tip_is_reported_even_when_headers_run_ahead()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
+
+        let tips = tips_of(&ctx);
+
+        assert_eq!(
+            tips.len(),
+            2,
+            "the header tip and the applied tip: {tips:?}"
+        );
+        let active: Vec<&sonic_rs::Value> = tips
+            .iter()
+            .filter(|tip| field(tip, "status") == "active")
+            .collect();
+        assert_eq!(active.len(), 1, "exactly one active tip: {tips:?}");
+        assert_eq!(
+            active
+                .first()
+                .and_then(|tip| tip.get("height"))
+                .and_then(JsonValueTrait::as_u64),
+            Some(3),
+            "the active tip is the applied one, not the header one"
+        );
+        Ok(())
+    }
+
+    /// A header the node has not connected is not the active chain.
+    ///
+    /// It is reported as `headers-only` with the distance it runs ahead, which
+    /// is what tells an operator the node is behind its own headers.
+    #[test]
+    fn a_header_tip_ahead_of_the_applied_tip_is_headers_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
+
+        let tips = tips_of(&ctx);
+        let Some(header_tip) = tips
+            .iter()
+            .find(|tip| tip.get("height").and_then(JsonValueTrait::as_u64) == Some(6))
+        else {
+            panic!("no tip at the header height: {tips:?}");
+        };
+
+        assert_eq!(field(header_tip, "status"), "headers-only");
+        assert_eq!(
+            header_tip.get("branchlen").and_then(JsonValueTrait::as_u64),
+            Some(3),
+            "three headers past the applied tip"
+        );
+        Ok(())
+    }
+
+    /// The active tip's own branch length is zero: it forks from itself.
+    #[test]
+    fn the_active_tip_has_no_branch_length() -> Result<(), Box<dyn std::error::Error>> {
+        let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
+        let tips = tips_of(&ctx);
+        let Some(active) = tips.iter().find(|tip| field(tip, "status") == "active") else {
+            panic!("no active tip: {tips:?}");
+        };
+        assert_eq!(
+            active.get("branchlen").and_then(JsonValueTrait::as_u64),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    /// A branch that was the chain and is not any more reads as a valid fork.
+    ///
+    /// This is the state a reorg leaves: the abandoned tip keeps its height and
+    /// its data, and Core reports it as `valid-fork` with the distance back to
+    /// the fork point. This node reports `headers-only`, and the assertion
+    /// below says why -- displacing a header is the only thing the block tree
+    /// records, and that is a fact about headers rather than about validation.
+    #[test]
+    fn a_branch_left_behind_by_a_reorg_is_reported_as_headers_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = Arc::new(Context::new());
+        let (abandoned_height, new_tip) = {
+            let mut tree = ctx.block_tree.write();
+            let genesis = synthetic_header(BlockHash::default(), 1_000_000);
+            let genesis_hash = genesis.compute_hash();
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+
+            let a1 = synthetic_header(genesis_hash, 1_000_600);
+            let a1_hash = a1.compute_hash();
+            let a1_id = tree.insert_node(Some(genesis_id), a1, NodeStatus::Active)?;
+            let a2 = synthetic_header(a1_hash, 1_001_200);
+            let a2_id = tree.insert_node(Some(a1_id), a2, NodeStatus::Active)?;
+            let abandoned_height = tree.node(a2_id)?.height;
+
+            // A longer branch from a1. The second block carries more work than
+            // a2, so the tree publishes it and demotes a2 to Stale -- the same
+            // sequence a real reorg follows.
+            let mut b2 = synthetic_header(a1_hash, 1_001_100);
+            b2.nonce = 77;
+            let b2_id = tree.insert_node(Some(a1_id), b2, NodeStatus::HeaderValid)?;
+            let b3 = synthetic_header(b2.compute_hash(), 1_001_700);
+            let b3_id = tree.insert_node(Some(b2_id), b3, NodeStatus::Active)?;
+
+            assert_eq!(
+                tree.node(a2_id)?.status,
+                NodeStatus::Stale,
+                "the fixture must actually displace the old tip"
+            );
+            let node = tree.node(b3_id)?;
+            (
+                abandoned_height,
+                (b3_id, node.height, node.chainwork, node.hash),
+            )
+        };
+        // The node followed the reorg: the new branch is what it has applied.
+        let (tip_id, height, chainwork, hash) = new_tip;
+        ctx.set_applied_tip(TipSnapshot {
+            tip_id,
+            height,
+            chainwork,
+            hash,
+        });
+
+        let tips = tips_of(&ctx);
+        let Some(abandoned) = tips.iter().find(|tip| {
+            tip.get("height").and_then(JsonValueTrait::as_u64) == Some(u64::from(abandoned_height))
+        }) else {
+            panic!("the abandoned tip is missing: {tips:?}");
+        };
+
+        // **Not `valid-fork`.** This fixture never applied a2's block -- it
+        // only inserted headers -- and the tree kept no record that anything
+        // did. `Stale` says the header was displaced, which is a fact about the
+        // header tree and not about validation; on a header-first node most
+        // stale nodes are headers whose bodies never arrived at all. Core's
+        // `valid-fork` means "fully validated, since reorganised", so emitting
+        // it here would claim a validation that did not happen.
+        assert_eq!(field(abandoned, "status"), "headers-only");
+        assert_eq!(
+            abandoned.get("branchlen").and_then(JsonValueTrait::as_u64),
+            Some(1),
+            "one block past the fork point"
+        );
+        Ok(())
+    }
+
+    /// An invalidated block is never reported as the chain being followed.
+    ///
+    /// `reorg::invalidate_block` marks the subtree invalid under the tree's
+    /// write lock and releases it, then disconnects and republishes
+    /// `applied_tip`. Between those two a caller holds a tree view that says
+    /// "invalid" and an applied tip that still names the block, and deciding on
+    /// the tip first labels a block the node has just rejected as `active` --
+    /// an operator reading that sees the node following a chain it has thrown
+    /// away.
+    ///
+    /// The window cannot be closed by ordering, because the two facts are
+    /// published separately. What removes the wrong answer is preferring the
+    /// one that cannot go stale: a block that is invalid was invalid before
+    /// this call and stays invalid after it.
+    ///
+    /// The fixture *is* that window, reproduced exactly: the subtree is
+    /// invalidated and the applied tip is left where invalidation found it.
+    #[test]
+    fn an_invalidated_applied_tip_is_not_reported_as_active()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = Arc::new(Context::new());
+        let tip = {
+            let mut tree = ctx.block_tree.write();
+            let genesis = synthetic_header(BlockHash::default(), 1_000_000);
+            let genesis_hash = genesis.compute_hash();
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+            let child = synthetic_header(genesis_hash, 1_000_600);
+            let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)?;
+            let node = tree.node(child_id)?;
+            TipSnapshot {
+                tip_id: child_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+        ctx.set_applied_tip(tip.clone());
+
+        // Before: the applied tip is the chain being followed.
+        let before = tips_of(&ctx);
+        let Some(active) = before
+            .iter()
+            .find(|reported| field(reported, "status") == "active")
+        else {
+            panic!("the applied tip must start out active: {before:?}");
+        };
+        assert_eq!(
+            active.get("height").and_then(JsonValueTrait::as_u64),
+            Some(u64::from(tip.height))
+        );
+
+        // The invalidation's first half, with the tip not yet republished.
+        {
+            let mut tree = ctx.block_tree.write();
+            tree.invalidate_subtree(tip.tip_id)?;
+        }
+
+        let after = tips_of(&ctx);
+        let Some(reported) = after.iter().find(|reported| {
+            reported.get("hash").and_then(JsonValueTrait::as_str)
+                == Some(tip.hash.to_string_be().as_str())
+        }) else {
+            panic!("the invalidated block must still be listed: {after:?}");
+        };
+        assert_eq!(
+            field(reported, "status"),
+            "invalid",
+            "an invalidated block must not be reported as the active chain"
+        );
+        assert!(
+            !after
+                .iter()
+                .any(|reported| field(reported, "status") == "active"),
+            "nothing is active while the invalidation is in flight: {after:?}"
+        );
+        Ok(())
+    }
+
+    /// Tips come back highest first, with no special place for the active one.
+    ///
+    /// Core orders by height descending. A fork longer than the active chain
+    /// is what an operator is looking for, and sorting the active tip to the
+    /// front would bury it.
+    #[test]
+    fn tips_are_ordered_by_height_descending() -> Result<(), Box<dyn std::error::Error>> {
+        let (ctx, _applied, _header) = ctx_with_headers_ahead(3, 6)?;
+
+        let heights: Vec<u64> = tips_of(&ctx)
+            .iter()
+            .map(|tip| {
+                tip.get("height")
+                    .and_then(JsonValueTrait::as_u64)
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        assert_eq!(heights, vec![6, 3], "highest first: {heights:?}");
         Ok(())
     }
 
@@ -4591,5 +4920,98 @@ mod scantxoutset_tests {
         let result = scantxoutset(&ctx, &json!(["abort"]))
             .unwrap_or_else(|err| panic!("scantxoutset abort failed: {err}"));
         assert_eq!(result.as_bool(), Some(false));
+    }
+}
+
+#[cfg(test)]
+mod stripped_size_tests {
+    use bitcoin_rs_primitives::{
+        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    };
+
+    /// A block whose single transaction carries a witness stack.
+    fn witness_block() -> Block {
+        let tx = Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0_u8; 32])), 0),
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness: vec![vec![0x21_u8; 64], vec![0x03_u8; 33]],
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }],
+        };
+        Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash::default(),
+                merkle_root: Hash256::default(),
+                time: 1_700_000_000,
+                bits: 0x207f_ffff,
+                nonce: 0,
+            },
+            txs: vec![tx],
+        }
+    }
+
+    /// A block whose transaction carries no witness.
+    fn witness_free_block() -> Block {
+        let tx = Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0_u8; 32])), 0),
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }],
+        };
+        Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash::default(),
+                merkle_root: Hash256::default(),
+                time: 1_700_000_000,
+                bits: 0x207f_ffff,
+                nonce: 0,
+            },
+            txs: vec![tx],
+        }
+    }
+
+    #[test]
+    fn stripped_size_is_below_total_for_a_witness_block() {
+        let block = witness_block();
+        let total = consensus_bytes(&block).len();
+        let stripped = crate::render::stripped_size(&block);
+
+        assert!(
+            stripped < total,
+            "the witness discount must be visible: {stripped} vs {total}"
+        );
+    }
+
+    #[test]
+    fn stripped_size_equals_the_sum_of_base_sizes_plus_header_and_count() {
+        let block = witness_block();
+        let manual: usize = 80
+            + 1 // compact size for 1 tx
+            + block.txs.iter().map(Tx::base_size).sum::<usize>();
+        assert_eq!(crate::render::stripped_size(&block), manual);
+    }
+
+    #[test]
+    fn stripped_size_equals_total_for_a_witness_free_block() {
+        let block = witness_free_block();
+        let total = consensus_bytes(&block).len();
+        assert_eq!(crate::render::stripped_size(&block), total);
     }
 }

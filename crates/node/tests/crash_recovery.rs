@@ -387,6 +387,112 @@ fn crash_recovery_replays_from_stored_bodies_after_crash() -> Result<()> {
     Ok(())
 }
 
+/// Production crash recovery with no checkpoint: recovery must replay the
+/// stored chain from genesis through the last applied block.
+#[test]
+fn crash_recovery_replays_from_genesis_without_checkpoint() -> Result<()> {
+    for backend in available_backends() {
+        let temp = tempfile::tempdir()?;
+        let config = make_config(&temp, backend);
+
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = genesis.block_hash();
+        let mut tip_hash = genesis_hash;
+
+        // Phase 1: open, apply genesis and blocks 1–3, then crash without a
+        // checkpoint.
+        {
+            let state = NodeState::open(config.clone(), None)?;
+            state.apply_block(&genesis)?;
+            let mut prev = genesis_hash;
+            for height in 1..=3_u32 {
+                let block = mine_regtest_block(prev, height, genesis.header.time + height)?;
+                state.apply_block(&block)?;
+                prev = block.block_hash();
+                tip_hash = prev;
+            }
+        }
+
+        // Phase 2: no checkpoint exists, so recovery starts with no applied
+        // tip and must replay genesis as well as blocks 1–3.
+        let restarted = NodeState::open(config, None)?;
+        assert!(
+            restarted.applied_tip().load().is_none(),
+            "{backend}: no checkpoint should leave the applied tip empty"
+        );
+
+        crash_recovery::recover_if_needed(&restarted)?;
+
+        let recovered_tip_snapshot = restarted.applied_tip().load();
+        let recovered_tip = recovered_tip_snapshot
+            .as_ref()
+            .context("recovery should restore an applied tip")?;
+        assert_eq!(recovered_tip.height, 3, "{backend}: recovered tip height");
+        assert_eq!(
+            recovered_tip.hash,
+            tip_hash.into(),
+            "{backend}: recovered tip hash"
+        );
+        assert_eq!(
+            restarted.replayed_heights(),
+            vec![0, 1, 2, 3],
+            "{backend}: replay should cover genesis and blocks [1, 2, 3]"
+        );
+
+        let meta = crash_recovery::read_meta(&restarted)?
+            .with_context(|| format!("{backend}: missing recovery metadata after recovery"))?;
+        assert_eq!(meta.height, 3, "{backend}: meta height should be 3");
+        assert_eq!(
+            meta.last_committed_height, 3,
+            "{backend}: last_committed_height should converge to 3"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn crash_recovery_replays_genesis_only_without_checkpoint() -> Result<()> {
+    for backend in available_backends() {
+        let temp = tempfile::tempdir()?;
+        let config = make_config(&temp, backend);
+
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = genesis.block_hash();
+
+        // Phase 1: apply only genesis without publishing a checkpoint.
+        {
+            let state = NodeState::open(config.clone(), None)?;
+            state.apply_block(&genesis)?;
+        }
+
+        // Phase 2: a cold reopen has no applied tip and must replay genesis.
+        let restarted = NodeState::open(config, None)?;
+        assert!(
+            restarted.applied_tip().load().is_none(),
+            "{backend}: no checkpoint should leave the applied tip empty"
+        );
+
+        crash_recovery::recover_if_needed(&restarted)?;
+
+        let recovered_tip_snapshot = restarted.applied_tip().load();
+        let recovered_tip = recovered_tip_snapshot
+            .as_ref()
+            .context("recovery should restore the genesis tip")?;
+        assert_eq!(recovered_tip.height, 0, "{backend}: recovered tip height");
+        assert_eq!(
+            recovered_tip.hash,
+            genesis_hash.into(),
+            "{backend}: recovered genesis hash"
+        );
+        assert_eq!(
+            restarted.replayed_heights(),
+            vec![0],
+            "{backend}: replay should cover genesis only"
+        );
+    }
+    Ok(())
+}
+
 /// Production meta persistence: after applying a block through the
 /// production apply path, the recovery meta should contain a tip hash.
 /// This test verifies the wiring — if the apply path stops writing

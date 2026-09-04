@@ -58,7 +58,7 @@ The bounded set of blocks in flight — requested but not yet received. Capped j
 A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation), does not blame a peer when local apply/stager backpressure is the bottleneck, and disconnects it so another peer can supply the block. See `docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md`.
 
 ### Peer lifecycle ownership
-`P2pService` owns P2P control state, workers, and download policy; its shared `PeerLifecycle` is the only live-lease and ready-peer mutation boundary. Ready snapshots and callbacks carry `PeerSource`, and sends or disconnects remain identity-checked. Address equality alone never authorizes a lifecycle mutation. See `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
+`P2pService` owns P2P control state, workers, and download policy. Its `PeerLifecycle` handle is the node-facing mutation boundary over the single `PeerTable` session store. Ready snapshots carry `PeerSource`, and sends or disconnects remain identity-checked. Address equality alone never authorizes a lifecycle mutation. See `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
 
 ### assumevalid
 Skipping script-signature verification for blocks at or below a trusted height while performing every other consensus check. Mainnet defaults to the hash-pinned anchor below; other networks default to height 0. `--assume-valid-height 0` requests full verification; a custom nonzero height skips without hash gating.
@@ -107,6 +107,21 @@ means preserving value and operation order, not forcing JSON text to match. See
 
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change. See `docs/solutions/logic-errors/exclude-provably-unspendable-utxos.md`.
+
+### Notification configuration
+
+Node configuration groups external notification adapters below
+`NotificationConfig`. ZMQ configuration follows the socket ownership boundary:
+one endpoint group contains its endpoint, all topics published by that socket,
+and an optional socket HWM override. Topics that share an endpoint therefore
+cannot claim different HWM values. The ZMQ publisher owns the default HWM of
+1,000; configuration mentions HWM only when an endpoint needs an operational
+override.
+
+The supported file form is `[[notifications.zmq]]` with `endpoint`, `topics`,
+and optional `hwm`. The former topic-specific `zmqpub*` endpoint and HWM fields
+are not part of node configuration, including CLI, environment, TOML, and
+`bitcoin.conf` adapters.
 
 ## Block apply
 ### Window script batching
@@ -174,7 +189,7 @@ The durable record that an authoritative disconnect started and how far it got. 
 The per-block inverse of a UTXO commit, queued before later apply mutations and made durable by the clean checkpoint rather than a per-block fsync. Keyed by height **and** block hash so an abandoned-branch record cannot replay against another block at the same height. Retained after a disconnect because branch flip-flop is normal.
 
 ### Owed derived state
-State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). The filter index is block-hash-addressed and only repoints its last-tip cache. `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` witness requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
+State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` witness requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
 
 ## Derived indexes
 
@@ -219,16 +234,16 @@ The coherent, non-torn view of the applied tip the chain-event publisher keeps i
 The bounded-channel wake-up `ChainEventPublisher::record` emits after replacing the snapshot cell: `{ kind, height, hash, epoch, sequence }`, one per committed connect or disconnect. Hints carry no payload to apply and a full channel drops them without blocking the commit path; recovery is always positional re-planning over the chain itself. Hints are not a recovery log.
 
 ### Reconciliation consumer
-An index that mirrors the applied chain by re-planning positionally against a fresh chain snapshot instead of receiving inline writes from the apply path. The txindex worker is the reference consumer; the BIP157/158 filter index is the second (`crates/node/src/filterindex_worker.rs`), which is what makes the seam real rather than a naming convention. A consumer owns its rows, its cursor, and its batch atomicity, and a failure or lag in it can never stall block application.
+An index that mirrors the applied chain by re-planning positionally against a fresh chain snapshot instead of receiving inline writes from the apply path. The txindex worker is the current consumer. A consumer owns its rows, its cursor, and its batch atomicity, and a failure or lag in it can never stall block application.
 
 ### Consumer cursor
 The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/node/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.
 
-### Extension capability
-The named, compiled-in service unit the extension registry reports and validates: an `ExtensionDescriptor` carries the id, namespace directory, schema version, and required/incompatible capability ids, and exists even when the runtime toggle is off. Enabled instances live or fail independently of core (`docs/contracts/extensions.md`); `getcapabilities` reports the live `CapabilitySnapshot` with compiled/enabled/state per capability.
+### Capability status
+The node-owned status report for concrete services exposed by the RPC layer. It
+contains compiled/enabled state and progress facts without introducing a
+generic extension registry or lifecycle abstraction.
 
-### Filter-header pointer
-The namespace-owned `(height, hash)` marker for the newest block whose BIP157 filter header the consumer's header chain provably ends at (`crates/ext-blockfilterindex`). Because filter and header rows are hash-addressed, a reorg rewinds only this pointer and the consumer cursor — rows are retained and re-derived rows are idempotent overwrites — which is the disconnect contract that lets the filter consumer share the txindex reconciliation shape without row deletion.
 ## Mempool
 
 ### Resolution-time sampling

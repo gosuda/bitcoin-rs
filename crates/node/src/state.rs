@@ -7,7 +7,6 @@
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_ext_api::Extension;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::context::{
@@ -547,6 +546,13 @@ impl NodeStorage {
                 let _ = store;
                 "mdbx"
             }
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
         }
     }
 
@@ -600,6 +606,13 @@ impl NodeStorage {
                 authority,
                 Arc::clone(durable_tip_height),
             )?)),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
         }
     }
 
@@ -628,6 +641,13 @@ impl NodeStorage {
                 Arc::clone(store),
                 files,
             )),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
         }
     }
 
@@ -646,6 +666,13 @@ impl NodeStorage {
             Self::Redb(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
             #[cfg(feature = "mdbx")]
             Self::Mdbx(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
         }
     }
 
@@ -667,6 +694,13 @@ impl NodeStorage {
             Self::Redb(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
             #[cfg(feature = "mdbx")]
             Self::Mdbx(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
         }
     }
 
@@ -686,6 +720,13 @@ impl NodeStorage {
             Self::Redb(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
             #[cfg(feature = "mdbx")]
             Self::Mdbx(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
         }
     }
 }
@@ -1005,115 +1046,18 @@ fn build_tx_index_open_spec(
         batch_limits,
         epoch,
         enabled,
-        rollback_rebuild_cutover: config.index_rollback_rebuild_cutover,
+        rollback_rebuild_cutover: crate::txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
     }))
 }
 
-/// Opens the BIP157/158 filter index extension namespace, if enabled.
-///
-/// The namespace lives at `data_dir/blockfilterindex` and is refused — and
-/// only that namespace — when its stored schema version is foreign or its
-/// rows predate versioning, per `docs/policies/db-migration.md`. The node
-/// keeps starting; the capability reports as disabled.
-#[allow(clippy::too_many_arguments)]
-fn open_filter_index(
-    config: &NodeConfig,
-    cache_bytes: u64,
-    applied_tip: Arc<arc_swap::ArcSwapOption<bitcoin_rs_chain::TipSnapshot>>,
-    block_tree: Arc<RwLock<bitcoin_rs_chain::BlockTree>>,
-    body_store: Arc<dyn crate::apply::PruneBodyStore>,
-    tx_lookup: Option<Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery>>,
-    chain_events: Arc<ChainEventPublisher>,
-    hints: crossbeam_channel::Receiver<ChainEventHint>,
-) -> Result<Option<crate::filterindex_worker::FilterIndexHandle>> {
-    use bitcoin_rs_ext_blockfilterindex::{
-        FilterBatch, FilterStore, FilterStoreOps, NAMESPACE, SCHEMA_VERSION,
-    };
-    if !config.blockfilterindex {
-        return Ok(None);
-    }
-    let namespace_dir = config.data_dir.join(NAMESPACE);
-    std::fs::create_dir_all(&namespace_dir)
-        .with_context(|| format!("create filter index namespace {}", namespace_dir.display()))?;
-    let store: Arc<dyn FilterStoreOps> = match config.storage_backend.as_str() {
-        #[cfg(feature = "rocksdb")]
-        "rocksdb" => Arc::new(FilterStore::new(Arc::new(
-            bitcoin_rs_storage::RocksDbStore::open_with_cache(&namespace_dir, cache_bytes)
-                .map_err(anyhow::Error::new)?,
-        ))),
-        #[cfg(feature = "fjall")]
-        "fjall" => Arc::new(FilterStore::new(Arc::new(
-            bitcoin_rs_storage::FjallStore::open_with_cache(&namespace_dir, cache_bytes)
-                .map_err(anyhow::Error::new)?,
-        ))),
-        #[cfg(feature = "redb")]
-        "redb" => Arc::new(FilterStore::new(Arc::new(
-            bitcoin_rs_storage::RedbStore::open_with_cache(&namespace_dir, cache_bytes)
-                .map_err(anyhow::Error::new)?,
-        ))),
-        #[cfg(feature = "mdbx")]
-        "mdbx" => Arc::new(FilterStore::new(Arc::new(
-            bitcoin_rs_storage::MdbxStore::open_with_cache(&namespace_dir, cache_bytes)
-                .map_err(anyhow::Error::new)?,
-        ))),
-        other => bail!("unsupported storage backend for blockfilterindex: {other}"),
-    };
-
-    // An enabled extension with an incompatible namespace is a configuration
-    // failure. Silently disabling it would lie about the requested capability.
-    match store.schema_version().map_err(anyhow::Error::new)? {
-        Some(version) if version != SCHEMA_VERSION => {
-            bail!(
-                "blockfilterindex schema version {version} is incompatible with {SCHEMA_VERSION}; \
-                 remove or quarantine {} to reindex",
-                namespace_dir.display()
-            );
-        }
-        Some(_) => {}
-        None => {
-            if !store.is_fresh().map_err(anyhow::Error::new)? {
-                bail!(
-                    "blockfilterindex namespace has rows without a schema version; \
-                     remove or quarantine {} to reindex",
-                    namespace_dir.display()
-                );
-            }
-            let mut init = FilterBatch::new();
-            init.put_schema_version();
-            store.apply(init).map_err(anyhow::Error::new)?;
-        }
-    }
-
-    let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    let runtime = Arc::new(crate::filterindex_worker::FilterIndexRuntime::new(wake_tx));
-    let status = Arc::new(crate::filterindex_worker::FilterIndexStatus::new(
-        Arc::clone(&runtime),
-        Arc::clone(&store),
-        Arc::clone(&applied_tip),
-        Arc::clone(&chain_events),
-    ));
-    let query = Arc::new(crate::filterindex_worker::FilterIndexQueryEngine::new(
-        Arc::clone(&status),
-        Arc::clone(&store),
-    ));
-    let worker = crate::filterindex_worker::FilterIndexWorker::spawn(
-        runtime,
-        store,
-        applied_tip,
-        block_tree,
-        body_store,
-        tx_lookup,
-        chain_events,
-        wake_rx,
-        hints,
-    )
-    .context("spawn filter index worker")?;
-    Ok(Some(crate::filterindex_worker::FilterIndexHandle {
-        status,
-        worker,
-        query,
-    }))
+struct TxIndexSpawn {
+    spec: crate::txindex_worker::TxIndexOpenSpec,
+    generation: crate::txindex_worker::Generation,
+    block_source: crate::NodeBlockSource,
+    body_source: Arc<dyn BlockBodySource>,
+    wake_rx: Receiver<()>,
+    recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
 }
 
 /// Aggregate handle to a running node.
@@ -1133,14 +1077,13 @@ pub struct NodeState {
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
     tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
+    tx_index_spawn: Option<TxIndexSpawn>,
     tx_index_worker: Option<crate::txindex_worker::TxIndexWorker>,
     tx_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>>>,
     /// Stable query adapter for txindex/script-index, constructed before open.
     tx_index_adapter: Option<Arc<crate::txindex_worker::TxIndexQueryAdapter>>,
-    /// Enabled BIP157/158 filter index extension, when `--blockfilterindex`.
-    filter_index: Option<crate::filterindex_worker::FilterIndexHandle>,
     /// Live capability report backing `getcapabilities`.
-    capabilities: Arc<crate::extensions::NodeCapabilities>,
+    capabilities: Arc<crate::capabilities::NodeCapabilities>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
@@ -1158,12 +1101,11 @@ pub struct NodeState {
     blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
     network: Arc<RwLock<NetworkState>>,
-    /// Sole runtime owner of P2P workers and mutable P2P control state.
-    p2p: Arc<bitcoin_rs_p2p::P2pService>,
     /// Shared P2P admission switch controlled by `setnetworkactive`.
     network_active: Arc<AtomicBool>,
-    /// Single lifecycle authority shared by sync, RPC, and P2P connections.
-    peer_lifecycle: Arc<bitcoin_rs_p2p::PeerLifecycle>,
+    /// Runtime owner of P2P workers, session table, and inbound channels.
+    p2p: Arc<bitcoin_rs_p2p::P2pService>,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     banned: Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     p2p_outbound_tx: crossbeam_channel::Sender<std::net::SocketAddr>,
     p2p_outbound_rx: Arc<Mutex<crossbeam_channel::Receiver<std::net::SocketAddr>>>,
@@ -1183,6 +1125,9 @@ pub struct NodeState {
 impl NodeState {
     /// Opens (or creates) the node's data directory and configured storage
     /// backend.
+    /// Derived-index workers are constructed dormant (`Opening`) and started
+    /// by [`Self::start_index_workers`] once crash recovery has made the
+    /// applied tip authoritative; `start_node` performs both steps.
     #[allow(clippy::arc_with_non_send_sync)]
     #[allow(clippy::too_many_lines)]
     pub fn open(
@@ -1211,18 +1156,15 @@ impl NodeState {
             crate::checkpoint::load_checkpoint_from_dir(&checkpoint_data_dir, checkpoint_config)?;
 
         // Divide the process cache budget across the persistent namespaces
-        // that exist in this deployment. The filter share applies when the
-        // blockfilterindex extension is enabled; a disabled namespace's
-        // share redistributes to chainstate.
+        // that exist in this deployment. A disabled txindex share redistributes
+        // to chainstate.
         let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.dbcache_mb);
         let cache_shares = bitcoin_rs_storage::split_cache_budget(
             cache_budget,
             !tx_index_capabilities(&config).is_empty(),
-            config.blockfilterindex,
         );
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
-        let filter_cache_bytes = cache_shares[2].bytes;
         let storage = NodeStorage::open(&config, chainstate_cache_bytes)?;
         let undo_store = storage.undo_store();
         // Before anything reads the chainstate, let alone serves or syncs it.
@@ -1237,9 +1179,9 @@ impl NodeState {
             // worse than none.
             //
             // Remove the authoritative views. The marker covers a disconnect
-            // that did not reach a clean UTXO-and-tip checkpoint. TxIndex and
-            // filter rows are derived state outside this marker, but a retained
-            // TxIndex watermark can stall rollback because wiping the chainstate
+            // that did not reach a clean UTXO-and-tip checkpoint. TxIndex rows
+            // are derived state outside this marker, but a retained TxIndex
+            // watermark can stall rollback because wiping the chainstate
             // removes the body positions the index refers to. Include the txindex
             // path so the operator action is complete.
             bail!(
@@ -1258,26 +1200,28 @@ impl NodeState {
             Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
         let block_body_store = storage.block_body_store(Arc::clone(&block_files));
 
-        let zmq_publications = config.zmq_publications();
-        let active_zmq_notifications: Vec<_> = zmq_publications
+        let zmq_endpoints = config.zmq_endpoints();
+        let active_zmq_notifications: Vec<_> = zmq_endpoints
             .iter()
-            .map(|publication| {
-                ZmqNotification::new(
-                    publication.topic.notifier_type(),
-                    publication.endpoint.clone(),
-                    publication.hwm,
-                )
+            .flat_map(|endpoint| {
+                endpoint.topics.iter().map(|topic| {
+                    ZmqNotification::new(
+                        topic.notifier_type(),
+                        endpoint.endpoint.clone(),
+                        endpoint.effective_hwm(),
+                    )
+                })
             })
             .collect();
         #[cfg(feature = "zmq")]
-        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_publications.is_empty() {
+        let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_endpoints.is_empty() {
             Arc::new(crate::NoOpZmqPublisher)
         } else {
-            Arc::new(crate::SocketZmqPublisher::bind(&zmq_publications)?)
+            Arc::new(crate::SocketZmqPublisher::bind(zmq_endpoints)?)
         };
         #[cfg(not(feature = "zmq"))]
         let zmq_publisher: Arc<dyn crate::ZmqPublisher> = {
-            let _ = &zmq_publications;
+            let _ = &zmq_endpoints;
             Arc::new(crate::NoOpZmqPublisher)
         };
         let (
@@ -1322,6 +1266,16 @@ impl NodeState {
         // valid format/bounds, matching genesis, older writer epoch, and
         // strictly greater witness height than the restored tip.
         let genesis_hex = config.network.genesis_block_hash().to_string_be();
+        // One reporter routes every rollback fact of this process — the
+        // checkpoint fallback detected here and the index-ahead rewinds the
+        // txindex worker detects later — through the same warning store and
+        // event marker.
+        let recovery_reporter = Arc::new(crate::recovery_evidence::RecoveryReporter::new(
+            Arc::clone(&warning_store),
+            config.data_dir.clone(),
+            genesis_hex.clone(),
+            epoch,
+        ));
         let restored_height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height);
         let restored_hash = restored_applied_tip
             .as_ref()
@@ -1336,17 +1290,11 @@ impl NodeState {
                 &genesis_hex,
                 restored_height,
             ) {
-                let reporter = crate::recovery_evidence::RecoveryReporter::new(
-                    Arc::clone(&warning_store),
-                    config.data_dir.clone(),
-                    genesis_hex.clone(),
-                    epoch,
-                );
                 let source = match resume_source {
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
                 };
-                reporter
+                recovery_reporter
                     .report_checkpoint_fallback(
                         witness_height,
                         restored_height,
@@ -1406,7 +1354,7 @@ impl NodeState {
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
         let tx_index_open_spec = build_tx_index_open_spec(&config, txindex_cache_bytes, epoch)?;
-        let (tx_index_runtime, tx_index_worker, tx_index_lifecycle, tx_index_adapter) =
+        let (tx_index_runtime, tx_index_spawn, tx_index_lifecycle, tx_index_adapter) =
             match tx_index_open_spec {
                 Some(spec) => {
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
@@ -1424,53 +1372,27 @@ impl NodeState {
                         Arc::clone(&lifecycle),
                     ));
                     let generation = crate::txindex_worker::Generation::new(spec.epoch);
-                    let worker = crate::txindex_worker::TxIndexWorker::spawn_with_open(
-                        Arc::clone(&runtime),
-                        spec,
-                        Arc::clone(&lifecycle),
-                        generation,
-                        Arc::clone(&applied_tip),
-                        Arc::clone(&block_tree),
-                        Some(Arc::clone(&block_body_store)),
-                        block_source,
-                        Some(body_source),
-                        Arc::clone(&chain_events),
-                        Arc::clone(&shutdown),
-                        wake_rx,
+                    (
+                        Some(runtime),
+                        Some(TxIndexSpawn {
+                            spec,
+                            generation,
+                            block_source,
+                            body_source,
+                            wake_rx,
+                            recovery_reporter: Arc::clone(&recovery_reporter),
+                        }),
+                        Some(lifecycle),
+                        Some(adapter),
                     )
-                    .context("spawn txindex worker")?;
-                    (Some(runtime), Some(worker), Some(lifecycle), Some(adapter))
                 }
                 None => (None, None, None, None),
             };
-        // The filter extension is the second reconciliation consumer; it
-        // clones the shared hint receiver (hints are wake-ups, never data)
-        // and never touches the txindex namespace.
-        let filter_index = open_filter_index(
-            &config,
-            filter_cache_bytes,
-            Arc::clone(&applied_tip),
-            Arc::clone(&block_tree),
-            Arc::clone(&block_body_store),
-            tx_index_adapter.as_ref().map(|a| {
-                let adapter: Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery> = a.clone();
-                adapter
-            }),
-            Arc::clone(&chain_events),
-            chain_event_hints_rx_raw.clone(),
-        )?;
-        let capabilities = Arc::new(crate::extensions::NodeCapabilities::new(
-            crate::extensions::CapabilityInputs {
-                applied_tip: Arc::clone(&applied_tip),
-                tx_query: tx_index_adapter.as_ref().map(|a| {
-                    let adapter: Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery> = a.clone();
-                    adapter
-                }),
+        let capabilities = Arc::new(crate::capabilities::NodeCapabilities::new(
+            crate::capabilities::CapabilityInputs {
+                tx_lifecycle: tx_index_lifecycle.clone(),
                 tx_runtime: tx_index_runtime.clone(),
-                txindex_enabled: config.txindex || config.script_index.is_enabled(),
-                filter_status: filter_index
-                    .as_ref()
-                    .map(|handle| Arc::clone(&handle.status)),
+                txindex_enabled: crate::capabilities::txindex_enabled(&config),
             },
         ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
@@ -1491,15 +1413,13 @@ impl NodeState {
                 outbound_peer_target: P2P_OUTBOUND_QUEUE_LIMIT,
                 outbound_queue_limit: P2P_OUTBOUND_QUEUE_LIMIT,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
-                download_budget: bitcoin_rs_p2p::SyncBudget::default(),
+                download_budget: bitcoin_rs_p2p::default_sync_budget(),
             },
             Arc::clone(&shutdown),
         ));
-        // These handles are views into `P2pService`; they keep existing node
-        // and RPC seams source-compatible without creating second state.
         let network_active = p2p.network_active_handle();
-        let peer_lifecycle = p2p.lifecycle();
         let banned = p2p.banned_handle();
+        let peer_table = p2p.table();
         let p2p_outbound_tx = p2p.outbound_sender();
         let p2p_outbound_rx = p2p.outbound_receiver();
         let inbound_headers_tx = p2p.inbound_headers_sender();
@@ -1569,9 +1489,9 @@ impl NodeState {
             recovery_meta_path: Some(config.data_dir.join(crate::crash_recovery::META_FILENAME)),
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
-        let sync = Arc::new(crate::BlockSync::new_with_p2p(
+        let sync = Arc::new(crate::BlockSync::new(
             apply_handles.clone(),
-            Arc::clone(&p2p),
+            Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
         ));
@@ -1597,7 +1517,6 @@ impl NodeState {
             chainstate_dir = %config.data_dir.join("chainstate").display(),
             chainstate_cache_bytes,
             txindex_cache_bytes,
-            filter_cache_bytes,
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
         );
@@ -1614,10 +1533,10 @@ impl NodeState {
             utxo,
             coin_stats,
             tx_index_runtime,
-            tx_index_worker,
+            tx_index_spawn,
+            tx_index_worker: None,
             tx_index_lifecycle,
             tx_index_adapter,
-            filter_index,
             capabilities,
             prune_service,
             zmq_publisher,
@@ -1632,9 +1551,9 @@ impl NodeState {
             blocks,
             transactions,
             network,
-            p2p,
             network_active,
-            peer_lifecycle,
+            p2p,
+            peer_table,
             banned,
             p2p_outbound_tx,
             p2p_outbound_rx,
@@ -1676,10 +1595,10 @@ impl NodeState {
     /// internal to the crate.
     pub fn publish_checkpoint(&self) -> Result<u64> {
         match self.write_clean_checkpoint()? {
-            crate::checkpoint::CheckpointWrite::Published { generation } => Ok(generation),
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
                 bail!("checkpoint refused: no applied tip to publish")
             }
+            crate::checkpoint::CheckpointWrite::Published { generation } => Ok(generation),
         }
     }
 
@@ -1855,26 +1774,47 @@ impl NodeState {
         })
     }
 
-    /// Returns the node-owned basic block-filter index query adapter.
-    ///
-    /// `None` when `--blockfilterindex` is not enabled, preserving the
-    /// absent-filter RPC contract for the default configuration.
-    #[must_use]
-    pub fn filter_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::FilterIndexQuery>> {
-        if !self.config.blockfilterindex {
-            return None;
-        }
-        self.filter_index.as_ref().map(|handle| {
-            let adapter: Arc<dyn bitcoin_rs_rpc::context::FilterIndexQuery> = handle.query.clone();
-            adapter
-        })
+    /// Starts the derived-index workers. Call only once the applied tip is
+    /// authoritative — after crash recovery — so the index reconciles against
+    /// the real chainstate and never mistakes a recovered gap for a stale branch.
+    pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
+        let Some(spawn) = self.tx_index_spawn.take() else {
+            return Ok(());
+        };
+        let runtime = self
+            .tx_index_runtime
+            .as_ref()
+            .context("txindex runtime missing for a pending worker spawn")?;
+        let lifecycle = self
+            .tx_index_lifecycle
+            .as_ref()
+            .context("txindex lifecycle missing for a pending worker spawn")?;
+        let worker = crate::txindex_worker::TxIndexWorker::spawn_with_open(
+            Arc::clone(runtime),
+            spawn.spec,
+            Arc::clone(lifecycle),
+            spawn.generation,
+            Arc::clone(&self.applied_tip),
+            Arc::clone(&self.block_tree),
+            Some(Arc::clone(&self.block_body_store)),
+            spawn.block_source,
+            Some(spawn.body_source),
+            Arc::clone(&self.chain_events),
+            spawn.recovery_reporter,
+            Arc::clone(&self.apply_handles.shutdown),
+            spawn.wake_rx,
+        )
+        .context("spawn txindex worker")?;
+        self.tx_index_worker = Some(worker);
+        Ok(())
     }
 
     /// Returns the live capability report provider for `getcapabilities`.
     #[must_use]
-    pub fn capability_provider(&self) -> Arc<dyn bitcoin_rs_ext_api::CapabilityProvider> {
+    pub fn capability_provider(&self) -> Arc<dyn bitcoin_rs_rpc::context::CapabilityProvider> {
         self.capabilities.clone()
     }
+
     /// Returns the manual pruning service when pruning is enabled.
     #[must_use]
     pub fn prune_service(&self) -> Option<Arc<dyn PruneService>> {
@@ -1972,31 +1912,10 @@ impl NodeState {
         Arc::clone(&self.network)
     }
 
-    /// Returns the sole runtime owner of P2P workers and control state.
-    #[must_use]
-    pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
-        Arc::clone(&self.p2p)
-    }
-
     /// Returns the shared P2P admission switch exposed to RPC and P2P workers.
     #[must_use]
     pub fn network_active(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.network_active)
-    }
-
-    /// Returns the shared identity-aware P2P lifecycle authority.
-    #[must_use]
-    pub fn peer_lifecycle(&self) -> Arc<bitcoin_rs_p2p::PeerLifecycle> {
-        Arc::clone(&self.peer_lifecycle)
-    }
-
-    /// Returns the authoritative lease view used by the transaction relay
-    /// adapter. The lifecycle remains the sole mutation boundary.
-    #[must_use]
-    pub fn peer_outbound(
-        &self,
-    ) -> Arc<RwLock<hashbrown::HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>> {
-        self.peer_lifecycle.peer_outbound_handle()
     }
 
     /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
@@ -2005,16 +1924,27 @@ impl NodeState {
         Arc::clone(&self.banned)
     }
 
+    /// Returns the P2P runtime that owns workers and the session table.
+    #[must_use]
+    pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
+        Arc::clone(&self.p2p)
+    }
+
+    #[must_use]
+    /// Returns the authoritative table of live peer sessions.
+    pub fn peer_table(&self) -> Arc<bitcoin_rs_p2p::PeerTable> {
+        Arc::clone(&self.peer_table)
+    }
+
+    /// Returns the service-owned persistent addnode view.
+    #[must_use]
+    pub fn added_nodes(&self) -> Arc<RwLock<Vec<std::net::SocketAddr>>> {
+        self.p2p.added_nodes_handle()
+    }
     /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
     #[must_use]
     pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<std::net::SocketAddr> {
         self.p2p_outbound_tx.clone()
-    }
-
-    /// Returns the service-owned persistent addnode entries.
-    #[must_use]
-    pub fn added_nodes(&self) -> Arc<RwLock<Vec<std::net::SocketAddr>>> {
-        self.p2p.added_nodes_handle()
     }
 
     /// Returns the shared receiver consumed by the outbound P2P drain worker.
@@ -2123,8 +2053,8 @@ impl NodeState {
         Arc::clone(&self.apply_handles.shutdown)
     }
 
-    /// Bounded index-worker shutdown: requests both txindex and filter-index
-    /// shutdowns, waits up to `deadline` for clean join, and detaches on
+    /// Bounded txindex-worker shutdown: requests the worker shutdown, waits up
+    /// to `deadline` for a clean join, and detaches on
     /// expiry. On detach, revokes the generation token and publishes
     /// `ShutdownAbandoned` so queries return typed `Unavailable` instead of
     /// hitting a torn reader.
@@ -2133,13 +2063,9 @@ impl NodeState {
         if let Some(runtime) = &self.tx_index_runtime {
             runtime.request_shutdown();
         }
-        if let Some(handle) = &self.filter_index {
-            handle.status.shutdown();
-        }
         // Take the worker out of self so we can join it without holding self
         // mutably across the wait.
         let tx_index_worker = self.tx_index_worker.take();
-        let filter_index = self.filter_index.take();
         let tx_deadline = start + deadline;
         let tx_joined = if let Some(mut worker) = tx_index_worker {
             let mut joined = false;
@@ -2174,20 +2100,6 @@ impl NodeState {
         } else {
             true
         };
-        let filter_deadline = start + deadline;
-        if let Some(handle) = filter_index {
-            while std::time::Instant::now() < filter_deadline {
-                if handle.is_finished() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if handle.is_finished() {
-                handle.join();
-            } else {
-                tracing::warn!("filter index worker still blocked; abandoning join");
-            }
-        }
         let _ = tx_joined;
     }
 
@@ -2216,8 +2128,6 @@ impl NodeState {
 
 impl Drop for NodeState {
     fn drop(&mut self) {
-        self.p2p.shutdown();
-        self.p2p.join();
         let _admission = self.apply_handles.admission.close();
         // Safety net: if `bounded_index_shutdown` was not called (e.g. in
         // tests that drop `NodeState` directly), still request shutdown and
@@ -2227,9 +2137,6 @@ impl Drop for NodeState {
         }
         if let Some(worker) = self.tx_index_worker.take() {
             worker.join();
-        }
-        if let Some(handle) = self.filter_index.take() {
-            handle.shutdown();
         }
     }
 }
@@ -2337,7 +2244,8 @@ mod tests {
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         config.txindex = true;
-        let state = NodeState::open(config, None)?;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
         let (Some(a), Some(b)) = (state.tx_index_query(), state.tx_index_query()) else {
             panic!("txindex query engine missing when enabled");
         };
@@ -2356,6 +2264,41 @@ mod tests {
     }
 
     #[test]
+    fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.txindex = true;
+        let mut state = NodeState::open(config, None)?;
+
+        assert!(state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
+            matches!(
+                lifecycle.load().as_ref(),
+                crate::txindex_worker::TxIndexLifecycle::Opening
+            )
+        }));
+        assert!(state.tx_index_worker.is_none());
+
+        state.start_index_workers()?;
+        assert!(state.tx_index_worker.is_some());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
+            matches!(
+                lifecycle.load().as_ref(),
+                crate::txindex_worker::TxIndexLifecycle::Opening
+            )
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "txindex lifecycle remained Opening"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -2364,7 +2307,8 @@ mod tests {
         config.txindex = false;
         config.script_index = crate::config::ScriptIndexMode::Full;
 
-        let state = NodeState::open(config, None)?;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
 
         assert!(state.apply_handles().tx_index_runtime.is_some());
         assert!(state.tx_index_query().is_none());
@@ -2383,17 +2327,11 @@ mod tests {
         Ok(())
     }
 
-    /// Opens a node in each `scriptindex` mode and asserts the concrete answer
-    /// for `unspent_outputs`, rather than only the `full` path.
+    /// Opens a node in each accepted `scriptindex` mode and asserts the
+    /// concrete answer for `unspent_outputs`, rather than only the `full` path.
     ///
-    /// This is the guard that would have caught advertising `utxo` before a
-    /// live store exists. Under `utxo` the node currently builds no
-    /// `Funding`/`Spending` rows and publishes no `ScriptHistory` watermark,
-    /// so every `ScriptIndexQuery` method gates on
-    /// `IndexCapabilities::SCRIPT_HISTORY` and reports `Retry` forever. The
-    /// mode is therefore rejected at config time; this test pins that the
-    /// rejection happens at `open`, and that the two accepted modes give
-    /// distinct, concrete answers instead of both degrading to `Retry`.
+    /// This is the guard that the two accepted modes give distinct, concrete
+    /// answers instead of both degrading to `Retry`.
     #[test]
     fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<()> {
         use bitcoin_rs_index::ScriptHash;
@@ -2402,7 +2340,7 @@ mod tests {
         // Genesis is applied in each case so the index worker has at least one
         // block to index. Without it the worker never publishes a
         // `ScriptHistory` watermark and every mode retries forever, which would
-        // make all three cases indistinguishable.
+        // make both cases indistinguishable.
         let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 
         // `disabled`: no script index at all, so no query adapter is handed
@@ -2421,26 +2359,6 @@ mod tests {
         );
         drop(state);
 
-        // `utxo`: the mode is named and parsed but has no durable live-output
-        // store, so opening must fail loudly rather than start a node that
-        // would advertise a live view nothing backs.
-        let dir = tempfile::tempdir()?;
-        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = false;
-        config.script_index = crate::config::ScriptIndexMode::Utxo;
-        let error = match NodeState::open(config, None) {
-            Ok(_) => panic!("utxo must be rejected while no live store backs it"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("scriptindex=utxo is not yet usable"),
-            "rejection must name what is missing, got: {error}"
-        );
-
         // `full`: the accepted mode. It converges on a concrete answer — an
         // empty set for an unfunded script — rather than retrying forever.
         let dir = tempfile::tempdir()?;
@@ -2449,7 +2367,8 @@ mod tests {
         config.p2p_listen.clear();
         config.txindex = false;
         config.script_index = crate::config::ScriptIndexMode::Full;
-        let state = NodeState::open(config, None)?;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
         let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
         let Some(query) = state.script_index_query() else {
             panic!("full mode must hand out a script-index query adapter")
@@ -2489,7 +2408,8 @@ mod tests {
         config.txindex = true;
 
         {
-            let state = NodeState::open(config.clone(), None)?;
+            let mut state = NodeState::open(config.clone(), None)?;
+            state.start_index_workers()?;
             assert!(state.tx_index_query().is_some());
         }
 
@@ -2552,7 +2472,7 @@ mod tests {
     }
 
     #[test]
-    fn open_constructs_empty_peer_lifecycle() -> anyhow::Result<()> {
+    fn open_constructs_empty_peer_table() -> anyhow::Result<()> {
         use tempfile::tempdir;
 
         let dir = tempdir()?;
@@ -2562,14 +2482,14 @@ mod tests {
         let state = NodeState::open(config, None)?;
 
         assert!(
-            state.peer_lifecycle.ready_peers().is_empty(),
-            "freshly opened registry is empty"
+            state.peer_table().is_empty(),
+            "freshly opened table is empty"
         );
         Ok(())
     }
 
     #[test]
-    fn open_constructs_empty_peer_outbound_map() -> anyhow::Result<()> {
+    fn open_constructs_empty_peer_table_again() -> anyhow::Result<()> {
         use tempfile::tempdir;
 
         let dir = tempdir()?;
@@ -2578,7 +2498,7 @@ mod tests {
         config.p2p_listen.clear();
         let state = NodeState::open(config, None)?;
 
-        assert!(state.peer_lifecycle.live_addresses().is_empty());
+        assert!(state.peer_table().is_empty());
         Ok(())
     }
 
@@ -2601,14 +2521,24 @@ mod tests {
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
-        config.zmqpubhashblock = vec!["inproc://state-zmq-pubhashblock".to_owned()];
-        config.zmqpubhashtx = vec!["inproc://state-zmq-pubhashtx".to_owned()];
-        config.zmqpubrawblock = vec!["inproc://state-zmq-pubrawblock".to_owned()];
-        config.zmqpubrawtx = vec!["inproc://state-zmq-pubrawtx".to_owned()];
-        config.zmqpubhashblockhwm = Some(17);
-        config.zmqpubhashtxhwm = Some(18);
-        config.zmqpubrawblockhwm = Some(19);
-        config.zmqpubrawtxhwm = Some(20);
+        config.notifications.zmq = vec![
+            crate::zmq_publisher::ZmqEndpointConfig {
+                endpoint: "inproc://state-zmq-block".to_owned(),
+                topics: vec![
+                    crate::zmq_publisher::ZmqTopic::HashBlock,
+                    crate::zmq_publisher::ZmqTopic::RawBlock,
+                ],
+                hwm: Some(17),
+            },
+            crate::zmq_publisher::ZmqEndpointConfig {
+                endpoint: "inproc://state-zmq-tx".to_owned(),
+                topics: vec![
+                    crate::zmq_publisher::ZmqTopic::HashTx,
+                    crate::zmq_publisher::ZmqTopic::RawTx,
+                ],
+                hwm: Some(20),
+            },
+        ];
         let state = NodeState::open(config, None)?;
 
         let notifications = state.active_zmq_notifications();
@@ -2622,9 +2552,9 @@ mod tests {
             .collect();
         assert_eq!(
             notification_types,
-            ["pubhashblock", "pubhashtx", "pubrawblock", "pubrawtx"]
+            ["pubhashblock", "pubrawblock", "pubhashtx", "pubrawtx"]
         );
-        assert_eq!(hwms, [17, 18, 19, 20]);
+        assert_eq!(hwms, [17, 17, 20, 20]);
         Ok(())
     }
 
@@ -3713,7 +3643,13 @@ mod tests {
             bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
         })?;
         scanned.tx_count = rolling.tx_count;
-        assert_eq!(rolling, scanned);
+        // Rolling per-coin accumulation is off by design (89f1dac5): the live
+        // listener tracks height and tx count only, and totals come from the
+        // on-demand scan. This mirrors clean_checkpoint's assertion below.
+        assert_ne!(
+            rolling.total_amount, scanned.total_amount,
+            "default resume must not receive rolling UTXO notifications"
+        );
         Ok(())
     }
 
@@ -4232,7 +4168,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
     fn non_regular_epoch_lock_refuses_start() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

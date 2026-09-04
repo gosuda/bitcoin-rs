@@ -4,7 +4,7 @@ use core::str::FromStr as _;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use sonic_rs::{JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use corepc_types::v31;
 
@@ -225,6 +225,11 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     let payload = required_checked_descriptor_payload(descriptor)?;
     // Match addr(...) wrapper.
     if let Some(inner) = strip_addr_wrapper(payload) {
+        if params.as_array().is_some_and(|args| args.len() > 1) {
+            return Err(RpcError::MethodDisabled(
+                "range arguments are unavailable without a wallet",
+            ));
+        }
         if inner.contains('*') {
             return Err(RpcError::MethodDisabled(
                 "ranged descriptors are unavailable without a wallet",
@@ -479,7 +484,7 @@ mod tests {
 mod validateaddress_tests {
     use super::*;
     use alloc::sync::Arc;
-    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait};
+    use sonic_rs::JsonValueTrait;
 
     /// Both invalid classes must answer exactly `{"isvalid": false}`: the
     /// valid-only fields are absent, never default-valued.

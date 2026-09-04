@@ -1,17 +1,18 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// Block download window, peer-assignment, stall, and scheduling policy.
-#[allow(missing_docs)]
-pub mod download;
 /// BIP155 addrv2 address helpers.
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
-/// Per-connection identity and cancellation.
 pub mod connection;
+/// Per-connection identity and cancellation.
+/// Per-connection traffic counters.
+pub mod counters;
 /// Inbound message dispatcher.
 pub mod dispatch;
+/// Block download window, peer-assignment, stall, and scheduling policy.
+pub mod download_window;
 /// Peer finite-state machine.
 pub mod fsm;
 /// Version/verack negotiation helpers.
@@ -26,6 +27,8 @@ pub mod listener;
 pub mod peer;
 /// Peer metadata published after a successful handshake.
 pub mod peer_info;
+/// Single owner of live peer sessions: leases and their handshake metadata.
+pub mod peer_table;
 /// Runtime owner for P2P control state and workers.
 pub mod service;
 /// Manual IP subnet banning primitives.
@@ -36,19 +39,23 @@ pub mod wire;
 pub mod wtxid;
 
 pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerStats, ReadyPeer};
+pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
+pub use listener::spawn_outbound_connection;
 pub use peer::{
     AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
     MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, NetworkControls,
     NodeAddress, Peer, PeerManager, PeerState, SystemDnsResolver, TrafficTotals,
     UPLOAD_TIMEFRAME_SECS, UploadTarget,
 };
-pub use download::{
-    DownloadWindow, PeerRequest, SyncBudget, SyncPeer, SyncPeerSelection, select_download_peers,
-    statically_fanout_eligible,
-};
 pub use peer_info::PeerInfo;
+pub use peer_table::{PeerSession, PeerTable};
 pub use service::{P2pControlError, P2pService, P2pServiceConfig, P2pServiceError};
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
+
+pub use download_window::{
+    DownloadWindow, FanoutCandidate, SyncBudget, SyncPeer, SyncPeerSelection,
+    configure_request_mode, default_sync_budget, statically_fanout_eligible,
+};

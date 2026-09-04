@@ -51,7 +51,8 @@ fn expected_hash_serialized_3(
     sorted.sort_unstable_by(|left, right| {
         left.0
             .txid
-            .0.to_le_bytes()
+            .0
+            .to_le_bytes()
             .cmp(&right.0.txid.0.to_le_bytes())
             .then_with(|| {
                 let left_vout = left.0.vout;
@@ -601,8 +602,14 @@ fn multi_shard_invalid_add_preserves_commit_rejection_atomicity()
     // Verify rejection atomicity across shards
     assert_eq!(set.get(&shard0_op), Some(shard0_txout));
     assert_eq!(set.get(&shard1_op), Some(shard1_txout));
-    assert_eq!(set.get(&OutPoint::new(txid_in_shard(0, 101).into(), 0)), None);
-    assert_eq!(set.get(&OutPoint::new(txid_in_shard(1, 101).into(), 0)), None);
+    assert_eq!(
+        set.get(&OutPoint::new(txid_in_shard(0, 101).into(), 0)),
+        None
+    );
+    assert_eq!(
+        set.get(&OutPoint::new(txid_in_shard(1, 101).into(), 0)),
+        None
+    );
     assert_eq!(set.len(), 2);
     Ok(())
 }

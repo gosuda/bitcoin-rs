@@ -100,23 +100,23 @@ fuzz_target!(|data: &[u8]| {
 
     let script_sig = script_sig.to_vec();
     let script_pubkey = script_pubkey.to_vec();
-    let prevout = bitcoin::TxOut {
-        value: bitcoin::Amount::from_sat(10_000),
-        script_pubkey: bitcoin::ScriptBuf::from_bytes(script_pubkey.clone()),
+    let prevout = bitcoin_rs_primitives::TxOut {
+        value: 10_000,
+        script_pubkey: script_pubkey.clone(),
     };
-    let tx = bitcoin::Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![bitcoin::TxIn {
-            previous_output: bitcoin::OutPoint::default(),
-            script_sig: bitcoin::ScriptBuf::from_bytes(script_sig.clone()),
-            sequence: bitcoin::Sequence::MAX,
-            witness: bitcoin::Witness::from_slice(&witness),
+    let tx = bitcoin_rs_primitives::Tx {
+        version: 2,
+        inputs: vec![bitcoin_rs_primitives::TxIn {
+            previous_output: bitcoin_rs_primitives::OutPoint::default(),
+            script_sig: script_sig.clone(),
+            sequence: u32::MAX,
+            witness: witness.clone(),
         }],
-        output: vec![bitcoin::TxOut {
-            value: bitcoin::Amount::from_sat(9_000),
-            script_pubkey: bitcoin::ScriptBuf::new(),
+        outputs: vec![bitcoin_rs_primitives::TxOut {
+            value: 9_000,
+            script_pubkey: Vec::new(),
         }],
+        lock_time: 0,
     };
 
     let interpreter = Interpreter::default();

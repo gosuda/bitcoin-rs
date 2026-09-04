@@ -1,13 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwapOption;
-use bitcoin::blockdata::constants::genesis_block;
-use bitcoin::{
-    Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
-    absolute::LockTime, transaction::Version,
-};
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_index::{ScriptHashRow, SpendingPrefixRow, TxidRow};
+use bitcoin_rs_primitives::{
+    Block, BlockHash, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    encode::double_sha256,
+};
 use bitcoin_rs_rpc::context::{BlockRecord, ScriptHistoryRecord};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 
@@ -179,12 +178,12 @@ struct QueryFixture {
 
 struct SingleBlockBody {
     height: u32,
-    hash: Hash256,
+    hash: BlockHash,
     body: Vec<u8>,
 }
 
 impl BlockBodySource for SingleBlockBody {
-    fn block_body(&self, height: u32, hash: Hash256) -> Option<Vec<u8>> {
+    fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
         (height == self.height && hash == self.hash).then(|| self.body.clone())
     }
 }
@@ -248,8 +247,8 @@ impl QueryFixture {
         let body_source = config.retain_body.then(|| {
             let source: Arc<dyn BlockBodySource> = Arc::new(SingleBlockBody {
                 height: tip.height,
-                hash: Hash256::from_le_bytes(config.block.block_hash().as_byte_array()),
-                body: bitcoin::consensus::encode::serialize(&config.block),
+                hash: config.block.block_hash(),
+                body: consensus_bytes(&config.block),
             });
             source
         });
@@ -273,8 +272,8 @@ impl QueryFixture {
 #[test]
 fn tx_queries_can_be_ready_while_script_history_is_backfilling()
 -> Result<(), Box<dyn std::error::Error>> {
-    let block = genesis_block(Network::Regtest);
-    let txid = block.txdata[0].compute_txid();
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
     let fixture = QueryFixture::new_with_script_history_watermark(
         FixtureConfig {
             block,
@@ -308,6 +307,28 @@ fn scan_response(
     }
 }
 
+/// Native BIP141-style txid merkle fold with the odd-leaf duplication rule.
+fn compute_merkle_root(block: &Block) -> Option<Hash256> {
+    let txs = &block.txs;
+    if txs.is_empty() {
+        return None;
+    }
+    let mut level: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pos in 0..level.len().div_ceil(2) {
+            let left = level[2 * pos];
+            let right = level[(2 * pos + 1).min(level.len() - 1)];
+            let mut pair = [0_u8; 64];
+            pair[..32].copy_from_slice(&left);
+            pair[32..].copy_from_slice(&right);
+            next.push(*double_sha256(&pair).as_byte_array());
+        }
+        level = next;
+    }
+    Some(Hash256::from_le_bytes(&level[0]))
+}
+
 /// Pins that the height query proves absence rather than guessing the tip.
 ///
 /// Without this, an implementation that answered `Some(tip.height)` for anything
@@ -316,8 +337,8 @@ fn scan_response(
 #[test]
 fn transaction_height_reports_nothing_for_an_unindexed_txid()
 -> Result<(), Box<dyn std::error::Error>> {
-    let block = genesis_block(Network::Regtest);
-    let txid = block.txdata[0].compute_txid();
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
     let fixture = QueryFixture::new(FixtureConfig {
         block,
         retain_body: false,
@@ -338,8 +359,8 @@ fn transaction_height_reports_nothing_for_an_unindexed_txid()
 #[test]
 fn transaction_retries_after_applied_tip_aba_revision_change()
 -> Result<(), Box<dyn std::error::Error>> {
-    let block = genesis_block(Network::Regtest);
-    let txid = block.txdata[0].compute_txid();
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid).to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
         block,
@@ -358,8 +379,8 @@ fn transaction_retries_after_applied_tip_aba_revision_change()
 
 #[test]
 fn transaction_rejects_watermark_from_rival_tip() -> Result<(), Box<dyn std::error::Error>> {
-    let block = genesis_block(Network::Regtest);
-    let txid = block.txdata[0].compute_txid();
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
     let indexed_row = TxidRow::row(&txid, 0).to_db_row().to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -387,8 +408,8 @@ fn transaction_rejects_watermark_from_rival_tip() -> Result<(), Box<dyn std::err
 
 #[test]
 fn transaction_rejects_incomplete_prefix_scan() -> Result<(), Box<dyn std::error::Error>> {
-    let block = genesis_block(Network::Regtest);
-    let txid = block.txdata[0].compute_txid();
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
     let tempting_row = TxidRow::row(&txid, 0).to_db_row().to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -414,8 +435,8 @@ fn transaction_rejects_incomplete_prefix_scan() -> Result<(), Box<dyn std::error
 #[test]
 fn transaction_reports_unavailable_when_indexed_body_is_missing()
 -> Result<(), Box<dyn std::error::Error>> {
-    let block = genesis_block(Network::Regtest);
-    let txid = block.txdata[0].compute_txid();
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
     let prefix = TxidRow::scan_prefix(&txid);
     let indexed_row = TxidRow::row(&txid, 0).to_db_row().to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -441,15 +462,14 @@ fn transaction_reports_unavailable_when_indexed_body_is_missing()
 #[test]
 fn unspent_outputs_preserve_distinct_vouts_for_same_transaction_and_script()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut block = genesis_block(Network::Regtest);
-    let transaction = &mut block.txdata[0];
-    transaction.output.push(transaction.output[0].clone());
-    block.header.merkle_root = block
-        .compute_merkle_root()
+    let mut block = Network::Regtest.genesis_block();
+    let transaction = &mut block.txs[0];
+    transaction.outputs.push(transaction.outputs[0].clone());
+    block.header.merkle_root = compute_merkle_root(&block)
         .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
 
-    let txid: Txid = block.txdata[0].compute_txid();
-    let script = block.txdata[0].output[0].script_pubkey.clone();
+    let txid: Txid = block.txs[0].txid();
+    let script = block.txs[0].outputs[0].script_pubkey.clone();
     let scripthash = ScriptHash::new(&script);
     let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -477,17 +497,16 @@ fn unspent_outputs_preserve_distinct_vouts_for_same_transaction_and_script()
 #[test]
 fn unspent_outputs_reject_aggregate_scan_budget_exhaustion()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut block = genesis_block(Network::Regtest);
-    let transaction = &mut block.txdata[0];
-    let output = transaction.output[0].clone();
+    let mut block = Network::Regtest.genesis_block();
+    let transaction = &mut block.txs[0];
+    let output = transaction.outputs[0].clone();
     transaction
-        .output
+        .outputs
         .extend(std::iter::repeat_n(output, QUERY_SCAN_COUNT_LIMIT - 1));
-    block.header.merkle_root = block
-        .compute_merkle_root()
+    block.header.merkle_root = compute_merkle_root(&block)
         .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
 
-    let scripthash = ScriptHash::new(&block.txdata[0].output[0].script_pubkey);
+    let scripthash = ScriptHash::new(&block.txs[0].outputs[0].script_pubkey);
     let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
         block,
@@ -512,9 +531,9 @@ fn unspent_outputs_reject_aggregate_scan_budget_exhaustion()
 #[test]
 fn confirmed_history_snapshot_includes_funding_transaction()
 -> Result<(), Box<dyn std::error::Error>> {
-    let block = genesis_block(Network::Regtest);
-    let txid = block.txdata[0].compute_txid();
-    let script = block.txdata[0].output[0].script_pubkey.clone();
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let script = block.txs[0].outputs[0].script_pubkey.clone();
     let scripthash = ScriptHash::new(&script);
     let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
     let fixture = QueryFixture::new(FixtureConfig {
@@ -540,34 +559,33 @@ fn confirmed_history_snapshot_includes_funding_transaction()
 #[test]
 fn confirmed_history_snapshot_includes_the_spending_transaction()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut block = genesis_block(Network::Regtest);
-    let coinbase = &mut block.txdata[0];
-    let txid = coinbase.compute_txid();
-    let script = coinbase.output[0].script_pubkey.clone();
+    let mut block = Network::Regtest.genesis_block();
+    let coinbase = &mut block.txs[0];
+    let txid = coinbase.txid();
+    let script = coinbase.outputs[0].script_pubkey.clone();
     let scripthash = ScriptHash::new(&script);
-    let value = coinbase.output[0].value.to_sat();
+    let value = coinbase.outputs[0].value;
 
-    let spend_tx = Transaction {
-        version: Version::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
+    let spend_tx = Tx {
+        version: 2,
+        lock_time: 0,
+        inputs: vec![TxIn {
             previous_output: OutPoint { txid, vout: 0 },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
-        output: vec![TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: ScriptBuf::new(),
+        outputs: vec![TxOut {
+            value,
+            script_pubkey: Vec::new(),
         }],
     };
-    block.txdata.push(spend_tx);
-    block.header.merkle_root = block
-        .compute_merkle_root()
+    block.txs.push(spend_tx);
+    block.header.merkle_root = compute_merkle_root(&block)
         .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
 
     let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
-    let spend_txid = block.txdata[1].compute_txid();
+    let spend_txid = block.txs[1].txid();
     let spend_prefix = SpendingPrefixRow::scan_prefix(&OutPoint { txid, vout: 0 }).to_vec();
     let spending_row = SpendingPrefixRow::row(&OutPoint { txid, vout: 0 }, 0)
         .to_db_row()
@@ -617,30 +635,29 @@ fn confirmed_history_snapshot_includes_the_spending_transaction()
 #[test]
 fn confirmed_history_snapshot_retries_after_aba_on_spending_scan()
 -> Result<(), Box<dyn std::error::Error>> {
-    let mut block = genesis_block(Network::Regtest);
-    let coinbase = &mut block.txdata[0];
-    let txid = coinbase.compute_txid();
-    let script = coinbase.output[0].script_pubkey.clone();
+    let mut block = Network::Regtest.genesis_block();
+    let coinbase = &mut block.txs[0];
+    let txid = coinbase.txid();
+    let script = coinbase.outputs[0].script_pubkey.clone();
     let scripthash = ScriptHash::new(&script);
-    let value = coinbase.output[0].value.to_sat();
+    let value = coinbase.outputs[0].value;
 
-    let spend_tx = Transaction {
-        version: Version::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
+    let spend_tx = Tx {
+        version: 2,
+        lock_time: 0,
+        inputs: vec![TxIn {
             previous_output: OutPoint { txid, vout: 0 },
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
-        output: vec![TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: ScriptBuf::new(),
+        outputs: vec![TxOut {
+            value,
+            script_pubkey: Vec::new(),
         }],
     };
-    block.txdata.push(spend_tx);
-    block.header.merkle_root = block
-        .compute_merkle_root()
+    block.txs.push(spend_tx);
+    block.header.merkle_root = compute_merkle_root(&block)
         .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
 
     let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();

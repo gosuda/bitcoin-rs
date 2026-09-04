@@ -27,9 +27,9 @@
 //! and `fee_estimate` its [`FeeRate`]: minimal records are defined here
 //! only when no existing public type fits, and both fit.
 
-use bitcoin_rs_ext_api::CapabilitySnapshot;
 use bitcoin_rs_mempool::{FeeRate, MempoolStats, MutationResult};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network, Tx, Txid, deserialize};
+use bitcoin_rs_rpc::context::CapabilitySnapshot;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -549,16 +549,24 @@ mod tests {
         config
     }
 
-    /// A `label`-keyed P2WPKH witness-program output script.
-    fn p2wpkh_script(label: u8) -> Vec<u8> {
-        let mut script = vec![0x00, 0x14, label];
-        script.resize(0x16, label);
+    /// `P2WSH(OP_TRUE)`: a version-0 push-32 program whose witness script is a
+    /// bare `OP_TRUE`. Standard as an output template and spendable by a
+    /// one-item `[OP_TRUE]` witness, so the fixture needs no signature
+    /// material.
+    fn spendable_script() -> Vec<u8> {
+        let mut script = vec![0x00, 0x20];
+        script.extend_from_slice(&[
+            0x4a, 0xe8, 0x15, 0x72, 0xf0, 0x6e, 0x1b, 0x88, 0xfd, 0x5c, 0xed, 0x7a, 0x1a, 0x00,
+            0x09, 0x45, 0x43, 0x2e, 0x83, 0xe1, 0x55, 0x1e, 0x6f, 0x72, 0x1e, 0xe9, 0xc0, 0x0b,
+            0x8c, 0xc3, 0x32, 0x60,
+        ]);
         script
     }
 
-    /// A standard one-input one-output spend: a funded confirmed P2WPKH
-    /// prevout pays 92 000 sats back to a P2WPKH output (8 000 sat fee).
-    fn spending_tx(previous_output: OutPoint, label: u8) -> Tx {
+    /// A standard one-input one-output spend: a funded confirmed
+    /// `P2WSH(OP_TRUE)` prevout pays 92 000 sats back to the same template
+    /// (8 000 sat fee).
+    fn spending_tx(previous_output: OutPoint) -> Tx {
         Tx {
             version: 2,
             lock_time: 0,
@@ -566,11 +574,11 @@ mod tests {
                 previous_output,
                 script_sig: Vec::new(),
                 sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                witness: vec![vec![0x51]],
             }],
             outputs: vec![TxOut {
                 value: 92_000,
-                script_pubkey: p2wpkh_script(label),
+                script_pubkey: spendable_script(),
             }],
         }
     }
@@ -597,12 +605,12 @@ mod tests {
         let broadcast_prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5A; 32])), 0);
         let direct_prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5B; 32])), 0);
         let mut changes = BlockChanges::default();
-        for (prevout, label) in [(broadcast_prevout, 0xA5_u8), (direct_prevout, 0xA6)] {
+        for prevout in [broadcast_prevout, direct_prevout] {
             changes.add(UtxoAdd::new(
                 prevout,
                 TxOut {
                     value: 100_000,
-                    script_pubkey: p2wpkh_script(label),
+                    script_pubkey: spendable_script(),
                 },
                 false,
                 1,
@@ -614,7 +622,7 @@ mod tests {
             .map_err(|error| format!("fixture utxo commit failed: {error}"))
             .expect("fixture utxo commit");
 
-        let broadcast_tx = spending_tx(broadcast_prevout, 0xA5);
+        let broadcast_tx = spending_tx(broadcast_prevout);
         let broadcast_txid = broadcast_tx.txid();
         let result = testing::block_on(node.broadcast(broadcast_tx)).expect("broadcast accepted");
         assert_eq!(result.len(), 1, "one admission commits one change");
@@ -644,7 +652,7 @@ mod tests {
         // directly. That path reaches no observer — the empty stream below
         // is what makes the assertion above gateway-specific rather than
         // pool-state-specific.
-        let direct_tx = spending_tx(direct_prevout, 0xA6);
+        let direct_tx = spending_tx(direct_prevout);
         let vsize = u32::try_from(direct_tx.vsize()).unwrap_or(u32::MAX);
         let entry = MempoolEntry::new(Arc::new(direct_tx), vsize, 8_000, 0, 1);
         node.state
