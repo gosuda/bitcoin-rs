@@ -77,6 +77,15 @@ pub(crate) const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
+/// Default fork depth at which a stale txindex watermark routes to a
+/// selective reset + rebuild instead of a per-block rewind.
+///
+/// Grounded in three measured runs of per-block forward-ingest versus rollback
+/// cost (see `docs/benchmarks/index-rollback-rebuild-cutover.md`): the default
+/// routes the 834k-block stale-branch incident shape to a rebuild while organic
+/// reorgs (tens of blocks) keep rewinding block by block.
+pub(crate) const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
+
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
 const POSITION_PREFETCH_BLOCKS: usize = 65_536;
 /// Maximum number of blocks whose bodies are held in memory and whose

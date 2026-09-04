@@ -387,6 +387,12 @@ impl PeerLease {
         self.id.get()
     }
 
+    /// Process-unique identity of this connection.
+    #[must_use]
+    pub const fn connection_id(&self) -> ConnectionId {
+        self.id
+    }
+
     /// Whether this connection was accepted by the listener.
     #[must_use]
     pub const fn is_inbound(&self) -> bool {

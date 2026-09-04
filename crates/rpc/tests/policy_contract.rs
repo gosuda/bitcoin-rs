@@ -85,7 +85,7 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
         TxOut {
             value,
-            script_pubkey: p2wpkh_script(),
+            script_pubkey: op_true_script(),
         },
         false,
         1,
@@ -107,11 +107,11 @@ fn confirmed_outpoint(label: u8) -> OutPoint {
     }
 }
 
-fn internal_message(error: &RpcError) -> String {
+fn reject_message(error: &RpcError) -> String {
     assert_eq!(
         error.code(),
-        RpcError::INTERNAL_ERROR,
-        "policy rejects surface as internal errors"
+        RpcError::CORE_VERIFY_REJECTED,
+        "policy rejects surface as transaction rejections"
     );
     error.to_string()
 }
@@ -129,7 +129,7 @@ fn sendrawtransaction_rejects_below_min_relay_fee_and_agrees_with_the_pool()
     let tx = tx(prevout, 9_999, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&tx)]))
             .err()
@@ -191,7 +191,7 @@ fn sendrawtransaction_and_testmempoolaccept_quote_the_floor_before_maxfeerate()
         .min_relay_fee_sat_per_kvb = 20_000_000;
     let both = funded_fee_tx(&strict, 0x81, 1_230);
     let handler = Handler::new(Arc::clone(&strict));
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&both)]))
             .err()
@@ -289,7 +289,7 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
 
     // 164 sat over 82 vB is exactly 2 000 sat/kvB: below the configured floor.
     let below = tx(fund_utxo(&ctx, 0x83, 10_164), 10_000, 0xffff_ffff);
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&below)]))
             .err()
@@ -377,7 +377,7 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
     // 82 sat over 82 vB is exactly 1 000 sat/kvB: clears the configured
     // floor, misses the pressure floor. Both outlets quote the pressure floor.
     let lukewarm = tx(fund_utxo(&ctx, 0x87, 10_082), 10_000, 0xffff_ffff);
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&lukewarm)]))
             .err()
@@ -529,7 +529,7 @@ fn sendrawtransaction_rejects_oversized_and_nonstandard_txs() -> Result<(), Box<
             script_pubkey: p2wpkh_script(),
         })
         .collect();
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&oversized)]))
             .err()
@@ -547,7 +547,7 @@ fn sendrawtransaction_rejects_oversized_and_nonstandard_txs() -> Result<(), Box<
         }],
         ..tx(fund_utxo(&ctx, 0x56, 10_000), 9_000, 0xffff_ffff)
     };
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&weird)]))
             .err()
@@ -715,7 +715,7 @@ fn sendrawtransaction_rejects_nonsignaling_replacements_with_rule1() -> Result<(
     let replacement = tx(confirmed_outpoint(0x61), 90_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))
             .err()
@@ -751,7 +751,7 @@ fn sendrawtransaction_rejects_rule2_replacements_adding_unconfirmed_inputs()
         ],
         100_000,
     );
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))
             .err()
@@ -798,7 +798,7 @@ fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
     // rate rule applies (48 780 sat/kvB clears the floor comfortably).
     let replacement = tx(confirmed_outpoint(0x9a), 96_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))
             .err()
@@ -869,7 +869,7 @@ fn sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate()
         found.ok_or("no output count satisfies the rule-6 shape")?
     };
     let handler = Handler::new(Arc::clone(&ctx));
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))
             .err()
@@ -923,7 +923,7 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
     mempool: &Arc<MempoolGateway>,
 ) -> Result<sonic_rs::Value, Box<dyn Error>> {
     // sendrawtransaction must reject.
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([tx_hex]))
             .err()
@@ -1103,7 +1103,7 @@ fn sendrawtransaction_enforces_ancestor_count_limits_at_admission() -> Result<()
     };
     let handler = Handler::new(Arc::clone(&ctx));
 
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&follower)]))
             .err()
@@ -1203,7 +1203,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_ancestor_count_limits()
     );
 
     // Admission must reject with the same class.
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&follower)]))
             .err()
@@ -1354,7 +1354,7 @@ fn sendrawtransaction_enforces_ancestor_size_limits_at_admission() -> Result<(),
         "unexpected reject-reason: {reject_reason}"
     );
 
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&follower)]))
             .err()
@@ -1458,7 +1458,7 @@ fn sendrawtransaction_enforces_descendant_count_limits_at_admission() -> Result<
         "unexpected reject-reason: {reject_reason}"
     );
 
-    let message = internal_message(
+    let message = reject_message(
         &handler
             .dispatch("sendrawtransaction", &json!([raw_tx_hex(&child)]))
             .err()
@@ -1857,8 +1857,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             network: NetworkHandles {
                 network: state.network(),
                 network_active: state.network_active(),
-                peers: state.peers(),
-                peer_outbound: state.peer_outbound(),
+                peer_table: state.peer_table(),
                 p2p_outbound_sender: Some(state.p2p_outbound_sender()),
                 banned: state.banned_subnets(),
                 added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),

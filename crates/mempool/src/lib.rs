@@ -3,6 +3,8 @@
 
 extern crate alloc;
 
+/// Transaction acceptance into the mempool.
+pub mod accept;
 /// Mempool entry metadata.
 pub mod entry;
 /// Package eviction policy.
@@ -26,6 +28,10 @@ pub mod rbf;
 /// Transaction relay standardness policy.
 pub mod standardness;
 
+pub use accept::{
+    AcceptChecks, AcceptContext, AcceptError, AcceptResult, MempoolUtxoView, accept_to_mempool,
+    check_acceptance,
+};
 pub use entry::{EntryId, MempoolEntry};
 pub use eviction::evict_lowest_fee_packages;
 pub use fee_estimator::{FeeEstimator, FeeRate};
@@ -36,8 +42,8 @@ pub use gateway::{
 #[cfg(any(test, feature = "test-seam"))]
 pub use gateway::{arm_admission_park, reset_admission_park};
 pub use mutation::{
-    AdmissionOrigin, MutationChange, MutationEnvelope, MutationOutcome, MutationResult, PeerToken,
-    RemovalReason,
+    AdmissionOrigin, InsertionOutcome, MutationChange, MutationEnvelope, MutationOutcome,
+    MutationResult, PeerToken, RemovalReason,
 };
 pub use pareto::ParetoFront;
 pub use policy::{MempoolLimits, MempoolPolicySnapshot, PolicyError};
@@ -46,3 +52,4 @@ pub use pool::{
     SnapshotEntry,
 };
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
+pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};

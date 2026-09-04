@@ -55,9 +55,7 @@ const DNS_BOOTSTRAP_FAST_REFILL_LIMIT: u8 = 2;
 /// helper sleeps in 100 ms slices, so this only bounds the re-check count.
 const DAEMON_SIGNAL_WAIT_SECS: u64 = 3_600;
 
-type PeerRegistry = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>;
-type PeerOutboundMap =
-    Arc<parking_lot::RwLock<hashbrown::HashMap<SocketAddr, bitcoin_rs_p2p::PeerLease>>>;
+type PeerTable = Arc<bitcoin_rs_p2p::PeerTable>;
 type BannedSubnets = Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>;
 type P2pChainQuery = Arc<dyn bitcoin_rs_p2p::ChainQuery>;
 type OutboundConnectionHandle =
@@ -135,18 +133,12 @@ fn spawn_p2p_listeners(
     config: &bitcoin_rs_node::NodeConfig,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     network_active: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    peers: &PeerRegistry,
-    peer_outbound: &PeerOutboundMap,
+    peer_table: &PeerTable,
     banned: BannedSubnets,
     inbound_headers_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundHeaders>,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
     sync_wake_tx: crossbeam_channel::Sender<()>,
     chain_query: P2pChainQuery,
-    peer_registered: Arc<
-        dyn Fn(SocketAddr, bitcoin_rs_p2p::PeerLease, bitcoin_rs_p2p::PeerInfo) -> bool
-            + Send
-            + Sync,
-    >,
     services: &mut NodeServices,
 ) -> anyhow::Result<()> {
     let magic = bitcoin::p2p::Magic::from_bytes(config.p2p_magic);
@@ -154,14 +146,12 @@ fn spawn_p2p_listeners(
         let listener_addr = *addr;
         let listener_shutdown = std::sync::Arc::clone(shutdown);
         let listener_network_active = std::sync::Arc::clone(network_active);
-        let listener_peers = Arc::clone(peers);
-        let listener_peer_outbound = Arc::clone(peer_outbound);
+        let listener_peer_table = Arc::clone(peer_table);
         let listener_banned = Arc::clone(&banned);
         let listener_inbound_headers_tx = inbound_headers_tx.clone();
         let listener_inbound_blocks_tx = inbound_blocks_tx.clone();
         let listener_sync_wake_tx = sync_wake_tx.clone();
         let listener_chain_query = Arc::clone(&chain_query);
-        let listener_peer_registered = Arc::clone(&peer_registered);
         let handle = std::thread::Builder::new()
             .name(format!("bitcoin-rs-p2p-{listener_addr}"))
             .spawn(move || {
@@ -170,14 +160,12 @@ fn spawn_p2p_listeners(
                     listener_shutdown,
                     listener_network_active,
                     magic,
-                    listener_peers,
-                    listener_peer_outbound,
+                    listener_peer_table,
                     listener_inbound_headers_tx,
                     listener_inbound_blocks_tx,
                     listener_banned,
                     Some(listener_chain_query),
                     Some(listener_sync_wake_tx),
-                    Some(listener_peer_registered),
                 )
             })
             .map_err(|error| -> anyhow::Error { error.into() })?;
@@ -215,16 +203,12 @@ fn reap_finished_outbound_connections(
 fn outbound_addr_available(
     addr: SocketAddr,
     active: &hashbrown::HashSet<SocketAddr>,
-    peers: &PeerRegistry,
-    peer_outbound: &PeerOutboundMap,
+    peer_table: &PeerTable,
 ) -> bool {
     if active.contains(&addr) {
         return false;
     }
-    if peer_outbound.read().contains_key(&addr) {
-        return false;
-    }
-    !peers.read().iter().any(|peer| peer.addr == addr)
+    !peer_table.is_connected(addr)
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -233,23 +217,16 @@ fn spawn_p2p_outbound_drain(
     shutdown: &Arc<AtomicBool>,
     sync_wake_tx: crossbeam_channel::Sender<()>,
     chain_query: P2pChainQuery,
-    peer_registered: Arc<
-        dyn Fn(SocketAddr, bitcoin_rs_p2p::PeerLease, bitcoin_rs_p2p::PeerInfo) -> bool
-            + Send
-            + Sync,
-    >,
 ) -> anyhow::Result<std::thread::JoinHandle<()>> {
     let outbound_rx = state.p2p_outbound_receiver();
     let magic = bitcoin::p2p::Magic::from_bytes(state.config().p2p_magic);
-    let outbound_registry = state.peers();
-    let outbound_peer_outbound = state.peer_outbound();
+    let outbound_peer_table = state.peer_table();
     let outbound_banned = state.banned_subnets();
     let outbound_headers_tx = state.inbound_headers_sender();
     let outbound_blocks_tx = state.inbound_blocks_sender();
     let outbound_sync_wake_tx = sync_wake_tx;
     let outbound_shutdown = Arc::clone(shutdown);
     let outbound_chain_query = Arc::clone(&chain_query);
-    let outbound_peer_registered = Arc::clone(&peer_registered);
     let outbound_network_active = state.network_active();
     Ok(std::thread::Builder::new()
         .name("bitcoin-rs-p2p-outbound-drain".to_owned())
@@ -276,23 +253,20 @@ fn spawn_p2p_outbound_drain(
                         if !outbound_addr_available(
                             addr,
                             &active,
-                            &outbound_registry,
-                            &outbound_peer_outbound,
+                            &outbound_peer_table,
                         ) {
                             continue;
                         }
                         let handle = bitcoin_rs_p2p::listener::spawn_outbound_connection_with_chain_and_sync_wake(
                             addr,
                             magic,
-                            Arc::clone(&outbound_registry),
-                            Arc::clone(&outbound_peer_outbound),
+                            Arc::clone(&outbound_peer_table),
                             outbound_headers_tx.clone(),
                             outbound_blocks_tx.clone(),
                             Arc::clone(&outbound_banned),
                             Arc::clone(&outbound_network_active),
                             Some(Arc::clone(&outbound_chain_query)),
                             Some(outbound_sync_wake_tx.clone()),
-                            Some(Arc::clone(&outbound_peer_registered)),
                         );
                         active.insert(addr);
                         handles.push((addr, handle));
@@ -317,7 +291,7 @@ fn spawn_dns_peer_maintenance(
     config: &NodeConfig,
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     network_active: Arc<AtomicBool>,
-    peer_outbound: PeerOutboundMap,
+    peer_table: PeerTable,
     outbound_tx: crossbeam_channel::Sender<SocketAddr>,
 ) -> anyhow::Result<Option<std::thread::JoinHandle<()>>> {
     if !config.dns_seeds_enabled {
@@ -351,7 +325,7 @@ fn spawn_dns_peer_maintenance(
                     &resolver,
                     seeds.as_slice(),
                     &network_active,
-                    &peer_outbound,
+                    &peer_table,
                     &outbound_tx,
                     &mut failed_backoff,
                     selection_cursor,
@@ -378,7 +352,7 @@ fn spawn_dns_peer_maintenance(
                         continue;
                     }
 
-                    let live = peer_outbound.read().len();
+                    let live = peer_table.len();
                     if live >= crate::sync::MIN_PEERS_FOR_FANOUT {
                         maintenance_delay = bootstrap_refill.next_delay(live, 0);
                         continue;
@@ -388,7 +362,7 @@ fn spawn_dns_peer_maintenance(
                         &resolver,
                         seeds.as_slice(),
                         &network_active,
-                        &peer_outbound,
+                        &peer_table,
                         &outbound_tx,
                         &mut failed_backoff,
                         selection_cursor,
@@ -414,7 +388,7 @@ fn spawn_dns_peer_maintenance(
 /// `try_send`s them into `outbound_tx`.
 ///
 /// Dedup is applied against:
-/// 1. Addresses already present in `peer_outbound`.
+/// 1. Addresses already present in `peer_table`.
 /// 2. Addresses in `recently_queued` whose cooldown window has not yet expired.
 ///
 /// Successfully queued addresses are inserted into `recently_queued` with the current
@@ -433,7 +407,7 @@ fn drain_dns_peer_deficit<R>(
     resolver: &R,
     seeds: &[&str],
     network_active: &AtomicBool,
-    peer_outbound: &PeerOutboundMap,
+    peer_table: &PeerTable,
     outbound_tx: &crossbeam_channel::Sender<SocketAddr>,
     recently_queued: &mut hashbrown::HashMap<SocketAddr, std::time::Instant>,
     selection_cursor: usize,
@@ -478,7 +452,7 @@ where
             if !seen.insert(addr) {
                 continue;
             }
-            if peer_outbound.read().contains_key(&addr) {
+            if peer_table.is_connected(addr) {
                 continue;
             }
             if recently_queued.contains_key(&addr) {
@@ -521,8 +495,7 @@ fn spawn_fixed_peer_bootstrap(
         return Ok(None);
     }
     let outbound_tx = state.p2p_outbound_sender();
-    let peers = state.peers();
-    let peer_outbound = state.peer_outbound();
+    let peer_table = state.peer_table();
     let bootstrap_shutdown = Arc::clone(shutdown);
     let network_active = state.network_active();
     Ok(Some(
@@ -548,9 +521,7 @@ fn spawn_fixed_peer_bootstrap(
                             }
                         };
                         for addr in addresses {
-                            if peer_outbound.read().contains_key(&addr)
-                                || peers.read().iter().any(|peer| peer.addr == addr)
-                            {
+                            if peer_table.is_connected(addr) {
                                 continue;
                             }
                             if !network_active.load(std::sync::atomic::Ordering::Acquire) {
@@ -915,13 +886,18 @@ pub(crate) fn start_node(
         state: Some(state),
         services: NodeServices::default(),
     };
-    let Some(state) = guard.state.as_ref() else {
-        // The guard was just built with `state: Some(state)` above.
-        panic!("state recorded above");
-    };
     // No sidecar consultation at boot: the V1 crash-recovery sidecar /
     // body-replay path was retired (issue #230, task 0). A stale sidecar
     // file on disk is ignored; recovery is checkpoint-based.
+    {
+        let Some(state) = guard.state.as_mut() else {
+            panic!("state recorded above");
+        };
+        state.start_index_workers()?;
+    }
+    let Some(state) = guard.state.as_ref() else {
+        panic!("state recorded above");
+    };
 
     tracing::info!(
         network = ?state.config().network,
@@ -960,7 +936,6 @@ pub(crate) fn start_node(
     );
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();
-    let peer_registered = sync.peer_registration_handle();
     let loop_handle = EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx);
     let mining_control: Arc<dyn bitcoin_rs_rpc::context::MiningControl> =
         Arc::new(crate::MiningCoordinator::new(
@@ -1001,8 +976,7 @@ pub(crate) fn start_node(
             network: bitcoin_rs_rpc::context::NetworkHandles {
                 network: state.network(),
                 network_active: Arc::clone(&network_active),
-                peers: state.peers(),
-                peer_outbound: state.peer_outbound(),
+                peer_table: state.peer_table(),
                 p2p_outbound_sender: Some(state.p2p_outbound_sender()),
                 banned: Arc::clone(&banned),
                 added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
@@ -1042,36 +1016,28 @@ pub(crate) fn start_node(
         .name("bitcoin-rs-rpc".into())
         .spawn(move || rpc_server.serve_with_shutdown(rpc_shutdown))?;
     guard.services.rpc_thread = Some(rpc_thread);
-    let peers = state.peers();
-    let peer_outbound = state.peer_outbound();
+    let peer_table = state.peer_table();
     spawn_p2p_listeners(
         state.config(),
         &shutdown,
         &network_active,
-        &peers,
-        &peer_outbound,
+        &peer_table,
         Arc::clone(&banned),
         state.inbound_headers_sender(),
         state.inbound_blocks_sender(),
         sync_wake_tx.clone(),
         Arc::clone(&p2p_chain_query),
-        Arc::clone(&peer_registered),
         &mut guard.services,
     )?;
-    let outbound_worker = spawn_p2p_outbound_drain(
-        state,
-        &shutdown,
-        sync_wake_tx,
-        Arc::clone(&p2p_chain_query),
-        Arc::clone(&peer_registered),
-    )?;
+    let outbound_worker =
+        spawn_p2p_outbound_drain(state, &shutdown, sync_wake_tx, Arc::clone(&p2p_chain_query))?;
     guard.services.outbound_worker = Some(outbound_worker);
     let bootstrap_worker = if state.config().connect.is_empty() {
         spawn_dns_peer_maintenance(
             state.config(),
             Arc::clone(&shutdown),
             Arc::clone(&network_active),
-            Arc::clone(&peer_outbound),
+            Arc::clone(&peer_table),
             state.p2p_outbound_sender(),
         )?
     } else {
@@ -1218,8 +1184,8 @@ mod tests {
     // Helper
     // ---------------------------------------------------------------------------
 
-    fn empty_peer_outbound() -> PeerOutboundMap {
-        Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()))
+    fn empty_peer_table() -> PeerTable {
+        Arc::new(bitcoin_rs_p2p::PeerTable::new())
     }
 
     fn signet_seeds() -> Vec<&'static str> {
@@ -1620,7 +1586,7 @@ mod tests {
 
     #[test]
     fn selection_cursor_rotates_seed_and_address_prefix() {
-        let peer_outbound = empty_peer_outbound();
+        let peer_table = empty_peer_table();
         let (dial_tx, dial_rx) = crossbeam_channel::unbounded();
         let mut recently_queued = hashbrown::HashMap::new();
 
@@ -1628,7 +1594,7 @@ mod tests {
             &SeedAwareResolver,
             &["seed-a", "seed-b", "seed-c"],
             &AtomicBool::new(true),
-            &peer_outbound,
+            &peer_table,
             &dial_tx,
             &mut recently_queued,
             1,
@@ -1646,7 +1612,7 @@ mod tests {
     fn inactive_network_skips_dns_resolution() {
         let resolver = CountingResolver(AtomicUsize::new(0));
         let network_active = AtomicBool::new(false);
-        let peer_outbound = empty_peer_outbound();
+        let peer_table = empty_peer_table();
         let (dial_tx, dial_rx) = crossbeam_channel::unbounded();
         let mut recently_queued = hashbrown::HashMap::new();
 
@@ -1654,7 +1620,7 @@ mod tests {
             &resolver,
             &["seed-a"],
             &network_active,
-            &peer_outbound,
+            &peer_table,
             &dial_tx,
             &mut recently_queued,
             0,
@@ -1685,26 +1651,24 @@ mod tests {
 
     #[test]
     fn deficit_queues_exact_shortfall_and_respects_dedup() {
-        let peer_outbound = empty_peer_outbound();
+        let peer_table = empty_peer_table();
         // Pre-populate 3 live connections using addresses the resolver will also return.
         for port in 10_000_u16..10_003 {
             let addr = SocketAddr::from(([127, 0, 0, 1], port));
             let (tx, _rx) = crossbeam_channel::unbounded();
-            peer_outbound
-                .write()
-                .insert(addr, bitcoin_rs_p2p::PeerLease::new(tx));
+            peer_table.register(addr, bitcoin_rs_p2p::PeerLease::new(tx));
         }
 
         let (dial_tx, dial_rx) = crossbeam_channel::unbounded();
         let seeds = signet_seeds();
         let mut recently_queued = hashbrown::HashMap::new();
-        let needed = crate::sync::MIN_PEERS_FOR_FANOUT - peer_outbound.read().len(); // 5
+        let needed = crate::sync::MIN_PEERS_FOR_FANOUT - peer_table.len(); // 5
 
         let queued = drain_dns_peer_deficit(
             &OverlapResolver,
             seeds.as_slice(),
             &AtomicBool::new(true),
-            &peer_outbound,
+            &peer_table,
             &dial_tx,
             &mut recently_queued,
             0,
@@ -1730,7 +1694,7 @@ mod tests {
 
     #[test]
     fn recently_queued_addr_suppressed_within_cooldown_window() -> anyhow::Result<()> {
-        let peer_outbound = empty_peer_outbound();
+        let peer_table = empty_peer_table();
         let (dial_tx, dial_rx) = crossbeam_channel::unbounded();
         let seeds = signet_seeds();
         let mut recently_queued: hashbrown::HashMap<SocketAddr, std::time::Instant> =
@@ -1741,7 +1705,7 @@ mod tests {
             &ManyAddrResolver,
             seeds.as_slice(),
             &AtomicBool::new(true),
-            &peer_outbound,
+            &peer_table,
             &dial_tx,
             &mut recently_queued,
             0,
@@ -1756,7 +1720,7 @@ mod tests {
             &ManyAddrResolver,
             seeds.as_slice(),
             &AtomicBool::new(true),
-            &peer_outbound,
+            &peer_table,
             &dial_tx,
             &mut recently_queued,
             0,
@@ -1777,7 +1741,7 @@ mod tests {
 
     #[test]
     fn full_dial_channel_does_not_panic_and_queues_what_fits() {
-        let peer_outbound = empty_peer_outbound();
+        let peer_table = empty_peer_table();
         // Channel capacity = 1 — only one address can be queued.
         let (dial_tx, dial_rx) = crossbeam_channel::bounded(1);
         let seeds = signet_seeds();
@@ -1787,7 +1751,7 @@ mod tests {
             &ManyAddrResolver,
             seeds.as_slice(),
             &AtomicBool::new(true),
-            &peer_outbound,
+            &peer_table,
             &dial_tx,
             &mut recently_queued,
             0,
@@ -1812,14 +1776,14 @@ mod tests {
     fn maintenance_loop_exits_on_shutdown() -> anyhow::Result<()> {
         let config = NodeConfig::default_for_network(bitcoin_rs_primitives::Network::Signet);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let peer_outbound = empty_peer_outbound();
+        let peer_table = empty_peer_table();
         let (dial_tx, _dial_rx) = crossbeam_channel::unbounded();
 
         let handle = spawn_dns_peer_maintenance(
             &config,
             Arc::clone(&shutdown),
             Arc::new(AtomicBool::new(true)),
-            peer_outbound,
+            peer_table,
             dial_tx,
         )?
         .ok_or_else(|| anyhow!("signet must produce a maintenance handle"))?;
@@ -1857,13 +1821,13 @@ mod tests {
         );
         // When connect is empty, spawn_dns_peer_maintenance is taken; its handle is Some.
         let shutdown = Arc::new(AtomicBool::new(true)); // pre-set: thread exits immediately
-        let peer_outbound = empty_peer_outbound();
+        let peer_table = empty_peer_table();
         let (dial_tx, _) = crossbeam_channel::unbounded();
         let handle = spawn_dns_peer_maintenance(
             &config,
             shutdown,
             Arc::new(AtomicBool::new(true)),
-            peer_outbound,
+            peer_table,
             dial_tx,
         )?
         .ok_or_else(|| anyhow!("signet must produce a maintenance handle"))?;
@@ -1885,13 +1849,13 @@ mod tests {
 
         for config in [regtest, disabled] {
             let shutdown = Arc::new(AtomicBool::new(false));
-            let peer_outbound = empty_peer_outbound();
+            let peer_table = empty_peer_table();
             let (dial_tx, _) = crossbeam_channel::unbounded();
             let handle = match spawn_dns_peer_maintenance(
                 &config,
                 shutdown,
                 Arc::new(AtomicBool::new(true)),
-                peer_outbound,
+                peer_table,
                 dial_tx,
             ) {
                 Ok(handle) => handle,
@@ -1913,34 +1877,20 @@ mod tests {
         let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
         let mut active = hashbrown::HashSet::new();
         active.insert(addr);
-        let peers: PeerRegistry = Arc::new(parking_lot::RwLock::new(Vec::new()));
-        let peer_outbound: PeerOutboundMap = empty_peer_outbound();
+        let peer_table: PeerTable = empty_peer_table();
 
-        assert!(!outbound_addr_available(
-            addr,
-            &active,
-            &peers,
-            &peer_outbound
-        ));
+        assert!(!outbound_addr_available(addr, &active, &peer_table));
     }
 
     #[test]
     fn outbound_addr_available_rejects_connected_duplicate() {
         let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
         let active = hashbrown::HashSet::new();
-        let peers: PeerRegistry = Arc::new(parking_lot::RwLock::new(Vec::new()));
-        let peer_outbound: PeerOutboundMap = empty_peer_outbound();
+        let peer_table: PeerTable = empty_peer_table();
         let (tx, _rx) = crossbeam_channel::unbounded();
-        peer_outbound
-            .write()
-            .insert(addr, bitcoin_rs_p2p::PeerLease::new(tx));
+        peer_table.register(addr, bitcoin_rs_p2p::PeerLease::new(tx));
 
-        assert!(!outbound_addr_available(
-            addr,
-            &active,
-            &peers,
-            &peer_outbound
-        ));
+        assert!(!outbound_addr_available(addr, &active, &peer_table));
     }
 
     #[test]

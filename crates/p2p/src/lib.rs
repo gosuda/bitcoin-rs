@@ -25,6 +25,8 @@ pub mod listener;
 pub mod peer;
 /// Peer metadata published after a successful handshake.
 pub mod peer_info;
+/// Single owner of live peer sessions: leases and their handshake metadata.
+pub mod peer_table;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Bitcoin P2P wire codec.
@@ -43,6 +45,7 @@ pub use peer::{
     UPLOAD_TIMEFRAME_SECS, UploadTarget,
 };
 pub use peer_info::PeerInfo;
+pub use peer_table::{PeerSession, PeerTable};
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
 

@@ -392,6 +392,7 @@ dependencies = [
  "bitcoin-rs-storage",
  "bytemuck",
  "bytes",
+ "criterion",
  "crossbeam-channel",
  "hashbrown 0.17.1",
  "metrics",

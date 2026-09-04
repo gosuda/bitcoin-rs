@@ -60,9 +60,9 @@ pub fn spawn_tx_ingress_consumer(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let utxo = state.utxo();
     let transactions = state.transactions();
-    let peer_outbound = state.peer_outbound();
+    let peer_table = state.peer_table();
     let (relay, relay_rx) = TxRelayQueue::new(TX_RELAY_QUEUE_CAPACITY);
-    let relay_sink = PeerRelaySink::new(peer_outbound);
+    let relay_sink = PeerRelaySink::new(peer_table);
     spawn_tx_relay_worker(relay_sink, relay_rx, Arc::clone(&shutdown))?;
     let handle = std::thread::Builder::new()
         .name("bitcoin-rs-tx-ingress".to_owned())
@@ -209,10 +209,15 @@ impl TxIngressConsumer {
         );
 
         match result {
-            Ok(mutation) => {
+            // A replacement the size-limit trim shed after commit is not in
+            // the pool: record the reject exactly like a refused admission.
+            Ok(outcome) if outcome.is_shed() => {
+                self.tx_admission.record_reject(txid, wtxid);
+            }
+            Ok(outcome) => {
                 // Accepted-only relay: only relay if the mutation includes
                 // an Accepted outcome for this txid.
-                let accepted = mutation.changes.iter().any(|c| {
+                let accepted = outcome.into_mutation().changes.iter().any(|c| {
                     c.txid == Hash256::from(txid)
                         && matches!(c.outcome, bitcoin_rs_mempool::MutationOutcome::Accepted)
                 });

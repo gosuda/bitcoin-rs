@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bitcoin_rs_chain::{ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::{Candidate, TemplateId};
-use bitcoin_rs_p2p::PeerInfo;
+use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     encode::double_sha256,
@@ -24,7 +24,6 @@ use bitcoin_rs_rpc::context::{
 };
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
-use parking_lot::RwLock;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 struct SmokeMiningControl;
@@ -91,6 +90,7 @@ impl MiningControl for SmokeMiningControl {
         Ok(MiningInfo {
             blocks: 0,
             last_candidate: None,
+            bits: 0x207f_ffff,
             difficulty: 1.0,
             network_hashes_per_second: 0.0,
             pooled_transactions: 0,
@@ -524,8 +524,9 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
 }
 
 #[test]
-fn network_peer_methods_read_shared_peer_registry() -> Result<(), Box<dyn std::error::Error>> {
-    let peers = Arc::new(RwLock::new(vec![PeerInfo {
+fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::error::Error>> {
+    let peer_table = Arc::new(PeerTable::new());
+    let info = PeerInfo {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
         version: 70016,
         services: 0,
@@ -533,8 +534,12 @@ fn network_peer_methods_read_shared_peer_registry() -> Result<(), Box<dyn std::e
         start_height: 0,
         conn_time: 0,
         inbound: true,
-    }]));
-    let ctx = context_with_peers(peers);
+    };
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let lease = PeerLease::new(tx);
+    peer_table.register(info.addr, lease.clone());
+    peer_table.publish_info(info.addr, &lease, info);
+    let ctx = context_with_peers(peer_table);
     let handler = Handler::new(ctx);
     let result = handler.dispatch("getpeerinfo", &json!([]))?;
     let array = result
@@ -816,9 +821,9 @@ impl Fixture {
     }
 }
 #[allow(clippy::arc_with_non_send_sync)]
-fn context_with_peers(peers: Arc<RwLock<Vec<PeerInfo>>>) -> Arc<Context> {
+fn context_with_peers(peer_table: Arc<PeerTable>) -> Arc<Context> {
     let mut ctx = Context::new();
-    ctx.peers = peers;
+    ctx.peer_table = peer_table;
     Arc::new(ctx)
 }
 

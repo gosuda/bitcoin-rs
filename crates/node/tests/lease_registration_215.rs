@@ -1,17 +1,8 @@
-//! Cross-crate regression test for issue #215: production P2P handshake
-//! publication cancels the current peer lease.
+//! Regression for the ownership boundary between p2p sessions and node sync.
 //!
-//! The bug: the p2p listener inserts the current `PeerLease` into
-//! `peer_outbound` *before* the handshake, then the production registration
-//! callback (`BlockSync::peer_registration_handle`) removes and cancels the
-//! lease at the same address. With pre-handshake registration, `prior` is the
-//! current connection's lease, not a predecessor — so the first post-handshake
-//! loop exits before reading any message.
-//!
-//! The existing unit tests in `sync.rs` exercise the callback in isolation
-//! but do not model the cross-crate production combination: a real p2p
-//! listener pre-handshake registration followed by the node callback. This
-//! test exercises that exact sequence through the public API.
+//! `PeerTable` owns registration, same-address replacement, cancellation, and
+//! handshake metadata. Node sync observes that table rather than registering
+//! sessions through a callback or maintaining a second peer collection.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,179 +11,80 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
 use bitcoin_rs_node::{BlockSync, Network, NoOpZmqPublisher, apply::ApplyHandles};
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerLease};
+use bitcoin_rs_p2p::{Message, PeerInfo, PeerLease, PeerTable};
+use bitcoin_rs_rpc::context::BlockLog;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
-use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
-type PeerMap = Arc<RwLock<HashMap<SocketAddr, PeerLease>>>;
 
-fn make_sync() -> (BlockSync, Arc<RwLock<Vec<PeerInfo>>>, PeerMap) {
+fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let chain_tip = block_tree.read().tip_handle();
-    let applied_tip: Arc<ArcSwapOption<bitcoin_rs_chain::TipSnapshot>> =
-        Arc::new(ArcSwapOption::empty());
-    let peers = Arc::new(RwLock::new(Vec::new()));
-    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
-    let (_headers_tx, headers_rx) = unbounded::<InboundHeaders>();
-    let (_blocks_tx, blocks_rx) = unbounded::<InboundBlock>();
-
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let (_headers_tx, headers_rx) = unbounded();
+    let (_blocks_tx, blocks_rx) = unbounded();
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let mut utxo = UtxoSet::new();
     utxo.set_listener(Box::new((*coin_stats).clone()));
-    let utxo = Arc::new(utxo);
-
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-    let mempool_gateway = MempoolGateway::shared(Arc::clone(&mempool));
-    let mining_generation = Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new());
-    let (chain_events, _chain_events_rx) = bitcoin_rs_node::state::ChainEventPublisher::detached(0);
-
+    let gateway = MempoolGateway::shared(Arc::clone(&mempool));
     let handles = ApplyHandles::new(
         Network::Regtest,
         chain_tip,
-        Arc::clone(&applied_tip),
-        Arc::clone(&block_tree),
-        utxo,
-        Arc::clone(&coin_stats),
+        applied_tip,
+        block_tree,
+        Arc::new(utxo),
+        coin_stats,
         None,
         mempool,
-        mempool_gateway,
-        mining_generation,
-        Arc::new(RwLock::new(bitcoin_rs_rpc::context::BlockLog::new())),
-        Arc::new(RwLock::new(HashMap::<
-            bitcoin_rs_primitives::Txid,
-            bitcoin_rs_primitives::Tx,
-        >::new())),
+        gateway,
+        Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
+        Arc::new(RwLock::new(BlockLog::new())),
+        Arc::new(RwLock::new(hashbrown::HashMap::new())),
         Arc::new(NoOpZmqPublisher),
-        Arc::new(chain_events),
+        Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
     );
-
-    let sync = BlockSync::new(
+    BlockSync::new(
         handles,
-        Arc::clone(&peers),
-        Arc::clone(&peer_outbound),
+        peer_table,
         Arc::new(Mutex::new(headers_rx)),
         Arc::new(Mutex::new(blocks_rx)),
-    );
-    (sync, peers, peer_outbound)
+    )
 }
 
-fn synthetic_peer(addr: SocketAddr, inbound: bool) -> PeerInfo {
+fn info(addr: SocketAddr) -> PeerInfo {
     PeerInfo {
         addr,
         version: 70_016,
-        services: 0,
+        services: 1,
         user_agent: String::from("/test/"),
         start_height: 0,
         conn_time: 0,
-        inbound,
+        inbound: true,
     }
 }
 
-/// Regression for #215: the p2p listener pre-registers the current connection's
-/// lease before the handshake. After the handshake, the node's
-/// `peer_registration_handle` callback is invoked with the *same* lease. The
-/// callback must detect that the prior entry is the same connection
-/// (`same_connection`) and must NOT cancel it.
 #[test]
-#[expect(
-    clippy::expect_used,
-    reason = "test: channel send/recv must succeed or test is broken"
-)]
-fn pre_registered_lease_survives_publication_callback() {
-    let (sync, peers, peer_outbound) = make_sync();
+fn peer_table_owns_handshake_publication_and_replacement() {
+    let table = Arc::new(PeerTable::new());
     let addr = SocketAddr::from(([127, 0, 0, 1], 18_447));
-
-    // Step 1: the p2p listener pre-registers the connection's lease before
-    // the handshake completes (mirroring listener.rs pre-handshake path).
-    let (tx, rx) = unbounded::<Message>();
-    let lease = PeerLease::new(tx);
-    peer_outbound.write().insert(addr, lease.clone());
-
-    // Step 2: the handshake completes and the production registration callback
-    // fires with the SAME lease (same connection). This is the cross-crate
-    // production combination that #215 identified as uncovered.
-    let registration = sync.peer_registration_handle();
-    let replaced = registration(addr, lease.clone(), synthetic_peer(addr, true));
-
-    // The callback must report `false` (not replaced) because the prior entry
-    // is the same connection, not a predecessor.
-    assert!(
-        !replaced,
-        "publication callback must not report replacement for same connection"
-    );
-
-    // The lease must NOT be cancelled — the session must survive to read its
-    // first post-handshake message.
-    assert!(
-        !lease.is_cancelled(),
-        "pre-registered lease must not be cancelled by its own publication"
-    );
-
-    // The lease in the map must be the same connection (not a cancelled clone).
-    assert!(
-        peer_outbound
-            .read()
-            .get(&addr)
-            .is_some_and(|current| current.same_connection(&lease)),
-        "outbound map must retain the same connection after publication"
-    );
-
-    // The peer must be registered.
-    assert_eq!(&*peers.read(), &[synthetic_peer(addr, true)]);
-
-    // The lease must still be usable — a message sent through it must arrive.
-    lease.send(Message::Ping(42)).expect("send must succeed");
-    assert_eq!(rx.recv().expect("recv must succeed"), Message::Ping(42));
-}
-
-/// A genuinely different predecessor at the same address MUST be cancelled.
-/// This verifies the callback still protects against stale connections — the
-/// fix only spares the *current* connection, not a real predecessor.
-#[test]
-#[expect(
-    clippy::expect_used,
-    reason = "test: channel send/recv must succeed or test is broken"
-)]
-fn predecessor_lease_is_cancelled_by_publication_callback() {
-    let (sync, peers, peer_outbound) = make_sync();
-    let addr = SocketAddr::from(([127, 0, 0, 1], 18_448));
-
-    // A stale predecessor occupies the address.
     let (old_tx, _old_rx) = unbounded::<Message>();
-    let old_lease = PeerLease::new(old_tx);
-    peer_outbound.write().insert(addr, old_lease.clone());
+    let old = PeerLease::new(old_tx);
+    assert!(!table.register(addr, old.clone()));
+    assert!(table.publish_info(addr, &old, info(addr)));
+    assert!(!old.is_cancelled());
+    assert_eq!(table.len(), 1);
+    assert_eq!(table.infos().len(), 1);
 
-    // A new connection arrives with a different lease.
-    let (new_tx, new_rx) = unbounded::<Message>();
-    let new_lease = PeerLease::new(new_tx);
+    let (new_tx, _new_rx) = unbounded::<Message>();
+    let new = PeerLease::new(new_tx);
+    assert!(table.register(addr, new.clone()));
+    assert!(old.is_cancelled());
+    assert!(!new.is_cancelled());
+    assert!(table.is_current(new.source(addr)));
 
-    let registration = sync.peer_registration_handle();
-    let replaced = registration(addr, new_lease.clone(), synthetic_peer(addr, false));
-
-    // The predecessor must be replaced and cancelled.
-    assert!(
-        replaced,
-        "a genuine predecessor must be reported as replaced"
-    );
-    assert!(
-        old_lease.is_cancelled(),
-        "predecessor lease must be cancelled"
-    );
-    assert!(!new_lease.is_cancelled(), "new lease must not be cancelled");
-
-    // The new lease must be in the map and usable.
-    assert!(
-        peer_outbound
-            .read()
-            .get(&addr)
-            .is_some_and(|current| current.same_connection(&new_lease)),
-        "outbound map must hold the new connection"
-    );
-    new_lease
-        .send(Message::Ping(99))
-        .expect("send must succeed");
-    assert_eq!(new_rx.recv().expect("recv must succeed"), Message::Ping(99));
-    assert_eq!(&*peers.read(), &[synthetic_peer(addr, false)]);
+    let sync = make_sync(Arc::clone(&table));
+    sync.tick();
+    assert_eq!(table.live_connections().len(), 1);
 }

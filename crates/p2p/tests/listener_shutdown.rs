@@ -1,5 +1,6 @@
 //! P2P listener shutdown integration coverage.
 use bitcoin::p2p::Magic;
+use bitcoin_rs_p2p::PeerTable;
 use bitcoin_rs_p2p::listener::serve_with_shutdown;
 use std::error::Error;
 use std::io;
@@ -21,16 +22,14 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     let listener_shutdown = Arc::clone(&shutdown);
     let network_active = Arc::new(AtomicBool::new(true));
     let (tx, rx) = mpsc::channel();
-    let registry = Arc::new(parking_lot::RwLock::new(Vec::new()));
-    let listener_registry = Arc::clone(&registry);
-    let outbound = Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
+    let peer_table = Arc::new(PeerTable::new());
+    let listener_peer_table = Arc::clone(&peer_table);
     let (inbound_headers_tx, _inbound_headers_rx) =
         crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundHeaders>();
     let (inbound_blocks_tx, _inbound_blocks_rx) =
         crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let banned = Arc::new(parking_lot::RwLock::new(Vec::new()));
 
-    let listener_outbound = Arc::clone(&outbound);
     let listener_banned = Arc::clone(&banned);
     let listener_network_active = Arc::clone(&network_active);
     let handle = thread::spawn(move || {
@@ -39,8 +38,7 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
             listener_shutdown,
             listener_network_active,
             Magic::BITCOIN,
-            listener_registry,
-            listener_outbound,
+            listener_peer_table,
             inbound_headers_tx,
             inbound_blocks_tx,
             listener_banned,
@@ -82,7 +80,7 @@ fn serve_with_shutdown_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     }
 
     result?;
-    assert!(registry.read().is_empty());
+    assert!(peer_table.is_empty());
     Ok(())
 }
 
@@ -99,9 +97,8 @@ fn serve_with_shutdown_returns_without_accepting_when_flag_preset() -> Result<()
     let listener_shutdown = Arc::clone(&shutdown);
     let network_active = Arc::new(AtomicBool::new(true));
     let (tx, rx) = mpsc::channel();
-    let registry = Arc::new(parking_lot::RwLock::new(Vec::new()));
-    let listener_registry = Arc::clone(&registry);
-    let outbound = Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::new()));
+    let peer_table = Arc::new(PeerTable::new());
+    let listener_peer_table = Arc::clone(&peer_table);
     let (inbound_headers_tx, _inbound_headers_rx) =
         crossbeam_channel::unbounded::<bitcoin_rs_p2p::InboundHeaders>();
     let (inbound_blocks_tx, _inbound_blocks_rx) =
@@ -114,8 +111,7 @@ fn serve_with_shutdown_returns_without_accepting_when_flag_preset() -> Result<()
             listener_shutdown,
             network_active,
             Magic::BITCOIN,
-            listener_registry,
-            outbound,
+            listener_peer_table,
             inbound_headers_tx,
             inbound_blocks_tx,
             banned,
@@ -130,6 +126,6 @@ fn serve_with_shutdown_returns_without_accepting_when_flag_preset() -> Result<()
     }
 
     result?;
-    assert!(registry.read().is_empty());
+    assert!(peer_table.is_empty());
     Ok(())
 }

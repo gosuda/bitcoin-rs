@@ -32,7 +32,7 @@ use bitcoin_rs_p2p::wire::{
     MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
     write_message,
 };
-use bitcoin_rs_p2p::{BannedSubnet, InboundBlock, InboundHeaders, Peer, PeerLease, PeerState};
+use bitcoin_rs_p2p::{BannedSubnet, InboundBlock, InboundHeaders, Peer, PeerState, PeerTable};
 use bitcoin_rs_primitives::{
     Block, BlockHash as NativeBlockHash, Hash256, Header, consensus_bytes,
 };
@@ -968,11 +968,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
     let listener_shutdown = Arc::clone(&shutdown);
     let network_active = Arc::new(AtomicBool::new(true));
     let listener_network_active = Arc::clone(&network_active);
-    let registry = Arc::new(parking_lot::RwLock::new(Vec::new()));
-    let outbound = Arc::new(parking_lot::RwLock::new(hashbrown::HashMap::<
-        SocketAddr,
-        PeerLease,
-    >::new()));
+    let peer_table = Arc::new(PeerTable::new());
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
     let banned = Arc::new(parking_lot::RwLock::new(Vec::<BannedSubnet>::new()));
@@ -983,8 +979,7 @@ fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Bo
             listener_shutdown,
             listener_network_active,
             magic,
-            registry,
-            outbound,
+            peer_table,
             headers_tx,
             blocks_tx,
             banned,

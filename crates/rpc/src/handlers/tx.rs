@@ -32,8 +32,6 @@ use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
 use corepc_types::v31;
 
-const DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
-
 /// Encodes `bytes` as lowercase hexadecimal.
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -490,11 +488,16 @@ pub(crate) fn admit_transaction(
 
         // Without a pool guard: resolve UTXO data and combine with the
         // mempool-dependent prevouts captured above.
-        let context = resolve_full_context(ctx, &tx, &mempool_prevouts);
+        let (context, prevouts) = resolve_full_context(ctx, &tx, &mempool_prevouts);
+        let locktime_cutoff = ctx
+            .median_time_past_for_hash(ctx.applied_hash())
+            .unwrap_or(0);
 
         let request = AdmissionRequest {
             tx: Arc::new(tx.clone()),
             context,
+            prevouts,
+            locktime_cutoff,
             max_feerate_sat_per_kvb,
             time: unix_time_secs(),
             height: ctx.applied_height(),
@@ -518,11 +521,21 @@ pub(crate) fn admit_transaction(
             Err(AdmitError::Policy(reason)) => {
                 return Err(reason.to_string());
             }
+            Err(AdmitError::Consensus) => {
+                return Err("consensus-verification-failed".to_owned());
+            }
         }
     }
 
     Err("admission retry exhausted: chain or mempool changed during submission".to_owned())
 }
+
+/// Fee rate above which `sendrawtransaction` refuses by default, in sat/kvB.
+///
+/// Bitcoin Core's `DEFAULT_MAX_RAW_TX_FEE_RATE`, `COIN / 10` — 0.1 BTC per kvB.
+/// The guard exists because a change-output mistake shows up as an enormous
+/// fee, and a fee is not recoverable once the transaction confirms.
+use crate::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB;
 
 pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "raw transaction is required")?;
@@ -564,11 +577,16 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
 
         // Without a pool guard: resolve UTXO data and combine with the
         // mempool-dependent prevouts captured above.
-        let context = resolve_full_context(ctx, &tx, &mempool_prevouts);
+        let (context, prevouts) = resolve_full_context(ctx, &tx, &mempool_prevouts);
+        let locktime_cutoff = ctx
+            .median_time_past_for_hash(ctx.applied_hash())
+            .unwrap_or(0);
 
         let request = AdmissionRequest {
             tx: Arc::new(tx.clone()),
             context,
+            prevouts,
+            locktime_cutoff,
             max_feerate_sat_per_kvb: max_feerate,
             time: unix_time_secs(),
             height: ctx.applied_height(),
@@ -591,6 +609,11 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
             Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => continue,
             Err(AdmitError::Policy(reason)) => {
                 return Err(reject_reason_to_rpc_error(reason));
+            }
+            Err(AdmitError::Consensus) => {
+                return Err(RpcError::TxRejected(
+                    "consensus-verification-failed".to_owned(),
+                ));
             }
         }
     }
@@ -817,10 +840,16 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
     if btc_per_kvb == 0.0 {
         return Ok(None);
     }
-    Ok(Some(sats_from_btc(
-        btc_per_kvb,
-        "maxfeerate is out of range",
-    )?))
+    let sats = sats_from_btc(btc_per_kvb, "maxfeerate is out of range")?;
+    // Core's `ParseFeeRate` refuses rates at or above 1 BTC/kvB, so the
+    // ceiling is enforced on the integer domain to keep the parameter
+    // contract identical.
+    if sats >= 100_000_000 {
+        return Err(RpcError::InvalidParams(
+            "Fee rates larger than or equal to 1BTC/kvB are not accepted",
+        ));
+    }
+    Ok(Some(sats))
 }
 
 fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
@@ -840,14 +869,17 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
 // Prevout / context resolution and frozen reason mapping.
 // ---------------------------------------------------------------------------
 
-/// Maps an [`AcceptanceRejectReason`] to the frozen RPC error code and
-/// string. `MaxFeeExceeded` is a parameter error (-32602); all others are
-/// internal errors (-32603). The string for `MinRelayFeeNotMet` uses the
-/// frozen hyphenated form `min-relay-fee-not-met`, not the mempool's Display.
+/// Maps an [`AcceptanceRejectReason`] to the Core-compatible RPC error.
+/// `MaxFeeExceeded` is a parameter error (`-32602`), pinned by the
+/// policy-contract integration test. All other admission rejections are
+/// transaction rejections (`-26`), matching Bitcoin Core's
+/// `RPC_VERIFY_REJECTED` code. The string for `MinRelayFeeNotMet` uses
+/// the frozen hyphenated form `min-relay-fee-not-met`, not the mempool's
+/// Display.
 fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
-        other => RpcError::Internal(reject_reason_to_frozen_string(other)),
+        other => RpcError::TxRejected(reject_reason_to_frozen_string(other)),
     }
 }
 
@@ -891,7 +923,7 @@ fn resolve_full_context(
     ctx: &Context,
     tx: &Tx,
     mempool_prevouts: &HashMap<OutPoint, TxOut>,
-) -> MempoolPackageTxContext {
+) -> (MempoolPackageTxContext, Vec<(OutPoint, TxOut)>) {
     let mut missing_inputs = false;
     let mut input_value = 0_u64;
     let mut prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
@@ -922,12 +954,15 @@ fn resolve_full_context(
     let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
     let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
 
-    MempoolPackageTxContext {
-        fee,
-        vsize,
-        sigop_cost,
-        missing_inputs,
-    }
+    (
+        MempoolPackageTxContext {
+            fee,
+            vsize,
+            sigop_cost,
+            missing_inputs,
+        },
+        prevouts,
+    )
 }
 
 fn package_contexts(
@@ -2207,9 +2242,18 @@ mod tests {
         );
     }
 
-    /// P2WPKH script: `OP_0` + push-20 + fixed 20-byte key hash.
-    fn retry_p2wpkh() -> Vec<u8> {
-        [vec![0x00, 0x14], vec![0x11; 20]].concat()
+    /// `P2WSH(OP_TRUE)`: a version-0 push-32 program whose witness script is a
+    /// bare `OP_TRUE`. It is a standard output template, and spendable by a
+    /// one-item `[OP_TRUE]` witness, so the retry fixtures chain parent and
+    /// child generations without signature material.
+    fn retry_spendable_script() -> Vec<u8> {
+        let mut script = vec![0x00, 0x20];
+        script.extend_from_slice(&[
+            0x4a, 0xe8, 0x15, 0x72, 0xf0, 0x6e, 0x1b, 0x88, 0xfd, 0x5c, 0xed, 0x7a, 0x1a, 0x00,
+            0x09, 0x45, 0x43, 0x2e, 0x83, 0xe1, 0x55, 0x1e, 0x6f, 0x72, 0x1e, 0xe9, 0xc0, 0x0b,
+            0x8c, 0xc3, 0x32, 0x60,
+        ]);
+        script
     }
 
     /// Funds a UTXO in the context's UTXO set and returns the outpoint.
@@ -2219,7 +2263,7 @@ mod tests {
             OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
             TxOut {
                 value,
-                script_pubkey: retry_p2wpkh(),
+                script_pubkey: retry_spendable_script(),
             },
             false,
             1,
@@ -2239,11 +2283,11 @@ mod tests {
                 previous_output: prevout,
                 script_sig: Vec::new(),
                 sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                witness: vec![vec![0x51]],
             }],
             outputs: vec![TxOut {
                 value: output_value,
-                script_pubkey: retry_p2wpkh(),
+                script_pubkey: retry_spendable_script(),
             }],
         }
     }
@@ -2390,6 +2434,476 @@ mod gettxout_via_utxo_tests {
         assert!(
             value.is_null(),
             "expected null for output absent from UTXO set, got {value:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod acceptance_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin::hex::DisplayHex as _;
+    use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
+    use bitcoin_rs_primitives::{
+        BlockHash, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    };
+    use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
+    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
+
+    use super::{sendrawtransaction, testmempoolaccept};
+    use crate::context::Context;
+    use crate::error::RpcError;
+
+    fn internal_outpoint(tag: u8) -> OutPoint {
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[tag; 32])), 0)
+    }
+
+    fn spent_outpoint(tag: u8) -> OutPoint {
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[tag; 32])), 0)
+    }
+
+    /// Seeds one confirmed, anyone-can-spend output worth `value`.
+    fn seed_utxo(ctx: &Context, tag: u8, value: u64) {
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            internal_outpoint(tag),
+            TxOut {
+                value,
+                script_pubkey: vec![0x51],
+            },
+            false,
+            7,
+        ));
+        ctx.utxo
+            .commit_block(&changes, &Hash256::default())
+            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+    }
+
+    fn spending_tx(tag: u8, output_value: u64) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![TxIn {
+                previous_output: spent_outpoint(tag),
+                script_sig: Vec::new(),
+                sequence: 0xffff_ffff,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: output_value,
+                script_pubkey: {
+                    let mut out = Vec::with_capacity(25);
+                    out.push(0x76); // OP_DUP
+                    out.push(0xa9); // OP_HASH160
+                    out.push(0x14);
+                    out.extend_from_slice(&[9_u8; 20]);
+                    out.push(0x88); // OP_EQUALVERIFY
+                    out.push(0xac); // OP_CHECKSIG
+                    out
+                },
+            }],
+        }
+    }
+
+    fn hex_of(tx: &Tx) -> String {
+        consensus_bytes(tx).to_lower_hex_string()
+    }
+
+    /// The transaction must land in the mempool.
+    ///
+    /// It previously went into a side `HashMap` that nothing else treated as
+    /// the mempool: `getmempoolinfo` reported an empty pool, mining saw no
+    /// candidates, and no policy check ran at all.
+    #[test]
+    fn sendrawtransaction_admits_the_transaction_to_the_mempool() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+        let tx = spending_tx(1, 90_000);
+
+        let Ok(value) = sendrawtransaction(&ctx, &json!([hex_of(&tx)])) else {
+            panic!("a standard transaction spending a confirmed output must be accepted");
+        };
+
+        assert_eq!(value.as_str(), Some(tx.txid().to_string().as_str()));
+        assert_eq!(ctx.mempool.read().len(), 1, "the pool must hold it");
+        assert!(ctx.mempool.read().contains_txid(&tx.txid()));
+    }
+
+    /// The default fee guard stops a transaction that burns its change.
+    ///
+    /// The classic shape: an input worth 1 BTC, an output worth a hundredth of
+    /// it, and the rest handed to the miner. Core refuses that by default and
+    /// the sender has to say they meant it. This node used to send it, and a
+    /// fee is not recoverable once the transaction confirms.
+    #[test]
+    fn sendrawtransaction_refuses_an_absurd_fee_by_default() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 8, 100_000_000);
+        // 1 BTC in, 0.01 BTC out: a 0.99 BTC fee on a ~110 vbyte transaction,
+        // which is thousands of times the 0.1 BTC/kvB default ceiling.
+        let tx = spending_tx(8, 1_000_000);
+
+        let error = sendrawtransaction(&ctx, &json!([hex_of(&tx)]))
+            .err()
+            .unwrap_or_else(|| panic!("an absurd fee must not be sent by default"));
+
+        assert_eq!(
+            error.code(),
+            RpcError::INVALID_PARAMS,
+            "max-fee-exceeded is a parameter error: {error:?}"
+        );
+        assert_eq!(ctx.mempool.read().len(), 0, "and nothing was admitted");
+    }
+
+    /// The guard is the caller's to lift, and the ceiling is a *rate*.
+    ///
+    /// Zero disables it outright. Any other value is BTC per kvB, turned into
+    /// an absolute fee for this transaction's vsize -- so 0.99 BTC/kvB on a
+    /// ~110-vbyte transaction is a ceiling near 0.109 BTC, and a 0.99 BTC fee
+    /// is still far above it. Reading the argument as an absolute cap would
+    /// send that transaction.
+    #[test]
+    fn the_fee_ceiling_is_a_rate_and_zero_disables_it() {
+        let disabled = {
+            let ctx = Arc::new(Context::new());
+            seed_utxo(&ctx, 9, 100_000_000);
+            let tx = spending_tx(9, 1_000_000);
+            let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx), 0]));
+            assert_eq!(ctx.mempool.read().len(), 1, "zero sends it: {sent:?}");
+            sent
+        };
+        assert!(disabled.is_ok(), "{disabled:?}");
+
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 12, 100_000_000);
+        let tx = spending_tx(12, 1_000_000);
+        let error = sendrawtransaction(&ctx, &json!([hex_of(&tx), 0.99]))
+            .err()
+            .unwrap_or_else(|| panic!("0.99 BTC/kvB is a ceiling, not a fee allowance"));
+        assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
+        assert_eq!(ctx.mempool.read().len(), 0);
+    }
+
+    /// A ceiling the transaction stays under changes nothing.
+    #[test]
+    fn sendrawtransaction_admits_a_fee_below_the_ceiling() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 10, 100_000);
+        // A ~10_000 sat fee on ~110 vbytes, well under the default ceiling.
+        let tx = spending_tx(10, 90_000);
+
+        let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
+
+        assert!(sent.is_ok(), "an ordinary fee is not capped: {sent:?}");
+        assert_eq!(ctx.mempool.read().len(), 1);
+    }
+
+    /// Core's `ParseFeeRate` refuses ceilings at or above one whole coin per
+    /// kvB, so the parameter itself is invalid no matter how small the fee.
+    #[test]
+    fn sendrawtransaction_rejects_a_fee_rate_of_a_whole_coin() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 11, 100_000);
+        let tx = spending_tx(11, 90_000);
+
+        let error = sendrawtransaction(&ctx, &json!([hex_of(&tx), 1.0]))
+            .err()
+            .unwrap_or_else(|| panic!("1 BTC/kvB is not an accepted ceiling"));
+
+        assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
+        assert_eq!(ctx.mempool.read().len(), 0, "nothing admitted: {error:?}");
+    }
+
+    /// A rejection must say why, under Core's `RPC_VERIFY_REJECTED` code.
+    #[test]
+    fn sendrawtransaction_rejects_a_transaction_whose_inputs_do_not_exist() {
+        let ctx = Arc::new(Context::new());
+        let tx = spending_tx(4, 90_000);
+
+        let outcome = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
+
+        let Err(error) = outcome else {
+            panic!("a transaction with no resolvable inputs must not be accepted");
+        };
+        assert!(
+            matches!(error, RpcError::TxRejected(_)),
+            "expected a rejection, got {error:?}"
+        );
+        assert_eq!(error.code(), RpcError::CORE_VERIFY_REJECTED);
+        assert!(ctx.mempool.read().is_empty());
+    }
+
+    /// A transaction with duplicate inputs must be rejected by consensus
+    /// verification, not admitted to the mempool.
+    #[test]
+    fn sendrawtransaction_rejects_a_transaction_with_duplicate_inputs() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+        let prev = spent_outpoint(1);
+        let tx = Tx {
+            version: 2,
+            lock_time: 0,
+            inputs: vec![
+                TxIn {
+                    previous_output: prev,
+                    script_sig: Vec::new(),
+                    sequence: 0xffff_ffff,
+                    witness: Vec::new(),
+                },
+                TxIn {
+                    previous_output: prev,
+                    script_sig: Vec::new(),
+                    sequence: 0xffff_ffff,
+                    witness: Vec::new(),
+                },
+            ],
+            outputs: vec![TxOut {
+                value: 90_000,
+                script_pubkey: vec![0x51],
+            }],
+        };
+
+        let outcome = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
+
+        let Err(error) = outcome else {
+            panic!("a transaction with duplicate inputs must not be accepted");
+        };
+        assert!(
+            matches!(error, RpcError::TxRejected(_)),
+            "expected a rejection, got {error:?}"
+        );
+        assert!(ctx.mempool.read().is_empty());
+    }
+
+    /// Core rebroadcasts rather than failing, and callers retry on a dropped
+    #[test]
+    fn sendrawtransaction_is_idempotent_for_a_transaction_already_in_the_pool() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+        let tx = spending_tx(1, 90_000);
+        let params = json!([hex_of(&tx)]);
+        let Ok(first) = sendrawtransaction(&ctx, &params) else {
+            panic!("the first submission must succeed");
+        };
+
+        let Ok(second) = sendrawtransaction(&ctx, &params) else {
+            panic!("resubmitting a transaction already in the mempool must not fail");
+        };
+
+        assert_eq!(first.as_str(), second.as_str());
+        assert_eq!(ctx.mempool.read().len(), 1, "it must not be inserted twice");
+    }
+
+    /// The verdict must come from the acceptance checks.
+    ///
+    /// This RPC used to answer `allowed: true` for anything that merely
+    /// decoded, so a transaction spending outputs that do not exist was
+    /// reported as acceptable.
+    #[test]
+    fn testmempoolaccept_rejects_a_transaction_that_only_decodes() {
+        let ctx = Arc::new(Context::new());
+        let tx = spending_tx(4, 90_000);
+
+        let Ok(value) = testmempoolaccept(&ctx, &json!([[hex_of(&tx)]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+
+        let Some(rows) = value.as_array() else {
+            panic!("testmempoolaccept must return an array");
+        };
+        let Some(row) = rows.first() else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(row.get("allowed").as_bool(), Some(false));
+        assert!(
+            row.get("reject-reason")
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "a rejection must carry a reason"
+        );
+    }
+
+    #[test]
+    fn testmempoolaccept_allows_a_transaction_without_admitting_it() {
+        let ctx = Arc::new(Context::new());
+        seed_utxo(&ctx, 1, 100_000);
+        let tx = spending_tx(1, 90_000);
+
+        let Ok(value) = testmempoolaccept(&ctx, &json!([[hex_of(&tx)]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+
+        let Some(row) = value.as_array().and_then(|rows| rows.first()) else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(row.get("allowed").as_bool(), Some(true));
+        assert_eq!(
+            row.get("vsize").as_u64(),
+            Some(tx.vsize()),
+            "vsize must be the transaction's, not a placeholder"
+        );
+        assert!(
+            ctx.mempool.read().is_empty(),
+            "testing acceptance must not accept"
+        );
+    }
+
+    /// `wtxid` was a copy of `txid`. They differ for any witness transaction,
+    /// and package relay identifies transactions by the witness id.
+    #[test]
+    fn testmempoolaccept_reports_the_witness_txid() {
+        let ctx = Arc::new(Context::new());
+        let mut tx = spending_tx(4, 90_000);
+        tx.inputs[0].witness.push(vec![1_u8; 8]);
+        assert_ne!(
+            tx.txid().to_string(),
+            tx.wtxid().to_string(),
+            "the fixture must carry a witness or this proves nothing"
+        );
+
+        let Ok(value) = testmempoolaccept(&ctx, &json!([[hex_of(&tx)]])) else {
+            panic!("testmempoolaccept must answer");
+        };
+
+        let Some(row) = value.as_array().and_then(|rows| rows.first()) else {
+            panic!("one transaction in, one row out");
+        };
+        assert_eq!(
+            row.get("txid").as_str(),
+            Some(tx.txid().to_string().as_str())
+        );
+        assert_eq!(
+            row.get("wtxid").as_str(),
+            Some(tx.wtxid().to_string().as_str())
+        );
+    }
+
+    /// Standardness is relay policy, enforced on mainnet.
+    ///
+    /// The mempool crate tests the gate itself; this covers the wiring that
+    /// passes the policy through. Network-based relaxation (regtest) is not
+    /// wired in the admission path yet — see the `require_standard` field
+    /// gap in `PackageTxContext` / `evaluate_one`.
+    #[test]
+    fn standardness_is_enforced_on_mainnet() {
+        let mainnet = Arc::new(Context::new());
+        assert_eq!(
+            mainnet.chain_network,
+            bitcoin_rs_primitives::Network::Mainnet,
+            "the fixture assumes the default context is mainnet"
+        );
+        seed_utxo(&mainnet, 1, 100_000);
+        let mut tx = spending_tx(1, 90_000);
+        // Consensus-valid, non-standard.
+        tx.version = 4;
+        assert!(
+            sendrawtransaction(&mainnet, &json!([hex_of(&tx)])).is_err(),
+            "mainnet must enforce standardness"
+        );
+    }
+    /// Builds a 12-header chain in `ctx.block_tree`, with the applied tip 6
+    /// blocks behind the header tip, and publishes both tips in `ctx`. Block
+    /// times start above the lock-time threshold so the MTP values actually
+    /// govern finality for the timestamp-locked transaction under test.
+    fn build_divergent_tips(ctx: &Context) -> (u32, u32) {
+        const BASE: u32 = 500_000_000;
+        const STEP: u32 = 600;
+
+        let mut ids = Vec::new();
+        {
+            let mut tree = ctx.block_tree.write();
+            let mut prev_id: Option<NodeId> = None;
+            for height in 0..=11_u32 {
+                let prev_hash = match prev_id {
+                    Some(id) => tree.node(id).expect("parent node exists").hash,
+                    None => Hash256::default(),
+                };
+                let header = BlockHeader {
+                    version: 1,
+                    prev_blockhash: BlockHash::from(prev_hash),
+                    merkle_root: Hash256::default(),
+                    time: BASE + STEP * height,
+                    bits: 0x207f_ffff,
+                    nonce: 0,
+                };
+                let id = tree
+                    .insert_node(prev_id, header, NodeStatus::HeaderValid)
+                    .unwrap_or_else(|err| panic!("insert header {height}: {err}"));
+                ids.push(id);
+                prev_id = Some(id);
+            }
+        }
+
+        let (applied_hash, best_hash) = {
+            let tree = ctx.block_tree.read();
+            let applied_id = ids[10];
+            let best_id = ids[11];
+            let applied_node = tree.node(applied_id).expect("applied node exists");
+            let best_node = tree.node(best_id).expect("best node exists");
+            ctx.set_applied_tip(TipSnapshot {
+                tip_id: applied_id,
+                height: applied_node.height,
+                chainwork: applied_node.chainwork,
+                hash: applied_node.hash,
+            });
+            ctx.set_chain_tip(TipSnapshot {
+                tip_id: best_id,
+                height: best_node.height,
+                chainwork: best_node.chainwork,
+                hash: best_node.hash,
+            });
+            (applied_node.hash, best_node.hash)
+        };
+
+        (
+            ctx.median_time_past_for_hash(applied_hash)
+                .expect("applied MTP exists"),
+            ctx.median_time_past_for_hash(best_hash)
+                .expect("best MTP exists"),
+        )
+    }
+
+    /// `sendrawtransaction` must take the BIP113 median-time-past from the
+    /// applied tip, not a header tip that has run ahead. A timestamp-locked
+    /// transaction that is final only under the header-tip MTP must be
+    /// rejected.
+    #[test]
+    fn sendrawtransaction_rejects_tx_final_only_under_header_tip_mtp() {
+        const BASE: u32 = 500_000_000;
+        let ctx = Arc::new(Context::new());
+        let (applied_mtp, best_mtp) = build_divergent_tips(&ctx);
+
+        assert!(
+            applied_mtp < best_mtp,
+            "fixture: header-tip MTP must exceed applied-tip MTP"
+        );
+
+        let lock_time = BASE + 3_300;
+        assert!(
+            applied_mtp < lock_time && lock_time < best_mtp,
+            "fixture: lock time must sit between the two MTPs"
+        );
+
+        seed_utxo(&ctx, 1, 100_000);
+        let mut tx = spending_tx(1, 90_000);
+        tx.lock_time = lock_time;
+        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+
+        let result = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
+        assert!(
+            result.is_err(),
+            "a tx final only under the header-tip MTP must be rejected; got {result:?}"
+        );
+        assert_eq!(
+            ctx.mempool.read().len(),
+            0,
+            "rejected tx must not enter the pool"
+        );
+        assert_eq!(
+            ctx.transactions.read().len(),
+            0,
+            "rejected tx must not be recorded as accepted"
         );
     }
 }

@@ -1,0 +1,14 @@
+# Shell scripts must keep LF endings whatever the checkout platform.
+#
+# Git converts LF to CRLF on checkout wherever `core.autocrlf=true`, which is
+# the Windows default. The blobs here are LF, so this costs nothing on Linux --
+# but on a Windows checkout every one of these scripts fails on its second line
+# with `set: pipefail: invalid option name`, because the shell reads the
+# trailing carriage return as part of the option name.
+#
+# Two integration suites run these scripts and so fail with it:
+# `bin/bitcoin-rs/tests/g2_bitcoind_muhash_script.rs` and
+# `bin/bitcoin-rs/tests/g14_guarded_run.rs`. CI runs on Linux and never sees
+# any of it, so the failure looks like a broken checkout rather than a missing
+# attribute -- and the message points nowhere near the cause.
+*.sh text eol=lf

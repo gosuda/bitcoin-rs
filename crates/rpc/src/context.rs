@@ -1,10 +1,5 @@
 use alloc::sync::Arc;
-use core::fmt;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use std::path::PathBuf;
-
 use arc_swap::ArcSwapOption;
-
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationResult};
@@ -12,9 +7,12 @@ use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
 };
 use compact_str::CompactString;
+use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
@@ -799,7 +797,9 @@ pub struct MiningInfo {
     pub blocks: u32,
     /// Most recently assembled candidate facts.
     pub last_candidate: Option<LastCandidateInfo>,
-    /// Difficulty of the applied tip.
+    /// Compact target bits of the applied tip.
+    pub bits: u32,
+    /// Difficulty represented by `bits`.
     pub difficulty: f64,
     /// Estimated network hashes per second.
     pub network_hashes_per_second: f64,
@@ -1118,10 +1118,8 @@ pub struct NetworkHandles {
     pub network: Arc<RwLock<NetworkState>>,
     /// Whether the node accepts or starts P2P connections.
     pub network_active: Arc<core::sync::atomic::AtomicBool>,
-    /// Connected peer registry.
-    pub peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
-    /// Live per-peer outbound control handles.
-    pub peer_outbound: Arc<RwLock<HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    /// Authoritative live peer sessions.
+    pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     /// Channel that requests outbound P2P connections.
     pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
     /// Manual IP/CIDR bans.
@@ -1196,12 +1194,10 @@ pub struct Context {
     /// Network selector used by handlers needing consensus parameters (e.g.
     /// difficulty calculation).
     pub chain_network: Network,
-    /// Live per-peer outbound control handles.
-    pub peer_outbound: Arc<RwLock<HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    /// Authoritative live peer sessions.
+    pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     /// Whether outbound and inbound network activity is enabled through RPC.
     pub network_active: Arc<core::sync::atomic::AtomicBool>,
-    /// Shared registry of currently-handshook peers.
-    pub peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
     /// Shared in-memory block tree.
     pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
     /// Optional durable block body reader for metadata-only block records.
@@ -1279,12 +1275,11 @@ impl Context {
             capabilities: None,
             prune_service: None,
             chain_control: None,
-            peer_outbound: Arc::new(RwLock::new(HashMap::new())),
+            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
             mining_control: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
             chain_network: Network::Mainnet,
-            peers: Arc::new(RwLock::new(Vec::new())),
             block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
             block_body_source: None,
             p2p_outbound_sender: None,
@@ -1332,12 +1327,11 @@ impl Context {
             capabilities: None,
             prune_service: None,
             chain_control: None,
-            peer_outbound: Arc::new(RwLock::new(HashMap::new())),
+            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
             mining_control: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
             chain_network: Network::Mainnet,
-            peers: Arc::new(RwLock::new(Vec::new())),
             block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
             block_body_source: None,
             p2p_outbound_sender: None,
@@ -1374,8 +1368,7 @@ impl Context {
                 NetworkHandles {
                     network,
                     network_active,
-                    peers,
-                    peer_outbound,
+                    peer_table,
                     p2p_outbound_sender,
                     banned,
                     added_nodes,
@@ -1400,8 +1393,7 @@ impl Context {
             capabilities,
             network,
             chain_network,
-            peers,
-            peer_outbound,
+            peer_table,
             network_active,
             block_tree,
             block_body_source: None,
@@ -2084,8 +2076,7 @@ mod tests {
             network: NetworkHandles {
                 network: Arc::new(RwLock::new(NetworkState::default())),
                 network_active: Arc::clone(&network_active),
-                peers: Arc::new(RwLock::new(Vec::new())),
-                peer_outbound: Arc::new(RwLock::new(HashMap::new())),
+                peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
                 p2p_outbound_sender: None,
                 banned: Arc::clone(&banned),
                 added_nodes: Arc::clone(&added_nodes),

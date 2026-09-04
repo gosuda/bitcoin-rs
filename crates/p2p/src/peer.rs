@@ -462,8 +462,7 @@ struct AddedNodeEntry {
 /// channel exactly like RPC-triggered outbound connections.
 #[derive(Clone)]
 pub struct NetworkControls {
-    peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-    peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+    peer_table: Arc<crate::PeerTable>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     activity: Arc<NetworkActivity>,
     totals: Arc<TrafficTotals>,
@@ -479,14 +478,12 @@ impl NetworkControls {
     /// Builds the control plane over the listener's shared state.
     #[must_use]
     pub fn new(
-        peer_registry: Arc<RwLock<Vec<crate::PeerInfo>>>,
-        peer_outbound: Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>>,
+        peer_table: Arc<crate::PeerTable>,
         banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
         default_port: u16,
     ) -> Self {
         Self {
-            peer_registry,
-            peer_outbound,
+            peer_table,
             banned,
             activity: Arc::new(NetworkActivity::new(true)),
             totals: Arc::new(TrafficTotals::new(0)),
@@ -511,16 +508,10 @@ impl NetworkControls {
         self
     }
 
-    /// Shared handshake registry, also published to RPC projections.
+    /// Shared authoritative live peer-session table.
     #[must_use]
-    pub fn peer_registry(&self) -> &Arc<RwLock<Vec<crate::PeerInfo>>> {
-        &self.peer_registry
-    }
-
-    /// Shared live-connection lease map.
-    #[must_use]
-    pub fn peer_outbound(&self) -> &Arc<RwLock<hashbrown::HashMap<SocketAddr, crate::PeerLease>>> {
-        &self.peer_outbound
+    pub fn peer_table(&self) -> &Arc<crate::PeerTable> {
+        &self.peer_table
     }
 
     /// Shared manual ban list, also enforced by the listener.
@@ -545,36 +536,29 @@ impl NetworkControls {
     /// handshake has not completed (Core `GetNodeCount(Both)`).
     #[must_use]
     pub fn connection_counts(&self) -> ConnectionCounts {
-        let outbound = self.peer_outbound.read();
         let mut counts = ConnectionCounts::default();
-        for lease in outbound.values() {
+        self.peer_table.for_each_lease(|_, lease| {
             if lease.is_inbound() {
                 counts.inbound += 1;
             } else {
                 counts.outbound += 1;
             }
-        }
+        });
         counts
     }
 
     /// Snapshot of every live connection joined with handshake metadata.
     #[must_use]
     pub fn connected_peers(&self) -> Vec<ConnectedPeer> {
-        let infos: hashbrown::HashMap<SocketAddr, crate::PeerInfo> = self
-            .peer_registry
-            .read()
-            .iter()
-            .map(|info| (info.addr, info.clone()))
-            .collect();
-        self.peer_outbound
-            .read()
-            .iter()
-            .map(|(addr, lease)| ConnectedPeer {
-                addr: *addr,
-                node_id: lease.node_id(),
-                inbound: lease.is_inbound(),
-                info: infos.get(addr).cloned(),
-                stats: lease.stats_handle(),
+        self.peer_table
+            .sessions()
+            .into_iter()
+            .map(|session| ConnectedPeer {
+                addr: session.addr,
+                node_id: session.lease.node_id(),
+                inbound: session.lease.is_inbound(),
+                info: session.info,
+                stats: session.lease.stats_handle(),
             })
             .collect()
     }
@@ -583,12 +567,12 @@ impl NetworkControls {
     /// handshake, when any offset has been observed.
     #[must_use]
     pub fn time_offset(&self) -> Option<i64> {
-        let mut offsets: Vec<i64> = self
-            .peer_outbound
-            .read()
-            .values()
-            .filter_map(|lease| lease.stats().time_offset())
-            .collect();
+        let mut offsets = Vec::new();
+        self.peer_table.for_each_lease(|_, lease| {
+            if let Some(offset) = lease.stats().time_offset() {
+                offsets.push(offset);
+            }
+        });
         offsets.sort_unstable();
         offsets.get(offsets.len() / 2).copied()
     }
@@ -600,12 +584,12 @@ impl NetworkControls {
     /// the peer disconnects.
     pub fn send_pings(&self, now_us: u64) -> usize {
         let mut scheduled = 0;
-        for lease in self.peer_outbound.read().values() {
+        self.peer_table.for_each_lease(|_, lease| {
             let nonce = lease.stats().begin_ping(now_us);
             if lease.send(crate::Message::Ping(nonce)).is_ok() {
                 scheduled += 1;
             }
-        }
+        });
         scheduled
     }
 
@@ -754,7 +738,7 @@ impl NetworkControls {
     pub fn added_node_infos(&self) -> Vec<AddedNodeInfo> {
         let entries = self.added_nodes.read().clone();
         let connected: hashbrown::HashSet<SocketAddr> =
-            self.peer_outbound.read().keys().copied().collect();
+            self.peer_table.addrs().into_iter().collect();
         entries
             .into_iter()
             .map(|entry| {
@@ -790,16 +774,12 @@ impl NetworkControls {
     /// Ingests connection and added-node facts already owned by this control
     /// plane into the durable address book without replacing prior entries.
     fn ingest_known_address_facts(&self, now: SystemTime) {
-        let infos: hashbrown::HashMap<SocketAddr, u64> = self
-            .peer_registry
-            .read()
-            .iter()
-            .map(|info| (info.addr, info.services))
-            .collect();
-        for (addr, services) in &infos {
-            self.observe_address(*addr, *services, now);
+        let mut infos = hashbrown::HashMap::new();
+        for info in self.peer_table.infos() {
+            infos.insert(info.addr, info.services);
+            self.observe_address(info.addr, info.services, now);
         }
-        for addr in self.peer_outbound.read().keys().copied() {
+        for addr in self.peer_table.addrs() {
             let services = infos.get(&addr).copied().unwrap_or(0);
             self.observe_address(addr, services, now);
         }
@@ -850,35 +830,12 @@ impl NetworkControls {
         addresses
     }
 
-    /// Cancels and removes every live lease matching `predicate`, also
-    /// dropping its handshake-registry entry; returns the disconnected
-    /// addresses in registry order.
+    /// Cancels and removes every live lease matching `predicate`.
     fn disconnect_matching(
         &self,
         predicate: impl Fn(&SocketAddr, &crate::PeerLease) -> bool,
     ) -> Vec<SocketAddr> {
-        let targets: Vec<SocketAddr> = {
-            let outbound = self.peer_outbound.read();
-            outbound
-                .iter()
-                .filter(|(addr, lease)| predicate(addr, lease))
-                .map(|(addr, _)| *addr)
-                .collect()
-        };
-        if targets.is_empty() {
-            return Vec::new();
-        }
-        let mut outbound = self.peer_outbound.write();
-        let mut registry = self.peer_registry.write();
-        let mut disconnected = Vec::new();
-        for addr in targets {
-            if let Some(lease) = outbound.remove(&addr) {
-                lease.cancel();
-                registry.retain(|peer| peer.addr != addr);
-                disconnected.push(addr);
-            }
-        }
-        disconnected
+        self.peer_table.disconnect_matching(predicate)
     }
 
     /// Disconnects the live connection at `addr`, removing its registry entry;
@@ -1023,8 +980,7 @@ mod tests {
 
     fn controls_with_no_peers() -> NetworkControls {
         NetworkControls::new(
-            Arc::new(RwLock::new(Vec::new())),
-            Arc::new(RwLock::new(hashbrown::HashMap::new())),
+            Arc::new(crate::PeerTable::new()),
             Arc::new(RwLock::new(Vec::new())),
             8_333,
         )
@@ -1041,8 +997,16 @@ mod tests {
         } else {
             crate::PeerLease::new(tx)
         };
-        controls.peer_outbound().write().insert(addr, lease.clone());
+        controls.peer_table().register(addr, lease.clone());
         lease
+    }
+
+    fn publish_info(controls: &NetworkControls, info: crate::PeerInfo) {
+        let lease = controls
+            .peer_table()
+            .lease(info.addr)
+            .unwrap_or_else(|| panic!("peer must be registered"));
+        controls.peer_table().publish_info(info.addr, &lease, info);
     }
 
     #[test]
@@ -1063,19 +1027,21 @@ mod tests {
         let controls = controls_with_no_peers();
         let addr = SocketAddr::from(([127, 0, 0, 1], 3));
         let lease = lease_in_map(&controls, addr, false);
-        controls.peer_registry().write().push(crate::PeerInfo {
-            addr,
-            version: 70_016,
-            services: 0,
-            user_agent: String::from("/test/"),
-            start_height: 0,
-            conn_time: 0,
-            inbound: false,
-        });
+        publish_info(
+            &controls,
+            crate::PeerInfo {
+                addr,
+                version: 70_016,
+                services: 0,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                conn_time: 0,
+                inbound: false,
+            },
+        );
         assert!(controls.disconnect_node(&addr));
         assert!(lease.is_cancelled());
-        assert!(controls.peer_outbound().read().is_empty());
-        assert!(controls.peer_registry().read().is_empty());
+        assert!(controls.peer_table().is_empty());
         assert!(!controls.disconnect_node(&addr));
     }
 
@@ -1085,7 +1051,7 @@ mod tests {
         let addr = SocketAddr::from(([127, 0, 0, 1], 5));
         let (tx, rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new_inbound(tx);
-        controls.peer_outbound().write().insert(addr, lease.clone());
+        controls.peer_table().register(addr, lease.clone());
         assert_eq!(controls.send_pings(10_000), 1);
         assert!(matches!(rx.try_recv(), Ok(Message::Ping(_))));
         assert!(lease.stats().ping_wait(10_500).is_some());
@@ -1101,7 +1067,7 @@ mod tests {
             false,
             crate::connection::OutboundBudget::new(0, 0),
         );
-        controls.peer_outbound().write().insert(addr, lease.clone());
+        controls.peer_table().register(addr, lease.clone());
 
         // The zero budget refuses the ping; it is not counted and the
         // saturation policy cancels the lease so the peer disconnects.
@@ -1143,15 +1109,18 @@ mod tests {
         let controls = controls_with_no_peers();
         let connected = SocketAddr::from(([198, 51, 100, 1], 8333));
         lease_in_map(&controls, connected, false);
-        controls.peer_registry().write().push(crate::PeerInfo {
-            addr: connected,
-            version: 70_016,
-            services: 9,
-            user_agent: String::from("/test/"),
-            start_height: 1,
-            conn_time: 10,
-            inbound: false,
-        });
+        publish_info(
+            &controls,
+            crate::PeerInfo {
+                addr: connected,
+                version: 70_016,
+                services: 9,
+                user_agent: String::from("/test/"),
+                start_height: 1,
+                conn_time: 10,
+                inbound: false,
+            },
+        );
         controls
             .add_node("198.51.100.2:8333")
             .unwrap_or_else(|err| panic!("add_node failed: {err}"));

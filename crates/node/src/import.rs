@@ -64,7 +64,8 @@ mod tests {
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         config.txindex = true;
-        let state = NodeState::open(config, None)?;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
         let outcome = import_block(&state, &bytes)?;
 
         assert_eq!(outcome.tx_count, 1, "genesis has one transaction");

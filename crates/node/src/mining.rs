@@ -614,7 +614,7 @@ impl MiningCoordinator {
     fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
         let tip = self.applied_tip.load_full();
         let blocks = tip.as_ref().map_or(0, |tip| tip.height);
-        let (difficulty, next_bits, next_difficulty) = match tip.as_ref() {
+        let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
             Some(tip) => {
                 let tree = self.block_tree.read();
                 let tip_bits =
@@ -630,12 +630,13 @@ impl MiningCoordinator {
                             MiningControlError::Failed(CompactString::from(error.to_string()))
                         })?;
                 (
+                    tip_bits,
                     difficulty_for_bits(tip_bits),
                     next.bits,
                     difficulty_for_bits(next.bits),
                 )
             }
-            None => (0.0, 0, 0.0),
+            None => (0, 0.0, 0, 0.0),
         };
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
@@ -644,6 +645,7 @@ impl MiningCoordinator {
         Ok(MiningInfo {
             blocks,
             last_candidate,
+            bits,
             difficulty,
             network_hashes_per_second,
             pooled_transactions,

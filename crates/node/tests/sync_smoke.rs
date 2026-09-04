@@ -1,4 +1,5 @@
 //! Block sync smoke tests.
+use hashbrown::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -11,7 +12,6 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
-use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
@@ -26,8 +26,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let chain_tip = block_tree.read().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-    let peers = Arc::new(RwLock::new(Vec::new()));
-    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+    let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx_raw) =
         unbounded::<bitcoin_rs_p2p::InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
@@ -41,8 +40,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     );
     let sync = BlockSync::new(
         handles,
-        Arc::clone(&peers),
-        Arc::clone(&peer_outbound),
+        Arc::clone(&peer_table),
         inbound_headers_rx,
         inbound_blocks_rx,
     );
@@ -81,8 +79,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
     let chain_tip = block_tree.read().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-    let peers = Arc::new(RwLock::new(Vec::new()));
-    let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+    let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx_raw) =
         unbounded::<bitcoin_rs_p2p::InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
@@ -96,8 +93,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
     );
     let sync = BlockSync::new(
         handles,
-        Arc::clone(&peers),
-        Arc::clone(&peer_outbound),
+        Arc::clone(&peer_table),
         inbound_headers_rx,
         inbound_blocks_rx,
     );

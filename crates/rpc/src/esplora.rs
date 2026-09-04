@@ -849,7 +849,20 @@ fn query_error(e: TxQueryError) -> Response {
 fn dispatch_error(e: crate::RpcError) -> Response {
     match e {
         crate::RpcError::NotFound(_) => not_found(),
-        crate::RpcError::InvalidParams(_) | crate::RpcError::InvalidType(_) => bad(&e.to_string()),
+        // 400: the request is the problem, and re-sending it unchanged will not
+        // help. That covers a malformed request and a refused transaction
+        // alike -- `unavailable` is 503, which tells a broadcaster to retry,
+        // and the one thing a rejected transaction will not do is succeed on a
+        // retry. Esplora answers `POST /tx` with 400 and the reject reason, and
+        // a wallet reads that as "fix the transaction" rather than "come back
+        // later".
+        //
+        // `TxRejected` is what policy or consensus refused; `TxVerifyError` a
+        // guard the caller configured themselves. Neither improves with time.
+        crate::RpcError::InvalidParams(_)
+        | crate::RpcError::InvalidType(_)
+        | crate::RpcError::TxRejected(_)
+        | crate::RpcError::TxVerifyError(_) => bad(&e.to_string()),
         _ => unavailable(&e.to_string()),
     }
 }
@@ -997,16 +1010,16 @@ mod tests {
     }
 
     fn transaction_with_funded_input(ctx: &Context) -> Tx {
-        // p2wpkh scriptPubKey: OP_0 <20-byte key hash>.
-        let script = vec![
-            0x00, 0x14, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
-            0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
-        ];
+        // OP_TRUE: an anyone-can-spend funding script, so the broadcast
+        // fixture's empty scriptSig satisfies script verification. The output
+        // stays P2WPKH: standardness only allows known output templates.
+        let spendable = vec![0x51];
+        let script = [vec![0x00, 0x14], vec![0x11; 20]].concat();
         let funding = transaction(
             None,
             TxOut {
                 value: 10_000,
-                script_pubkey: script.clone(),
+                script_pubkey: spendable.clone(),
             },
         );
         let txid = ctx.add_transaction(funding);
@@ -1015,7 +1028,7 @@ mod tests {
             OutPoint::new(txid, 0),
             TxOut {
                 value: 10_000,
-                script_pubkey: script.clone(),
+                script_pubkey: spendable,
             },
             false,
             1,
@@ -1443,7 +1456,12 @@ mod tests {
         let broadcast_transaction = transaction_with_funded_input(handler.context().as_ref());
         let raw = consensus_bytes(&broadcast_transaction).to_lower_hex_string();
         let broadcast = route_post(&handler, "/tx", raw.as_bytes()).expect("POST /tx is routed");
-        assert_eq!(broadcast.status, 200);
+        assert_eq!(
+            broadcast.status,
+            200,
+            "body: {}",
+            String::from_utf8_lossy(&broadcast.body)
+        );
         assert_eq!(broadcast.content_type, "text/plain");
 
         // Package relay is conditional in API.md (Bitcoin Core 28+). This node

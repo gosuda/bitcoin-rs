@@ -13,7 +13,7 @@
 //! must never stall mempool admission.
 //!
 //! [`RelaySink`] is the consumer seam: [`PeerRelaySink`] iterates the live
-//! peer map from [`crate::state::NodeState::peer_outbound`] and sends one
+//! peer table from [`bitcoin_rs_p2p::PeerTable`] and sends one
 //! `inv` per non-excluded peer. A test fake records announcements without a
 //! real connection, so the exclude/saturation logic is unit-testable without
 //! a running node.
@@ -51,10 +51,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use bitcoin_rs_p2p::{Message, PeerLease};
+use bitcoin_rs_p2p::Message;
 use bitcoin_rs_primitives::{Txid, Wtxid};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
-use parking_lot::RwLock;
 
 /// Drain poll interval when the relay queue is empty.
 const RELAY_POLL: Duration = Duration::from_millis(100);
@@ -171,19 +170,18 @@ pub trait RelaySink: Send + Sync {
     fn announce_inv(&self, txid: Txid, exclude: Option<u64>) -> RelayOutcome;
 }
 
-/// Production [`RelaySink`] over the shared peer-outbound map.
+/// Production [`RelaySink`] over the shared peer table.
 ///
-/// Borrows the same `Arc<RwLock<HashMap<SocketAddr, PeerLease>>>` exposed by
-/// [`crate::state::NodeState::peer_outbound`], so the relay worker sees peer
-/// connect/disconnect/reconnect as the listener mutates the map.
+/// Borrows the shared table, so the relay worker sees peer
+/// connect/disconnect/reconnect as the listener mutates sessions.
 pub struct PeerRelaySink {
-    peers: Arc<RwLock<hashbrown::HashMap<std::net::SocketAddr, PeerLease>>>,
+    peers: Arc<bitcoin_rs_p2p::PeerTable>,
 }
 
 impl PeerRelaySink {
-    /// Wraps the shared peer-outbound map from [`crate::state::NodeState::peer_outbound`].
+    /// Wraps the shared peer table.
     #[must_use]
-    pub fn new(peers: Arc<RwLock<hashbrown::HashMap<std::net::SocketAddr, PeerLease>>>) -> Self {
+    pub fn new(peers: Arc<bitcoin_rs_p2p::PeerTable>) -> Self {
         Self { peers }
     }
 }
@@ -196,14 +194,11 @@ impl RelaySink for PeerRelaySink {
         let message = Message::Inv(vec![inv]);
 
         let mut outcome = RelayOutcome::default();
-        let peers = self.peers.read();
-        for (addr, lease) in peers.iter() {
+        self.peers.for_each_lease(|addr, lease| {
             outcome.attempted += 1;
-            if let Some(id) = exclude
-                && lease.node_id() == id
-            {
+            if exclude.is_some_and(|id| lease.node_id() == id) {
                 outcome.excluded += 1;
-                continue;
+                return;
             }
             if let Err(error) = lease.send(message.clone()) {
                 // Saturation or a cancelled/disconnected lease: the existing
@@ -217,7 +212,7 @@ impl RelaySink for PeerRelaySink {
                 );
                 outcome.saturated += 1;
             }
-        }
+        });
         outcome
     }
 }
@@ -264,6 +259,7 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use bitcoin_rs_p2p::PeerLease;
     use bitcoin_rs_primitives::Hash256;
     use crossbeam_channel::bounded;
     use parking_lot::Mutex;
@@ -513,10 +509,10 @@ mod tests {
         let lease_b = PeerLease::new(tx_b);
         let source_id = lease_a.node_id();
 
-        let mut peers = hashbrown::HashMap::new();
-        peers.insert(addr_a, lease_a);
-        peers.insert(addr_b, lease_b);
-        let sink = PeerRelaySink::new(Arc::new(RwLock::new(peers)));
+        let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
+        peers.register(addr_a, lease_a);
+        peers.register(addr_b, lease_b);
+        let sink = PeerRelaySink::new(peers);
 
         let txid = dummy_txid(0xF6);
         let outcome = sink.announce_inv(txid, Some(source_id));

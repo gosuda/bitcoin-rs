@@ -123,6 +123,52 @@ impl MutationResult {
     }
 }
 
+/// The committed outcome of one admission insert.
+///
+/// [`Mempool::insert_entry`](crate::Mempool::insert_entry) and
+/// [`Mempool::replace_transaction`](crate::Mempool::replace_transaction)
+/// commit before they can learn that the post-insert size-limit trim shed
+/// the very entry they just placed: the conflict removals, the insert
+/// itself, and any trim evictions are already durable, and the mempool
+/// sequence has advanced. `Err` therefore means *nothing* was committed; a
+/// shed entry travels as [`InsertionOutcome::ShedAfterCommit`] carrying the
+/// full [`MutationResult`], so observers still learn every committed change
+/// while callers still treat the entry as rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InsertionOutcome {
+    /// The entry committed and stayed in the pool.
+    Accepted(MutationResult),
+    /// The entry committed, then the trim evicted it. The carried mutation
+    /// includes the entry's own `Accepted` change followed by its
+    /// `Removed(PolicyEviction)` removal -- and, for a replacement, the
+    /// conflict removals that committed first.
+    ShedAfterCommit(MutationResult),
+}
+
+impl InsertionOutcome {
+    /// The committed mutation record, whatever the entry's fate.
+    #[must_use]
+    pub const fn mutation(&self) -> &MutationResult {
+        match self {
+            Self::Accepted(result) | Self::ShedAfterCommit(result) => result,
+        }
+    }
+
+    /// Consumes the outcome into its committed mutation record.
+    #[must_use]
+    pub fn into_mutation(self) -> MutationResult {
+        match self {
+            Self::Accepted(result) | Self::ShedAfterCommit(result) => result,
+        }
+    }
+
+    /// Returns `true` when the pool shed the inserted entry after commit.
+    #[must_use]
+    pub const fn is_shed(&self) -> bool {
+        matches!(self, Self::ShedAfterCommit(_))
+    }
+}
+
 /// Identifies the network peer a transaction arrived from.
 ///
 /// Plain data by contract: the mempool crate never depends on the p2p

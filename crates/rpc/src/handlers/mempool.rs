@@ -39,7 +39,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         loaded: true,
         size: i64_saturated(stats.txs),
         bytes: i64_saturated(stats.bytes),
-        usage: i64_saturated(stats.bytes),
+        usage: i64_saturated(pool.dynamic_memory_usage()),
         total_fee: sat_to_btc(stats.total_fee),
         max_mempool: i64_saturated(maxmempool),
         mempool_min_fee: sat_to_btc(mempool_min_fee_sat_per_kvb),
@@ -644,6 +644,65 @@ mod tests {
                 script_pubkey: vec![label],
             }],
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_wiring_tests {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    use bitcoin_rs_mempool::MempoolEntry;
+    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use sonic_rs::{JsonValueTrait, json};
+
+    use super::*;
+
+    #[test]
+    fn getmempoolinfo_usage_is_the_pools_memory_not_its_vsize_sum() {
+        let ctx = Arc::new(Context::new());
+        {
+            let mut pool = ctx.mempool.pool().write();
+            for tag in 0_u8..4 {
+                let tx = Tx {
+                    version: 2,
+                    lock_time: 0,
+                    inputs: vec![TxIn {
+                        previous_output: OutPoint::new(
+                            Txid::from(Hash256::from_le_bytes(&[tag; 32])),
+                            0,
+                        ),
+                        script_sig: Vec::new(),
+                        sequence: u32::MAX,
+                        witness: Vec::new(),
+                    }],
+                    outputs: vec![TxOut {
+                        value: 10_000,
+                        script_pubkey: vec![0x51; 128],
+                    }],
+                };
+                let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+                let Ok(_id) = pool.insert_entry(entry) else {
+                    panic!("fixture insert failed");
+                };
+            }
+        }
+
+        let value =
+            getmempoolinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getmempoolinfo: {err}"));
+        let Some(bytes) = value.get("bytes").and_then(JsonValueTrait::as_u64) else {
+            panic!("bytes missing: {value:?}");
+        };
+        let Some(usage) = value.get("usage").and_then(JsonValueTrait::as_u64) else {
+            panic!("usage missing: {value:?}");
+        };
+
+        assert!(bytes > 0, "the fixture must hold transactions");
+        assert_ne!(
+            usage, bytes,
+            "`usage` was literally `bytes`; that is the defect"
+        );
+        assert!(usage > bytes, "{usage} vs {bytes}");
     }
 }
 

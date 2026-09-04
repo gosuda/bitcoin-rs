@@ -117,7 +117,7 @@ fn network_name(ip: IpAddr) -> &'static str {
 
 pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let peers = ctx.peers.read();
+    let peers = ctx.peer_table.infos();
     let total = peers.len();
     let inbound = peers.iter().filter(|p| p.inbound).count();
     let outbound = total.saturating_sub(inbound);
@@ -158,7 +158,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
 pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let peers = ctx.peers.read();
+    let peers = ctx.peer_table.infos();
     let rows = peers
         .iter()
         .enumerate()
@@ -294,13 +294,7 @@ pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .ok_or(RpcError::InvalidParams("state must be a boolean"))?;
     ctx.network_active.store(state, Ordering::SeqCst);
     if !state {
-        // Connection owners remove their own lease and peer metadata after
-        // observing cancellation. Clearing this map here would make that
-        // identity check fail and leave stale peers in the registry.
-        let leases = ctx.peer_outbound.read();
-        for lease in leases.values() {
-            lease.cancel();
-        }
+        ctx.peer_table.cancel_all();
     }
     typed_to_sonic(&v31::SetNetworkActive(state))
 }
@@ -378,7 +372,7 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
     // Verify the peer is currently connected before mutating anything.
     let found = {
-        let peers = ctx.peers.read();
+        let peers = ctx.peer_table.infos();
         match nodeid {
             Some(id) => id < peers.len() && peers[id].addr == addr,
             None => peers.iter().any(|p| p.addr == addr),
@@ -388,30 +382,14 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
         return Err(RpcError::NotFound("Node not found in connected nodes"));
     }
 
-    // Cancel and drop the outbound lease, if one exists for this address.
-    // Inbound peers have no lease; they are removed from `peers` below and
-    // the connection layer finalises teardown.
-    let lease = ctx.peer_outbound.write().remove(&addr);
-    if let Some(lease) = lease {
-        lease.cancel();
-    }
-
-    // Remove the matching peer from the live registry.
-    let mut peers = ctx.peers.write();
-    if let Some(id) = nodeid {
-        if id < peers.len() && peers[id].addr == addr {
-            peers.remove(id);
-        }
-    } else {
-        peers.retain(|p| p.addr != addr);
-    }
+    ctx.peer_table.disconnect(addr);
 
     Ok(Value::new_null())
 }
 
 pub(crate) fn getconnectioncount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let count = u64::try_from(ctx.peers.read().len()).unwrap_or(u64::MAX);
+    let count = u64::try_from(ctx.peer_table.len()).unwrap_or(u64::MAX);
     typed_to_sonic(&v31::GetConnectionCount(count))
 }
 
@@ -447,7 +425,7 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let mut entries: Vec<v31::NodeAddress> = Vec::new();
 
     // Live peers carry real service flags and handshake times.
-    for peer in ctx.peers.read().iter() {
+    for peer in ctx.peer_table.infos() {
         if !seen.insert(peer.addr) {
             continue;
         }
@@ -761,7 +739,7 @@ mod addnode_validation_tests {
 
         let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
         let ctx = Context::new();
-        ctx.peers.write().push(PeerInfo {
+        let info = PeerInfo {
             addr,
             version: 70_016,
             services: 9,
@@ -769,18 +747,19 @@ mod addnode_validation_tests {
             start_height: 0,
             conn_time: 0,
             inbound: false,
-        });
+        };
         let (tx, _rx) = unbounded();
         let lease = PeerLease::new(tx);
-        ctx.peer_outbound.write().insert(addr, lease.clone());
+        ctx.peer_table.register(addr, lease.clone());
+        ctx.peer_table.publish_info(addr, &lease, info);
         let ctx = Arc::new(ctx);
 
         let result = disconnectnode(&ctx, &json!([addr.to_string().as_str()]))
             .unwrap_or_else(|err| panic!("disconnectnode failed: {err}"));
         assert!(result.is_null());
         assert!(lease.is_cancelled());
-        assert!(ctx.peer_outbound.read().is_empty());
-        assert!(ctx.peers.read().is_empty());
+        assert!(ctx.peer_table.is_empty());
+        assert!(ctx.peer_table.infos().is_empty());
     }
 }
 
@@ -834,15 +813,15 @@ mod admin_rpc_tests {
         let (tx_b, _rx_b) = unbounded();
         let lease_a = PeerLease::new(tx_a);
         let lease_b = PeerLease::new(tx_b);
-        ctx.peer_outbound.write().insert(addr_a, lease_a.clone());
-        ctx.peer_outbound.write().insert(addr_b, lease_b.clone());
+        ctx.peer_table.register(addr_a, lease_a.clone());
+        ctx.peer_table.register(addr_b, lease_b.clone());
         let ctx = Arc::new(ctx);
 
         let _ = setnetworkactive(&ctx, &json!([false]))
             .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
         assert!(lease_a.is_cancelled());
         assert!(lease_b.is_cancelled());
-        assert_eq!(ctx.peer_outbound.read().len(), 2);
+        assert_eq!(ctx.peer_table.len(), 2);
     }
 
     #[test]
@@ -1072,7 +1051,7 @@ mod ban_state_tests {
 mod getnodeaddresses_tests {
     use super::*;
     use alloc::sync::Arc;
-    use bitcoin_rs_p2p::PeerInfo;
+    use bitcoin_rs_p2p::{PeerInfo, PeerLease};
     use sonic_rs::{JsonContainerTrait, JsonValueTrait, json};
 
     fn peer(addr: &str, services: u64) -> PeerInfo {
@@ -1085,6 +1064,13 @@ mod getnodeaddresses_tests {
             conn_time: 100,
             inbound: false,
         }
+    }
+
+    fn add_peer(ctx: &Context, info: PeerInfo) {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = PeerLease::new(tx);
+        ctx.peer_table.register(info.addr, lease.clone());
+        ctx.peer_table.publish_info(info.addr, &lease, info);
     }
 
     #[test]
@@ -1101,7 +1087,7 @@ mod getnodeaddresses_tests {
     #[test]
     fn returns_live_peer_addresses() {
         let ctx = Context::new();
-        ctx.peers.write().push(peer("127.0.0.1:8333", 9));
+        add_peer(&ctx, peer("127.0.0.1:8333", 9));
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([0]))
             .unwrap_or_else(|err| panic!("getnodeaddresses failed: {err}"));
@@ -1131,7 +1117,7 @@ mod getnodeaddresses_tests {
     #[test]
     fn deduplicates_peer_and_added_node() {
         let ctx = Context::new();
-        ctx.peers.write().push(peer("127.0.0.1:8333", 9));
+        add_peer(&ctx, peer("127.0.0.1:8333", 9));
         ctx.added_nodes
             .write()
             .push("127.0.0.1:8333".parse().expect("addr"));
@@ -1147,9 +1133,9 @@ mod getnodeaddresses_tests {
     #[test]
     fn count_limits_results() {
         let ctx = Context::new();
-        ctx.peers.write().push(peer("127.0.0.1:8333", 9));
-        ctx.peers.write().push(peer("127.0.0.2:8333", 9));
-        ctx.peers.write().push(peer("127.0.0.3:8333", 9));
+        add_peer(&ctx, peer("127.0.0.1:8333", 9));
+        add_peer(&ctx, peer("127.0.0.2:8333", 9));
+        add_peer(&ctx, peer("127.0.0.3:8333", 9));
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([2]))
             .unwrap_or_else(|err| panic!("getnodeaddresses failed: {err}"));
@@ -1162,8 +1148,8 @@ mod getnodeaddresses_tests {
     #[test]
     fn default_count_returns_one() {
         let ctx = Context::new();
-        ctx.peers.write().push(peer("127.0.0.1:8333", 9));
-        ctx.peers.write().push(peer("127.0.0.2:8333", 9));
+        add_peer(&ctx, peer("127.0.0.1:8333", 9));
+        add_peer(&ctx, peer("127.0.0.2:8333", 9));
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getnodeaddresses failed: {err}"));

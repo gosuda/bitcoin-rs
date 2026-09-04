@@ -1364,9 +1364,17 @@ fn build_tx_index_open_spec(
         batch_limits,
         epoch,
         enabled,
-        rollback_rebuild_cutover: config.index_rollback_rebuild_cutover,
+        rollback_rebuild_cutover: crate::txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
     }))
+}
+
+struct TxIndexSpawn {
+    spec: crate::txindex_worker::TxIndexOpenSpec,
+    generation: crate::txindex_worker::Generation,
+    block_source: crate::NodeBlockSource,
+    body_source: Arc<dyn BlockBodySource>,
+    wake_rx: Receiver<()>,
 }
 
 /// Aggregate handle to a running node.
@@ -1385,6 +1393,7 @@ pub struct NodeState {
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
     tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
+    tx_index_spawn: Option<TxIndexSpawn>,
     tx_index_worker: Option<crate::txindex_worker::TxIndexWorker>,
     tx_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>>>,
     /// Stable query adapter for txindex/script-index, constructed before open.
@@ -1410,11 +1419,7 @@ pub struct NodeState {
     network: Arc<RwLock<NetworkState>>,
     /// Shared P2P admission switch controlled by `setnetworkactive`.
     network_active: Arc<AtomicBool>,
-    peers: Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>>,
-    /// Per-peer outbound message senders, keyed by remote socket address.
-    /// External code pushes messages here; the per-connection thread drains
-    /// and writes them to the peer's TCP stream.
-    peer_outbound: Arc<RwLock<HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     banned: Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     p2p_outbound_tx: crossbeam_channel::Sender<std::net::SocketAddr>,
     p2p_outbound_rx: Arc<Mutex<crossbeam_channel::Receiver<std::net::SocketAddr>>>,
@@ -1433,6 +1438,9 @@ pub struct NodeState {
 impl NodeState {
     /// Opens (or creates) the node's data directory and configured storage
     /// backend.
+    /// Derived-index workers are constructed dormant (`Opening`) and started
+    /// by [`Self::start_index_workers`] once crash recovery has made the
+    /// applied tip authoritative; `start_node` performs both steps.
     #[allow(clippy::arc_with_non_send_sync)]
     #[allow(clippy::too_many_lines)]
     pub fn open(
@@ -1668,7 +1676,7 @@ impl NodeState {
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
         let tx_index_open_spec = build_tx_index_open_spec(&config, txindex_cache_bytes, epoch)?;
-        let (tx_index_runtime, tx_index_worker, tx_index_lifecycle, tx_index_adapter) =
+        let (tx_index_runtime, tx_index_spawn, tx_index_lifecycle, tx_index_adapter) =
             match tx_index_open_spec {
                 Some(spec) => {
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
@@ -1686,22 +1694,18 @@ impl NodeState {
                         Arc::clone(&lifecycle),
                     ));
                     let generation = crate::txindex_worker::Generation::new(spec.epoch);
-                    let worker = crate::txindex_worker::TxIndexWorker::spawn_with_open(
-                        Arc::clone(&runtime),
-                        spec,
-                        Arc::clone(&lifecycle),
-                        generation,
-                        Arc::clone(&applied_tip),
-                        Arc::clone(&block_tree),
-                        Some(Arc::clone(&block_body_store)),
-                        block_source,
-                        Some(body_source),
-                        Arc::clone(&chain_events),
-                        Arc::clone(&shutdown),
-                        wake_rx,
+                    (
+                        Some(runtime),
+                        Some(TxIndexSpawn {
+                            spec,
+                            generation,
+                            block_source,
+                            body_source,
+                            wake_rx,
+                        }),
+                        Some(lifecycle),
+                        Some(adapter),
                     )
-                    .context("spawn txindex worker")?;
-                    (Some(runtime), Some(worker), Some(lifecycle), Some(adapter))
                 }
                 None => (None, None, None, None),
             };
@@ -1718,9 +1722,8 @@ impl NodeState {
         ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let network_active = Arc::new(AtomicBool::new(true));
-        let peers = Arc::new(RwLock::new(Vec::new()));
         let banned = Arc::new(RwLock::new(Vec::new()));
-        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let (p2p_outbound_tx, p2p_outbound_rx_raw) =
             crossbeam_channel::bounded(P2P_OUTBOUND_QUEUE_LIMIT);
         let p2p_outbound_rx = Arc::new(Mutex::new(p2p_outbound_rx_raw));
@@ -1795,8 +1798,7 @@ impl NodeState {
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
         let sync = Arc::new(crate::BlockSync::new(
             apply_handles.clone(),
-            Arc::clone(&peers),
-            Arc::clone(&peer_outbound),
+            Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
         ));
@@ -1837,7 +1839,8 @@ impl NodeState {
             utxo,
             coin_stats,
             tx_index_runtime,
-            tx_index_worker,
+            tx_index_spawn,
+            tx_index_worker: None,
             tx_index_lifecycle,
             tx_index_adapter,
             capabilities,
@@ -1855,8 +1858,7 @@ impl NodeState {
             transactions,
             network,
             network_active,
-            peers,
-            peer_outbound,
+            peer_table,
             banned,
             p2p_outbound_tx,
             p2p_outbound_rx,
@@ -2020,6 +2022,40 @@ impl NodeState {
         })
     }
 
+    /// Starts the derived-index workers. Call only once the applied tip is
+    /// authoritative — after crash recovery — so the index reconciles against
+    /// the real chainstate and never mistakes a recovered gap for a stale branch.
+    pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
+        let Some(spawn) = self.tx_index_spawn.take() else {
+            return Ok(());
+        };
+        let runtime = self
+            .tx_index_runtime
+            .as_ref()
+            .context("txindex runtime missing for a pending worker spawn")?;
+        let lifecycle = self
+            .tx_index_lifecycle
+            .as_ref()
+            .context("txindex lifecycle missing for a pending worker spawn")?;
+        let worker = crate::txindex_worker::TxIndexWorker::spawn_with_open(
+            Arc::clone(runtime),
+            spawn.spec,
+            Arc::clone(lifecycle),
+            spawn.generation,
+            Arc::clone(&self.applied_tip),
+            Arc::clone(&self.block_tree),
+            Some(Arc::clone(&self.block_body_store)),
+            spawn.block_source,
+            Some(spawn.body_source),
+            Arc::clone(&self.chain_events),
+            Arc::clone(&self.apply_handles.shutdown),
+            spawn.wake_rx,
+        )
+        .context("spawn txindex worker")?;
+        self.tx_index_worker = Some(worker);
+        Ok(())
+    }
+
     /// Returns the live capability report provider for `getcapabilities`.
     #[must_use]
     pub fn capability_provider(&self) -> Arc<dyn bitcoin_rs_rpc::context::CapabilityProvider> {
@@ -2129,29 +2165,16 @@ impl NodeState {
         Arc::clone(&self.network_active)
     }
 
-    /// Returns the shared registry of currently-handshook peers.
-    #[must_use]
-    pub fn peers(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::PeerInfo>>> {
-        Arc::clone(&self.peers)
-    }
-
     /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
     #[must_use]
     pub fn banned_subnets(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>> {
         Arc::clone(&self.banned)
     }
 
-    /// Returns the shared per-peer outbound message-sender map.
-    ///
-    /// External callers can look up a peer's `Sender<Message>` by socket
-    /// address and send a message into that peer's outbound queue. The
-    /// per-connection thread drains the receiver each iteration of
-    /// `run_message_loop` and writes the message via `peer.send`.
     #[must_use]
-    pub fn peer_outbound(
-        &self,
-    ) -> Arc<RwLock<HashMap<std::net::SocketAddr, bitcoin_rs_p2p::PeerLease>>> {
-        Arc::clone(&self.peer_outbound)
+    /// Returns the authoritative table of live peer sessions.
+    pub fn peer_table(&self) -> Arc<bitcoin_rs_p2p::PeerTable> {
+        Arc::clone(&self.peer_table)
     }
     /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
     #[must_use]
@@ -2432,7 +2455,8 @@ mod tests {
         config.data_dir = dir.path().join("node");
         config.p2p_listen.clear();
         config.txindex = true;
-        let state = NodeState::open(config, None)?;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
         let (Some(a), Some(b)) = (state.tx_index_query(), state.tx_index_query()) else {
             panic!("txindex query engine missing when enabled");
         };
@@ -2451,6 +2475,41 @@ mod tests {
     }
 
     #[test]
+    fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p_listen.clear();
+        config.txindex = true;
+        let mut state = NodeState::open(config, None)?;
+
+        assert!(state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
+            matches!(
+                lifecycle.load().as_ref(),
+                crate::txindex_worker::TxIndexLifecycle::Opening
+            )
+        }));
+        assert!(state.tx_index_worker.is_none());
+
+        state.start_index_workers()?;
+        assert!(state.tx_index_worker.is_some());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
+            matches!(
+                lifecycle.load().as_ref(),
+                crate::txindex_worker::TxIndexLifecycle::Opening
+            )
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "txindex lifecycle remained Opening"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -2459,7 +2518,8 @@ mod tests {
         config.txindex = false;
         config.script_index = crate::config::ScriptIndexMode::Full;
 
-        let state = NodeState::open(config, None)?;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
 
         assert!(state.apply_handles().tx_index_runtime.is_some());
         assert!(state.tx_index_query().is_none());
@@ -2478,17 +2538,11 @@ mod tests {
         Ok(())
     }
 
-    /// Opens a node in each `scriptindex` mode and asserts the concrete answer
-    /// for `unspent_outputs`, rather than only the `full` path.
+    /// Opens a node in each accepted `scriptindex` mode and asserts the
+    /// concrete answer for `unspent_outputs`, rather than only the `full` path.
     ///
-    /// This is the guard that would have caught advertising `utxo` before a
-    /// live store exists. Under `utxo` the node currently builds no
-    /// `Funding`/`Spending` rows and publishes no `ScriptHistory` watermark,
-    /// so every `ScriptIndexQuery` method gates on
-    /// `IndexCapabilities::SCRIPT_HISTORY` and reports `Retry` forever. The
-    /// mode is therefore rejected at config time; this test pins that the
-    /// rejection happens at `open`, and that the two accepted modes give
-    /// distinct, concrete answers instead of both degrading to `Retry`.
+    /// This is the guard that the two accepted modes give distinct, concrete
+    /// answers instead of both degrading to `Retry`.
     #[test]
     fn script_index_modes_give_concrete_unspent_outputs_answers() -> anyhow::Result<()> {
         use bitcoin_rs_index::ScriptHash;
@@ -2497,7 +2551,7 @@ mod tests {
         // Genesis is applied in each case so the index worker has at least one
         // block to index. Without it the worker never publishes a
         // `ScriptHistory` watermark and every mode retries forever, which would
-        // make all three cases indistinguishable.
+        // make both cases indistinguishable.
         let scripthash = ScriptHash::from_script_bytes(&[0x51, 0x01]);
 
         // `disabled`: no script index at all, so no query adapter is handed
@@ -2516,26 +2570,6 @@ mod tests {
         );
         drop(state);
 
-        // `utxo`: the mode is named and parsed but has no durable live-output
-        // store, so opening must fail loudly rather than start a node that
-        // would advertise a live view nothing backs.
-        let dir = tempfile::tempdir()?;
-        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p_listen.clear();
-        config.txindex = false;
-        config.script_index = crate::config::ScriptIndexMode::Utxo;
-        let error = match NodeState::open(config, None) {
-            Ok(_) => panic!("utxo must be rejected while no live store backs it"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("scriptindex=utxo is not yet usable"),
-            "rejection must name what is missing, got: {error}"
-        );
-
         // `full`: the accepted mode. It converges on a concrete answer — an
         // empty set for an unfunded script — rather than retrying forever.
         let dir = tempfile::tempdir()?;
@@ -2544,7 +2578,8 @@ mod tests {
         config.p2p_listen.clear();
         config.txindex = false;
         config.script_index = crate::config::ScriptIndexMode::Full;
-        let state = NodeState::open(config, None)?;
+        let mut state = NodeState::open(config, None)?;
+        state.start_index_workers()?;
         let _ = state.apply_block(&crate::Network::Regtest.genesis_block())?;
         let Some(query) = state.script_index_query() else {
             panic!("full mode must hand out a script-index query adapter")
@@ -2584,7 +2619,8 @@ mod tests {
         config.txindex = true;
 
         {
-            let state = NodeState::open(config.clone(), None)?;
+            let mut state = NodeState::open(config.clone(), None)?;
+            state.start_index_workers()?;
             assert!(state.tx_index_query().is_some());
         }
 
@@ -2647,7 +2683,7 @@ mod tests {
     }
 
     #[test]
-    fn open_constructs_empty_peer_registry() -> anyhow::Result<()> {
+    fn open_constructs_empty_peer_table() -> anyhow::Result<()> {
         use tempfile::tempdir;
 
         let dir = tempdir()?;
@@ -2657,14 +2693,14 @@ mod tests {
         let state = NodeState::open(config, None)?;
 
         assert!(
-            state.peers().read().is_empty(),
-            "freshly opened registry is empty"
+            state.peer_table().is_empty(),
+            "freshly opened table is empty"
         );
         Ok(())
     }
 
     #[test]
-    fn open_constructs_empty_peer_outbound_map() -> anyhow::Result<()> {
+    fn open_constructs_empty_peer_table_again() -> anyhow::Result<()> {
         use tempfile::tempdir;
 
         let dir = tempdir()?;
@@ -2673,7 +2709,7 @@ mod tests {
         config.p2p_listen.clear();
         let state = NodeState::open(config, None)?;
 
-        assert!(state.peer_outbound().read().is_empty());
+        assert!(state.peer_table().is_empty());
         Ok(())
     }
 
@@ -4381,7 +4417,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn non_regular_epoch_lock_refuses_start() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

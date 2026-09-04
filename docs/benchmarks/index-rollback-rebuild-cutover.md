@@ -2,8 +2,8 @@
 
 ## Knob
 
-`Config::index_rollback_rebuild_cutover` (`crates/node/src/config.rs`), default
-`DEFAULT_INDEX_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000`.
+`txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (`crates/node/src/txindex_worker.rs`), default
+`100_000`.
 
 Decision rule implemented by the txindex worker (`reconcile_once`): for each
 stale-watermark selection, `depth = reconcile::rollback_depth(...)` (watermark
@@ -59,7 +59,7 @@ cutover = clamp(100_000 × t_fw / t_rb, 1_000, 100_000)
         → one significant figure = 100_000
 ```
 
-`DEFAULT_INDEX_ROLLBACK_REBUILD_CUTOVER = 100_000`. The benchmark proves the
+The default is `100_000`. The benchmark proves the
 default rounds to 100,000 and routes the #208 834k-gap incident to rebuild
 while ≤ ~100-block organic reorgs continue to rewind. The per-block ratio does
 not prove rebuild always scales better because total costs depend on tip height
@@ -71,6 +71,5 @@ Status: COMPLETED — three runs, medians of medians, spread recorded.
 
 - No bitcoin_conf_compat alias: this is not a Core knob and that file is
   outside this leaf.
-- `cutover = 0` means every resolvable stale watermark rebuilds (legal
-  operator choice, documented in `Config` rustdoc); `u32::MAX` restores the
-  pre-cutover rewind-at-any-depth behavior.
+- `cutover = 0` means every resolvable stale watermark rebuilds (used in
+  tests); `u32::MAX` restores the pre-cutover rewind-at-any-depth behavior.

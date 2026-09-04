@@ -63,7 +63,7 @@ use bitcoin_rs_node::{
     state::NodeState,
     sync::{SyncBudget, default_sync_budget},
 };
-use bitcoin_rs_p2p::{Message, PeerInfo};
+use bitcoin_rs_p2p::Message;
 use bitcoin_rs_primitives::deserialize;
 use bitcoin_rs_rpc::context::{BlockBodySource, BlockLog, BlockRecord};
 use bitcoin_rs_utxo::UtxoSet;
@@ -79,7 +79,6 @@ const PROXY_BLOCKS: u32 = 32;
 const SYNC_PROXY_BLOCKS: u32 = 128;
 const SYNC_PROXY_HEADER_HEIGHT: u32 = 4_096;
 const SYNC_PROXY_BLOCKS_USIZE: usize = 128;
-const SYNC_PROXY_START_HEIGHT: i32 = 4_096;
 const SYNC_PROXY_PEERS: usize = 512;
 const SYNC_OVERSIZED_BURST_BLOCKS: u32 = 1_024;
 const SYNC_OVERSIZED_BURST_BLOCKS_USIZE: usize = 1_024;
@@ -505,8 +504,7 @@ struct SyncFixture {
     sync: BlockSync,
     inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
     outbound_rxs: Vec<crossbeam_channel::Receiver<Message>>,
-    peers: Arc<RwLock<Vec<PeerInfo>>>,
-    peer_outbound: Arc<RwLock<HashMap<SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     blocks: Vec<Block>,
     /// Inbound payloads pre-cloned and pre-serialized during (untimed) setup, in
@@ -544,8 +542,7 @@ impl SyncFixture {
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());
-        let peers = Arc::new(RwLock::new(Vec::new()));
-        let peer_outbound = Arc::new(RwLock::new(HashMap::new()));
+        let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
         let (_inbound_headers_tx, inbound_headers_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundHeaders>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
@@ -561,20 +558,18 @@ impl SyncFixture {
         );
         let sync = BlockSync::new(
             handles,
-            Arc::clone(&peers),
-            Arc::clone(&peer_outbound),
+            Arc::clone(&peer_table),
             inbound_headers_rx,
             inbound_blocks_rx,
         );
 
-        let outbound_rxs = install_synthetic_peers(&peers, &peer_outbound, peer_count);
+        let outbound_rxs = install_synthetic_peers(&peer_table, peer_count);
 
         Self {
             sync,
             inbound_blocks_tx,
             outbound_rxs,
-            peers,
-            peer_outbound,
+            peer_table,
             applied_tip,
             blocks,
             prebuilt_inbound: Vec::new(),
@@ -650,7 +645,7 @@ impl SyncFixture {
                 .unwrap_or_else(|error| panic!("send staged overflow block failed: {error}"));
         }
         fixture.sync.tick();
-        fixture.outbound_rxs = install_synthetic_peers(&fixture.peers, &fixture.peer_outbound, 1);
+        fixture.outbound_rxs = install_synthetic_peers(&fixture.peer_table, 1);
         fixture
     }
 
@@ -884,15 +879,17 @@ impl ProductionStateSyncFixture {
     ) -> Self {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         config.data_dir = dir.path().join("node");
-        let state = NodeState::open(config, None)
+        let mut state = NodeState::open(config, None)
             .unwrap_or_else(|error| panic!("open node state failed: {error}"));
+        state
+            .start_index_workers()
+            .unwrap_or_else(|error| panic!("start index workers failed: {error}"));
         let blocks = {
             let block_tree = state.block_tree();
             let mut tree = block_tree.write();
             populate_blocks(&mut tree)
         };
-        let outbound_rxs =
-            install_synthetic_peers(&state.peers(), &state.peer_outbound(), peer_count);
+        let outbound_rxs = install_synthetic_peers(&state.peer_table(), peer_count);
         Self {
             _dir: dir,
             state,
@@ -1099,20 +1096,16 @@ fn populate_header_chain_from_blocks(tree: &mut BlockTree, blocks: &[Block]) {
 }
 
 fn install_synthetic_peers(
-    peers: &Arc<RwLock<Vec<PeerInfo>>>,
-    peer_outbound: &Arc<RwLock<HashMap<SocketAddr, bitcoin_rs_p2p::PeerLease>>>,
+    peer_table: &Arc<bitcoin_rs_p2p::PeerTable>,
     peer_count: usize,
 ) -> Vec<crossbeam_channel::Receiver<Message>> {
     let mut outbound_rxs = Vec::with_capacity(peer_count);
-    let mut peers = peers.write();
-    let mut peer_outbound = peer_outbound.write();
     for index in 0..peer_count {
         let port = u16::try_from(8_333_usize.saturating_add(index))
             .unwrap_or_else(|error| panic!("invalid synthetic peer port: {error}"));
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        peers.push(synthetic_peer(addr));
         let (outbound_tx, outbound_rx) = unbounded::<Message>();
-        peer_outbound.insert(addr, bitcoin_rs_p2p::PeerLease::new(outbound_tx));
+        peer_table.register(addr, bitcoin_rs_p2p::PeerLease::new(outbound_tx));
         outbound_rxs.push(outbound_rx);
     }
     outbound_rxs
@@ -1161,18 +1154,6 @@ fn tx_index_for_mode(mode: TxIndexMode) -> Option<Arc<TxIndexRuntime>> {
             let (wake_tx, _wake_rx) = crossbeam_channel::bounded(1);
             Some(Arc::new(TxIndexRuntime::new(wake_tx)))
         }
-    }
-}
-
-fn synthetic_peer(addr: SocketAddr) -> PeerInfo {
-    PeerInfo {
-        addr,
-        version: 70_016,
-        services: 0,
-        user_agent: "/bitcoin-rs-sync-bench:0.0.0/".to_owned(),
-        start_height: SYNC_PROXY_START_HEIGHT,
-        conn_time: 0,
-        inbound: false,
     }
 }
 

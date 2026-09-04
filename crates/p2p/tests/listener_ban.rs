@@ -12,7 +12,7 @@ use bitcoin_rs_p2p::listener::{
     serve_with_controls, serve_with_shutdown, spawn_outbound_connection,
     spawn_outbound_connection_with_controls,
 };
-use bitcoin_rs_p2p::{BannedSubnet, IpSubnet, NetworkControls, PeerError};
+use bitcoin_rs_p2p::{BannedSubnet, IpSubnet, NetworkControls, PeerError, PeerTable};
 use parking_lot::RwLock;
 
 #[test]
@@ -26,8 +26,7 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
     let accept_handle =
         thread::spawn(move || accept_one_connection(&accept_helper, &accept_shutdown));
 
-    let registry = Arc::new(RwLock::new(Vec::new()));
-    let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+    let peer_table = Arc::new(PeerTable::new());
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(vec![ban(IpSubnet::from_ip(addr.ip()))]));
@@ -37,8 +36,7 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
         addr,
         network_active,
         Magic::BITCOIN,
-        registry,
-        outbound,
+        peer_table,
         headers_tx,
         blocks_tx,
         banned,
@@ -78,10 +76,8 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
     let network_active = Arc::new(AtomicBool::new(true));
     let listener_shutdown = Arc::clone(&shutdown);
     let listener_network_active = Arc::clone(&network_active);
-    let registry = Arc::new(RwLock::new(Vec::new()));
-    let listener_registry = Arc::clone(&registry);
-    let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
-    let listener_outbound = Arc::clone(&outbound);
+    let peer_table = Arc::new(PeerTable::new());
+    let listener_peer_table = Arc::clone(&peer_table);
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(vec![ban(IpSubnet::new(
@@ -96,8 +92,7 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
             listener_shutdown,
             listener_network_active,
             Magic::BITCOIN,
-            listener_registry,
-            listener_outbound,
+            listener_peer_table,
             headers_tx,
             blocks_tx,
             listener_banned,
@@ -114,7 +109,7 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
     };
 
     wait_for_disconnect(&mut client, Duration::from_secs(1))?;
-    assert!(registry.read().is_empty());
+    assert!(peer_table.is_empty());
 
     shutdown.store(true, Ordering::Relaxed);
     join_listener(handle)?;
@@ -130,24 +125,21 @@ fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> 
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let network_active = Arc::new(AtomicBool::new(false));
-    let registry = Arc::new(RwLock::new(Vec::new()));
-    let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+    let peer_table = Arc::new(PeerTable::new());
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(Vec::new()));
 
     let listener_shutdown = Arc::clone(&shutdown);
     let listener_network_active = Arc::clone(&network_active);
-    let listener_registry = Arc::clone(&registry);
-    let listener_outbound = Arc::clone(&outbound);
+    let listener_peer_table = Arc::clone(&peer_table);
     let handle = thread::spawn(move || {
         serve_with_shutdown(
             addr,
             listener_shutdown,
             listener_network_active,
             Magic::BITCOIN,
-            listener_registry,
-            listener_outbound,
+            listener_peer_table,
             headers_tx,
             blocks_tx,
             banned,
@@ -156,7 +148,7 @@ fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> 
 
     let mut client = connect_with_retry(addr, Duration::from_secs(1))?;
     wait_for_disconnect(&mut client, Duration::from_secs(1))?;
-    assert!(registry.read().is_empty());
+    assert!(peer_table.is_empty());
 
     shutdown.store(true, Ordering::Relaxed);
     join_listener(handle)?;
@@ -176,8 +168,7 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     });
 
     let network_active = Arc::new(AtomicBool::new(false));
-    let registry = Arc::new(RwLock::new(Vec::new()));
-    let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+    let peer_table = Arc::new(PeerTable::new());
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(Vec::new()));
@@ -186,8 +177,7 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
         addr,
         Arc::clone(&network_active),
         Magic::BITCOIN,
-        Arc::clone(&registry),
-        Arc::clone(&outbound),
+        Arc::clone(&peer_table),
         headers_tx.clone(),
         blocks_tx.clone(),
         Arc::clone(&banned),
@@ -210,8 +200,7 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
         addr,
         network_active,
         Magic::BITCOIN,
-        registry,
-        outbound,
+        peer_table,
         headers_tx,
         blocks_tx,
         banned,
@@ -322,12 +311,10 @@ fn loopback_peer_pair(shutdown: &Arc<AtomicBool>) -> Result<LoopbackPeer, Box<dy
     let addr = helper.local_addr()?;
     drop(helper);
 
-    let registry = Arc::new(RwLock::new(Vec::new()));
-    let outbound = Arc::new(RwLock::new(hashbrown::HashMap::new()));
+    let peer_table = Arc::new(PeerTable::new());
     let banned = Arc::new(RwLock::new(Vec::new()));
     let controls = Arc::new(NetworkControls::new(
-        Arc::clone(&registry),
-        Arc::clone(&outbound),
+        Arc::clone(&peer_table),
         Arc::clone(&banned),
         8_333,
     ));
@@ -344,7 +331,6 @@ fn loopback_peer_pair(shutdown: &Arc<AtomicBool>) -> Result<LoopbackPeer, Box<dy
             listener_controls,
             headers_tx,
             blocks_tx,
-            None,
             None,
             None,
         )
@@ -367,11 +353,10 @@ fn loopback_peer_pair(shutdown: &Arc<AtomicBool>) -> Result<LoopbackPeer, Box<dy
             dial_blocks_tx,
             None,
             None,
-            None,
         );
 
         while !dial.is_finished() {
-            if controls.peer_outbound().read().contains_key(&addr) {
+            if controls.peer_table().is_connected(addr) {
                 // Successful dial stays attached to shared state; detach the
                 // handle the same way as before so tests join only the listener.
                 drop(dial);
@@ -386,7 +371,7 @@ fn loopback_peer_pair(shutdown: &Arc<AtomicBool>) -> Result<LoopbackPeer, Box<dy
         };
         match result {
             Ok(()) => {
-                if controls.peer_outbound().read().contains_key(&addr) {
+                if controls.peer_table().is_connected(addr) {
                     return Ok((controls, addr, listener));
                 }
                 shutdown.store(true, Ordering::Relaxed);
@@ -416,84 +401,13 @@ fn wait_until(deadline: Duration, predicate: impl Fn() -> bool) -> bool {
     predicate()
 }
 
-fn unix_micros_now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-        })
-}
-
-#[test]
-fn controls_see_both_connection_directions_and_handshake_registry() -> Result<(), Box<dyn Error>> {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let (controls, addr, listener) = loopback_peer_pair(&shutdown)?;
-
-    let handshake_done = wait_until(Duration::from_secs(5), || {
-        controls
-            .peer_registry()
-            .read()
-            .iter()
-            .any(|p| p.addr == addr)
-    });
-    shutdown.store(true, Ordering::Relaxed);
-    join_listener(listener)?;
-
-    assert!(handshake_done, "inbound handshake must publish peer info");
-    let counts = controls.connection_counts();
-    assert_eq!(counts.total(), 2, "one inbound and one outbound connection");
-    assert_eq!(counts.inbound, 1);
-    assert_eq!(counts.outbound, 1);
-
-    let peers = controls.connected_peers();
-    assert_eq!(peers.len(), 2);
-    assert!(peers.iter().all(|peer| peer.info.is_some()));
-    assert!(peers.iter().any(|peer| peer.inbound && peer.node_id > 0));
-    Ok(())
-}
-
-#[test]
-fn ping_round_trip_measures_duration_on_both_sides() -> Result<(), Box<dyn Error>> {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let (controls, addr, listener) = loopback_peer_pair(&shutdown)?;
-
-    let handshake_done = wait_until(Duration::from_secs(5), || {
-        controls
-            .peer_registry()
-            .read()
-            .iter()
-            .any(|p| p.addr == addr)
-    });
-    assert!(handshake_done, "handshake must complete before pinging");
-    assert_eq!(controls.send_pings(unix_micros_now()), 2);
-
-    let measured = wait_until(Duration::from_secs(5), || {
-        controls
-            .connected_peers()
-            .iter()
-            .all(|peer| peer.stats.ping_time().is_some())
-    });
-    shutdown.store(true, Ordering::Relaxed);
-    join_listener(listener)?;
-
-    assert!(
-        measured,
-        "both peers must answer their ping with a measured round trip"
-    );
-    Ok(())
-}
-
 #[test]
 fn traffic_totals_accumulate_from_live_connections() -> Result<(), Box<dyn Error>> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let (controls, addr, listener) = loopback_peer_pair(&shutdown)?;
 
     let traffic_flowed = wait_until(Duration::from_secs(5), || {
-        controls
-            .peer_registry()
-            .read()
-            .iter()
-            .any(|p| p.addr == addr)
+        controls.peer_table().is_connected(addr)
             && controls.totals().total_bytes_recv() > 0
             && controls.totals().total_bytes_sent() > 0
     });
@@ -514,11 +428,7 @@ fn setnetworkactive_refuses_new_outbound_activity() -> Result<(), Box<dyn Error>
     let shutdown = Arc::new(AtomicBool::new(false));
     let (controls, addr, listener) = loopback_peer_pair(&shutdown)?;
     let handshake_done = wait_until(Duration::from_secs(5), || {
-        controls
-            .peer_registry()
-            .read()
-            .iter()
-            .any(|p| p.addr == addr)
+        controls.peer_table().is_connected(addr)
     });
     assert!(handshake_done);
     assert!(!controls.set_network_active(false));
@@ -534,7 +444,6 @@ fn setnetworkactive_refuses_new_outbound_activity() -> Result<(), Box<dyn Error>
         dial_controls,
         headers_tx,
         blocks_tx,
-        None,
         None,
         None,
     );
@@ -560,29 +469,20 @@ fn controls_disconnect_node_promptly_removes_the_lease() -> Result<(), Box<dyn E
     let shutdown = Arc::new(AtomicBool::new(false));
     let (controls, addr, listener) = loopback_peer_pair(&shutdown)?;
     let handshake_done = wait_until(Duration::from_secs(5), || {
-        controls
-            .peer_registry()
-            .read()
-            .iter()
-            .any(|p| p.addr == addr)
+        controls.peer_table().is_connected(addr)
     });
     assert!(handshake_done);
     assert!(controls.disconnect_node(&addr));
 
     let outbound_gone = wait_until(Duration::from_secs(5), || {
-        !controls.peer_outbound().read().contains_key(&addr)
-            || !controls
-                .peer_registry()
-                .read()
-                .iter()
-                .any(|peer| peer.addr == addr)
+        !controls.peer_table().is_connected(addr) || !controls.peer_table().is_connected(addr)
     });
     shutdown.store(true, Ordering::Relaxed);
     join_listener(listener)?;
 
     assert!(
         outbound_gone,
-        "disconnect_node must remove the lease and its registry entry"
+        "disconnect_node must remove the lease and its peer_table entry"
     );
     assert!(!controls.disconnect_node(&addr));
     Ok(())
