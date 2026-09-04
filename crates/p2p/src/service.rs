@@ -57,7 +57,8 @@ pub struct P2pServiceConfig {
     pub outbound_queue_limit: usize,
     /// Inbound block queue capacity.
     pub inbound_block_queue_limit: usize,
-    /// Download scheduling budget owned by the P2P service.
+    /// Budget for the service-held download window. Production scheduling
+    /// uses `BlockSync`'s window.
     pub download_budget: SyncBudget,
 }
 
@@ -145,6 +146,8 @@ pub struct P2pService {
     inbound_headers_rx: Arc<Mutex<Receiver<crate::InboundHeaders>>>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+    /// Service-held window. Production `BlockSync` owns a separate window
+    /// and does not call [`Self::select_download_peers`].
     download_window: Arc<Mutex<DownloadWindow>>,
     workers: Mutex<Option<Workers>>,
     /// Per-start cancellation observed by listener and connection threads.
@@ -639,11 +642,11 @@ impl P2pService {
         self.lifecycle.disconnect_source(source)
     }
 
-    /// Selects source-bearing peers for one block-download scheduling pass.
+    /// Selects source-bearing peers from the service-held download window.
     ///
-    /// The lifecycle snapshot and the mutable download window are read and
-    /// updated by the same P2P owner, so callers cannot accidentally pair a
-    /// peer decision with a later address lookup.
+    /// Production `BlockSync` owns a separate window and does not call this
+    /// helper. The lifecycle snapshot and this window are still read in
+    /// lifecycle-before-window order so a future caller cannot invert locks.
     #[must_use]
     pub fn select_download_peers(&self, our_height: u32, now: Instant) -> crate::SyncPeerSelection {
         // Keep lifecycle-before-window ordering consistent with staller

@@ -48,6 +48,10 @@ const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
+///
+/// Owns the production [`DownloadWindow`]. Session identity stays on the
+/// shared [`PeerTable`]; this orchestrator calls identity-checked table
+/// methods and does not schedule through `P2pService::select_download_peers`.
 pub struct BlockSync {
     handles: crate::apply::ApplyHandles,
     peer_table: Arc<PeerTable>,

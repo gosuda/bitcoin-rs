@@ -10,21 +10,23 @@ made stale sync decisions capable of racing a same-address replacement.
 
 ## Decision
 
-`P2pService` is the runtime owner of P2P control state, workers, and download
-policy. Its `PeerLifecycle` handle is the node-facing mutation boundary over
-the single `PeerTable` session store. P2P connection threads register before
-handshake, publish metadata only while the publishing lease remains current,
-replace a genuine predecessor, and remove themselves during teardown.
+`P2pService` is the runtime owner of P2P control state and workers. Live
+sessions live in one `PeerTable`. `PeerLifecycle` wraps that table for
+service-owned send, cancel, and disconnect helpers. P2P connection threads
+register before handshake, publish metadata only while the publishing lease
+remains current, replace a genuine predecessor, and remove themselves during
+teardown.
 
 Higher layers receive a handshake-completion notification carrying the
 `PeerSource` only after P2P publishes that same connection as ready.
 `publish_info` is the identity-checked Ready transition; a stale predecessor
 whose publish is rejected must not reset address-scoped scheduler state.
-`BlockSync` clears leftover download and header state for the address when the
-current connection becomes ready. Ready-peer snapshots carry the same source,
-and sync queues messages through an identity-checked lease rather than
-resolving a `SocketAddr` again. Higher layers cannot insert into or remove from
-the shared maps. The source carries the connection identity, so a stale
+`BlockSync` owns the production download window and header-request state. It
+clears leftover address-scoped scheduler state when the current connection
+becomes ready, and it may disconnect a current `PeerSource` after a peer-fault
+headers batch. Ready-peer snapshots carry the same source, and sync queues
+messages through an identity-checked lease rather than resolving a
+`SocketAddr` again. The source carries the connection identity, so a stale
 operation cannot publish, send to, or cancel a replacement.
 
 ## Guardrails
@@ -34,8 +36,9 @@ operation cannot publish, send to, or cancel a replacement.
 - Scheduler state is reset only after the current lease publishes ready
   metadata. A stale predecessor must not notify.
 - Handshake metadata is published only for the current lease.
-- The node and RPC use one shared `Arc<P2pService>`; its listener workers and
-  download policy use the service-owned lifecycle.
+- The node and RPC use one shared `Arc<P2pService>` for workers and
+  session-store access. Production block-download scheduling stays on
+  `BlockSync`'s download window.
 - Ready-peer selection carries `PeerSource` through the final send.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale
