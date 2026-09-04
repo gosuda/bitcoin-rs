@@ -298,10 +298,10 @@ fn hash_avx2_parent_batches<T: Copy>(
 
 /// Core `CheckWitnessMalleation`.
 ///
-/// When SegWit is active and the coinbase has a BIP141 commitment, the
+/// When `SegWit` is active and the coinbase has a BIP141 commitment, the
 /// coinbase witness must be a single 32-byte reserved nonce and the
 /// commitment must match. Witness data without a commitment, or before
-/// SegWit, is `unexpected-witness`.
+/// `SegWit`, is `unexpected-witness`.
 ///
 /// `wtxids` must contain one witness ID per block transaction in block order
 /// when a commitment is present and the reserved nonce is well-formed.
@@ -333,7 +333,7 @@ pub fn check_witness_malleation(
 /// Returns whether the block's BIP141 commitment matches `wtxids`.
 ///
 /// Callers that already require a commitment (window precheck under active
-/// SegWit with witness data) use this as a boolean. Full consensus uses
+/// `SegWit` with witness data) use this as a boolean. Full consensus uses
 /// [`check_witness_malleation`].
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
     check_witness_malleation(block, true, wtxids).is_ok()
