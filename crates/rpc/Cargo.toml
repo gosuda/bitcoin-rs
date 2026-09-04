@@ -39,6 +39,10 @@ tracing.workspace = true
 sha2.workspace = true
 corepc-types.workspace = true
 
+[[bench]]
+name = "http_response"
+harness = false
+
 [dev-dependencies]
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
