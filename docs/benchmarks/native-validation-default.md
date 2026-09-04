@@ -33,10 +33,16 @@ NATIVE_TX_INVALID_FAILURES = 0
 ```
 
 Those columns feed Core's `script_tests.json`, `tx_valid.json`, and
-`tx_invalid.json` through `Interpreter`. A growth of any count fails the
-lane. Kernel-vs-interpreter fixture parity lives in
-`crates/consensus/tests/kernel_block_parity.rs` (legacy, P2SH, bare
-multisig, SegWit v0, Taproot key-path and script-path).
+`tx_invalid.json` through `Interpreter`. The harness reports parsed, executed,
+skipped, and failed rows (including skip reasons); the recorded gate is scoped
+to runnable rows and also requires nonzero execution, rather than claiming
+that zero mismatches covers rows it cannot execute. Kernel-
+vs-interpreter fixture parity lives in
+`crates/consensus/tests/kernel_block_parity.rs`: the committed differential is
+currently Taproot key-path, script-path has a separate non-vacuity check, and
+legacy, P2SH, bare multisig, and SegWit v0 fixtures are kernel-only in that
+harness. Native coverage for every class is established by the Core-vector
+lane.
 
 The earlier stub (`verify_non_taproot_portable`, bare `OP_TRUE` only) is
 gone. `CONCEPTS.md` and the crate rustdocs that still described it were
