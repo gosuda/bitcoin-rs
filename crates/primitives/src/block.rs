@@ -67,8 +67,6 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::hashes::Hash as _;
-
     use super::Block;
     use crate::encode::DecodeError;
 
@@ -90,24 +88,27 @@ mod tests {
     }
 
     #[test]
-    fn block_reencode_and_hash_match_bitcoin_crate_for_fixture() -> Result<()> {
+    fn fixture_block_reencodes_and_hashes_to_published_id() -> Result<()> {
         let bytes = std::fs::read("tests/testdata/363731.bin")?;
-        let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)?;
         let block = Block::consensus_decode(&bytes)?;
 
         assert_eq!(crate::encode::consensus_bytes(&block), bytes);
         assert_eq!(
             block.block_hash(),
-            BlockHash(Hash256::from_le_bytes(oracle.block_hash().as_byte_array()))
+            "00000000000000000c28e23330c29046f19e817fe8fe039f4044b2b2882aef53"
+                .parse::<BlockHash>()?
         );
         Ok(())
     }
 
     #[test]
-    fn size_and_weight_match_serialized_bytes_and_bitcoin_crate() -> Result<()> {
-        for fixture in ["tests/testdata/0.bin", "tests/testdata/363731.bin"] {
+    fn size_and_weight_match_serialized_bytes_and_pinned_weights() -> Result<()> {
+        let cases: &[(&str, usize, usize, u64)] = &[
+            ("tests/testdata/0.bin", 285, 285, 1140),
+            ("tests/testdata/363731.bin", 749_141, 749_141, 2_996_564),
+        ];
+        for (fixture, total, stripped, weight) in cases {
             let bytes = std::fs::read(fixture)?;
-            let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)?;
             let block = Block::consensus_decode(&bytes)?;
 
             assert_eq!(block.total_size(), bytes.len(), "{fixture}");
@@ -116,7 +117,9 @@ mod tests {
                 bytes.len(),
                 "{fixture}"
             );
-            assert_eq!(block.weight(), oracle.weight().to_wu(), "{fixture}");
+            assert_eq!(block.total_size(), *total, "{fixture}");
+            assert_eq!(block.stripped_size(), *stripped, "{fixture}");
+            assert_eq!(block.weight(), *weight, "{fixture}");
             assert_eq!(
                 block.weight(),
                 u64::try_from(block.stripped_size())?

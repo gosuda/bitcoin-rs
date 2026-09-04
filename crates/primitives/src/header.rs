@@ -43,29 +43,25 @@ impl Header {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::hashes::Hash as _;
-
     use super::Header;
-    use crate::{BlockHash, Hash256, encode::DecodeError};
+    use crate::{BlockHash, encode::DecodeError};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
     #[test]
-    fn header_hash_matches_bitcoin_crate() -> Result<()> {
+    fn genesis_header_hash_matches_published_id() -> Result<()> {
         let bytes = std::fs::read("tests/testdata/0.bin")?;
-        let block: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)?;
         let header = Header::consensus_decode(&bytes[..80])?;
 
-        let expected = BlockHash(Hash256::from_le_bytes(
-            block.header.block_hash().as_byte_array(),
-        ));
-        let oracle_header = &block.header;
-
-        assert_eq!(header.version, oracle_header.version.to_consensus());
-        assert_eq!(header.time, oracle_header.time);
-        assert_eq!(header.nonce, oracle_header.nonce);
-        assert_eq!(header.bits, oracle_header.bits.to_consensus());
-        assert_eq!(header.compute_hash(), expected);
+        assert_eq!(header.version, 1);
+        assert_eq!(header.time, 1_231_006_505);
+        assert_eq!(header.nonce, 2_083_236_893);
+        assert_eq!(header.bits, 0x1d00_ffff);
+        assert_eq!(
+            header.compute_hash(),
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+                .parse::<BlockHash>()?
+        );
         assert_eq!(crate::encode::consensus_bytes(&header), &bytes[..80]);
         Ok(())
     }
