@@ -99,6 +99,8 @@ pub struct BlockTemplate {
     /// Optional deployments available for versionbits negotiation.
     pub version_bits_available: Vec<AvailableMiningRule>,
     /// Header-version bits the solver must preserve.
+    ///
+    /// Core v31 `getblocktemplate` always reports `vbrequired` as 0.
     pub version_bits_required: u32,
     /// Capabilities implemented by this template producer.
     pub capabilities: Vec<MiningCapability>,

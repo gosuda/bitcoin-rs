@@ -699,20 +699,15 @@ impl MiningCoordinator {
             tip.tip_id,
             candidate.height,
         );
-        let mut required = 0_u32;
         let available = signalling
             .into_iter()
-            .map(|deployment| {
-                if deployment.locked_in {
-                    required |= 1_u32 << u32::from(deployment.bit);
-                }
-                AvailableMiningRule {
-                    rule: MiningRule::new(deployment.name),
-                    bit: deployment.bit,
-                }
+            .map(|deployment| AvailableMiningRule {
+                rule: MiningRule::new(deployment.name),
+                bit: deployment.bit,
             })
             .collect();
-        (available, required)
+        // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
+        (available, 0)
     }
 
     fn propose(&self, block: &Block) -> BlockValidationResult {
