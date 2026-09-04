@@ -6,7 +6,7 @@ use bitcoin_rs_mempool::{EntryId as MempoolEntryId, Mempool};
 use bitcoin_rs_primitives::Hash256;
 use serde::{Deserialize, Serialize};
 
-use crate::coinbase::{MiningError, block_subsidy, witness_commitment_script};
+use crate::coinbase::{MiningError, witness_commitment_script};
 use crate::policy::MiningPolicy;
 
 /// Parameters supplied by chain state for one `getblocktemplate` response.
@@ -16,6 +16,8 @@ pub struct BlockTemplateParams {
     pub previous_block_hash: Hash256,
     /// Candidate block height.
     pub height: u32,
+    /// Subsidy halving interval for the active network.
+    pub subsidy_halving_interval: u32,
     /// Candidate block version.
     pub version: i32,
     /// Compact target bits as an eight-character big-endian hex string.
@@ -131,7 +133,10 @@ impl BlockTemplate {
             )?);
         }
 
-        let coinbasevalue = block_subsidy(params.height)
+        let coinbasevalue = bitcoin_rs_consensus::block_subsidy(
+                params.height,
+                params.subsidy_halving_interval,
+            )
             .checked_add(fees)
             .ok_or(MiningError::CoinbaseValueOverflow)?;
         let commitment = witness_commitment(wtxids).ok_or(MiningError::WitnessCommitment)?;

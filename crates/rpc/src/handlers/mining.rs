@@ -296,15 +296,17 @@ fn assemble(
     };
     let current_time = u32::try_from(now).unwrap_or(u32::MAX).max(min_time);
 
-    let params = BlockTemplateParams {
+    let sequence = ctx.mempool.read().sequence_number();
+      let params = BlockTemplateParams {
         previous_block_hash: tip.hash,
         height,
+        subsidy_halving_interval: ctx.chain_network.subsidy_halving_interval(),
         version: VERSIONBITS_TOP_BITS,
         bits: format!("{:08x}", bits.to_consensus()),
         target: target_hex(bits),
         min_time,
         current_time,
-        long_poll_id: ctx.mining_template_id.load().to_string(),
+        long_poll_id: format!("{}-{}", tip.hash.to_string_be(), sequence),
         max_weight: MAX_BLOCK_WEIGHT,
         max_sigops: MAX_BLOCK_SIGOPS_COST,
         max_size: MAX_BLOCK_SERIALIZED_SIZE,
@@ -454,7 +456,7 @@ fn estimate_current_block(ctx: &Context) -> (u64, u64) {
         let Some(entry) = pool.entry(*entry_id) else {
             continue;
         };
-        weight = weight.saturating_add(u64::from(entry.vsize).saturating_mul(4));
+        weight = weight.saturating_add(entry.tx.weight().to_wu());
         count = count.saturating_add(1);
     }
     (weight, count)
