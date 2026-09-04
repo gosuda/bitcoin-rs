@@ -31,6 +31,9 @@ precedence rule and the index of contract pages live in
   [db-migration.md](policies/db-migration.md) covers on-disk schema changes.
 - [benchmarks/](benchmarks/) holds the retained benchmark notes:
   [end-to-end-sync.md](benchmarks/end-to-end-sync.md),
+  [offline-full-validation.md](benchmarks/offline-full-validation.md),
+  [p2p-loopback.md](benchmarks/p2p-loopback.md),
+  [muhash-rpc.md](benchmarks/muhash-rpc.md),
   [index-read-path.md](benchmarks/index-read-path.md), and
   [utxo-memory.md](benchmarks/utxo-memory.md). Read the methodology before
   quoting any number: the results depend on CPU pinning and on whether the
