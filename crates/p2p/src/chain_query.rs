@@ -1,26 +1,29 @@
-//! Node-side adapter for server-side P2P active-chain requests.
+//! Active-chain serving for `getheaders` / `getdata`.
 //!
-//! Headers come from `BlockTree`; block bodies come from the shared
-//! [`BlockBodySource`] when records are metadata-only.
+//! Locator interpretation, header-walk policy, and inventory serving live
+//! here. [`BlockTree`] answers active-chain identity; [`BlockBodySource`]
+//! supplies bodies.
 
-use alloc::sync::Arc;
+use std::sync::Arc;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_p2p::{ChainQuery, InventoryServing, PeerError};
+use bitcoin_rs_chain::{BlockBodySource, BlockTree};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
-use bitcoin_rs_rpc::context::BlockBodySource;
 use parking_lot::RwLock;
-/// Read-only in-memory active-chain view for P2P `getheaders` / `getdata`.
+
+use crate::dispatch::{ChainQuery, InventoryServing};
+use crate::wire::PeerError;
+
+/// Read-only active-chain view for P2P `getheaders` / `getdata`.
 #[derive(Clone)]
-pub struct NodeP2pChainQuery {
+pub struct ActiveChainQuery {
     block_tree: Arc<RwLock<BlockTree>>,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
 }
 
-impl NodeP2pChainQuery {
-    /// Builds a P2P chain query view over the node's shared active-chain state.
+impl ActiveChainQuery {
+    /// Builds a P2P chain query view over shared active-chain state.
     #[must_use]
     pub const fn new(block_tree: Arc<RwLock<BlockTree>>) -> Self {
         Self {
@@ -29,21 +32,35 @@ impl NodeP2pChainQuery {
         }
     }
 
-    /// Returns `self` with a durable body source for metadata-only block records.
+    /// Returns `self` with a durable body source for metadata-only headers.
     #[must_use]
     pub fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
         self.block_body_source = Some(source);
         self
     }
-}
 
-impl core::fmt::Debug for NodeP2pChainQuery {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("NodeP2pChainQuery").finish_non_exhaustive()
+    fn load_active_block_at_height(&self, current_height: u32, hash: BlockHash) -> Option<Block> {
+        let bytes = self
+            .block_body_source
+            .as_ref()?
+            .block_body(current_height, hash)?;
+        let block = Block::consensus_decode(&bytes).ok()?;
+        if block.block_hash() != hash {
+            return None;
+        }
+        let tree = self.block_tree.read();
+        (tree.active_height_of(tree.tip()?.tip_id, hash.into()) == Some(current_height))
+            .then_some(block)
     }
 }
 
-impl ChainQuery for NodeP2pChainQuery {
+impl core::fmt::Debug for ActiveChainQuery {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ActiveChainQuery").finish_non_exhaustive()
+    }
+}
+
+impl ChainQuery for ActiveChainQuery {
     fn headers_after(
         &self,
         locator_hashes: &[BlockHash],
@@ -66,7 +83,7 @@ impl ChainQuery for NodeP2pChainQuery {
 
         let mut height = locator_hashes
             .iter()
-            .find_map(|hash| active_height(&tree, tip.tip_id, *hash))
+            .find_map(|hash| tree.active_height_of(tip.tip_id, (*hash).into()))
             .and_then(|height| height.checked_add(1))
             .unwrap_or(1);
         let has_stop = stop_hash != BlockHash::default();
@@ -108,14 +125,12 @@ impl ChainQuery for NodeP2pChainQuery {
             let current_height = {
                 let tree = self.block_tree.read();
                 tree.tip()
-                    .and_then(|tip| active_height(&tree, tip.tip_id, hash))
+                    .and_then(|tip| tree.active_height_of(tip.tip_id, hash.into()))
             };
             let Some(current_height) = current_height else {
                 outcome.not_found.push(*item);
                 continue;
             };
-            // I7: the gate is consulted exactly once, immediately before a
-            // body load that the active-chain metadata says can exist.
             if !headroom() {
                 outcome.halted = true;
                 return Ok(outcome);
@@ -130,21 +145,6 @@ impl ChainQuery for NodeP2pChainQuery {
     }
 }
 
-impl NodeP2pChainQuery {
-    fn load_active_block_at_height(&self, current_height: u32, hash: BlockHash) -> Option<Block> {
-        let bytes = self
-            .block_body_source
-            .as_ref()?
-            .block_body(current_height, hash)?;
-        let block = Block::consensus_decode(&bytes).ok()?;
-        if block.block_hash() != hash {
-            return None;
-        }
-        let tree = self.block_tree.read();
-        (active_height(&tree, tree.tip()?.tip_id, hash) == Some(current_height)).then_some(block)
-    }
-}
-
 fn header_for_active_stop(
     tree: &BlockTree,
     tip_id: bitcoin_rs_chain::NodeId,
@@ -153,21 +153,9 @@ fn header_for_active_stop(
     if stop_hash == BlockHash::default() {
         return None;
     }
-    let height = active_height(tree, tip_id, stop_hash)?;
+    let height = tree.active_height_of(tip_id, stop_hash.into())?;
     let node_id = tree.node_at_height_from(tip_id, height)?;
     Some(tree.node(node_id).ok()?.header)
-}
-
-fn active_height(
-    tree: &BlockTree,
-    tip_id: bitcoin_rs_chain::NodeId,
-    hash: BlockHash,
-) -> Option<u32> {
-    let hash = hash256(hash);
-    let candidate = tree.node_by_hash(hash)?;
-    let active_id = tree.node_at_height_from(tip_id, candidate.height)?;
-    let active = tree.node(active_id).ok()?;
-    (active.hash == hash).then_some(active.height)
 }
 
 fn inventory_block_hash(item: &Inventory) -> Option<BlockHash> {
@@ -184,18 +172,12 @@ fn inventory_block_hash(item: &Inventory) -> Option<BlockHash> {
     }
 }
 
-fn hash256(hash: BlockHash) -> Hash256 {
-    hash.into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    // seam: P2P inventory wire hashes are rust-bitcoin newtypes at this boundary
     use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::consensus_bytes;
-    use bitcoin_rs_rpc::context::BlockBodySource;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -211,8 +193,6 @@ mod tests {
         }
     }
 
-    /// Body source serving several recorded bodies, counting loads, and
-    /// tripping an assertion when a load would exceed the derived bound.
     struct CountingBodySource {
         bodies: Vec<(u32, BlockHash, Vec<u8>)>,
         loads: AtomicUsize,
@@ -237,11 +217,10 @@ mod tests {
         }
     }
 
-    /// Collecting form of the streaming serve for assertion convenience.
     fn serve_collect(
-        query: &NodeP2pChainQuery,
+        query: &ActiveChainQuery,
         items: &[Inventory],
-    ) -> Result<(InventoryServing, Vec<Block>), bitcoin_rs_p2p::PeerError> {
+    ) -> Result<(InventoryServing, Vec<Block>), PeerError> {
         let blocks = RefCell::new(Vec::new());
         let outcome = query.serve_inventory_blocks(items, &|| true, &mut |block| {
             blocks.borrow_mut().push(block);
@@ -250,7 +229,6 @@ mod tests {
         Ok((outcome, blocks.into_inner()))
     }
 
-    /// Converts a native [`BlockHash`] to a `bitcoin::BlockHash` for P2P inventory.
     fn wire_hash(hash: BlockHash) -> WireBlockHash {
         WireBlockHash::from_byte_array(*hash.as_bytes())
     }
@@ -324,7 +302,7 @@ mod tests {
         let active1_id = tree.insert_node(Some(genesis_id), active1, NodeStatus::Active)?;
         tree.insert_node(Some(active1_id), active2, NodeStatus::Active)?;
         tree.insert_node(Some(genesis_id), fork1, NodeStatus::Stale)?;
-        let query = NodeP2pChainQuery::new(Arc::new(RwLock::new(tree)));
+        let query = ActiveChainQuery::new(Arc::new(RwLock::new(tree)));
 
         let response = query.headers_after(&[fork1.compute_hash()], BlockHash::default(), 10);
 
@@ -507,8 +485,6 @@ mod tests {
             .zip(&blocks)
             .map(|(height, block)| (height, block.block_hash(), consensus_bytes(block)))
             .collect();
-        // Tripwire: a third body load panics, so deleting the gate
-        // consultation (mutation M6) turns this test red.
         let body_source = Arc::new(CountingBodySource {
             bodies,
             loads: AtomicUsize::new(0),
@@ -541,13 +517,13 @@ mod tests {
         Ok(())
     }
 
-    fn query_with(headers: Vec<Header>) -> Result<NodeP2pChainQuery, bitcoin_rs_chain::ChainError> {
+    fn query_with(headers: Vec<Header>) -> Result<ActiveChainQuery, bitcoin_rs_chain::ChainError> {
         let mut tree = BlockTree::new();
         let mut parent = None;
         for header in headers {
             parent = Some(tree.insert_node(parent, header, NodeStatus::Active)?);
         }
-        Ok(NodeP2pChainQuery::new(Arc::new(RwLock::new(tree))))
+        Ok(ActiveChainQuery::new(Arc::new(RwLock::new(tree))))
     }
 
     fn seed_headers(count: u32) -> Vec<Header> {

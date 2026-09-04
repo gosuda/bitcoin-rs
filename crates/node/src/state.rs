@@ -62,6 +62,12 @@ pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 256;
 // inbound-block bound so both channels share the same flood posture; a full
 // channel drops the hint and never blocks the commit path.
 pub(crate) const CHAIN_HINT_CHANNEL_LIMIT: usize = INBOUND_BLOCK_CHANNEL_LIMIT;
+// Bounds inbound peer transactions between the per-peer listener threads and
+// the single ingress consumer. A full channel applies TCP backpressure to
+// that peer's read loop; other peers keep their own threads. Sized to absorb
+// a burst of honest `tx` deliveries without stalling header/block traffic on
+// the same connection under normal load.
+pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
 /// A coherent, non-torn view of the applied chain tip.
 ///
@@ -1421,7 +1427,7 @@ fn build_tx_index_open_spec(
 struct TxIndexSpawn {
     spec: crate::txindex_worker::TxIndexOpenSpec,
     generation: crate::txindex_worker::Generation,
-    block_source: crate::NodeBlockSource,
+    block_source: crate::txindex_worker::IndexBlockSource,
     body_source: Arc<dyn BlockBodySource>,
     wake_rx: Receiver<()>,
     recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
@@ -1448,8 +1454,8 @@ pub struct NodeState {
     tx_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>>>,
     /// Stable query adapter for txindex/script-index, constructed before open.
     tx_index_adapter: Option<Arc<crate::txindex_worker::TxIndexQueryAdapter>>,
-    /// Live capability report backing `getcapabilities`.
-    capabilities: Arc<crate::capabilities::NodeCapabilities>,
+    /// Live txindex status for the RPC `getcapabilities` projection.
+    txindex_status: Arc<crate::txindex_worker::TxIndexCapability>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
@@ -1479,6 +1485,10 @@ pub struct NodeState {
     inbound_headers_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundHeaders>>>,
     inbound_blocks_tx: Sender<bitcoin_rs_p2p::InboundBlock>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
+    inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    /// Process-wide P2P admission policy (orphan map + recent-rejects).
+    tx_admission: Arc<crate::tx_admission::TxAdmission>,
     chain_events: Arc<ChainEventPublisher>,
     chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
     apply_handles: crate::apply::ApplyHandles,
@@ -1738,9 +1748,10 @@ impl NodeState {
                     let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
                     let body_source: Arc<dyn bitcoin_rs_rpc::context::BlockBodySource> =
                         Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
-                    let block_source = crate::NodeBlockSource::new(Arc::clone(&blocks))
-                        .with_block_body_source(Arc::clone(&body_source))
-                        .with_block_tree(Arc::clone(&block_tree));
+                    let block_source =
+                        crate::txindex_worker::IndexBlockSource::new(Arc::clone(&blocks))
+                            .with_block_body_source(Arc::clone(&body_source))
+                            .with_block_tree(Arc::clone(&block_tree));
                     let lifecycle: Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>> =
                         Arc::new(arc_swap::ArcSwap::from_pointee(
                             crate::txindex_worker::TxIndexLifecycle::Opening,
@@ -1765,13 +1776,10 @@ impl NodeState {
                 }
                 None => (None, None, None, None),
             };
-        let capabilities = Arc::new(crate::capabilities::NodeCapabilities::new(
-            crate::capabilities::CapabilityInputs {
-                tx_lifecycle: tx_index_lifecycle.clone(),
-                tx_runtime: tx_index_runtime.clone(),
-                txindex_enabled: crate::capabilities::txindex_enabled(&config),
-                index_capabilities: tx_index_capabilities(&config),
-            },
+        let txindex_status = Arc::new(crate::txindex_worker::TxIndexCapability::new(
+            tx_index_lifecycle.clone(),
+            tx_index_runtime.clone(),
+            tx_index_capabilities(&config),
         ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
@@ -1804,6 +1812,9 @@ impl NodeState {
         let inbound_headers_rx = p2p.inbound_headers_receiver();
         let inbound_blocks_tx = p2p.inbound_blocks_sender();
         let inbound_blocks_rx = p2p.inbound_blocks_receiver();
+        let (inbound_tx_tx, inbound_tx_rx_raw) =
+            crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundTx>(INBOUND_TX_CHANNEL_LIMIT);
+        let inbound_tx_rx = Arc::new(Mutex::new(inbound_tx_rx_raw));
         let chain_event_hints_rx = Arc::new(Mutex::new(chain_event_hints_rx_raw));
         // The template-coordinator wake exists from node birth so the apply
         // path and the gateway can fire it before `run` builds the
@@ -1816,28 +1827,38 @@ impl NodeState {
         // `--zmq-pub-sequence` endpoint is configured; the mining
         // generation wake always does.
         let mempool_gateway = {
+            let composite = bitcoin_rs_mempool::CompositeObserver::new();
             let publisher = Arc::clone(&zmq_publisher);
-            let sequence: Option<Arc<dyn bitcoin_rs_mempool::MempoolObserver>> =
-                if publisher.wants_notifications() {
-                    let observer: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = Arc::new(
-                        crate::mempool_observer::MempoolSequenceObserver::new(publisher),
-                    );
-                    Some(observer)
-                } else {
-                    mempool_observer.cloned()
-                };
-            let observer = crate::mempool_observer::NodeMutationObserver::new(
-                sequence,
-                Arc::clone(&mining_generation),
-            );
-            // Intern it: one gateway per pool, so every route that resolves
-            // the pool - including a test attaching its own observer leg -
-            // reaches this instance and its observer slot.
+            if publisher.wants_notifications() {
+                composite.add_leg(
+                    "sequence",
+                    Arc::new(crate::zmq_publisher::MempoolSequenceObserver::new(
+                        publisher,
+                    )),
+                );
+            } else if let Some(observer) = mempool_observer.cloned() {
+                composite.add_leg("test", observer);
+            }
+            let cloned_mining = Arc::clone(&mining_generation);
+            let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
+            composite.add_leg("mining", mining_leg);
             bitcoin_rs_mempool::MempoolGateway::shared_with(
                 Arc::clone(&mempool),
-                Arc::new(observer),
+                Arc::new(composite),
             )
         };
+        let tx_admission = Arc::new(crate::tx_admission::TxAdmission::new(Arc::clone(
+            &mempool_gateway,
+        )));
+        tx_admission.attach_ingress(inbound_tx_tx.clone());
+        if let Err(error) = mempool_gateway.attach_observer_leg(
+            "tx-orphans",
+            Arc::new(crate::mempool_observer::OrphanWakeObserver::new(
+                Arc::clone(&tx_admission),
+            )),
+        ) {
+            tracing::error!(error, "failed to attach orphan-wake observer");
+        }
         let mut apply_handles = crate::apply::ApplyHandles {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
@@ -1866,6 +1887,7 @@ impl NodeState {
             )),
             journal,
             checkpoint_publisher: None,
+            tx_admission: Some(Arc::clone(&tx_admission)),
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
         // A restored checkpoint is durable at its own height by definition, so
@@ -1934,7 +1956,7 @@ impl NodeState {
             tx_index_worker: None,
             tx_index_lifecycle,
             tx_index_adapter,
-            capabilities,
+            txindex_status,
             prune_service,
             zmq_publisher,
             active_zmq_notifications,
@@ -1958,6 +1980,9 @@ impl NodeState {
             inbound_headers_rx,
             inbound_blocks_tx,
             inbound_blocks_rx,
+            inbound_tx_tx,
+            inbound_tx_rx,
+            tx_admission,
             chain_events: Arc::clone(&chain_events),
             chain_event_hints_rx,
             apply_handles,
@@ -2149,10 +2174,10 @@ impl NodeState {
         Ok(())
     }
 
-    /// Returns the live capability report provider for `getcapabilities`.
+    /// Returns the live txindex status source for `getcapabilities`.
     #[must_use]
-    pub fn capability_provider(&self) -> Arc<dyn bitcoin_rs_rpc::context::CapabilityProvider> {
-        self.capabilities.clone()
+    pub fn txindex_status(&self) -> Arc<dyn bitcoin_rs_rpc::capabilities::TxIndexStatusSource> {
+        self.txindex_status.clone()
     }
 
     /// Returns the manual pruning service when pruning is enabled.
@@ -2353,6 +2378,25 @@ impl NodeState {
         Arc::clone(&self.inbound_blocks_rx)
     }
 
+    /// Returns a cloned `Sender` that the P2P listener pushes inbound
+    /// transactions into for mempool admission.
+    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundTx> {
+        self.inbound_tx_tx.clone()
+    }
+
+    /// Returns the shared receiver handle drained by the tx-ingress consumer.
+    #[must_use]
+    pub fn inbound_tx_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>> {
+        Arc::clone(&self.inbound_tx_rx)
+    }
+
+    /// Returns the process-wide P2P admission policy (orphan map, recent-rejects,
+    /// and the [`bitcoin_rs_p2p::TxInventory`] implementation).
+    #[must_use]
+    pub fn tx_admission(&self) -> Arc<crate::tx_admission::TxAdmission> {
+        Arc::clone(&self.tx_admission)
+    }
+
     /// Returns the current coherent chain snapshot: the applied tip stamped
     /// with the process epoch and the commit sequence.
     #[must_use]
@@ -2483,7 +2527,7 @@ mod tests {
     };
     use bitcoin_rs_rpc::context::BlockRecord;
 
-    /// IDX-01: scriptindex mode selects ScriptLive and/or ScriptHistory.
+    /// IDX-01: scriptindex mode selects `ScriptLive` and/or `ScriptHistory`.
     #[test]
     fn script_index_capabilities_match_the_storage_contract() {
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -3039,6 +3083,36 @@ mod tests {
     }
 
     #[test]
+    fn inbound_tx_channel_is_bounded_against_flood() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p.listen.clear();
+        let state = NodeState::open(config, None)?;
+        let sender = state.inbound_tx_sender();
+        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+        let lease = bitcoin_rs_p2p::PeerLease::new(lease_tx);
+        let source = lease.source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        let tx = bitcoin_rs_primitives::Tx {
+            version: 1,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: 0,
+        };
+        for _ in 0..super::INBOUND_TX_CHANNEL_LIMIT {
+            sender
+                .try_send(bitcoin_rs_p2p::InboundTx::new(tx.clone(), source))
+                .unwrap_or_else(|error| panic!("send within the bound must succeed: {error}"));
+        }
+        let overflow = sender.try_send(bitcoin_rs_p2p::InboundTx::new(tx, source));
+        assert!(
+            matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
+            "channel must reject txs past INBOUND_TX_CHANNEL_LIMIT, got {overflow:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
     fn open_constructs_full_rpc_handle_set() -> anyhow::Result<()> {
         use tempfile::tempdir;
 
@@ -3475,6 +3549,8 @@ mod tests {
         std::fs::write(&current_file, [])?;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
+        // The prune is a no-op until a durable tip is published;
+        // `bitcoin_rs_storage::pruning::stage_block_and_undo_prune` owns file selection.
         state
             .durable_tip_height
             .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
@@ -3559,6 +3635,8 @@ mod tests {
 
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
+        // The prune is a no-op until a durable tip is published;
+        // `bitcoin_rs_storage::pruning::stage_block_and_undo_prune` owns file selection.
         state
             .durable_tip_height
             .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);

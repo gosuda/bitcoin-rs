@@ -19,6 +19,8 @@ core.*
 /.bitcoin-rs/
 /data/
 .env
+__pycache__/
+*.pyc
 
 # Agent task scratch is temporary; acceptance criteria belong in issues/PRs.
 .antigravitycli/

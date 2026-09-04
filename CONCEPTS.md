@@ -103,6 +103,7 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 `bitcoin-rs-storage --bench kvstore_backends`, `bitcoin-rs-utxo --bench record_codec`,
 `bitcoin-rs-utxo --bench utxo_commit`, `bitcoin-rs-mining --bench candidate`,
 `bitcoin-rs-node --bench sync_pipeline`).
+
 ## Consensus validation
 
 ### bitcoinkernel
@@ -112,6 +113,9 @@ The pure-Rust script path under `--no-default-features`. It fully verifies the T
 
 ### One-shot kernel block parse
 Parsing each block exactly once with `bitcoinkernel::Block::new` (`KernelBlock`, `crates/consensus/src/kernel.rs`) and reusing that parse downstream for txids and the transaction objects script preparation borrows via `TransactionRef`. Price a replacement by everything it subsumes, not by the line item that motivated it.
+
+### Runtime-dispatched AVX2 Merkle
+Parent hashing of Merkle pairs uses Bitcoin Core's 8-way AVX2 SHA-256d kernel on x86-64 hosts that advertise AVX2, selected at runtime. Hosts without AVX2, and trees too small to fill one 8-pair batch, use the allocation-free scalar spine. Both paths implement Bitcoin's odd-leaf duplication and mutated-tree rule.
 
 ### Script-flag exceptions (BIP16Exception)
 Blocks Core hardcodes in `consensus.script_flag_exceptions` to validate under a reduced flag set. As of Core v29: mainnet 170060 (P2SH) and 692261 (Taproot); testnet3 394. The P2SH waivers are reproduced by `Network::is_bip16_p2sh_exception` (by block hash); missing them wedges full-validation sync. The Taproot override needs no exception because `is_taproot_active` already height-gates TAPROOT. Compare *effective* flag sets, not raw overrides.
@@ -283,8 +287,28 @@ Recording a statistic when its outcome is known rather than when the subject arr
 
 ## Measurement
 
+### Product performance cell
+One coordinate of the frozen 36-cell denominator: one product domain
+(`offline`, `p2p`, `muhash`), one corpus (`c150` or `cmodern`), one native
+architecture (`x86_64` or `arm64`), and one backend (`fjall`, `rocksdb`,
+or `redb`). Diagnostics are not cells. See
+`docs/contracts/hot-path-attribution.md`.
+
+### Hot-path attribution ledger
+The single inventory of product hot paths, overlap groups, and
+dispositions. Nested stage histograms are diagnostics. A cell residual
+stays `unmeasured` until seven valid bitcoin-rs walls exist and the
+exclusive union is subtracted from whole-run wall. Owner:
+`docs/benchmarks/hot-path-ledger.toml`.
+
 ### Retained benchmark contract
 Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained set: node sync/apply, reduced UTXO commit, end-to-end mempool admission, Merkle dispatch, and the real-file index resolver.
+
+### C150
+The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
+
+### Cmodern
+The modern product corpus: mainnet genesis through height 709,635, the first height with executed examples of every required post-P2SH script class. Identities, census, and oracle are owned by `docs/contracts/campaign-corpora.md`.
 
 ### Matched-harness comparison
 A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians. See `docs/solutions/performance/allocator-parity-changes-wall-not-cpu.md`.

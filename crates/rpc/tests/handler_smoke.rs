@@ -334,6 +334,23 @@ fn gettxoutsetinfo_empty_muhash_matches_core_digest() -> Result<(), Box<dyn std:
 }
 
 #[test]
+fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), Box<dyn std::error::Error>>
+{
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let result = handler.dispatch("gettxoutsetinfo", &json!(["muhash", null, false]))?;
+    let muhash = result
+        .get("muhash")
+        .and_then(JsonValueTrait::as_str)
+        .ok_or("muhash missing")?;
+    assert_eq!(
+        muhash,
+        "dd5ad2a105c2d29495f577245c357409002329b9f4d6182c0af3dc2f462555c8"
+    );
+    Ok(())
+}
+
+#[test]
 fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
