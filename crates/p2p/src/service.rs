@@ -224,8 +224,29 @@ impl P2pService {
             listeners.push(handle);
         }
 
-        let outbound = self.spawn_outbound_worker(chain_query, sync_wake_tx, peer_ready)?;
-        let bootstrap = self.spawn_bootstrap_worker()?;
+        let outbound = match self.spawn_outbound_worker(chain_query, sync_wake_tx, peer_ready) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.shutdown.store(true, Ordering::Release);
+                self.lifecycle.cancel_all();
+                for handle in listeners {
+                    let _ = handle.join();
+                }
+                return Err(error);
+            }
+        };
+        let bootstrap = match self.spawn_bootstrap_worker() {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.shutdown.store(true, Ordering::Release);
+                self.lifecycle.cancel_all();
+                for handle in listeners {
+                    let _ = handle.join();
+                }
+                let _ = outbound.join();
+                return Err(error);
+            }
+        };
         *slot = Some(Workers {
             listeners,
             outbound,
@@ -732,7 +753,11 @@ fn run_dns_peer_maintenance(
     tracing::info!(queued, "dns peer bootstrap queued initial addresses");
 
     while !shutdown.load(Ordering::Acquire) {
-        let live = lifecycle.live_leases().len();
+        let live = lifecycle
+            .live_leases()
+            .iter()
+            .filter(|(_, lease)| !lease.is_inbound())
+            .count();
         let delay = if live == 0 && queued > 0 && fast_refills < DNS_BOOTSTRAP_FAST_REFILL_LIMIT {
             fast_refills = fast_refills.saturating_add(1);
             DNS_BOOTSTRAP_REFILL_INTERVAL
@@ -751,7 +776,11 @@ fn run_dns_peer_maintenance(
         if wait_for_shutdown(&shutdown, delay) {
             break;
         }
-        let live = lifecycle.live_leases().len();
+        let live = lifecycle
+            .live_leases()
+            .iter()
+            .filter(|(_, lease)| !lease.is_inbound())
+            .count();
         if live >= target {
             continue;
         }
