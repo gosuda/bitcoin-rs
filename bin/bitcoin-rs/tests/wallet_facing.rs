@@ -129,6 +129,62 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn startup_child_kills_the_process_unless_handed_off() -> TestResult {
+    let failed = spawn_held_child()?;
+    let failed_pid = failed.id();
+    drop(StartupChild::new(failed));
+    assert!(
+        wait_until_dead(failed_pid),
+        "drop before handoff must kill and reap the child (pid {failed_pid})"
+    );
+
+    let started = spawn_held_child()?;
+    let started_pid = started.id();
+    let mut live = StartupChild::new(started).into_inner()?;
+    assert!(
+        pid_is_alive(started_pid),
+        "handoff must leave the child running (pid {started_pid})"
+    );
+    let _ignored = live.kill();
+    let _ignored = live.wait();
+    Ok(())
+}
+
+fn spawn_held_child() -> TestResult<Child> {
+    Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to spawn sleep: {error}").into())
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn wait_until_dead(pid: u32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if !pid_is_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return !pid_is_alive(pid);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Coinbase output the miner pays, besides the witness commitment.
 enum Coinbase<'a> {
     AnyoneCanSpend,
