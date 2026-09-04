@@ -6,6 +6,14 @@ path. `API-06` is `getnetworkhashps` snapshot consistency.
 
 ## Clauses
 
+### `API-07`: HTTP socket posture and response framing
+
+- **Owner**: `prepare_http_socket` and `write_http` in
+  `crates/rpc/src/server.rs` own the RPC HTTP transport posture.
+- Accepted RPC HTTP sockets enable `TCP_NODELAY` before request handling.
+- Each response writes its HTTP headers and body together as one vectored
+  write. These are transport guarantees independent of the JSON-RPC method.
+
 ### `API-01`: Single manifest dispatcher authority
 
 - **Owner**: `MANIFEST` in `crates/rpc/src/manifest.rs` is the single source of
@@ -115,6 +123,8 @@ owned by [wallet-facing.md](wallet-facing.md).
   `generate_without_submit_does_not_advance_the_tip`
 - `crates/mining/tests/template_shape.rs` tests `candidate_solves_an_unsolved_regtest_header`,
   `ordered_assembly_keeps_snapshot_order`
+- `API-07`:
+  - `crates/rpc/src/server.rs` tests `write_http_emits_header_and_body_as_one_vectored_write` and `prepare_http_socket_disables_nagle`
 - `API-06`:
   - `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`
   - `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows`
