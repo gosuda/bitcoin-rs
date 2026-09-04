@@ -10,6 +10,9 @@
 
 use std::process::ExitCode;
 
+use anyhow::Context;
+use bitcoin_rs_node::{MeasureStorageRequest, measure_storage_footprint, storage_footprint_json};
+
 mod cli;
 mod env;
 mod toml;
@@ -17,14 +20,10 @@ mod toml;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn load(
-    args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
+fn config_from(
+    cli: cli::CliArgs,
     vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
-    let cli = match <cli::CliArgs as clap::Parser>::try_parse_from(args) {
-        Ok(cli) => cli,
-        Err(error) => error.exit(),
-    };
     let mut layers = Vec::new();
     if let Some(path) = &cli.config {
         layers.push(toml::user_config_from_path(path)?);
@@ -35,10 +34,49 @@ fn load(
     bitcoin_rs_node::resolve(&layer_refs)
 }
 
+#[cfg(test)]
+fn load(
+    args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
+    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
+    let cli = match <cli::CliArgs as clap::Parser>::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
+    config_from(cli, vars)
+}
+
+fn measure_storage(cli: cli::CliArgs) -> anyhow::Result<()> {
+    let output = cli.measure_storage_output.clone();
+    let request = MeasureStorageRequest {
+        high_water_allocated_bytes: cli.storage_high_water_bytes,
+        stop_height: cli.measure_storage_stop_height,
+        stop_hash: cli.measure_storage_stop_hash.clone(),
+    };
+    let config = config_from(cli, std::env::vars_os())?;
+    let evidence = measure_storage_footprint(&config, &request)?;
+    let json = storage_footprint_json(&evidence)?;
+    if let Some(path) = output {
+        std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    } else {
+        println!("{json}");
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
-    match load(std::env::args_os(), std::env::vars_os())
-        .and_then(|config| bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default()))
-    {
+    let cli = match <cli::CliArgs as clap::Parser>::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
+    let result = if cli.measure_storage {
+        measure_storage(cli)
+    } else {
+        config_from(cli, std::env::vars_os()).and_then(|config| {
+            bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default())
+        })
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("bitcoin-rs: {error:#}");
@@ -206,7 +244,7 @@ hwm = 5000
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
     }
 
-    /// IDX-01: `--scriptindex=utxo` enables ScriptLive only.
+    /// IDX-01: `--scriptindex=utxo` enables `ScriptLive` only.
     #[test]
     fn cli_scriptindex_utxo_enables_live_only_index() {
         let config = super::load(

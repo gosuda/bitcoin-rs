@@ -4,6 +4,11 @@
 //! total bytes on disk and per-column-family bytes, and computes write
 //! amplification versus the logical data size.
 //!
+//! This example is a backend-comparison harness. Custody-grade data-directory
+//! evidence (allocated blocks, two ledgers, identity) is
+//! `bitcoin-rs --measure-storage`
+//! (`docs/contracts/storage-footprint.md`).
+//!
 //! Run:
 //!
 //! ```text

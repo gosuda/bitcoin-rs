@@ -57,6 +57,8 @@ pub mod shutdown;
 pub mod signal;
 /// Shared node state.
 pub mod state;
+/// Custody-grade data-directory storage-footprint evidence.
+pub mod storage_footprint;
 /// Block download orchestrator.
 pub mod sync;
 /// Inbound P2P transaction admission policy: orphan map and recent-rejects.
@@ -87,6 +89,10 @@ pub use mining::{GenerationKey, MiningCoordinator};
 pub use p2p_chain::NodeP2pChainQuery;
 pub use run::run;
 pub use state::{ApplyError, DisconnectError};
+pub use storage_footprint::{
+    DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES, EVIDENCE_FORMAT, MeasureStorageRequest,
+    StorageFootprintEvidence, measure_storage_footprint, storage_footprint_json,
+};
 pub use sync::BlockSync;
 pub use txindex_worker::TxIndexRuntime;
 pub use utxo_view::UtxoSetView;

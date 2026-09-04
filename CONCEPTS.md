@@ -268,6 +268,18 @@ script before returning a result. Its watermark is independent of historical
 script rows, so live queries can become ready while history is still catching
 up.
 
+### Logical owner ledger
+Exact serialized key and value bytes for each column family or owning
+subsystem. Explains data-model growth. It is not filesystem allocation and
+must not be added to the physical ledger.
+
+### Physical namespace ledger
+Allocated filesystem blocks (`st_blocks * 512`) for each top-level
+data-directory namespace. The source of the data-directory budget. A snapshot
+is a lower bound on peak allocation; a passing sub-1-TB default-node result
+requires a conservative high-water from an isolated filesystem or project
+quota. See [docs/contracts/storage-footprint.md](docs/contracts/storage-footprint.md).
+
 ### Consumer cursor
 The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/node/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.
 

@@ -59,6 +59,21 @@ pub(crate) struct CliArgs {
     pub(crate) metrics_bind: Option<SocketAddr>,
     #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
+    /// Measure data-directory storage ledgers and exit. Does not start the node.
+    #[arg(long = "measure-storage")]
+    pub(crate) measure_storage: bool,
+    /// Write `--measure-storage` JSON to this path instead of stdout.
+    #[arg(long = "measure-storage-output")]
+    pub(crate) measure_storage_output: Option<PathBuf>,
+    /// Conservative peak allocated bytes from an isolated filesystem or project quota.
+    #[arg(long = "storage-high-water-bytes")]
+    pub(crate) storage_high_water_bytes: Option<u64>,
+    /// Override the recorded stop height for a storage-footprint record.
+    #[arg(long = "measure-storage-stop-height")]
+    pub(crate) measure_storage_stop_height: Option<u32>,
+    /// Override the recorded stop hash (RPC display hex) for a storage-footprint record.
+    #[arg(long = "measure-storage-stop-hash")]
+    pub(crate) measure_storage_stop_hash: Option<String>,
 }
 
 impl CliArgs {
