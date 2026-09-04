@@ -779,6 +779,30 @@ fn unversioned_rows_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `IDX-05`: a markerless store with Funding rows and no headers is refused,
+/// not stamped format 5.
+#[test]
+fn ensure_format_version_rejects_markerless_funding_rows() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryStore::default());
+    store.put(
+        ColumnFamily::Funding,
+        &[0u8; bitcoin_rs_index::HASH_PREFIX_ROW_SIZE],
+        &[],
+    )?;
+
+    let indexer = Indexer::new(Arc::clone(&store));
+    assert!(matches!(
+        indexer.ensure_format_version(),
+        Err(IndexError::LegacyCursorlessIndex)
+    ));
+    assert!(
+        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.is_none(),
+        "must not stamp format 5 onto a markerless populated store"
+    );
+    Ok(())
+}
+
 #[test]
 fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
@@ -1935,6 +1959,8 @@ fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset()
     Ok(())
 }
 
+/// `IDX-05`: format 5 remains the only durable marker after historical reset
+/// and rebuild; the leftover ASCII dual-read key stays deleted.
 #[test]
 fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());

@@ -1716,6 +1716,17 @@ impl<S: KvStore> Indexer<S> {
     /// A populated store with a missing or foreign marker is an error, not a
     /// slower dual-read path. Empty-or-malformed *row values* still scan the
     /// block: that is corruption safety, not an old-format decoder.
+    ///
+    /// Emptiness matches [`IndexWriter::open`]: any row in `TxConfirmed`,
+    /// `Funding`, `Spending`, `BlockHeaders`, or `ScriptLive` is an index row.
+    /// A markerless store that already has one is
+    /// [`IndexError::LegacyCursorlessIndex`].
+    ///
+    /// Adopting an empty store writes format 5 and deletes the leftover ASCII
+    /// marker in one [`KvStore::write_durable`] batch (`IDX-05`). The commit
+    /// point is that durable batch. A crash before it is durable leaves the
+    /// store unmarked; the next call retries. Storage errors belong to the
+    /// caller.
     pub fn ensure_format_version(&self) -> Result<(), IndexError> {
         match self.store.get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)? {
             Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => Ok(()),
@@ -1726,7 +1737,9 @@ impl<S: KvStore> Indexer<S> {
                     .map_or(0, u32::from_le_bytes);
                 Err(IndexError::UnsupportedTxIndexFormatVersion { version })
             }
-            None if self.has_any_header()? => Err(IndexError::LegacyCursorlessIndex),
+            None if has_any_index_row(self.store.as_ref())? => {
+                Err(IndexError::LegacyCursorlessIndex)
+            }
             None => {
                 let mut batch = self.store.new_batch();
                 batch.put(
@@ -1735,21 +1748,10 @@ impl<S: KvStore> Indexer<S> {
                     &FORMAT_VERSION_VALUE,
                 );
                 batch.delete(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY);
-                self.store.write(batch)?;
+                self.store.write_durable(batch)?;
                 Ok(())
             }
         }
-    }
-
-    /// True when the header column family holds at least one row.
-    ///
-    /// Deliberately not `header_count`: a legacy index takes this branch on
-    /// every single start, and counting reads every row in the column family
-    /// and allocates an 80-byte array per row — roughly a million of each at
-    /// mainnet height — to answer a question that is only ever yes or no.
-    fn has_any_header(&self) -> Result<bool, IndexError> {
-        let mut rows = self.store.iter_prefix(ColumnFamily::BlockHeaders, &[])?;
-        Ok(rows.next().transpose()?.is_some())
     }
 
     const FLUSH_THRESHOLD_ROWS: usize = 500_000;
