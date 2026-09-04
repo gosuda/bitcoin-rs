@@ -4278,7 +4278,7 @@ mod consensus_rule_tests {
         Ok(())
     }
 
-    /// Shared-view parallel path: a bad script is a Script consensus error.
+    /// VAL-02: shared-view parallel path reports a bad script as a Script consensus error.
     #[test]
     fn verify_block_transactions_shared_view_path_rejects_bad_script()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4312,8 +4312,7 @@ mod consensus_rule_tests {
         Ok(())
     }
 
-    /// Overlay path: a same-block spend resolved against the frozen per-tx
-    /// snapshot view is also a Script consensus error on a bad redeem.
+    /// VAL-02: overlay path resolves a same-block bad redeem as a Script consensus error.
     #[test]
     fn verify_block_transactions_overlay_path_rejects_bad_script()
     -> Result<(), Box<dyn std::error::Error>> {

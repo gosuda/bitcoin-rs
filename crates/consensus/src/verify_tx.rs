@@ -185,15 +185,13 @@ fn verify_transaction_with_locktime_cutoff(
     };
 
     if !skip_scripts {
-        // Native interpreter is the only production script engine. The `kernel`
-        // feature compiles an independent oracle; it never replaces this path.
+        // VAL-02: use the native interpreter for the production path.
         let spent_outputs: Vec<TxOut> = prep
             .prevouts
             .iter()
             .map(|(_, prevout)| prevout.clone())
             .collect();
         let mut cache = bitcoin_rs_primitives::SighashCache::new(tx);
-        cache.precompute(&spent_outputs);
         for input_index in 0..tx.inputs.len() {
             verify_input_script_portable(input_index, &spent_outputs, tx, flags, cache.clone())?;
         }
@@ -1149,7 +1147,7 @@ mod tests {
         );
     }
 
-    /// Native interpreter rejects a mismatched `OP_EQUAL` scriptSig.
+    /// VAL-02: native interpreter rejects a mismatched `OP_EQUAL` scriptSig.
     #[test]
     fn native_rejects_script_sig_mismatch() {
         let outpoint = OutPoint {
