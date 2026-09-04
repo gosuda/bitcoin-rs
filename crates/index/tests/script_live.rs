@@ -3,7 +3,9 @@
 //! Everything here drives the same `IndexWriter` API the node's worker uses,
 //! with a map-backed [`SpentCoinScripts`] standing in for the undo-record
 //! anchor the node supplies in production. The properties under test are the
-//! ones #225 names as acceptance criteria: anchored deletes, same-block
+//! CONTRACT: IDX-01, IDX-02, IDX-03. The suite covers the live capability's
+//! configured mode, query surface, and consistency behavior.
+//! The properties under test are the ones #225 names as acceptance criteria: anchored deletes, same-block
 //! cancellation, the UTXO-admission spendability predicate, identity-specific
 //! point deletes, fail-closed unresolvable spends, watermark independence
 //! from history, and seed-then-stamp ordering.
