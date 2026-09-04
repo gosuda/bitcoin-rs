@@ -35,6 +35,8 @@ pub mod peer_info;
 pub mod peer_table;
 /// Runtime owner for P2P control state and workers.
 pub mod service;
+/// Peer TCP socket options: `TCP_NODELAY`, blocking I/O, poll timeouts.
+pub mod socket;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Bitcoin P2P wire codec.
@@ -61,6 +63,7 @@ pub use service::{
     P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
     apply_network_active,
 };
+pub use socket::configure_peer_stream;
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
 
