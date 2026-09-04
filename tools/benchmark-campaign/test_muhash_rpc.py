@@ -2331,13 +2331,127 @@ class CampaignControllerTests(unittest.TestCase):
             field="arm config",
         )
         source.write_bytes(b"replaced-config")
-        module._rehash_copy(
+        descriptor = module._open_verified_snapshot(
             destination, digest, module.MAX_RECEIPT_BYTES, "arm config copy"
         )
+        try:
+            self.assertEqual(
+                Path(f"/proc/self/fd/{descriptor}").read_bytes(), b"pinned-config"
+            )
+            with self.assertRaises(OSError):
+                os.write(descriptor, b"changed")
+        finally:
+            os.close(descriptor)
         with self.assertRaises(module.ContractError):
-            module._rehash_copy(
+            module._open_verified_snapshot(
                 source, digest, module.MAX_RECEIPT_BYTES, "operator config"
             )
+        shutil.rmtree(root, ignore_errors=True)
+
+    def test_verified_config_inode_survives_workspace_path_replace(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        root = _make_root("muhash-config-inode-")
+        path = root / "workspace-config"
+        path.write_bytes(b"pinned-config")
+        digest = _sha256(b"pinned-config")
+        descriptor = module._open_verified_snapshot(
+            path, digest, module.MAX_RECEIPT_BYTES, "arm config copy"
+        )
+        try:
+            replacement = root / "attacker-config"
+            replacement.write_bytes(b"replaced-config")
+            os.replace(replacement, path)
+            self.assertEqual(path.read_bytes(), b"replaced-config")
+            path.write_bytes(b"in-place-mutated")
+            self.assertEqual(
+                Path(f"/proc/self/fd/{descriptor}").read_bytes(), b"pinned-config"
+            )
+        finally:
+            os.close(descriptor)
+        shutil.rmtree(root, ignore_errors=True)
+
+    def test_spawn_reads_verified_config_after_workspace_replace(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        root = _make_root("muhash-spawn-inode-")
+        datadir = root / "data"
+        datadir.mkdir()
+        cookie = root / "rpc.cookie"
+        cookie.write_bytes(b"bench-user:secret")
+        cookie.chmod(0o600)
+        pinned = b'{"ok": true}'
+        config = root / "workspace-config"
+        config.write_bytes(pinned)
+        script = b"""#!/usr/bin/env python3
+import argparse, hashlib, time
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument("--bind")
+parser.add_argument("--port", type=int)
+parser.add_argument("--cookie")
+parser.add_argument("--config", required=True)
+parser.add_argument("--data-dir", required=True)
+args = parser.parse_args()
+Path(args.data_dir).mkdir(parents=True, exist_ok=True)
+digest = hashlib.sha256(Path(args.config).read_bytes()).hexdigest()
+(Path(args.data_dir) / "seen").write_text(digest)
+time.sleep(30)
+"""
+        daemon = root / "node.py"
+        daemon.write_bytes(script)
+        daemon.chmod(0o700)
+        spec = module.ArmSpec(
+            "core",
+            "core-arm",
+            daemon,
+            _sha256(script),
+            (
+                "{binary}",
+                "--bind",
+                "{rpc_bind}",
+                "--port",
+                "{rpc_port}",
+                "--cookie",
+                "{cookie}",
+                "--config",
+                "{config}",
+                "--data-dir",
+                "{data_dir}",
+            ),
+            "coinsdb",
+            module.FileRef(config, _sha256(pinned), len(pinned)),
+            datadir,
+        )
+        arm = module._ArmProcess(
+            spec,
+            daemon,
+            config,
+            cookie,
+            1,
+            ("bench-user", "secret"),
+            Decimal("1"),
+            1024,
+            1,
+            "aa" * 32,
+        )
+        replacement = root / "attacker-config"
+        replacement.write_bytes(b'{"ok": false}')
+        real_popen = module.subprocess.Popen
+
+        def hijack(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            os.replace(replacement, config)
+            return real_popen(*args, **kwargs)
+
+        previous_timeout = module.ARM_READY_TIMEOUT_NS
+        module.ARM_READY_TIMEOUT_NS = 200_000_000
+        module.subprocess.Popen = hijack  # type: ignore[method-assign]
+        try:
+            with self.assertRaises(module.ContractError):
+                arm.spawn()
+        finally:
+            module.subprocess.Popen = real_popen  # type: ignore[method-assign]
+            module.ARM_READY_TIMEOUT_NS = previous_timeout
+            arm.terminate()
+        self.assertEqual((datadir / "seen").read_text(), _sha256(pinned))
         shutil.rmtree(root, ignore_errors=True)
 
 
