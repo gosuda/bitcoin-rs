@@ -1236,6 +1236,7 @@ mod tests {
             RpcError::InvalidType("Missing data String key for proposal")
         ));
         assert_eq!(missing.code(), RpcError::CORE_INVALID_TYPE);
+        assert_eq!(missing.to_string(), "Missing data String key for proposal");
         for hex in ["", "00", "zz", "deadbeef"] {
             let error = getblocktemplate(&ctx, &json!([{"mode": "proposal", "data": hex}]))
                 .expect_err("undecodable proposal must fail");

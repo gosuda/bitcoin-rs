@@ -20,7 +20,10 @@ pub enum RpcError {
     #[error("invalid params: {0}")]
     InvalidParams(&'static str),
     /// Parameter value has the wrong JSON type.
-    #[error("invalid type: {0}")]
+    ///
+    /// Bitcoin Core's `RPC_TYPE_ERROR` (-3). Display is the Core message text
+    /// with no wrapper prefix.
+    #[error("{0}")]
     InvalidType(&'static str),
     /// Requested object was not found.
     #[error("not found: {0}")]

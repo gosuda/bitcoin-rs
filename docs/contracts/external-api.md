@@ -37,7 +37,9 @@ vocabulary.
   standard JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-3`
   (invalid type), `-5` (not found), `-8` (invalid parameter), `-9` (not
   connected), `-10` (initial download), `-22` (deserialization), `-25`
-  (verify error), and `-26` (verify rejected).
+  (verify error), and `-26` (verify rejected). Core `-3`, `-8`, and `-22`
+  messages are the Core text with no wrapper prefix (`InvalidType`,
+  `InvalidParameter`, `Deserialization`).
 - The node ships no wallet and holds no private key material. Methods that
   would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. PSBT combination/finalization and descriptor
@@ -162,7 +164,8 @@ vocabulary.
 - Unknown or non-string `mode` is Core `-8` (`Invalid mode`).
 - Proposal mode does not require the client to list the `proposal`
   capability. Missing `data` is Core `-3`
-  (`Missing data String key for proposal`). Decode uses
+  (`Missing data String key for proposal`) with no `invalid type:` prefix.
+  Decode uses
   `decode_submitted_block` (`API-11`): `-22` `Block decode failed`, leftover
   bytes ignored.
 
