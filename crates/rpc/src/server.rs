@@ -750,6 +750,7 @@ mod tests {
         assert!(rows[1].get("error").is_some());
     }
 
+    /// Proof of `API-07`: HTTP responses use the owned socket posture and one vectored write.
     #[test]
     fn write_http_emits_header_and_body_as_one_vectored_write() {
         struct VectoredSink {
@@ -785,6 +786,7 @@ mod tests {
         assert!(text.ends_with("\r\n\r\n{}"));
     }
 
+    /// Proof of `API-07`: accepted HTTP sockets enable TCP_NODELAY.
     #[test]
     fn prepare_http_socket_disables_nagle() -> io::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
