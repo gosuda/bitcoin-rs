@@ -809,7 +809,9 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut ctx = Context::new().with_mining_control(Arc::new(SmokeMiningControl::new()));
+        let mut ctx = Context::new();
+        ctx.chain_network = Network::Regtest;
+        let mut ctx = ctx.with_mining_control(Arc::new(SmokeMiningControl::new()));
         let tx = tx(1, vec![0x51]);
         let merkle_root = fixture_merkle_root(std::slice::from_ref(&tx));
         let block = Block {

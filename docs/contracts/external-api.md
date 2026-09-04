@@ -4,6 +4,7 @@
 [contracts precedence rule](README.md). `API-05` is the solo-mining generate
 path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
 BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
+`API-08` is mainnet template operational gates.
 
 ## Clauses
 
@@ -30,7 +31,9 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 
 - JSON-RPC failures map through `RpcError` (`crates/rpc/src/error.rs`):
   standard JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-3`
-  (invalid type) and `-5` (not found).
+  (invalid type), `-5` (not found), `-8` (invalid parameter), `-9` (not
+  connected), `-10` (initial download), `-25` (verify error), and `-26`
+  (verify rejected).
 - The node ships no wallet and holds no private key material. Methods that
   would reveal, import, create, or use private keys return
   `RpcError::MethodNotFound`. PSBT combination/finalization and descriptor
@@ -98,6 +101,16 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 - On signet, the template carries `signet` in `rules` (mandatory) and
   `signet_challenge`. Other networks omit `signet_challenge`.
 
+### `API-08`: Mainnet template operational gates
+
+- **Owner**: `ensure_template_ready` in `crates/rpc/src/handlers/mining.rs`.
+- Template mode on mainnet requires at least one live peer (`PeerTable`) and
+  that the node has left IBD (`Context::is_initial_block_download`). Failures
+  are Core `-9` (`bitcoin-rs is not connected!`) and `-10`
+  (`bitcoin-rs is in initial sync and waiting for blocks...`).
+- Proposal mode does not apply these gates. Networks other than mainnet skip
+  them, matching Core `IsTestChain()`.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -139,3 +152,7 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
   - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
     `signet_template_includes_challenge_and_signet_rule`
+- `API-08`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
+    `getblocktemplate_rejects_mainnet_during_ibd`,
+    `getblocktemplate_proposal_skips_mainnet_connection_gates`
