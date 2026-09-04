@@ -24,6 +24,7 @@ use bitcoin::block::{Header, Version as BlockVersion};
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin::constants::{COINBASE_MATURITY, genesis_block};
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256;
 use bitcoin::opcodes::all::OP_PUSHNUM_1;
 use bitcoin::script::Builder;
 use bitcoin::transaction::Version as TxVersion;
@@ -91,23 +92,7 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     );
 
     client.wait_for_scriptindex(&address)?;
-
-    let address_utxos = client.esplora_json(&format!("/address/{address}/utxo"))?;
-    let utxos = address_utxos
-        .as_array()
-        .ok_or("address UTXO response must be a JSON array")?;
-    assert!(
-        !utxos.is_empty(),
-        "P2WPKH coinbase must be visible on /address/{{addr}}/utxo: {address_utxos}"
-    );
-
-    let history = client.esplora_json(&format!("/address/{address}/txs"))?;
-    assert!(
-        history
-            .as_array()
-            .is_some_and(|entries| !entries.is_empty()),
-        "address history must list the funding transaction: {history}"
-    );
+    assert_script_activity(&client, &address, &p2wpkh)?;
 
     let spend_hex = spend_first_anyone_can_spend(&client, &p2wpkh)?;
     let broadcast = client.esplora_post("/tx", spend_hex.as_bytes())?;
@@ -432,6 +417,51 @@ impl Client {
 
 fn p2wpkh_script() -> ScriptBuf {
     ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]))
+}
+
+fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) -> TestResult {
+    let summary = client.esplora_json(&format!("/address/{address}"))?;
+    assert!(
+        summary.get("chain_stats").is_some(),
+        "address summary must include chain_stats: {summary}"
+    );
+
+    let address_utxos = client.esplora_json(&format!("/address/{address}/utxo"))?;
+    let utxos = address_utxos
+        .as_array()
+        .ok_or("address UTXO response must be a JSON array")?;
+    assert!(
+        !utxos.is_empty(),
+        "P2WPKH coinbase must be visible on /address/{{addr}}/utxo: {address_utxos}"
+    );
+
+    let history = client.esplora_json(&format!("/address/{address}/txs"))?;
+    assert!(
+        history
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "address history must list the funding transaction: {history}"
+    );
+
+    let script_hash = sha256::Hash::hash(script.as_bytes()).to_string();
+    let twin = client.esplora_json(&format!("/scripthash/{script_hash}"))?;
+    assert!(
+        twin.get("chain_stats").is_some(),
+        "scripthash summary must include chain_stats: {twin}"
+    );
+    let twin_utxos = client.esplora_json(&format!("/scripthash/{script_hash}/utxo"))?;
+    assert_eq!(
+        twin_utxos, address_utxos,
+        "scripthash UTXOs must match the address twin"
+    );
+    let twin_history = client.esplora_json(&format!("/scripthash/{script_hash}/txs"))?;
+    assert!(
+        twin_history
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "scripthash history must list the funding transaction: {twin_history}"
+    );
+    Ok(())
 }
 
 fn spend_first_anyone_can_spend(client: &Client, payout: &ScriptBuf) -> TestResult<String> {
