@@ -139,6 +139,33 @@ methods. There is no internal wallet: private-key and wallet-construction
 methods are absent, while key-free PSBT utilities (`combinepsbt`, `finalizepsbt`)
 and descriptor helpers remain for external signers.
 
+## External wallet
+
+Point any Esplora client at the same listener. `--scriptindex` must be on,
+or address and scripthash routes return HTTP 503.
+
+[bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw`) is the
+named external consumer:
+
+Start the node in one terminal:
+
+```sh
+./target/release/bitcoin-rs \
+  --network regtest \
+  --scriptindex \
+  --data-dir .bitcoin-rs-regtest \
+  --rpc-bind 127.0.0.1:18443
+```
+
+Then, in a second terminal, run the wallet while the node is still running:
+
+```sh
+btcw balance -n regtest -u http://127.0.0.1:18443
+```
+
+The wallet stays in that repository. This node only serves the public
+surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).
+
 ## Verifying everything yourself
 
 Mainnet skips historical script checks below the pinned assume-valid anchor.
