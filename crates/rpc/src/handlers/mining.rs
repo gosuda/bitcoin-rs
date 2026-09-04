@@ -120,18 +120,11 @@ pub(crate) fn getnetworkhashps(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .mining_control
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
-    let array = params_array(params)?;
-    if array.len() > 2 {
+    if !params.is_null() && params_array(params)?.len() > 2 {
         return Err(RpcError::InvalidParams("too many parameters"));
     }
     let lookup = optional_i64(params, 0, 120)?;
     let height = optional_i64(params, 1, -1)?;
-    if lookup != -1 && lookup <= 0 {
-        return Err(RpcError::InvalidParams("nblocks must be positive or -1"));
-    }
-    if height < -1 {
-        return Err(RpcError::InvalidParams("height must be -1 or non-negative"));
-    }
     let rate = control
         .network_hash_ps(lookup, height)
         .map_err(map_mining_control_error)?;
@@ -447,10 +440,9 @@ fn render_validation_result(result: BlockValidationResult) -> Value {
 
 fn map_mining_control_error(error: MiningControlError) -> RpcError {
     match error {
-        MiningControlError::InvalidRequest(message) => RpcError::InvalidParams(message.to_string()),
-        MiningControlError::Unavailable(message) | MiningControlError::Failed(message) => {
-            RpcError::Internal(message.to_string())
-        }
+        MiningControlError::InvalidRequest(message)
+        | MiningControlError::Unavailable(message)
+        | MiningControlError::Failed(message) => RpcError::Internal(message.to_string()),
     }
 }
 
