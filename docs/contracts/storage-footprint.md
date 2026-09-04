@@ -33,13 +33,16 @@ Owners:
   not used after the root is open.
 - Symlinks are rejected, including a data-directory path that is itself a
   symlink.
-- Mount crossings (`st_dev` differs from the root) are rejected.
+- Mount crossings (`st_dev` differs from the root) are rejected, including
+  child directory opens used by logical scans after the physical walk.
 - Hard links are counted once by `(device, inode)`.
 - Collection walks the tree twice and rejects the observation if any path's
   identity or allocated size changed.
 - A FIFO, device, or other non-file/non-directory inode is rejected
-  (`UnsupportedEntry`) after `fstatat` and before `openat`, so a FIFO cannot
-  stall the walk.
+  (`UnsupportedEntry`) after `fstatat` and again after `openat`/`fstat`, so a
+  replacement between those calls cannot stall the walk or be counted as data.
+- Witness sidecar reads are bounded to the recovery 4 KiB evidence limit.
+  An oversized current file is ignored and `.prev` is tried.
 - A snapshot is a measured lower bound on peak allocation
   (`observation_kind = snapshot_lower_bound`). A create/allocate/delete peak
   can hide between samples. A passing sub-1-TB result requires a pinned stop
@@ -115,6 +118,8 @@ Owners:
   - `logical_flat_files_count_complete_frames_only`
   - `ledgers_are_not_summed_by_the_physical_total`
   - `fifo_is_rejected_without_blocking`
+  - `fifo_child_file_is_rejected`
+  - `fifo_block_file_is_rejected`
 - `crates/storage/src/footprint.rs` `comparison_tests`:
   - `size_change_is_reported`
   - `new_path_is_reported`
@@ -125,6 +130,7 @@ Owners:
   - `stop_height_without_hash_is_rejected`
   - `stop_hash_without_height_is_rejected`
   - `invalid_stop_hash_is_rejected`
+  - `oversized_current_witness_falls_back_to_prev`
   - `snapshot_of_default_mainnet_is_insufficient_for_the_peak_gate`
   - `identity_names_the_txindex_lane`
   - `high_water_above_budget_fails_the_default_mainnet_gate`

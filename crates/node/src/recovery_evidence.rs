@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Maximum file size for any evidence file (4 KiB).
-const MAX_FILE_BYTES: usize = 4096;
+pub(crate) const MAX_FILE_BYTES: usize = 4096;
 
 const WITNESS_FILE: &str = "applied-tip-witness.json";
 const WITNESS_PREV: &str = "applied-tip-witness.json.prev";

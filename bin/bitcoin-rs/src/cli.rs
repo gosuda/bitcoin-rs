@@ -70,10 +70,10 @@ pub(crate) struct CliArgs {
     /// Conservative peak allocated bytes from an isolated filesystem or project quota.
     #[arg(long = "storage-high-water-bytes")]
     pub(crate) storage_high_water_bytes: Option<u64>,
-    /// Override the recorded stop height. Must be paired with `--measure-storage-stop-hash`.
+    /// Recorded stop height. Pairing and hash format: `FP-03`.
     #[arg(long = "measure-storage-stop-height")]
     pub(crate) measure_storage_stop_height: Option<u32>,
-    /// Override the recorded stop hash as 64-character RPC (big-endian hex). Must be paired with `--measure-storage-stop-height`.
+    /// Recorded stop hash. Pairing and hash format: `FP-03`.
     #[arg(long = "measure-storage-stop-hash")]
     pub(crate) measure_storage_stop_hash: Option<String>,
 }

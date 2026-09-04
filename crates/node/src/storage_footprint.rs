@@ -34,9 +34,9 @@ pub const EVIDENCE_FORMAT: &str = "bitcoin-rs-storage-footprint-v1";
 pub struct MeasureStorageRequest {
     /// Conservative peak allocated bytes from an isolated filesystem or project quota.
     pub high_water_allocated_bytes: Option<u64>,
-    /// Pinned stop height. Must be paired with [`Self::stop_hash`].
+    /// Pinned stop height. Pairing and hash format: `FP-03`.
     pub stop_height: Option<u32>,
-    /// Pinned stop hash in RPC display hex. Must be paired with [`Self::stop_height`].
+    /// Pinned stop hash. Pairing and hash format: `FP-03`.
     pub stop_hash: Option<String>,
 }
 
@@ -346,7 +346,7 @@ fn read_witness_from_anchor(anchor: &DataDirAnchor, genesis: &str) -> Result<(u3
     const PREV: &str = "applied-tip-witness.json.prev";
     for name in [CURRENT, PREV] {
         if let Some(bytes) = anchor
-            .read_child_file(name)
+            .read_child_file(name, crate::recovery_evidence::MAX_FILE_BYTES)
             .map_err(|error| io_from_footprint(&error))?
         {
             if let Some(witness) =
@@ -795,6 +795,32 @@ mod tests {
                 .contains("invalid --measure-storage-stop-hash"),
             "{error}"
         );
+        Ok(())
+    }
+
+    fn witness_json(genesis: &str, height: u32) -> String {
+        format!(
+            "{{\"format\":\"1\",\"genesis_hash\":\"{genesis}\",\"writer_epoch\":1,\"height\":{height},\"block_hash\":\"{genesis}\",\"time\":1}}"
+        )
+    }
+
+    #[test]
+    fn oversized_current_witness_falls_back_to_prev() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+        let genesis = Network::Regtest.genesis_block_hash().to_string_be();
+        let prev = witness_json(&genesis, 3);
+        let mut current = " ".repeat(crate::recovery_evidence::MAX_FILE_BYTES + 1);
+        current.push_str(&witness_json(&genesis, 9));
+        std::fs::write(dir.path().join("applied-tip-witness.json"), current)?;
+        std::fs::write(dir.path().join("applied-tip-witness.json.prev"), prev)?;
+        let mut config = NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = dir.path().to_path_buf();
+        config.p2p.listen.clear();
+        let evidence = measure_storage_footprint(&config, &MeasureStorageRequest::default())?;
+        assert!(!evidence.identity.stop_pinned);
+        assert_eq!(evidence.identity.stop_height, 3);
+        assert_eq!(evidence.identity.stop_hash, genesis);
         Ok(())
     }
 

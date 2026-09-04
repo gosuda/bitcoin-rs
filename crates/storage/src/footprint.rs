@@ -305,8 +305,15 @@ impl DataDirAnchor {
     }
 
     /// Reads a direct child regular file without following a symlink.
-    pub fn read_child_file(&self, name: &str) -> Result<Option<Vec<u8>>, FootprintError> {
-        read_child_file(self.fd.as_fd(), name)
+    ///
+    /// Returns `Ok(None)` when the name is missing or the payload is larger
+    /// than `max_bytes`. The opened descriptor is typed with `fstat`.
+    pub fn read_child_file(
+        &self,
+        name: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FootprintError> {
+        read_child_file(self.fd.as_fd(), name, max_bytes)
     }
 }
 
@@ -526,13 +533,19 @@ fn walk_dir(
 }
 
 fn open_child_dir(dir: BorrowedFd<'_>, name: &str) -> Result<Option<OwnedFd>, FootprintError> {
+    let parent = rfs::fstat(dir)?;
     match rfs::openat(
         dir,
         name,
         nofollow_read() | OFlags::DIRECTORY,
         Mode::empty(),
     ) {
-        Ok(fd) => Ok(Some(fd)),
+        Ok(fd) => {
+            let child = rfs::fstat(&fd)?;
+            require_directory(&child, name)?;
+            require_same_dev(&parent, &child, name)?;
+            Ok(Some(fd))
+        }
         Err(Errno::NOENT) => Ok(None),
         Err(Errno::LOOP) => Err(FootprintError::Symlink {
             path: name.to_owned(),
@@ -544,26 +557,18 @@ fn open_child_dir(dir: BorrowedFd<'_>, name: &str) -> Result<Option<OwnedFd>, Fo
     }
 }
 
-fn read_child_file(dir: BorrowedFd<'_>, name: &str) -> Result<Option<Vec<u8>>, FootprintError> {
+fn read_child_file(
+    dir: BorrowedFd<'_>,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, FootprintError> {
+    let parent = rfs::fstat(dir)?;
     let listed = match rfs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => stat,
         Err(Errno::NOENT) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    match FileType::from_raw_mode(listed.st_mode) {
-        FileType::RegularFile => {}
-        FileType::Symlink => {
-            return Err(FootprintError::Symlink {
-                path: name.to_owned(),
-            });
-        }
-        other => {
-            return Err(FootprintError::UnsupportedEntry {
-                path: name.to_owned(),
-                kind: file_kind_name(other),
-            });
-        }
-    }
+    require_regular_file(&listed, name)?;
     let child = match rfs::openat(dir, name, nofollow_read(), Mode::empty()) {
         Ok(fd) => fd,
         Err(Errno::NOENT) => return Ok(None),
@@ -574,10 +579,56 @@ fn read_child_file(dir: BorrowedFd<'_>, name: &str) -> Result<Option<Vec<u8>>, F
         }
         Err(error) => return Err(error.into()),
     };
-    let mut file = File::from(child);
+    let child_stat = rfs::fstat(&child)?;
+    require_regular_file(&child_stat, name)?;
+    require_same_dev(&parent, &child_stat, name)?;
+    let limit = u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+    let mut limited = File::from(child).take(limit);
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Ok(None);
+    }
     Ok(Some(bytes))
+}
+
+fn require_regular_file(stat: &Stat, path: &str) -> Result<(), FootprintError> {
+    match FileType::from_raw_mode(stat.st_mode) {
+        FileType::RegularFile => Ok(()),
+        FileType::Symlink => Err(FootprintError::Symlink {
+            path: path.to_owned(),
+        }),
+        other => Err(FootprintError::UnsupportedEntry {
+            path: path.to_owned(),
+            kind: file_kind_name(other),
+        }),
+    }
+}
+
+fn require_directory(stat: &Stat, path: &str) -> Result<(), FootprintError> {
+    match FileType::from_raw_mode(stat.st_mode) {
+        FileType::Directory => Ok(()),
+        FileType::Symlink => Err(FootprintError::Symlink {
+            path: path.to_owned(),
+        }),
+        FileType::RegularFile => Err(FootprintError::NotADirectory {
+            path: path.to_owned(),
+        }),
+        other => Err(FootprintError::UnsupportedEntry {
+            path: path.to_owned(),
+            kind: file_kind_name(other),
+        }),
+    }
+}
+
+fn require_same_dev(root: &Stat, child: &Stat, path: &str) -> Result<(), FootprintError> {
+    if child.st_dev == root.st_dev {
+        Ok(())
+    } else {
+        Err(FootprintError::MountCrossing {
+            path: path.to_owned(),
+        })
+    }
 }
 
 fn file_kind_name(kind: FileType) -> &'static str {
@@ -722,6 +773,7 @@ fn classify_kv_file(rel: &str) -> PhysicalCategory {
 }
 
 fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, FootprintError> {
+    let root_stat = rfs::fstat(root)?;
     let blocks = match rfs::openat(
         root,
         crate::BLOCK_FILE_DIRECTORY,
@@ -739,6 +791,9 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
         }
         Err(error) => return Err(error.into()),
     };
+    let blocks_stat = rfs::fstat(&blocks)?;
+    require_directory(&blocks_stat, crate::BLOCK_FILE_DIRECTORY)?;
+    require_same_dev(&root_stat, &blocks_stat, crate::BLOCK_FILE_DIRECTORY)?;
     let mut rows = 0_u64;
     let mut value_bytes = 0_u64;
     let mut entries = rfs::Dir::read_from(&blocks)?;
@@ -762,18 +817,7 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
     for name in names {
         let child_rel = format!("{}/{name}", crate::BLOCK_FILE_DIRECTORY);
         let listed = rfs::statat(blocks.as_fd(), name.as_str(), AtFlags::SYMLINK_NOFOLLOW)?;
-        match FileType::from_raw_mode(listed.st_mode) {
-            FileType::RegularFile => {}
-            FileType::Symlink => {
-                return Err(FootprintError::Symlink { path: child_rel });
-            }
-            other => {
-                return Err(FootprintError::UnsupportedEntry {
-                    path: child_rel,
-                    kind: file_kind_name(other),
-                });
-            }
-        }
+        require_regular_file(&listed, &child_rel)?;
         let child = match rfs::openat(
             blocks.as_fd(),
             name.as_str(),
@@ -786,6 +830,9 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
             }
             Err(error) => return Err(error.into()),
         };
+        let child_stat = rfs::fstat(&child)?;
+        require_regular_file(&child_stat, &child_rel)?;
+        require_same_dev(&root_stat, &child_stat, &child_rel)?;
         let mut file = File::from(child);
         let (file_rows, framed) = complete_framed_stats(&mut file)?;
         rows = rows.saturating_add(file_rows);

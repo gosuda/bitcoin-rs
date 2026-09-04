@@ -253,24 +253,57 @@ fn logical_flat_files_count_complete_frames_only() {
     );
 }
 
-#[test]
-fn fifo_is_rejected_without_blocking() {
-    let dir = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+fn mkfifo(dir: &std::path::Path, name: &str) {
     let dirfd = rustix::fs::open(
-        dir.path(),
+        dir,
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .unwrap_or_else(|error| panic!("open: {error}"));
     rustix::fs::mkfifoat(
         &dirfd,
-        "pipe",
+        name,
         rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
     )
     .unwrap_or_else(|error| panic!("mkfifoat: {error}"));
-    drop(dirfd);
+}
 
+#[test]
+fn fifo_is_rejected_without_blocking() {
+    let dir = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    mkfifo(dir.path(), "pipe");
     let error = measure_physical_tree(dir.path())
+        .err()
+        .unwrap_or_else(|| panic!("expected fifo rejection"));
+    assert!(
+        matches!(error, FootprintError::UnsupportedEntry { kind: "fifo", .. }),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn fifo_child_file_is_rejected() {
+    let dir = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    mkfifo(dir.path(), "applied-tip-witness.json");
+    let anchor = DataDirAnchor::open(dir.path()).unwrap_or_else(|error| panic!("anchor: {error}"));
+    let error = anchor
+        .read_child_file("applied-tip-witness.json", 4096)
+        .err()
+        .unwrap_or_else(|| panic!("expected fifo rejection"));
+    assert!(
+        matches!(error, FootprintError::UnsupportedEntry { kind: "fifo", .. }),
+        "got {error:?}"
+    );
+}
+
+#[test]
+fn fifo_block_file_is_rejected() {
+    let dir = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+    fs::create_dir(dir.path().join("blocks")).unwrap_or_else(|error| panic!("mkdir: {error}"));
+    mkfifo(&dir.path().join("blocks"), "blk00000.dat");
+    let anchor = DataDirAnchor::open(dir.path()).unwrap_or_else(|error| panic!("anchor: {error}"));
+    let error = anchor
+        .logical_flat_block_files()
         .err()
         .unwrap_or_else(|| panic!("expected fifo rejection"));
     assert!(
