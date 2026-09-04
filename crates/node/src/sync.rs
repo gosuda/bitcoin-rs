@@ -49,9 +49,12 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
 ///
-/// Owns the production [`DownloadWindow`]. Session identity stays on the
-/// shared [`PeerTable`]; this orchestrator calls identity-checked table
-/// methods. `P2pService` does not hold a second window.
+/// Owns the production [`DownloadWindow`]. See the
+/// [multi-peer download architecture decision][architecture] for ownership
+/// details. Session identity stays on the shared [`PeerTable`]; this
+/// orchestrator calls identity-checked table methods.
+///
+/// [architecture]: https://github.com/gosuda/bitcoin-rs/blob/main/docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
     followers: crate::chain_effects::ChainFollowers,
