@@ -23,8 +23,9 @@ cargo install --locked cargo-deny
 ## Quick verification (PR gate)
 
 Pull requests run a fast pure-Rust gate configured in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml): `fmt`, `deny`, `clippy`,
-and normal workspace tests. No C++ toolchain, no benches, no backend matrix.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml): `fmt` and `deny` in
+parallel, then one `rust` job that runs `clippy` and workspace tests on a
+single compile graph. No C++ toolchain, no benches, no backend matrix.
 Run these locally before submitting:
 
 ```sh
