@@ -17,7 +17,8 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 `getmininginfo` omitting unset optional fields. `API-23` is
 `estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-24`
 is `generateblock` Core txid/raw-tx parse errors. `API-25` is
-`getprioritisedtransactions` `modified_fee` in satoshis.
+`getprioritisedtransactions` `modified_fee` in satoshis. `API-26` is
+Core `generatetoaddress` / `generateblock` invalid-output text.
 
 ## Clauses
 
@@ -84,7 +85,7 @@ is `generateblock` Core txid/raw-tx parse errors. `API-25` is
   Listed order is kept, those fees are not added to the coinbase, 64-character
   hex is a mempool txid, and decoded raw transactions are included without
   mempool admission. Extra positional arguments are rejected. Transaction
-  parse errors are `API-24`.
+  parse errors are `API-24`. Output parse errors are `API-26`.
 
 ### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
 
@@ -322,6 +323,20 @@ is `generateblock` Core txid/raw-tx parse errors. `API-25` is
   present only when `in_mempool`) is the same unit: a JSON number in
   satoshis, matching Core `CAmount`.
 
+### `API-26`: generate invalid-output text
+
+- **Owner**: `generateblock_payout_script` in
+  `crates/rpc/src/handlers/util.rs`; `generatetoaddress` in
+  `crates/rpc/src/handlers/mining.rs`.
+- `generatetoaddress` refuses a non-address with `-5`
+  `Error: Invalid address`.
+- `generateblock` tries a descriptor first (`require_checksum = false`).
+  Ranged/multipath descriptors stay `-8`. If Parse fails, the text is
+  tried as an address; a miss is `-5`
+  `Error: Invalid address or descriptor`, matching Core
+  `src/rpc/mining.cpp`. A supplied checksum that fails Parse is refused
+  through that fallback, not CheckChecksum's wording.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -459,3 +474,8 @@ owned by [wallet-facing.md](wallet-facing.md).
 - `API-25`:
   - `crates/rpc/src/handlers/mining.rs` test
     `getprioritisedtransactions_projects_the_overlay`
+- `API-26`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `generatetoaddress_rejects_script_hex_and_descriptors`,
+    `generateblock_rejects_garbage_output_like_core`,
+    `generateblock_rejects_invalid_supplied_checksums`

@@ -32,6 +32,7 @@ const GBT_REQUIRE_SIGNET: &str = r#"getblocktemplate must be called with the sig
 const PRIORITISE_DUMMY_ERROR: &str =
     "Priority is no longer supported, dummy argument to prioritisetransaction must be 0.";
 const PRIORITISE_DUST_ERROR: &str = "Priority is not supported for transactions with dust outputs.";
+const GENERATE_INVALID_ADDRESS: &str = "Error: Invalid address";
 
 fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
     fn nibble(byte: u8) -> Result<u8, ()> {
@@ -204,10 +205,11 @@ pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let nblocks = required_u32(params, 0, "nblocks is required")?;
     let address = required_str(params, 1, "address is required")?;
     let max_tries = optional_u64(params, 2, GenerateRequest::DEFAULT_MAX_TRIES)?;
+    // CONTRACT: docs/contracts/external-api.md#API-26
     let payout = payout_script_from_address(
         address,
         convert::bitcoin_network(ctx.chain_network),
-        "Invalid address or key",
+        GENERATE_INVALID_ADDRESS,
     )?;
     let generated = control
         .generate(GenerateRequest {
@@ -757,7 +759,7 @@ mod tests {
     };
     use parking_lot::Mutex;
 
-    use crate::handlers::util::descriptor_checksum;
+    use crate::handlers::util::{GENERATEBLOCK_INVALID_OUTPUT, descriptor_checksum};
 
     struct FakeMiningControl {
         template: Mutex<Option<BlockTemplate>>,
@@ -1984,7 +1986,7 @@ mod tests {
         assert!(hashes.iter().all(|hash| hash.as_str().is_some()));
     }
 
-    /// API-05: generatetoaddress rejects raw script hex and descriptors.
+    // CONTRACT: docs/contracts/external-api.md#API-26
     #[test]
     fn generatetoaddress_rejects_script_hex_and_descriptors() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1994,6 +1996,11 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("`{payout}` must not be an address"));
             assert_eq!(error.code(), RpcError::CORE_NOT_FOUND, "for `{payout}`");
+            assert_eq!(
+                error.to_string(),
+                GENERATE_INVALID_ADDRESS,
+                "for `{payout}`"
+            );
         }
     }
 
@@ -2043,7 +2050,7 @@ mod tests {
             payout_script_from_address(
                 REGTEST_ADDRESS,
                 bitcoin::Network::Regtest,
-                "Invalid address or key",
+                GENERATE_INVALID_ADDRESS,
             )
             .unwrap_or_else(|err| panic!("fixture address must decode: {err}"))
         );
@@ -2091,6 +2098,7 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("bare script hex must fail"));
         assert_eq!(hex.code(), RpcError::CORE_NOT_FOUND);
+        assert_eq!(hex.to_string(), GENERATEBLOCK_INVALID_OUTPUT);
     }
 
     /// API-05: 64-character hex is a mempool txid; longer hex is a raw transaction.
@@ -2177,7 +2185,7 @@ mod tests {
         ));
     }
 
-    /// API-05: a supplied descriptor checksum is verified even when optional.
+    // CONTRACT: docs/contracts/external-api.md#API-26
     #[test]
     fn generateblock_rejects_invalid_supplied_checksums() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -2187,25 +2195,32 @@ mod tests {
             .unwrap_or_else(|| panic!("fixture descriptor must have a checksum"));
         generateblock(&ctx, &json!([format!("{descriptor}#{checksum}"), []]))
             .unwrap_or_else(|err| panic!("a matching checksum must be accepted: {err}"));
-        for (input, expected) in [
-            (format!("{descriptor}#qqqqqqqq"), "does not match"),
-            (
-                format!("{descriptor}#short"),
-                "Expected 8 character checksum",
-            ),
-            (
-                format!("{descriptor}#aaaaaaaa#bbbbbbbb"),
-                "Multiple '#' symbols",
-            ),
+        for input in [
+            format!("{descriptor}#qqqqqqqq"),
+            format!("{descriptor}#short"),
+            format!("{descriptor}#aaaaaaaa#bbbbbbbb"),
         ] {
             let error = generateblock(&ctx, &json!([input.clone(), []]))
                 .err()
                 .unwrap_or_else(|| panic!("`{input}` must be refused"));
             assert_eq!(error.code(), RpcError::CORE_NOT_FOUND, "for `{input}`");
-            assert!(
-                error.to_string().contains(expected),
-                "`{input}` must say why: got {error}"
+            assert_eq!(
+                error.to_string(),
+                GENERATEBLOCK_INVALID_OUTPUT,
+                "for `{input}`"
             );
         }
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-26
+    #[test]
+    fn generateblock_rejects_garbage_output_like_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let error = generateblock(&ctx, &json!(["not-an-address", []]))
+            .err()
+            .unwrap_or_else(|| panic!("garbage output must fail"));
+        assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
+        assert_eq!(error.to_string(), GENERATEBLOCK_INVALID_OUTPUT);
     }
 }
