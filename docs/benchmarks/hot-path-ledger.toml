@@ -297,7 +297,7 @@ name = "socket read/write"
 parent = "cell.wall"
 concurrency_group = "p2p-io"
 domains = ["p2p"]
-seams = ["crates/p2p/src/connection.rs", "crates/p2p/src/listener.rs"]
+seams = ["crates/p2p/src/connection.rs", "crates/p2p/src/listener.rs", "crates/p2p/src/counters.rs"]
 disposition = "blocked"
 evidence = "Controlled by the #35 fixture bandwidth/delay. Overlaps apply. Unmeasured on product cells."
 

@@ -114,11 +114,14 @@ impl<S> Peer<S> {
 
 impl<S: Read + Write> Peer<S> {
     /// Queue and write one outbound message.
-    pub fn send(&mut self, message: &Message) -> Result<(), PeerError> {
+    ///
+    /// Returns the framed wire length so handshake accounting can charge the
+    /// same bytes `write_message` emitted, without encoding the payload twice.
+    pub fn send(&mut self, message: &Message) -> Result<usize, PeerError> {
         self.sender
             .send(message.clone())
             .map_err(|_| PeerError::Protocol("outbound peer queue disconnected"))?;
-        write_message(&mut self.stream, self.magic, message).map(|_| ())
+        write_message(&mut self.stream, self.magic, message)
     }
 }
 

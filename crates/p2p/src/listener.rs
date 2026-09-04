@@ -707,7 +707,8 @@ fn run_outbound_connection(
     let nonce = generate_nonce(addr);
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
-    let stream = crate::CountingStream::new(stream, counters);
+    let stream = crate::CountingStream::from_connected(stream, counters)
+        .map_err(crate::wire::PeerError::Io)?;
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, magic);
@@ -839,7 +840,8 @@ fn run_handshake(
 
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
-    let stream = crate::CountingStream::new(stream, counters);
+    let stream = crate::CountingStream::from_connected(stream, counters)
+        .map_err(crate::wire::PeerError::Io)?;
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
 
