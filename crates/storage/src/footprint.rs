@@ -338,7 +338,7 @@ fn logical_column_family_named<S: KvStore>(
 }
 
 fn nofollow_read() -> OFlags {
-    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW
+    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
