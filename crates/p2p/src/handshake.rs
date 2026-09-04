@@ -127,10 +127,8 @@ pub(crate) fn send_handshake_message<S: Read + Write>(
     lease: &PeerLease,
     totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), PeerError> {
-    peer.send(message)?;
-    let wire_len =
-        u64::try_from(crate::wire::HEADER_LEN + crate::wire::encode_payload(message)?.len())
-            .unwrap_or(u64::MAX);
+    let written = peer.send(message)?;
+    let wire_len = u64::try_from(written).unwrap_or(u64::MAX);
     lease.stats().record_sent(wire_len);
     lease.stats().record_msg_sent();
     if let Some(totals) = totals {
@@ -217,7 +215,7 @@ mod tests {
 
     use super::{Peer, PeerError, PeerState, run_inbound_handshake, version_message};
     use crate::handshake::feature_messages;
-    use crate::wire::{Message, write_message};
+    use crate::wire::{Message, read_message, write_message};
 
     struct ScriptedStream {
         inbound: Cursor<Vec<u8>>,
@@ -287,24 +285,16 @@ mod tests {
             "wire responses are written"
         );
 
-        let outbound_version = peer
-            .receiver
-            .try_recv()
-            .map_err(|_| PeerError::Protocol("missing outbound version"))?;
+        let mut outbound = Cursor::new(peer.stream.written);
+        let (outbound_version, _) = read_message(&mut outbound, magic)?;
         assert!(matches!(outbound_version, Message::Version(_)));
 
         for expected in feature_messages() {
-            let actual = peer
-                .receiver
-                .try_recv()
-                .map_err(|_| PeerError::Protocol("missing outbound feature message"))?;
+            let (actual, _) = read_message(&mut outbound, magic)?;
             assert_eq!(actual, expected);
         }
 
-        let outbound_verack = peer
-            .receiver
-            .try_recv()
-            .map_err(|_| PeerError::Protocol("missing outbound verack"))?;
+        let (outbound_verack, _) = read_message(&mut outbound, magic)?;
         assert_eq!(outbound_verack, Message::Verack);
 
         Ok(())

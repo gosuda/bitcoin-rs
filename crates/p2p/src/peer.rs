@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::p2p::message_network::VersionMessage;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::Sender;
 use parking_lot::RwLock;
 use thiserror::Error;
 
@@ -63,12 +63,6 @@ pub struct Peer<S> {
     pub stream: S,
     /// Current protocol state.
     pub state: PeerState,
-    /// Outbound message sender for event-loop integration.
-    // Vestigial queue: drained only by handshake tests (~6 messages per
-    // connection lifetime); production traffic uses the PeerLease channel.
-    pub sender: Sender<Message>,
-    /// Receiver paired with `sender` for tests and simple loops.
-    pub receiver: Receiver<Message>,
     /// Expected network magic.
     pub magic: Magic,
     /// Last remote version message.
@@ -86,14 +80,11 @@ pub struct Peer<S> {
 }
 
 impl<S> Peer<S> {
-    /// Create a peer using an in-process outbound queue.
+    /// Create a peer over `stream`.
     pub fn new(stream: S, magic: Magic) -> Self {
-        let (sender, receiver) = unbounded();
         Self {
             stream,
             state: PeerState::Disconnected,
-            sender,
-            receiver,
             magic,
             remote_version: None,
             version_received_time: None,
@@ -113,12 +104,9 @@ impl<S> Peer<S> {
 }
 
 impl<S: Read + Write> Peer<S> {
-    /// Queue and write one outbound message.
-    pub fn send(&mut self, message: &Message) -> Result<(), PeerError> {
-        self.sender
-            .send(message.clone())
-            .map_err(|_| PeerError::Protocol("outbound peer queue disconnected"))?;
-        write_message(&mut self.stream, self.magic, message).map(|_| ())
+    /// Write one outbound message and return the encoded wire length.
+    pub fn send(&mut self, message: &Message) -> Result<usize, PeerError> {
+        write_message(&mut self.stream, self.magic, message)
     }
 }
 
