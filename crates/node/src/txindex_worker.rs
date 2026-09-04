@@ -91,10 +91,10 @@ pub(crate) const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
 
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
 const POSITION_PREFETCH_BLOCKS: usize = 65_536;
-/// Maximum number of blocks whose bodies are held in memory and whose
-/// `prepare_block_with_spent_scripts` row-build work is fanned out across the rayon pool
-/// in one parallel prepare step. Matches the IBD download window so a filled
-/// 256-block staging cap can prepare in one pass when bodies are small.
+/// In-memory parallel-prepare cap owned by this worker. 256 matches the IBD
+/// download window so a filled staging set can prepare in one pass when bodies
+/// are small; catch-up also prepares already-stored bodies, so this is not
+/// `RECEIVED_BLOCK_BUDGET`. The byte budget below is independent of P2P staging.
 const PREPARE_CHUNK_BLOCKS: usize = 256;
 /// Serialized-body budget for one parallel prepare step. Stops a 1 MiB-class
 /// window from holding 256 bodies in RAM while still packing early-chain
