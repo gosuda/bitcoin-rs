@@ -1085,11 +1085,7 @@ fn hash_ps_at(
 
 /// Estimates hashes/s over `lookup` blocks ending at an already-resolved start.
 ///
-/// Height validation lives in [`resolve_hash_ps_start`]. The window is Core's
-/// parent walk (`GetNetworkHashPS`): `lookup` parent pointers from the start
-/// node, min/max header time, `chainwork` delta over that span. A missing
-/// start or unwalkable window is a zero rate so `getmininginfo` can stay
-/// best-effort.
+/// See the API-06 contract for the hash-rate window and fallback behavior.
 // CONTRACT: docs/contracts/external-api.md#API-06
 fn estimate_network_hashps(
     tree: &BlockTree,
