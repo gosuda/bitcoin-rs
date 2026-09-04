@@ -240,7 +240,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
+    if method.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request method",
