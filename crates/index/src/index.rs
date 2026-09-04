@@ -199,6 +199,43 @@ fn is_predecessor_height_format(value: &[u8]) -> bool {
     value == FORMAT_VERSION_V3 || value == FORMAT_VERSION_V4
 }
 
+fn decode_format_version(value: &[u8]) -> u32 {
+    value
+        .get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map_or(0, u32::from_le_bytes)
+}
+
+/// Decoded `[0x00, 'V']` marker. Callers apply policy: [`IndexWriter::open`]
+/// resets predecessors; [`Indexer::ensure_format_version`] refuses them.
+enum StoreFormat {
+    Current,
+    Predecessor { version: u32 },
+    Foreign { version: u32 },
+    Absent,
+}
+
+fn classify_store_format(value: Option<&[u8]>) -> StoreFormat {
+    match value {
+        Some(value) if value == FORMAT_VERSION_VALUE => StoreFormat::Current,
+        Some(value) if is_predecessor_height_format(value) => StoreFormat::Predecessor {
+            version: decode_format_version(value),
+        },
+        Some(value) => StoreFormat::Foreign {
+            version: decode_format_version(value),
+        },
+        None => StoreFormat::Absent,
+    }
+}
+
+fn stored_format<S: KvStore>(store: &S) -> Result<StoreFormat, IndexError> {
+    Ok(classify_store_format(
+        store
+            .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
+            .as_deref(),
+    ))
+}
+
 /// Decoded durable capability-reset state.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ResetState {
@@ -622,7 +659,8 @@ fn ensure_fence_live<S: KvStore>(
 }
 
 /// Publishes or adopts a reset claim. Same-mask adoption writes nothing; mask
-/// growth changes only byte zero of the exact observed claim.
+/// growth changes only byte zero of the exact observed claim. Leftover
+/// dual-format keys converge when the claim completes, not on adoption.
 fn acquire_capability_reset<S: KvStore>(
     store: &S,
     requested_mask: u8,
@@ -812,6 +850,14 @@ fn resume_capability_reset<S: KvStore>(
             ORDINARY_STATE_REVISION_KEY,
             &work.next_revision,
         );
+        // Same-mask adoption of an older claim never rewrites the claim
+        // batch, so leftover dual-format keys converge here (`IDX-05`).
+        completion.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        completion.delete(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY);
         if store.write_durable_if(&conditions, completion)? {
             return Ok(());
         }
@@ -1728,19 +1774,15 @@ impl<S: KvStore> Indexer<S> {
     /// store unmarked; the next call retries. Storage errors belong to the
     /// caller.
     pub fn ensure_format_version(&self) -> Result<(), IndexError> {
-        match self.store.get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)? {
-            Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => Ok(()),
-            Some(value) => {
-                let version = value
-                    .get(..4)
-                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-                    .map_or(0, u32::from_le_bytes);
+        match stored_format(self.store.as_ref())? {
+            StoreFormat::Current => Ok(()),
+            StoreFormat::Predecessor { version } | StoreFormat::Foreign { version } => {
                 Err(IndexError::UnsupportedTxIndexFormatVersion { version })
             }
-            None if has_any_index_row(self.store.as_ref())? => {
+            StoreFormat::Absent if has_any_index_row(self.store.as_ref())? => {
                 Err(IndexError::LegacyCursorlessIndex)
             }
-            None => {
+            StoreFormat::Absent => {
                 let mut batch = self.store.new_batch();
                 batch.put(
                     ColumnFamily::UtxoMeta,
@@ -3065,26 +3107,19 @@ impl<S: KvStore> IndexWriter<S> {
     /// [`IndexError::UnsupportedTxIndexFormatVersion`].
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
-        match indexer
-            .store
-            .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
-        {
-            Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
-            Some(value) if is_predecessor_height_format(value.as_slice()) => {
+        match stored_format(indexer.store.as_ref())? {
+            StoreFormat::Current => {}
+            StoreFormat::Predecessor { .. } => {
                 resume_capability_reset(
                     indexer.store.as_ref(),
                     generation,
                     IndexCapabilities::HISTORICAL.to_mask(),
                 )?;
             }
-            Some(value) => {
-                let version = value
-                    .get(..4)
-                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-                    .map_or(0, u32::from_le_bytes);
+            StoreFormat::Foreign { version } => {
                 return Err(IndexError::UnsupportedTxIndexFormatVersion { version });
             }
-            None => {
+            StoreFormat::Absent => {
                 if has_any_index_row(&*indexer.store)? {
                     return Err(IndexError::LegacyCursorlessIndex);
                 }

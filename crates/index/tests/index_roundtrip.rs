@@ -1305,8 +1305,8 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
         "completion CASes the exact claim to Idle(base_version + 1)"
     );
     assert_eq!(
-        marker_puts[1].deletes, 0,
-        "completion never deletes the state key"
+        marker_puts[1].deletes, 1,
+        "completion deletes the leftover ASCII format marker; the reset state key is CASed to Idle"
     );
     assert!(writer.consumer_cursor()?.is_none());
     Ok(())
@@ -3096,6 +3096,43 @@ fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
     Ok(())
 }
 
+/// `IDX-05`: completing a same-mask claim from an older binary drops the leftover ASCII marker.
+#[test]
+fn completing_an_adopted_claim_deletes_the_leftover_ascii_marker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    seed_populated_store(&store, 1)?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"index:format_version",
+        &2_u32.to_le_bytes(),
+    )?;
+    let mut crash = store.new_batch();
+    crash.put(
+        ColumnFamily::UtxoMeta,
+        RESET_KEY,
+        &claim_bytes(SCRIPT_HISTORY_MASK, 9, 0),
+    );
+    crash.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
+    crash.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
+    store.write_durable(crash)?;
+
+    IndexWriter::open(Arc::clone(&store), 7)?;
+
+    assert!(
+        store
+            .get(ColumnFamily::UtxoMeta, b"index:format_version")?
+            .is_none(),
+        "same-mask adoption must still drop the leftover ASCII marker on completion"
+    );
+    assert_eq!(
+        store.get(ColumnFamily::UtxoMeta, FORMAT_KEY)?.as_deref(),
+        Some(FORMAT_VALUE.as_slice()),
+        "completion stamps format 5 even when the adopted claim did not rewrite metadata"
+    );
+    Ok(())
+}
+
 #[test]
 fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -3144,7 +3181,10 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
         markers[1].marker_put.as_deref(),
         Some(idle_bytes(4).as_slice())
     );
-    assert_eq!(markers[1].deletes, 0, "completion never deletes");
+    assert_eq!(
+        markers[1].deletes, 1,
+        "completion deletes the leftover ASCII format marker"
+    );
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, RESET_KEY)?,
