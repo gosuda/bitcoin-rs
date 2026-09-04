@@ -1,18 +1,20 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
-use bitcoin_rs_mining::witness_commitment_script;
+use bitcoin_rs_mining::{
+    AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
+    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
+    MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
+    witness_commitment_script,
+};
 use bitcoin_rs_primitives::{Block, Tx, Txid, consensus_bytes, deserialize};
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
-use crate::compat::convert::{self, compact_target_hex, i64_saturated, sat_to_btc, typed_to_sonic};
-use crate::context::Context;
-use crate::context::{
-    AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
-    MiningCapability, MiningControlError, MiningInfo, MiningRule, TemplateMutation,
+use crate::compat::convert::{
+    self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic,
 };
+use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::util::{generateblock_payout_script, payout_script_from_address};
 use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str, required_u64};
@@ -184,12 +186,14 @@ pub(crate) fn getnetworkhashps(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .mining_control
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
-    let nblocks = optional_i64(params, 0, 120)?;
-    let height = optional_i64(params, 1, -1)?;
-    let rate = control
-        .network_hash_ps(nblocks, height)
-        .map_err(map_mining_control_error)?;
-    Ok(json!(rate))
+    let (lookup, height) = parse_network_hash_ps_args(params)?;
+    match control.network_hash_ps(lookup, height) {
+        Ok(rate) => Ok(json!(rate)),
+        Err(MiningControlError::InvalidRequest(message)) => {
+            Err(RpcError::InvalidParameter(message.to_string()))
+        }
+        Err(error) => Err(map_mining_control_error(error)),
+    }
 }
 
 pub(crate) fn getprioritisedtransactions(
@@ -197,25 +201,59 @@ pub(crate) fn getprioritisedtransactions(
     params: &Value,
 ) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let control = ctx
-        .mining_control
-        .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
-    let entries = control
-        .prioritised_transactions()
-        .map_err(map_mining_control_error)?;
     let mut object = sonic_rs::Object::new();
-    for entry in entries {
-        let key = entry.txid.to_string();
-        let _ = object.insert(
-            &key,
-            json!({
-                "fee_delta": entry.fee_delta,
-                "in_mempool": entry.in_mempool,
-            }),
-        );
+    for entry in ctx.mempool.prioritised_transactions() {
+        let txid = entry.txid.to_string();
+        let mut row = sonic_rs::Object::new();
+        let _ = row.insert("fee_delta", json!(entry.fee_delta));
+        let _ = row.insert("in_mempool", json!(entry.in_mempool));
+        if let Some(modified_fee) = entry.modified_fee {
+            let _ = row.insert("modified_fee", json!(signed_sat_to_btc(modified_fee)));
+        }
+        let _ = object.insert(&txid, Value::from(row));
     }
     Ok(Value::from(object))
+}
+
+/// Bitcoin Core `getnetworkhashps(nblocks=120, height=-1)`: both arguments are
+/// optional, extra positionals are rejected, and omitted/`null` params use the
+/// defaults. Invalid `nblocks`/`height` values are Core `-8`, not JSON-RPC `-32602`.
+fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
+    if !params.is_null() {
+        let array = params_array(params)?;
+        if array.len() > 2 {
+            return Err(RpcError::InvalidParams("too many parameters"));
+        }
+    }
+    let lookup = optional_i64(params, 0, 120)?;
+    let height = optional_i64(params, 1, -1)?;
+    if lookup < -1 || lookup == 0 {
+        return Err(RpcError::InvalidParameter(
+            "Invalid nblocks. Must be a positive number or -1.".to_owned(),
+        ));
+    }
+    if height < -1 {
+        return Err(RpcError::InvalidParameter(
+            "Block does not exist at specified height".to_owned(),
+        ));
+    }
+    Ok((lookup, height))
+}
+
+fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
+    if params.is_null() {
+        return Ok(default);
+    }
+    let array = params_array(params)?;
+    let Some(value) = array.get(index) else {
+        return Ok(default);
+    };
+    if value.is_null() {
+        return Ok(default);
+    }
+    value
+        .as_i64()
+        .ok_or(RpcError::InvalidType("parameter must be an integer"))
 }
 
 fn required_u32(params: &Value, index: usize, name: &'static str) -> Result<u32, RpcError> {
@@ -224,29 +262,19 @@ fn required_u32(params: &Value, index: usize, name: &'static str) -> Result<u32,
 }
 
 fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
-    let Some(array) = params.as_array() else {
+    if params.is_null() {
+        return Ok(default);
+    }
+    let array = params_array(params)?;
+    let Some(value) = array.get(index) else {
         return Ok(default);
     };
-    match array.get(index) {
-        None => Ok(default),
-        Some(value) if value.is_null() => Ok(default),
-        Some(value) => value
-            .as_u64()
-            .ok_or(RpcError::InvalidType("parameter must be an integer")),
-    }
-}
-
-fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
-    let Some(array) = params.as_array() else {
+    if value.is_null() {
         return Ok(default);
-    };
-    match array.get(index) {
-        None => Ok(default),
-        Some(value) if value.is_null() => Ok(default),
-        Some(value) => value
-            .as_i64()
-            .ok_or(RpcError::InvalidType("parameter must be an integer")),
     }
+    value
+        .as_u64()
+        .ok_or(RpcError::InvalidType("parameter must be an integer"))
 }
 
 fn parse_generateblock_transactions(params: &Value) -> Result<Vec<GenerateTx>, RpcError> {
@@ -514,9 +542,11 @@ fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
     typed_to_sonic(&v31::GetMiningInfo {
         blocks: u64::from(info.blocks),
         current_block_weight: info.last_candidate.map(|candidate| candidate.weight),
+        // Core's `currentblocktx` excludes the coinbase. `LastCandidateInfo`
+        // counts it because that is the candidate's transaction total.
         current_block_tx: info
             .last_candidate
-            .and_then(|candidate| i64::try_from(candidate.transactions).ok()),
+            .and_then(|candidate| i64::try_from(candidate.transactions.saturating_sub(1)).ok()),
         bits: format!("{:08x}", info.bits),
         target: compact_target_hex(info.bits),
         difficulty: info.difficulty,
@@ -551,12 +581,9 @@ fn render_validation_result(result: BlockValidationResult) -> Value {
 
 fn map_mining_control_error(error: MiningControlError) -> RpcError {
     match error {
-        MiningControlError::InvalidRequest(message) => {
-            RpcError::InvalidParameter(message.to_string())
-        }
-        MiningControlError::Unavailable(message) | MiningControlError::Failed(message) => {
-            RpcError::Internal(message.to_string())
-        }
+        MiningControlError::InvalidRequest(message)
+        | MiningControlError::Unavailable(message)
+        | MiningControlError::Failed(message) => RpcError::Internal(message.to_string()),
     }
 }
 
@@ -567,18 +594,17 @@ mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use bitcoin_rs_mining::{Candidate, CandidateTransaction, TemplateId};
+    use bitcoin_rs_mining::{
+        AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
+        BlockTemplateResult, BlockValidationResult, Candidate, CandidateTransaction,
+        GenerateRequest, GenerateSelection, GenerateTx, GeneratedBlock, LastCandidateInfo,
+        MiningControl, MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateId,
+        TemplateMutation,
+    };
     use bitcoin_rs_primitives::{
         BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
     };
     use parking_lot::Mutex;
-
-    use crate::context::{
-        AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-        BlockTemplateResult, BlockValidationResult, GenerateSelection, GenerateTx,
-        LastCandidateInfo, MiningControl, MiningControlError, MiningInfo, MiningRule,
-        SignetMiningInfo, TemplateMutation,
-    };
 
     struct FakeMiningControl {
         template: Mutex<Option<BlockTemplate>>,
@@ -586,7 +612,8 @@ mod tests {
         submit: Mutex<BlockValidationResult>,
         info: Mutex<MiningInfo>,
         last_request: Mutex<Option<BlockTemplateRequest>>,
-        last_generate: Mutex<Option<crate::context::GenerateRequest>>,
+        last_hash_ps: Mutex<Option<(i64, i64)>>,
+        last_generate: Mutex<Option<GenerateRequest>>,
         template_calls: AtomicUsize,
         submit_calls: AtomicUsize,
         info_calls: AtomicUsize,
@@ -601,6 +628,7 @@ mod tests {
                 submit: Mutex::new(BlockValidationResult::Accepted),
                 info: Mutex::new(sample_mining_info()),
                 last_request: Mutex::new(None),
+                last_hash_ps: Mutex::new(None),
                 last_generate: Mutex::new(None),
                 template_calls: AtomicUsize::new(0),
                 submit_calls: AtomicUsize::new(0),
@@ -648,6 +676,15 @@ mod tests {
             Ok(self.info.lock().clone())
         }
 
+        fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
+            let fail = self.fail.lock().clone();
+            if let Some(error) = fail {
+                return Err(error);
+            }
+            *self.last_hash_ps.lock() = Some((lookup, height));
+            Ok(self.info.lock().network_hashes_per_second)
+        }
+
         fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
             self.submit_calls.fetch_add(1, Ordering::Relaxed);
             let fail = self.fail.lock().clone();
@@ -661,27 +698,17 @@ mod tests {
 
         fn generate(
             &self,
-            request: crate::context::GenerateRequest,
-        ) -> Result<Vec<crate::context::GeneratedBlock>, MiningControlError> {
+            request: GenerateRequest,
+        ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
             *self.last_generate.lock() = Some(request.clone());
             let hash = bitcoin_rs_primitives::BlockHash::from(Hash256::from_le_bytes(&[0xab; 32]));
             Ok(vec![
-                crate::context::GeneratedBlock {
+                GeneratedBlock {
                     hash,
                     hex: String::from("00"),
                 };
                 usize::try_from(request.count).unwrap_or(0)
             ])
-        }
-
-        fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
-            Ok(0.0)
-        }
-
-        fn prioritised_transactions(
-            &self,
-        ) -> Result<Vec<crate::context::PrioritisedTransaction>, MiningControlError> {
-            Ok(Vec::new())
         }
     }
 
@@ -992,7 +1019,7 @@ mod tests {
             result
                 .get("currentblocktx")
                 .and_then(JsonValueTrait::as_u64),
-            Some(3)
+            Some(2)
         );
         assert_eq!(
             result.get("pooledtx").and_then(JsonValueTrait::as_u64),
@@ -1214,6 +1241,158 @@ mod tests {
         );
     }
 
+    #[test]
+    fn getnetworkhashps_requires_mining_control() {
+        let ctx = Arc::new(Context::new());
+        let error = getnetworkhashps(&ctx, &json!([])).expect_err("missing control must fail");
+        assert!(matches!(
+            error,
+            RpcError::MethodDisabled("mining is unavailable")
+        ));
+    }
+
+    #[test]
+    fn getnetworkhashps_forwards_defaults_and_caller_window() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let result = getnetworkhashps(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("default getnetworkhashps failed: {err}"));
+        assert!((result.as_f64().unwrap_or(0.0) - 42.5).abs() < f64::EPSILON);
+        assert_eq!(*control.last_hash_ps.lock(), Some((120, -1)));
+
+        let omitted = getnetworkhashps(&ctx, &Value::new_null())
+            .unwrap_or_else(|err| panic!("omitted getnetworkhashps params failed: {err}"));
+        assert!((omitted.as_f64().unwrap_or(0.0) - 42.5).abs() < f64::EPSILON);
+        assert_eq!(*control.last_hash_ps.lock(), Some((120, -1)));
+
+        getnetworkhashps(&ctx, &json!([60, 10]))
+            .unwrap_or_else(|err| panic!("windowed getnetworkhashps failed: {err}"));
+        assert_eq!(*control.last_hash_ps.lock(), Some((60, 10)));
+    }
+
+    #[test]
+    fn getnetworkhashps_rejects_arity_and_core_invalid_windows() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+
+        let extra = getnetworkhashps(&ctx, &json!([120, -1, 1]))
+            .expect_err("trailing getnetworkhashps arguments must fail");
+        assert!(matches!(
+            extra,
+            RpcError::InvalidParams("too many parameters")
+        ));
+        assert!(control.last_hash_ps.lock().is_none());
+
+        let nblocks = getnetworkhashps(&ctx, &json!([0])).expect_err("nblocks 0 must fail");
+        assert!(matches!(
+            nblocks,
+            RpcError::InvalidParameter(message)
+                if message == "Invalid nblocks. Must be a positive number or -1."
+        ));
+
+        let negative_lookup = getnetworkhashps(&ctx, &json!([-2]))
+            .expect_err("nblocks other than -1 or positive must fail");
+        assert!(matches!(
+            negative_lookup,
+            RpcError::InvalidParameter(message)
+                if message == "Invalid nblocks. Must be a positive number or -1."
+        ));
+
+        let height =
+            getnetworkhashps(&ctx, &json!([120, -10])).expect_err("height below -1 must fail");
+        assert!(matches!(
+            height,
+            RpcError::InvalidParameter(message)
+                if message == "Block does not exist at specified height"
+        ));
+        assert!(control.last_hash_ps.lock().is_none());
+    }
+
+    #[test]
+    fn getnetworkhashps_projects_control_invalid_request_as_invalid_parameter() {
+        let control = FakeMiningControl::with_template(sample_template());
+        *control.fail.lock() = Some(MiningControlError::InvalidRequest(CompactString::from(
+            "Block does not exist at specified height",
+        )));
+        let ctx = ctx_with_control(control);
+        let error = getnetworkhashps(&ctx, &json!([120, 99]))
+            .expect_err("out-of-range height from control must fail");
+        assert!(matches!(
+            error,
+            RpcError::InvalidParameter(message)
+                if message == "Block does not exist at specified height"
+        ));
+    }
+
+    #[test]
+    fn getprioritisedtransactions_projects_the_overlay() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let ctx = Arc::new(Context::new());
+        let pooled_tx = Tx {
+            version: 2,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: 0,
+        };
+        let pooled = pooled_tx.txid();
+        {
+            let mut pool = ctx.mempool.pool().write();
+            pool.insert_entry(MempoolEntry::new(Arc::new(pooled_tx), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        }
+        let absent = Txid::from(Hash256::from_le_bytes(&[0x22; 32]));
+        ctx.mempool
+            .prioritise(pooled, 500)
+            .unwrap_or_else(|err| panic!("pooled overlay: {err}"));
+        ctx.mempool
+            .prioritise(absent, -25)
+            .unwrap_or_else(|err| panic!("absent overlay: {err}"));
+        let result = getprioritisedtransactions(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getprioritisedtransactions failed: {err}"));
+        let object = result
+            .as_object()
+            .unwrap_or_else(|| panic!("object result"));
+        let pooled_row = object
+            .get(&pooled.to_string())
+            .unwrap_or_else(|| panic!("pooled overlay is listed"));
+        assert_eq!(
+            pooled_row.get("fee_delta").and_then(JsonValueTrait::as_i64),
+            Some(500)
+        );
+        assert_eq!(
+            pooled_row
+                .get("in_mempool")
+                .and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
+        let modified = pooled_row
+            .get("modified_fee")
+            .and_then(JsonValueTrait::as_f64)
+            .unwrap_or_else(|| panic!("pooled overlay must carry modified_fee in BTC"));
+        assert!(
+            (modified - signed_sat_to_btc(1_500)).abs() < f64::EPSILON,
+            "modified_fee must be actual fee plus delta in BTC, got {modified}"
+        );
+        let absent_row = object
+            .get(&absent.to_string())
+            .unwrap_or_else(|| panic!("absent overlay is listed"));
+        assert_eq!(
+            absent_row.get("fee_delta").and_then(JsonValueTrait::as_i64),
+            Some(-25)
+        );
+        assert_eq!(
+            absent_row
+                .get("in_mempool")
+                .and_then(JsonValueTrait::as_bool),
+            Some(false)
+        );
+        assert!(
+            absent_row.get("modified_fee").is_none(),
+            "Core omits modified_fee unless the tx is in the mempool"
+        );
+    }
+
     const MAINNET_ADDRESS: &str = "1111111111111111111114oLvT2";
 
     fn sample_raw_tx() -> Tx {
@@ -1375,17 +1554,5 @@ mod tests {
             request.selection,
             GenerateSelection::Ordered(vec![GenerateTx::Mempool(txid), GenerateTx::Raw(tx)])
         );
-    }
-
-    #[test]
-    fn getnetworkhashps_and_prioritised_transactions_project_control() {
-        let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(control);
-        let rate = getnetworkhashps(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getnetworkhashps failed: {err}"));
-        assert!(rate.as_f64().is_some());
-        let overlay = getprioritisedtransactions(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getprioritisedtransactions failed: {err}"));
-        assert!(overlay.is_object());
     }
 }

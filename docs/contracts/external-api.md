@@ -46,7 +46,7 @@ nothing normative; it places the owners under the
 
 ### `API-05`: Solo-mining generate path
 
-- **Owner**: `MiningControl::generate` in `crates/rpc/src/context.rs`,
+- **Owner**: `MiningControl::generate` in `crates/mining/src/control.rs`,
   implemented by `MiningCoordinator::generate_blocks` in
   `crates/node/src/mining.rs`.
 - The operation assembles a fresh candidate (no GBT cache), solves it, then

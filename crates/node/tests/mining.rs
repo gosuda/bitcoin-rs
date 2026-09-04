@@ -5,16 +5,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
+use bitcoin_rs_mining::{
+    BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
+    BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
+    MiningControlError,
+};
+use bitcoin_rs_node::{
+    MiningCoordinator, MiningOverrides, Network, NetworkSelection, NodeConfig, UserConfig, resolve,
+    state::NodeState,
+};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
-use bitcoin_rs_rpc::context::{
-    BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
-    GenerateRequest, GenerateSelection, GenerateTx, MiningControl, MiningControlError,
-};
 use compact_str::CompactString;
 use crossbeam_channel::bounded;
 use parking_lot::Mutex;
+use std::str::FromStr as _;
 
 fn open_regtest() -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
@@ -35,7 +40,7 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.block_tree(),
         state.mempool(),
         state.apply_handles(),
-        Vec::new(),
+        state.config().mining.payout_script.clone(),
         state.shutdown(),
     )
     .with_mempool_update_wait(Duration::ZERO)
@@ -87,7 +92,7 @@ fn template_request(long_poll_id: Option<CompactString>) -> BlockTemplateRequest
     }
 }
 
-fn expect_template(result: BlockTemplateResult) -> bitcoin_rs_rpc::context::BlockTemplate {
+fn expect_template(result: BlockTemplateResult) -> BlockTemplate {
     match result {
         BlockTemplateResult::Template(template) => template,
         other @ BlockTemplateResult::Proposal(_) => {
@@ -260,6 +265,94 @@ fn cache_reuses_candidate_for_identical_generation_key() -> anyhow::Result<()> {
         Arc::ptr_eq(&first.candidate, &second.candidate),
         "identical generation must reuse the cached candidate arc"
     );
+    Ok(())
+}
+
+#[test]
+fn watch_only_payout_lands_in_candidate_coinbase() -> anyhow::Result<()> {
+    const ADDRESS: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+    let dir = tempfile::tempdir()?;
+    let layer = UserConfig {
+        network: Some(NetworkSelection::Regtest),
+        mining: MiningOverrides {
+            payout_address: Some(ADDRESS.to_owned()),
+        },
+        ..Default::default()
+    };
+    let mut config = resolve(&[&layer])?;
+    config.data_dir = dir.path().join("node");
+    config.p2p.listen.clear();
+    std::mem::forget(dir);
+    let state = NodeState::open(config, None)?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let template = expect_template(mining.get_block_template(template_request(None))?);
+    let expected = bitcoin::Address::from_str(ADDRESS)?
+        .require_network(bitcoin::Network::Regtest)?
+        .script_pubkey()
+        .as_bytes()
+        .to_vec();
+    assert_eq!(
+        template.candidate.coinbase.outputs[0].script_pubkey, expected,
+        "configured watch-only payout must be the candidate coinbase script"
+    );
+    Ok(())
+}
+
+#[test]
+fn network_hash_ps_answers_on_the_applied_tip() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis_rate = mining.network_hash_ps(120, -1)?;
+    assert!(
+        genesis_rate.abs() < f64::EPSILON,
+        "genesis has no lookback window, got {genesis_rate}"
+    );
+    let genesis_height_rate = mining.network_hash_ps(120, 0)?;
+    assert!(
+        genesis_height_rate.abs() < f64::EPSILON,
+        "Core reports 0 at the genesis height, got {genesis_height_rate}"
+    );
+    Ok(())
+}
+
+#[test]
+fn network_hash_ps_rejects_core_invalid_windows() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    match mining.network_hash_ps(0, -1) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(
+                message.as_str(),
+                "Invalid nblocks. Must be a positive number or -1."
+            );
+        }
+        other => panic!("nblocks 0 must be invalid, got {other:?}"),
+    }
+    match mining.network_hash_ps(-2, -1) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(
+                message.as_str(),
+                "Invalid nblocks. Must be a positive number or -1."
+            );
+        }
+        other => panic!("nblocks -2 must be invalid, got {other:?}"),
+    }
+    match mining.network_hash_ps(120, -10) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(message.as_str(), "Block does not exist at specified height");
+        }
+        other => panic!("height -10 must be invalid, got {other:?}"),
+    }
+    match mining.network_hash_ps(120, 1) {
+        Err(MiningControlError::InvalidRequest(message)) => {
+            assert_eq!(message.as_str(), "Block does not exist at specified height");
+        }
+        other => panic!("height above the tip must be invalid, got {other:?}"),
+    }
     Ok(())
 }
 
@@ -541,7 +634,7 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
             state.block_tree(),
             state.mempool(),
             state.apply_handles(),
-            Vec::new(),
+            state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
         )
         .with_mempool_update_wait(Duration::ZERO),
@@ -577,7 +670,7 @@ fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
             state.block_tree(),
             state.mempool(),
             state.apply_handles(),
-            Vec::new(),
+            state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
         )
         .with_mempool_update_wait(Duration::ZERO),
@@ -723,7 +816,7 @@ fn mining_info_reports_network_hashps_after_genesis() -> anyhow::Result<()> {
 }
 
 #[test]
-fn currentblocktx_excludes_coinbase_for_zero_and_one() -> anyhow::Result<()> {
+fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
     use bitcoin_rs_mempool::MempoolEntry;
 
     let state = open_regtest()?;
@@ -735,7 +828,7 @@ fn currentblocktx_excludes_coinbase_for_zero_and_one() -> anyhow::Result<()> {
     assert!(empty.candidate.transactions.is_empty());
     assert_eq!(
         empty_info.last_candidate.map(|info| info.transactions),
-        Some(0)
+        Some(1)
     );
 
     let tx = Tx {
@@ -763,7 +856,7 @@ fn currentblocktx_excludes_coinbase_for_zero_and_one() -> anyhow::Result<()> {
     assert_eq!(one.candidate.transactions.len(), 1);
     assert_eq!(
         one_info.last_candidate.map(|info| info.transactions),
-        Some(1)
+        Some(2)
     );
     Ok(())
 }
@@ -943,7 +1036,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
             state.block_tree(),
             state.mempool(),
             state.apply_handles(),
-            Vec::new(),
+            state.config().mining.payout_script.clone(),
             state.shutdown(),
         )
         .with_mempool_update_wait(Duration::from_secs(10)),

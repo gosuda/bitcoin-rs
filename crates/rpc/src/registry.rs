@@ -141,8 +141,8 @@ declare_rows! {
     "prioritisetransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::prioritisetransaction);
     "generatetoaddress", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator.", "0.4.0", Some(mining::generatetoaddress);
     "generateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag.", "0.4.0", Some(mining::generateblock);
-    "getnetworkhashps", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Reuses the coordinator's chainwork/time window; nblocks<=0 uses the span since the last retarget.", "0.4.0", Some(mining::getnetworkhashps);
-    "getprioritisedtransactions", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Projects the mempool's persistent fee-delta overlay, including txids not currently admitted.", "0.4.0", Some(mining::getprioritisedtransactions);
+    "getnetworkhashps", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip.", "0.4.0", Some(mining::getnetworkhashps);
+    "getprioritisedtransactions", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled.", "0.4.0", Some(mining::getprioritisedtransactions);
 
     // -- JSON-RPC: bitcoin-rs extension ------------------------------
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/rpc/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);

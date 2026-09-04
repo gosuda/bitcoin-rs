@@ -13,8 +13,6 @@ use bitcoin_rs_primitives::Network;
 
 use crate::{BlockTree, CachedState, NodeId};
 
-const KNOWN_DEPLOYMENT_IDS: [u32; 2] = [CSV_DEPLOYMENT_ID, SEGWIT_DEPLOYMENT_ID];
-
 /// Read-only [`DeploymentContext`] over a [`BlockTree`] rooted at `tip_id`.
 struct DeploymentView<'a> {
     tree: &'a BlockTree,
@@ -64,6 +62,57 @@ pub fn softfork_state(
     }
 }
 
+/// A BIP9 deployment currently in `Started` or `LockedIn` at a candidate height.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SignallingDeployment {
+    /// BIP22 rule name (`csv`, `segwit`).
+    pub name: &'static str,
+    /// Header-version bit assigned to the deployment.
+    pub bit: u8,
+    /// Whether the deployment is `LockedIn` (bit required on the candidate).
+    pub locked_in: bool,
+}
+
+const NAMED_DEPLOYMENTS: [(&str, u32); 2] =
+    [("csv", CSV_DEPLOYMENT_ID), ("segwit", SEGWIT_DEPLOYMENT_ID)];
+
+/// Deployments a GBT caller must see in `vbavailable` / `vbrequired`.
+///
+/// Only `Started` and `LockedIn` states are signalling. Active and failed
+/// deployments are not negotiated as version bits.
+#[must_use]
+pub fn signalling_deployments(
+    tree: &BlockTree,
+    network: Network,
+    previous_tip_id: NodeId,
+    height: u32,
+) -> Vec<SignallingDeployment> {
+    let ctx = DeploymentView::new(tree, previous_tip_id);
+    NAMED_DEPLOYMENTS
+        .into_iter()
+        .filter_map(|(name, deployment_id)| {
+            let params = deployment_params(network, deployment_id)?;
+            let state =
+                cached_deployment_state(tree, &ctx, previous_tip_id, height, deployment_id, params);
+            match state {
+                DeploymentState::Started => Some(SignallingDeployment {
+                    name,
+                    bit: params.bit,
+                    locked_in: false,
+                }),
+                DeploymentState::LockedIn => Some(SignallingDeployment {
+                    name,
+                    bit: params.bit,
+                    locked_in: true,
+                }),
+                DeploymentState::Defined | DeploymentState::Active | DeploymentState::Failed => {
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 /// Versionbits candidate version at `height`, using the tree's BIP9 cache.
 #[must_use]
 pub fn candidate_version(
@@ -73,7 +122,7 @@ pub fn candidate_version(
     height: u32,
 ) -> i32 {
     let ctx = DeploymentView::new(tree, previous_tip_id);
-    versionbits_block_version(KNOWN_DEPLOYMENT_IDS.iter().filter_map(|&deployment_id| {
+    versionbits_block_version(NAMED_DEPLOYMENTS.iter().filter_map(|&(_, deployment_id)| {
         deployment_params(network, deployment_id).map(|params| {
             let state =
                 cached_deployment_state(tree, &ctx, previous_tip_id, height, deployment_id, params);

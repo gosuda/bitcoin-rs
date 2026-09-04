@@ -149,7 +149,7 @@ pub enum AdmitError {
 /// and `shared` shrinks to run-time composition plus tests.
 use crate::entry::MempoolEntry;
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
-use crate::pool::{Mempool, MempoolError, PrioritiseError};
+use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
 use crate::rbf::{RbfError, ReplacementCandidate};
 
 static REGISTRY: LazyLock<Mutex<Vec<Weak<MempoolGateway>>>> =
@@ -777,6 +777,12 @@ impl MempoolGateway {
     pub fn prioritise(&self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
         let mut pool = self.pool.write();
         pool.prioritise(txid, fee_delta)
+    }
+
+    /// Reads the stored fee-delta overlay map.
+    #[must_use]
+    pub fn prioritised_transactions(&self) -> Vec<PrioritisedTransaction> {
+        self.read().prioritised_transactions()
     }
 
     /// The single commit-and-publish path every publishing mutation flows

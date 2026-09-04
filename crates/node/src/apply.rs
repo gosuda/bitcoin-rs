@@ -10203,7 +10203,7 @@ mod consensus_rule_tests {
         Arc::new(UtxoSet::new())
     }
 
-    use bitcoin_rs_rpc::context::MiningControlError;
+    use bitcoin_rs_mining::MiningControlError;
     use compact_str::CompactString;
 
     /// A fake template coordinator recording generation publications.
@@ -10215,22 +10215,26 @@ mod consensus_rule_tests {
         MiningControlError::Unavailable(CompactString::from("not wired in this test"))
     }
 
-    impl bitcoin_rs_rpc::context::MiningControl for RecordingGenerationControl {
+    impl bitcoin_rs_mining::MiningControl for RecordingGenerationControl {
         fn get_block_template(
             &self,
-            _request: bitcoin_rs_rpc::context::BlockTemplateRequest,
-        ) -> Result<bitcoin_rs_rpc::context::BlockTemplateResult, MiningControlError> {
+            _request: bitcoin_rs_mining::BlockTemplateRequest,
+        ) -> Result<bitcoin_rs_mining::BlockTemplateResult, MiningControlError> {
             Err(generation_unavailable())
         }
 
-        fn mining_info(&self) -> Result<bitcoin_rs_rpc::context::MiningInfo, MiningControlError> {
+        fn mining_info(&self) -> Result<bitcoin_rs_mining::MiningInfo, MiningControlError> {
+            Err(generation_unavailable())
+        }
+
+        fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
             Err(generation_unavailable())
         }
 
         fn submit_block(
             &self,
             _block: Block,
-        ) -> Result<bitcoin_rs_rpc::context::BlockValidationResult, MiningControlError> {
+        ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
             Err(generation_unavailable())
         }
 
@@ -10240,19 +10244,8 @@ mod consensus_rule_tests {
 
         fn generate(
             &self,
-            _request: bitcoin_rs_rpc::context::GenerateRequest,
-        ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError> {
-            Err(generation_unavailable())
-        }
-
-        fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
-            Err(generation_unavailable())
-        }
-
-        fn prioritised_transactions(
-            &self,
-        ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError>
-        {
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
             Err(generation_unavailable())
         }
     }
@@ -10270,7 +10263,7 @@ mod consensus_rule_tests {
         let control = Arc::new(RecordingGenerationControl {
             published: Mutex::new(0),
         });
-        let control_dyn: Arc<dyn bitcoin_rs_rpc::context::MiningControl> = control.clone();
+        let control_dyn: Arc<dyn bitcoin_rs_mining::MiningControl> = control.clone();
         handles.mining_generation.attach(&control_dyn);
         assert_eq!(*control.published.lock(), 0, "nothing ran yet");
 

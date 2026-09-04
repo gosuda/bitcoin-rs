@@ -11,10 +11,13 @@ witness commitment. [`Candidate::solve`](crate::Candidate::solve) turns that
 candidate into a header that meets its compact target. Failures surface as
 [`MiningError`](crate::MiningError).
 
-The crate stops at the domain `Candidate` and the solved `Block` it produces.
-BIP22/BIP23 JSON projection, long-poll waiting, and block submission live
-behind the node-owned `MiningControl` surface consumed by RPC — they are not
-part of this crate.
+The crate owns the domain `Candidate`, [`Candidate::solve`](crate::Candidate::solve),
+and the node-facing mining contract ([`MiningControl`](crate::MiningControl),
+[`BlockTemplate`](crate::BlockTemplate), [`MiningInfo`](crate::MiningInfo),
+[`MiningControl::generate`](crate::MiningControl::generate)).
+BIP22/BIP23 JSON projection lives in RPC. Long-poll waiting, generate
+assemble-solve-submit, and block submission live in the node-owned
+coordinator that implements `MiningControl`.
 
 ## Features
 - `rocksdb`: forwarding marker for the rocksdb storage backend; gates no code in

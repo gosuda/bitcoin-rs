@@ -14,13 +14,13 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
-use bitcoin_rs_mining::{Candidate, TemplateId};
+use bitcoin_rs_mining::{
+    BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Candidate,
+    MiningCapability, MiningControl, MiningControlError, MiningInfo, TemplateId, TemplateMutation,
+};
 use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Tx, TxIn, Txid, client_version};
 use bitcoin_rs_rpc::Handler;
-use bitcoin_rs_rpc::context::{
-    BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Context,
-    MiningCapability, MiningControl, MiningControlError, MiningInfo, TemplateMutation,
-};
+use bitcoin_rs_rpc::context::Context;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 
 /// Re-parses one dispatched response against the pinned upstream wire type.
@@ -347,19 +347,13 @@ impl MiningControl for CompatMiningControl {
 
     fn generate(
         &self,
-        _request: bitcoin_rs_rpc::context::GenerateRequest,
-    ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError> {
+        _request: bitcoin_rs_mining::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
         Err(MiningControlError::Unavailable("not wired".into()))
     }
 
-    fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
-        Ok(0.0)
-    }
-
-    fn prioritised_transactions(
-        &self,
-    ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError> {
-        Ok(Vec::new())
+    fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
+        Ok(self.mining_info()?.network_hashes_per_second)
     }
 }
 
@@ -423,6 +417,12 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     assert_eq!(mining.next.height, 1);
     assert_eq!(mining.next.bits, "207fffff");
     assert_eq!(mining.next.target, mining.target);
+
+    let rate: f64 = typed(&handler.dispatch("getnetworkhashps", &json!([]))?)?;
+    assert!((rate - 0.0).abs() < f64::EPSILON);
+    let prioritised: std::collections::BTreeMap<String, serde_json::Value> =
+        typed(&handler.dispatch("getprioritisedtransactions", &json!([]))?)?;
+    assert!(prioritised.is_empty());
 
     Ok(())
 }

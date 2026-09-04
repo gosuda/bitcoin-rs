@@ -360,8 +360,9 @@ mod tests {
     use sonic_rs::JsonValueTrait as _;
 
     use super::{diff_best, load_schemas};
-    use crate::context::{
-        BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Context, MiningControl,
+    use crate::context::Context;
+    use bitcoin_rs_mining::{
+        BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningControl,
         MiningControlError, MiningInfo,
     };
 
@@ -398,6 +399,10 @@ mod tests {
             })
         }
 
+        fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
+            Ok(0.0)
+        }
+
         fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
             Ok(BlockValidationResult::Accepted)
         }
@@ -406,21 +411,11 @@ mod tests {
 
         fn generate(
             &self,
-            _request: crate::context::GenerateRequest,
-        ) -> Result<Vec<crate::context::GeneratedBlock>, MiningControlError> {
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
             Err(MiningControlError::Unavailable(
                 compact_str::CompactString::from("not wired"),
             ))
-        }
-
-        fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
-            Ok(0.0)
-        }
-
-        fn prioritised_transactions(
-            &self,
-        ) -> Result<Vec<crate::context::PrioritisedTransaction>, MiningControlError> {
-            Ok(Vec::new())
         }
     }
 
@@ -446,6 +441,8 @@ mod tests {
         ("getrawmempool", "[true]"),
         ("getrawmempool", "[false, true]"),
         ("getmininginfo", "[]"),
+        ("getnetworkhashps", "[]"),
+        ("getprioritisedtransactions", "[]"),
         ("getnetworkinfo", "[]"),
         ("getpeerinfo", "[]"),
         ("getconnectioncount", "[]"),
@@ -568,12 +565,12 @@ mod tests {
             COMPARED.iter().map(|(method, _)| *method).collect();
         assert_eq!(
             methods.len(),
-            20,
+            22,
             "the compared-method list changed; update the count and say why in the PR"
         );
         assert_eq!(
             COMPARED.len(),
-            23,
+            25,
             "the compared-invocation list changed; update the count and say why in the PR"
         );
         assert_eq!(

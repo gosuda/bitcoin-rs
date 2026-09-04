@@ -31,6 +31,10 @@ use anyhow::{anyhow, bail};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin_rs_mining::{
+    BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningControl,
+    MiningControlError, MiningInfo,
+};
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::tx_admission::TxAdmission;
 use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
@@ -41,10 +45,6 @@ use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
 use bitcoin_rs_p2p::{InboundTx, Message, Peer, PeerLease};
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
-use bitcoin_rs_rpc::context::{
-    BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningControl,
-    MiningControlError, MiningInfo,
-};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -154,6 +154,12 @@ impl MiningControl for RecordingMining {
         ))
     }
 
+    fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
+        Err(MiningControlError::Failed(
+            "not implemented".to_owned().into(),
+        ))
+    }
+
     fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
         Err(MiningControlError::Failed(
             "not implemented".to_owned().into(),
@@ -166,22 +172,8 @@ impl MiningControl for RecordingMining {
 
     fn generate(
         &self,
-        _request: bitcoin_rs_rpc::context::GenerateRequest,
-    ) -> Result<Vec<bitcoin_rs_rpc::context::GeneratedBlock>, MiningControlError> {
-        Err(MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-
-    fn network_hash_ps(&self, _nblocks: i64, _height: i64) -> Result<f64, MiningControlError> {
-        Err(MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-
-    fn prioritised_transactions(
-        &self,
-    ) -> Result<Vec<bitcoin_rs_rpc::context::PrioritisedTransaction>, MiningControlError> {
+        _request: bitcoin_rs_mining::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
         Err(MiningControlError::Failed(
             "not implemented".to_owned().into(),
         ))
