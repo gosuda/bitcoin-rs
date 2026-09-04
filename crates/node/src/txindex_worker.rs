@@ -1270,6 +1270,9 @@ type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) 
 /// [`Self::prepare_block_with_spent_scripts`] and
 /// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
 /// Callers that are not rebuilding `ScriptLive` pass [`NoSpentScripts`].
+/// Durability, crash visibility, and failure classification for rollback are
+/// owned by [`IndexWriter::commit_rollback_one_for_with_cursor_with_spent_scripts`]
+/// (`IDX-06` / `IDX-07`).
 pub(crate) trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
     fn prepare_block_with_spent_scripts(
