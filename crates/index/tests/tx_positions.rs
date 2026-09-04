@@ -12,7 +12,7 @@ mod common;
 use std::sync::Arc;
 
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
-use bitcoin_rs_index::{Indexer, ScriptHash};
+use bitcoin_rs_index::{IndexWriter, ScriptHash};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     deserialize,
@@ -21,8 +21,6 @@ use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
 
 use common::MemoryStore;
-
-const HEIGHT: u32 = 321;
 
 fn header() -> Header {
     Header {
@@ -109,9 +107,10 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
     let bytes = consensus_bytes(&block);
 
     let store = Arc::new(MemoryStore::default());
-    Indexer::new(Arc::clone(&store))
-        .ingest_block(&bytes, HEIGHT)
-        .expect("ingest");
+    IndexWriter::open(Arc::clone(&store), 1)
+        .expect("open")
+        .commit_block(0, &bytes)
+        .expect("commit");
 
     // Script 0x11 is funded by transaction 0 and again by transaction 1, which
     // collapse into a single row: one key, two positions.
@@ -147,9 +146,10 @@ fn txid_positions_address_their_own_transaction() {
     let bytes = consensus_bytes(&block);
 
     let store = Arc::new(MemoryStore::default());
-    Indexer::new(Arc::clone(&store))
-        .ingest_block(&bytes, HEIGHT)
-        .expect("ingest");
+    IndexWriter::open(Arc::clone(&store), 1)
+        .expect("open")
+        .commit_block(0, &bytes)
+        .expect("commit");
 
     let rows = rows_with_values(&store, ColumnFamily::TxConfirmed);
     assert_eq!(rows.len(), block.txs.len());

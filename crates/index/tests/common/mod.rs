@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use bitcoin_rs_index::{ScriptHash, ScriptHashRow, SpendingPrefixRow};
+use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{
     ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
 };
@@ -148,6 +150,36 @@ impl KvSnapshot for MemorySnapshot {
             .collect::<Vec<_>>();
         Ok(Box::new(rows.into_iter()))
     }
+}
+
+/// Writes one funding-row key at `height` with an empty value.
+///
+/// Empty values take the scan-fallback resolver path. Tests that pin
+/// little-endian key order, not watermark contiguity, use this instead of
+/// [`bitcoin_rs_index::IndexWriter::commit_block`].
+pub(crate) fn put_funding_row(
+    store: &MemoryStore,
+    scripthash: ScriptHash,
+    height: u32,
+) -> Result<(), StorageError> {
+    store.put(
+        ColumnFamily::Funding,
+        &ScriptHashRow::row(scripthash, height).to_db_row(),
+        &[],
+    )
+}
+
+/// Writes one spending-row key at `height` with an empty value.
+pub(crate) fn put_spending_row(
+    store: &MemoryStore,
+    outpoint: &OutPoint,
+    height: u32,
+) -> Result<(), StorageError> {
+    store.put(
+        ColumnFamily::Spending,
+        &SpendingPrefixRow::row(outpoint, height).to_db_row(),
+        &[],
+    )
 }
 
 /// Folds one batch's operations into the column families, in order.

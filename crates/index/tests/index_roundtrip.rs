@@ -9,8 +9,7 @@ use std::{
 };
 
 use bitcoin_rs_primitives::{
-    Block, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    encode::double_sha256,
+    Block, Network, OutPoint, Tx, TxIn, TxOut, consensus_bytes, encode::double_sha256,
 };
 use parking_lot::{Mutex, RwLock};
 
@@ -496,8 +495,9 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
+/// CONTRACT: IDX-06 — electrs-shaped occupancy after one atomic forward commit.
 #[test]
-fn ingest_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std::error::Error>> {
+fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std::error::Error>> {
     let cases = [
         (
             0_u32,
@@ -533,12 +533,25 @@ fn ingest_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
 
     for (height, expected) in cases {
         let store = std::sync::Arc::new(MemoryStore::default());
-        let mut indexer = Indexer::new(std::sync::Arc::clone(&store));
+        let mut writer = IndexWriter::open(std::sync::Arc::clone(&store), 1)?;
         let block = read_fixture(height)?;
+        let hash = block_hash(&block);
+        let prepared = writer.prepare_block(height, hash, &block)?;
+        assert_eq!(
+            prepared.row_counts(),
+            expected,
+            "height {height} prepared counts"
+        );
 
-        let counts = indexer.ingest_block(&block, height)?;
-
-        assert_eq!(counts, expected, "height {height} returned counts");
+        // Watermark contiguity starts at height 0. Commit the same body at
+        // genesis so store occupancy is checked through the sole mutation
+        // owner; row cardinality does not depend on the height suffix.
+        writer.commit_block(0, &block)?;
+        assert_eq!(
+            writer.last_counts(),
+            expected,
+            "height {height} committed counts"
+        );
         assert_eq!(
             store.count(ColumnFamily::TxConfirmed),
             expected.txids,
@@ -563,94 +576,11 @@ fn ingest_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
     Ok(())
 }
 
-#[test]
-fn ingest_with_precomputed_txids_matches_standard_ingest() -> Result<(), Box<dyn std::error::Error>>
-{
-    let height = 170_u32;
-    let block_bytes = read_fixture(height)?;
-    let block = Block::consensus_decode(&block_bytes)?;
-    let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-
-    assert_precomputed_ingest_matches_standard(&block_bytes, height, &txids)
-}
-
-#[test]
-fn ingest_with_verified_txids_matches_standard_ingest() -> Result<(), Box<dyn std::error::Error>> {
-    let height = 170_u32;
-    let block_bytes = read_fixture(height)?;
-    let block = Block::consensus_decode(&block_bytes)?;
-    let txids = block.txs.iter().map(Tx::txid).collect::<Vec<_>>();
-
-    assert_verified_ingest_matches_standard(&block_bytes, height, &txids)
-}
-
-#[test]
-fn ingest_with_mismatched_precomputed_txids_falls_back_to_standard_ingest()
--> Result<(), Box<dyn std::error::Error>> {
-    let height = 170_u32;
-    let block_bytes = read_fixture(height)?;
-
-    assert_precomputed_ingest_matches_standard(&block_bytes, height, &[])
-}
-
-#[test]
-fn ingest_with_same_length_wrong_precomputed_txids_falls_back_to_standard_ingest()
--> Result<(), Box<dyn std::error::Error>> {
-    let height = 170_u32;
-    let block_bytes = read_fixture(height)?;
-    let block = Block::consensus_decode(&block_bytes)?;
-    let stale_txids = vec![Txid(Hash256::from_le_bytes(&[0x42; 32])); block.txs.len()];
-
-    assert_precomputed_ingest_matches_standard(&block_bytes, height, &stale_txids)
-}
-
 fn read_fixture(height: u32) -> Result<Vec<u8>, std::io::Error> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../primitives/tests/testdata")
         .join(format!("{height}.bin"));
     std::fs::read(path)
-}
-
-fn assert_precomputed_ingest_matches_standard(
-    block: &[u8],
-    height: u32,
-    txids: &[Txid],
-) -> Result<(), Box<dyn std::error::Error>> {
-    assert_ingest_matches_standard(block, height, |indexer| {
-        indexer.ingest_block_with_txids(block, height, txids)
-    })
-}
-
-fn assert_verified_ingest_matches_standard(
-    block: &[u8],
-    height: u32,
-    txids: &[Txid],
-) -> Result<(), Box<dyn std::error::Error>> {
-    assert_ingest_matches_standard(block, height, |indexer| {
-        indexer.ingest_block_with_verified_txids(block, height, txids)
-    })
-}
-
-fn assert_ingest_matches_standard(
-    block: &[u8],
-    height: u32,
-    ingest: impl FnOnce(
-        &mut Indexer<MemoryStore>,
-    ) -> Result<IndexRowCounts, bitcoin_rs_index::IndexError>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let standard_store = std::sync::Arc::new(MemoryStore::default());
-    let mut standard_indexer = Indexer::new(std::sync::Arc::clone(&standard_store));
-    let candidate_store = std::sync::Arc::new(MemoryStore::default());
-    let mut candidate_indexer = Indexer::new(std::sync::Arc::clone(&candidate_store));
-
-    let standard_counts = standard_indexer.ingest_block(block, height)?;
-    let candidate_counts = ingest(&mut candidate_indexer)?;
-
-    assert_eq!(candidate_counts, standard_counts);
-    for &cf in ColumnFamily::ALL {
-        assert_eq!(candidate_store.rows(cf), standard_store.rows(cf));
-    }
-    Ok(())
 }
 
 fn block_hash(body: &[u8]) -> [u8; 32] {
@@ -743,9 +673,7 @@ fn format_3_open_resets_only_script_history() -> Result<(), Box<dyn std::error::
 #[test]
 fn unversioned_rows_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
-    let mut indexer = Indexer::new(Arc::clone(&store));
-    let body = read_fixture(0)?;
-    indexer.ingest_block(&body, 0)?;
+    store.put(ColumnFamily::TxConfirmed, b"orphan-row", &[])?;
 
     assert!(matches!(
         IndexWriter::open(Arc::clone(&store), 1),
@@ -1369,42 +1297,11 @@ fn consumer_cursor_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn legacy_flush_discards_rows_rejected_by_a_reset_fence() -> Result<(), Box<dyn std::error::Error>>
-{
-    let store = Arc::new(MemoryStore::default());
-    let mut indexer = Indexer::new(Arc::clone(&store));
-    indexer.begin_batch();
-    indexer.ingest_block(&read_fixture(0)?, 0)?;
-    let mut claim = store.new_batch();
-    claim.put(
-        ColumnFamily::UtxoMeta,
-        RESET_KEY,
-        &fenced_marker(TX_LOOKUP_MASK, 9),
-    );
-    claim.put(ColumnFamily::UtxoMeta, FORMAT_KEY, &FORMAT_VALUE);
-    claim.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
-    claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.write_durable(claim)?;
-
-    assert!(matches!(
-        indexer.end_batch(),
-        Err(IndexError::ResetInProgress)
-    ));
-    IndexWriter::open(Arc::clone(&store), 4)?;
-    indexer.begin_batch();
-    indexer.end_batch()?;
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-    assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
-    Ok(())
-}
-
-#[test]
-fn legacy_rollback_is_excluded_by_a_reset_fence() -> Result<(), Box<dyn std::error::Error>> {
+fn rollback_is_excluded_by_a_reset_fence() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
     let body = read_fixture(0)?;
-    let block: Block = bitcoin_rs_primitives::deserialize(&body)?;
-    let mut indexer = Indexer::new(Arc::clone(&store));
-    indexer.ingest_block(&body, 0)?;
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    writer.commit_block(0, &body)?;
     let rows_before = store.rows(ColumnFamily::TxConfirmed);
     let mut claim = store.new_batch();
     claim.put(
@@ -1418,7 +1315,7 @@ fn legacy_rollback_is_excluded_by_a_reset_fence() -> Result<(), Box<dyn std::err
     store.write_durable(claim)?;
 
     assert!(matches!(
-        indexer.rollback_block(&block, 0),
+        writer.commit_rollback_one(None, &body),
         Err(IndexError::ResetInProgress)
     ));
     assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_before);
@@ -2787,16 +2684,19 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
     )?;
     assert_state_revision(&store, Some(3))?;
 
-    // 4. legacy batched ingest flush
-    let mut indexer = Indexer::new(Arc::clone(&store));
-    indexer.begin_batch();
-    indexer.ingest_block(&body0, 0)?;
-    indexer.end_batch()?;
+    // 4. reconnect the rolled-back capability
+    let block =
+        writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body0), &body0)?;
+    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
+        max_rows: 100,
+        max_bytes: 1_000_000,
+    });
+    assert!(prepared.try_push(block).is_ok());
+    writer.commit_forward(prepared)?;
     assert_state_revision(&store, Some(4))?;
 
-    // 5. legacy rollback
-    let block: Block = bitcoin_rs_primitives::deserialize(&body0)?;
-    indexer.rollback_block(&block, 0)?;
+    // 5. rollback that capability again
+    writer.commit_rollback_one_for(IndexCapabilities::TX_LOOKUP, None, &body0)?;
     assert_state_revision(&store, Some(5))?;
     assert_eq!(
         stored_state_revision(&store)?,
