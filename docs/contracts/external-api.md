@@ -181,3 +181,7 @@ owned by [wallet-facing.md](wallet-facing.md).
     `submit_header_rejects_time_too_new`
   - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
     `nbits_mismatch_is_bad_diffbits`
+    - Execution evidence: `cargo test -p bitcoin-rs-node header_reject_tests` and
+      `cargo test -p bitcoin-rs-rpc submitheader` (CI job `test`, commit `adc8e37`).
+    - Core reference: Bitcoin Core v30.0 `src/rpc/mining.cpp` (`submitheader`)
+      and `src/validation.cpp` header reject reasons (tag `v30.0`).
