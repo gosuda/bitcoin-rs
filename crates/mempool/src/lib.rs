@@ -48,8 +48,8 @@ pub use mutation::{
 pub use pareto::ParetoFront;
 pub use policy::{MempoolLimits, MempoolPolicySnapshot, PolicyError};
 pub use pool::{
-    Mempool, MempoolError, MempoolMiningSnapshot, MempoolStats, PrioritiseError, ScriptHash,
-    SnapshotEntry,
+    Mempool, MempoolError, MempoolMiningSnapshot, MempoolStats, PrioritiseError,
+    PrioritisedTransaction, ScriptHash, SnapshotEntry,
 };
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
 pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};

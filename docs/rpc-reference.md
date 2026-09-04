@@ -73,6 +73,8 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator. |
 | `submitblock` | 0.4.0 |  |
 | `prioritisetransaction` | 0.4.0 |  |
+| `getnetworkhashps` | 0.4.0 | Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip. |
+| `getprioritisedtransactions` | 0.4.0 | Projects the mempool's signed fee-delta overlay, including txids not currently pooled. |
 
 ### Deviation
 
@@ -114,8 +116,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `help` | n/a | No per-method help text renderer. |
 | `logging` | n/a | Log-category controls not exposed over RPC. |
 | `stop` | n/a | Lifecycle control not exposed over RPC. |
-| `getnetworkhashps` | n/a | Network hash-rate estimate not implemented. |
-| `getprioritisedtransactions` | n/a | Prioritisation map not queryable yet. |
 | `submitheader` | n/a | Header-only submission not implemented. |
 | `getaddrmaninfo` | n/a | Addrman table stats not exposed. |
 | `abortprivatebroadcast` | n/a | Private-broadcast store not implemented. |
@@ -234,4 +234,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/node/src/zmq_publisher.rs). |
 
-Row counts: Implemented 66, Deviation 8, Extension 2, Unimplemented 96 - total 172.
+Row counts: Implemented 68, Deviation 8, Extension 2, Unimplemented 94 - total 172.

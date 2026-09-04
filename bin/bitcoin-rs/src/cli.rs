@@ -4,8 +4,8 @@ use std::str::FromStr;
 
 use anyhow::{Result, bail, ensure};
 use bitcoin_rs_node::{
-    IndexOverrides, NetworkSelection, ObservabilityOverrides, P2pOverrides, RpcOverrides,
-    ScriptIndexMode, StorageOverrides, UserConfig, ValidationOverrides,
+    IndexOverrides, MiningOverrides, NetworkSelection, ObservabilityOverrides, P2pOverrides,
+    RpcOverrides, ScriptIndexMode, StorageOverrides, UserConfig, ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;
@@ -61,6 +61,9 @@ pub(crate) struct CliArgs {
     pub(crate) metrics_bind: Option<SocketAddr>,
     #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
+    /// Watch-only coinbase payout address for solo mining templates.
+    #[arg(long = "mining-payout-address")]
+    pub(crate) mining_payout_address: Option<String>,
     /// Measure data-directory storage ledgers and exit. Does not start the node.
     #[arg(long = "measure-storage")]
     pub(crate) measure_storage: bool,
@@ -113,6 +116,9 @@ impl CliArgs {
             chainstate_journal: None,
             validation: ValidationOverrides {
                 assume_valid_height: self.assume_valid_height,
+            },
+            mining: MiningOverrides {
+                payout_address: self.mining_payout_address,
             },
         }
     }

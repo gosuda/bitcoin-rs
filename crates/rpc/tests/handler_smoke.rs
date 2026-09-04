@@ -11,16 +11,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_mining::{Candidate, TemplateId};
+use bitcoin_rs_mining::{
+    BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Candidate,
+    MiningControl, MiningControlError, MiningInfo, TemplateId,
+};
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     encode::double_sha256,
 };
-use bitcoin_rs_rpc::context::{
-    BlockRecord, BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult,
-    ChainControl, ChainControlError, Context, MiningControl, MiningControlError, MiningInfo,
-};
+use bitcoin_rs_rpc::context::{BlockRecord, ChainControl, ChainControlError, Context};
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
@@ -106,6 +106,10 @@ impl MiningControl for SmokeMiningControl {
         Ok(BlockValidationResult::Accepted)
     }
 
+    fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
+        Ok(0.0)
+    }
+
     fn publish_generation(&self) {}
 }
 
@@ -142,8 +146,8 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         ("getnetworkinfo", json!([])),
         ("getpeerinfo", json!([])),
         ("getconnectioncount", json!([])),
-        // getnetworkhashps is not implemented yet — Core-compat manifest gap,
-        // covered by the method-coverage work, not by this wiring sweep.
+        ("getnetworkhashps", json!([])),
+        ("getprioritisedtransactions", json!([])),
         ("uptime", json!([])),
         ("finalizepsbt", json!([valid_psbt.as_str()])),
         ("combinepsbt", json!([[valid_psbt.as_str()]])),

@@ -90,6 +90,17 @@ pub enum PrioritiseError {
     FeeDeltaOverflow,
 }
 
+/// One `prioritisetransaction` overlay entry, including txs not currently pooled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrioritisedTransaction {
+    /// Transaction id the overlay is stored against.
+    pub txid: Txid,
+    /// Accumulated signed satoshi overlay.
+    pub fee_delta: i64,
+    /// Whether `txid` is currently in the pool.
+    pub in_mempool: bool,
+}
+
 /// In-memory transaction pool with txid, funding, spending, and fee-priority indexes.
 #[derive(Debug)]
 pub struct Mempool {
@@ -974,6 +985,19 @@ impl Mempool {
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
         Ok(())
+    }
+
+    /// Returns every stored fee-delta overlay, including txids not in the pool.
+    #[must_use]
+    pub fn prioritised_transactions(&self) -> Vec<PrioritisedTransaction> {
+        self.fee_deltas
+            .iter()
+            .map(|(&txid, &fee_delta)| PrioritisedTransaction {
+                txid,
+                fee_delta,
+                in_mempool: self.by_txid.contains_key(&txid),
+            })
+            .collect()
     }
 
     /// Reason-carrying core for composite mutations that remove an entry and
@@ -2875,6 +2899,36 @@ mod tests {
         );
         pool.prioritise(other_txid, -1)
             .expect("recovery from the edge works");
+        Ok(())
+    }
+
+    #[test]
+    fn prioritised_transactions_includes_absent_txids() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let pooled = tx(30, Vec::new());
+        let pooled_txid = pooled.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7))?;
+        pool.prioritise(pooled_txid, 500)
+            .expect("pooled overlay applies");
+
+        let absent_txid = tx(31, Vec::new()).txid();
+        pool.prioritise(absent_txid, -25)
+            .expect("absent overlay is stored");
+
+        let overlay = pool.prioritised_transactions();
+        assert_eq!(overlay.len(), 2);
+        let pooled_row = overlay
+            .iter()
+            .find(|entry| entry.txid == pooled_txid)
+            .expect("pooled overlay is listed");
+        assert_eq!(pooled_row.fee_delta, 500);
+        assert!(pooled_row.in_mempool);
+        let absent_row = overlay
+            .iter()
+            .find(|entry| entry.txid == absent_txid)
+            .expect("absent overlay is listed");
+        assert_eq!(absent_row.fee_delta, -25);
+        assert!(!absent_row.in_mempool);
         Ok(())
     }
 
