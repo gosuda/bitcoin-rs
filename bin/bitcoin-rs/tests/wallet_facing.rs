@@ -3,9 +3,8 @@
 //!
 //! This is the executable proof of `docs/contracts/wallet-facing.md`. It
 //! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
-//! The package `[lib]` is process-input adapters (`bitcoin.conf`); this
-//! test does not import it, `bitcoin-rs-node`, `NodeState`, `UtxoSet`, or
-//! index types. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
+//! `source_does_not_import_node_internals` enforces `WF-01` on this
+//! source. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
 //! (`btcw -u`).
 
 #![allow(missing_docs)]
@@ -188,26 +187,28 @@ fn wait_until_dead(pid: u32) -> bool {
 #[test]
 fn source_does_not_import_node_internals() {
     let source = include_str!("wallet_facing.rs");
-    let imports = source.lines().filter_map(|line| {
-        let line = line.trim_start();
-        line.starts_with("use ").then_some(line)
-    });
-    for line in imports {
-        for banned in [
-            "bitcoin_rs::",
-            "bitcoin_rs_node",
-            "bitcoin_rs_storage",
-            "bitcoin_rs_primitives",
-            "bitcoin_rs_index",
-            "bitcoin_rs_utxo",
-            "NodeState",
-            "UtxoSet",
-        ] {
-            assert!(
-                !line.contains(banned),
-                "wallet-facing proof must not import {banned}: {line}"
-            );
-        }
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Executable tokens for WF-01. Reconstruct so this function does not
+    // contain the names it forbids. The contract owns the rule; this list
+    // is the proof, not a second policy.
+    for banned in [
+        concat!("bitcoin_rs", "::"),
+        concat!("bitcoin_rs", "_node"),
+        concat!("bitcoin_rs", "_storage"),
+        concat!("bitcoin_rs", "_primitives"),
+        concat!("bitcoin_rs", "_index"),
+        concat!("bitcoin_rs", "_utxo"),
+        concat!("Node", "State"),
+        concat!("Utxo", "Set"),
+    ] {
+        assert!(
+            !code.contains(banned),
+            "wallet-facing proof must not name {banned} (WF-01)"
+        );
     }
 }
 
