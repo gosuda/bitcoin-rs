@@ -1,10 +1,8 @@
 //! Download planner: window, staging, and conviction policy.
 //!
-//! [`SyncPlanner`] owns the in-flight [`crate::DownloadWindow`] and inbound
-//! [`crate::BlockStager`]. It consumes identity-bearing snapshots and produces
-//! [`SyncAction`] values. It does not send on sockets, mutate [`crate::PeerTable`],
-//! or apply blocks. The node `BlockSync` executor routes actions and feeds
-//! outcomes back.
+//! Ownership and executor boundaries are defined by the architecture contract:
+//! [`crate::SyncPlanner`] produces actions while the node executor applies them.
+//!
 
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -161,7 +159,7 @@ impl SyncPlanner {
         now: Instant,
     ) -> (Option<SyncAction>, Option<ColdFrontHedge>) {
         let apply_side_busy = self.apply_side_busy(next_expected);
-        if let Some(height) = next_apply_height {
+        let hedge = if let Some(height) = next_apply_height {
             let hedge = self.window.observe_cold_front(height, apply_side_busy, now);
             if let Some(addr) = self.window.observe_stall(height, apply_side_busy, now) {
                 return (
@@ -174,18 +172,24 @@ impl SyncPlanner {
                     None,
                 );
             }
-            if let Some((owner, front_hash)) = hedge {
-                return (None, Some(ColdFrontHedge { owner, front_hash }));
-            }
-        }
+            hedge
+        } else {
+            None
+        };
         let timed_out = self.window.observe_pending_timeout(apply_side_busy, now);
-        (
-            timed_out.map(|addr| SyncAction::Disconnect {
-                addr,
-                reason: SyncDisconnectReason::PendingTimeout,
-            }),
-            None,
-        )
+        if let Some(addr) = timed_out {
+            return (
+                Some(SyncAction::Disconnect {
+                    addr,
+                    reason: SyncDisconnectReason::PendingTimeout,
+                }),
+                None,
+            );
+        }
+        if let Some((owner, front_hash)) = hedge {
+            return (None, Some(ColdFrontHedge { owner, front_hash }));
+        }
+        (None, None)
     }
 }
 
@@ -195,6 +199,8 @@ mod tests {
     use crate::default_sync_budget;
     use std::time::Instant;
 
+    // Architecture contract: crates/p2p owns SyncPlanner and its policy;
+    // an empty planner therefore produces no executor action.
     #[test]
     fn empty_planner_plans_no_conviction() {
         let mut planner = SyncPlanner::new(default_sync_budget());
