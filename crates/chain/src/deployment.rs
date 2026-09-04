@@ -76,10 +76,11 @@ pub struct SignallingDeployment {
 const NAMED_DEPLOYMENTS: [(&str, u32); 2] =
     [("csv", CSV_DEPLOYMENT_ID), ("segwit", SEGWIT_DEPLOYMENT_ID)];
 
-/// Deployments a GBT caller must see in `vbavailable` / `vbrequired`.
+/// Deployments a GBT caller must see in `vbavailable`.
 ///
 /// Only `Started` and `LockedIn` states are signalling. Active and failed
-/// deployments are not negotiated as version bits.
+/// deployments are not negotiated as version bits. Core v31 `vbrequired` is
+/// always 0 and is not derived from this list.
 #[must_use]
 pub fn signalling_deployments(
     tree: &BlockTree,
